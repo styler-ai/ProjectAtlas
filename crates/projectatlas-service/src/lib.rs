@@ -10,9 +10,14 @@ use projectatlas_core::symbols::{
 };
 use projectatlas_core::telemetry::{TokenOverview, TokenTrendReport, TokenTrendWindow};
 use projectatlas_core::{
-    IndexedNode, NodeKind, RankedNode, repo_path_to_native, validated_repo_file_key,
+    IndexedNode, NavigationNextCall, NavigationNextCapability, NodeKind, RankedConnectionKind,
+    RankedConnectionTarget, RankedNode, RankedReasonCode, repo_path_to_native,
+    validated_repo_file_key,
 };
-use projectatlas_db::{AtlasStore, CapturedProjectBinding, DbError, IndexedFileText};
+use projectatlas_db::{
+    AtlasStore, CapturedProjectBinding, DbError, IndexedFileText, RepositoryNavigationConnections,
+    RepositoryNavigationNode,
+};
 use projectatlas_symbols::module_aliases_for_path;
 use regex::RegexBuilder;
 use serde::Serialize;
@@ -31,6 +36,10 @@ const FILE_METADATA_SYMBOL_LIMIT: usize = 20;
 const RANKED_REASON_LIMIT: usize = 6;
 /// Maximum selected candidates considered when service-side ranking enriches DB output.
 const RANKED_CANDIDATE_LIMIT: usize = 100;
+/// Maximum validated relationships retained for one navigation family.
+const RANKED_CONNECTION_FAMILY_LIMIT: u32 = 4;
+/// Maximum high-value connections sampled into one ranked row.
+const RANKED_CONNECTION_SAMPLE_LIMIT: usize = 3;
 /// Default number of folders and files returned by `next`.
 const NEXT_REPORT_DEFAULT_LIMIT: usize = 3;
 /// Maximum number of folders and files returned by `next`.
@@ -796,8 +805,32 @@ pub fn load_ranked_file_nodes(
     limit: usize,
     include_content: bool,
 ) -> ServiceResult<Vec<IndexedNode>> {
-    let matcher = FilePathMatcher::new(file_pattern)?;
     let target = limit.max(1);
+    let selected = load_ranked_file_node_candidates(
+        store,
+        query,
+        folder,
+        file_pattern,
+        target,
+        include_content,
+    )?;
+    Ok(ranked_nodes_with_reasons(store, query, selected)?
+        .into_iter()
+        .take(target)
+        .map(|ranked| ranked.node)
+        .collect())
+}
+
+/// Load the bounded file candidate set before final graph-aware truncation.
+fn load_ranked_file_node_candidates(
+    store: &AtlasStore,
+    query: &str,
+    folder: Option<&str>,
+    file_pattern: Option<&str>,
+    target: usize,
+    include_content: bool,
+) -> ServiceResult<Vec<IndexedNode>> {
+    let matcher = FilePathMatcher::new(file_pattern)?;
     let candidate_target = ranked_candidate_target(query, target);
     let mut selected = if matcher.filters() {
         load_ranked_file_nodes_matching_glob(store, query, folder, &matcher, candidate_target)?
@@ -815,8 +848,6 @@ pub fn load_ranked_file_nodes(
         )?;
     }
     append_paired_file_nodes(store, &matcher, candidate_target, &mut selected)?;
-    selected = sort_ranked_file_nodes(store, query, selected)?;
-    selected.truncate(target);
     Ok(selected)
 }
 
@@ -830,8 +861,12 @@ pub fn load_ranked_folder_nodes_with_reasons(
     query: &str,
     limit: usize,
 ) -> ServiceResult<Vec<RankedNode>> {
-    let selected = store.load_ranked_nodes(query, NodeKind::Folder, None, limit.max(1), 0)?;
-    ranked_nodes_with_reasons(store, query, selected)
+    let target = limit.max(1);
+    let candidate_target = ranked_candidate_target(query, target);
+    let selected = store.load_ranked_nodes(query, NodeKind::Folder, None, candidate_target, 0)?;
+    let mut ranked = ranked_nodes_with_reasons(store, query, selected)?;
+    ranked.truncate(target);
+    Ok(ranked)
 }
 
 /// Load ranked files with concise reasons.
@@ -847,9 +882,18 @@ pub fn load_ranked_file_nodes_with_reasons(
     limit: usize,
     include_content: bool,
 ) -> ServiceResult<Vec<RankedNode>> {
-    let selected =
-        load_ranked_file_nodes(store, query, folder, file_pattern, limit, include_content)?;
-    ranked_nodes_with_reasons(store, query, selected)
+    let target = limit.max(1);
+    let selected = load_ranked_file_node_candidates(
+        store,
+        query,
+        folder,
+        file_pattern,
+        target,
+        include_content,
+    )?;
+    let mut ranked = ranked_nodes_with_reasons(store, query, selected)?;
+    ranked.truncate(target);
+    Ok(ranked)
 }
 
 /// Build an indexed-metadata recommendation report for the next inspection step.
@@ -879,10 +923,18 @@ pub fn build_next_report(
 #[derive(Debug)]
 /// Score and evidence computed for one ranked node.
 struct RankedEvidence {
-    /// Additive deterministic score for ordering a bounded candidate set.
-    score: usize,
+    /// Exact normalized full-path dominance tier.
+    exact_path: bool,
+    /// Exact normalized basename dominance tier.
+    exact_name: bool,
+    /// Reviewed responsibility-purpose dominance tier.
+    reviewed_purpose: bool,
+    /// Bounded lexical and query-relevant graph context score.
+    context_score: usize,
     /// Concise evidence strings emitted to the agent-facing result.
     reasons: Vec<String>,
+    /// Compact stable evidence emitted to programmatic consumers.
+    reason_codes: Vec<RankedReasonCode>,
 }
 
 /// Return the bounded candidate count used before final ranking truncation.
@@ -896,7 +948,7 @@ fn ranked_candidate_target(query: &str, target: usize) -> usize {
     }
 }
 
-/// Attach reasons to a ranked node list without changing its order.
+/// Rank and enrich one bounded candidate set through a single graph batch call.
 fn ranked_nodes_with_reasons(
     store: &AtlasStore,
     query: &str,
@@ -904,45 +956,81 @@ fn ranked_nodes_with_reasons(
 ) -> ServiceResult<Vec<RankedNode>> {
     let terms = normalize_ranking_terms(query);
     let text_hit_paths = indexed_text_hit_paths(store, &selected, &terms)?;
-    selected
-        .into_iter()
-        .map(|node| {
-            let evidence = ranked_node_evidence(store, &node, &terms, &text_hit_paths)?;
-            Ok(RankedNode {
-                node,
-                reasons: evidence.reasons,
-            })
+    let owners = selected
+        .iter()
+        .map(|node| RepositoryNavigationNode {
+            path: node.node.path.clone(),
+            kind: node.node.kind,
         })
-        .collect()
-}
-
-/// Sort a bounded file candidate list by service-level ranking evidence.
-fn sort_ranked_file_nodes(
-    store: &AtlasStore,
-    query: &str,
-    selected: Vec<IndexedNode>,
-) -> ServiceResult<Vec<IndexedNode>> {
-    if query.trim().is_empty() || selected.len() <= 1 {
-        return Ok(selected);
-    }
-    let terms = normalize_ranking_terms(query);
-    let text_hit_paths = indexed_text_hit_paths(store, &selected, &terms)?;
+        .collect::<Vec<_>>();
+    let connections = store.repository_navigation_connections(
+        &owners,
+        RANKED_CONNECTION_FAMILY_LIMIT,
+        RANKED_CONNECTION_SAMPLE_LIMIT,
+    )?;
+    let mut connections_by_path = connections
+        .into_iter()
+        .map(|page| (page.path.clone(), page))
+        .collect::<HashMap<_, _>>();
+    let exact_query = normalize_exact_ranking_query(query);
     let mut scored = selected
         .into_iter()
         .enumerate()
         .map(|(index, node)| {
-            let evidence = ranked_node_evidence(store, &node, &terms, &text_hit_paths)?;
-            Ok((index, evidence.score, node))
+            let page = connections_by_path.remove(&node.node.path).ok_or_else(|| {
+                ServiceError::InvalidInput(format!(
+                    "graph navigation batch omitted indexed path {:?}",
+                    node.node.path
+                ))
+            })?;
+            let evidence =
+                ranked_node_evidence(store, &node, &terms, &exact_query, &text_hit_paths, &page)?;
+            let next_capability = match node.node.kind {
+                NodeKind::Folder => NavigationNextCapability::Files,
+                NodeKind::File if page.truncated => NavigationNextCapability::Relations,
+                NodeKind::File => NavigationNextCapability::Summary,
+            };
+            Ok((
+                index,
+                RankedEvidence {
+                    exact_path: evidence.exact_path,
+                    exact_name: evidence.exact_name,
+                    reviewed_purpose: evidence.reviewed_purpose,
+                    context_score: evidence.context_score,
+                    reasons: Vec::new(),
+                    reason_codes: Vec::new(),
+                },
+                RankedNode {
+                    node,
+                    reasons: evidence.reasons,
+                    reason_codes: evidence.reason_codes,
+                    connection_counts: page.counts,
+                    connections: page.connections,
+                    connections_truncated: page.truncated,
+                    next_call: NavigationNextCall {
+                        capability: next_capability,
+                        path: owners[index].path.clone(),
+                    },
+                },
+            ))
         })
         .collect::<ServiceResult<Vec<_>>>()?;
     scored.sort_by(|left, right| {
-        right
-            .1
-            .cmp(&left.1)
+        ranked_evidence_order(&left.1, &right.1)
             .then_with(|| left.0.cmp(&right.0))
-            .then_with(|| left.2.node.path.cmp(&right.2.node.path))
+            .then_with(|| left.2.node.node.path.cmp(&right.2.node.node.path))
     });
     Ok(scored.into_iter().map(|(_, _, node)| node).collect())
+}
+
+/// Compare ranking tiers before stable candidate order and path tie-breakers.
+fn ranked_evidence_order(left: &RankedEvidence, right: &RankedEvidence) -> std::cmp::Ordering {
+    right
+        .exact_path
+        .cmp(&left.exact_path)
+        .then_with(|| right.exact_name.cmp(&left.exact_name))
+        .then_with(|| right.reviewed_purpose.cmp(&left.reviewed_purpose))
+        .then_with(|| right.context_score.cmp(&left.context_score))
 }
 
 /// Compute score and reasons for one node from indexed metadata.
@@ -950,53 +1038,146 @@ fn ranked_node_evidence(
     store: &AtlasStore,
     node: &IndexedNode,
     terms: &[String],
+    exact_query: &str,
     text_hit_paths: &HashSet<String>,
+    connections: &RepositoryNavigationConnections,
 ) -> ServiceResult<RankedEvidence> {
-    let mut score = 0usize;
+    let normalized_path = node.node.path.replace('\\', "/").to_lowercase();
+    let normalized_name = normalized_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&normalized_path);
+    let exact_path = !exact_query.is_empty() && normalized_path == exact_query;
+    let exact_name = !exact_query.is_empty() && normalized_name == exact_query;
+    let mut reviewed_purpose = false;
+    let mut context_score = 0usize;
     let mut reasons = Vec::new();
-    if terms.is_empty() {
-        return Ok(RankedEvidence { score, reasons });
+    let mut reason_codes = Vec::new();
+
+    if exact_path {
+        push_ranked_reason(&mut reasons, "exact path".to_string());
+        push_ranked_reason_code(&mut reason_codes, RankedReasonCode::ExactPath);
+    }
+    if exact_name {
+        push_ranked_reason(&mut reasons, "exact name".to_string());
+        push_ranked_reason_code(&mut reason_codes, RankedReasonCode::ExactName);
     }
 
-    if let Some(term) = first_matching_term(&node.node.path, terms) {
-        score = score.saturating_add(40);
-        push_ranked_reason(&mut reasons, format!("path matched {term}"));
-    }
-    if let Some(term) = node
-        .purpose
-        .purpose
-        .as_deref()
-        .and_then(|purpose| first_matching_term(purpose, terms))
+    if let Some(term) = first_matching_term(&node.node.path, terms)
+        && !exact_path
     {
-        score = score.saturating_add(50);
+        context_score = context_score.saturating_add(40);
+        push_ranked_reason(&mut reasons, format!("path matched {term}"));
+        push_ranked_reason_code(&mut reason_codes, RankedReasonCode::Path);
+    }
+    if node.purpose.agent_reviewed()
+        && let Some(term) = node
+            .purpose
+            .purpose
+            .as_deref()
+            .and_then(|purpose| first_matching_term(purpose, terms))
+    {
+        reviewed_purpose = true;
         push_ranked_reason(&mut reasons, format!("purpose matched {term}"));
+        push_ranked_reason_code(&mut reason_codes, RankedReasonCode::ReviewedPurpose);
     }
     if let Some(term) = node
         .summary
         .as_deref()
         .and_then(|summary| first_matching_term(summary, terms))
     {
-        score = score.saturating_add(20);
+        context_score = context_score.saturating_add(20);
         push_ranked_reason(&mut reasons, format!("summary matched {term}"));
+        push_ranked_reason_code(&mut reason_codes, RankedReasonCode::Summary);
     }
     if node.node.kind == NodeKind::File {
         if let Some((symbol_name, term)) = first_symbol_match(store, &node.node.path, terms)? {
-            score = score.saturating_add(35);
+            context_score = context_score.saturating_add(35);
             push_ranked_reason(&mut reasons, format!("symbol {symbol_name} matched {term}"));
+            push_ranked_reason_code(&mut reason_codes, RankedReasonCode::Symbol);
         }
         if text_hit_paths.contains(&node.node.path)
             && let Some(term) = indexed_text_match_term(store, &node.node.path, terms)?
         {
-            score = score.saturating_add(15);
+            context_score = context_score.saturating_add(15);
             push_ranked_reason(&mut reasons, format!("indexed text matched {term}"));
+            push_ranked_reason_code(&mut reason_codes, RankedReasonCode::IndexedText);
         }
         if let Some(reason) = paired_path_reason(store, &node.node.path)? {
-            score = score.saturating_add(10);
+            context_score = context_score.saturating_add(10);
             push_ranked_reason(&mut reasons, reason);
+            push_ranked_reason_code(&mut reason_codes, RankedReasonCode::PairedFile);
         }
     }
 
-    Ok(RankedEvidence { score, reasons })
+    let mut graph_context_score = 0usize;
+    for count in &connections.counts {
+        if count.count == 0 {
+            continue;
+        }
+        graph_context_score = graph_context_score.saturating_add(2);
+        push_ranked_reason_code(&mut reason_codes, graph_reason_code(count.kind));
+    }
+    for connection in &connections.connections {
+        if ranked_connection_matches_terms(&connection.target, terms) {
+            graph_context_score = graph_context_score.saturating_add(18);
+            push_ranked_reason_code(&mut reason_codes, graph_reason_code(connection.kind));
+        }
+    }
+    context_score = context_score.saturating_add(graph_context_score.min(32));
+
+    Ok(RankedEvidence {
+        exact_path,
+        exact_name,
+        reviewed_purpose,
+        context_score,
+        reasons,
+        reason_codes,
+    })
+}
+
+/// Normalize a complete query for exact path and basename dominance.
+fn normalize_exact_ranking_query(query: &str) -> String {
+    query.trim().replace('\\', "/").to_lowercase()
+}
+
+/// Return whether one compact graph endpoint matches any normalized query term.
+fn ranked_connection_matches_terms(target: &RankedConnectionTarget, terms: &[String]) -> bool {
+    let fields = match target {
+        RankedConnectionTarget::Local { path, symbol } => {
+            [Some(path.as_str()), symbol.as_deref(), None]
+        }
+        RankedConnectionTarget::Package {
+            manager,
+            name,
+            manifest,
+        } => [
+            Some(manager.as_str()),
+            Some(name.as_str()),
+            Some(manifest.as_str()),
+        ],
+        RankedConnectionTarget::External { system, identity } => {
+            [Some(system.as_str()), Some(identity.as_str()), None]
+        }
+        RankedConnectionTarget::Unresolved { reference } => [Some(reference.as_str()), None, None],
+    };
+    fields
+        .into_iter()
+        .flatten()
+        .any(|field| first_matching_term(field, terms).is_some())
+}
+
+/// Map one connection family to its compact ranking signal.
+const fn graph_reason_code(kind: RankedConnectionKind) -> RankedReasonCode {
+    match kind {
+        RankedConnectionKind::Package => RankedReasonCode::GraphPackage,
+        RankedConnectionKind::Import => RankedReasonCode::GraphImport,
+        RankedConnectionKind::Call => RankedReasonCode::GraphCall,
+        RankedConnectionKind::Reference => RankedReasonCode::GraphReference,
+        RankedConnectionKind::Test => RankedReasonCode::GraphTest,
+        RankedConnectionKind::Route => RankedReasonCode::GraphRoute,
+        RankedConnectionKind::Config => RankedReasonCode::GraphConfig,
+    }
 }
 
 /// Split a query into unique lowercase terms used by ranking evidence.
@@ -1024,6 +1205,13 @@ fn first_matching_term(text: &str, terms: &[String]) -> Option<String> {
 fn push_ranked_reason(reasons: &mut Vec<String>, reason: String) {
     if reasons.len() < RANKED_REASON_LIMIT && !reasons.contains(&reason) {
         reasons.push(reason);
+    }
+}
+
+/// Append one unique compact reason code in stable discovery order.
+fn push_ranked_reason_code(codes: &mut Vec<RankedReasonCode>, code: RankedReasonCode) {
+    if !codes.contains(&code) {
+        codes.push(code);
     }
 }
 
@@ -3346,6 +3534,23 @@ mod tests {
         require_reason(&ranked[0].reasons, "symbol install_runtime matched install")?;
         require_reason(&ranked[0].reasons, "indexed text matched hiddenneedle")?;
         require_reason(&ranked[0].reasons, "paired test file tests/installer.rs")?;
+        require_eq(
+            &ranked[0]
+                .reason_codes
+                .contains(&RankedReasonCode::ReviewedPurpose),
+            &true,
+            "reviewed purpose reason code",
+        )?;
+        require_eq(
+            &ranked[0].connection_counts,
+            &Vec::new(),
+            "deterministic no-graph fallback counts",
+        )?;
+        require_eq(
+            &ranked[0].next_call.capability,
+            &NavigationNextCapability::Summary,
+            "no-graph fallback next call",
+        )?;
         if !ranked.iter().any(|node| {
             node.node.node.path == "tests/installer.rs"
                 && node
@@ -3355,6 +3560,149 @@ mod tests {
         }) {
             return Err(io::Error::other("paired test result/reason was missing").into());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn ranked_evidence_keeps_reviewed_purpose_ahead_of_bounded_graph_popularity()
+    -> Result<(), Box<dyn Error>> {
+        let store = AtlasStore::in_memory()?;
+        let mut popular = test_indexed_node("src/popular.rs", "popular-hash");
+        popular.purpose = Purpose {
+            path: popular.node.path.clone(),
+            purpose: Some("generated auth suggestion".to_string()),
+            source: PurposeSource::Generated,
+            status: PurposeStatus::Suggested,
+        };
+        popular.summary = None;
+        let counts = [
+            RankedConnectionKind::Package,
+            RankedConnectionKind::Import,
+            RankedConnectionKind::Call,
+            RankedConnectionKind::Reference,
+            RankedConnectionKind::Test,
+            RankedConnectionKind::Route,
+            RankedConnectionKind::Config,
+        ]
+        .into_iter()
+        .map(|kind| projectatlas_core::RankedConnectionCount {
+            kind,
+            count: RANKED_CONNECTION_FAMILY_LIMIT as usize,
+            truncated: true,
+        })
+        .collect::<Vec<_>>();
+        let popular_connections = RepositoryNavigationConnections {
+            path: popular.node.path.clone(),
+            counts,
+            connections: vec![projectatlas_core::RankedConnection {
+                kind: RankedConnectionKind::Call,
+                direction: projectatlas_core::RankedConnectionDirection::Inbound,
+                target: RankedConnectionTarget::Local {
+                    path: "src/auth.rs".to_string(),
+                    symbol: Some("authenticate".to_string()),
+                },
+            }],
+            truncated: true,
+        };
+        let popular_evidence = ranked_node_evidence(
+            &store,
+            &popular,
+            &["auth".to_string()],
+            "",
+            &HashSet::new(),
+            &popular_connections,
+        )?;
+        require_eq(
+            &popular_evidence.reviewed_purpose,
+            &false,
+            "generated purpose authority",
+        )?;
+        if popular_evidence.context_score > 32 {
+            return Err(io::Error::other("graph popularity was not saturated").into());
+        }
+
+        let mut reviewed = test_indexed_node("src/responsibility.rs", "reviewed-hash");
+        reviewed.purpose.purpose = Some("Own auth responsibility".to_string());
+        reviewed.summary = None;
+        let reviewed_evidence = ranked_node_evidence(
+            &store,
+            &reviewed,
+            &["auth".to_string()],
+            "",
+            &HashSet::new(),
+            &RepositoryNavigationConnections {
+                path: reviewed.node.path.clone(),
+                counts: Vec::new(),
+                connections: Vec::new(),
+                truncated: false,
+            },
+        )?;
+        require_eq(
+            &reviewed_evidence.reviewed_purpose,
+            &true,
+            "reviewed purpose tier",
+        )?;
+        require_eq(
+            &ranked_evidence_order(&reviewed_evidence, &popular_evidence),
+            &std::cmp::Ordering::Less,
+            "reviewed purpose dominance",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn ranked_service_preserves_dominant_tiers_across_more_than_one_hundred_weaker_matches()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let mut nodes = vec![
+            test_node("needle", "hash-exact"),
+            test_node("deep/needle", "hash-name"),
+            test_node("reviewed.rs", "hash-reviewed"),
+        ];
+        nodes
+            .extend((0..130).map(|index| test_node(&format!("weak/needle-{index:03}.rs"), "hash")));
+        store.replace_scan(&nodes)?;
+        store.set_purpose(
+            "reviewed.rs",
+            "Own needle responsibility",
+            PurposeSource::Agent,
+        )?;
+        for index in 0..130 {
+            let path = format!("weak/needle-{index:03}.rs");
+            store.set_suggested_purpose(&path, "Generated needle suggestion")?;
+            store.set_node_summary(&path, "Observed needle summary")?;
+        }
+
+        let ranked = load_ranked_file_nodes_with_reasons(&store, "needle", None, None, 3, false)?;
+        require_eq(
+            &ranked
+                .iter()
+                .map(|node| node.node.node.path.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["needle", "deep/needle", "reviewed.rs"],
+            "service exact path basename and reviewed-purpose order",
+        )?;
+        require_eq(
+            &ranked[0]
+                .reason_codes
+                .contains(&RankedReasonCode::ExactPath),
+            &true,
+            "exact path reason code",
+        )?;
+        require_eq(
+            &ranked[1]
+                .reason_codes
+                .contains(&RankedReasonCode::ExactName),
+            &true,
+            "exact basename reason code",
+        )?;
+        require_eq(
+            &ranked[2]
+                .reason_codes
+                .contains(&RankedReasonCode::ReviewedPurpose),
+            &true,
+            "reviewed purpose reason code after adversarial admission",
+        )?;
         Ok(())
     }
 

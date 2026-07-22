@@ -6,7 +6,9 @@ use predicates::prelude::*;
 use projectatlas_cli::optional_parser_lifecycle::OPTIONAL_PARSER_PACK_SELECTION_POLICY_PATH;
 use projectatlas_core::PurposeSource;
 use projectatlas_core::graph::{
-    CoverageScope, ExtendedRelationKind, GraphRelationKind, RelationResolution, RepositoryNodePath,
+    Completeness, ConfidenceClass, CoverageScope, EntitySelector, ExtendedRelationKind,
+    ExternalSelector, GraphEntity, GraphIdentityText, GraphRelationKind, LogicalRelation,
+    PackageSelector, RelationResolution, RepositoryFilePath, RepositoryNodePath,
 };
 use projectatlas_core::language::{BROAD_SOURCE_EXTENSIONS, detect_language_for_path};
 #[cfg(feature = "optional-parser-supervisor")]
@@ -7472,7 +7474,12 @@ fn ranked_files_and_next_include_bounded_reasons() -> Result<(), Box<dyn Error>>
         &["file_purpose"],
         "Installer runtime implementation for navigation tests.",
     )?;
+    require_json_string(file_entry, &["purpose_source"], "agent")?;
+    require_json_bool(file_entry, &["purpose_agent_reviewed"], true)?;
     require_json_contains(file_entry, &["reasons", "0"], "path matched")?;
+    require_json_string(file_entry, &["next_call", "capability"], "summary")?;
+    require_json_string(file_entry, &["next_call", "path"], "src/installer.rs")?;
+    require_json_bool(file_entry, &["connections_truncated"], false)?;
     let file_reasons = json_at(file_entry, &["reasons"])?
         .as_array()
         .ok_or_else(|| io::Error::other("file reasons were not an array"))?;
@@ -7508,6 +7515,11 @@ fn ranked_files_and_next_include_bounded_reasons() -> Result<(), Box<dyn Error>>
     require_json_string(&next_json, &["query"], "installer runtime hiddenNeedle")?;
     require_json_string(&next_json, &["files", "0", "path"], "src/installer.rs")?;
     require_json_contains(&next_json, &["files", "0", "reasons", "0"], "path matched")?;
+    require_json_string(
+        &next_json,
+        &["files", "0", "next_call", "capability"],
+        "summary",
+    )?;
     let suggestions = json_at(&next_json, &["suggestions"])?
         .as_array()
         .ok_or_else(|| io::Error::other("next suggestions were not an array"))?;
@@ -7521,6 +7533,279 @@ fn ranked_files_and_next_include_bounded_reasons() -> Result<(), Box<dyn Error>>
         ))
         .into());
     }
+    Ok(())
+}
+
+#[test]
+fn cli_navigation_rows_propagate_nonempty_typed_graph_evidence() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(repo.join(TESTS_DIR_NAME))?;
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"adapter-navigation\"\nversion = \"0.1.0\"\n",
+    )?;
+    for path in [
+        "src/navigation_owner.rs",
+        "src/navigation_local.rs",
+        "src/navigation_unresolved.rs",
+        "tests/navigation_owner.rs",
+    ] {
+        fs::write(repo.join(path), "pub fn navigation_fixture() {}\n")?;
+    }
+    let db = temp.path().join("projectatlas.db");
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+    publish_cli_navigation_graph(&db)?;
+
+    let json_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["files", "navigation", "--limit", "10"])
+        .output()?;
+    if !json_output.status.success() {
+        return Err(io::Error::other(format!(
+            "graph-enriched JSON files failed: {}",
+            String::from_utf8_lossy(&json_output.stderr)
+        ))
+        .into());
+    }
+    let files: Value = serde_json::from_slice(&json_output.stdout)?;
+    let rows = files
+        .as_array()
+        .ok_or_else(|| io::Error::other("graph-enriched files payload is not an array"))?;
+    let owner = rows
+        .iter()
+        .find(|row| row["path"] == "src/navigation_owner.rs")
+        .ok_or_else(|| io::Error::other("graph-enriched owner row is missing"))?;
+    require_json_bool(owner, &["connections_truncated"], true)?;
+    require_json_string(owner, &["next_call", "capability"], "relations")?;
+    let families = rows
+        .iter()
+        .flat_map(|row| {
+            row["connection_counts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|count| count["kind"].as_str())
+        })
+        .collect::<BTreeSet<_>>();
+    if families
+        != BTreeSet::from([
+            "package",
+            "import",
+            "call",
+            "reference",
+            "test",
+            "route",
+            "config",
+        ])
+    {
+        return Err(io::Error::other(format!(
+            "CLI graph families were not propagated: {families:?}"
+        ))
+        .into());
+    }
+    let target_kinds = rows
+        .iter()
+        .flat_map(|row| {
+            row["connections"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|connection| connection["target"]["kind"].as_str())
+        })
+        .collect::<BTreeSet<_>>();
+    for expected in ["local", "package", "external", "unresolved"] {
+        if !target_kinds.contains(expected) {
+            return Err(io::Error::other(format!(
+                "CLI graph targets omitted {expected}: {target_kinds:?}"
+            ))
+            .into());
+        }
+    }
+
+    let toon = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["files", "navigation", "--limit", "10"])
+        .output()?;
+    if !toon.status.success() {
+        return Err(io::Error::other(format!(
+            "graph-enriched TOON files failed: {}",
+            String::from_utf8_lossy(&toon.stderr)
+        ))
+        .into());
+    }
+    let toon = String::from_utf8(toon.stdout)?;
+    for expected in [
+        "connection_counts",
+        "connections",
+        "connections_truncated: true",
+        "capability: relations",
+    ] {
+        if !toon.contains(expected) {
+            return Err(io::Error::other(format!(
+                "TOON graph evidence omitted {expected:?}: {toon}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn publish_cli_navigation_graph(db: &Path) -> Result<(), Box<dyn Error>> {
+    let mut store = AtlasStore::open(db)?;
+    let project = store
+        .project_instance_id()?
+        .ok_or_else(|| io::Error::other("CLI navigation project identity is missing"))?;
+    let current_publication = store
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("CLI navigation publication is missing"))?;
+    let fingerprint = current_publication
+        .contract_fingerprint
+        .clone()
+        .ok_or_else(|| io::Error::other("CLI navigation fingerprint is missing"))?;
+    let generation = current_publication
+        .generation
+        .checked_next()
+        .ok_or_else(|| io::Error::other("CLI navigation generation overflow"))?;
+    let file_entity = |path: &str| {
+        GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new(path))?,
+            },
+            generation,
+        )
+    };
+    let owner = file_entity("src/navigation_owner.rs")?;
+    let local = file_entity("src/navigation_local.rs")?;
+    let unresolved = file_entity("src/navigation_unresolved.rs")?;
+    let test = file_entity("tests/navigation_owner.rs")?;
+    let package = GraphEntity::new(
+        project,
+        EntitySelector::Package {
+            package: PackageSelector {
+                manager: GraphIdentityText::new("cargo")?,
+                name: GraphIdentityText::new("adapter-navigation")?,
+                manifest: RepositoryFilePath::new(Path::new("Cargo.toml"))?,
+            },
+        },
+        generation,
+    )?;
+    let external = GraphEntity::new(
+        project,
+        EntitySelector::External {
+            external: ExternalSelector {
+                system: GraphIdentityText::new("crates.io")?,
+                identity: GraphIdentityText::new("serde@1")?,
+            },
+        },
+        generation,
+    )?;
+    let resolved = |source: &GraphEntity, kind, target: &GraphEntity| {
+        Ok::<_, Box<dyn Error>>(LogicalRelation::new(
+            source,
+            kind,
+            RelationResolution::resolved(target)?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )?)
+    };
+    let unresolved_relation = |source: &GraphEntity, kind, reference: &str| {
+        Ok::<_, Box<dyn Error>>(LogicalRelation::new(
+            source,
+            kind,
+            RelationResolution::Unresolved {
+                reference: GraphIdentityText::new(reference)?,
+            },
+            ConfidenceClass::High,
+            Completeness::Partial,
+            generation,
+        )?)
+    };
+    let relations = vec![
+        resolved(
+            &owner,
+            GraphRelationKind::Legacy(RelationKind::DependsOn),
+            &package,
+        )?,
+        LogicalRelation::new(
+            &owner,
+            GraphRelationKind::Legacy(RelationKind::Imports),
+            RelationResolution::external(&external)?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )?,
+        resolved(
+            &owner,
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            &local,
+        )?,
+        unresolved_relation(
+            &unresolved,
+            GraphRelationKind::Extended(ExtendedRelationKind::References),
+            "navigation-reference",
+        )?,
+        resolved(
+            &test,
+            GraphRelationKind::Extended(ExtendedRelationKind::Tests),
+            &owner,
+        )?,
+        resolved(
+            &owner,
+            GraphRelationKind::Extended(ExtendedRelationKind::RoutesTo),
+            &local,
+        )?,
+        unresolved_relation(
+            &owner,
+            GraphRelationKind::Extended(ExtendedRelationKind::Configures),
+            "NAVIGATION_MODE",
+        )?,
+    ];
+    let nodes = store
+        .load_nodes()?
+        .into_iter()
+        .map(|node| node.node)
+        .collect::<Vec<_>>();
+    {
+        let mut publication = store.begin_index_publication(&fingerprint)?;
+        publication.begin_scan_replacement()?;
+        publication.upsert_scan_node_batch(&nodes)?;
+        publication.finish_scan_replacement()?;
+        publication.replace_repository_graph(
+            project,
+            &[owner, local, unresolved, test, package, external],
+            &relations,
+            &[],
+            &[],
+        )?;
+        publication.complete()?;
+    }
+    store.set_purpose("src", "Navigation graph folder", PurposeSource::Agent)?;
+    store.set_purpose(
+        "src/navigation_owner.rs",
+        "Navigation graph owner",
+        PurposeSource::Agent,
+    )?;
+    store.set_purpose(
+        "src/navigation_unresolved.rs",
+        "Navigation unresolved graph owner",
+        PurposeSource::Agent,
+    )?;
     Ok(())
 }
 

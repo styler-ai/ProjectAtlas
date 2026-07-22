@@ -29,6 +29,8 @@ pub fn render_node_rows(label: &str, nodes: &[IndexedNode]) -> Vec<serde_json::V
                     "folder_purpose": purpose,
                     "content_summary": content_summary,
                     "status": node.purpose.status.to_string(),
+                    "purpose_source": node.purpose.source,
+                    "purpose_agent_reviewed": node.purpose.agent_reviewed(),
                 }),
                 "files" => json!({
                     "path": node.node.path,
@@ -37,6 +39,8 @@ pub fn render_node_rows(label: &str, nodes: &[IndexedNode]) -> Vec<serde_json::V
                     "file_purpose": purpose,
                     "content_summary": content_summary,
                     "status": node.purpose.status.to_string(),
+                    "purpose_source": node.purpose.source,
+                    "purpose_agent_reviewed": node.purpose.agent_reviewed(),
                 }),
                 _ => json!({
                     "path": node.node.path,
@@ -44,6 +48,8 @@ pub fn render_node_rows(label: &str, nodes: &[IndexedNode]) -> Vec<serde_json::V
                     "purpose": purpose,
                     "content_summary": content_summary,
                     "status": node.purpose.status.to_string(),
+                    "purpose_source": node.purpose.source,
+                    "purpose_agent_reviewed": node.purpose.agent_reviewed(),
                 }),
             }
         })
@@ -62,6 +68,17 @@ pub fn render_ranked_node_rows(label: &str, nodes: &[RankedNode]) -> Vec<serde_j
                 .unwrap_or_else(|| json!({}));
             if let Some(object) = row.as_object_mut() {
                 object.insert("reasons".to_string(), json!(ranked.reasons));
+                object.insert("reason_codes".to_string(), json!(ranked.reason_codes));
+                object.insert(
+                    "connection_counts".to_string(),
+                    json!(ranked.connection_counts),
+                );
+                object.insert("connections".to_string(), json!(ranked.connections));
+                object.insert(
+                    "connections_truncated".to_string(),
+                    json!(ranked.connections_truncated),
+                );
+                object.insert("next_call".to_string(), json!(ranked.next_call));
             }
             row
         })

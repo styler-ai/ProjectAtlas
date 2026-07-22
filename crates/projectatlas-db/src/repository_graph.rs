@@ -1,23 +1,28 @@
 //! Normalized repository-graph persistence and bounded prepared queries.
 
-use super::{AtlasStore, DbError, DbResult, IndexPublicationGuard, IndexPublicationState};
+use super::{
+    AtlasStore, DbError, DbResult, IndexPublicationGuard, IndexPublicationState, count_to_usize,
+};
 use crate::project_identity::{
     load_graph_generation, load_project_identity, require_bound_project_identity,
     set_graph_generation, verify_project_identity,
 };
-use projectatlas_core::IndexGeneration;
 use projectatlas_core::graph::{
     CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
     CoverageState, EntityResolutionKey, EntitySelector, ExtendedRelationKind, ExternalSelector,
-    GraphEntity, GraphEntityKey, GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind,
-    LogicalRelation, PackageSelector, ProjectInstanceId, RelationDependencyKey, RelationOccurrence,
-    RelationResolution, RepositoryFilePath, RepositoryNodePath, ResolutionKeyDomain, SourceSpan,
-    SymbolSelector,
+    GraphContractError, GraphEntity, GraphEntityKey, GraphIdentityText, GraphLimitKind,
+    GraphLimits, GraphRelationKind, LogicalRelation, PackageSelector, ProjectInstanceId,
+    RelationDependencyKey, RelationOccurrence, RelationResolution, RepositoryFilePath,
+    RepositoryNodePath, ResolutionKeyDomain, SourceSpan, SymbolSelector,
 };
 use projectatlas_core::symbols::{RelationKind, SymbolKind};
+use projectatlas_core::{
+    IndexGeneration, NodeKind, RankedConnection, RankedConnectionCount, RankedConnectionDirection,
+    RankedConnectionKind, RankedConnectionTarget,
+};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::Path;
 
@@ -29,6 +34,42 @@ pub struct RepositoryGraphPage<T> {
     /// Whether at least one additional validated row exists.
     pub truncated: bool,
 }
+
+/// One folder or file whose current graph context should enrich navigation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryNavigationNode {
+    /// Exact repository-relative path.
+    pub path: String,
+    /// Folder or file ownership semantics used by the set query.
+    pub kind: NodeKind,
+}
+
+/// Bounded current graph evidence for one folder or file navigation row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryNavigationConnections {
+    /// Exact repository-relative owner path.
+    pub path: String,
+    /// Sparse stable-order family counts.
+    pub counts: Vec<RankedConnectionCount>,
+    /// Bounded stable-order connection sample.
+    pub connections: Vec<RankedConnection>,
+    /// Whether the bounded sample omitted any validated relation through family or global overflow.
+    pub truncated: bool,
+}
+
+/// Maximum owners admitted to one generated set-oriented navigation statement.
+const NAVIGATION_CONNECTION_OWNER_CHUNK: usize = 8;
+
+/// Stable family order and normalized persisted selectors for navigation context.
+const NAVIGATION_CONNECTION_FAMILIES: &[(RankedConnectionKind, &str, &str)] = &[
+    (RankedConnectionKind::Package, "legacy", "depends-on"),
+    (RankedConnectionKind::Import, "legacy", "imports"),
+    (RankedConnectionKind::Call, "legacy", "calls"),
+    (RankedConnectionKind::Reference, "extended", "references"),
+    (RankedConnectionKind::Test, "extended", "tests"),
+    (RankedConnectionKind::Route, "extended", "routes-to"),
+    (RankedConnectionKind::Config, "extended", "configures"),
+];
 
 /// Conservative persisted footprint owned by exact affected source paths.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -186,7 +227,550 @@ struct CoverageRow {
     reached_limit: Option<String>,
 }
 
+/// One bounded flattened relation row used only for navigation enrichment.
+struct NavigationConnectionRow {
+    /// Zero-based owner position inside the current statement chunk.
+    owner_index: usize,
+    /// Closed connection family selected by the query branch.
+    kind: RankedConnectionKind,
+    /// Direction relative to the owner.
+    direction: RankedConnectionDirection,
+    /// Stable relation key used for deterministic ordering and deduplication.
+    relation_key: Vec<u8>,
+    /// Persisted resolution lifecycle state.
+    resolution_status: String,
+    /// Persisted unresolved or ambiguous identity.
+    reference: Option<String>,
+    /// Related normalized entity kind, absent only for unresolved output.
+    entity_kind: Option<String>,
+    /// Related repository path.
+    repository_path: Option<String>,
+    /// Related package ecosystem.
+    package_manager: Option<String>,
+    /// Related package name.
+    package_name: Option<String>,
+    /// Related package manifest.
+    manifest_path: Option<String>,
+    /// Related declaration name.
+    symbol_name: Option<String>,
+    /// Related external namespace.
+    external_system: Option<String>,
+    /// Related external identity.
+    external_identity: Option<String>,
+}
+
+/// Return one empty navigation page while retaining the requested owner path.
+fn empty_navigation_connections(path: &str) -> RepositoryNavigationConnections {
+    RepositoryNavigationConnections {
+        path: path.to_string(),
+        counts: Vec::new(),
+        connections: Vec::new(),
+        truncated: false,
+    }
+}
+
+/// Load one bounded chunk with a single compound set-oriented statement.
+fn collect_navigation_connection_rows(
+    connection: &Connection,
+    owners: &[RepositoryNavigationNode],
+    family_limit_plus_one: i64,
+) -> DbResult<Vec<NavigationConnectionRow>> {
+    let mut branches = Vec::with_capacity(owners.len() * NAVIGATION_CONNECTION_FAMILIES.len() * 2);
+    let mut values = Vec::new();
+    for (owner_index, owner) in owners.iter().enumerate() {
+        for &(kind, scope, relation) in NAVIGATION_CONNECTION_FAMILIES {
+            branches.push(navigation_connection_branch(
+                owner_index,
+                owner,
+                kind,
+                scope,
+                relation,
+                RankedConnectionDirection::Outbound,
+                family_limit_plus_one,
+                &mut values,
+            ));
+            if owner.kind != NodeKind::Folder || owner.path != "." {
+                branches.push(navigation_connection_branch(
+                    owner_index,
+                    owner,
+                    kind,
+                    scope,
+                    relation,
+                    RankedConnectionDirection::Inbound,
+                    family_limit_plus_one,
+                    &mut values,
+                ));
+            }
+        }
+    }
+    let sql = branches.join(" UNION ALL ");
+    let mut statement = connection.prepare(&sql)?;
+    let mut rows = statement.query(params_from_iter(values))?;
+    let mut collected = Vec::new();
+    while let Some(row) = rows.next()? {
+        collected.push(navigation_connection_row(row)?);
+    }
+    Ok(collected)
+}
+
+/// Build one indexed outbound or inbound query branch for one owner and family.
+fn navigation_connection_branch(
+    owner_index: usize,
+    owner: &RepositoryNavigationNode,
+    kind: RankedConnectionKind,
+    scope: &'static str,
+    relation: &'static str,
+    direction: RankedConnectionDirection,
+    family_limit_plus_one: i64,
+    values: &mut Vec<Value>,
+) -> String {
+    values.push(Value::Integer(owner_index as i64));
+    values.push(Value::Text(
+        navigation_connection_kind_name(kind).to_string(),
+    ));
+    if owner.kind == NodeKind::Folder
+        && owner.path == "."
+        && direction == RankedConnectionDirection::Outbound
+    {
+        values.push(Value::Text(scope.to_string()));
+        values.push(Value::Text(relation.to_string()));
+        values.push(Value::Integer(family_limit_plus_one));
+        return "SELECT * FROM (
+                    SELECT ? AS owner_index, ? AS expected_kind, 'outbound' AS direction,
+                           r.relation_key, r.relation_scope, r.relation_kind,
+                           r.resolution_status, r.reference_text,
+                           related.entity_kind, related.repository_path,
+                           related.package_manager, related.package_name, related.manifest_path,
+                           related.symbol_name, related.external_system, related.external_identity
+                      FROM graph_relations r INDEXED BY idx_graph_relations_kind_order
+                      LEFT JOIN graph_entities related
+                        ON related.entity_key = r.target_entity_key
+                     WHERE r.relation_scope = ? AND r.relation_kind = ?
+                     ORDER BY r.canonical_identity, r.relation_key
+                     LIMIT ?
+                )"
+        .to_string();
+    }
+    let (relation_key, related_key, index, direction_name) = match direction {
+        RankedConnectionDirection::Outbound => (
+            "source_entity_key",
+            "target_entity_key",
+            "idx_graph_relations_source_kind",
+            "outbound",
+        ),
+        RankedConnectionDirection::Inbound => (
+            "target_entity_key",
+            "source_entity_key",
+            "idx_graph_relations_target_kind",
+            "inbound",
+        ),
+    };
+    let owned = navigation_owned_entity_sql(owner, values);
+    let exclude_internal = if direction == RankedConnectionDirection::Inbound {
+        let owned_sources = navigation_owned_entity_sql(owner, values);
+        format!(" AND r.source_entity_key NOT IN ({owned_sources})")
+    } else {
+        String::new()
+    };
+    values.push(Value::Text(scope.to_string()));
+    values.push(Value::Text(relation.to_string()));
+    values.push(Value::Integer(family_limit_plus_one));
+    format!(
+        "SELECT * FROM (
+             SELECT ? AS owner_index, ? AS expected_kind, '{direction_name}' AS direction,
+                    r.relation_key, r.relation_scope, r.relation_kind,
+                    r.resolution_status, r.reference_text,
+                    related.entity_kind, related.repository_path,
+                    related.package_manager, related.package_name, related.manifest_path,
+                    related.symbol_name, related.external_system, related.external_identity
+               FROM graph_relations r INDEXED BY {index}
+               LEFT JOIN graph_entities related ON related.entity_key = r.{related_key}
+              WHERE r.{relation_key} IN ({owned})
+                {exclude_internal}
+                AND r.relation_scope = ? AND r.relation_kind = ?
+              ORDER BY r.canonical_identity, r.relation_key
+              LIMIT ?
+         )"
+    )
+}
+
+/// Build the indexed entity-key ownership set for one navigation owner.
+fn navigation_owned_entity_sql(
+    owner: &RepositoryNavigationNode,
+    values: &mut Vec<Value>,
+) -> String {
+    match owner.kind {
+        NodeKind::File => {
+            values.push(Value::Text(owner.path.clone()));
+            values.push(Value::Text(owner.path.clone()));
+            "SELECT entity_key
+               FROM graph_entities INDEXED BY idx_graph_entities_path
+              WHERE repository_path = ?
+             UNION
+             SELECT entity_key
+               FROM graph_entities INDEXED BY idx_graph_entities_manifest_path
+              WHERE manifest_path = ?"
+                .to_string()
+        }
+        NodeKind::Folder if owner.path == "." => "SELECT entity_key
+               FROM graph_entities INDEXED BY idx_graph_entities_path
+              WHERE repository_path IS NOT NULL
+             UNION
+             SELECT entity_key
+               FROM graph_entities INDEXED BY idx_graph_entities_manifest_path
+              WHERE manifest_path IS NOT NULL"
+            .to_string(),
+        NodeKind::Folder => {
+            let lower = format!("{}/", owner.path);
+            let upper = format!("{}0", owner.path);
+            values.push(Value::Text(owner.path.clone()));
+            values.push(Value::Text(lower.clone()));
+            values.push(Value::Text(upper.clone()));
+            values.push(Value::Text(owner.path.clone()));
+            values.push(Value::Text(lower));
+            values.push(Value::Text(upper));
+            "SELECT entity_key
+               FROM graph_entities INDEXED BY idx_graph_entities_path
+              WHERE repository_path = ?
+             UNION
+             SELECT entity_key
+               FROM graph_entities INDEXED BY idx_graph_entities_path
+              WHERE repository_path >= ? AND repository_path < ?
+             UNION
+             SELECT entity_key
+               FROM graph_entities INDEXED BY idx_graph_entities_manifest_path
+              WHERE manifest_path = ?
+             UNION
+             SELECT entity_key
+               FROM graph_entities INDEXED BY idx_graph_entities_manifest_path
+              WHERE manifest_path >= ? AND manifest_path < ?"
+                .to_string()
+        }
+    }
+}
+
+/// Decode one flattened navigation row without accepting partial corruption.
+fn navigation_connection_row(row: &Row<'_>) -> DbResult<NavigationConnectionRow> {
+    let owner_index = count_to_usize("navigation_connection.owner_index", row.get(0)?)?;
+    let expected_kind: String = row.get(1)?;
+    let direction = match row.get::<_, String>(2)?.as_str() {
+        "outbound" => RankedConnectionDirection::Outbound,
+        "inbound" => RankedConnectionDirection::Inbound,
+        _ => {
+            return Err(DbError::GraphRowShape {
+                table: "graph_relations",
+                reason: "navigation relation direction is invalid",
+            });
+        }
+    };
+    let relation_key: Vec<u8> = row.get(3)?;
+    if relation_key.len() != 32 {
+        return Err(DbError::InvalidBlobLength {
+            field: "graph_relations.relation_key",
+            expected: 32,
+            found: relation_key.len(),
+        });
+    }
+    let relation_scope: String = row.get(4)?;
+    let relation_kind: String = row.get(5)?;
+    let kind = navigation_connection_kind(&relation_scope, &relation_kind)?;
+    if navigation_connection_kind_name(kind) != expected_kind {
+        return Err(DbError::GraphRowShape {
+            table: "graph_relations",
+            reason: "navigation relation family does not match its query branch",
+        });
+    }
+    let resolution_status: String = row.get(6)?;
+    if !matches!(
+        resolution_status.as_str(),
+        "resolved" | "ambiguous" | "unresolved" | "external"
+    ) {
+        return Err(DbError::InvalidEnum {
+            field: "graph_relations.resolution_status",
+            value: resolution_status,
+        });
+    }
+    Ok(NavigationConnectionRow {
+        owner_index,
+        kind,
+        direction,
+        relation_key,
+        resolution_status,
+        reference: row.get(7)?,
+        entity_kind: row.get(8)?,
+        repository_path: row.get(9)?,
+        package_manager: row.get(10)?,
+        package_name: row.get(11)?,
+        manifest_path: row.get(12)?,
+        symbol_name: row.get(13)?,
+        external_system: row.get(14)?,
+        external_identity: row.get(15)?,
+    })
+}
+
+/// Compose deterministic per-owner pages from fully decoded rows.
+fn navigation_connection_pages(
+    owners: &[RepositoryNavigationNode],
+    mut rows: Vec<NavigationConnectionRow>,
+    family_limit: usize,
+    sample_limit: usize,
+) -> DbResult<Vec<RepositoryNavigationConnections>> {
+    rows.sort_by(|left, right| {
+        left.owner_index
+            .cmp(&right.owner_index)
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| {
+                navigation_direction_order(left.direction)
+                    .cmp(&navigation_direction_order(right.direction))
+            })
+            .then_with(|| left.relation_key.cmp(&right.relation_key))
+    });
+    let mut grouped =
+        BTreeMap::<(usize, RankedConnectionKind), Vec<NavigationConnectionRow>>::new();
+    for row in rows {
+        if row.owner_index >= owners.len() {
+            return Err(DbError::GraphRowShape {
+                table: "graph_relations",
+                reason: "navigation relation owner index is outside its request chunk",
+            });
+        }
+        grouped
+            .entry((row.owner_index, row.kind))
+            .or_default()
+            .push(row);
+    }
+
+    owners
+        .iter()
+        .enumerate()
+        .map(|(owner_index, owner)| {
+            let mut page = empty_navigation_connections(&owner.path);
+            for &(kind, _, _) in NAVIGATION_CONNECTION_FAMILIES {
+                let Some(rows) = grouped.remove(&(owner_index, kind)) else {
+                    continue;
+                };
+                let mut seen = HashSet::new();
+                let unique = rows
+                    .into_iter()
+                    .filter(|row| seen.insert(row.relation_key.clone()))
+                    .collect::<Vec<_>>();
+                let truncated = unique.len() > family_limit;
+                let count = unique.len().min(family_limit);
+                page.counts.push(RankedConnectionCount {
+                    kind,
+                    count,
+                    truncated,
+                });
+                for (family_index, row) in unique.into_iter().enumerate() {
+                    let target = navigation_connection_target(&row)?;
+                    if family_index < family_limit && page.connections.len() < sample_limit {
+                        page.connections.push(RankedConnection {
+                            kind,
+                            direction: row.direction,
+                            target,
+                        });
+                    } else if family_index < family_limit {
+                        page.truncated = true;
+                    }
+                }
+                page.truncated |= truncated;
+            }
+            Ok(page)
+        })
+        .collect()
+}
+
+/// Convert a persisted endpoint or unresolved reference into its compact target.
+fn navigation_connection_target(row: &NavigationConnectionRow) -> DbResult<RankedConnectionTarget> {
+    if row.direction == RankedConnectionDirection::Outbound
+        && matches!(row.resolution_status.as_str(), "ambiguous" | "unresolved")
+    {
+        let reference = row.reference.clone().ok_or(DbError::GraphRowShape {
+            table: "graph_relations",
+            reason: "unresolved navigation relation is missing its reference",
+        })?;
+        if row.entity_kind.is_some() {
+            return Err(DbError::GraphRowShape {
+                table: "graph_relations",
+                reason: "unresolved navigation relation retained a target entity",
+            });
+        }
+        return Ok(RankedConnectionTarget::Unresolved { reference });
+    }
+    if !matches!(row.resolution_status.as_str(), "resolved" | "external") {
+        return Err(DbError::GraphRowShape {
+            table: "graph_relations",
+            reason: "inbound navigation relation has no resolved target",
+        });
+    }
+    match row.entity_kind.as_deref() {
+        Some("project") => Ok(RankedConnectionTarget::Local {
+            path: ".".to_string(),
+            symbol: None,
+        }),
+        Some("folder" | "file") => Ok(RankedConnectionTarget::Local {
+            path: required_navigation_target(
+                row.repository_path.as_deref(),
+                "local navigation target is missing its repository path",
+            )?,
+            symbol: None,
+        }),
+        Some("symbol") => Ok(RankedConnectionTarget::Local {
+            path: required_navigation_target(
+                row.repository_path.as_deref(),
+                "symbol navigation target is missing its repository path",
+            )?,
+            symbol: Some(required_navigation_target(
+                row.symbol_name.as_deref(),
+                "symbol navigation target is missing its declaration name",
+            )?),
+        }),
+        Some("package") => Ok(RankedConnectionTarget::Package {
+            manager: required_navigation_target(
+                row.package_manager.as_deref(),
+                "package navigation target is missing its manager",
+            )?,
+            name: required_navigation_target(
+                row.package_name.as_deref(),
+                "package navigation target is missing its name",
+            )?,
+            manifest: required_navigation_target(
+                row.manifest_path.as_deref(),
+                "package navigation target is missing its manifest",
+            )?,
+        }),
+        Some("external") => Ok(RankedConnectionTarget::External {
+            system: required_navigation_target(
+                row.external_system.as_deref(),
+                "external navigation target is missing its system",
+            )?,
+            identity: required_navigation_target(
+                row.external_identity.as_deref(),
+                "external navigation target is missing its identity",
+            )?,
+        }),
+        Some(_) => Err(DbError::GraphRowShape {
+            table: "graph_entities",
+            reason: "navigation endpoint has an unsupported entity kind",
+        }),
+        None => Err(DbError::GraphRowShape {
+            table: "graph_relations",
+            reason: "resolved navigation relation target is missing",
+        }),
+    }
+}
+
+/// Clone one required nonempty target field.
+fn required_navigation_target(value: Option<&str>, reason: &'static str) -> DbResult<String> {
+    value
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or(DbError::GraphRowShape {
+            table: "graph_entities",
+            reason,
+        })
+}
+
+/// Map persisted relation family fields to the navigation family inventory.
+fn navigation_connection_kind(scope: &str, relation: &str) -> DbResult<RankedConnectionKind> {
+    NAVIGATION_CONNECTION_FAMILIES
+        .iter()
+        .find_map(|&(kind, expected_scope, expected_relation)| {
+            (scope == expected_scope && relation == expected_relation).then_some(kind)
+        })
+        .ok_or(DbError::GraphRowShape {
+            table: "graph_relations",
+            reason: "relation family is not available to navigation enrichment",
+        })
+}
+
+/// Return the stable compact name for one navigation family.
+const fn navigation_connection_kind_name(kind: RankedConnectionKind) -> &'static str {
+    match kind {
+        RankedConnectionKind::Package => "package",
+        RankedConnectionKind::Import => "import",
+        RankedConnectionKind::Call => "call",
+        RankedConnectionKind::Reference => "reference",
+        RankedConnectionKind::Test => "test",
+        RankedConnectionKind::Route => "route",
+        RankedConnectionKind::Config => "config",
+    }
+}
+
+/// Return stable outbound-before-inbound sample order.
+const fn navigation_direction_order(direction: RankedConnectionDirection) -> u8 {
+    match direction {
+        RankedConnectionDirection::Outbound => 0,
+        RankedConnectionDirection::Inbound => 1,
+    }
+}
+
 impl AtlasStore {
+    /// Load bounded current graph context for folder and file navigation rows.
+    ///
+    /// Owners are processed through a fixed-size set-oriented statement per
+    /// chunk. Each family uses separate indexed outbound and inbound branches,
+    /// exact file plus manifest ownership, or bounded folder-prefix ownership.
+    /// No partial result is returned if any statement or row fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid paths or limits, unavailable publication
+    /// state, `SQLite` failures, or any corrupt relation or endpoint row.
+    pub fn repository_navigation_connections(
+        &self,
+        owners: &[RepositoryNavigationNode],
+        family_limit: u32,
+        sample_limit: usize,
+    ) -> DbResult<Vec<RepositoryNavigationConnections>> {
+        let family_limit_plus_one = validated_limit_plus_one(
+            family_limit,
+            GraphLimits::MAX_ROWS,
+            "navigation connection rows must be nonzero and within the product ceiling",
+        )?;
+        if sample_limit == 0 || sample_limit > GraphLimits::MAX_ROWS as usize {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "navigation connection sample must be nonzero and within the product ceiling",
+            }
+            .into());
+        }
+        for owner in owners {
+            match owner.kind {
+                NodeKind::Folder => {
+                    RepositoryNodePath::new(Path::new(&owner.path))?;
+                }
+                NodeKind::File => {
+                    RepositoryFilePath::new(Path::new(&owner.path))?;
+                }
+            }
+        }
+        if owners.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.repository_graph_generation()?.is_none() {
+            return Ok(owners
+                .iter()
+                .map(|owner| empty_navigation_connections(&owner.path))
+                .collect());
+        }
+        let project = load_project_identity(&self.connection)?
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        require_bound_project_identity(&self.connection, project)?;
+
+        let mut result = Vec::with_capacity(owners.len());
+        for chunk in owners.chunks(NAVIGATION_CONNECTION_OWNER_CHUNK) {
+            let rows =
+                collect_navigation_connection_rows(&self.connection, chunk, family_limit_plus_one)?;
+            result.extend(navigation_connection_pages(
+                chunk,
+                rows,
+                family_limit as usize,
+                sample_limit,
+            )?);
+        }
+        Ok(result)
+    }
+
     /// Load one typed graph entity by its compact stable key.
     ///
     /// # Errors
@@ -3463,6 +4047,206 @@ mod tests {
         }
     }
 
+    /// Persisted all-family fixture for folder/file navigation enrichment.
+    struct NavigationFixture {
+        /// Selected project identity.
+        project: ProjectInstanceId,
+        /// Exact source path used by file-level assertions.
+        api_path: String,
+        /// Exact manifest path used by package-ownership assertions.
+        manifest_path: String,
+    }
+
+    /// Publish every navigation family plus skewed inbound call context.
+    fn publish_navigation_fixture(
+        store: &mut AtlasStore,
+        fingerprint: &str,
+    ) -> Result<NavigationFixture, Box<dyn Error>> {
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("navigation fixture identity is missing"))?;
+        let generation = IndexGeneration::new(1);
+        let api_path = "src/auth/api.rs".to_string();
+        let manifest_path = "Cargo.toml".to_string();
+        let mut nodes = vec![
+            graph_node(".", NodeKind::Folder, None),
+            graph_node("src", NodeKind::Folder, Some(".")),
+            graph_node("src/auth", NodeKind::Folder, Some("src")),
+            graph_node(&api_path, NodeKind::File, Some("src/auth")),
+            graph_node("src/auth/caller.rs", NodeKind::File, Some("src/auth")),
+            graph_node("src/other.rs", NodeKind::File, Some("src")),
+            graph_node("src/authz.rs", NodeKind::File, Some("src")),
+            graph_node("tests", NodeKind::Folder, Some(".")),
+            graph_node("tests/api_test.rs", NodeKind::File, Some("tests")),
+            graph_node("clients", NodeKind::Folder, Some(".")),
+            graph_node(&manifest_path, NodeKind::File, Some(".")),
+        ];
+        let api = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new(&api_path))?,
+            },
+            generation,
+        )?;
+        let internal_caller = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("src/auth/caller.rs"))?,
+            },
+            generation,
+        )?;
+        let other = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("src/other.rs"))?,
+            },
+            generation,
+        )?;
+        let sibling = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("src/authz.rs"))?,
+            },
+            generation,
+        )?;
+        let test = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("tests/api_test.rs"))?,
+            },
+            generation,
+        )?;
+        let package = GraphEntity::new(
+            project,
+            EntitySelector::Package {
+                package: PackageSelector {
+                    manager: GraphIdentityText::new("cargo")?,
+                    name: GraphIdentityText::new("projectatlas-navigation")?,
+                    manifest: RepositoryFilePath::new(Path::new(&manifest_path))?,
+                },
+            },
+            generation,
+        )?;
+        let mut entities = vec![
+            api.clone(),
+            internal_caller.clone(),
+            other.clone(),
+            sibling.clone(),
+            test.clone(),
+            package.clone(),
+        ];
+        let mut relations = vec![
+            LogicalRelation::new(
+                &api,
+                GraphRelationKind::Legacy(RelationKind::DependsOn),
+                RelationResolution::resolved(&package)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?,
+            LogicalRelation::new(
+                &api,
+                GraphRelationKind::Legacy(RelationKind::Imports),
+                RelationResolution::resolved(&other)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?,
+            LogicalRelation::new(
+                &api,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::resolved(&other)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?,
+            LogicalRelation::new(
+                &api,
+                GraphRelationKind::Extended(ExtendedRelationKind::References),
+                RelationResolution::Unresolved {
+                    reference: GraphIdentityText::new("SessionStore")?,
+                },
+                ConfidenceClass::High,
+                Completeness::Partial,
+                generation,
+            )?,
+            LogicalRelation::new(
+                &test,
+                GraphRelationKind::Extended(ExtendedRelationKind::Tests),
+                RelationResolution::resolved(&api)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?,
+            LogicalRelation::new(
+                &api,
+                GraphRelationKind::Extended(ExtendedRelationKind::RoutesTo),
+                RelationResolution::resolved(&other)?,
+                ConfidenceClass::High,
+                Completeness::Complete,
+                generation,
+            )?,
+            LogicalRelation::new(
+                &api,
+                GraphRelationKind::Extended(ExtendedRelationKind::Configures),
+                RelationResolution::Unresolved {
+                    reference: GraphIdentityText::new("AUTH_MODE")?,
+                },
+                ConfidenceClass::High,
+                Completeness::Partial,
+                generation,
+            )?,
+            LogicalRelation::new(
+                &internal_caller,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::resolved(&api)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?,
+            LogicalRelation::new(
+                &sibling,
+                GraphRelationKind::Legacy(RelationKind::Imports),
+                RelationResolution::resolved(&other)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?,
+        ];
+        for index in 0..4 {
+            let path = format!("clients/caller-{index}.rs");
+            nodes.push(graph_node(&path, NodeKind::File, Some("clients")));
+            let caller = GraphEntity::new(
+                project,
+                EntitySelector::File {
+                    path: RepositoryFilePath::new(Path::new(&path))?,
+                },
+                generation,
+            )?;
+            relations.push(LogicalRelation::new(
+                &caller,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::resolved(&api)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?);
+            entities.push(caller);
+        }
+
+        let mut publication = store.begin_index_publication(fingerprint)?;
+        publication.begin_scan_replacement()?;
+        publication.upsert_scan_node_batch(&nodes)?;
+        publication.finish_scan_replacement()?;
+        publication.replace_repository_graph(project, &entities, &relations, &[], &[])?;
+        publication.complete()?;
+        Ok(NavigationFixture {
+            project,
+            api_path,
+            manifest_path,
+        })
+    }
+
     /// Return a test failure without relying on panic-only assertions.
     fn require(condition: bool, message: &str) -> Result<(), Box<dyn Error>> {
         if condition {
@@ -5312,6 +6096,291 @@ mod tests {
         }
         assert_query_indexes(&store)?;
         store.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn navigation_connections_cover_families_prefixes_truncation_and_reopen()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("navigation-connections");
+        fs::create_dir_all(&root)?;
+        let db_path = root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &root)?;
+        let fixture = publish_navigation_fixture(&mut store, "navigation-connections")?;
+        let owners = vec![
+            RepositoryNavigationNode {
+                path: fixture.api_path.clone(),
+                kind: NodeKind::File,
+            },
+            RepositoryNavigationNode {
+                path: "src/auth".to_string(),
+                kind: NodeKind::Folder,
+            },
+            RepositoryNavigationNode {
+                path: fixture.manifest_path.clone(),
+                kind: NodeKind::File,
+            },
+            RepositoryNavigationNode {
+                path: ".".to_string(),
+                kind: NodeKind::Folder,
+            },
+        ];
+        let pages = store.repository_navigation_connections(&owners, 2, 20)?;
+        require_eq(&pages.len(), &owners.len(), "navigation owner count")?;
+        let api = &pages[0];
+        let families = api
+            .counts
+            .iter()
+            .map(|count| count.kind)
+            .collect::<Vec<_>>();
+        require_eq(
+            &families,
+            &NAVIGATION_CONNECTION_FAMILIES
+                .iter()
+                .map(|&(kind, _, _)| kind)
+                .collect::<Vec<_>>(),
+            "all navigation families",
+        )?;
+        let calls = api
+            .counts
+            .iter()
+            .find(|count| count.kind == RankedConnectionKind::Call)
+            .ok_or_else(|| io::Error::other("call navigation count is missing"))?;
+        require_eq(&calls.count, &2, "bounded high-degree call count")?;
+        require_eq(&calls.truncated, &true, "high-degree call truncation")?;
+        require_eq(&api.truncated, &true, "file aggregate truncation")?;
+        require(
+            api.connections.iter().any(|connection| {
+                connection.kind == RankedConnectionKind::Test
+                    && connection.direction == RankedConnectionDirection::Inbound
+            }),
+            "inbound test connection was not projected",
+        )?;
+
+        let folder = &pages[1];
+        let folder_imports = folder
+            .counts
+            .iter()
+            .find(|count| count.kind == RankedConnectionKind::Import)
+            .ok_or_else(|| io::Error::other("folder import count is missing"))?;
+        require_eq(
+            &folder_imports.count,
+            &1,
+            "folder prefix import count excluding sibling authz.rs",
+        )?;
+        let manifest = &pages[2];
+        require(
+            manifest
+                .counts
+                .iter()
+                .any(|count| count.kind == RankedConnectionKind::Package && count.count == 1),
+            "manifest-owned package context is missing",
+        )?;
+        require(
+            pages[3]
+                .counts
+                .iter()
+                .any(|count| count.kind == RankedConnectionKind::Call),
+            "root aggregate omitted bounded call context",
+        )?;
+
+        let globally_sampled = store.repository_navigation_connections(&owners[..1], 10, 3)?;
+        require_eq(
+            &globally_sampled[0].connections.len(),
+            &3,
+            "global connection sample limit",
+        )?;
+        require_eq(
+            &globally_sampled[0].counts.len(),
+            &NAVIGATION_CONNECTION_FAMILIES.len(),
+            "global sample retained all family counts",
+        )?;
+        require(
+            globally_sampled[0]
+                .counts
+                .iter()
+                .all(|count| !count.truncated),
+            "global sample incorrectly reported family overflow",
+        )?;
+        require_eq(
+            &globally_sampled[0].truncated,
+            &true,
+            "global sample truncation",
+        )?;
+
+        drop(store);
+        let reader = AtlasStore::open_read_only_for_project(&db_path, &root)?;
+        require_eq(
+            &reader.project_instance_id()?,
+            &Some(fixture.project),
+            "reopened navigation identity",
+        )?;
+        let reopened = reader.repository_navigation_connections(&owners[..1], 2, 20)?;
+        require_eq(
+            &reopened[0].counts,
+            &api.counts,
+            "reopened navigation counts",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn navigation_connections_use_owned_indexes_and_fail_all_or_error_on_corruption()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("navigation-plan-corruption");
+        fs::create_dir_all(&root)?;
+        let db_path = root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &root)?;
+        let fixture = publish_navigation_fixture(&mut store, "navigation-plan-corruption")?;
+        let owner = RepositoryNavigationNode {
+            path: fixture.api_path,
+            kind: NodeKind::File,
+        };
+        for (direction, expected_index) in [
+            (
+                RankedConnectionDirection::Outbound,
+                "idx_graph_relations_source_kind",
+            ),
+            (
+                RankedConnectionDirection::Inbound,
+                "idx_graph_relations_target_kind",
+            ),
+        ] {
+            let mut values = Vec::new();
+            let sql = navigation_connection_branch(
+                0,
+                &owner,
+                RankedConnectionKind::Call,
+                "legacy",
+                "calls",
+                direction,
+                3,
+                &mut values,
+            );
+            let mut statement = store
+                .connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+            let details = statement
+                .query_map(params_from_iter(values.iter()), |row| {
+                    row.get::<_, String>(3)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            for expected in [
+                expected_index,
+                "idx_graph_entities_path",
+                "idx_graph_entities_manifest_path",
+            ] {
+                require(
+                    details.iter().any(|detail| detail.contains(expected)),
+                    &format!("navigation plan missed {expected}: {details:?}"),
+                )?;
+            }
+            require(
+                details.iter().all(|detail| !detail.contains("SCAN graph_")),
+                &format!("navigation plan scanned graph storage: {details:?}"),
+            )?;
+        }
+        let folder_owner = RepositoryNavigationNode {
+            path: "src/auth".to_string(),
+            kind: NodeKind::Folder,
+        };
+        for (direction, expected_index) in [
+            (
+                RankedConnectionDirection::Outbound,
+                "idx_graph_relations_source_kind",
+            ),
+            (
+                RankedConnectionDirection::Inbound,
+                "idx_graph_relations_target_kind",
+            ),
+        ] {
+            let mut values = Vec::new();
+            let sql = navigation_connection_branch(
+                0,
+                &folder_owner,
+                RankedConnectionKind::Call,
+                "legacy",
+                "calls",
+                direction,
+                3,
+                &mut values,
+            );
+            let details = store
+                .connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?
+                .query_map(params_from_iter(values.iter()), |row| {
+                    row.get::<_, String>(3)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            for expected in [
+                expected_index,
+                "idx_graph_entities_path",
+                "idx_graph_entities_manifest_path",
+            ] {
+                require(
+                    details.iter().any(|detail| detail.contains(expected)),
+                    &format!("folder navigation plan missed {expected}: {details:?}"),
+                )?;
+            }
+            require(
+                details.iter().all(|detail| !detail.contains("SCAN graph_")),
+                &format!("folder navigation plan scanned graph storage: {details:?}"),
+            )?;
+        }
+        let root_owner = RepositoryNavigationNode {
+            path: ".".to_string(),
+            kind: NodeKind::Folder,
+        };
+        let mut root_values = Vec::new();
+        let root_sql = navigation_connection_branch(
+            0,
+            &root_owner,
+            RankedConnectionKind::Call,
+            "legacy",
+            "calls",
+            RankedConnectionDirection::Outbound,
+            2,
+            &mut root_values,
+        );
+        let root_details = store
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {root_sql}"))?
+            .query_map(params_from_iter(root_values.iter()), |row| {
+                row.get::<_, String>(3)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        require(
+            root_details
+                .iter()
+                .any(|detail| detail.contains("idx_graph_relations_kind_order")),
+            &format!("root navigation plan missed family index: {root_details:?}"),
+        )?;
+        require(
+            root_details
+                .iter()
+                .all(|detail| !detail.contains("SCAN graph_")),
+            &format!("root navigation plan scanned graph storage: {root_details:?}"),
+        )?;
+
+        store
+            .connection
+            .execute_batch("PRAGMA ignore_check_constraints = ON")?;
+        store.connection.execute(
+            "UPDATE graph_relations
+                SET resolution_status = 'unresolved', reference_text = 'broken-route'
+              WHERE relation_scope = 'extended' AND relation_kind = 'routes-to'",
+            [],
+        )?;
+        let error = require_db_error(
+            store.repository_navigation_connections(&[owner], 4, 20),
+            "corrupt navigation relation returned a partial page",
+        )?;
+        require(
+            matches!(error, DbError::GraphRowShape { .. }),
+            &format!("corrupt navigation relation returned {error}"),
+        )?;
         Ok(())
     }
 

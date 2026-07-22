@@ -47,7 +47,8 @@ use projectatlas_core::toon::{
     render_symbol_relations, render_symbols, render_token_overview, render_token_trends,
 };
 use projectatlas_core::{
-    IndexWorkControl, IndexWorkFailure, Overview, PurposeSource, PurposeStatus, RankedNode,
+    IndexWorkControl, IndexWorkFailure, NavigationNextCall, Overview, PurposeSource, PurposeStatus,
+    RankedConnection, RankedConnectionCount, RankedNode, RankedReasonCode,
     normalize_native_path_display, normalize_repo_path, normalize_repo_path_prefix,
     validated_repo_file_key, validated_repo_node_key,
 };
@@ -1485,12 +1486,24 @@ struct McpBriefCandidate {
     purpose_status: PurposeStatus,
     /// Purpose source.
     purpose_source: PurposeSource,
+    /// Whether the purpose is current agent-approved authored responsibility state.
+    purpose_agent_reviewed: bool,
     /// Purpose one-liner when present.
     purpose: Option<String>,
     /// Observed content summary when present.
     summary: Option<String>,
     /// Bounded ranking reasons.
     reasons: Vec<String>,
+    /// Bounded compact ranking reason codes.
+    reason_codes: Vec<RankedReasonCode>,
+    /// Sparse stable-order connection counts.
+    connection_counts: Vec<RankedConnectionCount>,
+    /// Bounded high-value current connection sample.
+    connections: Vec<RankedConnection>,
+    /// Whether the bounded sample omitted any validated relation through family or global overflow.
+    connections_truncated: bool,
+    /// Existing navigation capability recommended after this row.
+    next_call: NavigationNextCall,
 }
 
 /// Bounded health blocker section.
@@ -2588,14 +2601,21 @@ impl ProjectAtlasMcpServer {
 
     /// Convert a ranked node into a compact startup candidate.
     fn brief_candidate(row: RankedNode) -> McpBriefCandidate {
+        let purpose_agent_reviewed = row.node.purpose.agent_reviewed();
         McpBriefCandidate {
             path: row.node.node.path,
             kind: row.node.node.kind.to_string(),
             purpose_status: row.node.purpose.status,
             purpose_source: row.node.purpose.source,
+            purpose_agent_reviewed,
             purpose: row.node.purpose.purpose,
             summary: row.node.summary,
             reasons: row.reasons,
+            reason_codes: row.reason_codes,
+            connection_counts: row.connection_counts,
+            connections: row.connections,
+            connections_truncated: row.connections_truncated,
+            next_call: row.next_call,
         }
     }
 
@@ -4274,10 +4294,19 @@ impl ProjectAtlasMcpServer {
         Parameters(params): Parameters<AtlasQueryParams>,
         context: RequestContext<RoleServer>,
     ) -> String {
+        self.atlas_folders_response(params, Some(context))
+    }
+
+    /// Build the folders response with optional request telemetry context.
+    fn atlas_folders_response(
+        &self,
+        params: AtlasQueryParams,
+        context: Option<RequestContext<RoleServer>>,
+    ) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
             let query = Self::query_or_empty(params.query);
-            self.with_fresh_string_and_usage_for_request(&state, Some(context), |store, stamp| {
+            self.with_fresh_string_and_usage_for_request(&state, context, |store, stamp| {
                 let selected =
                     ranked_folder_nodes_with_reasons(store, &query, params.limit.unwrap_or(10))?;
                 let toon = render_ranked_nodes(NODE_LABEL_FOLDERS, &selected);
@@ -4307,6 +4336,15 @@ impl ProjectAtlasMcpServer {
         Parameters(params): Parameters<AtlasFilesParams>,
         context: RequestContext<RoleServer>,
     ) -> String {
+        self.atlas_files_response(params, Some(context))
+    }
+
+    /// Build the files response with optional request telemetry context.
+    fn atlas_files_response(
+        &self,
+        params: AtlasFilesParams,
+        context: Option<RequestContext<RoleServer>>,
+    ) -> String {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let (state, folder_filter, routed_project) = self.state_and_optional_folder_filter(
@@ -4315,7 +4353,7 @@ impl ProjectAtlasMcpServer {
                 nearest_project,
             )?;
             let query = Self::query_or_empty(params.query);
-            self.with_fresh_string_and_usage_for_request(&state, Some(context), |store, stamp| {
+            self.with_fresh_string_and_usage_for_request(&state, context, |store, stamp| {
                 let selected = ranked_file_nodes_with_reasons(
                     store,
                     &query,
@@ -5277,7 +5315,17 @@ mod tests {
     use super::*;
     use crate::atlas_map::init_project_with_config;
     use notify::{Event, EventKind, event::ModifyKind};
-    use projectatlas_core::{IndexCancellation, IndexWorkStage};
+    use projectatlas_core::graph::{
+        Completeness, ConfidenceClass, EntitySelector, ExtendedRelationKind, ExternalSelector,
+        GraphEntity, GraphIdentityText, GraphRelationKind, LogicalRelation, PackageSelector,
+        RelationResolution, RepositoryFilePath,
+    };
+    use projectatlas_core::symbols::RelationKind;
+    use projectatlas_core::{
+        IndexCancellation, IndexWorkStage, RankedConnectionDirection, RankedConnectionKind,
+        RankedConnectionTarget,
+    };
+    use std::collections::BTreeSet;
     use std::fs;
     use std::io;
     use std::time::Duration;
@@ -6297,6 +6345,345 @@ mod tests {
             "session brief returned a content-only indexed-text hit",
         )?;
 
+        let navigable = server.build_session_brief(
+            AtlasSessionBriefParams {
+                project_path: None,
+                query: Some("owner".to_string()),
+                purpose_task: None,
+                folder_limit: Some(5),
+                file_limit: Some(5),
+                blocker_limit: Some(5),
+                purpose_limit: Some(5),
+            },
+            None,
+        )?;
+        let candidate = navigable
+            .files
+            .first()
+            .ok_or_else(|| std::io::Error::other("navigable brief file is missing"))?;
+        require(
+            candidate.reason_codes.contains(&RankedReasonCode::Path)
+                && candidate.next_call.capability
+                    == projectatlas_core::NavigationNextCapability::Summary
+                && !candidate.purpose_agent_reviewed,
+            "session brief dropped ranked navigation evidence",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_navigation_and_session_brief_propagate_typed_graph_evidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo-a");
+        fs::create_dir_all(repo.join("src"))?;
+        fs::create_dir_all(repo.join("tests"))?;
+        fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"adapter-navigation\"\nversion = \"0.1.0\"\n",
+        )?;
+        for path in [
+            "src/navigation_owner.rs",
+            "src/navigation_local.rs",
+            "src/navigation_unresolved.rs",
+            "tests/navigation_owner.rs",
+        ] {
+            fs::write(repo.join(path), "pub fn navigation_fixture() {}\n")?;
+        }
+        let db_path = repo.join(".projectatlas").join("projectatlas.db");
+        let plan = ScanRuntimePlan::for_path(None, &repo, None)?;
+        let mut store = open_atlas_store_for_project(&db_path, &plan.root)?;
+        run_scan_pipeline(
+            &mut store,
+            &plan,
+            &SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, Some(1), Some(30)),
+        )?;
+        publish_mcp_navigation_graph(&mut store)?;
+        drop(store);
+
+        let server =
+            ProjectAtlasMcpServer::new(db_path, None, "mcp-navigation-test".to_string(), false);
+        let folders_text = server.atlas_folders_response(
+            AtlasQueryParams {
+                project_path: None,
+                query: Some("navigation".to_string()),
+                limit: Some(10),
+            },
+            None,
+        );
+        let files_text = server.atlas_files_response(
+            AtlasFilesParams {
+                project_path: None,
+                query: Some("navigation".to_string()),
+                folder: None,
+                nearest_project: Some(false),
+                file_pattern: None,
+                include_content: Some(false),
+                limit: Some(10),
+            },
+            None,
+        );
+        for (surface, text) in [
+            ("atlas_folders", &folders_text),
+            ("atlas_files", &files_text),
+        ] {
+            require(
+                text.contains("connection_counts")
+                    && text.contains("connections")
+                    && text.contains("direction:")
+                    && text.contains("target:")
+                    && text.contains("connections_truncated: true"),
+                &format!("{surface} dropped nonempty typed graph evidence: {text}"),
+            )?;
+        }
+
+        let brief = server.build_session_brief(
+            AtlasSessionBriefParams {
+                project_path: None,
+                query: Some("navigation".to_string()),
+                purpose_task: None,
+                folder_limit: Some(10),
+                file_limit: Some(10),
+                blocker_limit: Some(10),
+                purpose_limit: Some(10),
+            },
+            None,
+        )?;
+        let folder = brief
+            .folders
+            .iter()
+            .find(|candidate| candidate.path == "src")
+            .ok_or_else(|| io::Error::other("graph-enriched MCP folder is missing"))?;
+        require(
+            folder.connection_counts.len() == 7
+                && folder.connections.len() == 3
+                && folder.connections_truncated,
+            "MCP folder lost count, sample, or global truncation evidence",
+        )?;
+        let owner = brief
+            .files
+            .iter()
+            .find(|candidate| candidate.path == "src/navigation_owner.rs")
+            .ok_or_else(|| io::Error::other("graph-enriched MCP owner file is missing"))?;
+        require(
+            owner.connection_counts.len() == 6
+                && owner.connections.len() == 3
+                && owner.connections_truncated
+                && owner.next_call.capability
+                    == projectatlas_core::NavigationNextCapability::Relations,
+            "MCP file or session brief lost graph truncation or relations navigation",
+        )?;
+
+        let families = brief
+            .files
+            .iter()
+            .flat_map(|candidate| candidate.connection_counts.iter().map(|count| count.kind))
+            .collect::<BTreeSet<_>>();
+        require(
+            families
+                == BTreeSet::from([
+                    RankedConnectionKind::Package,
+                    RankedConnectionKind::Import,
+                    RankedConnectionKind::Call,
+                    RankedConnectionKind::Reference,
+                    RankedConnectionKind::Test,
+                    RankedConnectionKind::Route,
+                    RankedConnectionKind::Config,
+                ]),
+            &format!("MCP graph families were not propagated: {families:?}"),
+        )?;
+        let connections = brief
+            .files
+            .iter()
+            .flat_map(|candidate| candidate.connections.iter())
+            .collect::<Vec<_>>();
+        require(
+            connections
+                .iter()
+                .any(|connection| connection.direction == RankedConnectionDirection::Outbound)
+                && connections
+                    .iter()
+                    .any(|connection| connection.direction == RankedConnectionDirection::Inbound),
+            "MCP graph samples did not preserve both directions",
+        )?;
+        for (name, present) in [
+            (
+                "local",
+                connections.iter().any(|connection| {
+                    matches!(connection.target, RankedConnectionTarget::Local { .. })
+                }),
+            ),
+            (
+                "package",
+                connections.iter().any(|connection| {
+                    matches!(connection.target, RankedConnectionTarget::Package { .. })
+                }),
+            ),
+            (
+                "external",
+                connections.iter().any(|connection| {
+                    matches!(connection.target, RankedConnectionTarget::External { .. })
+                }),
+            ),
+            (
+                "unresolved",
+                connections.iter().any(|connection| {
+                    matches!(connection.target, RankedConnectionTarget::Unresolved { .. })
+                }),
+            ),
+        ] {
+            require(
+                present,
+                &format!("MCP graph samples omitted {name} targets"),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn publish_mcp_navigation_graph(
+        store: &mut AtlasStore,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("MCP navigation project identity is missing"))?;
+        let current_publication = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("MCP navigation publication is missing"))?;
+        let fingerprint = current_publication
+            .contract_fingerprint
+            .clone()
+            .ok_or_else(|| io::Error::other("MCP navigation fingerprint is missing"))?;
+        let generation = current_publication
+            .generation
+            .checked_next()
+            .ok_or_else(|| io::Error::other("MCP navigation generation overflow"))?;
+        let file_entity = |path: &str| {
+            GraphEntity::new(
+                project,
+                EntitySelector::File {
+                    path: RepositoryFilePath::new(Path::new(path))?,
+                },
+                generation,
+            )
+        };
+        let owner = file_entity("src/navigation_owner.rs")?;
+        let local = file_entity("src/navigation_local.rs")?;
+        let unresolved = file_entity("src/navigation_unresolved.rs")?;
+        let test = file_entity("tests/navigation_owner.rs")?;
+        let package = GraphEntity::new(
+            project,
+            EntitySelector::Package {
+                package: PackageSelector {
+                    manager: GraphIdentityText::new("cargo")?,
+                    name: GraphIdentityText::new("adapter-navigation")?,
+                    manifest: RepositoryFilePath::new(Path::new("Cargo.toml"))?,
+                },
+            },
+            generation,
+        )?;
+        let external = GraphEntity::new(
+            project,
+            EntitySelector::External {
+                external: ExternalSelector {
+                    system: GraphIdentityText::new("crates.io")?,
+                    identity: GraphIdentityText::new("serde@1")?,
+                },
+            },
+            generation,
+        )?;
+        let resolved = |source: &GraphEntity, kind, target: &GraphEntity| {
+            Ok::<_, Box<dyn std::error::Error>>(LogicalRelation::new(
+                source,
+                kind,
+                RelationResolution::resolved(target)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?)
+        };
+        let unresolved_relation = |source: &GraphEntity, kind, reference: &str| {
+            Ok::<_, Box<dyn std::error::Error>>(LogicalRelation::new(
+                source,
+                kind,
+                RelationResolution::Unresolved {
+                    reference: GraphIdentityText::new(reference)?,
+                },
+                ConfidenceClass::High,
+                Completeness::Partial,
+                generation,
+            )?)
+        };
+        let relations = vec![
+            resolved(
+                &package,
+                GraphRelationKind::Legacy(RelationKind::DependsOn),
+                &owner,
+            )?,
+            LogicalRelation::new(
+                &owner,
+                GraphRelationKind::Legacy(RelationKind::Imports),
+                RelationResolution::external(&external)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?,
+            resolved(
+                &owner,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                &local,
+            )?,
+            unresolved_relation(
+                &unresolved,
+                GraphRelationKind::Extended(ExtendedRelationKind::References),
+                "navigation-reference",
+            )?,
+            resolved(
+                &test,
+                GraphRelationKind::Extended(ExtendedRelationKind::Tests),
+                &owner,
+            )?,
+            resolved(
+                &owner,
+                GraphRelationKind::Extended(ExtendedRelationKind::RoutesTo),
+                &local,
+            )?,
+            unresolved_relation(
+                &owner,
+                GraphRelationKind::Extended(ExtendedRelationKind::Configures),
+                "NAVIGATION_MODE",
+            )?,
+        ];
+        let nodes = store
+            .load_nodes()?
+            .into_iter()
+            .map(|node| node.node)
+            .collect::<Vec<_>>();
+        {
+            let mut publication = store.begin_index_publication(&fingerprint)?;
+            publication.begin_scan_replacement()?;
+            publication.upsert_scan_node_batch(&nodes)?;
+            publication.finish_scan_replacement()?;
+            publication.replace_repository_graph(
+                project,
+                &[owner, local, unresolved, test, package, external],
+                &relations,
+                &[],
+                &[],
+            )?;
+            publication.complete()?;
+        }
+        store.set_purpose("src", "Navigation graph folder", PurposeSource::Agent)?;
+        store.set_purpose(
+            "src/navigation_owner.rs",
+            "Navigation graph owner",
+            PurposeSource::Agent,
+        )?;
+        store.set_purpose(
+            "src/navigation_unresolved.rs",
+            "Navigation unresolved graph owner",
+            PurposeSource::Agent,
+        )?;
         Ok(())
     }
 

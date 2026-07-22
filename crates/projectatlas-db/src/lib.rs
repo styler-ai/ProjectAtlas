@@ -17,7 +17,7 @@ pub use diagnostics::{
 pub use project_identity::{ProjectRootTransition, ProjectRootTransitionResult};
 pub use repository_graph::{
     RepositoryAffectedSourceFootprint, RepositoryGraphPage, RepositoryGraphRelationQuery,
-    RepositoryResolutionCandidate,
+    RepositoryNavigationConnections, RepositoryNavigationNode, RepositoryResolutionCandidate,
 };
 pub use sqlite_profile::validate_database_location;
 pub use telemetry::{
@@ -3273,6 +3273,10 @@ impl AtlasStore {
         offset: usize,
     ) -> DbResult<Vec<IndexedNode>> {
         let terms = normalize_query_terms(query);
+        let exact_query = normalize_exact_ranked_query(query);
+        let exact_name_enabled = !exact_query.is_empty() && !exact_query.contains('/');
+        let exact_name_pattern = format!("%/{}", sqlite_like_escape(&exact_query));
+        let reviewed_match_expression = reviewed_purpose_match_expression(terms.len());
         let score_expression = ranked_score_expression(terms.len());
         let mut sql = format!(
             "
@@ -3292,6 +3296,11 @@ impl AtlasStore {
                     p.source,
                     p.status,
                     s.summary,
+                    CASE WHEN lower(n.path) = ? THEN 1 ELSE 0 END AS exact_path,
+                    CASE WHEN ? = 1
+                              AND (lower(n.path) = ? OR lower(n.path) LIKE ? ESCAPE '\\')
+                         THEN 1 ELSE 0 END AS exact_name,
+                    {reviewed_match_expression} AS reviewed_purpose,
                     {score_expression} AS score
                 FROM nodes n
                 JOIN purposes p ON p.node_id = n.id
@@ -3305,9 +3314,18 @@ impl AtlasStore {
                   AND n.kind = ?
             "
         );
-        let mut values = Vec::new();
+        let mut values = vec![
+            Value::from(exact_query.clone()),
+            Value::from(i64::from(exact_name_enabled)),
+            Value::from(exact_query),
+            Value::from(exact_name_pattern),
+        ];
+        for term in &terms {
+            values.push(Value::from(sqlite_like_pattern(term)));
+        }
         for term in &terms {
             let pattern = sqlite_like_pattern(term);
+            values.push(Value::from(pattern.clone()));
             values.push(Value::from(pattern.clone()));
             values.push(Value::from(pattern.clone()));
             values.push(Value::from(pattern.clone()));
@@ -3324,8 +3342,8 @@ impl AtlasStore {
         sql.push_str(
             "
             )
-            WHERE score > 0
-            ORDER BY score DESC, path
+            WHERE score > 0 OR exact_path > 0 OR exact_name > 0 OR reviewed_purpose > 0
+            ORDER BY exact_path DESC, exact_name DESC, reviewed_purpose DESC, score DESC, path
             LIMIT ?
             OFFSET ?
             ",
@@ -5265,6 +5283,28 @@ fn normalize_query_terms(query: &str) -> Vec<String> {
         .collect()
 }
 
+/// Normalize the complete query used by exact path and basename admission tiers.
+fn normalize_exact_ranked_query(query: &str) -> String {
+    query.trim().replace('\\', "/").to_lowercase()
+}
+
+/// Build the reviewed-purpose admission predicate for normalized query terms.
+fn reviewed_purpose_match_expression(term_count: usize) -> String {
+    if term_count == 0 {
+        return "0".to_string();
+    }
+    let matches = std::iter::repeat_n(
+        "lower(COALESCE(p.purpose, '')) LIKE ? ESCAPE '\\'",
+        term_count,
+    )
+    .collect::<Vec<_>>()
+    .join(" OR ");
+    format!(
+        "CASE WHEN p.status = 'approved' AND p.source IN ('agent', 'human') \
+                    AND ({matches}) THEN 1 ELSE 0 END"
+    )
+}
+
 /// Build the SQL score expression for ranked node lookup.
 fn ranked_score_expression(term_count: usize) -> String {
     if term_count == 0 {
@@ -5273,7 +5313,10 @@ fn ranked_score_expression(term_count: usize) -> String {
     (0..term_count)
         .map(|_| {
             "(CASE WHEN lower(n.path) LIKE ? ESCAPE '\\' THEN 20 ELSE 0 END \
-             + CASE WHEN lower(COALESCE(p.purpose, '')) LIKE ? ESCAPE '\\' THEN 30 ELSE 0 END \
+             + CASE WHEN p.status = 'approved' AND p.source IN ('agent', 'human') \
+                          AND lower(COALESCE(p.purpose, '')) LIKE ? ESCAPE '\\' THEN 30 ELSE 0 END \
+             + CASE WHEN NOT (p.status = 'approved' AND p.source IN ('agent', 'human')) \
+                          AND lower(COALESCE(p.purpose, '')) LIKE ? ESCAPE '\\' THEN 2 ELSE 0 END \
              + CASE WHEN lower(COALESCE(s.summary, '')) LIKE ? ESCAPE '\\' THEN 10 ELSE 0 END \
              + CASE WHEN lower(COALESCE(symbol_summaries.summary, '')) LIKE ? ESCAPE '\\' THEN 25 ELSE 0 END)"
                 .to_string()
@@ -7768,6 +7811,43 @@ mod tests {
             &cleared_gradle_files.len(),
             &0,
             "cleared symbol-ranked file count",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn ranked_node_admission_preserves_dominant_tiers_before_candidate_cap()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let mut nodes = vec![
+            test_file_node("needle", "hash-exact"),
+            test_file_node("deep/needle", "hash-name"),
+            test_file_node("reviewed.rs", "hash-reviewed"),
+        ];
+        nodes.extend(
+            (0..130).map(|index| test_file_node(&format!("weak/needle-{index:03}.rs"), "hash")),
+        );
+        store.replace_scan(&nodes)?;
+        store.set_purpose(
+            "reviewed.rs",
+            "Own needle responsibility",
+            PurposeSource::Agent,
+        )?;
+        for index in 0..130 {
+            let path = format!("weak/needle-{index:03}.rs");
+            store.set_suggested_purpose(&path, "Generated needle suggestion")?;
+            store.set_node_summary(&path, "Observed needle summary")?;
+        }
+
+        let selected = store.load_ranked_nodes("needle", NodeKind::File, None, 100, 0)?;
+        require_eq(&selected.len(), &100, "bounded adversarial candidate count")?;
+        require_eq(
+            &selected[..3]
+                .iter()
+                .map(|node| node.node.path.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["needle", "deep/needle", "reviewed.rs"],
+            "pre-cap exact path basename and reviewed-purpose admission",
         )?;
         Ok(())
     }

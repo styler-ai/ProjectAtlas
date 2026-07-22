@@ -1695,9 +1695,10 @@ mod tests {
     };
     use projectatlas_core::graph::{
         CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageState, EntityResolutionKey,
-        EntitySelector, GraphEntity, GraphIdentityText, GraphRelationKind, LogicalRelation,
-        PackageSelector, ProjectInstanceId, RelationDependencyKey, RelationResolution,
-        RepositoryFilePath, ResolutionKeyDomain, ReusableTargetSelector, SymbolSelector,
+        EntitySelector, ExtendedRelationKind, GraphEntity, GraphIdentityText, GraphRelationKind,
+        LogicalRelation, PackageSelector, ProjectInstanceId, RelationDependencyKey,
+        RelationResolution, RepositoryFilePath, ResolutionKeyDomain, ReusableTargetSelector,
+        SymbolSelector,
     };
     use projectatlas_core::symbols::{
         CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolGraph, SymbolKind,
@@ -1887,6 +1888,81 @@ mod tests {
             bindings_per_entity.values().any(|count| *count > 1),
             "fixture did not exercise one entity exported under multiple canonical keys",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_projection_publication_does_not_fabricate_extended_relation_families()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("ordinary-projection");
+        fs::create_dir_all(root.join("src"))?;
+        let database = root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("ordinary projection identity is missing"))?;
+        let generation = IndexGeneration::new(1);
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let graphs = vec![
+            extract_symbol_graph(
+                "Cargo.toml",
+                Some("cargo-manifest"),
+                "[package]\nname = \"ordinary-projection\"\nversion = \"0.1.0\"\n",
+            ),
+            extract_symbol_graph(
+                "src/lib.rs",
+                Some("rust"),
+                "use std::path::Path;\npub fn route_test_config_reference() { helper(); }\nfn helper() {}\n",
+            ),
+        ];
+        let packages = PackageIndex::from_graphs(&graphs)?;
+        let projection =
+            build_entity_projection(project, generation, &[], &graphs, &packages, true, &control)?;
+        let candidates = resolution_registry_from_exports(&projection, &control)?;
+        let staged = finish_projection(
+            project,
+            generation,
+            RepositoryGraphMutation::Full,
+            projection,
+            &candidates,
+            &control,
+        )?;
+        require(
+            staged
+                .relations
+                .iter()
+                .any(|relation| matches!(relation.kind(), GraphRelationKind::Legacy(_))),
+            "ordinary projection fixture emitted no legacy relation",
+        )?;
+        {
+            let mut publication = store.begin_index_publication("ordinary-projection")?;
+            publication.begin_scan_replacement()?;
+            publication.upsert_scan_node_batch(&[
+                test_file_node("Cargo.toml", "cargo-manifest"),
+                test_file_node("src/lib.rs", "rust"),
+            ])?;
+            publication.finish_scan_replacement()?;
+            staged.apply(&mut publication, &control)?;
+            publication.complete()?;
+        }
+        for family in [
+            ExtendedRelationKind::References,
+            ExtendedRelationKind::Tests,
+            ExtendedRelationKind::RoutesTo,
+            ExtendedRelationKind::Configures,
+        ] {
+            let page = store.repository_graph_relations(
+                RepositoryGraphRelationQuery::Family {
+                    relation: GraphRelationKind::Extended(family),
+                },
+                10,
+            )?;
+            require(
+                page.rows.is_empty() && !page.truncated,
+                &format!("ordinary projection fabricated {family:?}"),
+            )?;
+        }
         Ok(())
     }
 
