@@ -1527,7 +1527,7 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         $invokeArguments[4] = $arguments
         $invokeArguments[5] = $env:SystemRoot
         $invokeArguments[6] = $environmentBlock
-        $invokeArguments[7] = $jobserverName
+        $invokeArguments[7] = [string]$jobserverName
         $invokeArguments[8] = 30
         $invokeArguments[9] = $admissionScenario
         $invokeArguments[10] = $receipt
