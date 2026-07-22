@@ -123,6 +123,35 @@ function Add-BoundedDiagnosticTail {
     return $retained + $Count
 }
 
+function Write-BoundedConstructionDiagnostic {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Role,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$StandardOutput,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$StandardError
+    )
+
+    $diagnostic =
+        "role: $Role`nstdout tail:`n$StandardOutput`nstderr tail:`n$StandardError`n"
+    foreach ($root in @($source, $inputs, $output)) {
+        $diagnostic = $diagnostic.Replace($root, "<contained-root>")
+    }
+    $diagnosticBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($diagnostic)
+    if ($diagnosticBytes.Length -gt $constructionDiagnosticMaxBytes) {
+        throw "Bounded construction diagnostic exceeded its byte limit."
+    }
+    [System.IO.File]::WriteAllBytes(
+        $script:constructionDiagnosticPath,
+        $diagnosticBytes
+    )
+}
+
 function Invoke-Checked {
     param(
         [Parameter(Mandatory = $true)]
@@ -236,18 +265,10 @@ function Invoke-Checked {
             $ascii = [System.Text.Encoding]::ASCII
             $stdout = $ascii.GetString($stdoutTail, 0, $stdoutLength)
             $stderr = $ascii.GetString($stderrTail, 0, $stderrLength)
-            $diagnostic = "role: $Role`nstdout tail:`n$stdout`nstderr tail:`n$stderr`n"
-            foreach ($root in @($source, $inputs, $output)) {
-                $diagnostic = $diagnostic.Replace($root, "<contained-root>")
-            }
-            $diagnosticBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($diagnostic)
-            if ($diagnosticBytes.Length -gt $constructionDiagnosticMaxBytes) {
-                throw "Bounded construction diagnostic exceeded its byte limit."
-            }
-            [System.IO.File]::WriteAllBytes(
-                $script:constructionDiagnosticPath,
-                $diagnosticBytes
-            )
+            Write-BoundedConstructionDiagnostic `
+                -Role $Role `
+                -StandardOutput $stdout `
+                -StandardError $stderr
         }
         try {
             Write-ConstructionStatus `
@@ -425,15 +446,53 @@ if ($Target -eq "x86_64-pc-windows-msvc") {
     $jobserverRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
         [System.Security.AccessControl.SemaphoreRights]::Modify
     $constructionJobserver = $null
+    $jobserverBootstrapOperation = "open"
     try {
         $constructionJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
             $constructionJobserverName,
             $jobserverRights
         )
-        if (-not $constructionJobserver.WaitOne(0) -or
-            $constructionJobserver.Release() -ne 0) {
+        $jobserverBootstrapOperation = "acquire"
+        if (-not $constructionJobserver.WaitOne(0)) {
             throw "Contained Cargo jobserver token could not be acquired and restored."
         }
+        $jobserverBootstrapOperation = "release"
+        if ($constructionJobserver.Release() -ne 0) {
+            throw "Contained Cargo jobserver token could not be acquired and restored."
+        }
+    }
+    catch {
+        $jobserverFailure = $_.Exception
+        while ($null -ne $jobserverFailure.InnerException) {
+            $jobserverFailure = $jobserverFailure.InnerException
+        }
+        $failureCategory = switch ($jobserverBootstrapOperation) {
+            "open" {
+                if ($jobserverFailure -is [System.Threading.WaitHandleCannotBeOpenedException]) {
+                    "jobserver-open-not-found"
+                }
+                elseif ($jobserverFailure -is [System.UnauthorizedAccessException]) {
+                    "jobserver-open-denied"
+                }
+                else {
+                    "jobserver-open-failed"
+                }
+            }
+            "acquire" { "jobserver-acquire-failed" }
+            "release" { "jobserver-release-failed" }
+            default { "jobserver-bootstrap-failed" }
+        }
+        $failureType = $jobserverFailure.GetType().FullName
+        $failureHResult = "0x{0:X8}" -f $jobserverFailure.HResult
+        Write-BoundedConstructionDiagnostic `
+            -Role "jobserver bootstrap" `
+            -StandardOutput "" `
+            -StandardError (
+                "category: $failureCategory`n" +
+                "exception_type: $failureType`n" +
+                "hresult: $failureHResult"
+            )
+        throw
     }
     finally {
         if ($null -ne $constructionJobserver) {

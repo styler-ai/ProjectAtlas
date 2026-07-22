@@ -36,6 +36,7 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile(
 Require ($parseErrors.Count -eq 0) "Production construction script did not parse."
 foreach ($name in @(
     "Add-BoundedDiagnosticTail",
+    "Write-BoundedConstructionDiagnostic",
     "Invoke-Checked",
     "Write-ConstructionStatus"
 )) {
@@ -1524,6 +1525,35 @@ public static class ProjectAtlasConstructionAdmissionFixture
     $script:constructionFailureRecorded = $false
     $script:constructionFailureExitCode = 1
     $pwsh = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+
+    $bootstrapFailure = [System.UnauthorizedAccessException]::new()
+    $bootstrapFailureHResult = "0x{0:X8}" -f $bootstrapFailure.HResult
+    Require `
+        ($bootstrapFailureHResult -eq "0x80070005" -and
+            $ast.Extent.Text.Contains(
+                '$failureHResult = "0x{0:X8}" -f $jobserverFailure.HResult'
+            )) `
+        "Jobserver bootstrap did not retain safe signed HRESULT formatting."
+    Write-BoundedConstructionDiagnostic `
+        -Role "jobserver bootstrap" `
+        -StandardOutput "" `
+        -StandardError (
+            "category: jobserver-open-denied`n" +
+            "exception_type: $($bootstrapFailure.GetType().FullName)`n" +
+            "hresult: $bootstrapFailureHResult"
+        )
+    $bootstrapDiagnostic = [System.IO.File]::ReadAllText(
+        $script:constructionDiagnosticPath
+    )
+    Require `
+        ($bootstrapDiagnostic.Contains("role: jobserver bootstrap") -and
+            $bootstrapDiagnostic.Contains("category: jobserver-open-denied") -and
+            $bootstrapDiagnostic.Contains(
+                "exception_type: System.UnauthorizedAccessException"
+            ) -and
+            $bootstrapDiagnostic.Contains("hresult: 0x80070005")) `
+        "Jobserver bootstrap did not emit its bounded failure classification."
+    [System.IO.File]::Delete($script:constructionDiagnosticPath)
 
     Invoke-Checked `
         -Executable $pwsh `
