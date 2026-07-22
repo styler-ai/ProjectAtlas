@@ -1632,7 +1632,11 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
                 else {
                     $null
                 }
-                throw "Construction normal admission invocation failed. type=$($normalFailure.GetType().Name) native_error_code=$nativeError"
+                $normalMessage = ([string]$normalFailure.Message -replace '[\x00-\x1F\x7F]+', ' ').Trim()
+                if ($normalMessage.Length -gt 512) {
+                    $normalMessage = $normalMessage.Substring(0, 512)
+                }
+                throw "Construction normal admission invocation failed. type=$($normalFailure.GetType().Name) native_error_code=$nativeError message=$normalMessage"
             }
             Require ($normalExitCode -eq 0) "Construction normal admission child failed."
             Require `
