@@ -234,6 +234,9 @@ fn hostile_peer(scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
         )?,
         _ => {}
     }
+    if scenario == "healthy" {
+        io::copy(&mut input, &mut io::sink())?;
+    }
     Ok(())
 }
 
