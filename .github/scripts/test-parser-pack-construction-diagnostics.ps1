@@ -120,7 +120,9 @@ try {
                 $wrapperText.Contains('RequiredIntegritySid = "S-1-16-8192";') -and
                 $wrapperText.Contains('SeGroupLogonId = 0xC0000000;') -and
                 $wrapperText.Contains('SemaphoreModifyState = 0x00000002;') -and
-                $wrapperText.Contains('"D:P(A;;0x00100002;;;" + childIdentity.LogonSid + ")"') -and
+                $wrapperText.Contains(
+                    '"D:P(A;;0x00100002;;;" + constructionIdentity.LogonSid + ")"'
+                ) -and
                 $wrapperText.Contains('"S:(ML;;NW;;;" + integritySid + ")"') -and
                 $wrapperText.Contains('private sealed class TokenInformationBuffer : IDisposable') -and
                 $wrapperText.Contains('requiredGroupBytes > groupsInformation.Length') -and
@@ -138,76 +140,57 @@ try {
         Require ($nativeSourceAssignments.Count -eq 1) "Expected one native adapter source assignment."
         Invoke-Expression $nativeSourceAssignments[0].Extent.Text
         Require `
-            (-not $nativeSource.Contains('LogonWithProfile') -and
-                $nativeSource -match 'passwordPointer,\s*0,\s*executable,') `
-            "Windows construction adapter did not retain zero process logon flags."
-        $directTokenOpenStart = $nativeSource.IndexOf(
-            'private static SafeAccessTokenHandle OpenConstructionToken(IntPtr processHandle)',
+            (-not $nativeSource.Contains('CreateProcessWithLogonW(') -and
+                -not $nativeSource.Contains('OpenConstructionToken') -and
+                -not $nativeSource.Contains('SeDebugPrivilege') -and
+                -not $nativeSource.Contains('AdjustTokenPrivileges') -and
+                $nativeSource.Contains('EntryPoint = "LogonUserW"') -and
+                $nativeSource.Contains('EntryPoint = "CreateProcessWithTokenW"') -and
+                $nativeSource -match
+                    'LogonUser\(\s*username,\s*"\.",\s*passwordPointer,\s*Logon32LogonInteractive,\s*Logon32ProviderDefault,\s*out token\)' -and
+                $nativeSource -match
+                    'CreateProcessWithToken\(\s*constructionToken,\s*0,\s*executable,' -and
+                $nativeSource.Contains(
+                    'Marshal.ZeroFreeGlobalAllocUnicode(passwordPointer);'
+                )) `
+            "Windows construction adapter did not retain one owned exact logon token."
+        $tokenLogonStart = $nativeSource.IndexOf(
+            'private static SafeAccessTokenHandle LogonConstructionUser(',
             [System.StringComparison]::Ordinal
         )
-        $privilegedTokenOpenStart = $nativeSource.IndexOf(
-            'private static SafeAccessTokenHandle OpenConstructionTokenWithDebugPrivilege(',
+        $jobserverStart = $nativeSource.IndexOf(
+            'private static SafeWaitHandle CreateAdmittedJobserver(',
             [System.StringComparison]::Ordinal
         )
         $tokenValidationStart = $nativeSource.IndexOf(
-            'private static ChildTokenIdentity ReadAndValidateChildToken(',
+            'private static ConstructionTokenIdentity ReadAndValidateConstructionToken(',
             [System.StringComparison]::Ordinal
         )
         Require `
-            ($directTokenOpenStart -ge 0 -and
-                $privilegedTokenOpenStart -gt $directTokenOpenStart -and
-                $tokenValidationStart -gt $privilegedTokenOpenStart) `
-            "Construction token-open ownership boundaries were missing."
-        $directTokenOpenSource = $nativeSource.Substring(
-            $directTokenOpenStart,
-            $privilegedTokenOpenStart - $directTokenOpenStart
+            ($tokenLogonStart -ge 0 -and
+                $jobserverStart -gt $tokenLogonStart -and
+                $tokenValidationStart -gt $jobserverStart) `
+            "Construction token ownership boundaries were missing."
+        $tokenLogonSource = $nativeSource.Substring(
+            $tokenLogonStart,
+            $jobserverStart - $tokenLogonStart
         )
-        $privilegedTokenOpenSource = $nativeSource.Substring(
-            $privilegedTokenOpenStart,
-            $tokenValidationStart - $privilegedTokenOpenStart
-        )
-        $enablePrivilegeIndex = $privilegedTokenOpenSource.IndexOf(
-            'AdjustTokenPrivilegesWithPreviousState(',
-            [System.StringComparison]::Ordinal
-        )
-        $privilegedRetryIndex = $privilegedTokenOpenSource.IndexOf(
-            'if (operationFailure == null && !OpenProcessToken(',
-            [System.StringComparison]::Ordinal
-        )
-        $restorePrivilegeIndex = $privilegedTokenOpenSource.IndexOf(
-            'AdjustTokenPrivilegesWithoutPreviousState(',
-            [System.StringComparison]::Ordinal
-        )
-        $returnTokenIndex = $privilegedTokenOpenSource.LastIndexOf(
-            'return processToken;',
-            [System.StringComparison]::Ordinal
+        $jobserverSource = $nativeSource.Substring(
+            $jobserverStart,
+            $tokenValidationStart - $jobserverStart
         )
         Require `
-            ($directTokenOpenSource.Contains('if (OpenProcessToken(') -and
-                $directTokenOpenSource.Contains('if (openError != ErrorAccessDenied)') -and
-                $directTokenOpenSource.Contains(
-                    'return OpenConstructionTokenWithDebugPrivilege(processHandle);'
+            ($tokenLogonSource.Contains('SafeAccessTokenHandle token = null;') -and
+                $tokenLogonSource.Contains('return token;') -and
+                $jobserverSource.Contains(
+                    'SafeAccessTokenHandle constructionToken,'
                 ) -and
-                $privilegedTokenOpenSource.Contains('TokenAdjustPrivileges | TokenQuery') -and
-                $privilegedTokenOpenSource.Contains(
-                    'LookupPrivilegeValue(null, SeDebugPrivilege, out debugPrivilege)'
+                $jobserverSource.Contains(
+                    'ConstructionTokenIdentity constructionIdentity,'
                 ) -and
-                $privilegedTokenOpenSource.Contains(
-                    'adjustError == ErrorNotAllAssigned'
-                ) -and
-                $privilegedTokenOpenSource.Contains(
-                    'bool restoreRequired = adjusted && previousState.PrivilegeCount == 1;'
-                ) -and
-                $privilegedTokenOpenSource.Contains('ref previousState,') -and
-                $privilegedTokenOpenSource.Contains(
-                    '"restore-construction-token-privilege"'
-                ) -and
-                -not $privilegedTokenOpenSource.Contains('OpenProcess(') -and
-                $enablePrivilegeIndex -ge 0 -and
-                $privilegedRetryIndex -gt $enablePrivilegeIndex -and
-                $restorePrivilegeIndex -gt $privilegedRetryIndex -and
-                $returnTokenIndex -gt $restorePrivilegeIndex) `
-            "Cross-account token access did not retain the exact scoped privilege contract."
+                $jobserverSource.Contains('DuplicateToken(') -and
+                -not $jobserverSource.Contains('constructionToken.Dispose()')) `
+            "Cross-account construction did not retain borrowed exact-token admission."
         if (-not ('ProjectAtlasConstructionProcess' -as [type])) {
             Add-Type -TypeDefinition $nativeSource -Language CSharp
         }
@@ -243,6 +226,14 @@ try {
             ($publicRunMethods.Count -eq 1 -and
                 $publicRunMethods[0].GetParameters().Count -eq 9) `
             "Construction adapter exposed an admission fault through its public launch API."
+        $tokenValidationIndex = $nativeSource.IndexOf(
+            'ReadAndValidateConstructionToken(constructionToken, principalSid);',
+            [System.StringComparison]::Ordinal
+        )
+        $processCreationIndex = $nativeSource.IndexOf(
+            'bool created = CreateProcessWithToken(',
+            [System.StringComparison]::Ordinal
+        )
         $processCreatedIndex = $nativeSource.IndexOf(
             'processCreated = true;',
             [System.StringComparison]::Ordinal
@@ -256,22 +247,36 @@ try {
             [System.StringComparison]::Ordinal
         )
         $jobserverFailureIndex = $nativeSource.IndexOf(
-            'if (admissionScenario == AdmissionScenario.FailAfterJobserverAdmissionBeforeJobAssignment)',
+            'AdmissionScenario.FailAfterJobserverAdmissionBeforeJobAssignment)',
             [System.StringComparison]::Ordinal
         )
         $jobAssignmentIndex = $nativeSource.IndexOf(
             'if (!AssignProcessToJobObject(job, process.Process))',
             [System.StringComparison]::Ordinal
         )
+        $admissionCleanupIndex = $nativeSource.IndexOf(
+            'if (processCreated && !assignedToJob)',
+            [System.StringComparison]::Ordinal
+        )
+        $tokenCloseIndex = $nativeSource.IndexOf(
+            'constructionToken.Dispose();',
+            [System.StringComparison]::Ordinal
+        )
         Require `
-            ($processCreatedIndex -ge 0 -and
+            ($tokenValidationIndex -ge 0 -and
+                $processCreationIndex -gt $tokenValidationIndex -and
+                $processCreatedIndex -gt $processCreationIndex -and
                 $admissionFailureIndex -gt $processCreatedIndex -and
                 $jobserverAdmissionIndex -gt $admissionFailureIndex -and
                 $jobserverFailureIndex -gt $jobserverAdmissionIndex -and
                 $jobAssignmentIndex -gt $jobserverFailureIndex -and
+                $admissionCleanupIndex -gt $jobAssignmentIndex -and
+                $tokenCloseIndex -gt $admissionCleanupIndex -and
                 $nativeSource.Contains(
                     'uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;'
                 ) -and
+                $nativeSource.Contains('ConstructionTokenHandleOwned') -and
+                $nativeSource.Contains('ConstructionTokenHandleClosed') -and
                 $nativeSource.Contains('AdmissionCleanupWaitMilliseconds = 5000;') -and
                 $nativeSource.Contains(
                     'int waitError = wait == WaitFailed ? Marshal.GetLastWin32Error() : 0;'
@@ -301,43 +306,53 @@ try {
                 $composedRunFailure.InnerExceptions[1].Message -eq 'cleanup-failure') `
             "Construction adapter did not preserve operation and cleanup failures together."
 
-        $privilegedTokenOpen = $adapterType.GetMethod(
-            'OpenConstructionTokenWithDebugPrivilege',
+        $logonConstructionUser = $adapterType.GetMethod(
+            'LogonConstructionUser',
             $nestedTypeFlags
         )
         Require `
-            ($null -ne $privilegedTokenOpen) `
-            "Construction privilege fallback was missing."
-        $privilegedTokenOpenFailure = $null
+            ($null -ne $logonConstructionUser) `
+            "Construction token logon boundary was missing."
+        $invalidPassword = [System.Security.SecureString]::new()
+        $invalidPassword.AppendChar('x')
+        $invalidPassword.MakeReadOnly()
+        $invalidLogonFailure = $null
         try {
-            $unexpectedToken = $privilegedTokenOpen.Invoke(
+            $unexpectedToken = $logonConstructionUser.Invoke(
                 $null,
-                [object[]]@([System.IntPtr]::Zero)
+                [object[]]@(
+                    "PAMissing$([guid]::NewGuid().ToString('N').Substring(0, 8))",
+                    $invalidPassword
+                )
             )
             if ($null -ne $unexpectedToken) {
                 $unexpectedToken.Dispose()
             }
         }
         catch {
-            $privilegedTokenOpenFailure = $_.Exception
-            while (($privilegedTokenOpenFailure -is
+            $invalidLogonFailure = $_.Exception
+            while (($invalidLogonFailure -is
                     [System.Management.Automation.MethodInvocationException] -or
-                    $privilegedTokenOpenFailure -is
+                    $invalidLogonFailure -is
                     [System.Reflection.TargetInvocationException]) -and
-                $null -ne $privilegedTokenOpenFailure.InnerException) {
-                $privilegedTokenOpenFailure = $privilegedTokenOpenFailure.InnerException
+                $null -ne $invalidLogonFailure.InnerException) {
+                $invalidLogonFailure = $invalidLogonFailure.InnerException
             }
         }
-        $privilegedTokenOpenFailureDescription = if ($null -eq $privilegedTokenOpenFailure) {
+        finally {
+            $invalidPassword.Dispose()
+        }
+        $invalidLogonFailureDescription = if ($null -eq $invalidLogonFailure) {
             'no failure'
         }
         else {
-            "$($privilegedTokenOpenFailure.GetType().FullName) $($privilegedTokenOpenFailure.Message)"
+            "$($invalidLogonFailure.GetType().FullName) $($invalidLogonFailure.Message)"
         }
         Require `
-            ($privilegedTokenOpenFailure -is [System.ComponentModel.Win32Exception] -and
-                $privilegedTokenOpenFailure.NativeErrorCode -in @(6, 1300)) `
-            "Construction privilege fallback did not fail closed for an invalid exact handle: $privilegedTokenOpenFailureDescription"
+            ($invalidLogonFailure -is [System.ComponentModel.Win32Exception] -and
+                $invalidLogonFailure.NativeErrorCode -eq 1326 -and
+                $invalidLogonFailure.Message -match '^logon-construction-user') `
+            "Construction token logon did not fail closed for invalid credentials: $invalidLogonFailureDescription"
 
         $admissionFixtureSource = @'
 using System;
@@ -1368,8 +1383,13 @@ public static class ProjectAtlasConstructionAdmissionFixture
             'CreateAdmittedJobserver',
             $nestedTypeFlags
         )
+        $readAndValidateConstructionToken = $adapterType.GetMethod(
+            'ReadAndValidateConstructionToken',
+            $nestedTypeFlags
+        )
         Require `
-            ($null -ne $createAdmittedJobserver) `
+            ($null -ne $createAdmittedJobserver -and
+                $null -ne $readAndValidateConstructionToken) `
             "Native adapter jobserver admission helpers were missing."
         $admittedJobserverName =
             "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
@@ -1384,109 +1404,110 @@ public static class ProjectAtlasConstructionAdmissionFixture
         Require `
             ($currentIntegritySids.Count -eq 1) `
             "The diagnostic token did not expose one integrity SID."
-        if ($currentIntegritySids[0] -eq 'S-1-16-8192') {
-            $admittedJobserverHandle = $null
-            try {
-                $admittedJobserverHandle = $createAdmittedJobserver.Invoke(
+        $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent(
+            [System.Security.Principal.TokenAccessLevels]::Query -bor
+                [System.Security.Principal.TokenAccessLevels]::Duplicate
+        )
+        try {
+            $currentToken = $currentIdentity.AccessToken
+            $currentPrincipalSid = $currentIdentity.User.Value
+            if ($currentIntegritySids[0] -eq 'S-1-16-8192') {
+                $constructionIdentity = $readAndValidateConstructionToken.Invoke(
                     $null,
-                    [object[]]@(
-                        [System.Diagnostics.Process]::GetCurrentProcess().Handle,
-                        [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
-                        $admittedJobserverName
-                    )
+                    [object[]]@($currentToken, $currentPrincipalSid)
                 )
-                Require `
-                    ($null -ne $admittedJobserverHandle -and
-                        -not $admittedJobserverHandle.IsInvalid -and
-                        -not $admittedJobserverHandle.IsClosed) `
-                    "Native adapter did not admit the current exact medium token."
-                $collisionRejected = $false
+                $admittedJobserverHandle = $null
                 try {
-                    $unexpectedHandle = $createAdmittedJobserver.Invoke(
+                    $admittedJobserverHandle = $createAdmittedJobserver.Invoke(
                         $null,
                         [object[]]@(
-                            [System.Diagnostics.Process]::GetCurrentProcess().Handle,
-                            [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
+                            $currentToken,
+                            $constructionIdentity,
                             $admittedJobserverName
                         )
                     )
-                    if ($null -ne $unexpectedHandle) {
-                        $unexpectedHandle.Dispose()
+                    Require `
+                        ($null -ne $admittedJobserverHandle -and
+                            -not $admittedJobserverHandle.IsInvalid -and
+                            -not $admittedJobserverHandle.IsClosed) `
+                        "Native adapter did not admit the current exact medium token."
+                    $collisionRejected = $false
+                    try {
+                        $unexpectedHandle = $createAdmittedJobserver.Invoke(
+                            $null,
+                            [object[]]@(
+                                $currentToken,
+                                $constructionIdentity,
+                                $admittedJobserverName
+                            )
+                        )
+                        if ($null -ne $unexpectedHandle) {
+                            $unexpectedHandle.Dispose()
+                        }
                     }
+                    catch {
+                        $collisionRejected = $true
+                    }
+                    Require $collisionRejected "Native adapter adopted a live jobserver name."
+                }
+                finally {
+                    if ($null -ne $admittedJobserverHandle) {
+                        $admittedJobserverHandle.Dispose()
+                        Require `
+                            $admittedJobserverHandle.IsClosed `
+                            "Native adapter did not close the admitted diagnostic jobserver."
+                    }
+                }
+            }
+            else {
+                $unsupportedIntegrityRejected = $false
+                try {
+                    $readAndValidateConstructionToken.Invoke(
+                        $null,
+                        [object[]]@($currentToken, $currentPrincipalSid)
+                    ) | Out-Null
                 }
                 catch {
-                    $collisionRejected = $true
-                }
-                Require $collisionRejected "Native adapter adopted a live jobserver name."
-            }
-            finally {
-                if ($null -ne $admittedJobserverHandle) {
-                    $admittedJobserverHandle.Dispose()
-                    Require `
-                        $admittedJobserverHandle.IsClosed `
-                        "Native adapter did not close the admitted diagnostic jobserver."
-                }
-            }
-        }
-        else {
-            $unsupportedIntegrityRejected = $false
-            try {
-                $unexpectedHandle = $createAdmittedJobserver.Invoke(
-                    $null,
-                    [object[]]@(
-                        [System.Diagnostics.Process]::GetCurrentProcess().Handle,
-                        [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
-                        $admittedJobserverName
-                    )
-                )
-                if ($null -ne $unexpectedHandle) {
-                    $unexpectedHandle.Dispose()
-                }
-            }
-            catch {
-                $failure = $_.Exception
-                while ($null -ne $failure) {
-                    if ($failure.Message -eq 'validate-construction-token-integrity') {
-                        $unsupportedIntegrityRejected = $true
-                        break
+                    $failure = $_.Exception
+                    while ($null -ne $failure) {
+                        if ($failure.Message -eq 'validate-construction-token-integrity') {
+                            $unsupportedIntegrityRejected = $true
+                            break
+                        }
+                        $failure = $failure.InnerException
                     }
-                    $failure = $failure.InnerException
                 }
+                Require `
+                    $unsupportedIntegrityRejected `
+                    "Native adapter did not reject the ambient non-medium diagnostic token exactly."
             }
             Require `
-                $unsupportedIntegrityRejected `
-                "Native adapter did not reject the ambient non-medium diagnostic token exactly."
-        }
-        Require `
-            ([ProjectAtlasConstructionProcess]::CanCreateFreshJobserverName(
-                $admittedJobserverName
-            )) `
-            "Native adapter retained the admitted diagnostic jobserver name."
-        $mismatchedTokenRejected = $false
-        $mismatchedJobserverName =
-            "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
-        try {
-            $unexpectedHandle = $createAdmittedJobserver.Invoke(
-                $null,
-                [object[]]@(
-                    [System.Diagnostics.Process]::GetCurrentProcess().Handle,
-                    'S-1-5-7',
-                    $mismatchedJobserverName
-                )
-            )
-            if ($null -ne $unexpectedHandle) {
-                $unexpectedHandle.Dispose()
+                ([ProjectAtlasConstructionProcess]::CanCreateFreshJobserverName(
+                    $admittedJobserverName
+                )) `
+                "Native adapter retained the admitted diagnostic jobserver name."
+            $mismatchedTokenRejected = $false
+            $mismatchedJobserverName =
+                "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+            try {
+                $readAndValidateConstructionToken.Invoke(
+                    $null,
+                    [object[]]@($currentToken, 'S-1-5-7')
+                ) | Out-Null
             }
+            catch {
+                $mismatchedTokenRejected = $true
+            }
+            Require $mismatchedTokenRejected "Native adapter accepted a mismatched construction token."
+            Require `
+                ([ProjectAtlasConstructionProcess]::CanCreateFreshJobserverName(
+                    $mismatchedJobserverName
+                )) `
+                "Mismatched-token rejection retained a jobserver name."
         }
-        catch {
-            $mismatchedTokenRejected = $true
+        finally {
+            $currentIdentity.Dispose()
         }
-        Require $mismatchedTokenRejected "Native adapter accepted a mismatched child token."
-        Require `
-            ([ProjectAtlasConstructionProcess]::CanCreateFreshJobserverName(
-                $mismatchedJobserverName
-            )) `
-            "Mismatched-token rejection retained a jobserver name."
     }
     $Target = "x86_64-pc-windows-msvc"
     $commandDiagnosticTailBytes = 24 * 1024
