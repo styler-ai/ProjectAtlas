@@ -996,9 +996,10 @@ using System.Text;
 public static class ProjectAtlasConstructionProcess
 {
     private const uint CreateSuspended = 0x00000004;
-    private const uint CreateBreakawayFromJob = 0x01000000;
     private const uint CreateNoWindow = 0x08000000;
     private const uint CreateUnicodeEnvironment = 0x00000400;
+    private const uint Logon32LogonInteractive = 2;
+    private const uint Logon32ProviderDefault = 0;
     private const uint JobObjectQuery = 0x0004;
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
     private const uint JobObjectLimitBreakawayOk = 0x00000800;
@@ -1052,6 +1053,8 @@ public static class ProjectAtlasConstructionProcess
         internal bool ProcessHandleClosed { get; set; }
         internal bool ThreadHandleOwned { get; set; }
         internal bool ThreadHandleClosed { get; set; }
+        internal bool LogonTokenHandleOwned { get; set; }
+        internal bool LogonTokenHandleClosed { get; set; }
         internal bool ConstructionTokenHandleOwned { get; set; }
         internal bool ConstructionTokenHandleClosed { get; set; }
     }
@@ -1176,12 +1179,24 @@ public static class ProjectAtlasConstructionProcess
         "advapi32.dll",
         CharSet = CharSet.Unicode,
         SetLastError = true,
-        EntryPoint = "CreateProcessWithLogonW")]
+        EntryPoint = "LogonUserW")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CreateProcessWithLogon(
+    private static extern bool LogonUser(
         string username,
         string domain,
         IntPtr password,
+        uint logonType,
+        uint logonProvider,
+        out SafeAccessTokenHandle tokenHandle);
+
+    [DllImport(
+        "advapi32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true,
+        EntryPoint = "CreateProcessWithTokenW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateProcessWithToken(
+        SafeAccessTokenHandle tokenHandle,
         uint logonFlags,
         string applicationName,
         StringBuilder commandLine,
@@ -1548,13 +1563,11 @@ public static class ProjectAtlasConstructionProcess
         if (!string.IsNullOrEmpty(brokerJobName))
         {
             ValidateCurrentBrokerJob(brokerJobName);
-            return CreateSuspended |
-                CreateBreakawayFromJob |
-                CreateNoWindow |
-                CreateUnicodeEnvironment;
         }
-
-        RequireCurrentProcessJobFree();
+        else
+        {
+            RequireCurrentProcessJobFree();
+        }
         return CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;
     }
 
@@ -1703,6 +1716,7 @@ public static class ProjectAtlasConstructionProcess
         IntPtr windowStation = IntPtr.Zero;
         IntPtr desktop = IntPtr.Zero;
         IntPtr originalWindowStation = IntPtr.Zero;
+        SafeAccessTokenHandle logonToken = null;
         SafeAccessTokenHandle constructionToken = null;
         ProcessInformation process = new ProcessInformation();
         bool processCreated = false;
@@ -1798,10 +1812,30 @@ public static class ProjectAtlasConstructionProcess
             try
             {
                 passwordPointer = Marshal.SecureStringToGlobalAllocUnicode(password);
-                created = CreateProcessWithLogon(
+                if (!LogonUser(
                     username,
                     ".",
                     passwordPointer,
+                    Logon32LogonInteractive,
+                    Logon32ProviderDefault,
+                    out logonToken))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "logon-construction-principal");
+                }
+                if (logonToken == null || logonToken.IsInvalid)
+                {
+                    throw new InvalidOperationException(
+                        "logon-construction-principal-returned-invalid-token");
+                }
+                if (admissionReceipt != null)
+                {
+                    admissionReceipt.LogonTokenHandleOwned = true;
+                }
+                ValidateConstructionToken(logonToken, principalSid);
+                created = CreateProcessWithToken(
+                    logonToken,
                     0,
                     executable,
                     commandLine,
@@ -1817,6 +1851,15 @@ public static class ProjectAtlasConstructionProcess
             }
             finally
             {
+                if (logonToken != null)
+                {
+                    logonToken.Dispose();
+                    if (admissionReceipt != null)
+                    {
+                        admissionReceipt.LogonTokenHandleClosed = logonToken.IsClosed;
+                    }
+                    logonToken = null;
+                }
                 if (passwordPointer != IntPtr.Zero)
                 {
                     Marshal.ZeroFreeGlobalAllocUnicode(passwordPointer);
@@ -1824,7 +1867,9 @@ public static class ProjectAtlasConstructionProcess
             }
             if (!created)
             {
-                throw new Win32Exception(createError, "create-process");
+                throw new Win32Exception(
+                    createError,
+                    "create-process-with-construction-token");
             }
             processCreated = true;
             if (admissionReceipt != null)
@@ -1873,9 +1918,9 @@ public static class ProjectAtlasConstructionProcess
             }
             if (inheritedJob)
             {
-                // Some alternate-logon hosts retain the authenticated parent Job despite the
-                // explicit breakaway flag. Only that exact broker Job is a valid parent for
-                // the empty, stricter construction Job that AssignProcessToJobObject nests.
+                // Brokered construction deliberately retains the authenticated parent Job.
+                // Only that exact broker Job is a valid parent for the empty, stricter
+                // construction Job that AssignProcessToJobObject nests.
                 string brokerJobName = GetConfiguredBrokerJobName();
                 if (string.IsNullOrEmpty(brokerJobName))
                 {

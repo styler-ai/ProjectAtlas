@@ -168,8 +168,16 @@ function Assert-ProductionRecoveryContracts {
     ))
     Require ($nativeSources.Count -eq 1) "Expected one construction native adapter source."
     $nativeText = $nativeSources[0].Right.Extent.Text
+    $principalLogonIndex = $nativeText.IndexOf(
+        'if (!LogonUser(',
+        [System.StringComparison]::Ordinal
+    )
+    $principalTokenValidationIndex = $nativeText.IndexOf(
+        'ValidateConstructionToken(logonToken, principalSid);',
+        [System.StringComparison]::Ordinal
+    )
     $processCreationIndex = $nativeText.IndexOf(
-        'created = CreateProcessWithLogon(',
+        'created = CreateProcessWithToken(',
         [System.StringComparison]::Ordinal
     )
     $creationFlagsIndex = $nativeText.IndexOf(
@@ -203,7 +211,9 @@ function Assert-ProductionRecoveryContracts {
     )
     Require `
         ($creationFlagsIndex -ge 0 -and
-            $processCreationIndex -gt $creationFlagsIndex -and
+            $principalLogonIndex -gt $creationFlagsIndex -and
+            $principalTokenValidationIndex -gt $principalLogonIndex -and
+            $processCreationIndex -gt $principalTokenValidationIndex -and
             $processCreatedIndex -gt $processCreationIndex -and
             $processTokenOpenIndex -gt $processCreatedIndex -and
             $tokenValidationIndex -gt $processTokenOpenIndex -and
@@ -211,7 +221,10 @@ function Assert-ProductionRecoveryContracts {
             $inheritedJobCheckIndex -gt $retainedJobInjectionIndex -and
             $ownJobAssignmentIndex -gt $inheritedJobCheckIndex -and
             $nativeText.Contains('return CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;') -and
-            $nativeText.Contains('CreateBreakawayFromJob = 0x01000000;') -and
+            $nativeText.Contains('EntryPoint = "LogonUserW"') -and
+            $nativeText.Contains('EntryPoint = "CreateProcessWithTokenW"') -and
+            -not $nativeText.Contains('EntryPoint = "CreateProcessWithLogonW"') -and
+            -not $nativeText.Contains('CreateBreakawayFromJob = 0x01000000;') -and
             $nativeText.Contains('ValidateCurrentBrokerJob(brokerJobName);') -and
             $nativeText.Contains('limits.BasicLimitInformation.LimitFlags != expectedFlags') -and
             $nativeText.Contains('JobObjectLimitKillOnJobClose | JobObjectLimitBreakawayOk') -and
@@ -219,9 +232,10 @@ function Assert-ProductionRecoveryContracts {
             $nativeText.Contains('construction-broker-job-membership') -and
             $nativeText.Contains('construction-broker-job-policy') -and
             $nativeText.Contains('Marshal.ZeroFreeGlobalAllocUnicode(passwordPointer);') -and
+            $nativeText.Contains('LogonTokenHandleOwned') -and
+            $nativeText.Contains('LogonTokenHandleClosed') -and
             $nativeText.Contains('MaximumLogonCommandLineCharacters = 1023;') -and
-            $nativeText.Contains('construction-process-retained-inherited-job') -and
-            -not $nativeText.Contains('CreateProcessWithTokenW')) `
+            $nativeText.Contains('construction-process-retained-inherited-job')) `
         "Construction admission no longer validates the suspended alternate-logon child before assigning its owned Job."
 
     $cleanupDefinitions = @($Ast.FindAll(

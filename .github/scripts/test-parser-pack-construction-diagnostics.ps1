@@ -272,13 +272,14 @@ try {
         Require ($nativeSourceAssignments.Count -eq 1) "Expected one native adapter source assignment."
         Invoke-Expression $nativeSourceAssignments[0].Extent.Text
         Require `
-            ($nativeSource.Contains('EntryPoint = "CreateProcessWithLogonW"') -and
+            ($nativeSource.Contains('EntryPoint = "LogonUserW"') -and
+                $nativeSource.Contains('EntryPoint = "CreateProcessWithTokenW"') -and
                 $nativeSource.Contains('private static extern bool OpenProcessToken(') -and
                 -not $nativeSource.Contains('SeDebugPrivilege') -and
                 -not $nativeSource.Contains('AdjustTokenPrivileges') -and
-                -not $nativeSource.Contains('EntryPoint = "LogonUserW"') -and
-                -not $nativeSource.Contains('EntryPoint = "CreateProcessWithTokenW"') -and
-                $nativeSource.Contains('CreateBreakawayFromJob = 0x01000000;') -and
+                -not $nativeSource.Contains('EntryPoint = "CreateProcessWithLogonW"') -and
+                -not $nativeSource.Contains('EntryPoint = "CreateProcessAsUserW"') -and
+                -not $nativeSource.Contains('CreateBreakawayFromJob = 0x01000000;') -and
                 $nativeSource.Contains('JobObjectLimitBreakawayOk = 0x00000800;') -and
                 $nativeSource.Contains('JobObjectLimitSilentBreakawayOk = 0x00001000;') -and
                 $nativeSource.Contains('construction-broker-job-required') -and
@@ -290,13 +291,29 @@ try {
                     '[ProjectAtlasConstructionProcess]::ConfigureBrokerJob($BrokerJobName)'
                 ) -and
                 $nativeSource -match
-                    'CreateProcessWithLogon\(\s*username,\s*"\.",\s*passwordPointer,\s*0,\s*executable,' -and
+                    'LogonUser\(\s*username,\s*"\.",\s*passwordPointer,\s*Logon32LogonInteractive,\s*Logon32ProviderDefault,\s*out logonToken\)' -and
+                $nativeSource -match
+                    'CreateProcessWithToken\(\s*logonToken,\s*0,\s*executable,' -and
                 $nativeSource.Contains(
                     'Marshal.ZeroFreeGlobalAllocUnicode(passwordPointer);'
-                )) `
+                ) -and
+                $nativeSource.Contains('logon-construction-principal') -and
+                $nativeSource.Contains('create-process-with-construction-token')) `
             "Windows construction adapter did not use the bounded alternate-logon process boundary."
+        $principalLogonStart = $nativeSource.IndexOf(
+            'if (!LogonUser(',
+            [System.StringComparison]::Ordinal
+        )
+        $principalTokenValidationStart = $nativeSource.IndexOf(
+            'ValidateConstructionToken(logonToken, principalSid);',
+            [System.StringComparison]::Ordinal
+        )
         $processCreationStart = $nativeSource.IndexOf(
-            'created = CreateProcessWithLogon(',
+            'created = CreateProcessWithToken(',
+            [System.StringComparison]::Ordinal
+        )
+        $principalTokenCloseStart = $nativeSource.IndexOf(
+            'logonToken.Dispose();',
             [System.StringComparison]::Ordinal
         )
         $processTokenOpenStart = $nativeSource.IndexOf(
@@ -308,7 +325,10 @@ try {
             [System.StringComparison]::Ordinal
         )
         Require `
-            ($processCreationStart -ge 0 -and
+            ($principalLogonStart -ge 0 -and
+                $principalTokenValidationStart -gt $principalLogonStart -and
+                $processCreationStart -gt $principalTokenValidationStart -and
+                $principalTokenCloseStart -gt $processCreationStart -and
                 $processTokenOpenStart -gt $processCreationStart -and
                 $tokenValidationStart -gt $processTokenOpenStart) `
             "Construction token ownership boundaries were missing."
@@ -353,7 +373,7 @@ try {
                 $privateRunCore.GetParameters().Count -eq 10) `
             "Construction adapter private recovery boundary changed."
         $processCreationIndex = $nativeSource.IndexOf(
-            'created = CreateProcessWithLogon(',
+            'created = CreateProcessWithToken(',
             [System.StringComparison]::Ordinal
         )
         $creationFlagsIndex = $nativeSource.IndexOf(
@@ -416,6 +436,8 @@ try {
                 $nativeSource.Contains('JobObjectLimitKillOnJobClose | JobObjectLimitBreakawayOk') -and
                 $nativeSource.Contains('MaximumLogonCommandLineCharacters = 1023;') -and
                 $nativeSource.Contains('construction-command-line-too-long') -and
+                $nativeSource.Contains('LogonTokenHandleOwned') -and
+                $nativeSource.Contains('LogonTokenHandleClosed') -and
                 $nativeSource.Contains('ConstructionTokenHandleOwned') -and
                 $nativeSource.Contains('ConstructionTokenHandleClosed') -and
                 $nativeSource.Contains('AdmissionCleanupWaitMilliseconds = 5000;') -and
