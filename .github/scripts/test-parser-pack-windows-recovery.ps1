@@ -105,17 +105,19 @@ function Assert-ProductionRecoveryContracts {
     ))
     Require ($dotSourceGuard.Count -eq 1) "Production cleanup is not safely dot-sourceable."
 
-    $breakpointVariableCollisions = @($Ast.FindAll(
+    $proxyCollisions = @($Ast.FindAll(
         {
             param($node)
-            $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
-                $node.VariablePath.UserPath -like 'breakpoint*'
+            ($node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $node.VariablePath.UserPath -like 'proxy*') -or
+                ($node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -like 'proxy*')
         },
         $true
     ))
     Require `
-        ($breakpointVariableCollisions.Count -eq 0) `
-        "Production wrapper collided with recovery breakpoint harness variables."
+        ($proxyCollisions.Count -eq 0) `
+        "Production wrapper collided with recovery proxy names."
 
     $topLevelParameters = @($Ast.ParamBlock.Parameters |
         ForEach-Object { $_.Name.VariablePath.UserPath })
@@ -132,45 +134,51 @@ function Assert-ProductionRecoveryContracts {
     return $nativeSources[0]
 }
 
-function Get-AccountSidAssignment {
+function Assert-AccountJournalConstructionContract {
     param(
         [Parameter(Mandatory = $true)]
         [System.Management.Automation.Language.ScriptBlockAst]$Ast
     )
 
-    $assignments = @($Ast.FindAll(
+    $commands = @($Ast.FindAll(
         {
             param($node)
-            if ($node -isnot [System.Management.Automation.Language.AssignmentStatementAst] -or
-                $node.Left -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
-                $node.Left.VariablePath.UserPath -ne 'sid' -or
-                $node.Right -isnot [System.Management.Automation.Language.CommandExpressionAst] -or
-                $node.Right.Expression -isnot
-                    [System.Management.Automation.Language.MemberExpressionAst]) {
-                return $false
-            }
-            $member = $node.Right.Expression
-            return `
-                (-not $member.Static -and
-                    $member.Expression -is
-                        [System.Management.Automation.Language.VariableExpressionAst] -and
-                    $member.Expression.VariablePath.UserPath -eq 'account' -and
-                    $member.Member -is
-                        [System.Management.Automation.Language.StringConstantExpressionAst] -and
-                    $member.Member.Value -eq 'Sid')
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -ceq 'New-LocalUser' -and
+                $node.CommandElements.Count -gt 0 -and
+                $node.CommandElements[0].Extent.Text -ceq 'New-LocalUser'
         },
         $true
     ))
     Require `
-        ($assignments.Count -eq 1 -and
-            $assignments[0].Extent.StartLineNumber -gt 0) `
-        "Expected one post-account construction SID assignment."
-    return $assignments[0]
+        ($commands.Count -eq 1 -and
+            $commands[0].Parent -is [System.Management.Automation.Language.PipelineAst] -and
+            $commands[0].Parent.Parent -is
+                [System.Management.Automation.Language.AssignmentStatementAst]) `
+        "Expected one interceptable production account-creation command."
+
+    $accountAssignment = $commands[0].Parent.Parent
+    Require `
+        ($accountAssignment.Left.Extent.Text -ceq '$account' -and
+            $accountAssignment.Parent -is
+                [System.Management.Automation.Language.StatementBlockAst]) `
+        "Production account creation no longer assigns the retained account."
+    $statements = @($accountAssignment.Parent.Statements)
+    $accountIndex = [Array]::IndexOf([object[]]$statements, $accountAssignment)
+    Require `
+        ($accountIndex -ge 0 -and
+            $statements.Count -gt ($accountIndex + 5) -and
+            $statements[$accountIndex + 1].Extent.Text -ceq '$sid = $account.Sid' -and
+            $statements[$accountIndex + 3].Extent.Text -ceq '$state.sid = $sid.Value' -and
+            $statements[$accountIndex + 4].Extent.Text -ceq '$state.stage = "filesystem"' -and
+            $statements[$accountIndex + 5].Extent.Text -ceq
+                'Write-ProtectedState -State $state') `
+        "Production account creation no longer precedes initial SID journal publication."
 }
 
 $productionAst = Get-ProductionWrapperAst
 $nativeSourceAssignment = Assert-ProductionRecoveryContracts -Ast $productionAst
-$accountSidAssignment = Get-AccountSidAssignment -Ast $productionAst
+Assert-AccountJournalConstructionContract -Ast $productionAst
 if ($StaticOnly) {
     Write-Output "Windows parser-pack recovery static validation passed."
     return
@@ -554,7 +562,7 @@ function Invoke-AccountJournalRecoveryScenario {
     $scenarioDirectory = Split-Path -Parent (Split-Path -Parent $StatePath)
     [System.IO.Directory]::CreateDirectory($scenarioDirectory) | Out-Null
     $parameterPath = Join-Path $scenarioDirectory 'construction-parameters.json'
-    $breakpointHarnessPath = Join-Path $scenarioDirectory 'hold-before-sid-assignment.ps1'
+    $proxyPath = Join-Path $scenarioDirectory 'hold-after-durable-account.ps1'
     $readyMarkerPath = Join-Path $scenarioDirectory 'account-created.ready'
     $scenarioParameters = @{}
     foreach ($entry in $ConstructionParameters.GetEnumerator()) {
@@ -567,13 +575,12 @@ function Invoke-AccountJournalRecoveryScenario {
             wrapper = $ProductionWrapper
             parameters = $scenarioParameters
             ready_marker = $readyMarkerPath
-            breakpoint_line = $accountSidAssignment.Extent.StartLineNumber
             expected_description = $accountDescription
             placeholder_sid = $placeholderSid
         } | ConvertTo-Json -Depth 8 -Compress),
         [System.Text.UTF8Encoding]::new($false)
     )
-    $breakpointHarnessSource = @'
+    $proxySource = @'
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -584,39 +591,98 @@ $payload = [System.IO.File]::ReadAllText($ParameterPath) |
     ConvertFrom-Json -AsHashtable -Depth 8
 $parameters = [hashtable]$payload.parameters
 $wrapperPath = (Get-Item -LiteralPath ([string]$payload.wrapper) -Force).FullName
-$breakpointLine = [int]$payload.breakpoint_line
-$breakpointReadyMarkerPath = [System.IO.Path]::GetFullPath([string]$payload.ready_marker)
-$breakpointExpectedDescription = [string]$payload.expected_description
-$breakpointPlaceholderSid = [string]$payload.placeholder_sid
+$proxyReadyMarkerPath = [System.IO.Path]::GetFullPath([string]$payload.ready_marker)
+$proxyExpectedDescription = [string]$payload.expected_description
+$proxyPlaceholderSid = [string]$payload.placeholder_sid
 $parameterDirectory = [System.IO.Path]::GetFullPath(
     [System.IO.Path]::GetDirectoryName($ParameterPath)
 )
-if ([System.IO.Path]::GetDirectoryName($breakpointReadyMarkerPath) -ne $parameterDirectory -or
-    [System.IO.File]::Exists($breakpointReadyMarkerPath) -or
-    $breakpointExpectedDescription -ne "ProjectAtlas optional parser pack construction" -or
-    $breakpointPlaceholderSid -ne "S-1-5-21-0-0-0-0") {
+if ([System.IO.Path]::GetDirectoryName($proxyReadyMarkerPath) -ne $parameterDirectory -or
+    [System.IO.File]::Exists($proxyReadyMarkerPath) -or
+    $proxyExpectedDescription -ne "ProjectAtlas optional parser pack construction" -or
+    $proxyPlaceholderSid -ne "S-1-5-21-0-0-0-0") {
     throw "Account-ready marker path is unsafe."
 }
-$breakpointStatePath = [System.IO.Path]::GetFullPath([string]$parameters.StatePath)
-$breakpointAction = {
-    $stateItem = Get-Item -LiteralPath $breakpointStatePath -Force
+$proxyStatePath = [System.IO.Path]::GetFullPath([string]$parameters.StatePath)
+function global:New-LocalUser {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][System.Security.SecureString]$Password,
+        [Parameter(Mandatory = $true)][DateTime]$AccountExpires,
+        [switch]$PasswordNeverExpires,
+        [switch]$UserMayNotChangePassword,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $creationPowerShell = [System.Management.Automation.PowerShell]::Create()
+    $creationHadErrors = $false
+    $creationErrors = @()
+    try {
+        $creationPowerShell.AddCommand(
+            'Microsoft.PowerShell.LocalAccounts\New-LocalUser'
+        ) | Out-Null
+        $creationPowerShell.AddParameter('Name', $Name) | Out-Null
+        $creationPowerShell.AddParameter('Password', $Password) | Out-Null
+        $creationPowerShell.AddParameter('AccountExpires', $AccountExpires) | Out-Null
+        $creationPowerShell.AddParameter('Description', $Description) | Out-Null
+        $creationPowerShell.AddParameter('ErrorAction', 'Stop') | Out-Null
+        if ($PasswordNeverExpires) {
+            $creationPowerShell.AddParameter('PasswordNeverExpires') | Out-Null
+        }
+        if ($UserMayNotChangePassword) {
+            $creationPowerShell.AddParameter('UserMayNotChangePassword') | Out-Null
+        }
+        $createdAccounts = @($creationPowerShell.Invoke())
+        $creationHadErrors = $creationPowerShell.HadErrors
+        $creationErrors = @($creationPowerShell.Streams.Error)
+    }
+    finally {
+        $creationPowerShell.Dispose()
+    }
+    if ($creationHadErrors -or $creationErrors.Count -ne 0) {
+        $creationMessage = if ($creationErrors.Count -eq 0) {
+            'unknown local-account creation error'
+        }
+        else {
+            [string]$creationErrors[0]
+        }
+        throw "Durable local-account creation failed: $creationMessage"
+    }
+
+    $publishedAccounts = @(
+        Microsoft.PowerShell.LocalAccounts\Get-LocalUser -ErrorAction Stop |
+            Where-Object { $_.Name -ceq $Name }
+    )
+    if ($createdAccounts.Count -ne 1 -or
+        $null -eq $createdAccounts[0].Sid -or
+        $publishedAccounts.Count -ne 1 -or
+        $null -eq $publishedAccounts[0].Sid -or
+        $createdAccounts[0].Sid.Value -ne $publishedAccounts[0].Sid.Value -or
+        $publishedAccounts[0].Sid.Value -notmatch
+            '\AS-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+\z' -or
+        [string]$publishedAccounts[0].Description -ne $Description) {
+        throw "Completed account creation did not publish one exact durable identity."
+    }
+
+    $stateItem = Get-Item -LiteralPath $proxyStatePath -Force
     if (($stateItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
         $stateItem.Length -le 0) {
         throw "Protected construction journal was not ready for the account marker."
     }
-    $breakpointJournal = [System.IO.File]::ReadAllText($stateItem.FullName) |
+    $proxyJournal = [System.IO.File]::ReadAllText($stateItem.FullName) |
         ConvertFrom-Json -Depth 6
-    if ($null -eq $account -or
-        [string]$account.Name -cne [string]$breakpointJournal.username -or
-        $null -eq $account.Sid -or
-        $account.Sid.Value -notmatch '\AS-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+\z' -or
-        [string]$account.Description -ne $breakpointExpectedDescription -or
-        [string]$breakpointJournal.sid -ne $breakpointPlaceholderSid -or
-        [string]$breakpointJournal.stage -ne 'identity') {
-        throw "Completed construction account did not match its placeholder journal."
+    if ([string]$proxyJournal.username -cne $Name -or
+        [string]$proxyJournal.sid -ne $proxyPlaceholderSid -or
+        [string]$proxyJournal.firewall_rule -notmatch
+            '\AProjectAtlas-ParserPack-Construction-[0-9a-f]{12}\z' -or
+        [string]$proxyJournal.stage -ne 'identity' -or
+        @($proxyJournal.acl_paths).Count -ne 0 -or
+        $Description -ne $proxyExpectedDescription) {
+        throw "Durable construction account did not retain its placeholder journal."
     }
 
-    $markerTemporaryPath = "$breakpointReadyMarkerPath.$([Guid]::NewGuid().ToString('N')).tmp"
+    $markerTemporaryPath = "$proxyReadyMarkerPath.$([Guid]::NewGuid().ToString('N')).tmp"
     try {
         [System.IO.File]::WriteAllText(
             $markerTemporaryPath,
@@ -625,11 +691,11 @@ $breakpointAction = {
         )
         Set-Acl `
             -LiteralPath $markerTemporaryPath `
-            -AclObject (Get-Acl -LiteralPath $breakpointStatePath)
+            -AclObject (Get-Acl -LiteralPath $proxyStatePath)
         if (-not (Get-Acl -LiteralPath $markerTemporaryPath).AreAccessRulesProtected) {
             throw "Account-ready marker ACL was not protected."
         }
-        [System.IO.File]::Move($markerTemporaryPath, $breakpointReadyMarkerPath)
+        [System.IO.File]::Move($markerTemporaryPath, $proxyReadyMarkerPath)
     }
     finally {
         if ([System.IO.File]::Exists($markerTemporaryPath)) {
@@ -637,32 +703,21 @@ $breakpointAction = {
         }
     }
 
-    $sidAssignmentGate = [System.Threading.ManualResetEventSlim]::new($false)
+    $accountPublicationGate = [System.Threading.ManualResetEventSlim]::new($false)
     try {
-        $sidAssignmentGate.Wait()
+        $accountPublicationGate.Wait()
     }
     finally {
-        $sidAssignmentGate.Dispose()
+        $accountPublicationGate.Dispose()
     }
-    throw "Construction SID-assignment breakpoint returned unexpectedly."
-}
-$breakpoint = Set-PSBreakpoint `
-    -Script $wrapperPath `
-    -Line $breakpointLine `
-    -Action $breakpointAction
-if ($null -eq $breakpoint -or
-    -not $breakpoint.Enabled -or
-    [System.IO.Path]::GetFullPath([string]$breakpoint.Script) -ne $wrapperPath -or
-    $breakpoint.Line -ne $breakpointLine -or
-    @(Get-PSBreakpoint | Where-Object { $_.Id -eq $breakpoint.Id }).Count -ne 1) {
-    throw "Construction SID-assignment breakpoint was not installed exactly once."
+    throw "Durable account proxy returned unexpectedly."
 }
 & $wrapperPath @parameters
-throw "Construction wrapper returned after the SID-assignment breakpoint."
+throw "Construction wrapper returned after the durable account proxy."
 '@
     [System.IO.File]::WriteAllText(
-        $breakpointHarnessPath,
-        $breakpointHarnessSource,
+        $proxyPath,
+        $proxySource,
         [System.Text.UTF8Encoding]::new($false)
     )
 
@@ -672,7 +727,7 @@ throw "Construction wrapper returned after the SID-assignment breakpoint."
     $wrapperStart.CreateNoWindow = $true
     foreach ($argument in @(
         '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-        '-File', $breakpointHarnessPath,
+        '-File', $proxyPath,
         '-ParameterPath', $parameterPath
     )) {
         $wrapperStart.ArgumentList.Add($argument)
@@ -720,7 +775,22 @@ throw "Construction wrapper returned after the SID-assignment breakpoint."
                     ($null -ne $observedPlaceholderState) `
                     "Account-ready marker appeared without its protected journal."
                 $markerValidated = $true
-                break
+            }
+            if ($markerValidated) {
+                $candidateAccount = Get-ExactLocalAccount `
+                    -Username ([string]$observedPlaceholderState.username)
+                $accountObserved = $null -ne $candidateAccount
+                $accountSidValidated =
+                    $accountObserved -and
+                    $null -ne $candidateAccount.Sid -and
+                    $candidateAccount.Sid.Value -match $sidPattern
+                $accountDescriptionValidated =
+                    $accountObserved -and
+                    [string]$candidateAccount.Description -eq $accountDescription
+                if ($accountSidValidated -and $accountDescriptionValidated) {
+                    $observedAccount = $candidateAccount
+                    break
+                }
             }
             Start-Sleep -Milliseconds 250
         } while ([DateTime]::UtcNow -lt $readyDeadline)
@@ -728,11 +798,15 @@ throw "Construction wrapper returned after the SID-assignment breakpoint."
             "marker=$markerObserved"
             "marker_acl=$markerValidated"
             "journal=$($null -ne $observedPlaceholderState)"
+            "account=$accountObserved"
+            "account_sid=$accountSidValidated"
+            "account_description=$accountDescriptionValidated"
             "process_alive=$(-not $wrapperProcess.HasExited)"
         ) -join ','
         Require `
             ($markerValidated -and
                 $null -ne $observedPlaceholderState -and
+                $null -ne $observedAccount -and
                 -not $wrapperProcess.HasExited -and
                 $null -ne (Get-Process -Id $wrapperProcessId -ErrorAction SilentlyContinue)) `
             "Pre-kill account-ready handshake did not complete under the fixed deadline ($preKillObservation)."
@@ -747,34 +821,36 @@ throw "Construction wrapper returned after the SID-assignment breakpoint."
             $wrapperProcessAbsent `
             "Account-ready construction wrapper PID survived abrupt termination."
 
+        $postKillAccount = $null
         $accountVisibilityDeadline = [DateTime]::UtcNow.AddSeconds(10)
         do {
             $candidateAccount = Get-ExactLocalAccount `
                 -Username ([string]$observedPlaceholderState.username)
-            $accountObserved = $null -ne $candidateAccount
-            $accountSidValidated =
-                $accountObserved -and
+            $postKillAccountObserved = $null -ne $candidateAccount
+            $postKillAccountSidValidated =
+                $postKillAccountObserved -and
                 $null -ne $candidateAccount.Sid -and
+                $candidateAccount.Sid.Value -eq $observedAccount.Sid.Value -and
                 $candidateAccount.Sid.Value -match $sidPattern
-            $accountDescriptionValidated =
-                $accountObserved -and
+            $postKillAccountDescriptionValidated =
+                $postKillAccountObserved -and
                 [string]$candidateAccount.Description -eq $accountDescription
-            if ($accountSidValidated -and $accountDescriptionValidated) {
-                $observedAccount = $candidateAccount
+            if ($postKillAccountSidValidated -and $postKillAccountDescriptionValidated) {
+                $postKillAccount = $candidateAccount
                 break
             }
             Start-Sleep -Milliseconds 250
         } while ([DateTime]::UtcNow -lt $accountVisibilityDeadline)
         $postKillObservation = @(
-            "account=$accountObserved"
-            "account_sid=$accountSidValidated"
-            "account_description=$accountDescriptionValidated"
+            "account=$postKillAccountObserved"
+            "account_sid=$postKillAccountSidValidated"
+            "account_description=$postKillAccountDescriptionValidated"
             "process_absent=$wrapperProcessAbsent"
         ) -join ','
         Require `
-            ($null -ne $observedAccount -and
-                $accountSidValidated -and
-                $accountDescriptionValidated -and
+            ($null -ne $postKillAccount -and
+                $postKillAccountSidValidated -and
+                $postKillAccountDescriptionValidated -and
                 $wrapperProcessAbsent) `
             "Post-kill account publication did not complete under the fixed deadline ($postKillObservation)."
     }
