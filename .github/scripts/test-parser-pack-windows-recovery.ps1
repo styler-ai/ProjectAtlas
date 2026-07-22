@@ -423,9 +423,158 @@ function Assert-AccountJournalConstructionContract {
         "Production account creation no longer precedes initial SID journal publication."
 }
 
+function Assert-NamedObjectProbeDiagnosticContract {
+    $selfTokens = $null
+    $selfParseErrors = $null
+    $selfAst = [System.Management.Automation.Language.Parser]::ParseFile(
+        $PSCommandPath,
+        [ref]$selfTokens,
+        [ref]$selfParseErrors
+    )
+    Require ($selfParseErrors.Count -eq 0) "Windows recovery script did not parse itself."
+    $probeAssignments = @($selfAst.FindAll(
+        {
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -eq '$namespaceProbeSource'
+        },
+        $true
+    ))
+    Require ($probeAssignments.Count -eq 1) "Expected one named-object probe source."
+    $probeText = [string]$probeAssignments[0].Right.Expression.Value
+    $probeTokens = $null
+    $probeParseErrors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput(
+        $probeText,
+        [ref]$probeTokens,
+        [ref]$probeParseErrors
+    )
+    Require ($probeParseErrors.Count -eq 0) "Named-object probe source did not parse."
+    foreach ($contract in @(
+        "'identity' = 121",
+        "'ambient-environment' = 122",
+        "'semaphore-acl' = 123",
+        "'semaphore-create' = 124",
+        "'cargo-makeflags' = 125",
+        "'descendant-launch' = 126",
+        "'descendant-open' = 127",
+        "'result-write' = 128",
+        "'cleanup' = 129",
+        'function ConvertTo-BoundedProbeError',
+        'function Write-AtomicProbeRecord',
+        '$probeStage = ''cleanup''',
+        '$probeStage = ''result-write''',
+        '[Console]::Error.WriteLine($fallbackJson)',
+        '$child.WaitForExit(15000)',
+        '$start.RedirectStandardOutput = $true',
+        '[System.Threading.Tasks.Task]::WaitAll($pipeTasks, 5000)',
+        "'descendant-native-diagnostic-invalid'",
+        '[System.ComponentModel.Win32Exception]::new(',
+        "[ValidateSet('none', 'operation-and-cleanup', 'descendant-open-not-found')]",
+        "'diagnostic-operation-fault ordinary/token C:/private/forward.txt //server/share/unquoted.txt'",
+        "'diagnostic-cleanup-fault ordinary\token D:\private/mixed\cleanup.txt ""//server/share/quoted forward.txt"" \\server\share\backward.txt \/server/share\mixed.txt'",
+        'exit [int]$record.exit_code'
+    )) {
+        Require `
+            $probeText.Contains($contract) `
+            "Named-object probe lost one stable diagnostic or cleanup contract."
+    }
+    Require `
+        ($probeText -notmatch '(?m)^\s*exit\s+1\s*$') `
+        "Named-object probe retained an unclassified exit path."
+    $canaryAssignments = @($selfAst.FindAll(
+        {
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -eq '$namespaceCanarySource'
+        },
+        $true
+    ))
+    Require ($canaryAssignments.Count -eq 1) "Expected one named-object canary source."
+    $canaryText = [string]$canaryAssignments[0].Right.Expression.Value
+    $canaryTokens = $null
+    $canaryParseErrors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput(
+        $canaryText,
+        [ref]$canaryTokens,
+        [ref]$canaryParseErrors
+    )
+    Require `
+        ($canaryParseErrors.Count -eq 0 -and
+            $canaryText -notmatch '(?m)^\s*exit\s+1\s*$' -and
+            $canaryText.Contains('exit 141') -and
+            $canaryText.Contains('exit 142') -and
+            $canaryText.Contains('exit 143') -and
+            $canaryText.Contains('exit 144') -and
+            $canaryText.Contains('[Console]::Out.WriteLine("native_code=$canaryNativeCode")')) `
+        "Named-object descendant canary retained an unclassified exit path."
+    $scenarioDefinitions = @($selfAst.FindAll(
+        {
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Invoke-ConstructionAdmissionRecoveryScenario'
+        },
+        $true
+    ))
+    Require ($scenarioDefinitions.Count -eq 1) "Expected one construction recovery scenario."
+    $scenarioText = $scenarioDefinitions[0].Extent.Text
+    Require `
+        ($scenarioText.Contains('Read-NamedObjectProbeRecord') -and
+            $scenarioText.Contains('Format-NamedObjectProbeFailure') -and
+            $scenarioText.Contains('stage=diagnostic-unavailable') -and
+            $scenarioText.Contains('stage=diagnostic-invalid') -and
+            -not $scenarioText.Contains('[bool]$probeResult') -and
+            -not $scenarioText.Contains('[int]$probeResult') -and
+            -not $scenarioText.Contains('[string]$probeResult')) `
+        "Construction recovery no longer surfaces one bounded child diagnostic."
+    $temporaryCleanupDefinitions = @($selfAst.FindAll(
+        {
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Remove-NamedObjectProbeTemporaryRecords'
+        },
+        $true
+    ))
+    Require `
+        ($temporaryCleanupDefinitions.Count -eq 1) `
+        "Expected one named-object temporary cleanup function."
+    $temporaryCleanupCommands = @($temporaryCleanupDefinitions[0].FindAll(
+        {
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -eq 'Get-ChildItem'
+        },
+        $true
+    ))
+    Require `
+        ($temporaryCleanupCommands.Count -eq 2 -and
+            @($temporaryCleanupCommands | Where-Object {
+                $_.Extent.Text.Contains('-Filter $temporaryNameFilter')
+            }).Count -eq 2 -and
+            -not $temporaryCleanupDefinitions[0].Extent.Text.Contains(
+                'Get-ChildItem -LiteralPath $resolvedExpectedParent -Force -File'
+            )) `
+        "Named-object temporary cleanup lost its provider-bounded exact-prefix audit."
+    $selfText = $selfAst.Extent.Text
+    Require `
+        ($selfText.Contains('function Test-ExactJsonInteger') -and
+            $selfText.Contains('$Value.GetType() -eq [long]') -and
+            $selfText.Contains('$Value.GetType() -eq [string]') -and
+            $selfText.Contains('$Value.GetType() -eq [bool]') -and
+            $selfText.Contains('function Test-BoundedProbeErrorsEqual') -and
+            $selfText.Contains('$isCleanupFailure =') -and
+            $selfText.Contains('function Format-NamedObjectProbeFailure') -and
+            $selfText.Contains('operation_error_type=$operationType') -and
+            $selfText.Contains('cleanup_error_type=$cleanupType') -and
+            $selfText.Contains('function Remove-NamedObjectProbeTemporaryRecords') -and
+            $selfText.Contains('$namespaceProbeResultPaths')) `
+        "Named-object probe reader, combined failure, or temporary cleanup contract changed."
+}
+
 $productionAst = Get-ProductionWrapperAst
 $nativeSourceAssignment = Assert-ProductionRecoveryContracts -Ast $productionAst
 Assert-AccountJournalConstructionContract -Ast $productionAst
+Assert-NamedObjectProbeDiagnosticContract
 $auditTokens = $null
 $auditParseErrors = $null
 [void][System.Management.Automation.Language.Parser]::ParseInput(
@@ -595,6 +744,7 @@ $scenarioStatePaths = [ordered]@{
 }
 $recoveryPasswords = [System.Collections.Generic.List[System.Security.SecureString]]::new()
 $namespaceProbePaths = [System.Collections.Generic.List[string]]::new()
+$namespaceProbeResultPaths = [System.Collections.Generic.List[string]]::new()
 
 function Invoke-BoundedProcess {
     param(
@@ -839,6 +989,249 @@ function Read-ScenarioState {
     return Invoke-WithCleanupDefinitions -StatePath $StatePath -Operation {
         return Read-CleanupState
     }
+}
+
+function Test-ExactJsonInteger {
+    param($Value)
+    return $null -ne $Value -and $Value.GetType() -eq [long]
+}
+
+function Test-ExactJsonString {
+    param($Value)
+    return $null -ne $Value -and $Value.GetType() -eq [string]
+}
+
+function Test-ExactJsonBoolean {
+    param($Value)
+    return $null -ne $Value -and $Value.GetType() -eq [bool]
+}
+
+function Test-BoundedProbeError {
+    param($Value)
+
+    if ($null -eq $Value -or
+        $Value.GetType() -ne [System.Management.Automation.PSCustomObject]) {
+        return $false
+    }
+    $keys = @($Value.PSObject.Properties.Name | Sort-Object)
+    if (Compare-Object `
+        -ReferenceObject @('message', 'native_code', 'type') `
+        -DifferenceObject $keys) {
+        return $false
+    }
+    if (-not (Test-ExactJsonString $Value.type) -or
+        $Value.type -notmatch '\A[A-Za-z0-9_.]{1,96}\z' -or
+        -not (Test-ExactJsonString $Value.message) -or
+        $Value.message -notmatch '\A[^\x00-\x1F\x7F]{1,384}\z') {
+        return $false
+    }
+    return $null -eq $Value.native_code -or
+        ((Test-ExactJsonInteger $Value.native_code) -and
+            $Value.native_code -ge [int32]::MinValue -and
+            $Value.native_code -le [int32]::MaxValue)
+}
+
+function Test-BoundedProbeErrorsEqual {
+    param(
+        $Left,
+        $Right
+    )
+
+    return (Test-BoundedProbeError $Left) -and
+        (Test-BoundedProbeError $Right) -and
+        $Left.type -ceq $Right.type -and
+        $Left.message -ceq $Right.message -and
+        (($null -eq $Left.native_code -and $null -eq $Right.native_code) -or
+            ($null -ne $Left.native_code -and
+                $null -ne $Right.native_code -and
+                $Left.native_code -eq $Right.native_code))
+}
+
+function Read-NamedObjectProbeRecord {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    Require `
+        ([System.IO.File]::Exists($Path) -and
+            -not [System.IO.Directory]::Exists($Path)) `
+        "Named-object probe diagnostic record is missing."
+    $item = Get-Item -LiteralPath $Path -Force
+    Require `
+        (-not $item.PSIsContainer -and
+            (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) -and
+            $item.Length -ge 1 -and
+            $item.Length -le 4096) `
+        "Named-object probe diagnostic record is unsafe or unbounded."
+    $record = [System.IO.File]::ReadAllText($item.FullName) |
+        ConvertFrom-Json -Depth 8
+    $expectedKeys = @(
+        'cleanup_error', 'created_new', 'descendant_exit_code', 'directory_path',
+        'error', 'exit_code', 'operation_error', 'operation_stage', 'schema_version',
+        'semaphore_name', 'session_id', 'stage', 'status'
+    ) | Sort-Object
+    $actualKeys = @($record.PSObject.Properties.Name | Sort-Object)
+    Require `
+        (-not (Compare-Object -ReferenceObject $expectedKeys -DifferenceObject $actualKeys)) `
+        "Named-object probe diagnostic schema changed."
+    $operationStageExitCodes = @{
+        'identity' = 121
+        'ambient-environment' = 122
+        'semaphore-acl' = 123
+        'semaphore-create' = 124
+        'cargo-makeflags' = 125
+        'descendant-launch' = 126
+        'descendant-open' = 127
+    }
+    Require `
+        ((Test-ExactJsonInteger $record.schema_version) -and
+            $record.schema_version -eq 2L -and
+            (Test-ExactJsonString $record.status) -and
+            (Test-ExactJsonString $record.stage) -and
+            (Test-ExactJsonInteger $record.exit_code) -and
+            (Test-ExactJsonInteger $record.session_id) -and
+            (Test-ExactJsonString $record.directory_path) -and
+            (Test-ExactJsonString $record.semaphore_name) -and
+            (Test-ExactJsonBoolean $record.created_new) -and
+            (Test-ExactJsonInteger $record.descendant_exit_code) -and
+            ($null -eq $record.operation_stage -or
+                (Test-ExactJsonString $record.operation_stage)) -and
+            $record.session_id -ge -1L -and
+            $record.session_id -le [int32]::MaxValue -and
+            $record.descendant_exit_code -ge -1L -and
+            $record.descendant_exit_code -le [int32]::MaxValue -and
+            ([string]::IsNullOrEmpty($record.directory_path) -or
+                $record.directory_path -match
+                    '\A(?:\\BaseNamedObjects|\\Sessions\\[1-9][0-9]*\\BaseNamedObjects)\z') -and
+            ([string]::IsNullOrEmpty($record.semaphore_name) -or
+                $record.semaphore_name -match
+                    '\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')) `
+        "Named-object probe diagnostic field types or values were invalid."
+
+    $isSuccess = $record.status -ceq 'success' -and
+        $record.stage -ceq 'complete' -and
+        $record.exit_code -eq 0L -and
+        $null -eq $record.error -and
+        $null -eq $record.operation_stage -and
+        $null -eq $record.operation_error -and
+        $null -eq $record.cleanup_error -and
+        $record.session_id -ge 0L -and
+        -not [string]::IsNullOrEmpty($record.directory_path) -and
+        -not [string]::IsNullOrEmpty($record.semaphore_name) -and
+        $record.created_new -eq $true -and
+        $record.descendant_exit_code -eq 0L
+
+    $isOperationFailure = $record.status -ceq 'failure' -and
+        $operationStageExitCodes.ContainsKey($record.stage) -and
+        $record.exit_code -eq [long]$operationStageExitCodes[$record.stage] -and
+        $record.operation_stage -ceq $record.stage -and
+        (Test-BoundedProbeErrorsEqual $record.error $record.operation_error) -and
+        $null -eq $record.cleanup_error
+
+    $operationPairAbsent = $null -eq $record.operation_stage -and
+        $null -eq $record.operation_error
+    $operationPairPresent = (Test-ExactJsonString $record.operation_stage) -and
+        $operationStageExitCodes.ContainsKey($record.operation_stage) -and
+        (Test-BoundedProbeError $record.operation_error)
+    $isCleanupFailure = $record.status -ceq 'failure' -and
+        $record.stage -ceq 'cleanup' -and
+        $record.exit_code -eq 129L -and
+        (Test-BoundedProbeErrorsEqual $record.error $record.cleanup_error) -and
+        ($operationPairAbsent -or $operationPairPresent)
+
+    Require `
+        (($isSuccess -or $isOperationFailure -or $isCleanupFailure) -and
+            @($isSuccess, $isOperationFailure, $isCleanupFailure |
+                Where-Object { $_ }).Count -eq 1) `
+        "Named-object probe diagnostic stage, exit, or error relationship was invalid."
+    return $record
+}
+
+function Format-NamedObjectProbeFailure {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Record,
+
+        [Parameter(Mandatory = $true)]
+        [int]$ProcessExitCode
+    )
+
+    $nativeCode = if ($null -eq $Record.error.native_code) {
+        ''
+    }
+    else {
+        [string]$Record.error.native_code
+    }
+    $operationStage = if ($null -eq $Record.operation_stage) {
+        ''
+    }
+    else {
+        $Record.operation_stage
+    }
+    $operationType = if ($null -eq $Record.operation_error) { '' } else { $Record.operation_error.type }
+    $operationNative = if ($null -eq $Record.operation_error -or
+        $null -eq $Record.operation_error.native_code) { '' } else { [string]$Record.operation_error.native_code }
+    $operationMessage = if ($null -eq $Record.operation_error) { '' } else { $Record.operation_error.message }
+    $cleanupType = if ($null -eq $Record.cleanup_error) { '' } else { $Record.cleanup_error.type }
+    $cleanupNative = if ($null -eq $Record.cleanup_error -or
+        $null -eq $Record.cleanup_error.native_code) { '' } else { [string]$Record.cleanup_error.native_code }
+    $cleanupMessage = if ($null -eq $Record.cleanup_error) { '' } else { $Record.cleanup_error.message }
+    return "Construction named-object probe child failed. exit_code=$ProcessExitCode stage=$($Record.stage) error_type=$($Record.error.type) native_error_code=$nativeCode message=$($Record.error.message) operation_stage=$operationStage operation_error_type=$operationType operation_native_error_code=$operationNative operation_message=$operationMessage cleanup_error_type=$cleanupType cleanup_native_error_code=$cleanupNative cleanup_message=$cleanupMessage"
+}
+
+function Remove-NamedObjectProbeTemporaryRecords {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResultPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedParent
+    )
+
+    $resolvedResult = [System.IO.Path]::GetFullPath($ResultPath)
+    $resolvedParent = [System.IO.Path]::GetDirectoryName($resolvedResult)
+    $resolvedExpectedParent = [System.IO.Path]::GetFullPath($ExpectedParent).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $resultName = [System.IO.Path]::GetFileName($resolvedResult)
+    Require `
+        ([string]::Equals(
+            $resolvedParent,
+            $resolvedExpectedParent,
+            [System.StringComparison]::OrdinalIgnoreCase
+        ) -and
+            $resultName -match
+                '\Aprojectatlas-object-namespace-probe-[0-9a-f]{32}\.json\z') `
+        "Refused to inspect an unsafe named-object probe temporary prefix."
+    $temporaryNamePattern = '\A' +
+        [System.Text.RegularExpressions.Regex]::Escape($resultName) +
+        '\.tmp-[0-9a-f]{32}\z'
+    $temporaryNameFilter = "$resultName.tmp-*"
+    foreach ($item in @(Get-ChildItem `
+        -LiteralPath $resolvedExpectedParent `
+        -Force `
+        -Filter $temporaryNameFilter |
+        Where-Object Name -Match $temporaryNamePattern)) {
+        Require `
+            (-not $item.PSIsContainer -and
+                (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) -and
+                [string]::Equals(
+                    [System.IO.Path]::GetDirectoryName($item.FullName),
+                    $resolvedExpectedParent,
+                    [System.StringComparison]::OrdinalIgnoreCase
+                )) `
+            "Refused to remove an unsafe named-object probe temporary file."
+        Remove-Item -LiteralPath $item.FullName -Force
+    }
+    Require `
+        (@(Get-ChildItem `
+            -LiteralPath $resolvedExpectedParent `
+            -Force `
+            -Filter $temporaryNameFilter |
+            Where-Object Name -Match $temporaryNamePattern).Count -eq 0) `
+        "Named-object probe temporary result survived suite cleanup."
 }
 
 function Add-ScenarioObjectDirectoryAccess {
@@ -1848,6 +2241,7 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
     $namespaceProbePaths.Add($probeScriptPath)
     $namespaceProbePaths.Add($probeResultPath)
     $namespaceProbePaths.Add($probeCanaryPath)
+    $namespaceProbeResultPaths.Add($probeResultPath)
     Require `
         (-not [System.IO.File]::Exists($probeScriptPath) -and
             -not [System.IO.Directory]::Exists($probeScriptPath) -and
@@ -1866,56 +2260,133 @@ param(
     [string]$ResultPath,
 
     [Parameter(Mandatory = $true)]
-    [string]$CanaryPath
+    [string]$CanaryPath,
+
+    [ValidateSet('none', 'operation-and-cleanup', 'descendant-open-not-found')]
+    [string]$DiagnosticFault = 'none'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$actualSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-if (-not [string]::Equals(
-        $actualSid,
-        $ExpectedPrincipalSid,
-        [System.StringComparison]::Ordinal
-    )) {
-    exit 101
+$probeExitCodes = [ordered]@{
+    'identity' = 121
+    'ambient-environment' = 122
+    'semaphore-acl' = 123
+    'semaphore-create' = 124
+    'cargo-makeflags' = 125
+    'descendant-launch' = 126
+    'descendant-open' = 127
+    'result-write' = 128
+    'cleanup' = 129
 }
-if (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS) {
-    exit 102
-}
-$security = [System.Security.AccessControl.SemaphoreSecurity]::new()
-$security.SetAccessRuleProtection($true, $false)
-$rights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
-    [System.Security.AccessControl.SemaphoreRights]::Modify
-$security.AddAccessRule([System.Security.AccessControl.SemaphoreAccessRule]::new(
-    [System.Security.Principal.SecurityIdentifier]::new($ExpectedPrincipalSid),
-    $rights,
-    [System.Security.AccessControl.AccessControlType]::Allow
-))
-$name = "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
-$createdNew = $false
-$semaphore = $null
-try {
-    $semaphore = [System.Threading.SemaphoreAcl]::Create(
-        1, 1, $name, [ref]$createdNew, $security
+
+function ConvertTo-BoundedProbeError {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Exception]$Exception
     )
-    if (-not $createdNew) { exit 103 }
-    $env:CARGO_MAKEFLAGS = "-j --jobserver-fds=$name --jobserver-auth=$name"
-    $start = [System.Diagnostics.ProcessStartInfo]::new()
-    $start.FileName = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-    $start.UseShellExecute = $false
-    foreach ($argument in @(
-        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-        '-File', $CanaryPath,
-        '-Name', $name,
-        '-ExpectedSid', $ExpectedPrincipalSid
-    )) {
-        $start.ArgumentList.Add($argument)
+
+    $failure = $Exception
+    while (($failure -is [System.Management.Automation.MethodInvocationException] -or
+            $failure -is [System.Management.Automation.RuntimeException]) -and
+        $null -ne $failure.InnerException) {
+        $failure = $failure.InnerException
     }
-    $child = [System.Diagnostics.Process]::Start($start)
-    $child.WaitForExit()
-    $childExitCode = $child.ExitCode
-    $child.Dispose()
+    $type = ($failure.GetType().Name -replace '[^A-Za-z0-9_.]', '_')
+    if ($type.Length -lt 1) { $type = 'Exception' }
+    if ($type.Length -gt 96) { $type = $type.Substring(0, 96) }
+    $message = [string]$failure.Message
+    foreach ($redaction in @($ExpectedPrincipalSid, $ResultPath, $CanaryPath)) {
+        if (-not [string]::IsNullOrEmpty($redaction)) {
+            $message = $message.Replace($redaction, '<redacted>')
+        }
+    }
+    $message = [System.Text.RegularExpressions.Regex]::Replace(
+        $message,
+        '(?i)(?:''(?:[A-Z]:[\\/]|[\\/]{2})[^'']*''|"(?:[A-Z]:[\\/]|[\\/]{2})[^"]*")',
+        '<path>'
+    )
+    $message = [System.Text.RegularExpressions.Regex]::Replace(
+        $message,
+        '(?i)(?<![A-Za-z0-9_])(?:[A-Z]:[\\/]|[\\/]{2})[^\s,;''"]+',
+        '<path>'
+    )
+    $message = ($message -replace '[\x00-\x1F\x7F]+', ' ').Trim()
+    if ($message.Length -lt 1) { $message = 'probe-stage-failed' }
+    if ($message.Length -gt 384) { $message = $message.Substring(0, 384) }
+    $nativeCode = if ($failure -is [System.ComponentModel.Win32Exception]) {
+        [int]$failure.NativeErrorCode
+    }
+    else {
+        $null
+    }
+    return [ordered]@{
+        type = $type
+        native_code = $nativeCode
+        message = $message
+    }
+}
+
+function Write-AtomicProbeRecord {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Record
+    )
+
+    $parent = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($Path))
+    if (-not [System.IO.Directory]::Exists($parent) -or
+        [System.IO.File]::Exists($Path) -or
+        [System.IO.Directory]::Exists($Path)) {
+        throw [System.InvalidOperationException]::new('probe-result-path-unavailable')
+    }
+    $json = $Record | ConvertTo-Json -Compress -Depth 6
+    if ($json.Length -lt 1 -or $json.Length -gt 4096) {
+        throw [System.InvalidOperationException]::new('probe-result-size')
+    }
+    $temporaryPath = "$Path.tmp-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        [System.IO.File]::WriteAllText(
+            $temporaryPath,
+            $json,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        $temporaryItem = Get-Item -LiteralPath $temporaryPath -Force
+        if ($temporaryItem.PSIsContainer -or
+            (($temporaryItem.Attributes -band
+                [System.IO.FileAttributes]::ReparsePoint) -ne 0) -or
+            $temporaryItem.Length -lt 1 -or
+            $temporaryItem.Length -gt 4096) {
+            throw [System.InvalidOperationException]::new('probe-result-temporary-file')
+        }
+        [System.IO.File]::Move($temporaryPath, $Path)
+    }
+    finally {
+        if ([System.IO.File]::Exists($temporaryPath)) {
+            [System.IO.File]::Delete($temporaryPath)
+        }
+    }
+}
+
+$probeStage = 'identity'
+$sessionId = -1
+$directoryPath = ''
+$name = ''
+$createdNew = $false
+$childExitCode = -1
+$semaphore = $null
+$child = $null
+$childOutputTask = $null
+$childErrorTask = $null
+$operationStage = $null
+$operationError = $null
+$cleanupError = $null
+try {
+    $actualIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $actualSid = $actualIdentity.User.Value
     $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
     $directoryPath = if ($sessionId -eq 0) {
         '\BaseNamedObjects'
@@ -1923,28 +2394,228 @@ try {
     else {
         "\Sessions\$sessionId\BaseNamedObjects"
     }
-    $result = [ordered]@{
-        schema_version = 1
-        session_id = $sessionId
-        directory_path = $directoryPath
-        semaphore_name = $name
-        created_new = $createdNew
-        descendant_exit_code = $childExitCode
+    if (-not [string]::Equals(
+            $actualSid,
+            $ExpectedPrincipalSid,
+            [System.StringComparison]::Ordinal
+        )) {
+        throw [System.InvalidOperationException]::new('construction-principal-sid-mismatch')
     }
-    $json = $result | ConvertTo-Json -Compress -Depth 4
-    if ($json.Length -lt 1 -or $json.Length -gt 4096) { exit 104 }
-    [System.IO.File]::WriteAllText(
-        $ResultPath,
-        $json,
-        [System.Text.UTF8Encoding]::new($false)
+
+    $probeStage = 'ambient-environment'
+    if (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS) {
+        throw [System.InvalidOperationException]::new('ambient-cargo-makeflags')
+    }
+
+    $probeStage = 'semaphore-acl'
+    if ($DiagnosticFault -ceq 'operation-and-cleanup') {
+        throw [System.InvalidOperationException]::new(
+            'diagnostic-operation-fault ordinary/token C:/private/forward.txt //server/share/unquoted.txt'
+        )
+    }
+    $security = [System.Security.AccessControl.SemaphoreSecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $rights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
+        [System.Security.AccessControl.SemaphoreRights]::Modify
+    $security.AddAccessRule([System.Security.AccessControl.SemaphoreAccessRule]::new(
+        [System.Security.Principal.SecurityIdentifier]::new($ExpectedPrincipalSid),
+        $rights,
+        [System.Security.AccessControl.AccessControlType]::Allow
+    ))
+
+    $probeStage = 'semaphore-create'
+    $name = "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+    $semaphore = [System.Threading.SemaphoreAcl]::Create(
+        1, 1, $name, [ref]$createdNew, $security
     )
-    if ($childExitCode -ne 0) { exit 105 }
+    if (-not $createdNew) {
+        throw [System.InvalidOperationException]::new('jobserver-name-collision')
+    }
+
+    $probeStage = 'cargo-makeflags'
+    $env:CARGO_MAKEFLAGS = "-j --jobserver-fds=$name --jobserver-auth=$name"
+    if ([string]$env:CARGO_MAKEFLAGS -cne
+        "-j --jobserver-fds=$name --jobserver-auth=$name") {
+        throw [System.InvalidOperationException]::new('cargo-makeflags-write')
+    }
+
+    $probeStage = 'descendant-launch'
+    $start = [System.Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $descendantName = if ($DiagnosticFault -ceq 'descendant-open-not-found') {
+        "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+    }
+    else {
+        $name
+    }
+    foreach ($argument in @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', $CanaryPath,
+        '-Name', $descendantName,
+        '-ExpectedSid', $ExpectedPrincipalSid
+    )) {
+        $start.ArgumentList.Add($argument)
+    }
+    $child = [System.Diagnostics.Process]::Start($start)
+    if ($null -eq $child) {
+        throw [System.InvalidOperationException]::new('descendant-start-returned-null')
+    }
+    $childOutputTask = $child.StandardOutput.ReadToEndAsync()
+    $childErrorTask = $child.StandardError.ReadToEndAsync()
+
+    $probeStage = 'descendant-open'
+    if (-not $child.WaitForExit(15000)) {
+        throw [System.TimeoutException]::new('descendant-open-timeout')
+    }
+    $pipeTasks = [System.Threading.Tasks.Task[]]@($childOutputTask, $childErrorTask)
+    if (-not [System.Threading.Tasks.Task]::WaitAll($pipeTasks, 5000)) {
+        throw [System.TimeoutException]::new('descendant-diagnostic-pipe-timeout')
+    }
+    $childOutput = $childOutputTask.Result
+    $childError = $childErrorTask.Result
+    if ($childOutput.Length -gt 1024 -or $childError.Length -gt 1024) {
+        throw [System.InvalidOperationException]::new('descendant-diagnostic-output-limit')
+    }
+    $childExitCode = [int]$child.ExitCode
+    if ($childExitCode -ne 0) {
+        if ($childExitCode -in @(143, 144)) {
+            $nativeMatch = [System.Text.RegularExpressions.Regex]::Match(
+                $childOutput,
+                '\Anative_code=(-?[0-9]{1,10})\r?\n?\z'
+            )
+            $descendantNativeCode = 0
+            if (-not $nativeMatch.Success -or
+                -not [int]::TryParse(
+                    $nativeMatch.Groups[1].Value,
+                    [System.Globalization.NumberStyles]::Integer,
+                    [System.Globalization.CultureInfo]::InvariantCulture,
+                    [ref]$descendantNativeCode
+                )) {
+                throw [System.InvalidOperationException]::new(
+                    'descendant-native-diagnostic-invalid'
+                )
+            }
+            throw [System.ComponentModel.Win32Exception]::new(
+                $descendantNativeCode,
+                "descendant-open-exit-$childExitCode"
+            )
+        }
+        throw [System.InvalidOperationException]::new(
+            "descendant-open-exit-$childExitCode"
+        )
+    }
+}
+catch {
+    $operationStage = $probeStage
+    $operationError = ConvertTo-BoundedProbeError -Exception $_.Exception
 }
 finally {
+    $probeStage = 'cleanup'
+    $cleanupFailures = [System.Collections.Generic.List[System.Exception]]::new()
     Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS -ErrorAction SilentlyContinue
-    if ($null -ne $semaphore) { $semaphore.Dispose() }
+    if ($null -ne $child) {
+        try {
+            if (-not $child.HasExited) {
+                $child.Kill($true)
+                if (-not $child.WaitForExit(5000)) {
+                    throw [System.TimeoutException]::new('descendant-cleanup-timeout')
+                }
+            }
+        }
+        catch {
+            $cleanupFailures.Add($_.Exception)
+        }
+        try {
+            $child.Dispose()
+        }
+        catch {
+            $cleanupFailures.Add($_.Exception)
+        }
+    }
+    if ($null -ne $semaphore) {
+        try {
+            $semaphore.Dispose()
+        }
+        catch {
+            $cleanupFailures.Add($_.Exception)
+        }
+    }
+    if ($DiagnosticFault -ceq 'operation-and-cleanup') {
+        $cleanupFailures.Add(
+            [System.InvalidOperationException]::new(
+                'diagnostic-cleanup-fault ordinary\token D:\private/mixed\cleanup.txt "//server/share/quoted forward.txt" \\server\share\backward.txt \/server/share\mixed.txt'
+            )
+        )
+    }
+    if ($cleanupFailures.Count -ne 0) {
+        $cleanupFailure = if ($cleanupFailures.Count -eq 1) {
+            $cleanupFailures[0]
+        }
+        else {
+            [System.AggregateException]::new('probe-cleanup-failed', $cleanupFailures)
+        }
+        $cleanupError = ConvertTo-BoundedProbeError -Exception $cleanupFailure
+    }
 }
-exit 0
+
+if ($null -ne $cleanupError) {
+    $status = 'failure'
+    $finalStage = 'cleanup'
+    $exitCode = [int]$probeExitCodes[$finalStage]
+    $finalError = $cleanupError
+}
+elseif ($null -ne $operationError) {
+    $status = 'failure'
+    $finalStage = [string]$operationStage
+    $exitCode = [int]$probeExitCodes[$finalStage]
+    $finalError = $operationError
+}
+else {
+    $status = 'success'
+    $finalStage = 'complete'
+    $exitCode = 0
+    $finalError = $null
+}
+$record = [ordered]@{
+    schema_version = 2
+    status = $status
+    stage = $finalStage
+    exit_code = $exitCode
+    error = $finalError
+    operation_stage = $operationStage
+    operation_error = $operationError
+    cleanup_error = $cleanupError
+    session_id = $sessionId
+    directory_path = $directoryPath
+    semaphore_name = $name
+    created_new = $createdNew
+    descendant_exit_code = $childExitCode
+}
+$probeStage = 'result-write'
+try {
+    Write-AtomicProbeRecord -Path $ResultPath -Record $record
+}
+catch {
+    $writeError = ConvertTo-BoundedProbeError -Exception $_.Exception
+    $fallback = [ordered]@{
+        schema_version = 2
+        status = 'failure'
+        stage = 'result-write'
+        exit_code = [int]$probeExitCodes['result-write']
+        error = $writeError
+    }
+    $fallbackJson = $fallback | ConvertTo-Json -Compress -Depth 4
+    if ($fallbackJson.Length -gt 1024) {
+        $fallbackJson = '{"schema_version":2,"status":"failure","stage":"result-write","exit_code":128,"error":{"type":"Exception","native_code":null,"message":"probe-result-write-failed"}}'
+    }
+    [Console]::Error.WriteLine($fallbackJson)
+    exit [int]$probeExitCodes['result-write']
+}
+exit [int]$record.exit_code
 '@
     $namespaceCanarySource = @'
 [CmdletBinding()]
@@ -1959,7 +2630,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne $ExpectedSid) {
-    exit 111
+    exit 141
 }
 $nativeSource = @"
 using System;
@@ -1990,8 +2661,32 @@ public static class ProjectAtlasRecoveryJobserverCanary
     }
 }
 "@
-Add-Type -TypeDefinition $nativeSource -Language CSharp
-[ProjectAtlasRecoveryJobserverCanary]::OpenAndClose($Name)
+try {
+    Add-Type -TypeDefinition $nativeSource -Language CSharp
+}
+catch {
+    exit 142
+}
+try {
+    [ProjectAtlasRecoveryJobserverCanary]::OpenAndClose($Name)
+}
+catch {
+    $canaryFailure = $_.Exception
+    while ($null -ne $canaryFailure.InnerException) {
+        $canaryFailure = $canaryFailure.InnerException
+    }
+    $canaryNativeCode = if ($canaryFailure -is [System.ComponentModel.Win32Exception]) {
+        [int]$canaryFailure.NativeErrorCode
+    }
+    else {
+        0
+    }
+    [Console]::Out.WriteLine("native_code=$canaryNativeCode")
+    if ([string]$canaryFailure.Message -match '^open-recovery-jobserver') {
+        exit 143
+    }
+    exit 144
+}
 exit 0
 '@
     [System.IO.File]::WriteAllText(
@@ -2107,9 +2802,37 @@ exit 0
                 }
                 throw "Construction normal admission invocation failed. type=$($normalFailure.GetType().Name) native_error_code=$nativeError message=$normalMessage"
             }
-            Require `
-                ($normalExitCode -eq 0) `
-                "Construction named-object probe child failed. exit_code=$normalExitCode"
+            $probeResult = $null
+            if ([System.IO.File]::Exists($probeResultPath) -and
+                -not [System.IO.Directory]::Exists($probeResultPath)) {
+                try {
+                    $probeResult = Read-NamedObjectProbeRecord -Path $probeResultPath
+                }
+                catch {
+                    $diagnosticFailure = ($_.Exception.Message -replace
+                        '[\x00-\x1F\x7F]+', ' ').Trim()
+                    if ($diagnosticFailure.Length -gt 384) {
+                        $diagnosticFailure = $diagnosticFailure.Substring(0, 384)
+                    }
+                    throw "Construction named-object probe child failed. exit_code=$normalExitCode stage=diagnostic-invalid error_type=InvalidProbeRecord native_error_code= message=$diagnosticFailure"
+                }
+            }
+            elseif ($normalExitCode -ne 0) {
+                throw "Construction named-object probe child failed. exit_code=$normalExitCode stage=diagnostic-unavailable error_type=MissingProbeRecord native_error_code= message=probe-result-missing"
+            }
+            else {
+                throw "Construction named-object probe child failed. exit_code=0 stage=diagnostic-unavailable error_type=MissingProbeRecord native_error_code= message=probe-result-missing"
+            }
+            if ($normalExitCode -ne 0) {
+                if ($probeResult.status -cne 'failure' -or
+                    $probeResult.exit_code -ne [long]$normalExitCode -or
+                    $null -eq $probeResult.error) {
+                    throw "Construction named-object probe child failed. exit_code=$normalExitCode stage=diagnostic-invalid error_type=InconsistentProbeRecord native_error_code= message=probe-result-exit-mismatch"
+                }
+                throw (Format-NamedObjectProbeFailure `
+                    -Record $probeResult `
+                    -ProcessExitCode $normalExitCode)
+            }
             Require `
                 ([ProjectAtlasConstructionProcess]::LastTotalProcesses -ge 2) `
                 "Construction normal admission did not contain its child and descendant canary."
@@ -2118,49 +2841,36 @@ exit 0
                 -Receipt $receipt `
                 -ExpectTermination $false
             Invoke-ExactSidProcessAudit -Sid $identity.Sid -Expectation absent
-            Require `
-                ([System.IO.File]::Exists($probeResultPath) -and
-                    -not [System.IO.Directory]::Exists($probeResultPath)) `
-                "Construction named-object probe did not write a regular result file."
-            $probeResultItem = Get-Item -LiteralPath $probeResultPath -Force
-            Require `
-                (-not $probeResultItem.PSIsContainer -and
-                    (($probeResultItem.Attributes -band
-                        [System.IO.FileAttributes]::ReparsePoint) -eq 0) -and
-                    $probeResultItem.Length -ge 1 -and
-                    $probeResultItem.Length -le 4096) `
-                "Construction named-object probe result was unsafe or unbounded."
-            $probeResult = Get-Content `
-                -LiteralPath $probeResultPath `
-                -Raw `
-                -Encoding UTF8 | ConvertFrom-Json -Depth 8
-            $expectedDirectoryPath = if ([int]$probeResult.session_id -eq 0) {
+            $expectedDirectoryPath = if ($probeResult.session_id -eq 0L) {
                 '\BaseNamedObjects'
             }
             else {
-                "\Sessions\$([int]$probeResult.session_id)\BaseNamedObjects"
+                "\Sessions\$($probeResult.session_id)\BaseNamedObjects"
             }
             Require `
-                ([int]$probeResult.schema_version -eq 1 -and
-                    [int]$probeResult.session_id -ge 0 -and
+                ($probeResult.schema_version -eq 2L -and
+                    $probeResult.status -ceq 'success' -and
+                    $probeResult.stage -ceq 'complete' -and
+                    $probeResult.exit_code -eq 0L -and
+                    $probeResult.session_id -ge 0L -and
                      [string]::Equals(
-                        [string]$probeResult.directory_path,
+                        $probeResult.directory_path,
                         $expectedDirectoryPath,
                         [System.StringComparison]::Ordinal
                     ) -and
                     [string]::Equals(
-                        [string]$probeResult.directory_path,
+                        $probeResult.directory_path,
                         $objectDirectory,
                         [System.StringComparison]::Ordinal
                     ) -and
-                    [bool]$probeResult.created_new -and
-                    [int]$probeResult.descendant_exit_code -eq 0 -and
-                    [string]$probeResult.semaphore_name -match
+                    $probeResult.created_new -eq $true -and
+                    $probeResult.descendant_exit_code -eq 0L -and
+                    $probeResult.semaphore_name -match
                         '\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z') `
                 "Construction named-object probe result identity was invalid."
             $survivingSemaphore = $null
             $semaphoreAbsent = -not [System.Threading.SemaphoreAcl]::TryOpenExisting(
-                [string]$probeResult.semaphore_name,
+                $probeResult.semaphore_name,
                 [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
                     [System.Security.AccessControl.SemaphoreRights]::Modify,
                 [ref]$survivingSemaphore
@@ -2703,17 +3413,27 @@ finally {
             $cleanupFailures.Add($_.Exception)
         }
     }
+    $expectedProbeParent = [System.IO.Path]::GetFullPath(
+        [System.IO.Path]::Combine($env:SystemRoot, 'Temp')
+    ).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    foreach ($probeResultPath in $namespaceProbeResultPaths) {
+        try {
+            Remove-NamedObjectProbeTemporaryRecords `
+                -ResultPath $probeResultPath `
+                -ExpectedParent $expectedProbeParent
+        }
+        catch {
+            $cleanupFailures.Add($_.Exception)
+        }
+    }
     foreach ($probePath in $namespaceProbePaths) {
         try {
             $resolvedProbePath = [System.IO.Path]::GetFullPath($probePath)
             $resolvedProbeParent = [System.IO.Path]::GetDirectoryName(
                 $resolvedProbePath
-            )
-            $expectedProbeParent = [System.IO.Path]::GetFullPath(
-                [System.IO.Path]::Combine($env:SystemRoot, 'Temp')
-            ).TrimEnd(
-                [System.IO.Path]::DirectorySeparatorChar,
-                [System.IO.Path]::AltDirectorySeparatorChar
             )
             Require `
                 ([string]::Equals(

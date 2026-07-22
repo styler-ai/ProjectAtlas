@@ -3,7 +3,9 @@ param(
     [string]$ProductionScript = (Join-Path $PSScriptRoot "run-parser-pack-contained-construction.ps1"),
     [string]$WindowsWrapper = (Join-Path $PSScriptRoot "invoke-parser-pack-windows-construction.ps1"),
     [string]$WindowsRunnerJobBroker =
-        (Join-Path $PSScriptRoot "invoke-parser-pack-windows-runner-job-broker.ps1")
+        (Join-Path $PSScriptRoot "invoke-parser-pack-windows-runner-job-broker.ps1"),
+    [string]$WindowsRecovery =
+        (Join-Path $PSScriptRoot "test-parser-pack-windows-recovery.ps1")
 )
 
 Set-StrictMode -Version Latest
@@ -21,6 +23,89 @@ function Require {
     if (-not $Condition) {
         throw $Message
     }
+}
+
+function Invoke-BoundedDiagnosticChild {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.ProcessStartInfo]$StartInfo,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 60000)]
+        [int]$OperationTimeoutMilliseconds
+    )
+
+    Require `
+        (-not $StartInfo.UseShellExecute -and
+            $StartInfo.RedirectStandardOutput -and
+            $StartInfo.RedirectStandardError) `
+        "Bounded diagnostic child requires redirected pipes."
+    $receipt = [pscustomobject]@{
+        TimedOut = $false
+        ReapedBeforePipeCollection = $false
+        PipeCompleted = $false
+        Disposed = $false
+        ExitCode = -1
+        StandardOutput = ''
+        StandardError = ''
+    }
+    $process = $null
+    $operationFailure = $null
+    try {
+        $process = [System.Diagnostics.Process]::Start($StartInfo)
+        if ($null -eq $process) {
+            throw "Could not start bounded diagnostic child."
+        }
+        $outputTask = $process.StandardOutput.ReadToEndAsync()
+        $errorTask = $process.StandardError.ReadToEndAsync()
+        $finished = $process.WaitForExit($OperationTimeoutMilliseconds)
+        if (-not $finished) {
+            $receipt.TimedOut = $true
+            $process.Kill($true)
+            if (-not $process.WaitForExit(5000)) {
+                throw "Timed-out diagnostic child could not be reaped."
+            }
+        }
+        $receipt.ReapedBeforePipeCollection = $process.HasExited
+        if (-not $receipt.ReapedBeforePipeCollection) {
+            throw "Diagnostic child was not reaped before pipe collection."
+        }
+        $pipeTasks = [System.Threading.Tasks.Task[]]@($outputTask, $errorTask)
+        $receipt.PipeCompleted = [System.Threading.Tasks.Task]::WaitAll($pipeTasks, 5000)
+        if (-not $receipt.PipeCompleted) {
+            throw "Diagnostic child pipes did not close inside the fixed deadline."
+        }
+        $receipt.StandardOutput = $outputTask.Result
+        $receipt.StandardError = $errorTask.Result
+        if ($receipt.StandardOutput.Length -gt 4096 -or
+            $receipt.StandardError.Length -gt 4096) {
+            throw "Diagnostic child exceeded its fixed pipe-output limit."
+        }
+        $receipt.ExitCode = $process.ExitCode
+    }
+    catch {
+        $operationFailure = $_.Exception
+    }
+    finally {
+        if ($null -ne $process) {
+            try {
+                if (-not $process.HasExited) {
+                    $process.Kill($true)
+                    if (-not $process.WaitForExit(5000)) {
+                        throw "Fallback diagnostic child termination could not be reaped."
+                    }
+                }
+            }
+            finally {
+                $process.Dispose()
+                $receipt.Disposed = $true
+            }
+        }
+    }
+    if ($null -ne $operationFailure) {
+        throw $operationFailure
+    }
+    return $receipt
 }
 
 $production = Get-Item -LiteralPath $ProductionScript -Force
@@ -145,6 +230,73 @@ try {
         )
         Require ($brokerParseErrors.Count -eq 0) "Windows runner Job broker did not parse."
         $brokerText = $brokerAst.Extent.Text
+        $recoveryTokens = $null
+        $recoveryParseErrors = $null
+        $recoveryAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Get-Item -LiteralPath $WindowsRecovery -Force).FullName,
+            [ref]$recoveryTokens,
+            [ref]$recoveryParseErrors
+        )
+        Require ($recoveryParseErrors.Count -eq 0) "Windows recovery script did not parse."
+        $probeAssignments = @($recoveryAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $node.Left.Extent.Text -eq '$namespaceProbeSource'
+            },
+            $true
+        ))
+        Require ($probeAssignments.Count -eq 1) "Expected one Windows named-object probe source."
+        $probeSource = [string]$probeAssignments[0].Right.Expression.Value
+        $probeTokens = $null
+        $probeParseErrors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseInput(
+            $probeSource,
+            [ref]$probeTokens,
+            [ref]$probeParseErrors
+        )
+        Require ($probeParseErrors.Count -eq 0) "Windows named-object probe did not parse."
+        $canaryAssignments = @($recoveryAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $node.Left.Extent.Text -eq '$namespaceCanarySource'
+            },
+            $true
+        ))
+        Require ($canaryAssignments.Count -eq 1) "Expected one Windows named-object canary source."
+        $canarySource = [string]$canaryAssignments[0].Right.Expression.Value
+        $canaryTokens = $null
+        $canaryParseErrors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseInput(
+            $canarySource,
+            [ref]$canaryTokens,
+            [ref]$canaryParseErrors
+        )
+        Require ($canaryParseErrors.Count -eq 0) "Windows named-object canary did not parse."
+        foreach ($functionName in @(
+            'Test-ExactJsonInteger',
+            'Test-ExactJsonString',
+            'Test-ExactJsonBoolean',
+            'Test-BoundedProbeError',
+            'Test-BoundedProbeErrorsEqual',
+            'Read-NamedObjectProbeRecord',
+            'Format-NamedObjectProbeFailure',
+            'Remove-NamedObjectProbeTemporaryRecords'
+        )) {
+            $functionDefinitions = @($recoveryAst.FindAll(
+                {
+                    param($node)
+                    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                        $node.Name -eq $functionName
+                },
+                $true
+            ))
+            Require `
+                ($functionDefinitions.Count -eq 1) `
+                "Expected one $functionName recovery diagnostic function."
+            Invoke-Expression $functionDefinitions[0].Extent.Text
+        }
         $brokerParameters = @($brokerAst.ParamBlock.Parameters |
             ForEach-Object { $_.Name.VariablePath.UserPath })
         $brokerJoinIndex = $brokerText.IndexOf(
@@ -187,6 +339,311 @@ try {
                 $brokerRequestIndex -gt $brokerReadyIndex -and
                 $brokerTargetIndex -gt $brokerRequestIndex) `
             "Windows runner Job broker lost its fixed authenticated admission boundary."
+
+        $boundedDiagnosticText =
+            ${function:Invoke-BoundedDiagnosticChild}.Ast.Extent.Text
+        $reapBeforePipeIndex = $boundedDiagnosticText.IndexOf(
+            '$receipt.ReapedBeforePipeCollection = $process.HasExited',
+            [System.StringComparison]::Ordinal
+        )
+        $pipeDeadlineIndex = $boundedDiagnosticText.IndexOf(
+            '[System.Threading.Tasks.Task]::WaitAll($pipeTasks, 5000)',
+            $reapBeforePipeIndex,
+            [System.StringComparison]::Ordinal
+        )
+        $pipeCollectionIndex = $boundedDiagnosticText.IndexOf(
+            '$receipt.StandardOutput = $outputTask.Result',
+            $pipeDeadlineIndex,
+            [System.StringComparison]::Ordinal
+        )
+        $disposeIndex = $boundedDiagnosticText.IndexOf(
+            '$process.Dispose()',
+            $pipeCollectionIndex,
+            [System.StringComparison]::Ordinal
+        )
+        Require `
+            ($reapBeforePipeIndex -ge 0 -and
+                $pipeDeadlineIndex -gt $reapBeforePipeIndex -and
+                $pipeCollectionIndex -gt $pipeDeadlineIndex -and
+                $disposeIndex -gt $pipeCollectionIndex -and
+                $boundedDiagnosticText.Contains('finally {')) `
+            "Bounded diagnostic child changed reap, pipe, or disposal ordering."
+
+        $timeoutStart = [System.Diagnostics.ProcessStartInfo]::new()
+        $timeoutStart.FileName =
+            [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $timeoutStart.UseShellExecute = $false
+        $timeoutStart.CreateNoWindow = $true
+        $timeoutStart.RedirectStandardOutput = $true
+        $timeoutStart.RedirectStandardError = $true
+        foreach ($argument in @(
+            '-NoLogo', '-NoProfile', '-NonInteractive',
+            '-Command', 'Start-Sleep -Seconds 30'
+        )) {
+            $timeoutStart.ArgumentList.Add($argument)
+        }
+        $timeoutReceipt = Invoke-BoundedDiagnosticChild `
+            -StartInfo $timeoutStart `
+            -OperationTimeoutMilliseconds 100
+        Require `
+            ($timeoutReceipt.TimedOut -and
+                $timeoutReceipt.ReapedBeforePipeCollection -and
+                $timeoutReceipt.PipeCompleted -and
+                $timeoutReceipt.Disposed -and
+                $timeoutReceipt.StandardOutput.Length -eq 0 -and
+                $timeoutReceipt.StandardError.Length -eq 0) `
+            "Diagnostic timeout did not reap, close pipes, and dispose in order."
+
+        $probeId = [Guid]::NewGuid().ToString('N')
+        $probeScript = [System.IO.Path]::Combine(
+            $testRoot,
+            "projectatlas-object-namespace-probe-$probeId.ps1"
+        )
+        $probeResult = [System.IO.Path]::Combine(
+            $testRoot,
+            "projectatlas-object-namespace-probe-$probeId.json"
+        )
+        $probeCanary = [System.IO.Path]::Combine(
+            $testRoot,
+            "projectatlas-object-namespace-canary-$probeId.ps1"
+        )
+        [System.IO.File]::WriteAllText(
+            $probeScript,
+            $probeSource,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        [System.IO.File]::WriteAllText(
+            $probeCanary,
+            $canarySource,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        $probeStart = [System.Diagnostics.ProcessStartInfo]::new()
+        $probeStart.FileName = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $probeStart.UseShellExecute = $false
+        $probeStart.CreateNoWindow = $true
+        $probeStart.RedirectStandardOutput = $true
+        $probeStart.RedirectStandardError = $true
+        $probeStart.Environment['CARGO_MAKEFLAGS'] = '--jobserver-auth=forbidden'
+        foreach ($argument in @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', $probeScript,
+            '-ExpectedPrincipalSid',
+            [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
+            '-ResultPath', $probeResult,
+            '-CanaryPath', $probeCanary
+        )) {
+            $probeStart.ArgumentList.Add($argument)
+        }
+        $probeReceipt = Invoke-BoundedDiagnosticChild `
+            -StartInfo $probeStart `
+            -OperationTimeoutMilliseconds 15000
+        Require `
+            (-not $probeReceipt.TimedOut -and
+                $probeReceipt.ReapedBeforePipeCollection -and
+                $probeReceipt.PipeCompleted -and
+                $probeReceipt.Disposed -and
+                $probeReceipt.ExitCode -eq 122 -and
+                $probeReceipt.StandardOutput.Length -eq 0 -and
+                $probeReceipt.StandardError.Length -le 1024) `
+            "Named-object diagnostic fault did not return its stable bounded exit."
+        $probeResultItem = Get-Item -LiteralPath $probeResult -Force
+        Require `
+            (-not $probeResultItem.PSIsContainer -and
+                (($probeResultItem.Attributes -band
+                    [System.IO.FileAttributes]::ReparsePoint) -eq 0) -and
+                $probeResultItem.Length -ge 1 -and
+                $probeResultItem.Length -le 4096) `
+            "Named-object diagnostic fault did not atomically publish one bounded record."
+        $probeRecord = Read-NamedObjectProbeRecord -Path $probeResultItem.FullName
+        Require `
+            ($probeRecord.schema_version -eq 2L -and
+                $probeRecord.status -ceq 'failure' -and
+                $probeRecord.stage -ceq 'ambient-environment' -and
+                $probeRecord.exit_code -eq 122L -and
+                $probeRecord.error.type -ceq 'InvalidOperationException' -and
+                $null -eq $probeRecord.error.native_code -and
+                $probeRecord.error.message -ceq 'ambient-cargo-makeflags' -and
+                $probeRecord.operation_stage -ceq 'ambient-environment' -and
+                $probeRecord.operation_error.message -ceq
+                    'ambient-cargo-makeflags' -and
+                $null -eq $probeRecord.cleanup_error -and
+                @(Get-ChildItem -LiteralPath $testRoot -Force -File |
+                    Where-Object Name -like "$([System.IO.Path]::GetFileName($probeResult)).tmp-*").Count -eq 0) `
+            "Named-object diagnostic fault omitted its bounded stage or error."
+
+        $stringSchemaRecord = [System.IO.Path]::Combine(
+            $testRoot,
+            "projectatlas-object-namespace-probe-$([Guid]::NewGuid().ToString('N')).json"
+        )
+        $stringSchemaPayload = [System.IO.File]::ReadAllText($probeResult) |
+            ConvertFrom-Json -Depth 8
+        $stringSchemaPayload.schema_version = '2'
+        [System.IO.File]::WriteAllText(
+            $stringSchemaRecord,
+            ($stringSchemaPayload | ConvertTo-Json -Depth 8 -Compress)
+        )
+        $stringSchemaRejected = $false
+        try {
+            [void](Read-NamedObjectProbeRecord -Path $stringSchemaRecord)
+        }
+        catch {
+            $stringSchemaRejected = $_.Exception.Message -eq
+                'Named-object probe diagnostic field types or values were invalid.'
+        }
+        Require `
+            $stringSchemaRejected `
+            "Named-object diagnostic reader coerced a string schema version."
+
+        $stringBooleanRecord = [System.IO.Path]::Combine(
+            $testRoot,
+            "projectatlas-object-namespace-probe-$([Guid]::NewGuid().ToString('N')).json"
+        )
+        $stringBooleanPayload = [ordered]@{
+            schema_version = 2
+            status = 'success'
+            stage = 'complete'
+            exit_code = 0
+            error = $null
+            operation_stage = $null
+            operation_error = $null
+            cleanup_error = $null
+            session_id = 1
+            directory_path = '\BaseNamedObjects'
+            semaphore_name = "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+            created_new = 'false'
+            descendant_exit_code = 0
+        }
+        [System.IO.File]::WriteAllText(
+            $stringBooleanRecord,
+            ($stringBooleanPayload | ConvertTo-Json -Depth 8 -Compress)
+        )
+        $stringBooleanRejected = $false
+        try {
+            [void](Read-NamedObjectProbeRecord -Path $stringBooleanRecord)
+        }
+        catch {
+            $stringBooleanRejected = $_.Exception.Message -eq
+                'Named-object probe diagnostic field types or values were invalid.'
+        }
+        Require `
+            $stringBooleanRejected `
+            "Named-object diagnostic reader coerced a string Boolean."
+
+        $mismatchedRelationshipRecord = [System.IO.Path]::Combine(
+            $testRoot,
+            "projectatlas-object-namespace-probe-$([Guid]::NewGuid().ToString('N')).json"
+        )
+        $mismatchedRelationshipPayload = [System.IO.File]::ReadAllText($probeResult) |
+            ConvertFrom-Json -Depth 8
+        $mismatchedRelationshipPayload.operation_stage = 'identity'
+        [System.IO.File]::WriteAllText(
+            $mismatchedRelationshipRecord,
+            ($mismatchedRelationshipPayload | ConvertTo-Json -Depth 8 -Compress)
+        )
+        $mismatchedRelationshipRejected = $false
+        try {
+            [void](Read-NamedObjectProbeRecord -Path $mismatchedRelationshipRecord)
+        }
+        catch {
+            $mismatchedRelationshipRejected = $_.Exception.Message -eq
+                'Named-object probe diagnostic stage, exit, or error relationship was invalid.'
+        }
+        Require `
+            $mismatchedRelationshipRejected `
+            "Named-object diagnostic reader accepted mismatched stage ownership."
+
+        foreach ($faultRow in @(
+            [pscustomobject]@{
+                Name = 'combined'
+                Fault = 'operation-and-cleanup'
+                ExitCode = 129
+            },
+            [pscustomobject]@{
+                Name = 'native'
+                Fault = 'descendant-open-not-found'
+                ExitCode = 127
+            }
+        )) {
+            $faultId = [Guid]::NewGuid().ToString('N')
+            $faultResult = [System.IO.Path]::Combine(
+                $testRoot,
+                "projectatlas-object-namespace-probe-$faultId.json"
+            )
+            $faultStart = [System.Diagnostics.ProcessStartInfo]::new()
+            $faultStart.FileName =
+                [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+            $faultStart.UseShellExecute = $false
+            $faultStart.CreateNoWindow = $true
+            $faultStart.RedirectStandardOutput = $true
+            $faultStart.RedirectStandardError = $true
+            [void]$faultStart.Environment.Remove('CARGO_MAKEFLAGS')
+            foreach ($argument in @(
+                '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                '-File', $probeScript,
+                '-ExpectedPrincipalSid',
+                [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
+                '-ResultPath', $faultResult,
+                '-CanaryPath', $probeCanary,
+                '-DiagnosticFault', $faultRow.Fault
+            )) {
+                $faultStart.ArgumentList.Add($argument)
+            }
+            $faultReceipt = Invoke-BoundedDiagnosticChild `
+                -StartInfo $faultStart `
+                -OperationTimeoutMilliseconds 15000
+            Require `
+                (-not $faultReceipt.TimedOut -and
+                    $faultReceipt.ReapedBeforePipeCollection -and
+                    $faultReceipt.PipeCompleted -and
+                    $faultReceipt.Disposed -and
+                    $faultReceipt.ExitCode -eq $faultRow.ExitCode) `
+                "Named-object $($faultRow.Name) fault lost its stable process boundary."
+            $faultRecord = Read-NamedObjectProbeRecord -Path $faultResult
+            if ($faultRow.Name -eq 'combined') {
+                $combinedMessage = Format-NamedObjectProbeFailure `
+                    -Record $faultRecord `
+                    -ProcessExitCode $faultReceipt.ExitCode
+                Require `
+                    ($faultRecord.stage -ceq 'cleanup' -and
+                        $faultRecord.operation_stage -ceq 'semaphore-acl' -and
+                        $faultRecord.operation_error.message -ceq
+                            'diagnostic-operation-fault ordinary/token <path> <path>' -and
+                        $faultRecord.cleanup_error.message -ceq
+                            'diagnostic-cleanup-fault ordinary\token <path> <path> <path> <path>' -and
+                        $combinedMessage -match
+                            'operation_error_type=InvalidOperationException' -and
+                        $combinedMessage -match
+                            'cleanup_error_type=InvalidOperationException' -and
+                        $combinedMessage -match
+                            'operation_message=diagnostic-operation-fault ordinary/token <path> <path>' -and
+                        $combinedMessage -match
+                            'cleanup_message=diagnostic-cleanup-fault ordinary\\token <path> <path> <path> <path>' -and
+                        $combinedMessage -notmatch
+                            '(?i)(?:[A-Z]:[\\/]|[\\/]{2})') `
+                    "Combined probe failure did not preserve both redacted causes."
+            }
+            else {
+                Require `
+                    ($faultRecord.stage -ceq 'descendant-open' -and
+                        $faultRecord.error.type -ceq 'Win32Exception' -and
+                        $faultRecord.error.native_code -eq 2L -and
+                        $faultRecord.error.message -match
+                            '^descendant-open-exit-143') `
+                    "Descendant OpenSemaphore failure lost its native error code."
+            }
+        }
+
+        $temporarySurvivor = "$probeResult.tmp-$([Guid]::NewGuid().ToString('N'))"
+        $temporaryDecoy = "$probeResult.tmp-not-owned"
+        [System.IO.File]::WriteAllText($temporarySurvivor, '{}')
+        [System.IO.File]::WriteAllText($temporaryDecoy, '{}')
+        Remove-NamedObjectProbeTemporaryRecords `
+            -ResultPath $probeResult `
+            -ExpectedParent $testRoot
+        Require `
+            (-not [System.IO.File]::Exists($temporarySurvivor) -and
+                [System.IO.File]::Exists($temporaryDecoy)) `
+            "Named-object temporary cleanup removed outside its exact owned prefix."
 
         $bootstrapFailure = $null
         try {
