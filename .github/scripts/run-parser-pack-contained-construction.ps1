@@ -347,6 +347,16 @@ function New-ContainedCargoJobserver {
         [string]$Name
     )
 
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    if ($null -eq $identity.Owner -or
+        -not [string]::Equals(
+            $identity.Owner.Value,
+            $Sid.Value,
+            [System.StringComparison]::Ordinal
+        )) {
+        throw "Contained Cargo jobserver requires the construction SID as the token default owner."
+    }
+
     if ($null -eq ('ProjectAtlasCargoJobserverNative' -as [type])) {
         $nativeSource = @'
 using System;
@@ -418,17 +428,11 @@ public static class ProjectAtlasCargoJobserverNative
             }
 
             SafeWaitHandle handle = new SafeWaitHandle(rawHandle, true);
-            if (createError != 0)
+            if (createError == ErrorAlreadyExists)
             {
                 handle.Dispose();
-                if (createError == ErrorAlreadyExists)
-                {
-                    throw new InvalidOperationException(
-                        "contained-cargo-jobserver-name-collision");
-                }
-                throw new Win32Exception(
-                    createError,
-                    "create-contained-cargo-jobserver");
+                throw new InvalidOperationException(
+                    "contained-cargo-jobserver-name-collision");
             }
             return handle;
         }
@@ -447,7 +451,6 @@ public static class ProjectAtlasCargoJobserverNative
 
     $security = [System.Security.AccessControl.SemaphoreSecurity]::new()
     $security.SetAccessRuleProtection($true, $false)
-    $security.SetOwner($Sid)
     $rights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
         [System.Security.AccessControl.SemaphoreRights]::Modify
     $security.AddAccessRule(

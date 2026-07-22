@@ -486,6 +486,8 @@ function Assert-NamedObjectProbeDiagnosticContract {
         'directory_traverse_ntstatus = $directoryTraverseNtStatus',
         'directory_create_object_ntstatus = $directoryCreateObjectNtStatus',
         'directory_traverse_create_ntstatus = $directoryTraverseCreateNtStatus',
+        'construction-token-owner-sid-mismatch',
+        '$security.SetAccessRuleProtection($true, $false)',
         'post_job_native_create_win32 = $postJobNativeCreateWin32',
         'post_job_native_created_new = $postJobNativeCreatedNew',
         'post_job_native_close_win32 = $postJobNativeCloseWin32',
@@ -509,7 +511,8 @@ function Assert-NamedObjectProbeDiagnosticContract {
     }
     Require `
         (-not $probeText.Contains("'post-job-native-semaphore-create'") -and
-            -not $probeText.Contains("'post-job-native-semaphore-close'")) `
+            -not $probeText.Contains("'post-job-native-semaphore-close'") -and
+            -not $probeText.Contains('$security.SetOwner(')) `
         "Default-security semaphore diagnostics must not gate the explicit-security access proof."
     Require `
         ($probeText -notmatch '(?m)^\s*exit\s+1\s*$') `
@@ -2843,17 +2846,11 @@ public static class ProjectAtlasNamedObjectAccessProbe
             }
 
             SafeWaitHandle handle = new SafeWaitHandle(rawHandle, true);
-            if (createError != 0)
+            if (createError == ErrorAlreadyExists)
             {
                 handle.Dispose();
-                if (createError == ErrorAlreadyExists)
-                {
-                    throw new InvalidOperationException(
-                        "contained-cargo-jobserver-name-collision");
-                }
-                throw new System.ComponentModel.Win32Exception(
-                    createError,
-                    "create-contained-cargo-jobserver");
+                throw new InvalidOperationException(
+                    "contained-cargo-jobserver-name-collision");
             }
             return handle;
         }
@@ -2905,6 +2902,14 @@ try {
         )) {
         throw [System.InvalidOperationException]::new('construction-principal-sid-mismatch')
     }
+    if ($null -eq $actualIdentity.Owner -or
+        -not [string]::Equals(
+            $actualIdentity.Owner.Value,
+            $ExpectedPrincipalSid,
+            [System.StringComparison]::Ordinal
+        )) {
+        throw [System.InvalidOperationException]::new('construction-token-owner-sid-mismatch')
+    }
 
     $probeStage = 'ambient-environment'
     if (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS) {
@@ -2943,9 +2948,6 @@ try {
     }
     $security = [System.Security.AccessControl.SemaphoreSecurity]::new()
     $security.SetAccessRuleProtection($true, $false)
-    $security.SetOwner(
-        [System.Security.Principal.SecurityIdentifier]::new($ExpectedPrincipalSid)
-    )
     $rights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
         [System.Security.AccessControl.SemaphoreRights]::Modify
     $security.AddAccessRule([System.Security.AccessControl.SemaphoreAccessRule]::new(

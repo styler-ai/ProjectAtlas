@@ -2139,13 +2139,17 @@ public static class ProjectAtlasConstructionAdmissionFixture
         $jobserverDefinitionText = $jobserverDefinitions[0].Extent.Text
         Require `
             ($jobserverDefinitionText.Contains('$security.SetAccessRuleProtection($true, $false)') -and
-                $jobserverDefinitionText.Contains('$security.SetOwner($Sid)') -and
+                $jobserverDefinitionText.Contains('$identity.Owner.Value') -and
+                $jobserverDefinitionText.Contains('requires the construction SID as the token default owner') -and
                 $jobserverDefinitionText.Contains('[System.Security.AccessControl.SemaphoreRights]::Synchronize -bor') -and
                 $jobserverDefinitionText.Contains('[System.Security.AccessControl.SemaphoreRights]::Modify') -and
                 $jobserverDefinitionText.Contains('[System.Security.AccessControl.AccessControlType]::Allow') -and
                 $jobserverDefinitionText.Contains('public static class ProjectAtlasCargoJobserverNative') -and
                 $jobserverDefinitionText.Contains('SynchronizeAndModify = 0x00100002') -and
                 $jobserverDefinitionText.Contains('$security.GetSecurityDescriptorBinaryForm()') -and
+                -not $jobserverDefinitionText.Contains('$security.SetOwner(') -and
+                -not $jobserverDefinitionText.Contains('if (createError != 0)') -and
+                $jobserverDefinitionText.Contains('if (createError == ErrorAlreadyExists)') -and
                 -not $jobserverDefinitionText.Contains('[System.Threading.SemaphoreAcl]::Create(') -and
                 ([regex]::Matches($jobserverDefinitionText, '\.AddAccessRule\(').Count -eq 1)) `
             "Contained Cargo jobserver did not retain one protected exact-rights DACL."
