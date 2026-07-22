@@ -1415,7 +1415,9 @@ function Assert-AdmissionReceipt {
         [Type]$ReceiptType,
 
         [Parameter(Mandatory = $true)]
-        [object]$Receipt
+        [object]$Receipt,
+
+        [switch]$ExpectJobserver
     )
 
     $processId = [int](Get-ReflectedReceiptValue `
@@ -1432,7 +1434,9 @@ function Assert-AdmissionReceipt {
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ProcessHandleOwned) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ProcessHandleClosed) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ThreadHandleOwned) -and
-            [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ThreadHandleClosed)) `
+            [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ThreadHandleClosed) -and
+            [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name JobserverHandleOwned) -eq [bool]$ExpectJobserver -and
+            [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name JobserverHandleClosed) -eq [bool]$ExpectJobserver) `
         "Construction admission recovery receipt was incomplete."
     Require `
         ($null -eq (Get-Process -Id $processId -ErrorAction SilentlyContinue)) `
@@ -1440,6 +1444,10 @@ function Assert-AdmissionReceipt {
 }
 
 function New-MinimalUserEnvironmentBlock {
+    param(
+        [string]$JobserverName
+    )
+
     $values = [ordered]@{
         ComSpec = $env:ComSpec
         OS = 'Windows_NT'
@@ -1449,6 +1457,10 @@ function New-MinimalUserEnvironmentBlock {
         TEMP = (Join-Path $env:SystemRoot 'Temp')
         TMP = (Join-Path $env:SystemRoot 'Temp')
         WINDIR = $env:WINDIR
+    }
+    if (-not [string]::IsNullOrEmpty($JobserverName)) {
+        $values.CARGO_MAKEFLAGS =
+            "-j --jobserver-fds=$JobserverName --jobserver-auth=$JobserverName"
     }
     return (($values.GetEnumerator() | ForEach-Object {
         "$($_.Key)=$($_.Value)"
@@ -1481,21 +1493,33 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         "Construction adapter lost its private recovery boundary."
     Require `
         (([enum]::GetNames($scenarioType) -join ',') -eq
-            'Normal,FailBeforeJobAssignment,FailBeforeJobAssignmentAndCleanupFailure') `
+            'Normal,FailBeforeJobAssignment,FailBeforeJobAssignmentAndCleanupFailure,FailAfterJobserverAdmissionBeforeJobAssignment') `
         "Construction adapter recovery scenario domain changed."
 
-    $environmentBlock = New-MinimalUserEnvironmentBlock
     $arguments = [string[]]@(
         '-NoLogo', '-NoProfile', '-NonInteractive',
         '-Command', 'Start-Sleep -Seconds 30'
     )
-    foreach ($scenarioName in @(
-        'FailBeforeJobAssignment',
-        'FailBeforeJobAssignmentAndCleanupFailure'
+    foreach ($scenarioRow in @(
+        [pscustomobject]@{
+            Name = 'FailBeforeJobAssignment'
+            JobserverName = $null
+        },
+        [pscustomobject]@{
+            Name = 'FailBeforeJobAssignmentAndCleanupFailure'
+            JobserverName = $null
+        },
+        [pscustomobject]@{
+            Name = 'FailAfterJobserverAdmissionBeforeJobAssignment'
+            JobserverName = "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+        }
     )) {
+        $scenarioName = $scenarioRow.Name
+        $jobserverName = $scenarioRow.JobserverName
+        $environmentBlock = New-MinimalUserEnvironmentBlock -JobserverName $jobserverName
         $admissionScenario = [enum]::Parse($scenarioType, $scenarioName)
         $receipt = [Activator]::CreateInstance($receiptType, $true)
-        $invokeArguments = [object[]]::new(10)
+        $invokeArguments = [object[]]::new(11)
         $invokeArguments[0] = $identity.Username
         $invokeArguments[1] = $identity.Sid
         $invokeArguments[2] = $identity.Password
@@ -1503,9 +1527,10 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         $invokeArguments[4] = $arguments
         $invokeArguments[5] = $env:SystemRoot
         $invokeArguments[6] = $environmentBlock
-        $invokeArguments[7] = 30
-        $invokeArguments[8] = $admissionScenario
-        $invokeArguments[9] = $receipt
+        $invokeArguments[7] = $jobserverName
+        $invokeArguments[8] = 30
+        $invokeArguments[9] = $admissionScenario
+        $invokeArguments[10] = $receipt
         $failure = Get-ReflectedOperationFailure `
             -Method $runCore `
             -Arguments $invokeArguments
@@ -1515,7 +1540,7 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
                     $failure.Message -eq 'construction-self-test-before-job-assignment') `
                 "Construction pre-Job failure returned the wrong operation error."
         }
-        else {
+        elseif ($scenarioName -eq 'FailBeforeJobAssignmentAndCleanupFailure') {
             Require `
                 ($failure -is [System.AggregateException] -and
                     $failure.InnerExceptions.Count -eq 2 -and
@@ -1525,7 +1550,21 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
                         'construction-self-test-cleanup') `
                 "Construction adapter did not preserve operation and cleanup failures."
         }
-        Assert-AdmissionReceipt -ReceiptType $receiptType -Receipt $receipt
+        else {
+            Require `
+                ($failure -is [System.InvalidOperationException] -and
+                    $failure.Message -eq 'construction-self-test-after-jobserver-admission') `
+                "Construction post-jobserver admission fault returned the wrong operation error."
+        }
+        Assert-AdmissionReceipt `
+            -ReceiptType $receiptType `
+            -Receipt $receipt `
+            -ExpectJobserver:($null -ne $jobserverName)
+        if ($null -ne $jobserverName) {
+            Require `
+                ([ProjectAtlasConstructionProcess]::CanCreateFreshJobserverName($jobserverName)) `
+                "Construction admission recovery retained its jobserver name."
+        }
     }
 
     $launcherExit = Invoke-BoundedProcess `

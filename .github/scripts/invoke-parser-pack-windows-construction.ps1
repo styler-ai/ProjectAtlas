@@ -986,9 +986,12 @@ $nativeSource = @'
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
+using Microsoft.Win32.SafeHandles;
 using System.Runtime.InteropServices;
 using System.Security;
+using System.Security.Principal;
 using System.Text;
+using System.Text.RegularExpressions;
 
 public static class ProjectAtlasConstructionProcess
 {
@@ -1006,6 +1009,26 @@ public static class ProjectAtlasConstructionProcess
     private const uint WindowStationAllAccess = 0x000F037F;
     private const uint DesktopAllAccess = 0x000F01FF;
     private const uint SddlRevision1 = 1;
+    private const uint TokenQuery = 0x0008;
+    private const uint TokenDuplicate = 0x0002;
+    private const int TokenUserInformation = 1;
+    private const int TokenGroupsInformation = 2;
+    private const int TokenIntegrityLevelInformation = 25;
+    private const int SecurityImpersonation = 2;
+    private const uint SeGroupEnabled = 0x00000004;
+    private const uint SeGroupUseForDenyOnly = 0x00000010;
+    private const uint SeGroupLogonId = 0xC0000000;
+    private const uint Synchronize = 0x00100000;
+    private const uint SemaphoreModifyState = 0x00000002;
+    private const uint SemaphoreAllAccess = 0x001F0003;
+    private const int ErrorInsufficientBuffer = 122;
+    private const int ErrorAlreadyExists = 183;
+    private const int MaximumTokenInformationBytes = 64 * 1024;
+    private const int MaximumTokenGroupCount = 1024;
+    private const string RequiredIntegritySid = "S-1-16-8192";
+    private static readonly Regex JobserverNamePattern = new Regex(
+        @"\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z",
+        RegexOptions.CultureInvariant);
 
     public static uint LastTotalProcesses { get; private set; }
 
@@ -1013,7 +1036,8 @@ public static class ProjectAtlasConstructionProcess
     {
         Normal,
         FailBeforeJobAssignment,
-        FailBeforeJobAssignmentAndCleanupFailure
+        FailBeforeJobAssignmentAndCleanupFailure,
+        FailAfterJobserverAdmissionBeforeJobAssignment
     }
 
     private sealed class AdmissionReceipt
@@ -1028,6 +1052,8 @@ public static class ProjectAtlasConstructionProcess
         internal bool ProcessHandleClosed { get; set; }
         internal bool ThreadHandleOwned { get; set; }
         internal bool ThreadHandleClosed { get; set; }
+        internal bool JobserverHandleOwned { get; set; }
+        internal bool JobserverHandleClosed { get; set; }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1069,6 +1095,41 @@ public static class ProjectAtlasConstructionProcess
         public IntPtr Thread;
         public uint ProcessId;
         public uint ThreadId;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SidAndAttributes
+    {
+        public IntPtr Sid;
+        public uint Attributes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenUser
+    {
+        public SidAndAttributes User;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenGroups
+    {
+        public uint GroupCount;
+        public SidAndAttributes Groups;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenMandatoryLabel
+    {
+        public SidAndAttributes Label;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GenericMapping
+    {
+        public uint GenericRead;
+        public uint GenericWrite;
+        public uint GenericExecute;
+        public uint GenericAll;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1135,6 +1196,48 @@ public static class ProjectAtlasConstructionProcess
         ref StartupInfo startupInfo,
         out ProcessInformation processInformation);
 
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool OpenProcessToken(
+        IntPtr processHandle,
+        uint desiredAccess,
+        out SafeAccessTokenHandle tokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DuplicateToken(
+        SafeAccessTokenHandle existingToken,
+        int impersonationLevel,
+        out SafeAccessTokenHandle duplicateToken);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetTokenInformation(
+        SafeAccessTokenHandle tokenHandle,
+        int tokenInformationClass,
+        IntPtr tokenInformation,
+        int tokenInformationLength,
+        out int returnLength);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsValidSid(IntPtr sid);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern uint GetLengthSid(IntPtr sid);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AccessCheck(
+        IntPtr securityDescriptor,
+        SafeAccessTokenHandle clientToken,
+        uint desiredAccess,
+        ref GenericMapping genericMapping,
+        IntPtr privilegeSet,
+        ref uint privilegeSetLength,
+        out uint grantedAccess,
+        [MarshalAs(UnmanagedType.Bool)] out bool accessStatus);
+
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(
@@ -1179,6 +1282,39 @@ public static class ProjectAtlasConstructionProcess
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true,
+        EntryPoint = "CreateSemaphoreExW")]
+    private static extern IntPtr CreateSemaphoreEx(
+        ref SecurityAttributes attributes,
+        int initialCount,
+        int maximumCount,
+        string name,
+        uint flags,
+        uint desiredAccess);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true,
+        EntryPoint = "CreateSemaphoreExW")]
+    private static extern IntPtr CreateSemaphoreExWithoutSecurity(
+        IntPtr attributes,
+        int initialCount,
+        int maximumCount,
+        string name,
+        uint flags,
+        uint desiredAccess);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr OpenSemaphore(
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ReleaseSemaphore(
+        IntPtr semaphore,
+        int releaseCount,
+        out int previousCount);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -1227,6 +1363,545 @@ public static class ProjectAtlasConstructionProcess
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr handle);
 
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetSecurityDescriptorSacl(
+        IntPtr securityDescriptor,
+        [MarshalAs(UnmanagedType.Bool)] out bool saclPresent,
+        out IntPtr sacl,
+        [MarshalAs(UnmanagedType.Bool)] out bool saclDefaulted);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern uint SetSecurityInfo(
+        IntPtr handle,
+        int objectType,
+        uint securityInformation,
+        IntPtr owner,
+        IntPtr group,
+        IntPtr dacl,
+        IntPtr sacl);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern uint GetSecurityInfo(
+        IntPtr handle,
+        int objectType,
+        uint securityInformation,
+        IntPtr owner,
+        IntPtr group,
+        IntPtr dacl,
+        out IntPtr sacl,
+        out IntPtr securityDescriptor);
+
+    private sealed class ChildTokenIdentity
+    {
+        internal string LogonSid { get; set; }
+        internal string IntegritySid { get; set; }
+    }
+
+    private sealed class TokenInformationBuffer : IDisposable
+    {
+        internal TokenInformationBuffer(IntPtr pointer, int length)
+        {
+            Pointer = pointer;
+            Length = length;
+        }
+
+        internal IntPtr Pointer { get; private set; }
+        internal int Length { get; private set; }
+
+        public void Dispose()
+        {
+            if (Pointer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(Pointer);
+                Pointer = IntPtr.Zero;
+                Length = 0;
+            }
+        }
+    }
+
+    public static bool CanCreateFreshJobserverName(string name)
+    {
+        ValidateJobserverName(name);
+        IntPtr handle = CreateSemaphoreExWithoutSecurity(
+            IntPtr.Zero,
+            1,
+            1,
+            name,
+            0,
+            SemaphoreAllAccess);
+        if (handle == IntPtr.Zero)
+        {
+            throw Failure("probe-fresh-jobserver-name");
+        }
+        int createError = Marshal.GetLastWin32Error();
+        using (var ownedHandle = new SafeWaitHandle(handle, true))
+        {
+            return createError != ErrorAlreadyExists;
+        }
+    }
+
+    private static void ValidateJobserverRequest(string name, string environmentBlock)
+    {
+        string expected = null;
+        if (!string.IsNullOrEmpty(name))
+        {
+            ValidateJobserverName(name);
+            expected = "CARGO_MAKEFLAGS=-j --jobserver-fds=" + name +
+                " --jobserver-auth=" + name;
+        }
+
+        int matchingRows = 0;
+        int makeflagsRows = 0;
+        foreach (string row in environmentBlock.Split('\0'))
+        {
+            if (row.StartsWith("CARGO_MAKEFLAGS=", StringComparison.Ordinal))
+            {
+                makeflagsRows++;
+                if (string.Equals(row, expected, StringComparison.Ordinal))
+                {
+                    matchingRows++;
+                }
+            }
+        }
+        if ((expected == null && makeflagsRows != 0) ||
+            (expected != null && (makeflagsRows != 1 || matchingRows != 1)))
+        {
+            throw new InvalidOperationException("validate-construction-jobserver-environment");
+        }
+    }
+
+    private static void ValidateJobserverName(string name)
+    {
+        if (string.IsNullOrEmpty(name) || !JobserverNamePattern.IsMatch(name))
+        {
+            throw new ArgumentException("validate-construction-jobserver-name", nameof(name));
+        }
+    }
+
+    private static SafeWaitHandle CreateAdmittedJobserver(
+        IntPtr processHandle,
+        string principalSid,
+        string name)
+    {
+        SafeAccessTokenHandle processToken;
+        if (!OpenProcessToken(
+            processHandle,
+            TokenQuery | TokenDuplicate,
+            out processToken))
+        {
+            throw Failure("open-construction-token");
+        }
+
+        using (processToken)
+        {
+            ChildTokenIdentity childIdentity = ReadAndValidateChildToken(
+                processToken,
+                principalSid);
+            string daclSddl = "D:P(A;;0x00100002;;;" + childIdentity.LogonSid + ")";
+            IntPtr securityDescriptor = IntPtr.Zero;
+            SafeWaitHandle semaphore = null;
+            try
+            {
+                if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
+                    daclSddl,
+                    SddlRevision1,
+                    out securityDescriptor,
+                    IntPtr.Zero))
+                {
+                    throw Failure("create-construction-jobserver-security");
+                }
+                SecurityAttributes attributes = new SecurityAttributes();
+                attributes.Length = Marshal.SizeOf<SecurityAttributes>();
+                attributes.SecurityDescriptor = securityDescriptor;
+                attributes.InheritHandle = false;
+                IntPtr semaphoreHandle = CreateSemaphoreEx(
+                    ref attributes,
+                    1,
+                    1,
+                    name,
+                    0,
+                    SemaphoreAllAccess);
+                if (semaphoreHandle == IntPtr.Zero)
+                {
+                    throw Failure("create-construction-jobserver");
+                }
+                int createError = Marshal.GetLastWin32Error();
+                semaphore = new SafeWaitHandle(semaphoreHandle, true);
+                if (createError == ErrorAlreadyExists)
+                {
+                    throw new InvalidOperationException("construction-jobserver-name-collision");
+                }
+                ApplyMediumMandatoryLabel(
+                    semaphore.DangerousGetHandle(),
+                    childIdentity.IntegritySid);
+
+                SafeAccessTokenHandle impersonationToken;
+                if (!DuplicateToken(
+                    processToken,
+                    SecurityImpersonation,
+                    out impersonationToken))
+                {
+                    throw Failure("duplicate-construction-token");
+                }
+                using (impersonationToken)
+                {
+                    AssertAccessCheck(semaphore.DangerousGetHandle(), impersonationToken);
+                    WindowsIdentity.RunImpersonated(
+                        impersonationToken,
+                        () => AssertImpersonatedJobserverAccess(name));
+                }
+                SafeWaitHandle admitted = semaphore;
+                semaphore = null;
+                return admitted;
+            }
+            finally
+            {
+                if (semaphore != null)
+                {
+                    semaphore.Dispose();
+                }
+                if (securityDescriptor != IntPtr.Zero)
+                {
+                    LocalFree(securityDescriptor);
+                }
+            }
+        }
+    }
+
+    private static ChildTokenIdentity ReadAndValidateChildToken(
+        SafeAccessTokenHandle token,
+        string principalSid)
+    {
+        var expectedPrincipal = new SecurityIdentifier(principalSid);
+        using (TokenInformationBuffer userInformation = GetBoundedTokenInformation(
+            token,
+            TokenUserInformation))
+        {
+            RequireStructureBytes<TokenUser>(userInformation, "validate-construction-token-user");
+            TokenUser tokenUser = Marshal.PtrToStructure<TokenUser>(userInformation.Pointer);
+            SecurityIdentifier actualPrincipal = ReadBoundedSid(
+                userInformation,
+                tokenUser.User.Sid,
+                "validate-construction-token-user");
+            if (!expectedPrincipal.Equals(actualPrincipal))
+            {
+                throw new InvalidOperationException("validate-construction-token-user");
+            }
+        }
+
+        string logonSid = null;
+        int logonSidCount = 0;
+        using (TokenInformationBuffer groupsInformation = GetBoundedTokenInformation(
+            token,
+            TokenGroupsInformation))
+        {
+            RequireStructureBytes<TokenGroups>(
+                groupsInformation,
+                "validate-construction-token-groups");
+            TokenGroups groups = Marshal.PtrToStructure<TokenGroups>(groupsInformation.Pointer);
+            if (groups.GroupCount == 0 || groups.GroupCount > MaximumTokenGroupCount)
+            {
+                throw new InvalidOperationException("validate-construction-token-groups");
+            }
+            int groupOffset = Marshal.OffsetOf<TokenGroups>(nameof(TokenGroups.Groups)).ToInt32();
+            int groupSize = Marshal.SizeOf<SidAndAttributes>();
+            long requiredGroupBytes = checked(
+                (long)groupOffset + checked((long)groups.GroupCount * groupSize));
+            if (groupOffset < sizeof(uint) || requiredGroupBytes > groupsInformation.Length)
+            {
+                throw new InvalidOperationException("validate-construction-token-groups");
+            }
+            for (uint index = 0; index < groups.GroupCount; index++)
+            {
+                IntPtr groupPointer = IntPtr.Add(
+                    groupsInformation.Pointer,
+                    checked(groupOffset + checked((int)index * groupSize)));
+                SidAndAttributes group = Marshal.PtrToStructure<SidAndAttributes>(groupPointer);
+                SecurityIdentifier groupSid = ReadBoundedSid(
+                    groupsInformation,
+                    group.Sid,
+                    "validate-construction-token-group-sid");
+                bool isLogonSid = (group.Attributes & SeGroupLogonId) == SeGroupLogonId;
+                bool isEnabled = (group.Attributes & SeGroupEnabled) != 0;
+                bool isDenyOnly = (group.Attributes & SeGroupUseForDenyOnly) != 0;
+                if (isLogonSid && isEnabled && !isDenyOnly)
+                {
+                    logonSidCount++;
+                    logonSid = groupSid.Value;
+                }
+            }
+        }
+        if (logonSidCount != 1 || string.IsNullOrEmpty(logonSid))
+        {
+            throw new InvalidOperationException("validate-construction-token-logon-sid");
+        }
+
+        string integritySid;
+        using (TokenInformationBuffer integrityInformation = GetBoundedTokenInformation(
+            token,
+            TokenIntegrityLevelInformation))
+        {
+            RequireStructureBytes<TokenMandatoryLabel>(
+                integrityInformation,
+                "validate-construction-token-integrity");
+            TokenMandatoryLabel label = Marshal.PtrToStructure<TokenMandatoryLabel>(
+                integrityInformation.Pointer);
+            integritySid = ReadBoundedSid(
+                integrityInformation,
+                label.Label.Sid,
+                "validate-construction-token-integrity").Value;
+        }
+        if (!string.Equals(integritySid, RequiredIntegritySid, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("validate-construction-token-integrity");
+        }
+        return new ChildTokenIdentity
+        {
+            LogonSid = logonSid,
+            IntegritySid = integritySid
+        };
+    }
+
+    private static TokenInformationBuffer GetBoundedTokenInformation(
+        SafeAccessTokenHandle token,
+        int informationClass)
+    {
+        int requiredBytes;
+        bool measured = GetTokenInformation(
+            token,
+            informationClass,
+            IntPtr.Zero,
+            0,
+            out requiredBytes);
+        int measurementError = Marshal.GetLastWin32Error();
+        if (measured || measurementError != ErrorInsufficientBuffer ||
+            requiredBytes <= 0 || requiredBytes > MaximumTokenInformationBytes)
+        {
+            throw new Win32Exception(
+                measurementError,
+                "measure-construction-token-information");
+        }
+        IntPtr information = Marshal.AllocHGlobal(requiredBytes);
+        int returnedBytes;
+        if (!GetTokenInformation(
+            token,
+            informationClass,
+            information,
+            requiredBytes,
+            out returnedBytes))
+        {
+            int readError = Marshal.GetLastWin32Error();
+            Marshal.FreeHGlobal(information);
+            throw new Win32Exception(readError, "read-construction-token-information");
+        }
+        if (returnedBytes <= 0 || returnedBytes > requiredBytes)
+        {
+            Marshal.FreeHGlobal(information);
+            throw new InvalidOperationException("bound-construction-token-information");
+        }
+        return new TokenInformationBuffer(information, returnedBytes);
+    }
+
+    private static void RequireStructureBytes<T>(
+        TokenInformationBuffer information,
+        string operation)
+    {
+        if (information == null || information.Pointer == IntPtr.Zero ||
+            information.Length < Marshal.SizeOf<T>())
+        {
+            throw new InvalidOperationException(operation);
+        }
+    }
+
+    private static SecurityIdentifier ReadBoundedSid(
+        TokenInformationBuffer information,
+        IntPtr sid,
+        string operation)
+    {
+        if (information == null || information.Pointer == IntPtr.Zero || sid == IntPtr.Zero)
+        {
+            throw new InvalidOperationException(operation);
+        }
+        long offset = checked(sid.ToInt64() - information.Pointer.ToInt64());
+        const int sidHeaderBytes = 8;
+        if (offset < 0 || offset > information.Length - sidHeaderBytes || !IsValidSid(sid))
+        {
+            throw new InvalidOperationException(operation);
+        }
+        uint sidBytes = GetLengthSid(sid);
+        if (sidBytes < sidHeaderBytes ||
+            checked(offset + sidBytes) > information.Length)
+        {
+            throw new InvalidOperationException(operation);
+        }
+        return new SecurityIdentifier(sid);
+    }
+
+    private static void ApplyMediumMandatoryLabel(IntPtr semaphore, string integritySid)
+    {
+        if (!string.Equals(integritySid, RequiredIntegritySid, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("validate-construction-jobserver-integrity");
+        }
+        IntPtr labelDescriptor = IntPtr.Zero;
+        try
+        {
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
+                "S:(ML;;NW;;;" + integritySid + ")",
+                SddlRevision1,
+                out labelDescriptor,
+                IntPtr.Zero))
+            {
+                throw Failure("create-construction-jobserver-label");
+            }
+            bool saclPresent;
+            bool saclDefaulted;
+            IntPtr sacl;
+            if (!GetSecurityDescriptorSacl(
+                labelDescriptor,
+                out saclPresent,
+                out sacl,
+                out saclDefaulted) ||
+                !saclPresent || sacl == IntPtr.Zero)
+            {
+                throw Failure("read-construction-jobserver-label");
+            }
+            uint result = SetSecurityInfo(
+                semaphore,
+                6,
+                0x00000010,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                sacl);
+            if (result != 0)
+            {
+                throw new Win32Exception(
+                    unchecked((int)result),
+                    "apply-construction-jobserver-label");
+            }
+        }
+        finally
+        {
+            if (labelDescriptor != IntPtr.Zero)
+            {
+                LocalFree(labelDescriptor);
+            }
+        }
+    }
+
+    private static void AssertAccessCheck(
+        IntPtr semaphore,
+        SafeAccessTokenHandle impersonationToken)
+    {
+        IntPtr objectSecurity = IntPtr.Zero;
+        IntPtr privilegeSet = IntPtr.Zero;
+        try
+        {
+            IntPtr sacl;
+            uint securityResult = GetSecurityInfo(
+                semaphore,
+                6,
+                0x00000001 | 0x00000002 | 0x00000004 | 0x00000010,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                out sacl,
+                out objectSecurity);
+            if (securityResult != 0 || objectSecurity == IntPtr.Zero)
+            {
+                throw new Win32Exception(
+                    unchecked((int)securityResult),
+                    "read-construction-jobserver-security");
+            }
+            GenericMapping mapping = new GenericMapping
+            {
+                GenericRead = 0x00020000,
+                GenericWrite = 0x00020002,
+                GenericExecute = 0x00120000,
+                GenericAll = SemaphoreAllAccess
+            };
+            uint privilegeBytes = 0;
+            uint grantedAccess;
+            bool accessStatus;
+            bool measured = AccessCheck(
+                objectSecurity,
+                impersonationToken,
+                Synchronize | SemaphoreModifyState,
+                ref mapping,
+                IntPtr.Zero,
+                ref privilegeBytes,
+                out grantedAccess,
+                out accessStatus);
+            int measurementError = Marshal.GetLastWin32Error();
+            if (measured || measurementError != ErrorInsufficientBuffer ||
+                privilegeBytes == 0 || privilegeBytes > MaximumTokenInformationBytes)
+            {
+                throw new Win32Exception(
+                    measurementError,
+                    "measure-construction-jobserver-access");
+            }
+            privilegeSet = Marshal.AllocHGlobal(checked((int)privilegeBytes));
+            if (!AccessCheck(
+                objectSecurity,
+                impersonationToken,
+                Synchronize | SemaphoreModifyState,
+                ref mapping,
+                privilegeSet,
+                ref privilegeBytes,
+                out grantedAccess,
+                out accessStatus))
+            {
+                throw Failure("check-construction-jobserver-access");
+            }
+            uint expected = Synchronize | SemaphoreModifyState;
+            if (!accessStatus || (grantedAccess & expected) != expected)
+            {
+                throw new UnauthorizedAccessException("check-construction-jobserver-access");
+            }
+        }
+        finally
+        {
+            if (privilegeSet != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(privilegeSet);
+            }
+            if (objectSecurity != IntPtr.Zero)
+            {
+                LocalFree(objectSecurity);
+            }
+        }
+    }
+
+    private static void AssertImpersonatedJobserverAccess(string name)
+    {
+        IntPtr childHandleValue = OpenSemaphore(
+            Synchronize | SemaphoreModifyState,
+            false,
+            name);
+        if (childHandleValue == IntPtr.Zero)
+        {
+            throw Failure("open-construction-jobserver-as-child");
+        }
+        using (var childHandle = new SafeWaitHandle(childHandleValue, true))
+        {
+            uint wait = WaitForSingleObject(childHandle.DangerousGetHandle(), 0);
+            if (wait != WaitObject0)
+            {
+                throw new InvalidOperationException("acquire-construction-jobserver-as-child");
+            }
+            int previousCount;
+            if (!ReleaseSemaphore(
+                childHandle.DangerousGetHandle(),
+                1,
+                out previousCount) || previousCount != 0)
+            {
+                throw Failure("release-construction-jobserver-as-child");
+            }
+        }
+    }
+
     public static int Run(
         string username,
         string principalSid,
@@ -1235,6 +1910,7 @@ public static class ProjectAtlasConstructionProcess
         string[] arguments,
         string workingDirectory,
         string environmentBlock,
+        string jobserverName,
         int timeoutSeconds)
     {
         return RunCore(
@@ -1245,6 +1921,7 @@ public static class ProjectAtlasConstructionProcess
             arguments,
             workingDirectory,
             environmentBlock,
+            jobserverName,
             timeoutSeconds,
             AdmissionScenario.Normal,
             null);
@@ -1258,6 +1935,7 @@ public static class ProjectAtlasConstructionProcess
         string[] arguments,
         string workingDirectory,
         string environmentBlock,
+        string jobserverName,
         int timeoutSeconds,
         AdmissionScenario admissionScenario,
         AdmissionReceipt admissionReceipt)
@@ -1269,6 +1947,7 @@ public static class ProjectAtlasConstructionProcess
         IntPtr windowStation = IntPtr.Zero;
         IntPtr desktop = IntPtr.Zero;
         IntPtr originalWindowStation = IntPtr.Zero;
+        SafeWaitHandle jobserver = null;
         ProcessInformation process = new ProcessInformation();
         bool processCreated = false;
         bool assignedToJob = false;
@@ -1277,6 +1956,7 @@ public static class ProjectAtlasConstructionProcess
         Exception cleanupFailure = null;
         try
         {
+            ValidateJobserverRequest(jobserverName, environmentBlock);
             job = CreateJobObject(IntPtr.Zero, null);
             if (job == IntPtr.Zero)
             {
@@ -1396,9 +2076,31 @@ public static class ProjectAtlasConstructionProcess
             {
                 admissionReceipt.ProcessId = checked((int)process.ProcessId);
             }
-            if (admissionScenario != AdmissionScenario.Normal)
+            if (admissionScenario == AdmissionScenario.FailBeforeJobAssignment ||
+                admissionScenario == AdmissionScenario.FailBeforeJobAssignmentAndCleanupFailure)
             {
                 throw new InvalidOperationException("construction-self-test-before-job-assignment");
+            }
+            if (!string.IsNullOrEmpty(jobserverName))
+            {
+                jobserver = CreateAdmittedJobserver(
+                    process.Process,
+                    principalSid,
+                    jobserverName);
+                if (admissionReceipt != null)
+                {
+                    admissionReceipt.JobserverHandleOwned = true;
+                }
+            }
+            if (admissionScenario == AdmissionScenario.FailAfterJobserverAdmissionBeforeJobAssignment)
+            {
+                if (jobserver == null || jobserver.IsInvalid || jobserver.IsClosed)
+                {
+                    throw new InvalidOperationException(
+                        "construction-self-test-jobserver-admission-missing");
+                }
+                throw new InvalidOperationException(
+                    "construction-self-test-after-jobserver-admission");
             }
             if (!AssignProcessToJobObject(job, process.Process))
             {
@@ -1493,20 +2195,35 @@ public static class ProjectAtlasConstructionProcess
             {
                 if (processCreated && assignedToJob && job != IntPtr.Zero)
                 {
-                    TerminateJobObject(job, FailureExitCode);
+                    cleanupFailure = AppendCleanupFailure(
+                        cleanupFailure,
+                        RecoverAssignedProcessTree(job, process));
+                    job = IntPtr.Zero;
+                    process = new ProcessInformation();
                 }
-                if (process.Thread != IntPtr.Zero)
+                else
                 {
-                    CloseHandle(process.Thread);
+                    cleanupFailure = AppendCleanupFailure(
+                        cleanupFailure,
+                        CloseHandleFailure(process.Thread, "close-construction-thread"));
+                    cleanupFailure = AppendCleanupFailure(
+                        cleanupFailure,
+                        CloseHandleFailure(process.Process, "close-construction-process"));
+                    cleanupFailure = AppendCleanupFailure(
+                        cleanupFailure,
+                        CloseHandleFailure(job, "close-construction-job"));
+                    job = IntPtr.Zero;
+                    process = new ProcessInformation();
                 }
-                if (process.Process != IntPtr.Zero)
+            }
+            if (jobserver != null)
+            {
+                jobserver.Dispose();
+                if (admissionReceipt != null)
                 {
-                    CloseHandle(process.Process);
+                    admissionReceipt.JobserverHandleClosed = jobserver.IsClosed;
                 }
-                if (job != IntPtr.Zero)
-                {
-                    CloseHandle(job);
-                }
+                jobserver = null;
             }
             if (environment != IntPtr.Zero)
             {
@@ -1597,6 +2314,79 @@ public static class ProjectAtlasConstructionProcess
             cleanupFailure = closeFailure;
         }
         return cleanupFailure;
+    }
+
+    private static Exception RecoverAssignedProcessTree(
+        IntPtr job,
+        ProcessInformation process)
+    {
+        Exception cleanupFailure = null;
+        try
+        {
+            BasicAccountingInformation accounting;
+            if (!QueryInformationJobObject(
+                job,
+                JobObjectBasicAccountingInformation,
+                out accounting,
+                (uint)Marshal.SizeOf<BasicAccountingInformation>(),
+                IntPtr.Zero))
+            {
+                throw Failure("query-construction-job-cleanup");
+            }
+            if (accounting.ActiveProcesses != 0 &&
+                !TerminateJobObject(job, FailureExitCode))
+            {
+                throw Failure("terminate-construction-job-cleanup");
+            }
+            Stopwatch timer = Stopwatch.StartNew();
+            while (accounting.ActiveProcesses != 0)
+            {
+                if (timer.ElapsedMilliseconds >= AdmissionCleanupWaitMilliseconds)
+                {
+                    throw new InvalidOperationException("reap-construction-job-cleanup");
+                }
+                System.Threading.Thread.Sleep(25);
+                if (!QueryInformationJobObject(
+                    job,
+                    JobObjectBasicAccountingInformation,
+                    out accounting,
+                    (uint)Marshal.SizeOf<BasicAccountingInformation>(),
+                    IntPtr.Zero))
+                {
+                    throw Failure("query-construction-job-cleanup");
+                }
+            }
+        }
+        catch (Exception failure)
+        {
+            cleanupFailure = failure;
+        }
+        cleanupFailure = AppendCleanupFailure(
+            cleanupFailure,
+            CloseHandleFailure(process.Thread, "close-construction-thread"));
+        cleanupFailure = AppendCleanupFailure(
+            cleanupFailure,
+            CloseHandleFailure(process.Process, "close-construction-process"));
+        cleanupFailure = AppendCleanupFailure(
+            cleanupFailure,
+            CloseHandleFailure(job, "close-construction-job"));
+        return cleanupFailure;
+    }
+
+    private static Exception AppendCleanupFailure(Exception current, Exception next)
+    {
+        if (next == null)
+        {
+            return current;
+        }
+        if (current == null)
+        {
+            return next;
+        }
+        return new AggregateException(
+            "Construction cleanup retained more than one failure.",
+            current,
+            next);
     }
 
     private static void TerminateAndWaitProcess(
@@ -1767,7 +2557,12 @@ function Invoke-AsConstructionPrincipal {
         [string[]]$Arguments,
 
         [Parameter(Mandatory = $true)]
-        [int]$CommandTimeoutSeconds
+        [int]$CommandTimeoutSeconds,
+
+        [string]$EnvironmentBlock = $script:constructionEnvironment,
+
+        [ValidatePattern('\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
+        [string]$JobserverName
     )
 
     return [ProjectAtlasConstructionProcess]::Run(
@@ -1777,7 +2572,8 @@ function Invoke-AsConstructionPrincipal {
         $pwsh,
         $Arguments,
         $source,
-        $script:constructionEnvironment,
+        $EnvironmentBlock,
+        $JobserverName,
         $CommandTimeoutSeconds
     )
 }
@@ -2129,12 +2925,7 @@ $groupRows = @(
 if ($LASTEXITCODE -ne 0) { exit 31 }
 $integritySids = @($groupRows | Where-Object { $_.Sid -like 'S-1-16-*' })
 if ($integritySids.Count -ne 1 -or
-    [string]$integritySids[0].Sid -notin @(
-        'S-1-16-8192',
-        'S-1-16-8448',
-        'S-1-16-12288',
-        'S-1-16-16384'
-    )) {
+    [string]$integritySids[0].Sid -ne 'S-1-16-8192') {
     exit 32
 }
 $handle = [System.IO.File]::Open(
@@ -2192,6 +2983,13 @@ exit 0
         throw "Construction principal boundary probe did not contain its descendant process tree."
     }
 
+    $constructionJobserverName =
+        "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+    $constructionJobserverEnvironmentValues = $environment.Clone()
+    $constructionJobserverEnvironmentValues.CARGO_MAKEFLAGS =
+        "-j --jobserver-fds=$constructionJobserverName --jobserver-auth=$constructionJobserverName"
+    $constructionJobserverEnvironment = New-EnvironmentBlock `
+        -Values $constructionJobserverEnvironmentValues
     $constructionArguments = @(
         "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
         "-File", $constructionScript,
@@ -2212,7 +3010,9 @@ exit 0
     Write-ProtectedState -State $state
     $constructionExitCode = Invoke-AsConstructionPrincipal `
         -Arguments $constructionArguments `
-        -CommandTimeoutSeconds $TimeoutSeconds
+        -CommandTimeoutSeconds $TimeoutSeconds `
+        -EnvironmentBlock $constructionJobserverEnvironment `
+        -JobserverName $constructionJobserverName
     if ($constructionExitCode -ne 0) {
         $failedStage = Write-BoundedConstructionFailure `
             -ObservedExitCode $constructionExitCode `

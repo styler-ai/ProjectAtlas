@@ -92,27 +92,41 @@ try {
         $expectedJobserverNameExpression =
             '"Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString(''N''))"'
         Require `
-            ($productionText.Contains(
+            ($wrapperText.Contains(
                 $expectedJobserverNameExpression,
                 [System.StringComparison]::Ordinal
             ) -and
-                $productionText.Contains('New-ContainedCargoJobserver') -and
-                $productionText.Contains('$env:CARGO_MAKEFLAGS =') -and
-                $productionText.Contains(
-                    '"-j --jobserver-fds=$($script:constructionJobserverName) --jobserver-auth=$($script:constructionJobserverName)"'
-                )) `
-            "Contained Windows construction did not own its exact global Cargo jobserver."
+                $wrapperText.Contains('$constructionJobserverEnvironmentValues.CARGO_MAKEFLAGS =') -and
+                $wrapperText.Contains('-EnvironmentBlock $constructionJobserverEnvironment') -and
+                $wrapperText.Contains('-JobserverName $constructionJobserverName') -and
+                $productionText.Contains('[System.Threading.SemaphoreAcl]::OpenExisting(') -and
+                $productionText.Contains('$constructionJobserver.WaitOne(0)') -and
+                -not $productionText.Contains('New-ContainedCargoJobserver') -and
+                -not $productionText.Contains('[System.Threading.SemaphoreAcl]::Create(')) `
+            "Windows construction did not bind the exact parent-owned jobserver to the contained child."
         Require `
             (-not $productionText.Contains(
                 '"Local\ProjectAtlasParserPack-',
                 [System.StringComparison]::Ordinal
-            )) `
+            ) -and
+                -not $wrapperText.Contains(
+                    '"Local\ProjectAtlasParserPack-',
+                    [System.StringComparison]::Ordinal
+                )) `
             "Contained Windows construction retained the inaccessible client-session jobserver."
         Require `
-            (-not $wrapperText.Contains('CARGO_MAKEFLAGS =') -and
-                -not $wrapperText.Contains('New-ConstructionJobserver') -and
-                -not $wrapperText.Contains('$script:constructionJobserver')) `
-            "Windows wrapper retained parent-owned Cargo jobserver state."
+            ($wrapperText.Contains('CreateAdmittedJobserver(') -and
+                $wrapperText.Contains('WindowsIdentity.RunImpersonated(') -and
+                $wrapperText.Contains('RequiredIntegritySid = "S-1-16-8192";') -and
+                $wrapperText.Contains('SeGroupLogonId = 0xC0000000;') -and
+                $wrapperText.Contains('SemaphoreModifyState = 0x00000002;') -and
+                $wrapperText.Contains('"D:P(A;;0x00100002;;;" + childIdentity.LogonSid + ")"') -and
+                $wrapperText.Contains('"S:(ML;;NW;;;" + integritySid + ")"') -and
+                $wrapperText.Contains('private sealed class TokenInformationBuffer : IDisposable') -and
+                $wrapperText.Contains('requiredGroupBytes > groupsInformation.Length') -and
+                $wrapperText.Contains('!IsValidSid(sid)') -and
+                $wrapperText.Contains('checked(offset + sidBytes) > information.Length')) `
+            "Windows wrapper did not retain exact child-token jobserver admission."
         $nativeSourceAssignments = @($wrapperAst.FindAll(
             {
                 param($node)
@@ -152,7 +166,7 @@ try {
         Require ($null -ne $processInformationType) "Construction process information was missing."
         Require `
             (([enum]::GetNames($admissionScenarioType) -join ',') -eq
-                'Normal,FailBeforeJobAssignment,FailBeforeJobAssignmentAndCleanupFailure') `
+                'Normal,FailBeforeJobAssignment,FailBeforeJobAssignmentAndCleanupFailure,FailAfterJobserverAdmissionBeforeJobAssignment') `
             "Construction admission failure domain was not closed."
 
         $publicRunMethods = @($adapterType.GetMethods(
@@ -160,14 +174,22 @@ try {
         ) | Where-Object Name -eq 'Run')
         Require `
             ($publicRunMethods.Count -eq 1 -and
-                $publicRunMethods[0].GetParameters().Count -eq 8) `
+                $publicRunMethods[0].GetParameters().Count -eq 9) `
             "Construction adapter exposed an admission fault through its public launch API."
         $processCreatedIndex = $nativeSource.IndexOf(
             'processCreated = true;',
             [System.StringComparison]::Ordinal
         )
         $admissionFailureIndex = $nativeSource.IndexOf(
-            'if (admissionScenario != AdmissionScenario.Normal)',
+            'if (admissionScenario == AdmissionScenario.FailBeforeJobAssignment ||',
+            [System.StringComparison]::Ordinal
+        )
+        $jobserverAdmissionIndex = $nativeSource.IndexOf(
+            'jobserver = CreateAdmittedJobserver(',
+            [System.StringComparison]::Ordinal
+        )
+        $jobserverFailureIndex = $nativeSource.IndexOf(
+            'if (admissionScenario == AdmissionScenario.FailAfterJobserverAdmissionBeforeJobAssignment)',
             [System.StringComparison]::Ordinal
         )
         $jobAssignmentIndex = $nativeSource.IndexOf(
@@ -177,7 +199,9 @@ try {
         Require `
             ($processCreatedIndex -ge 0 -and
                 $admissionFailureIndex -gt $processCreatedIndex -and
-                $jobAssignmentIndex -gt $admissionFailureIndex -and
+                $jobserverAdmissionIndex -gt $admissionFailureIndex -and
+                $jobserverFailureIndex -gt $jobserverAdmissionIndex -and
+                $jobAssignmentIndex -gt $jobserverFailureIndex -and
                 $nativeSource.Contains(
                     'uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;'
                 ) -and
@@ -1215,76 +1239,107 @@ public static class ProjectAtlasConstructionAdmissionFixture
             $true
         ))
         Require `
-            ($jobserverDefinitions.Count -eq 1) `
-            "Expected one New-ContainedCargoJobserver definition."
-        $jobserverDefinitionText = $jobserverDefinitions[0].Extent.Text
+            ($jobserverDefinitions.Count -eq 0) `
+            "Contained construction retained child-owned jobserver creation."
+        $freshJobserverName =
+            "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
         Require `
-            ($jobserverDefinitionText.Contains('$security.SetAccessRuleProtection($true, $false)') -and
-                $jobserverDefinitionText.Contains('[System.Security.AccessControl.SemaphoreRights]::Synchronize -bor') -and
-                $jobserverDefinitionText.Contains('[System.Security.AccessControl.SemaphoreRights]::Modify') -and
-                $jobserverDefinitionText.Contains('$Sid,') -and
-                $jobserverDefinitionText.Contains('[System.Security.AccessControl.AccessControlType]::Allow') -and
-                $jobserverDefinitionText.Contains('[System.Threading.SemaphoreAcl]::Create(') -and
-                $jobserverDefinitionText.Contains('"namespace=global`ncustom_create=${customClass}:$($customFailure.HResult)`ndefault_create=$defaultResult`n"') -and
-                $jobserverDefinitionText.Contains('[System.Threading.Semaphore]::new(') -and
-                -not $jobserverDefinitionText.Contains('$customFailure.Message') -and
-                ([regex]::Matches($jobserverDefinitionText, '\.AddAccessRule\(').Count -eq 1)) `
-            "Contained Cargo jobserver did not retain its exact DACL and bounded fallback diagnostic."
-        Invoke-Expression $jobserverDefinitionText
-        $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-        $jobserverRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
-            [System.Security.AccessControl.SemaphoreRights]::Modify
-        $jobserverName = "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
-        $jobserver = New-ContainedCargoJobserver -Sid $currentSid -Name $jobserverName
-        $openedJobserver = $null
+            ([ProjectAtlasConstructionProcess]::CanCreateFreshJobserverName($freshJobserverName)) `
+            "Native adapter did not close its fresh-name probe handle."
+        Require `
+            ([ProjectAtlasConstructionProcess]::CanCreateFreshJobserverName($freshJobserverName)) `
+            "Native adapter retained a fresh-name probe between calls."
+        $invalidNameRejected = $false
         try {
-            $openedJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
-                $jobserverName,
-                $jobserverRights
+            [ProjectAtlasConstructionProcess]::CanCreateFreshJobserverName(
+                "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+            ) | Out-Null
+        }
+        catch {
+            $invalidNameRejected = $true
+        }
+        Require $invalidNameRejected "Native adapter accepted a client-session jobserver name."
+        $createAdmittedJobserver = $adapterType.GetMethod(
+            'CreateAdmittedJobserver',
+            $nestedTypeFlags
+        )
+        Require `
+            ($null -ne $createAdmittedJobserver) `
+            "Native adapter jobserver admission helpers were missing."
+        $admittedJobserverName =
+            "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+        $admittedJobserverHandle = $null
+        try {
+            $admittedJobserverHandle = $createAdmittedJobserver.Invoke(
+                $null,
+                [object[]]@(
+                    [System.Diagnostics.Process]::GetCurrentProcess().Handle,
+                    [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
+                    $admittedJobserverName
+                )
             )
-            Require ($openedJobserver.WaitOne(0)) "Construction jobserver did not expose one token."
             Require `
-                ($openedJobserver.Release() -eq 0) `
-                "Construction jobserver did not restore its token."
+                ($null -ne $admittedJobserverHandle -and
+                    -not $admittedJobserverHandle.IsInvalid -and
+                    -not $admittedJobserverHandle.IsClosed) `
+                "Native adapter did not admit the current exact medium token."
             $collisionRejected = $false
             try {
-                $unexpectedJobserver = New-ContainedCargoJobserver `
-                    -Sid $currentSid `
-                    -Name $jobserverName
-                $unexpectedJobserver.Dispose()
+                $unexpectedHandle = $createAdmittedJobserver.Invoke(
+                    $null,
+                    [object[]]@(
+                        [System.Diagnostics.Process]::GetCurrentProcess().Handle,
+                        [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
+                        $admittedJobserverName
+                    )
+                )
+                if ($null -ne $unexpectedHandle) {
+                    $unexpectedHandle.Dispose()
+                }
             }
             catch {
                 $collisionRejected = $true
             }
-            Require $collisionRejected "Construction jobserver accepted a live-name collision."
-            $localNameRejected = $false
-            try {
-                $unexpectedLocalJobserver = New-ContainedCargoJobserver `
-                    -Sid $currentSid `
-                    -Name "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
-                $unexpectedLocalJobserver.Dispose()
-            }
-            catch {
-                $localNameRejected = $true
-            }
-            Require $localNameRejected "Contained Cargo jobserver accepted a client-session namespace."
+            Require $collisionRejected "Native adapter adopted a live jobserver name."
         }
         finally {
-            if ($null -ne $openedJobserver) {
-                $openedJobserver.Dispose()
+            if ($null -ne $admittedJobserverHandle) {
+                $admittedJobserverHandle.Dispose()
+                Require `
+                    $admittedJobserverHandle.IsClosed `
+                    "Native adapter did not close the admitted diagnostic jobserver."
             }
-            $jobserver.Dispose()
         }
-        $postCleanupJobserver = $null
-        $jobserverNameRemoved = -not [System.Threading.SemaphoreAcl]::TryOpenExisting(
-            $jobserverName,
-            $jobserverRights,
-            [ref]$postCleanupJobserver
-        )
-        if ($null -ne $postCleanupJobserver) {
-            $postCleanupJobserver.Dispose()
+        Require `
+            ([ProjectAtlasConstructionProcess]::CanCreateFreshJobserverName(
+                $admittedJobserverName
+            )) `
+            "Native adapter retained the admitted diagnostic jobserver name."
+        $mismatchedTokenRejected = $false
+        $mismatchedJobserverName =
+            "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+        try {
+            $unexpectedHandle = $createAdmittedJobserver.Invoke(
+                $null,
+                [object[]]@(
+                    [System.Diagnostics.Process]::GetCurrentProcess().Handle,
+                    'S-1-5-7',
+                    $mismatchedJobserverName
+                )
+            )
+            if ($null -ne $unexpectedHandle) {
+                $unexpectedHandle.Dispose()
+            }
         }
-        Require $jobserverNameRemoved "Contained Cargo jobserver survived its last owned handle."
+        catch {
+            $mismatchedTokenRejected = $true
+        }
+        Require $mismatchedTokenRejected "Native adapter accepted a mismatched child token."
+        Require `
+            ([ProjectAtlasConstructionProcess]::CanCreateFreshJobserverName(
+                $mismatchedJobserverName
+            )) `
+            "Mismatched-token rejection retained a jobserver name."
     }
     $Target = "x86_64-pc-windows-msvc"
     $commandDiagnosticTailBytes = 24 * 1024

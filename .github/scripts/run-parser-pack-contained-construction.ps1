@@ -316,89 +316,6 @@ function Write-ConstructionStatus {
     }
 }
 
-function New-ContainedCargoJobserver {
-    param(
-        [Parameter(Mandatory = $true)]
-        [System.Security.Principal.SecurityIdentifier]$Sid,
-
-        [Parameter(Mandatory = $true)]
-        [ValidatePattern('\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
-        [string]$Name
-    )
-
-    $security = [System.Security.AccessControl.SemaphoreSecurity]::new()
-    $security.SetAccessRuleProtection($true, $false)
-    $rights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
-        [System.Security.AccessControl.SemaphoreRights]::Modify
-    $security.AddAccessRule(
-        [System.Security.AccessControl.SemaphoreAccessRule]::new(
-            $Sid,
-            $rights,
-            [System.Security.AccessControl.AccessControlType]::Allow
-        )
-    )
-
-    $createdNew = $false
-    try {
-        $semaphore = [System.Threading.SemaphoreAcl]::Create(
-            1,
-            1,
-            $Name,
-            [ref]$createdNew,
-            $security
-        )
-    }
-    catch {
-        $customFailure = $_.Exception
-        $defaultSemaphore = $null
-        $defaultCreatedNew = $false
-        $defaultResult = "not-attempted"
-        try {
-            $defaultName =
-                "Global\ProjectAtlasParserPackProbe-$([guid]::NewGuid().ToString('N'))"
-            $defaultSemaphore = [System.Threading.Semaphore]::new(
-                1,
-                1,
-                $defaultName,
-                [ref]$defaultCreatedNew
-            )
-            $defaultResult = if ($defaultCreatedNew) { "succeeded" } else { "collision" }
-        }
-        catch {
-            $defaultResult = "failed:$($_.Exception.HResult)"
-        }
-        finally {
-            if ($null -ne $defaultSemaphore) {
-                $defaultSemaphore.Dispose()
-            }
-        }
-        $customClass = switch ($customFailure.GetType().Name) {
-            "UnauthorizedAccessException" { "unauthorized-access" }
-            "WaitHandleCannotBeOpenedException" { "cannot-open" }
-            "PlatformNotSupportedException" { "unsupported" }
-            default { "other" }
-        }
-        $diagnostic =
-            "namespace=global`ncustom_create=${customClass}:$($customFailure.HResult)`ndefault_create=$defaultResult`n"
-        try {
-            [System.IO.File]::WriteAllText(
-                $script:constructionDiagnosticPath,
-                $diagnostic,
-                [System.Text.UTF8Encoding]::new($false)
-            )
-        }
-        catch {
-            # The parent still fails closed from the bounded status record.
-        }
-        throw "Contained Cargo jobserver could not be created."
-    }
-    if (-not $createdNew) {
-        $semaphore.Dispose()
-        throw "Contained Cargo jobserver name was not unique."
-    }
-    return $semaphore
-}
-
 if ($targetIsolation[$Target] -ne $NetworkIsolation) {
     throw "NetworkIsolation does not match Target."
 }
@@ -431,18 +348,7 @@ $script:constructionDiagnosticPath = [System.IO.Path]::Combine(
 $script:constructionStage = "validate-inputs"
 $script:constructionFailureRecorded = $false
 $script:constructionFailureExitCode = 1
-$script:constructionJobserver = $null
-$script:constructionJobserverName = $null
 trap {
-    if ($null -ne $script:constructionJobserver) {
-        try {
-            $script:constructionJobserver.Dispose()
-        }
-        catch {
-            # Process teardown still closes the exact process-owned semaphore handle.
-        }
-        $script:constructionJobserver = $null
-    }
     Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS -ErrorAction SilentlyContinue
     if (-not $script:constructionFailureRecorded) {
         $failureExitCode = 1
@@ -508,23 +414,32 @@ $env:CARGO_TARGET_DIR = $buildDirectory
 $env:TSLP_OFFLINE = "1"
 $env:TSLP_LINK_MODE = "dynamic"
 if ($Target -eq "x86_64-pc-windows-msvc") {
-    if (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS) {
-        throw "Contained construction inherited a Cargo jobserver."
+    $jobserverPattern =
+        '\A-j --jobserver-fds=(Global\\ProjectAtlasParserPack-[0-9a-f]{32}) --jobserver-auth=\1\z'
+    if ([string]$env:CARGO_MAKEFLAGS -notmatch $jobserverPattern) {
+        throw "Contained construction did not inherit its exact Cargo jobserver."
     }
+    $constructionJobserverName = $Matches[1]
     $script:constructionStage = "jobserver-bootstrap"
     Write-ConstructionStatus -Stage $script:constructionStage -State "running"
-    $constructionSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-    # The disposable non-interactive logon cannot create synchronization
-    # objects in the runner's client-session namespace. Its exact-SID DACL
-    # limits the global object to the disposable identity; the wrapper bounds
-    # that identity and its process tree for the construction lifetime.
-    $script:constructionJobserverName =
-        "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
-    $script:constructionJobserver = New-ContainedCargoJobserver `
-        -Sid $constructionSid `
-        -Name $script:constructionJobserverName
-    $env:CARGO_MAKEFLAGS =
-        "-j --jobserver-fds=$($script:constructionJobserverName) --jobserver-auth=$($script:constructionJobserverName)"
+    $jobserverRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
+        [System.Security.AccessControl.SemaphoreRights]::Modify
+    $constructionJobserver = $null
+    try {
+        $constructionJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
+            $constructionJobserverName,
+            $jobserverRights
+        )
+        if (-not $constructionJobserver.WaitOne(0) -or
+            $constructionJobserver.Release() -ne 0) {
+            throw "Contained Cargo jobserver token could not be acquired and restored."
+        }
+    }
+    finally {
+        if ($null -ne $constructionJobserver) {
+            $constructionJobserver.Dispose()
+        }
+    }
 }
 
     $workerBuildArguments = @(
@@ -846,10 +761,6 @@ $publishedNetworkCheck = [System.IO.Path]::Combine(
 )
 [System.IO.File]::Copy($acceptedManifest, $publishedManifest, $false)
 [System.IO.File]::Copy($networkCheck, $publishedNetworkCheck, $false)
-if ($null -ne $script:constructionJobserver) {
-    $script:constructionJobserver.Dispose()
-    $script:constructionJobserver = $null
-}
 Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS -ErrorAction SilentlyContinue
 [System.IO.File]::Delete($script:constructionStatusPath)
 
