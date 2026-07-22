@@ -1268,22 +1268,63 @@ public static class ProjectAtlasConstructionAdmissionFixture
             "Native adapter jobserver admission helpers were missing."
         $admittedJobserverName =
             "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
-        $admittedJobserverHandle = $null
-        try {
-            $admittedJobserverHandle = $createAdmittedJobserver.Invoke(
-                $null,
-                [object[]]@(
-                    [System.Diagnostics.Process]::GetCurrentProcess().Handle,
-                    [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
-                    $admittedJobserverName
+        $currentGroupCsv = @(whoami.exe /groups /fo csv /nh)
+        Require ($LASTEXITCODE -eq 0) "Could not inspect the diagnostic token integrity."
+        $currentIntegritySids = @(
+            $currentGroupCsv |
+                ConvertFrom-Csv -Header Name, Type, Sid, Attributes |
+                Where-Object { $_.Sid -like 'S-1-16-*' } |
+                ForEach-Object { $_.Sid }
+        )
+        Require `
+            ($currentIntegritySids.Count -eq 1) `
+            "The diagnostic token did not expose one integrity SID."
+        if ($currentIntegritySids[0] -eq 'S-1-16-8192') {
+            $admittedJobserverHandle = $null
+            try {
+                $admittedJobserverHandle = $createAdmittedJobserver.Invoke(
+                    $null,
+                    [object[]]@(
+                        [System.Diagnostics.Process]::GetCurrentProcess().Handle,
+                        [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
+                        $admittedJobserverName
+                    )
                 )
-            )
-            Require `
-                ($null -ne $admittedJobserverHandle -and
-                    -not $admittedJobserverHandle.IsInvalid -and
-                    -not $admittedJobserverHandle.IsClosed) `
-                "Native adapter did not admit the current exact medium token."
-            $collisionRejected = $false
+                Require `
+                    ($null -ne $admittedJobserverHandle -and
+                        -not $admittedJobserverHandle.IsInvalid -and
+                        -not $admittedJobserverHandle.IsClosed) `
+                    "Native adapter did not admit the current exact medium token."
+                $collisionRejected = $false
+                try {
+                    $unexpectedHandle = $createAdmittedJobserver.Invoke(
+                        $null,
+                        [object[]]@(
+                            [System.Diagnostics.Process]::GetCurrentProcess().Handle,
+                            [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
+                            $admittedJobserverName
+                        )
+                    )
+                    if ($null -ne $unexpectedHandle) {
+                        $unexpectedHandle.Dispose()
+                    }
+                }
+                catch {
+                    $collisionRejected = $true
+                }
+                Require $collisionRejected "Native adapter adopted a live jobserver name."
+            }
+            finally {
+                if ($null -ne $admittedJobserverHandle) {
+                    $admittedJobserverHandle.Dispose()
+                    Require `
+                        $admittedJobserverHandle.IsClosed `
+                        "Native adapter did not close the admitted diagnostic jobserver."
+                }
+            }
+        }
+        else {
+            $unsupportedIntegrityRejected = $false
             try {
                 $unexpectedHandle = $createAdmittedJobserver.Invoke(
                     $null,
@@ -1298,17 +1339,18 @@ public static class ProjectAtlasConstructionAdmissionFixture
                 }
             }
             catch {
-                $collisionRejected = $true
+                $failure = $_.Exception
+                while ($null -ne $failure) {
+                    if ($failure.Message -eq 'validate-construction-token-integrity') {
+                        $unsupportedIntegrityRejected = $true
+                        break
+                    }
+                    $failure = $failure.InnerException
+                }
             }
-            Require $collisionRejected "Native adapter adopted a live jobserver name."
-        }
-        finally {
-            if ($null -ne $admittedJobserverHandle) {
-                $admittedJobserverHandle.Dispose()
-                Require `
-                    $admittedJobserverHandle.IsClosed `
-                    "Native adapter did not close the admitted diagnostic jobserver."
-            }
+            Require `
+                $unsupportedIntegrityRejected `
+                "Native adapter did not reject the ambient non-medium diagnostic token exactly."
         }
         Require `
             ([ProjectAtlasConstructionProcess]::CanCreateFreshJobserverName(
