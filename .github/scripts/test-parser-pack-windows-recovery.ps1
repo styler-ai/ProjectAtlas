@@ -479,8 +479,10 @@ function Assert-NamedObjectProbeDiagnosticContract {
         'function ConvertTo-BoundedProbeError',
         'function Write-AtomicProbeRecord',
         'public static class ProjectAtlasNamedObjectAccessProbe',
+        'SemaphoreSynchronizeAndModify = 0x00100002',
         'NtOpenDirectoryObject(',
         'CreateAndCloseSemaphore(',
+        'CreateOwnedSemaphore(',
         'directory_traverse_ntstatus = $directoryTraverseNtStatus',
         'directory_create_object_ntstatus = $directoryCreateObjectNtStatus',
         'directory_traverse_create_ntstatus = $directoryTraverseCreateNtStatus',
@@ -2614,12 +2616,23 @@ function Write-AtomicProbeRecord {
 $nativeProbeSource = @"
 using System;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 public static class ProjectAtlasNamedObjectAccessProbe
 {
     private const uint ObjCaseInsensitive = 0x00000040;
-    private const uint SemaphoreAllAccess = 0x001F0003;
+    private const uint SemaphoreSynchronizeAndModify = 0x00100002;
     private const int ErrorAlreadyExists = 183;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityAttributes
+    {
+        internal int Length;
+        internal IntPtr SecurityDescriptor;
+
+        [MarshalAs(UnmanagedType.Bool)]
+        internal bool InheritHandle;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct UnicodeString
@@ -2656,6 +2669,19 @@ public static class ProjectAtlasNamedObjectAccessProbe
         EntryPoint = "CreateSemaphoreExW")]
     private static extern IntPtr CreateSemaphoreEx(
         IntPtr securityAttributes,
+        int initialCount,
+        int maximumCount,
+        string name,
+        uint flags,
+        uint desiredAccess);
+
+    [DllImport(
+        "kernel32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true,
+        EntryPoint = "CreateSemaphoreExW")]
+    private static extern IntPtr CreateSemaphoreExWithSecurity(
+        ref SecurityAttributes securityAttributes,
         int initialCount,
         int maximumCount,
         string name,
@@ -2733,7 +2759,7 @@ public static class ProjectAtlasNamedObjectAccessProbe
             1,
             name,
             0,
-            SemaphoreAllAccess);
+            SemaphoreSynchronizeAndModify);
         int createError = Marshal.GetLastWin32Error();
         if (handle == IntPtr.Zero)
         {
@@ -2742,6 +2768,67 @@ public static class ProjectAtlasNamedObjectAccessProbe
         createdNew = createError != ErrorAlreadyExists;
         closeError = CloseHandle(handle) ? 0 : Marshal.GetLastWin32Error();
         return createdNew ? 0 : createError;
+    }
+
+    public static SafeWaitHandle CreateOwnedSemaphore(
+        string name,
+        byte[] securityDescriptor)
+    {
+        if (string.IsNullOrEmpty(name) ||
+            securityDescriptor == null ||
+            securityDescriptor.Length == 0)
+        {
+            throw new ArgumentException("contained-cargo-jobserver-input");
+        }
+
+        GCHandle pinnedDescriptor = default(GCHandle);
+        try
+        {
+            pinnedDescriptor = GCHandle.Alloc(
+                securityDescriptor,
+                GCHandleType.Pinned);
+            SecurityAttributes attributes = new SecurityAttributes();
+            attributes.Length = Marshal.SizeOf(typeof(SecurityAttributes));
+            attributes.SecurityDescriptor = pinnedDescriptor.AddrOfPinnedObject();
+            attributes.InheritHandle = false;
+
+            IntPtr rawHandle = CreateSemaphoreExWithSecurity(
+                ref attributes,
+                1,
+                1,
+                name,
+                0,
+                SemaphoreSynchronizeAndModify);
+            int createError = Marshal.GetLastWin32Error();
+            if (rawHandle == IntPtr.Zero)
+            {
+                throw new System.ComponentModel.Win32Exception(
+                    createError,
+                    "create-contained-cargo-jobserver");
+            }
+
+            SafeWaitHandle handle = new SafeWaitHandle(rawHandle, true);
+            if (createError != 0)
+            {
+                handle.Dispose();
+                if (createError == ErrorAlreadyExists)
+                {
+                    throw new InvalidOperationException(
+                        "contained-cargo-jobserver-name-collision");
+                }
+                throw new System.ComponentModel.Win32Exception(
+                    createError,
+                    "create-contained-cargo-jobserver");
+            }
+            return handle;
+        }
+        finally
+        {
+            if (pinnedDescriptor.IsAllocated)
+            {
+                pinnedDescriptor.Free();
+            }
+        }
     }
 }
 "@
@@ -2834,6 +2921,9 @@ try {
     }
     $security = [System.Security.AccessControl.SemaphoreSecurity]::new()
     $security.SetAccessRuleProtection($true, $false)
+    $security.SetOwner(
+        [System.Security.Principal.SecurityIdentifier]::new($ExpectedPrincipalSid)
+    )
     $rights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
         [System.Security.AccessControl.SemaphoreRights]::Modify
     $security.AddAccessRule([System.Security.AccessControl.SemaphoreAccessRule]::new(
@@ -2844,12 +2934,11 @@ try {
 
     $probeStage = 'semaphore-create'
     $name = "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
-    $semaphore = [System.Threading.SemaphoreAcl]::Create(
-        1, 1, $name, [ref]$createdNew, $security
+    $semaphore = [ProjectAtlasNamedObjectAccessProbe]::CreateOwnedSemaphore(
+        $name,
+        $security.GetSecurityDescriptorBinaryForm()
     )
-    if (-not $createdNew) {
-        throw [System.InvalidOperationException]::new('jobserver-name-collision')
-    }
+    $createdNew = $true
 
     $probeStage = 'cargo-makeflags'
     $env:CARGO_MAKEFLAGS = "-j --jobserver-fds=$name --jobserver-auth=$name"

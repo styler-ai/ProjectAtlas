@@ -1580,7 +1580,7 @@ public static class ProjectAtlasConstructionProcess
     private const uint WaitFailed = UInt32.MaxValue;
     private const uint AdmissionCleanupWaitMilliseconds = 5000;
     private const uint FailureExitCode = 125;
-    private const uint SemaphoreAllAccess = 0x001F0003;
+    private const uint SemaphoreSynchronizeAndModify = 0x00100002;
     private const int ErrorAlreadyExists = 183;
     private const uint WindowStationAllAccess = 0x000F037F;
     private const uint DesktopAllAccess = 0x000F01FF;
@@ -2134,7 +2134,7 @@ public static class ProjectAtlasConstructionProcess
             1,
             receipt.PreJobNativeSemaphoreName,
             0,
-            SemaphoreAllAccess);
+            SemaphoreSynchronizeAndModify);
         int createError = Marshal.GetLastWin32Error();
         if (handle == IntPtr.Zero)
         {

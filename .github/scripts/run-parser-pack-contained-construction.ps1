@@ -347,8 +347,107 @@ function New-ContainedCargoJobserver {
         [string]$Name
     )
 
+    if ($null -eq ('ProjectAtlasCargoJobserverNative' -as [type])) {
+        $nativeSource = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public static class ProjectAtlasCargoJobserverNative
+{
+    private const uint SynchronizeAndModify = 0x00100002;
+    private const int ErrorAlreadyExists = 183;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityAttributes
+    {
+        internal int Length;
+        internal IntPtr SecurityDescriptor;
+
+        [MarshalAs(UnmanagedType.Bool)]
+        internal bool InheritHandle;
+    }
+
+    [DllImport(
+        "kernel32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true,
+        EntryPoint = "CreateSemaphoreExW")]
+    private static extern IntPtr CreateSemaphoreEx(
+        ref SecurityAttributes securityAttributes,
+        int initialCount,
+        int maximumCount,
+        string name,
+        uint flags,
+        uint desiredAccess);
+
+    public static SafeWaitHandle Create(string name, byte[] securityDescriptor)
+    {
+        if (string.IsNullOrEmpty(name) ||
+            securityDescriptor == null ||
+            securityDescriptor.Length == 0)
+        {
+            throw new ArgumentException("contained-cargo-jobserver-input");
+        }
+
+        GCHandle pinnedDescriptor = default(GCHandle);
+        try
+        {
+            pinnedDescriptor = GCHandle.Alloc(
+                securityDescriptor,
+                GCHandleType.Pinned);
+            SecurityAttributes attributes = new SecurityAttributes();
+            attributes.Length = Marshal.SizeOf(typeof(SecurityAttributes));
+            attributes.SecurityDescriptor = pinnedDescriptor.AddrOfPinnedObject();
+            attributes.InheritHandle = false;
+
+            IntPtr rawHandle = CreateSemaphoreEx(
+                ref attributes,
+                1,
+                1,
+                name,
+                0,
+                SynchronizeAndModify);
+            int createError = Marshal.GetLastWin32Error();
+            if (rawHandle == IntPtr.Zero)
+            {
+                throw new Win32Exception(
+                    createError,
+                    "create-contained-cargo-jobserver");
+            }
+
+            SafeWaitHandle handle = new SafeWaitHandle(rawHandle, true);
+            if (createError != 0)
+            {
+                handle.Dispose();
+                if (createError == ErrorAlreadyExists)
+                {
+                    throw new InvalidOperationException(
+                        "contained-cargo-jobserver-name-collision");
+                }
+                throw new Win32Exception(
+                    createError,
+                    "create-contained-cargo-jobserver");
+            }
+            return handle;
+        }
+        finally
+        {
+            if (pinnedDescriptor.IsAllocated)
+            {
+                pinnedDescriptor.Free();
+            }
+        }
+    }
+}
+'@
+        Add-Type -TypeDefinition $nativeSource -Language CSharp -ErrorAction Stop
+    }
+
     $security = [System.Security.AccessControl.SemaphoreSecurity]::new()
     $security.SetAccessRuleProtection($true, $false)
+    $security.SetOwner($Sid)
     $rights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
         [System.Security.AccessControl.SemaphoreRights]::Modify
     $security.AddAccessRule(
@@ -359,22 +458,14 @@ function New-ContainedCargoJobserver {
         )
     )
 
-    $createdNew = $false
     try {
-        $semaphore = [System.Threading.SemaphoreAcl]::Create(
-            1,
-            1,
+        $semaphore = [ProjectAtlasCargoJobserverNative]::Create(
             $Name,
-            [ref]$createdNew,
-            $security
+            $security.GetSecurityDescriptorBinaryForm()
         )
     }
     catch {
         throw "Contained Cargo jobserver could not be created."
-    }
-    if (-not $createdNew) {
-        $semaphore.Dispose()
-        throw "Contained Cargo jobserver name was not unique."
     }
     return $semaphore
 }

@@ -772,6 +772,9 @@ try {
                 $nativeSource.Contains('logon-construction-principal') -and
                 $nativeSource.Contains('create-process-with-construction-token') -and
                 $nativeSource.Contains('ambient-construction-jobserver') -and
+                $nativeSource.Contains('SemaphoreSynchronizeAndModify = 0x00100002;') -and
+                -not $nativeSource.Contains('SemaphoreAllAccess') -and
+                -not $nativeSource.Contains('0x001F0003') -and
                 -not $nativeSource.Contains('CreateConstructionJobserver(') -and
                 $nativeSource.Contains(
                     'CapturePreJobNativeSemaphoreProbe(admissionReceipt);'
@@ -2135,10 +2138,14 @@ public static class ProjectAtlasConstructionAdmissionFixture
         $jobserverDefinitionText = $jobserverDefinitions[0].Extent.Text
         Require `
             ($jobserverDefinitionText.Contains('$security.SetAccessRuleProtection($true, $false)') -and
+                $jobserverDefinitionText.Contains('$security.SetOwner($Sid)') -and
                 $jobserverDefinitionText.Contains('[System.Security.AccessControl.SemaphoreRights]::Synchronize -bor') -and
                 $jobserverDefinitionText.Contains('[System.Security.AccessControl.SemaphoreRights]::Modify') -and
                 $jobserverDefinitionText.Contains('[System.Security.AccessControl.AccessControlType]::Allow') -and
-                $jobserverDefinitionText.Contains('[System.Threading.SemaphoreAcl]::Create(') -and
+                $jobserverDefinitionText.Contains('public static class ProjectAtlasCargoJobserverNative') -and
+                $jobserverDefinitionText.Contains('SynchronizeAndModify = 0x00100002') -and
+                $jobserverDefinitionText.Contains('$security.GetSecurityDescriptorBinaryForm()') -and
+                -not $jobserverDefinitionText.Contains('[System.Threading.SemaphoreAcl]::Create(') -and
                 ([regex]::Matches($jobserverDefinitionText, '\.AddAccessRule\(').Count -eq 1)) `
             "Contained Cargo jobserver did not retain one protected exact-rights DACL."
         Invoke-Expression $jobserverDefinitionText
