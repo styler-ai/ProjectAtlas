@@ -592,7 +592,7 @@ function New-LocalUser {
     }
     throw "Account-ready proxy returned unexpectedly."
 }
-& ([string]$payload.wrapper) @parameters
+. ([string]$payload.wrapper) @parameters
 throw "Construction wrapper returned after the account-ready proxy."
 '@
     [System.IO.File]::WriteAllText(
