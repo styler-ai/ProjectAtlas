@@ -294,19 +294,76 @@ function Find-LocalUserByName {
 function Get-PrincipalProcesses {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Sid
+        [string]$Sid,
+
+        [Parameter(Mandatory = $true)]
+        [DateTime]$Deadline
     )
 
+    $remainingSeconds = [Math]::Floor(($Deadline - [DateTime]::UtcNow).TotalSeconds)
+    if ($remainingSeconds -lt 1) {
+        throw "Process ownership scan reached its cleanup deadline."
+    }
     $owned = [System.Collections.Generic.List[object]]::new()
-    foreach ($process in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+    foreach ($process in @(Get-CimInstance `
+        -ClassName Win32_Process `
+        -OperationTimeoutSec ([uint32]$remainingSeconds) `
+        -ErrorAction Stop)) {
         try {
-            $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
-            if ($owner.ReturnValue -eq 0 -and [string]$owner.Sid -eq $Sid) {
+            $remainingSeconds = [Math]::Floor(
+                ($Deadline - [DateTime]::UtcNow).TotalSeconds
+            )
+            if ($remainingSeconds -lt 1) {
+                throw "Process ownership scan reached its cleanup deadline."
+            }
+            $owner = Invoke-CimMethod `
+                -InputObject $process `
+                -MethodName GetOwnerSid `
+                -OperationTimeoutSec ([uint32]$remainingSeconds) `
+                -ErrorAction Stop
+            if ($owner.ReturnValue -ne 0) {
+                throw [System.InvalidOperationException]::new(
+                    "Process owner query returned a nonzero status."
+                )
+            }
+            if ([string]$owner.Sid -eq $Sid) {
                 $owned.Add($process)
             }
         }
         catch {
-            throw "Could not prove the owner of one running process."
+            $ownerFailure = $_.Exception
+            $processId = [int]$process.ProcessId
+            $remainingProcesses = $null
+            try {
+                $remainingSeconds = [Math]::Floor(
+                    ($Deadline - [DateTime]::UtcNow).TotalSeconds
+                )
+                if ($remainingSeconds -lt 1) {
+                    throw [System.TimeoutException]::new(
+                        "Process ownership requery reached its cleanup deadline."
+                    )
+                }
+                $remainingProcesses = @(
+                    Get-CimInstance `
+                        -ClassName Win32_Process `
+                        -Filter "ProcessId = $processId" `
+                        -OperationTimeoutSec ([uint32]$remainingSeconds) `
+                        -ErrorAction Stop
+                )
+            }
+            catch {
+                throw [System.AggregateException]::new(
+                    "Could not requery one process after its owner query failed.",
+                    @($ownerFailure, $_.Exception)
+                )
+            }
+            if ($remainingProcesses.Count -eq 0) {
+                continue
+            }
+            throw [System.InvalidOperationException]::new(
+                "Could not prove the owner of one running process.",
+                $ownerFailure
+            )
         }
     }
     return @($owned)
@@ -429,7 +486,9 @@ function Invoke-Cleanup {
     try {
         $processDeadline = [DateTime]::UtcNow.AddSeconds(30)
         do {
-            $processes = @(Get-PrincipalProcesses -Sid $sid.Value)
+            $processes = @(
+                Get-PrincipalProcesses -Sid $sid.Value -Deadline $processDeadline
+            )
             foreach ($process in $processes) {
                 try {
                     Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop
@@ -442,7 +501,9 @@ function Invoke-Cleanup {
                 Start-Sleep -Milliseconds 250
             }
         } while ($processes.Count -ne 0 -and [DateTime]::UtcNow -lt $processDeadline)
-        $zeroProcesses = @(Get-PrincipalProcesses -Sid $sid.Value).Count -eq 0
+        $zeroProcesses = @(
+            Get-PrincipalProcesses -Sid $sid.Value -Deadline $processDeadline
+        ).Count -eq 0
         if (-not $zeroProcesses) {
             $cleanupErrors.Add("principal-processes-present")
         }

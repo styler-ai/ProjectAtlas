@@ -447,6 +447,45 @@ public static class ProjectAtlasConstructionAdmissionFixture
                 -not $probeSource.Contains('$TokenRestrictionProbePath')) `
             "Session-local jobserver proof did not remain exact and self-contained."
 
+        $principalProcessDefinitions = @($wrapperAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -eq 'Get-PrincipalProcesses'
+            },
+            $true
+        ))
+        Require `
+            ($principalProcessDefinitions.Count -eq 1) `
+            "Expected one Get-PrincipalProcesses definition."
+        $principalProcessDefinition = $principalProcessDefinitions[0]
+        $principalProcessParameters = @(
+            $principalProcessDefinition.Body.ParamBlock.Parameters |
+                ForEach-Object { $_.Name.VariablePath.UserPath }
+        )
+        Require `
+            ($principalProcessParameters.Count -eq 2 -and
+                $principalProcessParameters[0] -eq 'Sid' -and
+                $principalProcessParameters[1] -eq 'Deadline') `
+            "Principal-process scans did not receive the caller's cleanup deadline."
+        $boundedCimCalls = @($principalProcessDefinition.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandAst] -and
+                    $node.GetCommandName() -in @('Get-CimInstance', 'Invoke-CimMethod')
+            },
+            $true
+        ))
+        Require `
+            ($boundedCimCalls.Count -eq 3 -and
+                @($boundedCimCalls | Where-Object {
+                    @($_.CommandElements | Where-Object {
+                        $_ -is [System.Management.Automation.Language.CommandParameterAst] -and
+                            $_.ParameterName -eq 'OperationTimeoutSec'
+                    }).Count -ne 1
+                }).Count -eq 0) `
+            "Principal-process CIM operations were not bounded by the cleanup deadline."
+
         $cleanupDefinitions = @($wrapperAst.FindAll(
             {
                 param($node)
@@ -483,8 +522,25 @@ public static class ProjectAtlasConstructionAdmissionFixture
                 }).Count -eq 0) `
             "Normal construction cleanup calls unexpectedly selected the recovery checkpoint."
         $cleanupText = $cleanupDefinition.Extent.Text
+        $principalProcessCalls = @($cleanupDefinition.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandAst] -and
+                    $node.GetCommandName() -eq 'Get-PrincipalProcesses'
+            },
+            $true
+        ))
+        Require `
+            ($principalProcessCalls.Count -eq 2 -and
+                @($principalProcessCalls | Where-Object {
+                    -not $_.Extent.Text.Contains(
+                        '-Deadline $processDeadline',
+                        [System.StringComparison]::Ordinal
+                    )
+                }).Count -eq 0) `
+            "Cleanup did not thread one fixed deadline through every principal-process scan."
         $zeroProcessIndex = $cleanupText.IndexOf(
-            '$zeroProcesses = @(Get-PrincipalProcesses -Sid $sid.Value).Count -eq 0',
+            '$zeroProcesses = @(',
             [System.StringComparison]::Ordinal
         )
         $checkpointIndex = $cleanupText.IndexOf(
@@ -520,6 +576,231 @@ public static class ProjectAtlasConstructionAdmissionFixture
         Require `
             ($dotSourceGuards.Count -eq 1) `
             "Construction wrapper did not retain its exact dot-source-only load guard."
+
+        $raceProbeStart = [System.Diagnostics.ProcessStartInfo]::new()
+        $raceProbeStart.FileName =
+            [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $raceProbeStart.UseShellExecute = $false
+        $raceProbeStart.CreateNoWindow = $true
+        foreach ($argument in @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+            'Start-Sleep -Seconds 60'
+        )) {
+            $raceProbeStart.ArgumentList.Add($argument)
+        }
+        $raceProbe = $null
+        try {
+            $raceProbe = [System.Diagnostics.Process]::Start($raceProbeStart)
+            Require ($null -ne $raceProbe) "Could not start the process-owner race probe."
+            $snapshotDeadline = [DateTime]::UtcNow.AddSeconds(10)
+            $staleSnapshot = @()
+            do {
+                $staleSnapshot = @(
+                    CimCmdlets\Get-CimInstance `
+                        -ClassName Win32_Process `
+                        -Filter "ProcessId = $($raceProbe.Id)" `
+                        -OperationTimeoutSec 5 `
+                        -ErrorAction Stop
+                )
+                if ($staleSnapshot.Count -eq 0) {
+                    Start-Sleep -Milliseconds 100
+                }
+            } while ($staleSnapshot.Count -eq 0 -and
+                [DateTime]::UtcNow -lt $snapshotDeadline)
+            Require `
+                ($staleSnapshot.Count -eq 1) `
+                "Could not snapshot the process-owner race probe."
+            $raceProbe.Kill($true)
+            Require `
+                ($raceProbe.WaitForExit(5000) -and
+                    $null -eq (Get-Process -Id $raceProbe.Id -ErrorAction SilentlyContinue)) `
+                "Process-owner race probe could not be reaped."
+
+            $staleOwnerFailure = $null
+            try {
+                CimCmdlets\Invoke-CimMethod `
+                    -InputObject $staleSnapshot[0] `
+                    -MethodName GetOwnerSid `
+                    -OperationTimeoutSec 5 `
+                    -ErrorAction Stop | Out-Null
+            }
+            catch {
+                $staleOwnerFailure = $_.Exception
+            }
+            Require `
+                ($staleOwnerFailure -is [Microsoft.Management.Infrastructure.CimException]) `
+                "Exited process snapshot did not reproduce the GetOwnerSid race."
+
+            $vanishedProcessProof = & {
+                param(
+                    [string]$Definition,
+                    [Microsoft.Management.Infrastructure.CimInstance]$Snapshot
+                )
+                Invoke-Expression $Definition
+                $capturedTimeouts = [System.Collections.Generic.List[uint32]]::new()
+                function Get-CimInstance {
+                    [CmdletBinding()]
+                    param(
+                        [string]$ClassName,
+                        [string]$Filter,
+                        [uint32]$OperationTimeoutSec
+                    )
+                    $capturedTimeouts.Add($OperationTimeoutSec)
+                    if (-not [string]::IsNullOrEmpty($Filter)) {
+                        return @()
+                    }
+                    return $Snapshot
+                }
+                $owned = @(
+                    Get-PrincipalProcesses `
+                        -Sid ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value) `
+                        -Deadline ([DateTime]::UtcNow.AddSeconds(10))
+                )
+                return [pscustomobject]@{
+                    OwnedCount = $owned.Count
+                    Timeouts = @($capturedTimeouts)
+                }
+            } $principalProcessDefinition.Extent.Text $staleSnapshot[0]
+            Require `
+                ($vanishedProcessProof.OwnedCount -eq 0 -and
+                    $vanishedProcessProof.Timeouts.Count -eq 2 -and
+                    @($vanishedProcessProof.Timeouts | Where-Object {
+                        $_ -lt 1 -or $_ -gt 10
+                    }).Count -eq 0) `
+                "Principal-process scan did not tolerate only the reaped snapshot race."
+        }
+        finally {
+            if ($null -ne $raceProbe) {
+                if (-not $raceProbe.HasExited) {
+                    $raceProbe.Kill($true)
+                    if (-not $raceProbe.WaitForExit(5000)) {
+                        throw "Fallback process-owner race probe termination could not be reaped."
+                    }
+                }
+                $raceProbe.Dispose()
+            }
+        }
+
+        $liveProcessFailureProof = & {
+            param([string]$Definition)
+            Invoke-Expression $Definition
+            $probeState = [pscustomobject]@{ EnumerationCalls = 0 }
+            function Get-CimInstance {
+                [CmdletBinding()]
+                param(
+                    [string]$ClassName,
+                    [string]$Filter,
+                    [uint32]$OperationTimeoutSec
+                )
+                $probeState.EnumerationCalls += 1
+                return [pscustomobject]@{
+                    ProcessId = [System.Diagnostics.Process]::GetCurrentProcess().Id
+                }
+            }
+            function Invoke-CimMethod {
+                [CmdletBinding()]
+                param(
+                    [object]$InputObject,
+                    [string]$MethodName,
+                    [uint32]$OperationTimeoutSec
+                )
+                return [pscustomobject]@{ ReturnValue = 5; Sid = $null }
+            }
+
+            $liveFailure = $null
+            try {
+                Get-PrincipalProcesses `
+                    -Sid ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value) `
+                    -Deadline ([DateTime]::UtcNow.AddSeconds(10)) | Out-Null
+            }
+            catch {
+                $liveFailure = $_.Exception
+            }
+            $enumerationCallsBeforeExpiredScan = $probeState.EnumerationCalls
+            $deadlineFailure = $null
+            try {
+                Get-PrincipalProcesses `
+                    -Sid ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value) `
+                    -Deadline ([DateTime]::UtcNow.AddSeconds(-1)) | Out-Null
+            }
+            catch {
+                $deadlineFailure = $_.Exception
+            }
+            return [pscustomobject]@{
+                LiveFailure = $liveFailure
+                DeadlineFailure = $deadlineFailure
+                EnumerationCallsBeforeExpiredScan = $enumerationCallsBeforeExpiredScan
+                EnumerationCallsAfterExpiredScan = $probeState.EnumerationCalls
+            }
+        } $principalProcessDefinition.Extent.Text
+        Require `
+            ($liveProcessFailureProof.LiveFailure -is [System.InvalidOperationException] -and
+                $liveProcessFailureProof.LiveFailure.Message -eq
+                    'Could not prove the owner of one running process.' -and
+                $liveProcessFailureProof.LiveFailure.InnerException -is
+                    [System.InvalidOperationException] -and
+                $liveProcessFailureProof.LiveFailure.InnerException.Message -eq
+                    'Process owner query returned a nonzero status.' -and
+                $liveProcessFailureProof.DeadlineFailure.Message -eq
+                    'Process ownership scan reached its cleanup deadline.' -and
+                $liveProcessFailureProof.EnumerationCallsBeforeExpiredScan -eq 2 -and
+                $liveProcessFailureProof.EnumerationCallsAfterExpiredScan -eq 2) `
+            "Principal-process scan weakened live-PID failure or its fixed deadline."
+
+        $requeryFailureProof = & {
+            param([string]$Definition)
+            Invoke-Expression $Definition
+            $probeState = [pscustomobject]@{ EnumerationCalls = 0 }
+            function Get-CimInstance {
+                [CmdletBinding()]
+                param(
+                    [string]$ClassName,
+                    [string]$Filter,
+                    [uint32]$OperationTimeoutSec
+                )
+                $probeState.EnumerationCalls += 1
+                if (-not [string]::IsNullOrEmpty($Filter)) {
+                    throw 'exact PID requery failed'
+                }
+                return [pscustomobject]@{
+                    ProcessId = [System.Diagnostics.Process]::GetCurrentProcess().Id
+                }
+            }
+            function Invoke-CimMethod {
+                [CmdletBinding()]
+                param(
+                    [object]$InputObject,
+                    [string]$MethodName,
+                    [uint32]$OperationTimeoutSec
+                )
+                return [pscustomobject]@{ ReturnValue = 5; Sid = $null }
+            }
+            try {
+                Get-PrincipalProcesses `
+                    -Sid ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value) `
+                    -Deadline ([DateTime]::UtcNow.AddSeconds(10)) | Out-Null
+            }
+            catch {
+                return [pscustomobject]@{
+                    Failure = $_.Exception
+                    EnumerationCalls = $probeState.EnumerationCalls
+                }
+            }
+            throw 'Expected the exact-PID requery probe to fail.'
+        } $principalProcessDefinition.Extent.Text
+        Require `
+            ($requeryFailureProof.Failure -is [System.AggregateException] -and
+                $requeryFailureProof.Failure.Message.StartsWith(
+                    'Could not requery one process after its owner query failed.',
+                    [System.StringComparison]::Ordinal
+                ) -and
+                $requeryFailureProof.Failure.InnerExceptions.Count -eq 2 -and
+                $requeryFailureProof.Failure.InnerExceptions[0].Message -eq
+                    'Process owner query returned a nonzero status.' -and
+                $requeryFailureProof.Failure.InnerExceptions[1].Message -eq
+                    'exact PID requery failed' -and
+                $requeryFailureProof.EnumerationCalls -eq 2) `
+            "Principal-process scan did not preserve owner and exact-PID requery failures."
 
         $dotSourceStateDirectory = [System.IO.Directory]::CreateDirectory(
             [System.IO.Path]::Combine(
@@ -587,7 +868,10 @@ public static class ProjectAtlasConstructionAdmissionFixture
             }
             function Find-LocalUserBySid { param([string]$Sid) return $null }
             function Find-LocalUserByName { param([string]$Name) return $null }
-            function Get-PrincipalProcesses { param([string]$Sid) return @() }
+            function Get-PrincipalProcesses {
+                param([string]$Sid, [DateTime]$Deadline)
+                return @()
+            }
             function Get-CimInstance {
                 $checkpointState.DurableCleanup = $true
                 throw 'durable-cleanup-started'

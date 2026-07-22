@@ -76,7 +76,7 @@ function Assert-ProductionRecoveryContracts {
     Require ($cleanupDefinitions.Count -eq 1) "Expected one production cleanup function."
     $cleanupText = $cleanupDefinitions[0].Extent.Text
     $zeroProcessIndex = $cleanupText.IndexOf(
-        '$zeroProcesses = @(Get-PrincipalProcesses -Sid $sid.Value).Count -eq 0',
+        '$zeroProcesses = @(',
         [System.StringComparison]::Ordinal
     )
     $checkpointIndex = $cleanupText.IndexOf(
@@ -411,14 +411,76 @@ function Get-ExactLocalAccount {
 function Get-ExactSidProcesses {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Sid
+        [string]$Sid,
+
+        [Parameter(Mandatory = $true)]
+        [DateTime]$Deadline
     )
 
+    $remainingSeconds = [Math]::Floor(($Deadline - [DateTime]::UtcNow).TotalSeconds)
+    if ($remainingSeconds -lt 1) {
+        throw "Exact-SID process scan reached its deadline."
+    }
     $matches = [System.Collections.Generic.List[object]]::new()
-    foreach ($process in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
-        $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
-        if ($owner.ReturnValue -eq 0 -and [string]$owner.Sid -eq $Sid) {
-            $matches.Add($process)
+    foreach ($process in @(Get-CimInstance `
+        -ClassName Win32_Process `
+        -OperationTimeoutSec ([uint32]$remainingSeconds) `
+        -ErrorAction Stop)) {
+        try {
+            $remainingSeconds = [Math]::Floor(
+                ($Deadline - [DateTime]::UtcNow).TotalSeconds
+            )
+            if ($remainingSeconds -lt 1) {
+                throw "Exact-SID process scan reached its deadline."
+            }
+            $owner = Invoke-CimMethod `
+                -InputObject $process `
+                -MethodName GetOwnerSid `
+                -OperationTimeoutSec ([uint32]$remainingSeconds) `
+                -ErrorAction Stop
+            if ($owner.ReturnValue -ne 0) {
+                throw [System.InvalidOperationException]::new(
+                    "Exact-SID process owner query returned a nonzero status."
+                )
+            }
+            if ([string]$owner.Sid -eq $Sid) {
+                $matches.Add($process)
+            }
+        }
+        catch {
+            $ownerFailure = $_.Exception
+            $processId = [int]$process.ProcessId
+            $remainingProcesses = $null
+            try {
+                $remainingSeconds = [Math]::Floor(
+                    ($Deadline - [DateTime]::UtcNow).TotalSeconds
+                )
+                if ($remainingSeconds -lt 1) {
+                    throw [System.TimeoutException]::new(
+                        "Exact-SID process requery reached its deadline."
+                    )
+                }
+                $remainingProcesses = @(
+                    Get-CimInstance `
+                        -ClassName Win32_Process `
+                        -Filter "ProcessId = $processId" `
+                        -OperationTimeoutSec ([uint32]$remainingSeconds) `
+                        -ErrorAction Stop
+                )
+            }
+            catch {
+                throw [System.AggregateException]::new(
+                    "Could not requery one process after its exact-SID owner query failed.",
+                    @($ownerFailure, $_.Exception)
+                )
+            }
+            if ($remainingProcesses.Count -eq 0) {
+                continue
+            }
+            throw [System.InvalidOperationException]::new(
+                "Could not prove one running process was not owned by the exact SID.",
+                $ownerFailure
+            )
         }
     }
     return @($matches)
@@ -495,8 +557,9 @@ function Assert-ScenarioAbsent {
                 ($null -ne $_.Sid -and $_.Sid.Value -eq $Sid)
         }).Count -eq 0) `
         "Recovery cleanup left its exact account."
+    $processDeadline = [DateTime]::UtcNow.AddSeconds(10)
     Require `
-        (@(Get-ExactSidProcesses -Sid $Sid).Count -eq 0) `
+        (@(Get-ExactSidProcesses -Sid $Sid -Deadline $processDeadline).Count -eq 0) `
         "Recovery cleanup left an exact-SID process."
     Require `
         (@(Get-ExactProfile -Sid $Sid).Count -eq 0) `
@@ -1525,7 +1588,10 @@ function Invoke-CleanupRetryRecoveryScenario {
         -TimeoutSeconds 15 `
         -FailureMessage "Profile-backed exact-SID process did not become observable." `
         -Condition {
-            @(Get-ExactSidProcesses -Sid $identity.Sid | Where-Object {
+            $scanDeadline = [DateTime]::UtcNow.AddSeconds(5)
+            @(Get-ExactSidProcesses `
+                -Sid $identity.Sid `
+                -Deadline $scanDeadline | Where-Object {
                 [int]$_.ProcessId -eq $launchReceipt.ProcessId
             }).Count -eq 1 -and
                 @(Get-ExactProfile -Sid $identity.Sid).Count -eq 1
@@ -1543,8 +1609,11 @@ function Invoke-CleanupRetryRecoveryScenario {
     Require `
         ($checkpointFailure -eq 'cleanup-retry-checkpoint') `
         "Cleanup retry scenario did not fail at the exact checkpoint."
+    $checkpointProcessDeadline = [DateTime]::UtcNow.AddSeconds(10)
     Require `
-        (@(Get-ExactSidProcesses -Sid $identity.Sid).Count -eq 0 -and
+        (@(Get-ExactSidProcesses `
+            -Sid $identity.Sid `
+            -Deadline $checkpointProcessDeadline).Count -eq 0 -and
             $null -eq (Get-Process -Id $launchReceipt.ProcessId -ErrorAction SilentlyContinue)) `
         "Cleanup retry checkpoint left its exact process alive."
     Wait-ForRecoveryCondition `
