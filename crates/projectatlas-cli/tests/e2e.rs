@@ -6,9 +6,10 @@ use predicates::prelude::*;
 use projectatlas_cli::optional_parser_lifecycle::OPTIONAL_PARSER_PACK_SELECTION_POLICY_PATH;
 use projectatlas_core::PurposeSource;
 use projectatlas_core::graph::{
-    Completeness, ConfidenceClass, CoverageScope, EntitySelector, ExtendedRelationKind,
-    ExternalSelector, GraphEntity, GraphIdentityText, GraphRelationKind, LogicalRelation,
-    PackageSelector, RelationResolution, RepositoryFilePath, RepositoryNodePath,
+    Completeness, ConfidenceClass, CoverageRecord, CoverageScope, CoverageState, EntitySelector,
+    ExtendedRelationKind, ExternalSelector, GraphEntity, GraphIdentityText, GraphLimitKind,
+    GraphRelationKind, LogicalRelation, PackageSelector, RelationResolution, RepositoryFilePath,
+    RepositoryNodePath,
 };
 use projectatlas_core::language::{BROAD_SOURCE_EXTENSIONS, detect_language_for_path};
 #[cfg(feature = "optional-parser-supervisor")]
@@ -1503,7 +1504,7 @@ fn settings_reports_supported_predecessor_without_migration() -> Result<(), Box<
         || schema
             .get("migration_steps_remaining")
             .and_then(Value::as_u64)
-            != Some(5)
+            != Some(6)
         || !settings.get("index").is_some_and(Value::is_null)
         || !settings.get("telemetry").is_some_and(Value::is_null)
     {
@@ -7338,6 +7339,7 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"atlas_session_brief","arguments":{"query":"indexed","folder_limit":1,"file_limit":1,"blocker_limit":1}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"atlas_task_status","arguments":{"task_id":"task-progress-contract"}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"atlas_task_cancel","arguments":{"task_id":"task-progress-contract"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"atlas_health","arguments":{"coverage":true,"path_prefix":"src/lib.rs","parser":"tree-sitter","provider":"tree-sitter","coverage_state":"complete","limit":1}}}"#.to_string(),
     ];
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let stdout = run_mcp_stdio(
@@ -7369,6 +7371,8 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains("already_finished")
         || !stdout.contains("health:")
         || !stdout.contains("health_findings[1]")
+        || !stdout.contains("coverage:")
+        || !stdout.contains("output_bytes:")
         || !stdout.contains("next_start_index: 1")
         || !stdout.contains("ProjectAtlas")
         || !stdout.contains("Token Impact")
@@ -7661,6 +7665,135 @@ fn cli_navigation_rows_propagate_nonempty_typed_graph_evidence() -> Result<(), B
             .into());
         }
     }
+
+    let summary_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["summary", "src/navigation_owner.rs", "--limit", "10"])
+        .output()?;
+    if !summary_output.status.success() {
+        return Err(io::Error::other(format!(
+            "coverage-enriched summary failed: {}",
+            String::from_utf8_lossy(&summary_output.stderr)
+        ))
+        .into());
+    }
+    let summary: Value = serde_json::from_slice(&summary_output.stdout)?;
+    require_json_bool(&summary, &["coverage", "available"], true)?;
+    require_json_string(&summary, &["coverage", "trust"], "partial")?;
+    require_json_string(&summary, &["coverage", "next_call", "capability"], "health")?;
+
+    let coverage_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "health-check",
+            "--coverage",
+            "--relation",
+            "calls",
+            "--coverage-state",
+            "failed",
+            "--reason",
+            "parser failed",
+            "--limit",
+            "1",
+        ])
+        .output()?;
+    if !coverage_output.status.success() {
+        return Err(io::Error::other(format!(
+            "filtered JSON coverage failed: {}",
+            String::from_utf8_lossy(&coverage_output.stderr)
+        ))
+        .into());
+    }
+    let coverage: Value = serde_json::from_slice(&coverage_output.stdout)?;
+    require_json_usize(&coverage, &["returned"], 1)?;
+    require_json_string(&coverage, &["total", "state"], "exact")?;
+    require_json_string(&coverage, &["rows", "0", "state"], "failed")?;
+    require_json_string(
+        &coverage,
+        &["rows", "0", "next_call", "capability"],
+        "health",
+    )?;
+    require_json_usize(&coverage, &["output_bytes"], coverage_output.stdout.len())?;
+
+    let parsed_coverage = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "health-check",
+            "--coverage",
+            "--path-prefix",
+            "src/navigation_owner.rs",
+            "--parser",
+            "tree-sitter",
+            "--provider",
+            "tree-sitter",
+            "--coverage-state",
+            "partial",
+            "--limit",
+            "1",
+        ])
+        .output()?;
+    if !parsed_coverage.status.success() {
+        return Err(io::Error::other(format!(
+            "filtered TOON coverage failed: {}",
+            String::from_utf8_lossy(&parsed_coverage.stderr)
+        ))
+        .into());
+    }
+    let parsed_coverage = String::from_utf8(parsed_coverage.stdout)?;
+    for expected in [
+        "coverage:",
+        "returned: 1",
+        "state: partial",
+        "parser: \"tree-sitter\"",
+        "provider: \"tree-sitter\"",
+        "capability: summary",
+        "output_bytes:",
+    ] {
+        if !parsed_coverage.contains(expected) {
+            return Err(io::Error::other(format!(
+                "TOON coverage omitted {expected:?}: {parsed_coverage}"
+            ))
+            .into());
+        }
+    }
+    let toon_output_bytes = parsed_coverage
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("output_bytes: "))
+        .ok_or_else(|| io::Error::other("TOON coverage omitted numeric output_bytes"))?
+        .parse::<usize>()?;
+    if toon_output_bytes != parsed_coverage.len() {
+        return Err(io::Error::other(format!(
+            "TOON coverage output_bytes mismatch: expected {}, got {toon_output_bytes}",
+            parsed_coverage.len()
+        ))
+        .into());
+    }
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["health-check", "--coverage", "--coverage-state", "unknown"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid coverage state"));
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["health-check", "--parser", "tree-sitter"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--coverage"));
     Ok(())
 }
 
@@ -7776,6 +7909,30 @@ fn publish_cli_navigation_graph(db: &Path) -> Result<(), Box<dyn Error>> {
             "NAVIGATION_MODE",
         )?,
     ];
+    let coverage = vec![
+        CoverageRecord::new(
+            CoverageScope::Path {
+                path: RepositoryNodePath::new(Path::new("src/navigation_owner.rs"))?,
+            },
+            None,
+            CoverageState::Partial,
+            4,
+            1,
+            generation,
+            Some(GraphIdentityText::new("one fallback fact omitted")?),
+            Some(GraphLimitKind::Rows),
+        )?,
+        CoverageRecord::new(
+            CoverageScope::Project,
+            Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+            CoverageState::Failed,
+            0,
+            1,
+            generation,
+            Some(GraphIdentityText::new("parser failed")?),
+            None,
+        )?,
+    ];
     let nodes = store
         .load_nodes()?
         .into_iter()
@@ -7791,7 +7948,7 @@ fn publish_cli_navigation_graph(db: &Path) -> Result<(), Box<dyn Error>> {
             &[owner, local, unresolved, test, package, external],
             &relations,
             &[],
-            &[],
+            &coverage,
         )?;
         publication.complete()?;
     }

@@ -16,7 +16,7 @@ use projectatlas_core::normalize_native_path_display;
 use std::path::PathBuf;
 
 /// Current `SQLite` schema version supported by this crate.
-pub(crate) const SCHEMA_VERSION: i64 = 13;
+pub(crate) const SCHEMA_VERSION: i64 = 14;
 /// Released 0.3.26 schema accepted by the migration inventory.
 pub(crate) const PREVIOUS_SCHEMA_VERSION: i64 = 8;
 /// First internal schema with explicit publication invalidation.
@@ -27,6 +27,8 @@ const GRAPH_SCHEMA_VERSION: i64 = 10;
 const TELEMETRY_SCHEMA_VERSION: i64 = 11;
 /// First schema with canonical entity and relation resolution keys.
 const RESOLUTION_SCHEMA_VERSION: i64 = 12;
+/// First schema with separate source-parser and fact-provider provenance.
+const PARSER_PROVENANCE_SCHEMA_VERSION: i64 = 13;
 /// Metadata key for the durable schema version.
 pub(crate) const SCHEMA_VERSION_KEY: &str = "schema_version";
 /// Metadata key for the owning project root.
@@ -94,8 +96,13 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         from: RESOLUTION_SCHEMA_VERSION,
-        to: SCHEMA_VERSION,
+        to: PARSER_PROVENANCE_SCHEMA_VERSION,
         apply: migrate_12_to_13,
+    },
+    Migration {
+        from: PARSER_PROVENANCE_SCHEMA_VERSION,
+        to: SCHEMA_VERSION,
+        apply: migrate_13_to_14,
     },
 ];
 
@@ -223,6 +230,8 @@ static GRAPH_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::n
 static TELEMETRY_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 /// Process-local immutable schema-12 contract before parser provenance separation.
 static RESOLUTION_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
+/// Process-local immutable schema-13 contract before coverage-discovery indexes.
+static PARSER_PROVENANCE_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 
 /// Immutable physical schema emitted by the released 0.3.26 runtime.
 #[cfg(test)]
@@ -644,6 +653,18 @@ const GRAPH_SCHEMA_SQL: &str = "
         ON graph_coverage(scope_path, id);
     CREATE INDEX idx_graph_coverage_relation_state
         ON graph_coverage(relation_scope, relation_kind, state, id);
+";
+
+/// Lookup indexes owned by bounded project-wide coverage discovery.
+const COVERAGE_DISCOVERY_SCHEMA_SQL: &str = "
+    CREATE INDEX idx_source_parse_metadata_source_parser_path
+        ON source_parse_metadata(source_parser, path);
+    CREATE INDEX idx_source_parse_metadata_fact_parser_path
+        ON source_parse_metadata(fact_parser, path);
+    CREATE INDEX idx_graph_coverage_discovery_state
+        ON graph_coverage(state, scope_path, id);
+    CREATE INDEX idx_graph_coverage_discovery_reason
+        ON graph_coverage(reason, scope_path, id);
 ";
 
 /// Canonical resolution identities and their graph-owner bindings.
@@ -1351,7 +1372,8 @@ fn schema_state(connection: &Connection) -> DbResult<SchemaState> {
         | PUBLICATION_SCHEMA_VERSION
         | GRAPH_SCHEMA_VERSION
         | TELEMETRY_SCHEMA_VERSION
-        | RESOLUTION_SCHEMA_VERSION => Ok(SchemaState::UpgradeRequired),
+        | RESOLUTION_SCHEMA_VERSION
+        | PARSER_PROVENANCE_SCHEMA_VERSION => Ok(SchemaState::UpgradeRequired),
         _ => Err(DbError::SchemaVersion {
             found,
             expected: SCHEMA_VERSION,
@@ -1364,6 +1386,7 @@ fn create_fresh(connection: &Connection, expected_root: Option<&str>) -> DbResul
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
     connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    connection.execute_batch(COVERAGE_DISCOVERY_SCHEMA_SQL)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
@@ -1435,6 +1458,12 @@ fn migrate_12_to_13(connection: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Add the indexed filter paths used by bounded coverage discovery.
+fn migrate_13_to_14(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(COVERAGE_DISCOVERY_SCHEMA_SQL)?;
+    Ok(())
+}
+
 /// Invalidate derived rows without deleting authored local state.
 pub(crate) fn invalidate_derived_publication(connection: &Connection) -> DbResult<()> {
     connection.execute(
@@ -1475,6 +1504,7 @@ fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResul
             GRAPH_SCHEMA_VERSION => graph_predecessor_schema_contract()?,
             TELEMETRY_SCHEMA_VERSION => telemetry_predecessor_schema_contract()?,
             RESOLUTION_SCHEMA_VERSION => resolution_predecessor_schema_contract()?,
+            PARSER_PROVENANCE_SCHEMA_VERSION => parser_provenance_predecessor_schema_contract()?,
             found => {
                 return Err(DbError::SchemaVersion {
                     found,
@@ -1558,6 +1588,7 @@ fn schema_contract() -> DbResult<&'static SchemaContract> {
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
     connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    connection.execute_batch(COVERAGE_DISCOVERY_SCHEMA_SQL)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
@@ -1605,6 +1636,22 @@ fn resolution_predecessor_schema_contract() -> DbResult<&'static SchemaContract>
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
     Ok(RESOLUTION_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
+}
+
+/// Build the immutable schema-13 contract before coverage-discovery indexes.
+fn parser_provenance_predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
+    if let Some(contract) = PARSER_PROVENANCE_PREDECESSOR_SCHEMA_CONTRACT.get() {
+        return Ok(contract);
+    }
+    let connection = Connection::open_in_memory()?;
+    connection.execute_batch(BASE_SCHEMA_SQL)?;
+    connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
+    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
+    connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
+    connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
+    let contract = read_schema_contract(&connection)?;
+    Ok(PARSER_PROVENANCE_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
 }
 
 /// Build the immutable schema-8/9 contract from the unchanged base DDL.
@@ -2505,6 +2552,24 @@ mod tests {
                 "parser-provenance migration changed valid publication metadata",
             )
             .into());
+        }
+        for index in [
+            "idx_source_parse_metadata_source_parser_path",
+            "idx_source_parse_metadata_fact_parser_path",
+            "idx_graph_coverage_discovery_state",
+            "idx_graph_coverage_discovery_reason",
+        ] {
+            let exists = store.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = ?1)",
+                [index],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !exists {
+                return Err(io::Error::other(format!(
+                    "coverage-discovery migration omitted {index}"
+                ))
+                .into());
+            }
         }
         Ok(())
     }

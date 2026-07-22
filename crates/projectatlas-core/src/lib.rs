@@ -508,6 +508,8 @@ pub enum NavigationNextCapability {
     Summary,
     /// Inspect detailed typed relations after a connection sample truncates.
     Relations,
+    /// Inspect bounded structural or coverage health for the selected path.
+    Health,
 }
 
 /// Directly reusable next navigation call for one ranked row.

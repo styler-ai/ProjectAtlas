@@ -65,8 +65,8 @@ use projectatlas_fs::{
     scan_repo_controlled, scan_repo_controlled_with_work,
 };
 use projectatlas_service::{
-    FilePathMatcher, NextStepReport, build_next_report, load_ranked_file_nodes_with_reasons,
-    load_ranked_folder_nodes_with_reasons,
+    CoverageDiscoveryReport, FilePathMatcher, NextStepReport, build_next_report,
+    load_ranked_file_nodes_with_reasons, load_ranked_folder_nodes_with_reasons,
 };
 use projectatlas_symbols::{extract_symbol_graph_controlled, semantic_resolution_contract_digest};
 use rayon::ThreadPoolBuilder;
@@ -3265,6 +3265,11 @@ pub(crate) fn render_health_page(page: &HealthFindingsPage, query: &HealthQuery)
         },
         "health_findings": rows,
     }))
+}
+
+/// Render one bounded current coverage page as compact TOON.
+pub(crate) fn render_coverage_report(report: &CoverageDiscoveryReport) -> String {
+    encode_agent_payload(&json!({ "coverage": report }))
 }
 
 /// Render a purpose curation queue as compact TOON.

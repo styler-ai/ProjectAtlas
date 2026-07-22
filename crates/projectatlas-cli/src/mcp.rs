@@ -34,9 +34,9 @@ use crate::{
     AgentErrorKind, CliError, DEFAULT_FILE_SUMMARY_LIMIT, DatabaseFilesystemErrorPayload,
     HarnessConfig, OutputFormat, RootTransition, RuntimeInfoReport,
     build_harness_mcp_config_report, build_parity_report, build_root_report, build_runtime_info,
-    database_filesystem_error_payload, render_code_slice, render_file_summary,
-    render_parity_report, render_root_report, render_runtime_info, render_search_report,
-    render_watch_status,
+    database_filesystem_error_payload, finalize_coverage_output, render_code_slice,
+    render_file_summary, render_parity_report, render_root_report, render_runtime_info,
+    render_search_report, render_watch_status,
 };
 use projectatlas_core::graph::ProjectInstanceId;
 use projectatlas_core::health::Severity;
@@ -53,13 +53,14 @@ use projectatlas_core::{
     validated_repo_file_key, validated_repo_node_key,
 };
 use projectatlas_db::{
-    AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, read_project_root_read_only,
-    verify_project_database,
+    AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, RepositoryCoverageQuery,
+    read_project_root_read_only, verify_project_database,
 };
 use projectatlas_service::{
-    SymbolSliceSelector, TokenReport, TokenReportRequest, build_file_summary_from_source,
-    load_token_report, read_indexed_code_slice_from_source, read_symbol_slice_from_source,
-    search_indexed_files,
+    COVERAGE_PAGE_MAX_LIMIT, SymbolSliceSelector, TokenReport, TokenReportRequest,
+    build_file_summary_from_source, load_coverage_discovery, load_token_report,
+    parse_coverage_parser, parse_coverage_relation, parse_coverage_state,
+    read_indexed_code_slice_from_source, read_symbol_slice_from_source, search_indexed_files,
 };
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
@@ -831,6 +832,18 @@ struct AtlasHealthParams {
     include_assets: Option<bool>,
     /// Include low-priority files in the purpose queue.
     include_low_priority_files: Option<bool>,
+    /// Opt in to bounded current coverage discovery instead of structural findings.
+    coverage: Option<bool>,
+    /// Optional source parser coverage filter.
+    parser: Option<String>,
+    /// Optional derived-fact provider coverage filter.
+    provider: Option<String>,
+    /// Optional relationship-family coverage filter.
+    relation: Option<String>,
+    /// Optional complete, partial, failed, ignored, oversized, quarantined, or stale filter.
+    coverage_state: Option<String>,
+    /// Optional exact coverage reason filter.
+    reason: Option<String>,
 }
 
 /// MCP parameter payload for bounded task-scoped purpose curation.
@@ -3957,6 +3970,53 @@ fn health_query_from_params(
     })
 }
 
+/// Return whether MCP parameters contain coverage-only filters.
+fn has_coverage_filters(params: &AtlasHealthParams) -> bool {
+    params.parser.is_some()
+        || params.provider.is_some()
+        || params.relation.is_some()
+        || params.coverage_state.is_some()
+        || params.reason.is_some()
+}
+
+/// Convert explicit MCP coverage parameters into one typed bounded DB query.
+fn coverage_query_from_params(
+    params: &AtlasHealthParams,
+) -> Result<RepositoryCoverageQuery, CliError> {
+    let limit = params
+        .limit
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_HEALTH_LIMIT)
+        .min(COVERAGE_PAGE_MAX_LIMIT as usize);
+    Ok(RepositoryCoverageQuery {
+        start_index: u32::try_from(params.start_index.unwrap_or(0)).map_err(|error| {
+            CliError::InvalidInput(format!("coverage start index is too large: {error}"))
+        })?,
+        limit: u32::try_from(limit).map_err(|error| {
+            CliError::InvalidInput(format!("coverage limit is too large: {error}"))
+        })?,
+        path_prefix: trimmed_filter(params.path_prefix.as_deref())
+            .map(|value| normalize_repo_path_prefix(&value)),
+        parser: trimmed_filter(params.parser.as_deref())
+            .as_deref()
+            .map(parse_coverage_parser)
+            .transpose()?,
+        provider: trimmed_filter(params.provider.as_deref())
+            .as_deref()
+            .map(parse_coverage_parser)
+            .transpose()?,
+        relation: trimmed_filter(params.relation.as_deref())
+            .as_deref()
+            .map(parse_coverage_relation)
+            .transpose()?,
+        state: trimmed_filter(params.coverage_state.as_deref())
+            .as_deref()
+            .map(parse_coverage_state)
+            .transpose()?,
+        reason: trimmed_filter(params.reason.as_deref()),
+    })
+}
+
 /// Return the DB scope for MCP purpose queue parameters.
 fn purpose_queue_scope(params: &AtlasHealthParams) -> HealthScope {
     match (
@@ -4810,7 +4870,7 @@ impl ProjectAtlasMcpServer {
     /// Return structural health findings.
     #[tool(
         name = "atlas_health",
-        description = "Return a bounded ProjectAtlas structural health page with optional category, severity, and path-prefix filters."
+        description = "Return a bounded ProjectAtlas structural health page, or opt in to current coverage discovery with path, parser/provider, relation, state, and reason filters."
     )]
     fn atlas_health(
         &self,
@@ -4819,6 +4879,38 @@ impl ProjectAtlasMcpServer {
     ) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path.clone())?;
+            if params.coverage.unwrap_or(false) {
+                let query = coverage_query_from_params(&params)?;
+                return self.with_fresh_string_and_usage_for_request(
+                    &state,
+                    Some(context),
+                    |store, stamp| {
+                        let mut report = load_coverage_discovery(store, query.clone())?;
+                        let toon = finalize_coverage_output(OutputFormat::Toon, &mut report)?;
+                        let usage = Self::telemetry_enabled()
+                            .then(|| {
+                                self.estimated_source_tokens_cached(
+                                    &state, store, &stamp, None, None,
+                                )
+                            })
+                            .and_then(Result::ok)
+                            .map(|baseline_tokens| {
+                                McpUsageIntent::directory_walk(
+                                    MCP_EVENT_ATLAS_HEALTH,
+                                    None,
+                                    None,
+                                    baseline_tokens,
+                                )
+                            });
+                        Ok((toon, usage))
+                    },
+                );
+            }
+            if has_coverage_filters(&params) {
+                return Err(CliError::InvalidInput(
+                    "coverage filters require coverage=true".to_string(),
+                ));
+            }
             let scope = if params.source_only.unwrap_or(false) {
                 HealthScope::source_only()
             } else {

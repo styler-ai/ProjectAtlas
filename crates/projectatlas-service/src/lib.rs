@@ -4,19 +4,23 @@ mod import_aliases;
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use import_aliases::{ImportAliasMap, load_import_alias_map};
+use projectatlas_core::graph::{
+    CoverageScope, CoverageState, ExtendedRelationKind, GraphLimitKind, GraphLimits,
+    GraphRelationKind,
+};
 use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolKind, SymbolRelation,
 };
 use projectatlas_core::telemetry::{TokenOverview, TokenTrendReport, TokenTrendWindow};
 use projectatlas_core::{
-    IndexedNode, NavigationNextCall, NavigationNextCapability, NodeKind, RankedConnectionKind,
-    RankedConnectionTarget, RankedNode, RankedReasonCode, repo_path_to_native,
-    validated_repo_file_key,
+    IndexGeneration, IndexedNode, NavigationNextCall, NavigationNextCapability, NodeKind,
+    RankedConnectionKind, RankedConnectionTarget, RankedNode, RankedReasonCode,
+    repo_path_to_native, validated_repo_file_key,
 };
 use projectatlas_db::{
-    AtlasStore, CapturedProjectBinding, DbError, IndexedFileText, RepositoryNavigationConnections,
-    RepositoryNavigationNode,
+    AtlasStore, CapturedProjectBinding, DbError, IndexedFileText, RepositoryCoverageQuery,
+    RepositoryCoverageRow, RepositoryNavigationConnections, RepositoryNavigationNode,
 };
 use projectatlas_symbols::module_aliases_for_path;
 use regex::RegexBuilder;
@@ -44,6 +48,10 @@ const RANKED_CONNECTION_SAMPLE_LIMIT: usize = 3;
 const NEXT_REPORT_DEFAULT_LIMIT: usize = 3;
 /// Maximum number of folders and files returned by `next`.
 const NEXT_REPORT_MAX_LIMIT: usize = 10;
+/// Maximum rows returned by one agent-facing coverage page.
+pub const COVERAGE_PAGE_MAX_LIMIT: u32 = 200;
+/// Maximum rows retained by one selected-file coverage digest.
+const COVERAGE_DIGEST_ROW_LIMIT: u32 = 16;
 /// Status emitted when live source was read successfully.
 const SOURCE_STATUS_LIVE: &str = "live-source";
 /// Status emitted when indexed metadata had to stand in for live source.
@@ -154,6 +162,426 @@ pub fn load_token_report(
     Ok(report)
 }
 
+/// Closed trust projection for one normalized coverage state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageTrustState {
+    /// The selected producer reported complete coverage.
+    Trusted,
+    /// Some current facts are available while omissions remain explicit.
+    Partial,
+    /// The selected facts are unavailable or not current enough to trust.
+    Untrusted,
+}
+
+/// Closed producer family represented by one coverage row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageExtractionPass {
+    /// File parse and fact projection coverage.
+    GraphProjection,
+    /// One normalized relationship-family extraction pass.
+    Relationship,
+}
+
+/// Typed cardinality knowledge for one bounded coverage page.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", content = "value", rename_all = "snake_case")]
+pub enum CoverageTotalState {
+    /// The bounded page proves the exact filtered total.
+    Exact(u32),
+    /// At least this many matching rows exist.
+    AtLeast(u32),
+    /// An exact or lower-bound total is unavailable at this continuation.
+    Unknown,
+}
+
+/// Per-state counts retained by one selected-file coverage digest.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct CoverageStateCounts {
+    /// Complete coverage rows.
+    pub complete: u32,
+    /// Partial coverage rows.
+    pub partial: u32,
+    /// Failed coverage rows.
+    pub failed: u32,
+    /// Intentionally ignored coverage rows.
+    pub ignored: u32,
+    /// Oversized coverage rows.
+    pub oversized: u32,
+    /// Quarantined coverage rows.
+    pub quarantined: u32,
+    /// Stale coverage rows.
+    pub stale: u32,
+}
+
+/// Compact relationship and parse coverage attached to one selected-file summary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CoverageDigest {
+    /// Whether current coverage rows exist for the selected file.
+    pub available: bool,
+    /// Active generation shared by every retained row, or zero when unavailable.
+    pub active_generation: IndexGeneration,
+    /// Source parser pass recorded for the file.
+    pub parser: Option<ParserKind>,
+    /// Fact provider pass recorded for the file.
+    pub provider: Option<ParserKind>,
+    /// Bounded per-state coverage counts.
+    pub states: CoverageStateCounts,
+    /// Total items declared by retained coverage rows.
+    pub total: u64,
+    /// Covered items declared by retained coverage rows.
+    pub covered: u64,
+    /// Omitted or untrusted items declared by retained coverage rows.
+    pub omitted: u64,
+    /// Number of retained relation-family rows.
+    pub relation_rows: u32,
+    /// Whether additional selected-file rows were omitted by the digest bound.
+    pub truncated: bool,
+    /// Conservative trust state across the retained digest.
+    pub trust: CoverageTrustState,
+    /// Existing opt-in health surface for deeper coverage discovery.
+    pub next_call: NavigationNextCall,
+}
+
+/// One actionable row in an opt-in coverage page.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CoverageDiscoveryRow {
+    /// Exact repository-relative path, or `.` for project-scoped coverage.
+    pub path: String,
+    /// Stable extraction-pass owner for parse or relationship facts.
+    pub extraction_pass: CoverageExtractionPass,
+    /// Optional normalized relation family.
+    pub relation: Option<GraphRelationKind>,
+    /// Current coverage lifecycle state.
+    pub state: CoverageState,
+    /// Conservative trust projection.
+    pub trust: CoverageTrustState,
+    /// Total items represented by this row.
+    pub total: u64,
+    /// Successfully covered items.
+    pub covered: u64,
+    /// Omitted or untrusted items.
+    pub omitted: u64,
+    /// Actionable explanation when coverage is not complete.
+    pub reason: Option<String>,
+    /// Reached product limit when applicable.
+    pub reached_limit: Option<GraphLimitKind>,
+    /// Active complete index generation.
+    pub active_generation: IndexGeneration,
+    /// Source parser pass for path-scoped coverage.
+    pub parser: Option<ParserKind>,
+    /// Fact provider pass for path-scoped coverage.
+    pub provider: Option<ParserKind>,
+    /// Existing selected-file summary or health surface to call next.
+    pub next_call: NavigationNextCall,
+}
+
+/// Agent-facing bounded coverage discovery report.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CoverageDiscoveryReport {
+    /// Zero-based result offset after filters.
+    pub start_index: u32,
+    /// Requested page limit after the service ceiling is applied.
+    pub limit: u32,
+    /// Maximum service page size.
+    pub max_limit: u32,
+    /// Number of rows returned.
+    pub returned: u32,
+    /// Whether at least one additional validated row exists.
+    pub truncated: bool,
+    /// Next zero-based continuation when another row exists.
+    pub continuation: Option<u32>,
+    /// Product ceiling reached when further continuation is intentionally unavailable.
+    pub reached_limit: Option<GraphLimitKind>,
+    /// Typed knowledge of the filtered total.
+    pub total: CoverageTotalState,
+    /// Encoded output bytes, filled by the selected adapter.
+    pub output_bytes: u32,
+    /// Absolute encoded-output ceiling.
+    pub max_output_bytes: u32,
+    /// Fully validated actionable rows.
+    pub rows: Vec<CoverageDiscoveryRow>,
+}
+
+/// Parse one public parser/provider coverage filter.
+///
+/// # Errors
+///
+/// Returns an error when the value is not a supported parser pass.
+pub fn parse_coverage_parser(value: &str) -> ServiceResult<ParserKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "tree-sitter" | "tree_sitter" => Ok(ParserKind::TreeSitter),
+        "manifest" => Ok(ParserKind::Manifest),
+        "structural" => Ok(ParserKind::Structural),
+        "fallback" => Ok(ParserKind::Fallback),
+        _ => Err(ServiceError::InvalidInput(format!(
+            "invalid coverage parser/provider '{value}'; expected tree-sitter, manifest, structural, or fallback"
+        ))),
+    }
+}
+
+/// Parse one public relation-family coverage filter.
+///
+/// # Errors
+///
+/// Returns an error when the value is not a supported legacy or extended family.
+pub fn parse_coverage_relation(value: &str) -> ServiceResult<GraphRelationKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "contains" => Ok(GraphRelationKind::Legacy(RelationKind::Contains)),
+        "imports" => Ok(GraphRelationKind::Legacy(RelationKind::Imports)),
+        "calls" => Ok(GraphRelationKind::Legacy(RelationKind::Calls)),
+        "depends-on" | "depends_on" => Ok(GraphRelationKind::Legacy(RelationKind::DependsOn)),
+        "references" => Ok(GraphRelationKind::Extended(
+            ExtendedRelationKind::References,
+        )),
+        "tests" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Tests)),
+        "routes-to" | "routes_to" => {
+            Ok(GraphRelationKind::Extended(ExtendedRelationKind::RoutesTo))
+        }
+        "configures" => Ok(GraphRelationKind::Extended(
+            ExtendedRelationKind::Configures,
+        )),
+        "reads" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Reads)),
+        "writes" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Writes)),
+        _ => Err(ServiceError::InvalidInput(format!(
+            "invalid coverage relation '{value}'"
+        ))),
+    }
+}
+
+/// Parse one public coverage lifecycle filter.
+///
+/// # Errors
+///
+/// Returns an error when the value is not one of the seven closed states.
+pub fn parse_coverage_state(value: &str) -> ServiceResult<CoverageState> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "complete" => Ok(CoverageState::Complete),
+        "partial" => Ok(CoverageState::Partial),
+        "failed" => Ok(CoverageState::Failed),
+        "ignored" => Ok(CoverageState::Ignored),
+        "oversized" => Ok(CoverageState::Oversized),
+        "quarantined" => Ok(CoverageState::Quarantined),
+        "stale" => Ok(CoverageState::Stale),
+        _ => Err(ServiceError::InvalidInput(format!(
+            "invalid coverage state '{value}'"
+        ))),
+    }
+}
+
+/// Load one bounded opt-in coverage page without starting index work.
+///
+/// # Errors
+///
+/// Returns an error when the selected project has no identity, the query bounds
+/// are invalid, or persisted coverage/provenance is inconsistent.
+pub fn load_coverage_discovery(
+    store: &AtlasStore,
+    mut query: RepositoryCoverageQuery,
+) -> ServiceResult<CoverageDiscoveryReport> {
+    if query.start_index >= GraphLimits::MAX_ROWS {
+        return Err(ServiceError::InvalidInput(format!(
+            "coverage start index must be below {}",
+            GraphLimits::MAX_ROWS
+        )));
+    }
+    query.limit = query
+        .limit
+        .clamp(1, COVERAGE_PAGE_MAX_LIMIT)
+        .min(GraphLimits::MAX_ROWS - query.start_index);
+    let project = store
+        .project_instance_id()?
+        .ok_or(ServiceError::SelectedProjectUnavailable)?;
+    let page = store.repository_coverage_page(project, &query)?;
+    let rows = page
+        .rows
+        .into_iter()
+        .map(coverage_discovery_row)
+        .collect::<Vec<_>>();
+    let returned = u32::try_from(rows.len()).map_err(|error| {
+        ServiceError::InvalidInput(format!("coverage row count did not fit u32: {error}"))
+    })?;
+    let proved = query.start_index.saturating_add(returned);
+    let total = if page.truncated {
+        CoverageTotalState::AtLeast(proved.saturating_add(1))
+    } else if query.start_index == 0 || returned > 0 {
+        CoverageTotalState::Exact(proved)
+    } else {
+        CoverageTotalState::Unknown
+    };
+    let next_index = query.start_index.saturating_add(returned);
+    let continuation = (page.truncated && next_index < GraphLimits::MAX_ROWS).then_some(next_index);
+    let reached_limit = (page.truncated && continuation.is_none()).then_some(GraphLimitKind::Rows);
+    Ok(CoverageDiscoveryReport {
+        start_index: query.start_index,
+        limit: query.limit,
+        max_limit: COVERAGE_PAGE_MAX_LIMIT,
+        returned,
+        truncated: page.truncated,
+        continuation,
+        reached_limit,
+        total,
+        output_bytes: 0,
+        max_output_bytes: GraphLimits::MAX_OUTPUT_BYTES,
+        rows,
+    })
+}
+
+/// Project one validated storage row into the agent-facing coverage contract.
+fn coverage_discovery_row(row: RepositoryCoverageRow) -> CoverageDiscoveryRow {
+    let coverage = row.coverage;
+    let path = match coverage.scope() {
+        CoverageScope::Project => ".".to_string(),
+        CoverageScope::Path { path } => path.as_str().to_string(),
+    };
+    let relation = coverage.relation();
+    CoverageDiscoveryRow {
+        next_call: NavigationNextCall {
+            capability: if matches!(coverage.scope(), CoverageScope::Path { .. }) {
+                NavigationNextCapability::Summary
+            } else {
+                NavigationNextCapability::Health
+            },
+            path: path.clone(),
+        },
+        path,
+        extraction_pass: if relation.is_some() {
+            CoverageExtractionPass::Relationship
+        } else {
+            CoverageExtractionPass::GraphProjection
+        },
+        relation,
+        state: coverage.state(),
+        trust: coverage_trust(coverage.state()),
+        total: coverage.total(),
+        covered: coverage.covered(),
+        omitted: coverage.omitted(),
+        reason: coverage.reason().map(|reason| reason.as_str().to_string()),
+        reached_limit: coverage.reached_limit(),
+        active_generation: coverage.generation(),
+        parser: row.parser,
+        provider: row.provider,
+    }
+}
+
+/// Return the conservative trust state for one coverage lifecycle state.
+const fn coverage_trust(state: CoverageState) -> CoverageTrustState {
+    match state {
+        CoverageState::Complete => CoverageTrustState::Trusted,
+        CoverageState::Partial => CoverageTrustState::Partial,
+        CoverageState::Failed
+        | CoverageState::Ignored
+        | CoverageState::Oversized
+        | CoverageState::Quarantined
+        | CoverageState::Stale => CoverageTrustState::Untrusted,
+    }
+}
+
+/// Build the bounded selected-file coverage digest used by normal summaries.
+fn load_coverage_digest(
+    store: &AtlasStore,
+    path: &str,
+    parse_metadata: Option<&SourceParseMetadata>,
+) -> ServiceResult<CoverageDigest> {
+    let project = store
+        .project_instance_id()?
+        .ok_or(ServiceError::SelectedProjectUnavailable)?;
+    let path_page = store.repository_coverage_page(
+        project,
+        &RepositoryCoverageQuery {
+            start_index: 0,
+            limit: COVERAGE_DIGEST_ROW_LIMIT,
+            path_prefix: Some(path.to_string()),
+            parser: None,
+            provider: None,
+            relation: None,
+            state: None,
+            reason: None,
+        },
+    )?;
+    let rows = path_page
+        .rows
+        .into_iter()
+        .filter(|row| {
+            matches!(
+                row.coverage.scope(),
+                CoverageScope::Path { path: row_path } if row_path.as_str() == path
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut states = CoverageStateCounts::default();
+    let mut total = 0_u64;
+    let mut covered = 0_u64;
+    let mut omitted = 0_u64;
+    let mut relation_rows = 0_u32;
+    let mut trust = CoverageTrustState::Trusted;
+    for row in &rows {
+        let record = &row.coverage;
+        increment_coverage_state(&mut states, record.state());
+        total = checked_coverage_sum(total, record.total(), "total")?;
+        covered = checked_coverage_sum(covered, record.covered(), "covered")?;
+        omitted = checked_coverage_sum(omitted, record.omitted(), "omitted")?;
+        if record.relation().is_some() {
+            relation_rows = relation_rows.saturating_add(1);
+        }
+        trust = match (trust, coverage_trust(record.state())) {
+            (_, CoverageTrustState::Untrusted) => CoverageTrustState::Untrusted,
+            (CoverageTrustState::Trusted, CoverageTrustState::Partial) => {
+                CoverageTrustState::Partial
+            }
+            (current, _) => current,
+        };
+    }
+    let available = !rows.is_empty();
+    if !available {
+        trust = CoverageTrustState::Untrusted;
+    }
+    Ok(CoverageDigest {
+        available,
+        active_generation: rows
+            .first()
+            .map_or(IndexGeneration::ZERO, |row| row.coverage.generation()),
+        parser: rows
+            .iter()
+            .find_map(|row| row.parser)
+            .or_else(|| parse_metadata.map(|metadata| metadata.parser)),
+        provider: rows.iter().find_map(|row| row.provider),
+        states,
+        total,
+        covered,
+        omitted,
+        relation_rows,
+        truncated: path_page.truncated,
+        trust,
+        next_call: NavigationNextCall {
+            capability: NavigationNextCapability::Health,
+            path: path.to_string(),
+        },
+    })
+}
+
+/// Add one persisted non-negative coverage count without silent overflow.
+fn checked_coverage_sum(current: u64, value: u64, field: &str) -> ServiceResult<u64> {
+    current.checked_add(value).ok_or_else(|| {
+        ServiceError::InvalidInput(format!("selected-file coverage {field} overflowed u64"))
+    })
+}
+
+/// Increment the closed selected-file state counter.
+fn increment_coverage_state(counts: &mut CoverageStateCounts, state: CoverageState) {
+    let count = match state {
+        CoverageState::Complete => &mut counts.complete,
+        CoverageState::Partial => &mut counts.partial,
+        CoverageState::Failed => &mut counts.failed,
+        CoverageState::Ignored => &mut counts.ignored,
+        CoverageState::Oversized => &mut counts.oversized,
+        CoverageState::Quarantined => &mut counts.quarantined,
+        CoverageState::Stale => &mut counts.stale,
+    };
+    *count = count.saturating_add(1);
+}
+
 /// Structured deterministic intelligence for one indexed file.
 #[derive(Debug, Serialize)]
 pub struct FileSummaryReport {
@@ -223,6 +651,8 @@ pub struct FileSummaryReport {
     pub exports: Vec<String>,
     /// Call relationships discovered inside this file.
     pub calls: Vec<FileCallSummary>,
+    /// Compact current relationship and parse coverage.
+    pub coverage: CoverageDigest,
 }
 
 /// Compact file-summary symbol row.
@@ -503,6 +933,7 @@ fn build_file_summary_with_source_state(
     let symbol_count = store.symbol_count_for_path(&file_key)?;
     let symbol_parser_kinds = store.symbol_parser_kinds_for_path(&file_key)?;
     let parse_metadata = store.load_source_parse_metadata(&file_key)?;
+    let coverage = load_coverage_digest(store, &file_key, parse_metadata.as_ref())?;
     let truncated = [
         total_functions,
         total_methods,
@@ -570,6 +1001,7 @@ fn build_file_summary_with_source_state(
         dependencies,
         exports,
         calls,
+        coverage,
     })
 }
 
@@ -2265,6 +2697,9 @@ fn exported_symbol_names(symbols: &[CodeSymbol]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use projectatlas_core::graph::{
+        CoverageRecord, GraphIdentityText, GraphLimitKind, RepositoryNodePath,
+    };
     use projectatlas_core::symbols::{ParserKind, SymbolGraph};
     use projectatlas_core::telemetry::UsageDetailAvailability;
     use projectatlas_core::{Node, Purpose, PurposeSource, PurposeStatus, normalized_parent};
@@ -2327,6 +2762,180 @@ mod tests {
         ) {
             return Err(io::Error::other("unbound token report did not fail closed").into());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn summary_digest_and_opt_in_coverage_page_share_current_typed_rows()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("coverage-service");
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(root.join("src/lib.rs"), "pub fn run() {}\n")?;
+        let db_path = root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("service fixture identity is missing"))?;
+        let generation = IndexGeneration::new(1);
+        let mut publication = store.begin_index_publication("coverage-service")?;
+        publication.begin_scan_replacement()?;
+        publication.upsert_scan_node_batch(&[test_node("src/lib.rs", "coverage-hash")])?;
+        publication.finish_scan_replacement()?;
+        publication.replace_symbol_graph(&SymbolGraph {
+            path: "src/lib.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: Vec::new(),
+            relations: Vec::new(),
+        })?;
+        let mut coverage = vec![
+            CoverageRecord::new(
+                CoverageScope::Path {
+                    path: RepositoryNodePath::new(Path::new("src/lib.rs"))?,
+                },
+                None,
+                CoverageState::Partial,
+                3,
+                1,
+                generation,
+                Some(GraphIdentityText::new("one fallback fact omitted")?),
+                Some(GraphLimitKind::Rows),
+            )?,
+            CoverageRecord::new(
+                CoverageScope::Project,
+                Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+                CoverageState::Failed,
+                0,
+                1,
+                generation,
+                Some(GraphIdentityText::new("parser failed")?),
+                None,
+            )?,
+        ];
+        for index in 0..=COVERAGE_DIGEST_ROW_LIMIT {
+            let sibling_path = format!("src/lib.rs.{index:02}");
+            coverage.push(CoverageRecord::new(
+                CoverageScope::Path {
+                    path: RepositoryNodePath::new(Path::new(&sibling_path))?,
+                },
+                None,
+                CoverageState::Complete,
+                1,
+                0,
+                generation,
+                None,
+                None,
+            )?);
+        }
+        publication.replace_repository_graph(project, &[], &[], &[], &coverage)?;
+        publication.complete()?;
+        drop(store);
+
+        let store = AtlasStore::open_read_only_for_project(&db_path, &root)?;
+        let summary = build_file_summary(&store, Path::new("src/lib.rs"), 10)?;
+        require_eq(
+            &summary.coverage.available,
+            &true,
+            "summary coverage availability",
+        )?;
+        require_eq(
+            &summary.coverage.states.partial,
+            &1,
+            "summary partial coverage count",
+        )?;
+        require_eq(
+            &summary.coverage.states.complete,
+            &0,
+            "summary excluded lexical sibling coverage",
+        )?;
+        require_eq(
+            &summary.coverage.states.failed,
+            &0,
+            "summary excluded project-wide coverage",
+        )?;
+        require_eq(
+            &summary.coverage.truncated,
+            &false,
+            "summary exact-file coverage truncation",
+        )?;
+        require_eq(
+            &summary.coverage.trust,
+            &CoverageTrustState::Partial,
+            "summary exact-file coverage trust",
+        )?;
+        require_eq(
+            &summary.coverage.provider,
+            &Some(ParserKind::TreeSitter),
+            "summary fact provider",
+        )?;
+        require_eq(
+            &summary.coverage.next_call.capability,
+            &NavigationNextCapability::Health,
+            "summary coverage next call",
+        )?;
+
+        let report = load_coverage_discovery(
+            &store,
+            RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 10,
+                path_prefix: None,
+                parser: None,
+                provider: None,
+                relation: Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+                state: Some(CoverageState::Failed),
+                reason: Some("parser failed".to_string()),
+            },
+        )?;
+        require_eq(&report.returned, &1, "filtered service coverage row")?;
+        require_eq(
+            &report.total,
+            &CoverageTotalState::Exact(1),
+            "bounded exact coverage total",
+        )?;
+        require_eq(
+            &report.rows[0].next_call.capability,
+            &NavigationNextCapability::Health,
+            "project coverage next call",
+        )?;
+        let truncated = load_coverage_discovery(
+            &store,
+            RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 1,
+                path_prefix: None,
+                parser: None,
+                provider: None,
+                relation: None,
+                state: None,
+                reason: None,
+            },
+        )?;
+        require_eq(
+            &truncated.total,
+            &CoverageTotalState::AtLeast(2),
+            "truncated coverage lower bound",
+        )?;
+        require_eq(&truncated.continuation, &Some(1), "coverage continuation")?;
+        let exhausted = load_coverage_discovery(
+            &store,
+            RepositoryCoverageQuery {
+                start_index: 100,
+                limit: 1,
+                path_prefix: None,
+                parser: None,
+                provider: None,
+                relation: None,
+                state: None,
+                reason: None,
+            },
+        )?;
+        require_eq(
+            &exhausted.total,
+            &CoverageTotalState::Unknown,
+            "exhausted nonzero continuation total",
+        )?;
         Ok(())
     }
 

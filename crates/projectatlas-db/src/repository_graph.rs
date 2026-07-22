@@ -15,7 +15,7 @@ use projectatlas_core::graph::{
     RelationDependencyKey, RelationOccurrence, RelationResolution, RepositoryFilePath,
     RepositoryNodePath, ResolutionKeyDomain, SourceSpan, SymbolSelector,
 };
-use projectatlas_core::symbols::{RelationKind, SymbolKind};
+use projectatlas_core::symbols::{ParserKind, RelationKind, SymbolKind};
 use projectatlas_core::{
     IndexGeneration, NodeKind, RankedConnection, RankedConnectionCount, RankedConnectionDirection,
     RankedConnectionKind, RankedConnectionTarget,
@@ -33,6 +33,38 @@ pub struct RepositoryGraphPage<T> {
     pub rows: Vec<T>,
     /// Whether at least one additional validated row exists.
     pub truncated: bool,
+}
+
+/// Bounded filters for opt-in project-wide coverage discovery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryCoverageQuery {
+    /// Zero-based result offset after filters are applied.
+    pub start_index: u32,
+    /// Maximum rows returned before the overflow sentinel.
+    pub limit: u32,
+    /// Optional normalized repository path prefix.
+    pub path_prefix: Option<String>,
+    /// Optional source parser pass.
+    pub parser: Option<ParserKind>,
+    /// Optional derived-fact provider pass.
+    pub provider: Option<ParserKind>,
+    /// Optional relation family.
+    pub relation: Option<GraphRelationKind>,
+    /// Optional coverage lifecycle state.
+    pub state: Option<CoverageState>,
+    /// Optional exact persisted reason.
+    pub reason: Option<String>,
+}
+
+/// One discovered coverage row with parse and fact-provider provenance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryCoverageRow {
+    /// Validated normalized graph coverage record.
+    pub coverage: CoverageRecord,
+    /// Source parser pass for path-scoped coverage.
+    pub parser: Option<ParserKind>,
+    /// Fact provider pass for path-scoped coverage.
+    pub provider: Option<ParserKind>,
 }
 
 /// One folder or file whose current graph context should enrich navigation.
@@ -225,6 +257,10 @@ struct CoverageRow {
     reason: Option<String>,
     /// Optional reached product limit.
     reached_limit: Option<String>,
+    /// Optional source parser pass joined from file metadata.
+    parser: Option<String>,
+    /// Optional derived-fact provider pass joined from file metadata.
+    provider: Option<String>,
 }
 
 /// One bounded flattened relation row used only for navigation enrichment.
@@ -1261,7 +1297,8 @@ impl AtlasStore {
         let raw = {
             let mut statement = self.connection.prepare_cached(
                 "SELECT project_instance_id, scope_kind, scope_path, relation_scope,
-                        relation_kind, state, total, covered, omitted, reason, reached_limit
+                        relation_kind, state, total, covered, omitted, reason, reached_limit,
+                        NULL, NULL
                    FROM graph_coverage
                   WHERE project_instance_id = ?1
                     AND scope_kind = ?2 AND scope_path IS ?3
@@ -1282,6 +1319,139 @@ impl AtlasStore {
         };
         page_from_raw(raw, limit, |row| {
             coverage_from_row(row, project, generation)
+        })
+    }
+
+    /// Discover one bounded page of current coverage with optional typed filters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid bounds, unavailable publication state,
+    /// project mismatch, `SQLite` failure, or invalid persisted coverage or
+    /// parser provenance.
+    pub fn repository_coverage_page(
+        &self,
+        project: ProjectInstanceId,
+        query: &RepositoryCoverageQuery,
+    ) -> DbResult<RepositoryGraphPage<RepositoryCoverageRow>> {
+        let limit_plus_one = validated_limit_plus_one(
+            query.limit,
+            GraphLimits::MAX_ROWS,
+            "coverage rows must be nonzero and within the product ceiling",
+        )?;
+        if query.start_index >= GraphLimits::MAX_ROWS {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "coverage start index is at or above the product ceiling",
+            }
+            .into());
+        }
+        let Some(generation) = self.repository_graph_generation()? else {
+            return Ok(empty_page());
+        };
+        if !verify_project_identity(&self.connection, project)? {
+            return Ok(empty_page());
+        }
+
+        let provenance_driven = query.parser.is_some() || query.provider.is_some();
+        let path_prefix = query.path_prefix.as_deref().filter(|prefix| *prefix != ".");
+        let mut sql = String::from(
+            "SELECT coverage.project_instance_id, coverage.scope_kind,
+                    coverage.scope_path, coverage.relation_scope,
+                    coverage.relation_kind, coverage.state, coverage.total,
+                    coverage.covered, coverage.omitted, coverage.reason,
+                    coverage.reached_limit, metadata.source_parser,
+                    metadata.fact_parser
+               FROM ",
+        );
+        if provenance_driven {
+            sql.push_str(
+                "source_parse_metadata AS metadata
+                 CROSS JOIN graph_coverage AS coverage
+                   ON coverage.scope_kind = 'path'
+                  AND coverage.scope_path = metadata.path",
+            );
+        } else {
+            sql.push_str(
+                "graph_coverage AS coverage
+                 LEFT JOIN source_parse_metadata AS metadata
+                   ON metadata.path = coverage.scope_path",
+            );
+        }
+        sql.push_str(" WHERE coverage.project_instance_id = ?");
+        let mut values = vec![Value::Blob(project.as_bytes().to_vec())];
+
+        if let Some(prefix) = path_prefix {
+            sql.push_str(
+                " AND coverage.scope_kind = 'path'
+                  AND coverage.scope_path >= ? AND coverage.scope_path < ?
+                  AND (coverage.scope_path = ? OR coverage.scope_path >= ?)",
+            );
+            values.push(Value::Text(prefix.to_string()));
+            values.push(Value::Text(format!("{prefix}0")));
+            values.push(Value::Text(prefix.to_string()));
+            values.push(Value::Text(format!("{prefix}/")));
+        }
+        if let Some(parser) = query.parser {
+            sql.push_str(" AND metadata.source_parser = ?");
+            values.push(Value::Text(parser.to_string()));
+        }
+        if let Some(provider) = query.provider {
+            sql.push_str(" AND metadata.fact_parser = ?");
+            values.push(Value::Text(provider.to_string()));
+        }
+        if let Some(relation) = query.relation {
+            let (scope, kind) = relation_parts(relation);
+            sql.push_str(" AND coverage.relation_scope = ? AND coverage.relation_kind = ?");
+            values.push(Value::Text(scope.to_string()));
+            values.push(Value::Text(kind.to_string()));
+        }
+        if let Some(state) = query.state {
+            sql.push_str(" AND coverage.state = ?");
+            values.push(Value::Text(coverage_state_name(state).to_string()));
+        }
+        if let Some(reason) = query.reason.as_deref() {
+            sql.push_str(" AND coverage.reason = ?");
+            values.push(Value::Text(reason.to_string()));
+        }
+
+        if provenance_driven {
+            sql.push_str(" ORDER BY metadata.path, coverage.id");
+        } else if path_prefix.is_some() {
+            sql.push_str(
+                " ORDER BY coverage.scope_path, coverage.relation_scope,
+                          coverage.relation_kind, coverage.state, coverage.id",
+            );
+        } else if query.relation.is_some() {
+            sql.push_str(
+                " ORDER BY coverage.relation_scope, coverage.relation_kind,
+                          coverage.state, coverage.id",
+            );
+        } else if query.state.is_some() {
+            sql.push_str(" ORDER BY coverage.state, coverage.scope_path, coverage.id");
+        } else if query.reason.is_some() {
+            sql.push_str(" ORDER BY coverage.reason, coverage.scope_path, coverage.id");
+        } else {
+            sql.push_str(
+                " ORDER BY coverage.scope_kind, coverage.scope_path,
+                          coverage.relation_scope, coverage.relation_kind,
+                          coverage.state, coverage.id",
+            );
+        }
+        sql.push_str(" LIMIT ? OFFSET ?");
+        values.push(Value::Integer(limit_plus_one));
+        values.push(Value::Integer(i64::from(query.start_index)));
+
+        let raw = {
+            let mut statement = self.connection.prepare_cached(&sql)?;
+            let mut rows = statement.query(params_from_iter(values.iter()))?;
+            let mut collected = Vec::new();
+            while let Some(row) = rows.next()? {
+                collected.push(coverage_row(row)?);
+            }
+            collected
+        };
+        page_from_raw(raw, query.limit, |row| {
+            coverage_discovery_from_row(row, project, generation)
         })
     }
 
@@ -3201,6 +3371,30 @@ fn coverage_from_row(
     Ok(record)
 }
 
+/// Reconstruct discovered coverage together with strict parser provenance.
+fn coverage_discovery_from_row(
+    row: CoverageRow,
+    expected_project: ProjectInstanceId,
+    generation: IndexGeneration,
+) -> DbResult<RepositoryCoverageRow> {
+    let parser = row
+        .parser
+        .as_deref()
+        .map(|value| parse_parser_kind("source_parse_metadata.source_parser", value))
+        .transpose()?;
+    let provider = row
+        .provider
+        .as_deref()
+        .map(|value| parse_parser_kind("source_parse_metadata.fact_parser", value))
+        .transpose()?;
+    let coverage = coverage_from_row(row, expected_project, generation)?;
+    Ok(RepositoryCoverageRow {
+        coverage,
+        parser,
+        provider,
+    })
+}
+
 /// Load one entity through the stable-key primary index.
 fn load_entity_by_digest(
     store: &AtlasStore,
@@ -3378,6 +3572,8 @@ fn coverage_row(row: &Row<'_>) -> rusqlite::Result<CoverageRow> {
         omitted: row.get(8)?,
         reason: row.get(9)?,
         reached_limit: row.get(10)?,
+        parser: row.get(11)?,
+        provider: row.get(12)?,
     })
 }
 
@@ -3662,6 +3858,20 @@ pub(crate) fn parse_coverage_state(value: &str) -> DbResult<CoverageState> {
         "stale" => Ok(CoverageState::Stale),
         _ => Err(DbError::InvalidEnum {
             field: "graph_coverage.state",
+            value: value.to_string(),
+        }),
+    }
+}
+
+/// Parse one normalized parser provenance spelling without fallback coercion.
+fn parse_parser_kind(field: &'static str, value: &str) -> DbResult<ParserKind> {
+    match value {
+        "tree-sitter" => Ok(ParserKind::TreeSitter),
+        "manifest" => Ok(ParserKind::Manifest),
+        "structural" => Ok(ParserKind::Structural),
+        "fallback" => Ok(ParserKind::Fallback),
+        _ => Err(DbError::InvalidEnum {
+            field,
             value: value.to_string(),
         }),
     }
@@ -4497,6 +4707,40 @@ mod tests {
         Ok(())
     }
 
+    /// Require one coverage-discovery query shape to seek through its owning indexes.
+    fn assert_coverage_discovery_plan(
+        connection: &Connection,
+        sql: &str,
+        values: &[Value],
+        required_indexes: &[&str],
+        allow_bounded_partial_sort: bool,
+        context: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut statement = connection.prepare(sql)?;
+        let details = statement
+            .query_map(params_from_iter(values.iter()), |row| {
+                row.get::<_, String>(3)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        require(
+            required_indexes
+                .iter()
+                .all(|index| details.iter().any(|detail| detail.contains(index))),
+            &format!("{context} did not use {required_indexes:?}; query plan was {details:?}"),
+        )?;
+        require(
+            details.iter().all(|detail| {
+                let uses_temporary_sort = detail.contains("USE TEMP B-TREE");
+                let bounded_partial_sort = detail.contains("USE TEMP B-TREE FOR LAST");
+                !detail.contains("SCAN coverage")
+                    && (!uses_temporary_sort
+                        || (allow_bounded_partial_sort && bounded_partial_sort))
+            }),
+            &format!("{context} used an unbounded scan or sort: {details:?}"),
+        )?;
+        Ok(())
+    }
+
     /// Publish one complete fixture and its lexical source text.
     fn publish_fixture(
         store: &mut AtlasStore,
@@ -4505,7 +4749,19 @@ mod tests {
         let project = store
             .project_instance_id()?
             .ok_or_else(|| io::Error::other("bound fixture identity is missing"))?;
-        let fixture = graph_fixture(project, IndexGeneration::new(1))?;
+        let mut fixture = graph_fixture(project, IndexGeneration::new(1))?;
+        fixture.coverage.push(CoverageRecord::new(
+            CoverageScope::Path {
+                path: RepositoryNodePath::new(Path::new("src/Äuth.rs"))?,
+            },
+            None,
+            CoverageState::Complete,
+            1,
+            0,
+            IndexGeneration::new(1),
+            None,
+            None,
+        )?);
         let mut occurrences = fixture.occurrences.clone();
         occurrences.push(fixture.occurrences[0].clone());
         let mut publication = store.begin_index_publication(fingerprint)?;
@@ -6096,6 +6352,291 @@ mod tests {
         }
         assert_query_indexes(&store)?;
         store.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn coverage_discovery_filters_provenance_and_fails_closed_after_reopen()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("coverage-discovery");
+        fs::create_dir_all(&project_root)?;
+        let db_path = project_root.join("projectatlas.db");
+        let mut writer = AtlasStore::open_for_project(&db_path, &project_root)?;
+        let fixture = publish_fixture(&mut writer, "coverage-discovery")?;
+        let sibling_path = "src/Äuth.rs.backup";
+        let sibling_coverage = CoverageRecord::new(
+            CoverageScope::Path {
+                path: RepositoryNodePath::new(Path::new(sibling_path))?,
+            },
+            None,
+            CoverageState::Complete,
+            1,
+            0,
+            IndexGeneration::new(2),
+            None,
+            None,
+        )?;
+        let mut publication = writer.begin_index_publication("coverage-discovery-sibling")?;
+        publication.replace_repository_graph_for_paths(
+            fixture.project,
+            &[sibling_path.to_string()],
+            &[],
+            &[],
+            &[],
+            &[sibling_coverage],
+        )?;
+        publication.complete()?;
+        drop(writer);
+
+        let store = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+        let project_value = Value::Blob(fixture.project.as_bytes().to_vec());
+        assert_coverage_discovery_plan(
+            &store.connection,
+            "EXPLAIN QUERY PLAN
+             SELECT coverage.id FROM graph_coverage AS coverage
+              WHERE coverage.project_instance_id = ?
+                AND coverage.scope_kind = 'path'
+                AND coverage.scope_path >= ? AND coverage.scope_path < ?
+                AND (coverage.scope_path = ? OR coverage.scope_path >= ?)
+              ORDER BY coverage.scope_path, coverage.relation_scope, coverage.relation_kind,
+                       coverage.state, coverage.id LIMIT 11",
+            &[
+                project_value.clone(),
+                Value::Text("src/Äuth.rs".to_string()),
+                Value::Text("src/Äuth.rs0".to_string()),
+                Value::Text("src/Äuth.rs".to_string()),
+                Value::Text("src/Äuth.rs/".to_string()),
+            ],
+            &["idx_graph_coverage_scope_order"],
+            false,
+            "coverage path filter",
+        )?;
+        assert_coverage_discovery_plan(
+            &store.connection,
+            "EXPLAIN QUERY PLAN
+             SELECT coverage.id FROM graph_coverage AS coverage
+              WHERE coverage.project_instance_id = ? AND coverage.state = ?
+              ORDER BY coverage.state, coverage.scope_path, coverage.id LIMIT 11",
+            &[project_value.clone(), Value::Text("failed".to_string())],
+            &["idx_graph_coverage_discovery_state"],
+            false,
+            "coverage state filter",
+        )?;
+        assert_coverage_discovery_plan(
+            &store.connection,
+            "EXPLAIN QUERY PLAN
+             SELECT coverage.id FROM graph_coverage AS coverage
+              WHERE coverage.project_instance_id = ? AND coverage.reason = ?
+              ORDER BY coverage.reason, coverage.scope_path, coverage.id LIMIT 11",
+            &[
+                project_value.clone(),
+                Value::Text("parser failed".to_string()),
+            ],
+            &["idx_graph_coverage_discovery_reason"],
+            false,
+            "coverage reason filter",
+        )?;
+        for (column, index, context) in [
+            (
+                "source_parser",
+                "idx_source_parse_metadata_source_parser_path",
+                "coverage parser filter",
+            ),
+            (
+                "fact_parser",
+                "idx_source_parse_metadata_fact_parser_path",
+                "coverage provider filter",
+            ),
+        ] {
+            assert_coverage_discovery_plan(
+                &store.connection,
+                &format!(
+                    "EXPLAIN QUERY PLAN
+                     SELECT coverage.id
+                       FROM source_parse_metadata AS metadata
+                       CROSS JOIN graph_coverage AS coverage
+                         ON coverage.scope_kind = 'path'
+                        AND coverage.scope_path = metadata.path
+                      WHERE coverage.project_instance_id = ?
+                        AND metadata.{column} = ?
+                      ORDER BY metadata.path, coverage.id LIMIT 11"
+                ),
+                &[
+                    project_value.clone(),
+                    Value::Text("tree-sitter".to_string()),
+                ],
+                &[index, "idx_graph_coverage_scope_order"],
+                true,
+                context,
+            )?;
+        }
+        let all = store.repository_coverage_page(
+            fixture.project,
+            &RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 2,
+                path_prefix: None,
+                parser: None,
+                provider: None,
+                relation: None,
+                state: None,
+                reason: None,
+            },
+        )?;
+        require(
+            all.truncated && all.rows.len() == 2,
+            "coverage discovery did not use LIMIT + 1",
+        )?;
+        let all_states = store.repository_coverage_page(
+            fixture.project,
+            &RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 10,
+                path_prefix: None,
+                parser: None,
+                provider: None,
+                relation: None,
+                state: None,
+                reason: None,
+            },
+        )?;
+        for state in [
+            CoverageState::Complete,
+            CoverageState::Partial,
+            CoverageState::Failed,
+            CoverageState::Ignored,
+            CoverageState::Oversized,
+            CoverageState::Quarantined,
+            CoverageState::Stale,
+        ] {
+            require(
+                all_states
+                    .rows
+                    .iter()
+                    .any(|row| row.coverage.state() == state),
+                &format!("coverage discovery omitted {state:?}"),
+            )?;
+        }
+
+        let exact_path = store.repository_coverage_page(
+            fixture.project,
+            &RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 1,
+                path_prefix: Some("src/Äuth.rs".to_string()),
+                parser: None,
+                provider: None,
+                relation: None,
+                state: None,
+                reason: None,
+            },
+        )?;
+        require(
+            !exact_path.truncated && exact_path.rows.len() == 1,
+            "exact coverage path admitted a lexical sibling",
+        )?;
+        require_eq(
+            exact_path.rows[0].coverage.scope(),
+            &CoverageScope::Path {
+                path: RepositoryNodePath::new(Path::new("src/Äuth.rs"))?,
+            },
+            "exact coverage path scope",
+        )?;
+
+        let parsed = store.repository_coverage_page(
+            fixture.project,
+            &RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 10,
+                path_prefix: Some("src/Äuth.rs".to_string()),
+                parser: Some(ParserKind::TreeSitter),
+                provider: Some(ParserKind::TreeSitter),
+                relation: None,
+                state: Some(CoverageState::Complete),
+                reason: None,
+            },
+        )?;
+        require_eq(&parsed.rows.len(), &1, "parser/provider filtered coverage")?;
+        require_eq(
+            &parsed.rows[0].parser,
+            &Some(ParserKind::TreeSitter),
+            "source parser provenance",
+        )?;
+        require_eq(
+            &parsed.rows[0].provider,
+            &Some(ParserKind::TreeSitter),
+            "fact provider provenance",
+        )?;
+
+        let failed_calls = store.repository_coverage_page(
+            fixture.project,
+            &RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 10,
+                path_prefix: None,
+                parser: None,
+                provider: None,
+                relation: Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+                state: Some(CoverageState::Failed),
+                reason: Some("parser failed".to_string()),
+            },
+        )?;
+        require_eq(&failed_calls.rows.len(), &1, "combined coverage filters")?;
+        require_eq(
+            &failed_calls.rows[0].coverage.state(),
+            &CoverageState::Failed,
+            "failed coverage state",
+        )?;
+
+        let absent = store.repository_coverage_page(
+            fixture.project,
+            &RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 10,
+                path_prefix: None,
+                parser: None,
+                provider: Some(ParserKind::Manifest),
+                relation: None,
+                state: None,
+                reason: None,
+            },
+        )?;
+        require(
+            absent.rows.is_empty(),
+            "provider filter returned a false match",
+        )?;
+        store.finish_index_read_snapshot()?;
+        drop(store);
+
+        let writer = AtlasStore::open_for_project(&db_path, &project_root)?;
+        writer.connection.execute(
+            "UPDATE source_parse_metadata SET source_parser = 'corrupt-parser'
+              WHERE path = 'src/Äuth.rs'",
+            [],
+        )?;
+        drop(writer);
+        let store = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+        let error = require_db_error(
+            store.repository_coverage_page(
+                fixture.project,
+                &RepositoryCoverageQuery {
+                    start_index: 0,
+                    limit: 10,
+                    path_prefix: Some("src/Äuth.rs".to_string()),
+                    parser: None,
+                    provider: None,
+                    relation: None,
+                    state: None,
+                    reason: None,
+                },
+            ),
+            "corrupt parser provenance was accepted",
+        )?;
+        require(
+            matches!(error, DbError::InvalidEnum { .. }),
+            &format!("unexpected parser corruption error: {error}"),
+        )?;
         Ok(())
     }
 

@@ -16,8 +16,9 @@ pub use diagnostics::{
 };
 pub use project_identity::{ProjectRootTransition, ProjectRootTransitionResult};
 pub use repository_graph::{
-    RepositoryAffectedSourceFootprint, RepositoryGraphPage, RepositoryGraphRelationQuery,
-    RepositoryNavigationConnections, RepositoryNavigationNode, RepositoryResolutionCandidate,
+    RepositoryAffectedSourceFootprint, RepositoryCoverageQuery, RepositoryCoverageRow,
+    RepositoryGraphPage, RepositoryGraphRelationQuery, RepositoryNavigationConnections,
+    RepositoryNavigationNode, RepositoryResolutionCandidate,
 };
 pub use sqlite_profile::validate_database_location;
 pub use telemetry::{

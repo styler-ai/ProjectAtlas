@@ -32,12 +32,14 @@ use projectatlas_core::{
 };
 use projectatlas_db::{
     AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, ProjectRootTransition,
-    ProjectRootTransitionResult, verify_project_database,
+    ProjectRootTransitionResult, RepositoryCoverageQuery, verify_project_database,
 };
 use projectatlas_service::{
-    CodeSlice, FileSummaryReport, SearchReport, SymbolSliceSelector, TokenReport,
-    TokenReportRequest, build_file_summary_from_source, load_token_report,
-    read_indexed_code_slice_from_source, read_symbol_slice_from_source, search_indexed_files,
+    COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CoverageDiscoveryReport, FileSummaryReport, SearchReport,
+    SymbolSliceSelector, TokenReport, TokenReportRequest, build_file_summary_from_source,
+    load_coverage_discovery, load_token_report, parse_coverage_parser, parse_coverage_relation,
+    parse_coverage_state, read_indexed_code_slice_from_source, read_symbol_slice_from_source,
+    search_indexed_files,
 };
 use rmcp::schemars;
 use runtime::{
@@ -53,9 +55,9 @@ use runtime::{
     open_fresh_atlas_store_for_project, purpose_curation_page, ranked_file_nodes_with_reasons,
     ranked_folder_nodes_with_reasons, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
-    render_health_page, render_purpose_curation_page, render_purpose_review_report,
-    reset_index_files, resolved_mcp_config_path, review_purposes, run_init_bootstrap,
-    run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
+    render_coverage_report, render_health_page, render_purpose_curation_page,
+    render_purpose_review_report, reset_index_files, resolved_mcp_config_path, review_purposes,
+    run_init_bootstrap, run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
     run_symbol_build_pipeline_controlled, run_watch_loop, strip_legacy_purpose,
     validated_indexed_file_key, watcher_status_report,
 };
@@ -704,6 +706,24 @@ enum Command {
         /// Restrict findings to source files and folders that contain source files.
         #[arg(long)]
         source_only: bool,
+        /// Opt in to bounded current coverage discovery instead of structural findings.
+        #[arg(long)]
+        coverage: bool,
+        /// Optional source parser coverage filter.
+        #[arg(long, requires = "coverage")]
+        parser: Option<String>,
+        /// Optional derived-fact provider coverage filter.
+        #[arg(long, requires = "coverage")]
+        provider: Option<String>,
+        /// Optional relationship-family coverage filter.
+        #[arg(long, requires = "coverage")]
+        relation: Option<String>,
+        /// Optional complete, partial, failed, ignored, oversized, quarantined, or stale filter.
+        #[arg(long, requires = "coverage")]
+        coverage_state: Option<String>,
+        /// Optional exact coverage reason filter.
+        #[arg(long, requires = "coverage")]
+        reason: Option<String>,
     },
     /// Resolve a deterministic health finding with agent rationale.
     Health {
@@ -1620,8 +1640,43 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             path_prefix,
             summary_only,
             source_only,
+            coverage,
+            parser,
+            provider,
+            relation,
+            coverage_state,
+            reason,
         } => {
             let store = open_index_for_read(cli)?;
+            if *coverage {
+                let query = coverage_query_from_cli(
+                    *start_index,
+                    *limit,
+                    &CoverageCliFilters {
+                        path_prefix: path_prefix.as_deref(),
+                        parser: parser.as_deref(),
+                        provider: provider.as_deref(),
+                        relation: relation.as_deref(),
+                        state: coverage_state.as_deref(),
+                        reason: reason.as_deref(),
+                    },
+                )?;
+                let mut report = load_coverage_discovery(&store, query)?;
+                let toon = finalize_coverage_output(cli.format, &mut report)?;
+                print_tracked_directory_output_estimate(
+                    cli.format,
+                    &store,
+                    usage_instance,
+                    &cli.session,
+                    "health-check",
+                    None,
+                    None,
+                    || estimated_source_tokens_for_indexed_files(&store, None, None),
+                    &toon,
+                    &report,
+                )?;
+                return Ok(());
+            }
             let query = health_query_from_cli(
                 *start_index,
                 *limit,
@@ -2511,6 +2566,82 @@ fn health_query_from_cli(
     }
 }
 
+/// Borrowed CLI-only coverage filters before typed service parsing.
+struct CoverageCliFilters<'a> {
+    /// Optional repository path prefix.
+    path_prefix: Option<&'a str>,
+    /// Optional source parser pass.
+    parser: Option<&'a str>,
+    /// Optional fact provider pass.
+    provider: Option<&'a str>,
+    /// Optional relation family.
+    relation: Option<&'a str>,
+    /// Optional coverage state.
+    state: Option<&'a str>,
+    /// Optional exact reason.
+    reason: Option<&'a str>,
+}
+
+/// Build one typed bounded coverage query from explicit CLI filters.
+fn coverage_query_from_cli(
+    start_index: usize,
+    limit: usize,
+    filters: &CoverageCliFilters<'_>,
+) -> Result<RepositoryCoverageQuery, CliError> {
+    Ok(RepositoryCoverageQuery {
+        start_index: u32::try_from(start_index).map_err(|error| {
+            CliError::InvalidInput(format!("coverage start index is too large: {error}"))
+        })?,
+        limit: limit.clamp(1, COVERAGE_PAGE_MAX_LIMIT as usize) as u32,
+        path_prefix: trimmed_cli_filter(filters.path_prefix)
+            .map(|value| normalize_repo_path_prefix(&value)),
+        parser: trimmed_cli_filter(filters.parser)
+            .as_deref()
+            .map(parse_coverage_parser)
+            .transpose()?,
+        provider: trimmed_cli_filter(filters.provider)
+            .as_deref()
+            .map(parse_coverage_parser)
+            .transpose()?,
+        relation: trimmed_cli_filter(filters.relation)
+            .as_deref()
+            .map(parse_coverage_relation)
+            .transpose()?,
+        state: trimmed_cli_filter(filters.state)
+            .as_deref()
+            .map(parse_coverage_state)
+            .transpose()?,
+        reason: trimmed_cli_filter(filters.reason),
+    })
+}
+
+/// Stabilize format-specific encoded byte metadata before output and telemetry.
+fn finalize_coverage_output(
+    format: OutputFormat,
+    report: &mut CoverageDiscoveryReport,
+) -> Result<String, CliError> {
+    for _ in 0..4 {
+        let toon = render_coverage_report(report);
+        let rendered = serialized_output(format, &toon, report)?;
+        let output_bytes = u32::try_from(rendered.len()).map_err(|error| {
+            CliError::InvalidInput(format!("coverage output size did not fit u32: {error}"))
+        })?;
+        if output_bytes > report.max_output_bytes {
+            return Err(CliError::InvalidInput(format!(
+                "coverage output exceeded {} bytes",
+                report.max_output_bytes
+            )));
+        }
+        if report.output_bytes == output_bytes {
+            return Ok(rendered);
+        }
+        report.output_bytes = output_bytes;
+    }
+    Err(CliError::InvalidInput(
+        "coverage output byte metadata did not stabilize".to_string(),
+    ))
+}
+
 /// Return the DB scope for purpose queue CLI switches.
 fn purpose_queue_scope(include_assets: bool, include_low_priority_files: bool) -> HealthScope {
     match (include_assets, include_low_priority_files) {
@@ -2916,6 +3047,12 @@ impl RequiredCliCommand {
                 path_prefix: None,
                 summary_only: true,
                 source_only: false,
+                coverage: false,
+                parser: None,
+                provider: None,
+                relation: None,
+                coverage_state: None,
+                reason: None,
             },
             Self::Health => Command::Health {
                 command: HealthCommand::Resolve {
