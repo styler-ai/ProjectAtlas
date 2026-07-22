@@ -1573,6 +1573,14 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
                                 [ordered]@{
                                     type = $_.GetType().FullName
                                     message = & $normalizeFailureMessage $_.Message
+                                    native_error_code = $(
+                                        if ($_ -is [System.ComponentModel.Win32Exception]) {
+                                            $_.NativeErrorCode
+                                        }
+                                        else {
+                                            $null
+                                        }
+                                    )
                                 }
                             }
                     )
@@ -1581,6 +1589,14 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
                     scenario = $scenarioName
                     failure_type = $failure.GetType().FullName
                     failure_message = & $normalizeFailureMessage $failure.Message
+                    failure_native_error_code = $(
+                        if ($failure -is [System.ComponentModel.Win32Exception]) {
+                            $failure.NativeErrorCode
+                        }
+                        else {
+                            $null
+                        }
+                    )
                     failure_inner_exceptions = $innerFailures
                     receipt = [ordered]@{
                         process_id = [int](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name ProcessId)
