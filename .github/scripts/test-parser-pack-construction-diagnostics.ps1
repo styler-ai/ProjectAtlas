@@ -304,7 +304,13 @@ try {
                 ) -and
                 $nativeSource.Contains('logon-construction-principal') -and
                 $nativeSource.Contains('create-process-with-construction-token') -and
-                $nativeSource.Contains('S:(ML;;NW;;;ME)') -and
+                $nativeSource.Contains('WindowsIdentity.RunImpersonated(') -and
+                $nativeSource.Contains(
+                    '() => CreateConstructionJobserverForCurrentToken('
+                ) -and
+                $nativeSource.Contains(
+                    '"D:P(A;;0x00100002;;;" + logonSid + ")"'
+                ) -and
                 $nativeSource.Contains('ambient-construction-jobserver')) `
             "Windows construction adapter did not use the bounded alternate-logon process boundary."
         $principalLogonStart = $nativeSource.IndexOf(
@@ -705,7 +711,6 @@ public static class ProjectAtlasConstructionAdmissionFixture
             'LastJobserverSynchronizeAccessCheck',
             'CreateAdmittedJobserver',
             'CanCreateFreshJobserverName',
-            'RunImpersonated',
             'AccessCheck(',
             'ProjectAtlasCurrentProcessTokenRestrictionProbe',
             'ProjectAtlasObjectDirectoryProbe',
@@ -1561,7 +1566,8 @@ public static class ProjectAtlasConstructionAdmissionFixture
             ($currentIntegritySids.Count -eq 1) `
             "The diagnostic token did not expose one integrity SID."
         $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent(
-            [System.Security.Principal.TokenAccessLevels]::Query
+            [System.Security.Principal.TokenAccessLevels]::Query -bor
+                [System.Security.Principal.TokenAccessLevels]::Duplicate
         )
         try {
             $currentToken = $currentIdentity.AccessToken
@@ -1571,14 +1577,18 @@ public static class ProjectAtlasConstructionAdmissionFixture
                     $null,
                     [object[]]@($currentToken, $currentPrincipalSid)
                 )
-                $createArguments = [object[]]@($currentLogonSid, $null)
+                $createArguments = [object[]]@(
+                    $currentToken,
+                    $currentLogonSid,
+                    $null
+                )
                 $jobserverHandle = $null
                 try {
                     $jobserverHandle = $createConstructionJobserver.Invoke(
                         $null,
                         $createArguments
                     )
-                    $jobserverName = [string]$createArguments[1]
+                    $jobserverName = [string]$createArguments[2]
                     Require `
                         ($null -ne $jobserverHandle -and
                             -not $jobserverHandle.IsInvalid -and

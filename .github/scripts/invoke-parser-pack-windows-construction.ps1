@@ -1474,15 +1474,28 @@ public static class ProjectAtlasConstructionProcess
     }
 
     private static SafeWaitHandle CreateConstructionJobserver(
+        SafeAccessTokenHandle constructionToken,
         string logonSid,
         out string name)
     {
         // CreateProcessWithToken keeps the authenticated child in the caller's session.
-        // Precreate one Local object so that child only needs exact-object access, not
-        // permission to create arbitrary objects in the session namespace.
+        // Create the Local object while impersonating that validated medium token so
+        // Windows derives its owner and integrity from the construction principal.
+        // The elevated parent retains the only lifetime handle after impersonation ends.
         name = JobserverPrefix + Guid.NewGuid().ToString("N");
-        string sddl = "D:P(A;;0x00100002;;;" + logonSid + ")" +
-            "S:(ML;;NW;;;ME)";
+        string jobserverName = name;
+        return WindowsIdentity.RunImpersonated(
+            constructionToken,
+            () => CreateConstructionJobserverForCurrentToken(
+                logonSid,
+                jobserverName));
+    }
+
+    private static SafeWaitHandle CreateConstructionJobserverForCurrentToken(
+        string logonSid,
+        string name)
+    {
+        string sddl = "D:P(A;;0x00100002;;;" + logonSid + ")";
         IntPtr descriptor = IntPtr.Zero;
         try
         {
@@ -1949,6 +1962,7 @@ public static class ProjectAtlasConstructionProcess
                     principalSid);
                 string jobserverName;
                 jobserver = CreateConstructionJobserver(
+                    logonToken,
                     admittedLogonSid,
                     out jobserverName);
                 if (admissionReceipt != null)

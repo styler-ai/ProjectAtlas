@@ -242,7 +242,13 @@ function Assert-ProductionRecoveryContracts {
             $nativeText.Contains('LogonTokenHandleClosed') -and
             $nativeText.Contains('JobserverHandleOwned') -and
             $nativeText.Contains('JobserverHandleClosed') -and
-            $nativeText.Contains('S:(ML;;NW;;;ME)') -and
+            $nativeText.Contains('WindowsIdentity.RunImpersonated(') -and
+            $nativeText.Contains(
+                '() => CreateConstructionJobserverForCurrentToken('
+            ) -and
+            $nativeText.Contains(
+                '"D:P(A;;0x00100002;;;" + logonSid + ")"'
+            ) -and
             $nativeText.Contains('ambient-construction-jobserver') -and
             $nativeText.Contains('MaximumLogonCommandLineCharacters = 1023;') -and
             $nativeText.Contains('construction-process-retained-inherited-job')) `
