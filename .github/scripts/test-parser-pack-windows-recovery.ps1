@@ -2185,7 +2185,15 @@ try {
         $auditFailure = $_.Exception.Message
     }
     Require `
-        ($auditFailure -eq 'Exact-SID WTS process audit failed.') `
+        ($null -ne $auditFailure -and
+            $auditFailure.StartsWith(
+                'Bounded recovery process failed. exit=1 ',
+                [System.StringComparison]::Ordinal
+            ) -and
+            $auditFailure.Contains(
+                'Exact-SID WTS process audit did not satisfy its expected state.',
+                [System.StringComparison]::Ordinal
+            )) `
         "Exact-SID WTS process audit did not propagate child failure."
     $auditTimeout = $null
     try {
@@ -2199,7 +2207,11 @@ try {
         $auditTimeout = $_.Exception.Message
     }
     Require `
-        ($auditTimeout -eq 'Recovery process exceeded its fixed deadline.') `
+        ($null -ne $auditTimeout -and
+            $auditTimeout.StartsWith(
+                'Recovery process exceeded its fixed deadline. ',
+                [System.StringComparison]::Ordinal
+            )) `
         "Exact-SID WTS process audit did not enforce its parent deadline."
 
     Invoke-AccountJournalRecoveryScenario `
