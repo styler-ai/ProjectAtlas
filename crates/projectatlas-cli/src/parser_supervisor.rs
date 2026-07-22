@@ -915,16 +915,32 @@ fn diagnostic_reader_loop(
 ) -> Result<Vec<u8>, ParserIoThreadError> {
     if expect_windows_admission {
         let mut observed = [0_u8; PARSER_WINDOWS_BROKER_ADMISSION_RECORD.len()];
-        stderr
-            .read_exact(&mut observed)
-            .map_err(|source| ParserIoThreadError::Stream {
-                operation: "read Windows admission record",
-                source,
-            })?;
+        if let Err(source) = stderr.read_exact(&mut observed) {
+            let message = source.to_string();
+            return if events
+                .send(DiagnosticReaderEvent::Failure(
+                    ParserIoThreadError::Stream {
+                        operation: "read Windows admission record",
+                        source,
+                    },
+                ))
+                .is_ok()
+            {
+                Ok(Vec::new())
+            } else {
+                Err(ParserIoThreadError::Stream {
+                    operation: "read Windows admission record",
+                    source: io::Error::other(message),
+                })
+            };
+        }
         if observed != PARSER_WINDOWS_BROKER_ADMISSION_RECORD {
             let error = ParserIoThreadError::AdmissionMismatch;
-            drop(events.send(DiagnosticReaderEvent::Failure(error)));
-            return Err(ParserIoThreadError::AdmissionMismatch);
+            return if events.send(DiagnosticReaderEvent::Failure(error)).is_ok() {
+                Ok(Vec::new())
+            } else {
+                Err(ParserIoThreadError::AdmissionMismatch)
+            };
         }
     }
     if events
@@ -943,27 +959,39 @@ fn diagnostic_reader_loop(
             Err(source) if source.kind() == io::ErrorKind::Interrupted => continue,
             Err(source) => {
                 let message = source.to_string();
-                drop(events.try_send(DiagnosticReaderEvent::Failure(
-                    ParserIoThreadError::Stream {
+                return if events
+                    .send(DiagnosticReaderEvent::Failure(
+                        ParserIoThreadError::Stream {
+                            operation: "read diagnostic stream",
+                            source,
+                        },
+                    ))
+                    .is_ok()
+                {
+                    Ok(diagnostics)
+                } else {
+                    Err(ParserIoThreadError::Stream {
                         operation: "read diagnostic stream",
-                        source,
-                    },
-                )));
-                return Err(ParserIoThreadError::Stream {
-                    operation: "read diagnostic stream",
-                    source: io::Error::other(message),
-                });
+                        source: io::Error::other(message),
+                    })
+                };
             }
         };
         if count > PARSER_MAX_STDERR_BYTES.saturating_sub(diagnostics.len()) {
-            drop(events.try_send(DiagnosticReaderEvent::Failure(
-                ParserIoThreadError::DiagnosticOverflow {
+            return if events
+                .send(DiagnosticReaderEvent::Failure(
+                    ParserIoThreadError::DiagnosticOverflow {
+                        maximum: PARSER_MAX_STDERR_BYTES,
+                    },
+                ))
+                .is_ok()
+            {
+                Ok(diagnostics)
+            } else {
+                Err(ParserIoThreadError::DiagnosticOverflow {
                     maximum: PARSER_MAX_STDERR_BYTES,
-                },
-            )));
-            return Err(ParserIoThreadError::DiagnosticOverflow {
-                maximum: PARSER_MAX_STDERR_BYTES,
-            });
+                })
+            };
         }
         diagnostics.extend_from_slice(&chunk[..count]);
     }
@@ -1578,10 +1606,32 @@ impl ResidentParserSession {
         no_progress_timeout: Duration,
         cancellation: &IndexCancellation,
     ) -> Result<Self, ParserSupervisorError> {
+        let memory_limits = memory_limits.checked()?;
+        let command = platform_command(launch, memory_limits)?;
+        Self::launch_command(
+            launch,
+            grammar,
+            memory_limits,
+            absolute_deadline,
+            no_progress_timeout,
+            cancellation,
+            command,
+        )
+    }
+
+    /// Launch one already closed command through the production process owner.
+    fn launch_command(
+        launch: &VerifiedParserPackLaunch,
+        grammar: ParserLanguageIdentity,
+        memory_limits: ParserMemoryLimits,
+        absolute_deadline: Instant,
+        no_progress_timeout: Duration,
+        cancellation: &IndexCancellation,
+        mut command: Command,
+    ) -> Result<Self, ParserSupervisorError> {
+        let _ = memory_limits;
         let session = fresh_session_identity()?;
         let containment = containment_for_platform(launch.platform);
-        let memory_limits = memory_limits.checked()?;
-        let mut command = platform_command(launch, memory_limits)?;
         let program = PathBuf::from(command.get_program());
         let mut child = command
             .spawn()
@@ -3140,6 +3190,314 @@ impl Drop for OptionalParserSupervisor {
     fn drop(&mut self) {
         drop(self.take_and_shutdown_resident());
     }
+}
+
+/// Execute the process-owning supervisor against the test-only hostile protocol peer.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
+    #[derive(Clone, Copy)]
+    enum ExpectedFailure {
+        Cancelled,
+        Deadline,
+        InvalidAdmission,
+        Io,
+        NoProgress,
+        Progress(&'static str),
+        Ready(&'static str),
+        Response(&'static str),
+        Limit(&'static str),
+        InvalidControl(ParserFrameKind),
+    }
+
+    struct Case {
+        scenario: &'static str,
+        expected: ExpectedFailure,
+        source_bytes: usize,
+        cancellation_after: Option<Duration>,
+        deadline: Duration,
+        no_progress: Duration,
+        limits: ParserRequestLimits,
+    }
+
+    fn default_limits() -> io::Result<ParserRequestLimits> {
+        ParserRequestLimits::new(4 * 1024, 16, 16)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    fn case(scenario: &'static str, expected: ExpectedFailure) -> io::Result<Case> {
+        Ok(Case {
+            scenario,
+            expected,
+            source_bytes: 32,
+            cancellation_after: None,
+            deadline: Duration::from_secs(2),
+            no_progress: Duration::from_millis(150),
+            limits: default_limits()?,
+        })
+    }
+
+    fn error_matches(error: &ParserSupervisorError, expected: ExpectedFailure) -> bool {
+        match (error, expected) {
+            (ParserSupervisorError::Cancelled { .. }, ExpectedFailure::Cancelled)
+            | (ParserSupervisorError::DeadlineExceeded { .. }, ExpectedFailure::Deadline)
+            | (ParserSupervisorError::InvalidAdmission, ExpectedFailure::InvalidAdmission)
+            | (ParserSupervisorError::IoThread { .. }, ExpectedFailure::Io)
+            | (ParserSupervisorError::NoProgress { .. }, ExpectedFailure::NoProgress) => true,
+            (
+                ParserSupervisorError::Protocol {
+                    source: ParserProtocolError::ProgressRegression { field },
+                },
+                ExpectedFailure::Progress(expected),
+            )
+            | (
+                ParserSupervisorError::Protocol {
+                    source: ParserProtocolError::ReadyIdentityMismatch { field },
+                },
+                ExpectedFailure::Ready(expected),
+            )
+            | (
+                ParserSupervisorError::Protocol {
+                    source: ParserProtocolError::ResponseIdentityMismatch { field },
+                },
+                ExpectedFailure::Response(expected),
+            )
+            | (
+                ParserSupervisorError::Protocol {
+                    source: ParserProtocolError::RequestLimitExceeded { field, .. },
+                },
+                ExpectedFailure::Limit(expected),
+            ) => field == &expected,
+            (
+                ParserSupervisorError::Protocol {
+                    source: ParserProtocolError::InvalidControlJson { kind, .. },
+                },
+                ExpectedFailure::InvalidControl(expected),
+            ) => kind == &expected,
+            _ => false,
+        }
+    }
+
+    fn command_for(peer: &Path, scenario: &str) -> io::Result<Command> {
+        let current_dir = peer
+            .parent()
+            .ok_or_else(|| io::Error::other("hostile peer path has no parent"))?;
+        let mut command = Command::new(peer);
+        command
+            .arg("--peer")
+            .arg(scenario)
+            .current_dir(current_dir)
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        command.process_group(0);
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        {
+            use std::os::windows::process::CommandExt;
+
+            command.creation_flags(0x0800_0000);
+        }
+        Ok(command)
+    }
+
+    fn test_launch(peer: &Path) -> io::Result<VerifiedParserPackLaunch> {
+        let pack_root = peer
+            .parent()
+            .ok_or_else(|| io::Error::other("hostile peer path has no parent"))?
+            .to_path_buf();
+        let platform = host_pack_platform()
+            .ok_or_else(|| io::Error::other("host has no optional-parser containment target"))?;
+        Ok(VerifiedParserPackLaunch {
+            pack_root,
+            platform,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            worker: peer.to_path_buf(),
+            #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+            containment_broker: Some(peer.to_path_buf()),
+            accepted_grammars: vec!["hostile".to_owned()],
+            artifact: ParserArtifactIdentity::for_bytes(b"parser-supervisor-hostile-peer"),
+            accepted_manifest_sha256: "0".repeat(64),
+            payloads: Vec::new(),
+        })
+    }
+
+    fn operate(
+        peer: &Path,
+        case: &Case,
+    ) -> Result<ParserCompletionEvidence, ParserSupervisorError> {
+        let launch = test_launch(peer).map_err(|source| ParserSupervisorError::IoThread {
+            phase: "adversarial test launch",
+            message: source.to_string(),
+        })?;
+        let grammar = ParserLanguageIdentity::new("hostile")?;
+        let cancellation = IndexCancellation::new();
+        let cancellation_thread = case.cancellation_after.map(|delay| {
+            let cancellation = cancellation.clone();
+            thread::spawn(move || {
+                thread::sleep(delay);
+                cancellation.cancel();
+            })
+        });
+        let deadline = Instant::now()
+            .checked_add(case.deadline)
+            .unwrap_or_else(Instant::now);
+        let resident = ResidentParserSession::launch_command(
+            &launch,
+            grammar,
+            ParserMemoryLimits::PRODUCTION,
+            deadline,
+            case.no_progress,
+            &cancellation,
+            command_for(peer, case.scenario).map_err(|source| ParserSupervisorError::IoThread {
+                phase: "adversarial test command",
+                message: source.to_string(),
+            })?,
+        );
+        let result = match resident {
+            Ok(mut resident) => {
+                let source = vec![b'x'; case.source_bytes];
+                let operation = resident.parse(
+                    &source,
+                    ParserSourceIdentity::for_bytes(&source)?,
+                    case.limits,
+                    deadline,
+                    case.no_progress,
+                    &cancellation,
+                );
+                match operation {
+                    Ok(evidence) => resident.shutdown().map(|()| evidence),
+                    Err(operation) => Err(attach_cleanup(operation, resident.shutdown())),
+                }
+            }
+            Err(error) => Err(error),
+        };
+        if let Some(handle) = cancellation_thread {
+            handle
+                .join()
+                .map_err(|_panic| ParserSupervisorError::Cleanup {
+                    message: "adversarial cancellation thread panicked".to_owned(),
+                })?;
+        }
+        result
+    }
+
+    fn require_failure(peer: &Path, hostile: &Case) -> io::Result<()> {
+        let Err(error) = operate(peer, hostile) else {
+            return Err(io::Error::other(format!(
+                "hostile scenario {} unexpectedly succeeded",
+                hostile.scenario
+            )));
+        };
+        if error.has_mandatory_cleanup_failure() {
+            return Err(io::Error::other(format!(
+                "hostile scenario {} did not reap and join cleanly: {error:?}",
+                hostile.scenario
+            )));
+        }
+        if !error_matches(&error, hostile.expected) {
+            return Err(io::Error::other(format!(
+                "hostile scenario {} returned the wrong typed failure: {error:?}",
+                hostile.scenario
+            )));
+        }
+
+        let healthy = case("healthy", ExpectedFailure::Io)?;
+        let evidence = operate(peer, &healthy).map_err(|error| {
+            io::Error::other(format!(
+                "healthy restart after {} failed: {error:?}",
+                hostile.scenario
+            ))
+        })?;
+        if evidence.root_kind().as_str() != "source_file" {
+            return Err(io::Error::other("healthy restart returned other evidence"));
+        }
+        Ok(())
+    }
+
+    let mut cases = vec![
+        case("pre-ready-stall", ExpectedFailure::NoProgress)?,
+        case("ready-session", ExpectedFailure::Ready("session"))?,
+        case("ready-artifact", ExpectedFailure::Ready("artifact"))?,
+        case("ready-containment", ExpectedFailure::Ready("containment"))?,
+        case(
+            "ready-malformed",
+            ExpectedFailure::InvalidControl(ParserFrameKind::Ready),
+        )?,
+        case("ready-truncated", ExpectedFailure::Io)?,
+        case("ready-oversized", ExpectedFailure::Io)?,
+        case("progress-session", ExpectedFailure::Response("session"))?,
+        case("progress-request", ExpectedFailure::Response("request_id"))?,
+        case("progress-duplicate", ExpectedFailure::Progress("sequence"))?,
+        case("progress-gap", ExpectedFailure::Progress("sequence"))?,
+        case(
+            "progress-regression",
+            ExpectedFailure::Progress("completed_work"),
+        )?,
+        case("progress-endless", ExpectedFailure::Deadline)?,
+        case("progress-no-work", ExpectedFailure::NoProgress)?,
+        case(
+            "completion-malformed",
+            ExpectedFailure::InvalidControl(ParserFrameKind::Completion),
+        )?,
+        case("completion-truncated", ExpectedFailure::Io)?,
+        case("completion-oversized", ExpectedFailure::Io)?,
+        case("stderr-flood", ExpectedFailure::Io)?,
+        case(
+            "limit-output",
+            ExpectedFailure::Limit("completion.output_bytes"),
+        )?,
+        case(
+            "limit-source",
+            ExpectedFailure::Limit("evidence.root_end_byte"),
+        )?,
+        case(
+            "limit-nodes",
+            ExpectedFailure::Limit("evidence.named_node_count"),
+        )?,
+        case(
+            "limit-depth",
+            ExpectedFailure::Limit("evidence.maximum_depth"),
+        )?,
+    ];
+    let mut blocked_cancel = case("blocked-write", ExpectedFailure::Cancelled)?;
+    blocked_cancel.source_bytes = 4 * 1024 * 1024;
+    blocked_cancel.cancellation_after = Some(Duration::from_millis(75));
+    blocked_cancel.no_progress = Duration::from_secs(1);
+    cases.push(blocked_cancel);
+    let mut blocked_deadline = case("blocked-write", ExpectedFailure::Deadline)?;
+    blocked_deadline.source_bytes = 4 * 1024 * 1024;
+    blocked_deadline.deadline = Duration::from_millis(125);
+    blocked_deadline.no_progress = Duration::from_secs(1);
+    cases.push(blocked_deadline);
+    if let Some(progress_endless) = cases
+        .iter_mut()
+        .find(|candidate| candidate.scenario == "progress-endless")
+    {
+        progress_endless.deadline = Duration::from_millis(250);
+        progress_endless.no_progress = Duration::from_secs(1);
+    }
+    if let Some(output_limit) = cases
+        .iter_mut()
+        .find(|candidate| candidate.scenario == "limit-output")
+    {
+        output_limit.limits = ParserRequestLimits::new(64, 16, 16)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    cases.extend([
+        case("admission-forged", ExpectedFailure::InvalidAdmission)?,
+        case("admission-truncated", ExpectedFailure::Io)?,
+        case("admission-stall", ExpectedFailure::NoProgress)?,
+        case("admission-flood", ExpectedFailure::Io)?,
+    ]);
+
+    for hostile in &cases {
+        require_failure(peer, hostile)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

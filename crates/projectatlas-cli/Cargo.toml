@@ -20,6 +20,12 @@ name = "optional_parser_pack_release"
 path = "examples/optional_parser_pack_release.rs"
 required-features = ["optional-parser-supervisor"]
 
+[[test]]
+name = "parser_supervisor_adversarial"
+path = "tests/parser_supervisor_adversarial.rs"
+harness = false
+required-features = ["optional-parser-supervisor"]
+
 [features]
 default = ["optional-parser-supervisor"]
 optional-parser-supervisor = ["dep:nix", "dep:tar", "dep:tempfile", "dep:zstd"]

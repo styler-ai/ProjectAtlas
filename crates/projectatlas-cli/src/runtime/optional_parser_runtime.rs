@@ -544,6 +544,24 @@ mod tests {
     }
 
     #[test]
+    fn operation_and_cleanup_failures_remain_distinct_at_the_runtime_boundary() {
+        let operation = CliError::ParserPack(OptionalParserPackLifecycleError::InvalidData {
+            reason: "synthetic operation failure".to_owned(),
+        });
+        let cleanup = CliError::ParserPack(OptionalParserPackLifecycleError::Supervisor(
+            ParserSupervisorError::Cleanup {
+                message: "synthetic cleanup failure".to_owned(),
+            },
+        ));
+
+        let result = combine_optional_operation_and_cleanup::<()>(Err(operation), Err(cleanup));
+        assert!(matches!(
+            result,
+            Err(CliError::OptionalParserOperationAndCleanup { .. })
+        ));
+    }
+
+    #[test]
     fn cleanup_failure_retains_execution_owner_until_runtime_state_drops() {
         struct DropProbe<'a>(&'a AtomicUsize);
 

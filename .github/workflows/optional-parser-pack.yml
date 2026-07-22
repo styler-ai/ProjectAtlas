@@ -629,6 +629,18 @@ jobs:
           name: parser-pack-${{ matrix.target }}-construction
           path: ${{ runner.temp }}/parser-pack-runtime-e2e
 
+      - name: Exercise adversarial supervisor protocol and cleanup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "parser-pack-runtime-e2e-target"
+          cargo test `
+            -p projectatlas-cli `
+            --test parser_supervisor_adversarial `
+            --all-features `
+            --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Exercise packaged archive through the normal runtime lifecycle
         shell: pwsh
         run: |
