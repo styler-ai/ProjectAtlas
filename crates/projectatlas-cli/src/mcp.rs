@@ -372,6 +372,12 @@ const MCP_ERROR_IGNORE_KIND_REQUIRED: &str =
     "ignore kind is required; expected dir-name or path-prefix";
 /// Required ignore kind diagnostic for mutation tools.
 const MCP_ERROR_IGNORE_KIND_REQUIRED_FOR_ADD: &str = "ignore kind is required for atlas_ignore_add";
+/// Invalid coverage start-index diagnostic prefix.
+const MCP_ERROR_COVERAGE_START_INDEX_TOO_LARGE_PREFIX: &str = "coverage start index is too large: ";
+/// Invalid coverage limit diagnostic prefix.
+const MCP_ERROR_COVERAGE_LIMIT_TOO_LARGE_PREFIX: &str = "coverage limit is too large: ";
+/// Coverage-filter diagnostic for the default structural-health mode.
+const MCP_ERROR_COVERAGE_FILTERS_REQUIRE_COVERAGE: &str = "coverage filters require coverage=true";
 /// CI environment variable used by MCP map export safeguards.
 const MCP_ENV_CI: &str = "CI";
 /// GitHub Actions environment variable used by MCP map export safeguards.
@@ -3990,10 +3996,14 @@ fn coverage_query_from_params(
         .min(COVERAGE_PAGE_MAX_LIMIT as usize);
     Ok(RepositoryCoverageQuery {
         start_index: u32::try_from(params.start_index.unwrap_or(0)).map_err(|error| {
-            CliError::InvalidInput(format!("coverage start index is too large: {error}"))
+            let mut message = String::from(MCP_ERROR_COVERAGE_START_INDEX_TOO_LARGE_PREFIX);
+            message.push_str(&error.to_string());
+            CliError::InvalidInput(message)
         })?,
         limit: u32::try_from(limit).map_err(|error| {
-            CliError::InvalidInput(format!("coverage limit is too large: {error}"))
+            let mut message = String::from(MCP_ERROR_COVERAGE_LIMIT_TOO_LARGE_PREFIX);
+            message.push_str(&error.to_string());
+            CliError::InvalidInput(message)
         })?,
         path_prefix: trimmed_filter(params.path_prefix.as_deref())
             .map(|value| normalize_repo_path_prefix(&value)),
@@ -4908,7 +4918,7 @@ impl ProjectAtlasMcpServer {
             }
             if has_coverage_filters(&params) {
                 return Err(CliError::InvalidInput(
-                    "coverage filters require coverage=true".to_string(),
+                    MCP_ERROR_COVERAGE_FILTERS_REQUIRE_COVERAGE.to_string(),
                 ));
             }
             let scope = if params.source_only.unwrap_or(false) {
