@@ -571,6 +571,17 @@ throw "Construction wrapper returned after the fail-fast proxy."
             [string]$placeholderState.stage -eq 'identity' -and
             @($placeholderState.acl_paths).Count -eq 0) `
         "Fail-fast account journal did not retain the exact placeholder state."
+    Wait-ForRecoveryCondition `
+        -TimeoutSeconds 10 `
+        -FailureMessage "Fail-fast account did not become durably observable." `
+        -Condition {
+            $candidateAccount = Get-ExactLocalAccount `
+                -Username ([string]$placeholderState.username)
+            $null -ne $candidateAccount -and
+                $null -ne $candidateAccount.Sid -and
+                $candidateAccount.Sid.Value -match $sidPattern -and
+                [string]$candidateAccount.Description -eq $accountDescription
+        }
     $account = Get-ExactLocalAccount -Username ([string]$placeholderState.username)
     Require `
         ($null -ne $account -and
