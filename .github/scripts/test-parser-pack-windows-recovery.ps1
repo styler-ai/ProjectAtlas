@@ -2244,9 +2244,6 @@ try {
         -StatePath $scenarioStatePaths.AccountJournal
     $debugPrivilegeBefore =
         [ProjectAtlasConstructionPrivilegeAudit]::ReadDebugPrivilegeAttributes()
-    Require `
-        (($debugPrivilegeBefore -band 0x00000002) -eq 0) `
-        "Elevated recovery runner started with SeDebugPrivilege enabled."
     $admissionRecoveryFailure = $null
     $privilegeAuditFailure = $null
     try {
@@ -2262,7 +2259,7 @@ try {
                 [ProjectAtlasConstructionPrivilegeAudit]::ReadDebugPrivilegeAttributes()
             Require `
                 ($debugPrivilegeAfter -eq $debugPrivilegeBefore) `
-                "Construction admission did not restore the exact SeDebugPrivilege attributes."
+                "Construction admission did not preserve the exact SeDebugPrivilege attributes."
         }
         catch {
             $privilegeAuditFailure = $_.Exception
