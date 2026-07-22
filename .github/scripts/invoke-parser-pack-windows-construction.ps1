@@ -985,6 +985,7 @@ foreach ($requiredEnvironment in @("INCLUDE", "LIB", "LIBPATH")) {
 
 $nativeSource = @'
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using Microsoft.Win32.SafeHandles;
@@ -1021,12 +1022,15 @@ public static class ProjectAtlasConstructionProcess
     private const uint SeGroupEnabled = 0x00000004;
     private const uint SeGroupUseForDenyOnly = 0x00000010;
     private const uint SeGroupLogonId = 0xC0000000;
+    private const uint SemaphoreSynchronizeAndModify = 0x00100002;
     private const int ErrorInsufficientBuffer = 122;
+    private const int ErrorAlreadyExists = 183;
     private const int MaximumTokenInformationBytes = 64 * 1024;
     private const int MaximumTokenGroupCount = 1024;
     private const int MaximumLogonCommandLineCharacters = 1023;
     private const string RequiredIntegritySid = "S-1-16-8192";
     private const string BrokerJobPrefix = "Global\\ProjectAtlasParserPackBroker-";
+    private const string JobserverPrefix = "Local\\ProjectAtlasParserPack-";
 
     private static readonly object BrokerJobSync = new object();
     private static string configuredBrokerJobName;
@@ -1055,6 +1059,8 @@ public static class ProjectAtlasConstructionProcess
         internal bool ThreadHandleClosed { get; set; }
         internal bool LogonTokenHandleOwned { get; set; }
         internal bool LogonTokenHandleClosed { get; set; }
+        internal bool JobserverHandleOwned { get; set; }
+        internal bool JobserverHandleClosed { get; set; }
         internal bool ConstructionTokenHandleOwned { get; set; }
         internal bool ConstructionTokenHandleClosed { get; set; }
     }
@@ -1274,6 +1280,19 @@ public static class ProjectAtlasConstructionProcess
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
 
+    [DllImport(
+        "kernel32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true,
+        EntryPoint = "CreateSemaphoreExW")]
+    private static extern IntPtr CreateSemaphoreEx(
+        ref SecurityAttributes attributes,
+        int initialCount,
+        int maximumCount,
+        string name,
+        uint flags,
+        uint desiredAccess);
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr OpenJobObject(
         uint desiredAccess,
@@ -1364,7 +1383,7 @@ public static class ProjectAtlasConstructionProcess
         }
     }
 
-    private static void ValidateConstructionToken(
+    private static string ValidateConstructionToken(
         SafeAccessTokenHandle token,
         string principalSid)
     {
@@ -1385,6 +1404,7 @@ public static class ProjectAtlasConstructionProcess
             }
         }
 
+        string logonSid = null;
         int logonSidCount = 0;
         using (TokenInformationBuffer groupsInformation = GetBoundedTokenInformation(
             token,
@@ -1412,7 +1432,7 @@ public static class ProjectAtlasConstructionProcess
                     groupsInformation.Pointer,
                     checked(groupOffset + checked((int)index * groupSize)));
                 SidAndAttributes group = Marshal.PtrToStructure<SidAndAttributes>(groupPointer);
-                ReadBoundedSid(
+                SecurityIdentifier groupSid = ReadBoundedSid(
                     groupsInformation,
                     group.Sid,
                     "validate-construction-token-group-sid");
@@ -1422,6 +1442,7 @@ public static class ProjectAtlasConstructionProcess
                 if (isLogonSid && isEnabled && !isDenyOnly)
                 {
                     logonSidCount++;
+                    logonSid = groupSid.Value;
                 }
             }
         }
@@ -1449,6 +1470,95 @@ public static class ProjectAtlasConstructionProcess
         {
             throw new InvalidOperationException("validate-construction-token-integrity");
         }
+        return logonSid;
+    }
+
+    private static SafeWaitHandle CreateConstructionJobserver(
+        string logonSid,
+        out string name)
+    {
+        // CreateProcessWithToken keeps the authenticated child in the caller's session.
+        // Precreate one Local object so that child only needs exact-object access, not
+        // permission to create arbitrary objects in the session namespace.
+        name = JobserverPrefix + Guid.NewGuid().ToString("N");
+        string sddl = "D:P(A;;0x00100002;;;" + logonSid + ")" +
+            "S:(ML;;NW;;;ME)";
+        IntPtr descriptor = IntPtr.Zero;
+        try
+        {
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
+                sddl,
+                SddlRevision1,
+                out descriptor,
+                IntPtr.Zero))
+            {
+                throw Failure("create-construction-jobserver-security");
+            }
+            SecurityAttributes attributes = new SecurityAttributes();
+            attributes.Length = Marshal.SizeOf<SecurityAttributes>();
+            attributes.SecurityDescriptor = descriptor;
+            attributes.InheritHandle = false;
+            IntPtr handle = CreateSemaphoreEx(
+                ref attributes,
+                1,
+                1,
+                name,
+                0,
+                SemaphoreSynchronizeAndModify);
+            if (handle == IntPtr.Zero)
+            {
+                throw Failure("create-construction-jobserver");
+            }
+            int createError = Marshal.GetLastWin32Error();
+            SafeWaitHandle result = new SafeWaitHandle(handle, true);
+            if (createError == ErrorAlreadyExists)
+            {
+                result.Dispose();
+                throw new InvalidOperationException("construction-jobserver-name-collision");
+            }
+            return result;
+        }
+        finally
+        {
+            if (descriptor != IntPtr.Zero)
+            {
+                LocalFree(descriptor);
+            }
+        }
+    }
+
+    private static string AddConstructionJobserverEnvironment(
+        string environmentBlock,
+        string name)
+    {
+        if (string.IsNullOrEmpty(environmentBlock) ||
+            !environmentBlock.EndsWith("\0\0", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("construction-environment-termination");
+        }
+        List<string> rows = new List<string>();
+        foreach (string row in environmentBlock.Split('\0'))
+        {
+            if (row.Length == 0)
+            {
+                continue;
+            }
+            if (row.StartsWith("CARGO_MAKEFLAGS=", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("ambient-construction-jobserver");
+            }
+            rows.Add(row);
+        }
+        rows.Add(
+            "CARGO_MAKEFLAGS=-j --jobserver-fds=" + name +
+            " --jobserver-auth=" + name);
+        rows.Sort(StringComparer.OrdinalIgnoreCase);
+        string result = string.Join("\0", rows) + "\0\0";
+        if (result.Length > 32767)
+        {
+            throw new InvalidOperationException("construction-environment-too-large");
+        }
+        return result;
     }
 
     private static TokenInformationBuffer GetBoundedTokenInformation(
@@ -1717,7 +1827,9 @@ public static class ProjectAtlasConstructionProcess
         IntPtr desktop = IntPtr.Zero;
         IntPtr originalWindowStation = IntPtr.Zero;
         SafeAccessTokenHandle logonToken = null;
+        SafeWaitHandle jobserver = null;
         SafeAccessTokenHandle constructionToken = null;
+        string admittedLogonSid = null;
         ProcessInformation process = new ProcessInformation();
         bool processCreated = false;
         bool assignedToJob = false;
@@ -1805,7 +1917,6 @@ public static class ProjectAtlasConstructionProcess
             startup.Desktop = windowStationName + "\\" + desktopName;
             StringBuilder commandLine = new StringBuilder(BuildCommandLine(executable, arguments));
             uint flags = GetConstructionCreationFlags();
-            environment = Marshal.StringToHGlobalUni(environmentBlock);
             IntPtr passwordPointer = IntPtr.Zero;
             bool created = false;
             int createError = 0;
@@ -1833,7 +1944,21 @@ public static class ProjectAtlasConstructionProcess
                 {
                     admissionReceipt.LogonTokenHandleOwned = true;
                 }
-                ValidateConstructionToken(logonToken, principalSid);
+                admittedLogonSid = ValidateConstructionToken(
+                    logonToken,
+                    principalSid);
+                string jobserverName;
+                jobserver = CreateConstructionJobserver(
+                    admittedLogonSid,
+                    out jobserverName);
+                if (admissionReceipt != null)
+                {
+                    admissionReceipt.JobserverHandleOwned = true;
+                }
+                string constructionEnvironment = AddConstructionJobserverEnvironment(
+                    environmentBlock,
+                    jobserverName);
+                environment = Marshal.StringToHGlobalUni(constructionEnvironment);
                 created = CreateProcessWithToken(
                     logonToken,
                     0,
@@ -1895,7 +2020,16 @@ public static class ProjectAtlasConstructionProcess
             {
                 admissionReceipt.ConstructionTokenHandleOwned = true;
             }
-            ValidateConstructionToken(constructionToken, principalSid);
+            string processLogonSid = ValidateConstructionToken(
+                constructionToken,
+                principalSid);
+            if (!string.Equals(
+                processLogonSid,
+                admittedLogonSid,
+                StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("construction-process-logon-sid");
+            }
             if (admissionScenario == AdmissionScenario.RetainedJobBeforeAdmission)
             {
                 if (!AssignProcessToJobObject(job, process.Process))
@@ -2061,6 +2195,15 @@ public static class ProjectAtlasConstructionProcess
                         constructionToken.IsClosed;
                 }
                 constructionToken = null;
+            }
+            if (jobserver != null)
+            {
+                jobserver.Dispose();
+                if (admissionReceipt != null)
+                {
+                    admissionReceipt.JobserverHandleClosed = jobserver.IsClosed;
+                }
+                jobserver = null;
             }
             if (environment != IntPtr.Zero)
             {
@@ -2821,8 +2964,11 @@ foreach ($entry in [Environment]::GetEnvironmentVariables().Keys) {
         exit 23
     }
 }
+$jobserverPattern =
+    '\A-j --jobserver-fds=(Local\\ProjectAtlasParserPack-[0-9a-f]{32}) ' +
+    '--jobserver-auth=\1\z'
 if ([string]$env:CARGO_BUILD_JOBS -cne '1' -or
-    (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS)) {
+    [string]$env:CARGO_MAKEFLAGS -cnotmatch $jobserverPattern) {
     exit 24
 }
 exit 0

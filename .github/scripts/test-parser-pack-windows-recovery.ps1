@@ -173,7 +173,11 @@ function Assert-ProductionRecoveryContracts {
         [System.StringComparison]::Ordinal
     )
     $principalTokenValidationIndex = $nativeText.IndexOf(
-        'ValidateConstructionToken(logonToken, principalSid);',
+        'admittedLogonSid = ValidateConstructionToken(',
+        [System.StringComparison]::Ordinal
+    )
+    $jobserverCreationIndex = $nativeText.IndexOf(
+        'jobserver = CreateConstructionJobserver(',
         [System.StringComparison]::Ordinal
     )
     $processCreationIndex = $nativeText.IndexOf(
@@ -193,7 +197,7 @@ function Assert-ProductionRecoveryContracts {
         [System.StringComparison]::Ordinal
     )
     $tokenValidationIndex = $nativeText.IndexOf(
-        'ValidateConstructionToken(constructionToken, principalSid);',
+        'string processLogonSid = ValidateConstructionToken(',
         [System.StringComparison]::Ordinal
     )
     $retainedJobInjectionIndex = $nativeText.IndexOf(
@@ -213,7 +217,8 @@ function Assert-ProductionRecoveryContracts {
         ($creationFlagsIndex -ge 0 -and
             $principalLogonIndex -gt $creationFlagsIndex -and
             $principalTokenValidationIndex -gt $principalLogonIndex -and
-            $processCreationIndex -gt $principalTokenValidationIndex -and
+            $jobserverCreationIndex -gt $principalTokenValidationIndex -and
+            $processCreationIndex -gt $jobserverCreationIndex -and
             $processCreatedIndex -gt $processCreationIndex -and
             $processTokenOpenIndex -gt $processCreatedIndex -and
             $tokenValidationIndex -gt $processTokenOpenIndex -and
@@ -223,6 +228,7 @@ function Assert-ProductionRecoveryContracts {
             $nativeText.Contains('return CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;') -and
             $nativeText.Contains('EntryPoint = "LogonUserW"') -and
             $nativeText.Contains('EntryPoint = "CreateProcessWithTokenW"') -and
+            $nativeText.Contains('EntryPoint = "CreateSemaphoreExW"') -and
             -not $nativeText.Contains('EntryPoint = "CreateProcessWithLogonW"') -and
             -not $nativeText.Contains('CreateBreakawayFromJob = 0x01000000;') -and
             $nativeText.Contains('ValidateCurrentBrokerJob(brokerJobName);') -and
@@ -234,6 +240,10 @@ function Assert-ProductionRecoveryContracts {
             $nativeText.Contains('Marshal.ZeroFreeGlobalAllocUnicode(passwordPointer);') -and
             $nativeText.Contains('LogonTokenHandleOwned') -and
             $nativeText.Contains('LogonTokenHandleClosed') -and
+            $nativeText.Contains('JobserverHandleOwned') -and
+            $nativeText.Contains('JobserverHandleClosed') -and
+            $nativeText.Contains('S:(ML;;NW;;;ME)') -and
+            $nativeText.Contains('ambient-construction-jobserver') -and
             $nativeText.Contains('MaximumLogonCommandLineCharacters = 1023;') -and
             $nativeText.Contains('construction-process-retained-inherited-job')) `
         "Construction admission no longer validates the suspended alternate-logon child before assigning its owned Job."
@@ -1561,6 +1571,8 @@ function Assert-AdmissionReceipt {
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ThreadHandleClosed) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name LogonTokenHandleOwned) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name LogonTokenHandleClosed) -and
+            [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name JobserverHandleOwned) -and
+            [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name JobserverHandleClosed) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ConstructionTokenHandleOwned) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ConstructionTokenHandleClosed)) `
         "Construction admission recovery receipt was incomplete."
@@ -1624,9 +1636,22 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         '-NoLogo', '-NoProfile', '-NonInteractive',
         '-Command', 'Start-Sleep -Seconds 30'
     )
+    $jobserverCanary = @'
+$match = [regex]::Match(
+    [string]$env:CARGO_MAKEFLAGS,
+    '\A-j --jobserver-fds=(Local\\ProjectAtlasParserPack-[0-9a-f]{32}) --jobserver-auth=\1\z'
+)
+if (-not $match.Success) { exit 41 }
+try {
+    $semaphore = [System.Threading.Semaphore]::OpenExisting($match.Groups[1].Value)
+    $semaphore.Dispose()
+}
+catch { exit 42 }
+exit 0
+'@
     $normalArguments = [string[]]@(
         '-NoLogo', '-NoProfile', '-NonInteractive',
-        '-Command', 'exit 0'
+        '-Command', $jobserverCanary
     )
     $environmentBlock = New-MinimalUserEnvironmentBlock
     $invalidPassword = [System.Security.SecureString]::new()

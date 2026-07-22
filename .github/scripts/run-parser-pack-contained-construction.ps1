@@ -342,10 +342,14 @@ function Assert-CargoConstructionEnvironment {
         [string]$Target
     )
 
-    if ($Target -eq "x86_64-pc-windows-msvc" -and
-        ([string]$env:CARGO_BUILD_JOBS -cne "1" -or
-            (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS))) {
-        throw "Windows construction requires a one-job Cargo budget and no inherited jobserver."
+    if ($Target -eq "x86_64-pc-windows-msvc") {
+        $jobserverPattern =
+            '\A-j --jobserver-fds=(Local\\ProjectAtlasParserPack-[0-9a-f]{32}) ' +
+            '--jobserver-auth=\1\z'
+        if ([string]$env:CARGO_BUILD_JOBS -cne "1" -or
+            [string]$env:CARGO_MAKEFLAGS -cnotmatch $jobserverPattern) {
+            throw "Windows construction requires its owned one-token Cargo jobserver."
+        }
     }
 }
 

@@ -110,12 +110,14 @@ try {
             }
             catch {
                 $rejected = $_.Exception.Message -eq
-                    'Windows construction requires a one-job Cargo budget and no inherited jobserver.'
+                    'Windows construction requires its owned one-token Cargo jobserver.'
             }
             Require $rejected "Windows construction accepted an invalid Cargo environment."
         }
         $env:CARGO_BUILD_JOBS = '1'
-        Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS -ErrorAction SilentlyContinue
+        $ownedJobserverName = "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+        $env:CARGO_MAKEFLAGS =
+            "-j --jobserver-fds=$ownedJobserverName --jobserver-auth=$ownedJobserverName"
         Assert-CargoConstructionEnvironment -Target 'x86_64-pc-windows-msvc'
         Remove-Item -LiteralPath Env:CARGO_BUILD_JOBS -ErrorAction SilentlyContinue
         Assert-CargoConstructionEnvironment -Target 'x86_64-unknown-linux-gnu'
@@ -246,12 +248,14 @@ try {
                 'CARGO_BUILD_JOBS = "1"'
             ).Count -eq 1 -and
                 $productionText.Contains('[string]$env:CARGO_BUILD_JOBS -cne "1"') -and
-                $productionText.Contains('Test-Path -LiteralPath Env:CARGO_MAKEFLAGS') -and
-                -not $wrapperText.Contains('CreateAdmittedJobserver') -and
-                -not $wrapperText.Contains('CARGO_MAKEFLAGS =') -and
+                $productionText.Contains(
+                    '[string]$env:CARGO_MAKEFLAGS -cnotmatch $jobserverPattern'
+                ) -and
+                $wrapperText.Contains('CreateConstructionJobserver(') -and
+                $wrapperText.Contains('AddConstructionJobserverEnvironment(') -and
                 -not $productionText.Contains('SemaphoreAcl') -and
                 -not $productionText.Contains('Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS')) `
-            "Windows construction did not use Cargo's native single-worker bound."
+            "Windows construction did not use its token-bound one-worker jobserver."
         Require `
             ($wrapperText.Contains('ValidateConstructionToken(') -and
                 $wrapperText.Contains('RequiredIntegritySid = "S-1-16-8192";') -and
@@ -274,6 +278,7 @@ try {
         Require `
             ($nativeSource.Contains('EntryPoint = "LogonUserW"') -and
                 $nativeSource.Contains('EntryPoint = "CreateProcessWithTokenW"') -and
+                $nativeSource.Contains('EntryPoint = "CreateSemaphoreExW"') -and
                 $nativeSource.Contains('private static extern bool OpenProcessToken(') -and
                 -not $nativeSource.Contains('SeDebugPrivilege') -and
                 -not $nativeSource.Contains('AdjustTokenPrivileges') -and
@@ -298,18 +303,24 @@ try {
                     'Marshal.ZeroFreeGlobalAllocUnicode(passwordPointer);'
                 ) -and
                 $nativeSource.Contains('logon-construction-principal') -and
-                $nativeSource.Contains('create-process-with-construction-token')) `
+                $nativeSource.Contains('create-process-with-construction-token') -and
+                $nativeSource.Contains('S:(ML;;NW;;;ME)') -and
+                $nativeSource.Contains('ambient-construction-jobserver')) `
             "Windows construction adapter did not use the bounded alternate-logon process boundary."
         $principalLogonStart = $nativeSource.IndexOf(
             'if (!LogonUser(',
             [System.StringComparison]::Ordinal
         )
         $principalTokenValidationStart = $nativeSource.IndexOf(
-            'ValidateConstructionToken(logonToken, principalSid);',
+            'admittedLogonSid = ValidateConstructionToken(',
             [System.StringComparison]::Ordinal
         )
         $processCreationStart = $nativeSource.IndexOf(
             'created = CreateProcessWithToken(',
+            [System.StringComparison]::Ordinal
+        )
+        $jobserverCreationStart = $nativeSource.IndexOf(
+            'jobserver = CreateConstructionJobserver(',
             [System.StringComparison]::Ordinal
         )
         $principalTokenCloseStart = $nativeSource.IndexOf(
@@ -321,13 +332,14 @@ try {
             [System.StringComparison]::Ordinal
         )
         $tokenValidationStart = $nativeSource.IndexOf(
-            'ValidateConstructionToken(constructionToken, principalSid);',
+            'string processLogonSid = ValidateConstructionToken(',
             [System.StringComparison]::Ordinal
         )
         Require `
             ($principalLogonStart -ge 0 -and
                 $principalTokenValidationStart -gt $principalLogonStart -and
-                $processCreationStart -gt $principalTokenValidationStart -and
+                $jobserverCreationStart -gt $principalTokenValidationStart -and
+                $processCreationStart -gt $jobserverCreationStart -and
                 $principalTokenCloseStart -gt $processCreationStart -and
                 $processTokenOpenStart -gt $processCreationStart -and
                 $tokenValidationStart -gt $processTokenOpenStart) `
@@ -389,7 +401,7 @@ try {
             [System.StringComparison]::Ordinal
         )
         $tokenValidationIndex = $nativeSource.IndexOf(
-            'ValidateConstructionToken(constructionToken, principalSid);',
+            'string processLogonSid = ValidateConstructionToken(',
             [System.StringComparison]::Ordinal
         )
         $retainedJobInjectionIndex = $nativeSource.IndexOf(
@@ -438,6 +450,8 @@ try {
                 $nativeSource.Contains('construction-command-line-too-long') -and
                 $nativeSource.Contains('LogonTokenHandleOwned') -and
                 $nativeSource.Contains('LogonTokenHandleClosed') -and
+                $nativeSource.Contains('JobserverHandleOwned') -and
+                $nativeSource.Contains('JobserverHandleClosed') -and
                 $nativeSource.Contains('ConstructionTokenHandleOwned') -and
                 $nativeSource.Contains('ConstructionTokenHandleClosed') -and
                 $nativeSource.Contains('AdmissionCleanupWaitMilliseconds = 5000;') -and
@@ -715,7 +729,9 @@ public static class ProjectAtlasConstructionAdmissionFixture
             ($probeSource.Contains('$ExpectedSessionId') -and
                 $probeSource.Contains('S-1-16-8192') -and
                 $probeSource.Contains('$principal.IsInRole($expectedSecurityIdentifier)') -and
-                $probeSource.Contains('Test-Path -LiteralPath Env:CARGO_MAKEFLAGS') -and
+                $probeSource.Contains(
+                    '[string]$env:CARGO_MAKEFLAGS -cnotmatch $jobserverPattern'
+                ) -and
                 $probeSource.Contains('exit 24') -and
                 $probeSource.Contains('[Environment]::GetEnvironmentVariables().Keys')) `
             "Construction boundary probe did not retain identity, session, integrity, and sanitized-environment checks."
@@ -734,7 +750,7 @@ public static class ProjectAtlasConstructionAdmissionFixture
             [System.StringComparison]::Ordinal
         )
         $cargoMakeflagsCheckIndex = $probeSource.IndexOf(
-            'Test-Path -LiteralPath Env:CARGO_MAKEFLAGS',
+            '[string]$env:CARGO_MAKEFLAGS -cnotmatch $jobserverPattern',
             [System.StringComparison]::Ordinal
         )
         Require `
@@ -1520,9 +1536,19 @@ public static class ProjectAtlasConstructionAdmissionFixture
             'ValidateConstructionToken',
             $nestedTypeFlags
         )
+        $createConstructionJobserver = $adapterType.GetMethod(
+            'CreateConstructionJobserver',
+            $nestedTypeFlags
+        )
+        $addConstructionJobserverEnvironment = $adapterType.GetMethod(
+            'AddConstructionJobserverEnvironment',
+            $nestedTypeFlags
+        )
         Require `
-            ($null -ne $validateConstructionToken) `
-            "Native adapter construction-token validation was missing."
+            ($null -ne $validateConstructionToken -and
+                $null -ne $createConstructionJobserver -and
+                $null -ne $addConstructionJobserverEnvironment) `
+            "Native adapter construction jobserver boundary was missing."
         $currentGroupCsv = @(whoami.exe /groups /fo csv /nh)
         Require ($LASTEXITCODE -eq 0) "Could not inspect the diagnostic token integrity."
         $currentIntegritySids = @(
@@ -1541,10 +1567,57 @@ public static class ProjectAtlasConstructionAdmissionFixture
             $currentToken = $currentIdentity.AccessToken
             $currentPrincipalSid = $currentIdentity.User.Value
             if ($currentIntegritySids[0] -eq 'S-1-16-8192') {
-                $validateConstructionToken.Invoke(
+                $currentLogonSid = [string]$validateConstructionToken.Invoke(
                     $null,
                     [object[]]@($currentToken, $currentPrincipalSid)
-                ) | Out-Null
+                )
+                $createArguments = [object[]]@($currentLogonSid, $null)
+                $jobserverHandle = $null
+                try {
+                    $jobserverHandle = $createConstructionJobserver.Invoke(
+                        $null,
+                        $createArguments
+                    )
+                    $jobserverName = [string]$createArguments[1]
+                    Require `
+                        ($null -ne $jobserverHandle -and
+                            -not $jobserverHandle.IsInvalid -and
+                            $jobserverName -match
+                                '\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z') `
+                        "Native adapter did not create one owned token-bound jobserver."
+                    $openedJobserver = [System.Threading.Semaphore]::OpenExisting(
+                        $jobserverName
+                    )
+                    $openedJobserver.Dispose()
+                    $jobserverEnvironment = [string]$addConstructionJobserverEnvironment.Invoke(
+                        $null,
+                        [object[]]@("CARGO_BUILD_JOBS=1`0PATH=fixture`0`0", $jobserverName)
+                    )
+                    Require `
+                        ($jobserverEnvironment.Contains(
+                            "CARGO_MAKEFLAGS=-j --jobserver-fds=$jobserverName --jobserver-auth=$jobserverName"
+                        ) -and
+                            $jobserverEnvironment.EndsWith("`0`0")) `
+                        "Native adapter did not publish its exact jobserver environment."
+                }
+                finally {
+                    if ($null -ne $jobserverHandle) {
+                        $jobserverHandle.Dispose()
+                    }
+                }
+                $closedJobserverRejected = $false
+                try {
+                    $unexpectedJobserver = [System.Threading.Semaphore]::OpenExisting(
+                        $jobserverName
+                    )
+                    $unexpectedJobserver.Dispose()
+                }
+                catch [System.Threading.WaitHandleCannotBeOpenedException] {
+                    $closedJobserverRejected = $true
+                }
+                Require `
+                    $closedJobserverRejected `
+                    "Native adapter retained its jobserver after closing the owner handle."
             }
             else {
                 $unsupportedIntegrityRejected = $false

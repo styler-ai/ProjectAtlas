@@ -1669,7 +1669,14 @@ intentionally inherits the authenticated broker Job; a direct non-hosted launch 
 requires both parent and child to be Job-free. The adapter validates the exact child
 token and parent-Job membership, assigns the child before resume to the stricter
 no-breakaway kill-on-close construction Job nested beneath the broker Job, and cleans
-it by exact SID. The
+it by exact SID. The broker also owns one unique, non-inheritable, one-token Cargo
+jobserver semaphore in the shared `Local\` session namespace. Its protected DACL
+grants only the disposable token's exact enabled logon SID the synchronize and modify
+rights that Cargo and `rustc` require, and its mandatory label prevents lower-integrity
+writes. Ambient jobserver state is rejected. The broker retains the only owner handle
+until the assigned process tree is reaped and then closes it, so the semaphore cannot
+outlive construction. This preserves the one-worker budget without adding broader
+named-object or global-namespace permission to the disposable principal. The
 hosted-runner broker is trusted CI orchestration and is never
 packaged with, or substituted for, the artifact-bound AppContainer broker. This is
 the construction egress and lifecycle boundary. Fresh
