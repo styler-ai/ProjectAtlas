@@ -398,7 +398,8 @@ function Get-ExactLocalAccount {
 
     $matches = @(Get-LocalUser -ErrorAction Stop | Where-Object {
         $_.Name -ceq $Username -and
-            ($null -eq $Sid -or ($null -ne $_.Sid -and $_.Sid.Value -eq $Sid))
+            ([string]::IsNullOrEmpty($Sid) -or
+                ($null -ne $_.Sid -and $_.Sid.Value -eq $Sid))
     })
     Require ($matches.Count -le 1) "Recovery identity resolved to multiple local accounts."
     if ($matches.Count -eq 0) {
