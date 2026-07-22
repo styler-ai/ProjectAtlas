@@ -619,7 +619,11 @@ throw "Construction wrapper returned after the account-ready proxy."
     $proxyCleanupFailures = [System.Collections.Generic.List[System.Exception]]::new()
     $observedAccount = $null
     $observedPlaceholderState = $null
+    $markerObserved = $false
     $markerValidated = $false
+    $accountObserved = $false
+    $accountSidValidated = $false
+    $accountDescriptionValidated = $false
     try {
         $proxyProcess = [System.Diagnostics.Process]::Start($proxyStart)
         if ($null -eq $proxyProcess) {
@@ -632,6 +636,7 @@ throw "Construction wrapper returned after the account-ready proxy."
                 throw "Account-ready construction wrapper exited before the recovery handshake."
             }
             if (-not $markerValidated -and [System.IO.File]::Exists($readyMarkerPath)) {
+                $markerObserved = $true
                 $readyItem = Get-Item -LiteralPath $readyMarkerPath -Force
                 if (($readyItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
                     $readyItem.Length -le 0 -or
@@ -654,22 +659,36 @@ throw "Construction wrapper returned after the account-ready proxy."
             if ($markerValidated) {
                 $candidateAccount = Get-ExactLocalAccount `
                     -Username ([string]$observedPlaceholderState.username)
-                if ($null -ne $candidateAccount -and
+                $accountObserved = $null -ne $candidateAccount
+                $accountSidValidated =
+                    $accountObserved -and
                     $null -ne $candidateAccount.Sid -and
-                    $candidateAccount.Sid.Value -match $sidPattern -and
-                    [string]$candidateAccount.Description -eq $accountDescription) {
+                    $candidateAccount.Sid.Value -match $sidPattern
+                $accountDescriptionValidated =
+                    $accountObserved -and
+                    [string]$candidateAccount.Description -eq $accountDescription
+                if ($accountSidValidated -and $accountDescriptionValidated) {
                     $observedAccount = $candidateAccount
                     break
                 }
             }
             Start-Sleep -Milliseconds 250
         } while ([DateTime]::UtcNow -lt $readyDeadline)
+        $handshakeObservation = @(
+            "marker=$markerObserved"
+            "marker_acl=$markerValidated"
+            "journal=$($null -ne $observedPlaceholderState)"
+            "account=$accountObserved"
+            "account_sid=$accountSidValidated"
+            "account_description=$accountDescriptionValidated"
+            "process_alive=$(-not $proxyProcess.HasExited)"
+        ) -join ','
         Require `
             ($null -ne $observedAccount -and
                 $null -ne $observedPlaceholderState -and
                 -not $proxyProcess.HasExited -and
                 $null -ne (Get-Process -Id $proxyProcessId -ErrorAction SilentlyContinue)) `
-            "Account-ready marker and durable account were not observed under the fixed deadline."
+            "Account-ready handshake did not complete under the fixed deadline ($handshakeObservation)."
 
         $proxyProcess.Kill($true)
         if (-not $proxyProcess.WaitForExit(5000)) {
