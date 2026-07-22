@@ -7,7 +7,11 @@ param(
 
     [hashtable]$ConstructionParameters,
 
+    [string]$BrokerJobName,
+
     [string]$RecoveryRoot,
+
+    [string]$RunnerTemporaryRoot,
 
     [switch]$StaticOnly
 )
@@ -168,6 +172,10 @@ function Assert-ProductionRecoveryContracts {
         'created = CreateProcessWithLogon(',
         [System.StringComparison]::Ordinal
     )
+    $creationFlagsIndex = $nativeText.IndexOf(
+        'uint flags = GetConstructionCreationFlags();',
+        [System.StringComparison]::Ordinal
+    )
     $processCreatedIndex = $nativeText.IndexOf(
         'processCreated = true;',
         [System.StringComparison]::Ordinal
@@ -194,20 +202,25 @@ function Assert-ProductionRecoveryContracts {
         [System.StringComparison]::Ordinal
     )
     Require `
-        ($processCreationIndex -ge 0 -and
+        ($creationFlagsIndex -ge 0 -and
+            $processCreationIndex -gt $creationFlagsIndex -and
             $processCreatedIndex -gt $processCreationIndex -and
             $processTokenOpenIndex -gt $processCreatedIndex -and
             $tokenValidationIndex -gt $processTokenOpenIndex -and
             $retainedJobInjectionIndex -gt $tokenValidationIndex -and
             $inheritedJobCheckIndex -gt $retainedJobInjectionIndex -and
             $ownJobAssignmentIndex -gt $inheritedJobCheckIndex -and
-            $nativeText.Contains(
-                'uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;'
-            ) -and
+            $nativeText.Contains('return CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;') -and
+            $nativeText.Contains('CreateBreakawayFromJob = 0x01000000;') -and
+            $nativeText.Contains('ValidateCurrentBrokerJob(brokerJobName);') -and
+            $nativeText.Contains('limits.BasicLimitInformation.LimitFlags != expectedFlags') -and
+            $nativeText.Contains('JobObjectLimitKillOnJobClose | JobObjectLimitBreakawayOk') -and
+            $nativeText.Contains('construction-broker-job-required') -and
+            $nativeText.Contains('construction-broker-job-membership') -and
+            $nativeText.Contains('construction-broker-job-policy') -and
             $nativeText.Contains('Marshal.ZeroFreeGlobalAllocUnicode(passwordPointer);') -and
             $nativeText.Contains('MaximumLogonCommandLineCharacters = 1023;') -and
             $nativeText.Contains('construction-process-retained-inherited-job') -and
-            -not $nativeText.Contains('CreateBreakawayFromJob') -and
             -not $nativeText.Contains('CreateProcessWithTokenW')) `
         "Construction admission no longer validates the suspended alternate-logon child before assigning its owned Job."
 
@@ -346,6 +359,17 @@ Require `
     ($auditParseErrors.Count -eq 0) `
     "Exact-SID WTS audit helper did not parse."
 if ($StaticOnly) {
+    if (-not [string]::IsNullOrWhiteSpace($BrokerJobName)) {
+        if ($env:OS -ne "Windows_NT" -or -not [Environment]::Is64BitProcess) {
+            throw "Windows broker admission validation requires 64-bit Windows."
+        }
+        Invoke-Expression $nativeSourceAssignment.Extent.Text
+        if (-not ('ProjectAtlasConstructionProcess' -as [type])) {
+            Add-Type -TypeDefinition $nativeSource -Language CSharp
+        }
+        [ProjectAtlasConstructionProcess]::ConfigureBrokerJob($BrokerJobName)
+        Write-Output "Windows parser-pack construction broker admission passed."
+    }
     Write-Output "Windows parser-pack recovery static validation passed."
     return
 }
@@ -362,6 +386,12 @@ if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Adm
 if ($null -eq $ConstructionParameters) {
     throw "Windows parser-pack recovery requires the production construction parameters."
 }
+if ([string]::IsNullOrWhiteSpace($BrokerJobName)) {
+    throw "Windows parser-pack recovery requires the shared broker Job name."
+}
+if ([string]::IsNullOrWhiteSpace($RunnerTemporaryRoot)) {
+    throw "Windows parser-pack recovery requires the trusted runner temporary root."
+}
 foreach ($requiredParameter in @(
     'Mode', 'StatePath', 'SourceRoot', 'InputDirectory', 'VendorDirectory',
     'OutputDirectory', 'CargoHome', 'TemporaryDirectory', 'HomeDirectory',
@@ -377,11 +407,22 @@ foreach ($requiredParameter in @(
 Require `
     ([string]$ConstructionParameters.Mode -eq 'construct') `
     "Windows parser-pack recovery received a non-construction parameter set."
+Require `
+    ($ConstructionParameters.ContainsKey('BrokerJobName') -and
+        [string]$ConstructionParameters.BrokerJobName -ceq $BrokerJobName) `
+    "Windows parser-pack recovery did not receive one exact shared broker Job."
 
 $ProductionWrapper = (Get-Item -LiteralPath $ProductionWrapper -Force).FullName
 $LauncherPath = (Get-Item -LiteralPath $LauncherPath -Force).FullName
 $RecoveryRoot = [System.IO.Path]::GetFullPath($RecoveryRoot)
-$runnerTemp = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd(
+$runnerTempItem = Get-Item -LiteralPath (
+    [System.IO.Path]::GetFullPath($RunnerTemporaryRoot)
+) -Force
+Require `
+    ($runnerTempItem.PSIsContainer -and
+        (($runnerTempItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0)) `
+    "Windows parser-pack recovery requires one regular runner temporary root."
+$runnerTemp = $runnerTempItem.FullName.TrimEnd(
     [System.IO.Path]::DirectorySeparatorChar,
     [System.IO.Path]::AltDirectorySeparatorChar
 )
@@ -1409,6 +1450,7 @@ function Initialize-ConstructionAdapter {
     if (-not ('ProjectAtlasConstructionProcess' -as [type])) {
         Add-Type -TypeDefinition $nativeSource -Language CSharp
     }
+    [ProjectAtlasConstructionProcess]::ConfigureBrokerJob($BrokerJobName)
     return [ProjectAtlasConstructionProcess]
 }
 

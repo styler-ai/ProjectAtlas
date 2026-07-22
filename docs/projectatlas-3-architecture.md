@@ -1656,15 +1656,56 @@ reopened.
 Construction after dependency and asset acquisition is physically network-denied in
 addition to Cargo and dependency offline flags. Linux construction runs in a network
 namespace. Windows construction runs as a disposable non-administrator principal
-under an exact SID-scoped outbound Windows Firewall block; its full-trust process is
-created suspended, assigned before resume to a no-breakaway kill-on-close Job, and
-cleaned by exact SID. This is the construction egress and lifecycle boundary. Fresh
+under an exact SID-scoped outbound Windows Firewall block. A hosted Windows runner
+can place the workflow process in an immutable ambient Job, so the workflow first
+uses WMI to start one trusted Job-free broker, authenticates its exact PID, image,
+SID, creation identity, and named-pipe peer, and admits it to an ephemeral
+runner-SID-owned Job with `KILL_ON_JOB_CLOSE | BREAKAWAY_OK`. Recovery and production
+construction both use that same broker implementation. Only after proving membership
+in that exact Job may the construction adapter create its alternate-logon process
+suspended with explicit breakaway, verify that the child is Job-free, assign it
+before resume to the stricter no-breakaway kill-on-close construction Job, and clean
+it by exact SID. The hosted-runner broker is trusted CI orchestration and is never
+packaged with, or substituted for, the artifact-bound AppContainer broker. This is
+the construction egress and lifecycle boundary. Fresh
 verification and normal untrusted grammar execution retain the stronger artifact-
 bound AppContainer/LPAC boundary described above. When no pack is installed, default
 core does not download, compile, link, initialize, or pay binary/startup/resident-
 memory cost for optional grammars, and all accepted 0.3.26 behavior remains
 available. Version 0.4 does not add a generic multi-pack framework; a split is
 reconsidered only if a measured package, installation, or platform ceiling fails.
+
+```mermaid
+sequenceDiagram
+    participant R as Hosted runner
+    participant J as Owned runner broker Job
+    participant W as WMI broker child
+    participant T as Fixed recovery or construction target
+    participant F as Direct fallback cleanup
+    R->>J: Create runner-SID and SYSTEM Job plus protected pipe
+    R->>W: Win32_Process.Create with BREAKAWAY_FROM_JOB
+    W->>W: Prove initially Job-free and authenticate pipe server
+    Note over J,W: Parent death closes the sole long-lived Job handle
+    alt Bootstrap fails before Job admission
+        W-->>R: Bounded bootstrap failure when possible
+        R->>W: Terminate exact retained process handle and reap
+    else Exact broker admission succeeds
+        W->>J: Verify flags, join exact Job, close child Job handle
+        W-->>R: READY with exact PID and target kind
+        R->>R: Verify PID, image, SID, start, session, pipe peer, and membership
+        R->>W: ADMIT fixed target, bounded parameters, environment, and deadline
+        W->>T: Invoke trusted sibling script in-process
+        alt Target succeeds
+            T-->>W: Bounded output
+            W-->>R: Matching result and process exit
+            R->>J: Require zero active processes
+        else Target, deadline, protocol, or parent-side validation fails
+            R->>W: Terminate exact retained process handle
+            R->>J: Terminate admitted tree and close kill-on-close Job
+        end
+    end
+    R->>F: Always run exact-state cleanup outside the broker
+```
 
 The optional-pack workflow records one bounded, content-free measurement receipt per
 accepted target. Each receipt binds the candidate revision, platform target, pinned
@@ -1693,7 +1734,8 @@ flowchart TB
     WinBroker[Artifact-bound Windows containment broker] --> Construct
     Accepted --> Boundary{Construction egress boundary}
     Boundary --> LinuxBoundary[Linux network namespace]
-    Boundary --> WindowsBoundary[Windows principal firewall plus Job]
+    Boundary --> WindowsRunner[WMI Job-free bootstrap plus authenticated runner broker Job]
+    WindowsRunner --> WindowsBoundary[Disposable principal firewall plus no-breakaway construction Job]
     LinuxBoundary --> Construct
     WindowsBoundary --> Construct
     Construct --> Artifact[Immutable target artifact plus payload manifest]

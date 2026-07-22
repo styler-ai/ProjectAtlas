@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [string]$ProductionScript = (Join-Path $PSScriptRoot "run-parser-pack-contained-construction.ps1"),
-    [string]$WindowsWrapper = (Join-Path $PSScriptRoot "invoke-parser-pack-windows-construction.ps1")
+    [string]$WindowsWrapper = (Join-Path $PSScriptRoot "invoke-parser-pack-windows-construction.ps1"),
+    [string]$WindowsRunnerJobBroker =
+        (Join-Path $PSScriptRoot "invoke-parser-pack-windows-runner-job-broker.ps1")
 )
 
 Set-StrictMode -Version Latest
@@ -134,6 +136,109 @@ try {
         )
         Require ($wrapperParseErrors.Count -eq 0) "Windows construction wrapper did not parse."
         $wrapperText = $wrapperAst.Extent.Text
+        $brokerTokens = $null
+        $brokerParseErrors = $null
+        $brokerAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Get-Item -LiteralPath $WindowsRunnerJobBroker -Force).FullName,
+            [ref]$brokerTokens,
+            [ref]$brokerParseErrors
+        )
+        Require ($brokerParseErrors.Count -eq 0) "Windows runner Job broker did not parse."
+        $brokerText = $brokerAst.Extent.Text
+        $brokerParameters = @($brokerAst.ParamBlock.Parameters |
+            ForEach-Object { $_.Name.VariablePath.UserPath })
+        $brokerJoinIndex = $brokerText.IndexOf(
+            '[ProjectAtlasWindowsRunnerJob]::Join($BrokerJobName)',
+            [System.StringComparison]::Ordinal
+        )
+        $brokerReadyIndex = $brokerText.IndexOf(
+            "kind = 'ready'",
+            $brokerJoinIndex,
+            [System.StringComparison]::Ordinal
+        )
+        $brokerRequestIndex = $brokerText.IndexOf(
+            '$request = Read-BrokerFrame',
+            $brokerReadyIndex,
+            [System.StringComparison]::Ordinal
+        )
+        $brokerTargetIndex = $brokerText.IndexOf(
+            '& $targetItem.FullName @targetParameters',
+            $brokerRequestIndex,
+            [System.StringComparison]::Ordinal
+        )
+        Require `
+            ('ScriptPath' -notin $brokerParameters -and
+                'Command' -notin $brokerParameters -and
+                'Arguments' -notin $brokerParameters -and
+                $brokerText.Contains("[ValidateSet('construction', 'recovery')]") -and
+                $brokerText.Contains('CreateFlags = [uint32](0x01000000 -bor 0x08000000)') -and
+                $brokerText.Contains('JobObjectLimitKillOnJobClose | JobObjectLimitBreakawayOk') -and
+                $brokerText.Contains('limits.BasicLimitInformation.LimitFlags != expected') -and
+                $brokerText.Contains('JobObjectLimitSilentBreakawayOk') -and
+                $brokerText.Contains('GetNamedPipeClientProcessId') -and
+                $brokerText.Contains('GetNamedPipeServerProcessId') -and
+                $brokerText.Contains('$maximumDiagnosticCharacters = 12 * 1024') -and
+                $brokerText.Contains('[char]::IsHighSurrogate(') -and
+                $brokerText.Contains('TerminateExactProcess(') -and
+                $brokerText.Contains('[System.IO.Pipes.NamedPipeServerStreamAcl]::Create(') -and
+                $brokerText.Contains('$security.SetAccessRuleProtection($true, $false)') -and
+                $brokerJoinIndex -ge 0 -and
+                $brokerReadyIndex -gt $brokerJoinIndex -and
+                $brokerRequestIndex -gt $brokerReadyIndex -and
+                $brokerTargetIndex -gt $brokerRequestIndex) `
+            "Windows runner Job broker lost its fixed authenticated admission boundary."
+
+        $bootstrapFailure = $null
+        try {
+            & $WindowsRunnerJobBroker `
+                -TargetKind recovery `
+                -TargetParameters @{
+                    ProductionWrapper = $WindowsWrapper
+                    StaticOnly = $true
+                } `
+                -TimeoutSeconds 60 `
+                -BootstrapTestFault hold-before-join
+            throw 'Broker pre-Join fault unexpectedly succeeded.'
+        }
+        catch {
+            $bootstrapFailure = $_.Exception.Message
+        }
+        Require `
+            ($bootstrapFailure -eq 'broker-ready-receipt') `
+            "Windows runner Job broker returned the wrong pre-Join fault."
+        $bootstrapSurvivors = @(
+            Get-CimInstance Win32_Process -Filter "Name = 'pwsh.exe'" |
+                Where-Object {
+                    [int]$_.ProcessId -ne $PID -and
+                    [string]$_.CommandLine -like '*-BrokerChild*' -and
+                    [string]$_.CommandLine -like
+                        '*-BootstrapTestFault hold-before-join*'
+                }
+        )
+        Require `
+            ($bootstrapSurvivors.Count -eq 0) `
+            "Windows runner Job broker retained its pre-Join WMI process."
+
+        $escapedPathTail = (('路径\"' * 700) -join '')
+        $escapedMissingWrapper = "$env:TEMP\missing-$escapedPathTail.ps1"
+        $targetFailure = $null
+        try {
+            & $WindowsRunnerJobBroker `
+                -TargetKind recovery `
+                -TargetParameters @{
+                    ProductionWrapper = $escapedMissingWrapper
+                    StaticOnly = $true
+                } `
+                -TimeoutSeconds 60
+            throw 'Broker escaped diagnostic fault unexpectedly succeeded.'
+        }
+        catch {
+            $targetFailure = $_.Exception.Message
+        }
+        Require `
+            ($targetFailure -match '^broker-target-failed:' -and
+                $targetFailure -notmatch 'broker-frame-size|broker-pipe-closed') `
+            "Windows runner Job broker lost one escaped Unicode target failure."
         $productionText = $ast.Extent.Text
         Require `
             ([System.Text.RegularExpressions.Regex]::Matches(
@@ -173,7 +278,15 @@ try {
                 -not $nativeSource.Contains('AdjustTokenPrivileges') -and
                 -not $nativeSource.Contains('EntryPoint = "LogonUserW"') -and
                 -not $nativeSource.Contains('EntryPoint = "CreateProcessWithTokenW"') -and
-                -not $nativeSource.Contains('CreateBreakawayFromJob') -and
+                $nativeSource.Contains('CreateBreakawayFromJob = 0x01000000;') -and
+                $nativeSource.Contains('JobObjectLimitBreakawayOk = 0x00000800;') -and
+                $nativeSource.Contains('JobObjectLimitSilentBreakawayOk = 0x00001000;') -and
+                $nativeSource.Contains('construction-broker-job-required') -and
+                $nativeSource.Contains('construction-broker-job-membership') -and
+                $nativeSource.Contains('construction-broker-job-policy') -and
+                $wrapperText.Contains(
+                    '[ProjectAtlasConstructionProcess]::ConfigureBrokerJob($BrokerJobName)'
+                ) -and
                 $nativeSource -match
                     'CreateProcessWithLogon\(\s*username,\s*"\.",\s*passwordPointer,\s*0,\s*executable,' -and
                 $nativeSource.Contains(
@@ -241,6 +354,10 @@ try {
             'created = CreateProcessWithLogon(',
             [System.StringComparison]::Ordinal
         )
+        $creationFlagsIndex = $nativeSource.IndexOf(
+            'uint flags = GetConstructionCreationFlags();',
+            [System.StringComparison]::Ordinal
+        )
         $processCreatedIndex = $nativeSource.IndexOf(
             'processCreated = true;',
             [System.StringComparison]::Ordinal
@@ -279,7 +396,8 @@ try {
             [System.StringComparison]::Ordinal
         )
         Require `
-            ($processCreationIndex -ge 0 -and
+            ($creationFlagsIndex -ge 0 -and
+                $processCreationIndex -gt $creationFlagsIndex -and
                 $processCreatedIndex -gt $processCreationIndex -and
                 $processTokenOpenIndex -gt $processCreatedIndex -and
                 $tokenValidationIndex -gt $processTokenOpenIndex -and
@@ -289,9 +407,10 @@ try {
                 $jobAssignmentIndex -gt $admissionFailureIndex -and
                 $admissionCleanupIndex -gt $jobAssignmentIndex -and
                 $tokenCloseIndex -gt $admissionCleanupIndex -and
-                $nativeSource.Contains(
-                    'uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;'
-                ) -and
+                $nativeSource.Contains('return CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;') -and
+                $nativeSource.Contains('ValidateCurrentBrokerJob(brokerJobName);') -and
+                $nativeSource.Contains('limits.BasicLimitInformation.LimitFlags != expectedFlags') -and
+                $nativeSource.Contains('JobObjectLimitKillOnJobClose | JobObjectLimitBreakawayOk') -and
                 $nativeSource.Contains('MaximumLogonCommandLineCharacters = 1023;') -and
                 $nativeSource.Contains('construction-command-line-too-long') -and
                 $nativeSource.Contains('ConstructionTokenHandleOwned') -and

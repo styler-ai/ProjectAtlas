@@ -25,6 +25,7 @@ param(
     [string]$RustcRelease,
     [string]$RustcCommitHash,
     [string]$ResolverAddress,
+    [string]$BrokerJobName,
 
     [ValidateRange(60, 7200)]
     [int]$TimeoutSeconds = 3600
@@ -995,9 +996,13 @@ using System.Text;
 public static class ProjectAtlasConstructionProcess
 {
     private const uint CreateSuspended = 0x00000004;
+    private const uint CreateBreakawayFromJob = 0x01000000;
     private const uint CreateNoWindow = 0x08000000;
     private const uint CreateUnicodeEnvironment = 0x00000400;
+    private const uint JobObjectQuery = 0x0004;
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+    private const uint JobObjectLimitBreakawayOk = 0x00000800;
+    private const uint JobObjectLimitSilentBreakawayOk = 0x00001000;
     private const int JobObjectExtendedLimitInformation = 9;
     private const int JobObjectBasicAccountingInformation = 1;
     private const uint WaitObject0 = 0;
@@ -1020,6 +1025,10 @@ public static class ProjectAtlasConstructionProcess
     private const int MaximumTokenGroupCount = 1024;
     private const int MaximumLogonCommandLineCharacters = 1023;
     private const string RequiredIntegritySid = "S-1-16-8192";
+    private const string BrokerJobPrefix = "Global\\ProjectAtlasParserPackBroker-";
+
+    private static readonly object BrokerJobSync = new object();
+    private static string configuredBrokerJobName;
 
     public static uint LastTotalProcesses { get; private set; }
 
@@ -1250,6 +1259,12 @@ public static class ProjectAtlasConstructionProcess
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr OpenJobObject(
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        string name);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetInformationJobObject(
@@ -1267,6 +1282,18 @@ public static class ProjectAtlasConstructionProcess
         uint informationLength,
         IntPtr returnLength);
 
+    [DllImport(
+        "kernel32.dll",
+        EntryPoint = "QueryInformationJobObject",
+        SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryExtendedLimitInformation(
+        IntPtr job,
+        int informationClass,
+        out ExtendedLimitInformation information,
+        uint informationLength,
+        IntPtr returnLength);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
@@ -1274,6 +1301,9 @@ public static class ProjectAtlasConstructionProcess
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -1481,6 +1511,141 @@ public static class ProjectAtlasConstructionProcess
         return new SecurityIdentifier(sid);
     }
 
+    public static void ConfigureBrokerJob(string brokerJobName)
+    {
+        if (string.IsNullOrEmpty(brokerJobName))
+        {
+            RequireCurrentProcessJobFree();
+            lock (BrokerJobSync)
+            {
+                if (configuredBrokerJobName != null)
+                {
+                    throw new InvalidOperationException(
+                        "construction-broker-job-reconfiguration");
+                }
+            }
+            return;
+        }
+        ValidateBrokerJobName(brokerJobName);
+        ValidateCurrentBrokerJob(brokerJobName);
+        lock (BrokerJobSync)
+        {
+            if (configuredBrokerJobName != null &&
+                !string.Equals(
+                    configuredBrokerJobName,
+                    brokerJobName,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("construction-broker-job-reconfiguration");
+            }
+            configuredBrokerJobName = brokerJobName;
+        }
+    }
+
+    private static uint GetConstructionCreationFlags()
+    {
+        string brokerJobName;
+        lock (BrokerJobSync)
+        {
+            brokerJobName = configuredBrokerJobName;
+        }
+        if (!string.IsNullOrEmpty(brokerJobName))
+        {
+            ValidateCurrentBrokerJob(brokerJobName);
+            return CreateSuspended |
+                CreateBreakawayFromJob |
+                CreateNoWindow |
+                CreateUnicodeEnvironment;
+        }
+
+        RequireCurrentProcessJobFree();
+        return CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;
+    }
+
+    private static void RequireCurrentProcessJobFree()
+    {
+        bool currentProcessInJob;
+        if (!IsProcessInJob(GetCurrentProcess(), IntPtr.Zero, out currentProcessInJob))
+        {
+            throw Failure("inspect-construction-parent-job");
+        }
+        if (currentProcessInJob)
+        {
+            throw new InvalidOperationException("construction-broker-job-required");
+        }
+    }
+
+    private static void ValidateBrokerJobName(string brokerJobName)
+    {
+        if (string.IsNullOrEmpty(brokerJobName) ||
+            brokerJobName.Length != BrokerJobPrefix.Length + 32 ||
+            !brokerJobName.StartsWith(BrokerJobPrefix, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("construction-broker-job-name");
+        }
+        for (int index = BrokerJobPrefix.Length; index < brokerJobName.Length; index++)
+        {
+            char character = brokerJobName[index];
+            if (!((character >= '0' && character <= '9') ||
+                (character >= 'a' && character <= 'f')))
+            {
+                throw new InvalidOperationException("construction-broker-job-name");
+            }
+        }
+    }
+
+    private static void ValidateCurrentBrokerJob(string brokerJobName)
+    {
+        IntPtr brokerJob = OpenJobObject(
+            JobObjectQuery,
+            false,
+            brokerJobName);
+        if (brokerJob == IntPtr.Zero)
+        {
+            throw Failure("open-construction-broker-job");
+        }
+        try
+        {
+            ExtendedLimitInformation limits;
+            if (!QueryExtendedLimitInformation(
+                brokerJob,
+                JobObjectExtendedLimitInformation,
+                out limits,
+                (uint)Marshal.SizeOf<ExtendedLimitInformation>(),
+                IntPtr.Zero))
+            {
+                throw Failure("query-construction-broker-job");
+            }
+            uint expectedFlags =
+                JobObjectLimitKillOnJobClose | JobObjectLimitBreakawayOk;
+            if (limits.BasicLimitInformation.LimitFlags != expectedFlags ||
+                (limits.BasicLimitInformation.LimitFlags &
+                    JobObjectLimitSilentBreakawayOk) != 0)
+            {
+                throw new InvalidOperationException("construction-broker-job-policy");
+            }
+            bool currentProcessInBrokerJob;
+            if (!IsProcessInJob(
+                GetCurrentProcess(),
+                brokerJob,
+                out currentProcessInBrokerJob))
+            {
+                throw Failure("inspect-construction-broker-membership");
+            }
+            if (!currentProcessInBrokerJob)
+            {
+                throw new InvalidOperationException("construction-broker-job-membership");
+            }
+        }
+        finally
+        {
+            if (!CloseHandle(brokerJob))
+            {
+                throw Failure("close-construction-broker-job");
+            }
+        }
+    }
+
     public static int Run(
         string username,
         string principalSid,
@@ -1610,7 +1775,7 @@ public static class ProjectAtlasConstructionProcess
             startup.Size = Marshal.SizeOf<StartupInfo>();
             startup.Desktop = windowStationName + "\\" + desktopName;
             StringBuilder commandLine = new StringBuilder(BuildCommandLine(executable, arguments));
-            uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;
+            uint flags = GetConstructionCreationFlags();
             environment = Marshal.StringToHGlobalUni(environmentBlock);
             IntPtr passwordPointer = IntPtr.Zero;
             bool created = false;
@@ -2126,6 +2291,7 @@ public static class ProjectAtlasConstructionProcess
 }
 '@
 Add-Type -TypeDefinition $nativeSource -Language CSharp
+[ProjectAtlasConstructionProcess]::ConfigureBrokerJob($BrokerJobName)
 
 function Add-PrincipalAcl {
     param(

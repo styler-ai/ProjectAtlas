@@ -23,7 +23,7 @@ jobs:
       github.event.label.name == 'optional-parser-pack-proof'
     name: construct ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 75
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -221,6 +221,7 @@ jobs:
           Enter-VsDevShell -VsInstallPath $vsInstall -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64" | Out-Null
 
           $wrapper = Join-Path $env:GITHUB_WORKSPACE ".github/scripts/invoke-parser-pack-windows-construction.ps1"
+          $broker = Join-Path $env:GITHUB_WORKSPACE ".github/scripts/invoke-parser-pack-windows-runner-job-broker.ps1"
           $state = Join-Path $env:RUNNER_TEMP "parser-pack-windows-construction-state/state.json"
           $launcher = Join-Path $env:RUNNER_TEMP "parser-pack-appcontainer/launcher.exe"
           $constructionParameters = @{
@@ -245,12 +246,20 @@ jobs:
             RustcCommitHash = '${{ steps.identity.outputs.rustc_commit_hash }}'
             ResolverAddress = '${{ steps.network.outputs.resolver_address }}'
           }
-          & (Join-Path $env:GITHUB_WORKSPACE ".github/scripts/test-parser-pack-windows-recovery.ps1") `
-            -ProductionWrapper $wrapper `
-            -LauncherPath $launcher `
-            -ConstructionParameters $constructionParameters `
-            -RecoveryRoot (Join-Path $env:RUNNER_TEMP "parser-pack-windows-recovery")
-          & $wrapper @constructionParameters
+          & $broker `
+            -TargetKind recovery `
+            -TimeoutSeconds 600 `
+            -TargetParameters @{
+              ProductionWrapper = $wrapper
+              LauncherPath = $launcher
+              ConstructionParameters = $constructionParameters
+              RecoveryRoot = Join-Path $env:RUNNER_TEMP "parser-pack-windows-recovery"
+              RunnerTemporaryRoot = $env:RUNNER_TEMP
+            }
+          & $broker `
+            -TargetKind construction `
+            -TimeoutSeconds 3660 `
+            -TargetParameters $constructionParameters
 
           $publish = Join-Path $env:RUNNER_TEMP "parser-pack-output/publish"
           $publishedLauncher = Join-Path $publish "parser-pack-appcontainer-launcher.exe"
