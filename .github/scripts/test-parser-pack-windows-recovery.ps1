@@ -1551,10 +1551,54 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
                 "Construction adapter did not preserve operation and cleanup failures."
         }
         else {
-            Require `
-                ($failure -is [System.InvalidOperationException] -and
-                    $failure.Message -eq 'construction-self-test-after-jobserver-admission') `
-                "Construction post-jobserver admission fault returned the wrong operation error."
+            $postAdmissionFailureMatches =
+                $failure -is [System.InvalidOperationException] -and
+                $failure.Message -eq 'construction-self-test-after-jobserver-admission'
+            if (-not $postAdmissionFailureMatches) {
+                $normalizeFailureMessage = {
+                    param([string]$Message)
+
+                    $normalized = $Message -replace '[\r\n]+', ' '
+                    if ($normalized.Length -gt 512) {
+                        return $normalized.Substring(0, 512)
+                    }
+                    return $normalized
+                }
+                $innerFailures = @()
+                if ($failure -is [System.AggregateException]) {
+                    $innerFailures = @(
+                        $failure.InnerExceptions |
+                            Select-Object -First 4 |
+                            ForEach-Object {
+                                [ordered]@{
+                                    type = $_.GetType().FullName
+                                    message = & $normalizeFailureMessage $_.Message
+                                }
+                            }
+                    )
+                }
+                $diagnostic = [ordered]@{
+                    scenario = $scenarioName
+                    failure_type = $failure.GetType().FullName
+                    failure_message = & $normalizeFailureMessage $failure.Message
+                    failure_inner_exceptions = $innerFailures
+                    receipt = [ordered]@{
+                        process_id = [int](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name ProcessId)
+                        termination_attempted = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name TerminationAttempted)
+                        wait_result = [uint32](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name WaitResult)
+                        reaped = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name Reaped)
+                        job_handle_owned = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name JobHandleOwned)
+                        job_handle_closed = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name JobHandleClosed)
+                        process_handle_owned = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name ProcessHandleOwned)
+                        process_handle_closed = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name ProcessHandleClosed)
+                        thread_handle_owned = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name ThreadHandleOwned)
+                        thread_handle_closed = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name ThreadHandleClosed)
+                        jobserver_handle_owned = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name JobserverHandleOwned)
+                        jobserver_handle_closed = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name JobserverHandleClosed)
+                    }
+                } | ConvertTo-Json -Depth 5 -Compress
+                throw "Construction post-jobserver admission fault returned the wrong operation error. diagnostic=$diagnostic"
+            }
         }
         Assert-AdmissionReceipt `
             -ReceiptType $receiptType `
