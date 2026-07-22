@@ -542,12 +542,16 @@ function Invoke-BoundedProcess {
     $start.FileName = $FilePath
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
     foreach ($argument in $Arguments) {
         $start.ArgumentList.Add($argument)
     }
     $process = $null
     $processId = 0
     $exitCode = $null
+    $standardOutput = ''
+    $standardError = ''
     $operationFailure = $null
     $cleanupFailures = [System.Collections.Generic.List[System.Exception]]::new()
     try {
@@ -556,17 +560,34 @@ function Invoke-BoundedProcess {
             throw "Could not start one bounded recovery process."
         }
         $processId = $process.Id
-        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
+        $standardErrorTask = $process.StandardError.ReadToEndAsync()
+        $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+        if ($timedOut) {
             $process.Kill($true)
             if (-not $process.WaitForExit(5000)) {
                 throw "Timed-out recovery process could not be reaped."
             }
-            throw "Recovery process exceeded its fixed deadline."
+        }
+        $standardOutput = $standardOutputTask.GetAwaiter().GetResult()
+        $standardError = $standardErrorTask.GetAwaiter().GetResult()
+        $maximumDiagnosticCharacters = 4096
+        if ($standardOutput.Length -gt $maximumDiagnosticCharacters -or
+            $standardError.Length -gt $maximumDiagnosticCharacters) {
+            throw "Bounded recovery process exceeded its fixed diagnostic output limit."
+        }
+        $standardOutput = ($standardOutput -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+', ' ').Trim()
+        $standardError = ($standardError -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+', ' ').Trim()
+        if ($timedOut) {
+            throw "Recovery process exceeded its fixed deadline. stdout=$standardOutput stderr=$standardError"
         }
         if ($null -ne (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
             throw "Bounded recovery process PID survived completion."
         }
         $exitCode = $process.ExitCode
+        if ($exitCode -ne 0) {
+            throw "Bounded recovery process failed. exit=$exitCode stdout=$standardOutput stderr=$standardError"
+        }
     }
     catch {
         $operationFailure = $_.Exception
