@@ -225,7 +225,9 @@ function Read-CleanupState {
         [string]$state.username -notmatch $usernamePattern -or
         [string]$state.firewall_rule -notmatch $ruleNamePattern -or
         [string]$state.sid -notmatch $sidPattern -or
-        [string]$state.stage -notin @("identity", "filesystem", "network", "construction") -or
+        [string]$state.stage -notin @(
+            "identity", "filesystem", "network", "construction", "processes_absent"
+        ) -or
         $state.acl_paths -isnot [System.Array] -or
         $state.acl_paths.Count -gt 64) {
         throw "Construction cleanup state contains invalid values."
@@ -291,6 +293,262 @@ function Find-LocalUserByName {
     return $matches[0]
 }
 
+$principalProcessNativeSource = @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Runtime.ExceptionServices;
+using System.Security.Principal;
+
+public static class ProjectAtlasPrincipalProcess
+{
+    private const uint ProcessTerminate = 0x0001;
+    private const uint ProcessQueryLimitedInformation = 0x1000;
+    private const uint Synchronize = 0x00100000;
+    private const uint TokenQuery = 0x0008;
+    private const int TokenUser = 1;
+    private const int ErrorInvalidParameter = 87;
+    private const int ErrorInsufficientBuffer = 122;
+    private const uint WaitObject0 = 0;
+    private const uint WaitTimeout = 258;
+    private const uint WaitFailed = 0xFFFFFFFF;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SidAndAttributes
+    {
+        internal IntPtr Sid;
+        internal uint Attributes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenUserValue
+    {
+        internal SidAndAttributes User;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inheritHandle, uint processId);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetTokenInformation(
+        IntPtr token,
+        int informationClass,
+        IntPtr information,
+        int informationLength,
+        out int returnLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public static bool TerminateExact(
+        int processId,
+        string expectedSid,
+        int waitMilliseconds)
+    {
+        if (processId <= 0 || String.IsNullOrWhiteSpace(expectedSid) ||
+            waitMilliseconds <= 0)
+        {
+            throw new ArgumentException("invalid exact-process termination input");
+        }
+
+        IntPtr process = IntPtr.Zero;
+        IntPtr token = IntPtr.Zero;
+        Exception operationFailure = null;
+        bool terminated = false;
+        try
+        {
+            SecurityIdentifier expected = new SecurityIdentifier(expectedSid);
+            process = OpenProcess(
+                ProcessTerminate | ProcessQueryLimitedInformation | Synchronize,
+                false,
+                checked((uint)processId));
+            if (process == IntPtr.Zero)
+            {
+                int openError = Marshal.GetLastWin32Error();
+                if (openError != ErrorInvalidParameter)
+                {
+                    throw new Win32Exception(openError, "open-exact-principal-process");
+                }
+            }
+            else
+            {
+                terminated = TerminateOpenedProcess(
+                    process,
+                    ref token,
+                    expected,
+                    waitMilliseconds);
+            }
+        }
+        catch (Exception failure)
+        {
+            operationFailure = failure;
+        }
+
+        List<Exception> closeFailures = new List<Exception>();
+        if (token != IntPtr.Zero && !CloseHandle(token))
+        {
+            closeFailures.Add(new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "close-exact-principal-process-token"));
+        }
+        if (process != IntPtr.Zero && !CloseHandle(process))
+        {
+            closeFailures.Add(new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "close-exact-principal-process"));
+        }
+        if (operationFailure != null)
+        {
+            if (closeFailures.Count != 0)
+            {
+                closeFailures.Insert(0, operationFailure);
+                throw new AggregateException(
+                    "Exact principal process operation and handle cleanup failed.",
+                    closeFailures);
+            }
+            ExceptionDispatchInfo.Capture(operationFailure).Throw();
+        }
+        if (closeFailures.Count == 1)
+        {
+            ExceptionDispatchInfo.Capture(closeFailures[0]).Throw();
+        }
+        if (closeFailures.Count > 1)
+        {
+            throw new AggregateException(
+                "Exact principal process handle cleanup failed.",
+                closeFailures);
+        }
+        return terminated;
+    }
+
+    private static bool TerminateOpenedProcess(
+        IntPtr process,
+        ref IntPtr token,
+        SecurityIdentifier expected,
+        int waitMilliseconds)
+    {
+        if (!OpenProcessToken(process, TokenQuery, out token))
+        {
+            int tokenError = Marshal.GetLastWin32Error();
+            if (WaitForSingleObject(process, 0) == WaitObject0)
+            {
+                return false;
+            }
+            throw new Win32Exception(tokenError, "open-exact-principal-process-token");
+        }
+
+        IntPtr tokenInformation = IntPtr.Zero;
+        try
+        {
+            int tokenInformationLength;
+            bool sizeResult = GetTokenInformation(
+                token,
+                TokenUser,
+                IntPtr.Zero,
+                0,
+                out tokenInformationLength);
+            int sizeError = Marshal.GetLastWin32Error();
+            if (sizeResult || sizeError != ErrorInsufficientBuffer ||
+                tokenInformationLength <= 0)
+            {
+                throw new Win32Exception(
+                    sizeError,
+                    "size-exact-principal-process-token");
+            }
+            tokenInformation = Marshal.AllocHGlobal(tokenInformationLength);
+            if (!GetTokenInformation(
+                    token,
+                    TokenUser,
+                    tokenInformation,
+                    tokenInformationLength,
+                    out tokenInformationLength))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "read-exact-principal-process-token");
+            }
+            TokenUserValue tokenUser = Marshal.PtrToStructure<TokenUserValue>(tokenInformation);
+            SecurityIdentifier actual = new SecurityIdentifier(tokenUser.User.Sid);
+            if (!actual.Equals(expected))
+            {
+                return false;
+            }
+
+            if (!TerminateProcess(process, 137))
+            {
+                int terminationError = Marshal.GetLastWin32Error();
+                if (WaitForSingleObject(process, 0) != WaitObject0)
+                {
+                    throw new Win32Exception(
+                        terminationError,
+                        "terminate-exact-principal-process");
+                }
+                return true;
+            }
+            uint wait = WaitForSingleObject(process, checked((uint)waitMilliseconds));
+            if (wait == WaitTimeout)
+            {
+                throw new TimeoutException("Exact principal process termination was not reaped.");
+            }
+            if (wait == WaitFailed)
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "wait-exact-principal-process");
+            }
+            if (wait != WaitObject0)
+            {
+                throw new InvalidOperationException("Unexpected exact principal process wait result.");
+            }
+            return true;
+        }
+        finally
+        {
+            if (tokenInformation != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(tokenInformation);
+            }
+        }
+    }
+}
+'@
+
+function Initialize-PrincipalProcessNative {
+    if (-not ("ProjectAtlasPrincipalProcess" -as [type])) {
+        Add-Type -TypeDefinition $principalProcessNativeSource -Language CSharp
+    }
+    return [ProjectAtlasPrincipalProcess]
+}
+
+function Get-CimOperationTimeoutSeconds {
+    param(
+        [Parameter(Mandatory = $true)]
+        [DateTime]$Deadline
+    )
+
+    $remainingSeconds = [Math]::Floor(($Deadline - [DateTime]::UtcNow).TotalSeconds)
+    if ($remainingSeconds -lt 1) {
+        throw [System.TimeoutException]::new(
+            "Principal process discovery reached its cleanup deadline."
+        )
+    }
+    return [uint32]$remainingSeconds
+}
+
 function Get-PrincipalProcesses {
     param(
         [Parameter(Mandatory = $true)]
@@ -300,73 +558,44 @@ function Get-PrincipalProcesses {
         [DateTime]$Deadline
     )
 
-    $remainingSeconds = [Math]::Floor(($Deadline - [DateTime]::UtcNow).TotalSeconds)
-    if ($remainingSeconds -lt 1) {
-        throw "Process ownership scan reached its cleanup deadline."
+    $sidValue = [System.Security.Principal.SecurityIdentifier]::new($Sid).Value
+    $accounts = @(Get-CimInstance `
+        -ClassName Win32_UserAccount `
+        -Filter "SID='$sidValue' AND LocalAccount=TRUE" `
+        -OperationTimeoutSec (Get-CimOperationTimeoutSeconds -Deadline $Deadline) `
+        -ErrorAction Stop)
+    if ($accounts.Count -ne 1 -or
+        [string]$accounts[0].SID -ne $sidValue -or
+        -not [bool]$accounts[0].LocalAccount) {
+        throw [System.InvalidOperationException]::new(
+            "Could not resolve one exact local account for process cleanup."
+        )
     }
-    $owned = [System.Collections.Generic.List[object]]::new()
-    foreach ($process in @(Get-CimInstance `
-        -ClassName Win32_Process `
-        -OperationTimeoutSec ([uint32]$remainingSeconds) `
-        -ErrorAction Stop)) {
-        try {
-            $remainingSeconds = [Math]::Floor(
-                ($Deadline - [DateTime]::UtcNow).TotalSeconds
-            )
-            if ($remainingSeconds -lt 1) {
-                throw "Process ownership scan reached its cleanup deadline."
-            }
-            $owner = Invoke-CimMethod `
-                -InputObject $process `
-                -MethodName GetOwnerSid `
-                -OperationTimeoutSec ([uint32]$remainingSeconds) `
-                -ErrorAction Stop
-            if ($owner.ReturnValue -ne 0) {
-                throw [System.InvalidOperationException]::new(
-                    "Process owner query returned a nonzero status."
-                )
-            }
-            if ([string]$owner.Sid -eq $Sid) {
-                $owned.Add($process)
-            }
-        }
-        catch {
-            $ownerFailure = $_.Exception
+
+    $sessions = @(Get-CimAssociatedInstance `
+        -InputObject $accounts[0] `
+        -Association Win32_LoggedOnUser `
+        -ResultClassName Win32_LogonSession `
+        -OperationTimeoutSec (Get-CimOperationTimeoutSeconds -Deadline $Deadline) `
+        -ErrorAction Stop)
+    $owned = [System.Collections.Generic.Dictionary[int, object]]::new()
+    foreach ($session in $sessions) {
+        foreach ($process in @(Get-CimAssociatedInstance `
+            -InputObject $session `
+            -Association Win32_SessionProcess `
+            -ResultClassName Win32_Process `
+            -OperationTimeoutSec (Get-CimOperationTimeoutSeconds -Deadline $Deadline) `
+            -ErrorAction Stop)) {
             $processId = [int]$process.ProcessId
-            $remainingProcesses = $null
-            try {
-                $remainingSeconds = [Math]::Floor(
-                    ($Deadline - [DateTime]::UtcNow).TotalSeconds
-                )
-                if ($remainingSeconds -lt 1) {
-                    throw [System.TimeoutException]::new(
-                        "Process ownership requery reached its cleanup deadline."
-                    )
-                }
-                $remainingProcesses = @(
-                    Get-CimInstance `
-                        -ClassName Win32_Process `
-                        -Filter "ProcessId = $processId" `
-                        -OperationTimeoutSec ([uint32]$remainingSeconds) `
-                        -ErrorAction Stop
+            if ($processId -le 0) {
+                throw [System.InvalidOperationException]::new(
+                    "Exact-account process association returned an invalid PID."
                 )
             }
-            catch {
-                throw [System.AggregateException]::new(
-                    "Could not requery one process after its owner query failed.",
-                    @($ownerFailure, $_.Exception)
-                )
-            }
-            if ($remainingProcesses.Count -eq 0) {
-                continue
-            }
-            throw [System.InvalidOperationException]::new(
-                "Could not prove the owner of one running process.",
-                $ownerFailure
-            )
+            $owned[$processId] = $process
         }
     }
-    return @($owned)
+    return @($owned.Values | Sort-Object { [int]$_.ProcessId })
 }
 
 function Remove-PrincipalAcl {
@@ -420,7 +649,9 @@ function Assert-PrincipalAclAbsent {
 
 function Invoke-Cleanup {
     param(
-        [scriptblock]$AfterProcessTermination
+        [scriptblock]$AfterProcessTermination,
+
+        [scriptblock]$AfterAccountRemoval
     )
 
     $state = Read-CleanupState
@@ -473,46 +704,88 @@ function Invoke-Cleanup {
     if ($null -ne $namedAccount -and $namedAccount.Sid.Value -ne $sid.Value) {
         throw "Construction cleanup account name was rebound to a different SID."
     }
+    $processAbsenceRecorded = [string]$state.stage -eq "processes_absent"
+    $accountDisabled = $false
+    if ($null -eq $account -and -not $processAbsenceRecorded) {
+        throw "Construction cleanup lost its exact account before process absence was recorded; any firewall rule remains active."
+    }
     if ($null -ne $account) {
+        $processAbsenceRecorded = $false
         try {
             Disable-LocalUser -SID $sid -ErrorAction Stop
+            $disabledAccount = Find-LocalUserBySid -Sid $sid.Value
+            if ($null -eq $disabledAccount -or
+                $disabledAccount.Name -ne [string]$state.username -or
+                [string]$disabledAccount.Description -ne
+                    "ProjectAtlas optional parser pack construction" -or
+                [bool]$disabledAccount.Enabled) {
+                throw "account-not-disabled"
+            }
+            $accountDisabled = $true
         }
         catch {
             $cleanupErrors.Add("disable-account")
         }
     }
 
-    $zeroProcesses = $false
-    try {
-        $processDeadline = [DateTime]::UtcNow.AddSeconds(30)
-        do {
-            $processes = @(
+    $zeroProcesses = $processAbsenceRecorded -and $null -eq $account
+    if ($null -ne $account) {
+        try {
+            Initialize-PrincipalProcessNative | Out-Null
+            $processDeadline = [DateTime]::UtcNow.AddSeconds(30)
+            do {
+                $processes = @(
+                    Get-PrincipalProcesses -Sid $sid.Value -Deadline $processDeadline
+                )
+                foreach ($process in $processes) {
+                    $remainingMilliseconds = [Math]::Floor(
+                        ($processDeadline - [DateTime]::UtcNow).TotalMilliseconds
+                    )
+                    if ($remainingMilliseconds -lt 1) {
+                        throw "Exact process termination reached its cleanup deadline."
+                    }
+                    [void][ProjectAtlasPrincipalProcess]::TerminateExact(
+                        [int]$process.ProcessId,
+                        $sid.Value,
+                        [int][Math]::Min(5000, $remainingMilliseconds)
+                    )
+                }
+                if ($processes.Count -ne 0) {
+                    Start-Sleep -Milliseconds 250
+                }
+            } while ($processes.Count -ne 0 -and [DateTime]::UtcNow -lt $processDeadline)
+            $zeroProcesses = @(
                 Get-PrincipalProcesses -Sid $sid.Value -Deadline $processDeadline
-            )
-            foreach ($process in $processes) {
-                try {
-                    Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop
-                }
-                catch {
-                    $cleanupErrors.Add("terminate-process")
-                }
+            ).Count -eq 0
+            if (-not $zeroProcesses) {
+                $cleanupErrors.Add("principal-processes-present")
             }
-            if ($processes.Count -ne 0) {
-                Start-Sleep -Milliseconds 250
-            }
-        } while ($processes.Count -ne 0 -and [DateTime]::UtcNow -lt $processDeadline)
-        $zeroProcesses = @(
-            Get-PrincipalProcesses -Sid $sid.Value -Deadline $processDeadline
-        ).Count -eq 0
-        if (-not $zeroProcesses) {
-            $cleanupErrors.Add("principal-processes-present")
+        }
+        catch {
+            $cleanupErrors.Add("query-principal-processes")
         }
     }
-    catch {
-        $cleanupErrors.Add("query-principal-processes")
+
+    if ($zeroProcesses -and $accountDisabled -and $cleanupErrors.Count -eq 0) {
+        try {
+            $state.stage = "processes_absent"
+            Write-ProtectedState -State @{
+                schema_version = [int]$state.schema_version
+                username = [string]$state.username
+                sid = [string]$state.sid
+                firewall_rule = [string]$state.firewall_rule
+                acl_paths = @($state.acl_paths)
+                stage = [string]$state.stage
+            }
+            $processAbsenceRecorded = $true
+        }
+        catch {
+            $cleanupErrors.Add("record-process-absence")
+        }
     }
 
-    if ($zeroProcesses -and $null -ne $AfterProcessTermination) {
+    if ($zeroProcesses -and $processAbsenceRecorded -and
+        $null -ne $AfterProcessTermination) {
         & $AfterProcessTermination
     }
 
@@ -553,19 +826,28 @@ function Invoke-Cleanup {
     }
 
     $accountAbsent = $false
-    try {
-        $account = Find-LocalUserBySid -Sid $sid.Value
-        if ($null -ne $account) {
-            $account | Remove-LocalUser -ErrorAction Stop
+    if ($processAbsenceRecorded) {
+        try {
+            $account = Find-LocalUserBySid -Sid $sid.Value
+            if ($null -ne $account) {
+                $account | Remove-LocalUser -ErrorAction Stop
+            }
+            if ($null -ne (Find-LocalUserBySid -Sid $sid.Value) -or
+                $null -ne (Find-LocalUserByName -Name ([string]$state.username))) {
+                throw "account-present"
+            }
+            $accountAbsent = $true
         }
-        if ($null -ne (Find-LocalUserBySid -Sid $sid.Value) -or
-            $null -ne (Find-LocalUserByName -Name ([string]$state.username))) {
-            throw "account-present"
+        catch {
+            $cleanupErrors.Add("remove-account")
         }
-        $accountAbsent = $true
     }
-    catch {
-        $cleanupErrors.Add("remove-account")
+    else {
+        $cleanupErrors.Add("retain-account")
+    }
+
+    if ($accountAbsent -and $null -ne $AfterAccountRemoval) {
+        & $AfterAccountRemoval
     }
 
     if ($zeroProcesses -and $accountAbsent) {

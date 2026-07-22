@@ -468,23 +468,84 @@ public static class ProjectAtlasConstructionAdmissionFixture
                 $principalProcessParameters[0] -eq 'Sid' -and
                 $principalProcessParameters[1] -eq 'Deadline') `
             "Principal-process scans did not receive the caller's cleanup deadline."
-        $boundedCimCalls = @($principalProcessDefinition.FindAll(
+        $principalAccountQueries = @($principalProcessDefinition.FindAll(
             {
                 param($node)
                 $node -is [System.Management.Automation.Language.CommandAst] -and
-                    $node.GetCommandName() -in @('Get-CimInstance', 'Invoke-CimMethod')
+                    $node.GetCommandName() -eq 'Get-CimInstance'
+            },
+            $true
+        ))
+        $principalAssociationQueries = @($principalProcessDefinition.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandAst] -and
+                    $node.GetCommandName() -eq 'Get-CimAssociatedInstance'
             },
             $true
         ))
         Require `
-            ($boundedCimCalls.Count -eq 3 -and
-                @($boundedCimCalls | Where-Object {
+            ($principalAccountQueries.Count -eq 1 -and
+                $principalAccountQueries[0].Extent.Text.Contains(
+                    '-ClassName Win32_UserAccount',
+                    [System.StringComparison]::Ordinal
+                ) -and
+                $principalAccountQueries[0].Extent.Text.Contains(
+                    'LocalAccount=TRUE',
+                    [System.StringComparison]::Ordinal
+                ) -and
+                $principalAssociationQueries.Count -eq 2 -and
+                @($principalAccountQueries + $principalAssociationQueries |
+                    Where-Object {
                     @($_.CommandElements | Where-Object {
                         $_ -is [System.Management.Automation.Language.CommandParameterAst] -and
                             $_.ParameterName -eq 'OperationTimeoutSec'
                     }).Count -ne 1
-                }).Count -eq 0) `
-            "Principal-process CIM operations were not bounded by the cleanup deadline."
+                }).Count -eq 0 -and
+                $principalProcessDefinition.Extent.Text.Contains(
+                    'Win32_LoggedOnUser',
+                    [System.StringComparison]::Ordinal
+                ) -and
+                $principalProcessDefinition.Extent.Text.Contains(
+                    'Win32_SessionProcess',
+                    [System.StringComparison]::Ordinal
+                ) -and
+                -not $principalProcessDefinition.Extent.Text.Contains(
+                    'GetOwnerSid',
+                    [System.StringComparison]::Ordinal
+                )) `
+            "Principal-process discovery was not exact-account associated and deadline bounded."
+
+        $principalNativeAssignments = @($wrapperAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $node.Left.Extent.Text -eq '$principalProcessNativeSource'
+            },
+            $true
+        ))
+        Require `
+            ($principalNativeAssignments.Count -eq 1) `
+            "Expected one cleanup-owned principal-process native source."
+        $principalNativeText = $principalNativeAssignments[0].Extent.Text
+        foreach ($requiredNativeContract in @(
+            'OpenProcess(', 'OpenProcessToken(', 'GetTokenInformation(',
+            'TerminateProcess(', 'WaitForSingleObject(', 'CloseHandle(',
+            'TokenUser', 'operationFailure', 'closeFailures'
+        )) {
+            Require `
+                ($principalNativeText.Contains(
+                    $requiredNativeContract,
+                    [System.StringComparison]::Ordinal
+                )) `
+                "Principal-process native cleanup lost $requiredNativeContract."
+        }
+        Require `
+            (-not $principalNativeText.Contains(
+                'GetProcessTimes',
+                [System.StringComparison]::Ordinal
+            )) `
+            "Principal-process cleanup reintroduced a stale PID creation-time split."
 
         $cleanupDefinitions = @($wrapperAst.FindAll(
             {
@@ -498,14 +559,17 @@ public static class ProjectAtlasConstructionAdmissionFixture
         $cleanupDefinition = $cleanupDefinitions[0]
         $cleanupParameters = @($cleanupDefinition.Body.ParamBlock.Parameters)
         Require `
-            ($cleanupParameters.Count -eq 1 -and
+            ($cleanupParameters.Count -eq 2 -and
                 $cleanupParameters[0].Name.VariablePath.UserPath -eq
-                    'AfterProcessTermination') `
-            "Construction cleanup checkpoint was not one internal optional function parameter."
+                    'AfterProcessTermination' -and
+                $cleanupParameters[1].Name.VariablePath.UserPath -eq
+                    'AfterAccountRemoval') `
+            "Construction cleanup checkpoints were not internal optional function parameters."
         $topLevelParameters = @($wrapperAst.ParamBlock.Parameters |
             ForEach-Object { $_.Name.VariablePath.UserPath })
         Require `
-            ('AfterProcessTermination' -notin $topLevelParameters) `
+            ('AfterProcessTermination' -notin $topLevelParameters -and
+                'AfterAccountRemoval' -notin $topLevelParameters) `
             "Construction cleanup checkpoint leaked into the production command line."
         $ordinaryCleanupCalls = @($wrapperAst.FindAll(
             {
@@ -544,7 +608,23 @@ public static class ProjectAtlasConstructionAdmissionFixture
             [System.StringComparison]::Ordinal
         )
         $checkpointIndex = $cleanupText.IndexOf(
-            'if ($zeroProcesses -and $null -ne $AfterProcessTermination)',
+            '$null -ne $AfterProcessTermination)',
+            [System.StringComparison]::Ordinal
+        )
+        $processAbsenceWriteIndex = $cleanupText.IndexOf(
+            '$state.stage = "processes_absent"',
+            [System.StringComparison]::Ordinal
+        )
+        $accountRemovalIndex = $cleanupText.IndexOf(
+            '$account | Remove-LocalUser -ErrorAction Stop',
+            [System.StringComparison]::Ordinal
+        )
+        $accountCheckpointIndex = $cleanupText.IndexOf(
+            'if ($accountAbsent -and $null -ne $AfterAccountRemoval)',
+            [System.StringComparison]::Ordinal
+        )
+        $firewallCleanupIndex = $cleanupText.IndexOf(
+            'if ($zeroProcesses -and $accountAbsent)',
             [System.StringComparison]::Ordinal
         )
         $aclCleanupIndex = $cleanupText.IndexOf(
@@ -553,8 +633,12 @@ public static class ProjectAtlasConstructionAdmissionFixture
         )
         Require `
             ($zeroProcessIndex -ge 0 -and
-                $checkpointIndex -gt $zeroProcessIndex -and
-                $aclCleanupIndex -gt $checkpointIndex) `
+                $processAbsenceWriteIndex -gt $zeroProcessIndex -and
+                $checkpointIndex -gt $processAbsenceWriteIndex -and
+                $aclCleanupIndex -gt $checkpointIndex -and
+                $accountRemovalIndex -gt $aclCleanupIndex -and
+                $accountCheckpointIndex -gt $accountRemovalIndex -and
+                $firewallCleanupIndex -gt $accountCheckpointIndex) `
             "Construction cleanup checkpoint was not after exact-SID process absence and before durable cleanup."
         $dotSourceGuards = @($wrapperAst.FindAll(
             {
@@ -577,230 +661,153 @@ public static class ProjectAtlasConstructionAdmissionFixture
             ($dotSourceGuards.Count -eq 1) `
             "Construction wrapper did not retain its exact dot-source-only load guard."
 
-        $raceProbeStart = [System.Diagnostics.ProcessStartInfo]::new()
-        $raceProbeStart.FileName =
-            [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-        $raceProbeStart.UseShellExecute = $false
-        $raceProbeStart.CreateNoWindow = $true
-        foreach ($argument in @(
-            '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
-            'Start-Sleep -Seconds 60'
-        )) {
-            $raceProbeStart.ArgumentList.Add($argument)
+        Invoke-Expression $principalNativeAssignments[0].Extent.Text
+        if (-not ('ProjectAtlasPrincipalProcess' -as [type])) {
+            Add-Type -TypeDefinition $principalProcessNativeSource -Language CSharp
         }
-        $raceProbe = $null
+        $currentProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+        $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $mismatchedSid = if ($currentSid -eq 'S-1-5-18') { 'S-1-5-19' } else { 'S-1-5-18' }
+        $currentProcess.Refresh()
+        $initialHandleCount = $currentProcess.HandleCount
+        foreach ($iteration in 1..32) {
+            $terminated = [ProjectAtlasPrincipalProcess]::TerminateExact($currentProcess.Id, $mismatchedSid, 1000)
+            if ($terminated -or $currentProcess.HasExited) {
+                throw "Token-mismatched pinned handle terminated an unrelated process."
+            }
+        }
+        $currentProcess.Refresh()
+        if (($currentProcess.HandleCount - $initialHandleCount) -gt 4) {
+            throw "Pinned process termination leaked native handles."
+        }
+
+        $terminationStart = [System.Diagnostics.ProcessStartInfo]::new()
+        $terminationStart.FileName = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $terminationStart.UseShellExecute = $false
+        $terminationStart.CreateNoWindow = $true
+        foreach ($argument in @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 30')) {
+            $terminationStart.ArgumentList.Add($argument)
+        }
+        $terminationProcess = $null
         try {
-            $raceProbe = [System.Diagnostics.Process]::Start($raceProbeStart)
-            Require ($null -ne $raceProbe) "Could not start the process-owner race probe."
-            $snapshotDeadline = [DateTime]::UtcNow.AddSeconds(10)
-            $staleSnapshot = @()
-            do {
-                $staleSnapshot = @(
-                    CimCmdlets\Get-CimInstance `
-                        -ClassName Win32_Process `
-                        -Filter "ProcessId = $($raceProbe.Id)" `
-                        -OperationTimeoutSec 5 `
-                        -ErrorAction Stop
-                )
-                if ($staleSnapshot.Count -eq 0) {
-                    Start-Sleep -Milliseconds 100
-                }
-            } while ($staleSnapshot.Count -eq 0 -and
-                [DateTime]::UtcNow -lt $snapshotDeadline)
-            Require `
-                ($staleSnapshot.Count -eq 1) `
-                "Could not snapshot the process-owner race probe."
-            $raceProbe.Kill($true)
-            Require `
-                ($raceProbe.WaitForExit(5000) -and
-                    $null -eq (Get-Process -Id $raceProbe.Id -ErrorAction SilentlyContinue)) `
-                "Process-owner race probe could not be reaped."
-
-            $staleOwnerFailure = $null
-            try {
-                CimCmdlets\Invoke-CimMethod `
-                    -InputObject $staleSnapshot[0] `
-                    -MethodName GetOwnerSid `
-                    -OperationTimeoutSec 5 `
-                    -ErrorAction Stop | Out-Null
+            $terminationProcess = [System.Diagnostics.Process]::Start($terminationStart)
+            if ($null -eq $terminationProcess) {
+                throw "Could not start the pinned-handle termination canary."
             }
-            catch {
-                $staleOwnerFailure = $_.Exception
+            $terminated = [ProjectAtlasPrincipalProcess]::TerminateExact($terminationProcess.Id, $currentSid, 5000)
+            if (-not $terminated -or -not $terminationProcess.WaitForExit(5000) -or
+                $null -ne (Get-Process -Id $terminationProcess.Id -ErrorAction SilentlyContinue)) {
+                throw "Pinned exact-SID handle did not terminate and reap its process."
             }
-            Require `
-                ($staleOwnerFailure -is [Microsoft.Management.Infrastructure.CimException]) `
-                "Exited process snapshot did not reproduce the GetOwnerSid race."
-
-            $vanishedProcessProof = & {
-                param(
-                    [string]$Definition,
-                    [Microsoft.Management.Infrastructure.CimInstance]$Snapshot
-                )
-                Invoke-Expression $Definition
-                $capturedTimeouts = [System.Collections.Generic.List[uint32]]::new()
-                function Get-CimInstance {
-                    [CmdletBinding()]
-                    param(
-                        [string]$ClassName,
-                        [string]$Filter,
-                        [uint32]$OperationTimeoutSec
-                    )
-                    $capturedTimeouts.Add($OperationTimeoutSec)
-                    if (-not [string]::IsNullOrEmpty($Filter)) {
-                        return @()
-                    }
-                    return $Snapshot
-                }
-                $owned = @(
-                    Get-PrincipalProcesses `
-                        -Sid ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value) `
-                        -Deadline ([DateTime]::UtcNow.AddSeconds(10))
-                )
-                return [pscustomobject]@{
-                    OwnedCount = $owned.Count
-                    Timeouts = @($capturedTimeouts)
-                }
-            } $principalProcessDefinition.Extent.Text $staleSnapshot[0]
-            Require `
-                ($vanishedProcessProof.OwnedCount -eq 0 -and
-                    $vanishedProcessProof.Timeouts.Count -eq 2 -and
-                    @($vanishedProcessProof.Timeouts | Where-Object {
-                        $_ -lt 1 -or $_ -gt 10
-                    }).Count -eq 0) `
-                "Principal-process scan did not tolerate only the reaped snapshot race."
         }
         finally {
-            if ($null -ne $raceProbe) {
-                if (-not $raceProbe.HasExited) {
-                    $raceProbe.Kill($true)
-                    if (-not $raceProbe.WaitForExit(5000)) {
-                        throw "Fallback process-owner race probe termination could not be reaped."
+            if ($null -ne $terminationProcess) {
+                if (-not $terminationProcess.HasExited) {
+                    $terminationProcess.Kill($true)
+                    if (-not $terminationProcess.WaitForExit(5000)) {
+                        throw "Fallback pinned-handle termination canary could not be reaped."
                     }
                 }
-                $raceProbe.Dispose()
+                $terminationProcess.Dispose()
             }
         }
 
-        $liveProcessFailureProof = & {
-            param([string]$Definition)
-            Invoke-Expression $Definition
-            $probeState = [pscustomobject]@{ EnumerationCalls = 0 }
+        $timeoutDefinitions = @($wrapperAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -eq 'Get-CimOperationTimeoutSeconds'
+            },
+            $true
+        ))
+        if ($timeoutDefinitions.Count -ne 1) {
+            throw "Expected one principal-process CIM deadline helper."
+        }
+        $associationProof = & {
+            param([string]$TimeoutDefinition, [string]$DiscoveryDefinition, [string]$ExpectedSid)
+            Invoke-Expression $TimeoutDefinition
+            Invoke-Expression $DiscoveryDefinition
+            $probeState = [pscustomobject]@{
+                Mode = 'exact'
+                AccountCalls = 0
+                AssociationCalls = [System.Collections.Generic.List[string]]::new()
+            }
+            $account = [pscustomobject]@{ SID = $ExpectedSid; LocalAccount = $true }
+            $sessionOne = [pscustomobject]@{ LogonId = '101' }
+            $sessionTwo = [pscustomobject]@{ LogonId = '102' }
+            $processOne = [pscustomobject]@{ ProcessId = 401 }
+            $processTwo = [pscustomobject]@{ ProcessId = 402 }
             function Get-CimInstance {
                 [CmdletBinding()]
-                param(
-                    [string]$ClassName,
-                    [string]$Filter,
-                    [uint32]$OperationTimeoutSec
-                )
-                $probeState.EnumerationCalls += 1
-                return [pscustomobject]@{
-                    ProcessId = [System.Diagnostics.Process]::GetCurrentProcess().Id
+                param([string]$ClassName, [string]$Filter, [uint32]$OperationTimeoutSec)
+                $probeState.AccountCalls += 1
+                if ($OperationTimeoutSec -lt 1 -or $ClassName -ne 'Win32_UserAccount' -or
+                    -not $Filter.Contains($ExpectedSid)) {
+                    throw 'unexpected exact-account query'
                 }
+                if ($probeState.Mode -eq 'missing') { return @() }
+                if ($probeState.Mode -eq 'ambiguous') { return @($account, $account) }
+                return $account
             }
-            function Invoke-CimMethod {
+            function Get-CimAssociatedInstance {
                 [CmdletBinding()]
-                param(
-                    [object]$InputObject,
-                    [string]$MethodName,
-                    [uint32]$OperationTimeoutSec
-                )
-                return [pscustomobject]@{ ReturnValue = 5; Sid = $null }
+                param([object]$InputObject, [string]$Association, [string]$ResultClassName, [uint32]$OperationTimeoutSec)
+                if ($OperationTimeoutSec -lt 1) { throw 'unbounded association query' }
+                $probeState.AssociationCalls.Add($Association)
+                if ($Association -eq 'Win32_LoggedOnUser') { return @($sessionOne, $sessionTwo) }
+                if ($Association -eq 'Win32_SessionProcess' -and $InputObject.LogonId -eq '101') {
+                    return @($processOne)
+                }
+                if ($Association -eq 'Win32_SessionProcess' -and $InputObject.LogonId -eq '102') {
+                    return @($processOne, $processTwo)
+                }
+                throw 'unexpected association query'
             }
-
-            $liveFailure = $null
+            $exact = @(Get-PrincipalProcesses -Sid $ExpectedSid -Deadline ([DateTime]::UtcNow.AddSeconds(10)))
+            $probeState.Mode = 'missing'
             try {
-                Get-PrincipalProcesses `
-                    -Sid ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value) `
-                    -Deadline ([DateTime]::UtcNow.AddSeconds(10)) | Out-Null
+                Get-PrincipalProcesses -Sid $ExpectedSid -Deadline ([DateTime]::UtcNow.AddSeconds(10)) | Out-Null
+                $missingFailure = $null
             }
-            catch {
-                $liveFailure = $_.Exception
-            }
-            $enumerationCallsBeforeExpiredScan = $probeState.EnumerationCalls
-            $deadlineFailure = $null
+            catch { $missingFailure = $_.Exception.Message }
+            $probeState.Mode = 'ambiguous'
             try {
-                Get-PrincipalProcesses `
-                    -Sid ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value) `
-                    -Deadline ([DateTime]::UtcNow.AddSeconds(-1)) | Out-Null
+                Get-PrincipalProcesses -Sid $ExpectedSid -Deadline ([DateTime]::UtcNow.AddSeconds(10)) | Out-Null
+                $ambiguousFailure = $null
             }
-            catch {
-                $deadlineFailure = $_.Exception
+            catch { $ambiguousFailure = $_.Exception.Message }
+            $callsBeforeExpired = $probeState.AccountCalls
+            try {
+                Get-PrincipalProcesses -Sid $ExpectedSid -Deadline ([DateTime]::UtcNow.AddSeconds(-1)) | Out-Null
+                $deadlineFailure = $null
             }
+            catch { $deadlineFailure = $_.Exception.Message }
             return [pscustomobject]@{
-                LiveFailure = $liveFailure
+                Exact = @($exact)
+                AccountCalls = $probeState.AccountCalls
+                CallsBeforeExpired = $callsBeforeExpired
+                AssociationCalls = @($probeState.AssociationCalls)
+                MissingFailure = $missingFailure
+                AmbiguousFailure = $ambiguousFailure
                 DeadlineFailure = $deadlineFailure
-                EnumerationCallsBeforeExpiredScan = $enumerationCallsBeforeExpiredScan
-                EnumerationCallsAfterExpiredScan = $probeState.EnumerationCalls
             }
-        } $principalProcessDefinition.Extent.Text
-        Require `
-            ($liveProcessFailureProof.LiveFailure -is [System.InvalidOperationException] -and
-                $liveProcessFailureProof.LiveFailure.Message -eq
-                    'Could not prove the owner of one running process.' -and
-                $liveProcessFailureProof.LiveFailure.InnerException -is
-                    [System.InvalidOperationException] -and
-                $liveProcessFailureProof.LiveFailure.InnerException.Message -eq
-                    'Process owner query returned a nonzero status.' -and
-                $liveProcessFailureProof.DeadlineFailure.Message -eq
-                    'Process ownership scan reached its cleanup deadline.' -and
-                $liveProcessFailureProof.EnumerationCallsBeforeExpiredScan -eq 2 -and
-                $liveProcessFailureProof.EnumerationCallsAfterExpiredScan -eq 2) `
-            "Principal-process scan weakened live-PID failure or its fixed deadline."
-
-        $requeryFailureProof = & {
-            param([string]$Definition)
-            Invoke-Expression $Definition
-            $probeState = [pscustomobject]@{ EnumerationCalls = 0 }
-            function Get-CimInstance {
-                [CmdletBinding()]
-                param(
-                    [string]$ClassName,
-                    [string]$Filter,
-                    [uint32]$OperationTimeoutSec
-                )
-                $probeState.EnumerationCalls += 1
-                if (-not [string]::IsNullOrEmpty($Filter)) {
-                    throw 'exact PID requery failed'
-                }
-                return [pscustomobject]@{
-                    ProcessId = [System.Diagnostics.Process]::GetCurrentProcess().Id
-                }
-            }
-            function Invoke-CimMethod {
-                [CmdletBinding()]
-                param(
-                    [object]$InputObject,
-                    [string]$MethodName,
-                    [uint32]$OperationTimeoutSec
-                )
-                return [pscustomobject]@{ ReturnValue = 5; Sid = $null }
-            }
-            try {
-                Get-PrincipalProcesses `
-                    -Sid ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value) `
-                    -Deadline ([DateTime]::UtcNow.AddSeconds(10)) | Out-Null
-            }
-            catch {
-                return [pscustomobject]@{
-                    Failure = $_.Exception
-                    EnumerationCalls = $probeState.EnumerationCalls
-                }
-            }
-            throw 'Expected the exact-PID requery probe to fail.'
-        } $principalProcessDefinition.Extent.Text
-        Require `
-            ($requeryFailureProof.Failure -is [System.AggregateException] -and
-                $requeryFailureProof.Failure.Message.StartsWith(
-                    'Could not requery one process after its owner query failed.',
-                    [System.StringComparison]::Ordinal
-                ) -and
-                $requeryFailureProof.Failure.InnerExceptions.Count -eq 2 -and
-                $requeryFailureProof.Failure.InnerExceptions[0].Message -eq
-                    'Process owner query returned a nonzero status.' -and
-                $requeryFailureProof.Failure.InnerExceptions[1].Message -eq
-                    'exact PID requery failed' -and
-                $requeryFailureProof.EnumerationCalls -eq 2) `
-            "Principal-process scan did not preserve owner and exact-PID requery failures."
+        } $timeoutDefinitions[0].Extent.Text $principalProcessDefinition.Extent.Text $currentSid
+        if ($associationProof.Exact.Count -ne 2 -or
+            [int]$associationProof.Exact[0].ProcessId -ne 401 -or
+            [int]$associationProof.Exact[1].ProcessId -ne 402 -or
+            $associationProof.AssociationCalls.Count -ne 3 -or
+            @($associationProof.AssociationCalls | Where-Object {
+                $_ -notin @('Win32_LoggedOnUser', 'Win32_SessionProcess')
+            }).Count -ne 0 -or
+            $associationProof.MissingFailure -ne
+                'Could not resolve one exact local account for process cleanup.' -or
+            $associationProof.AmbiguousFailure -ne
+                'Could not resolve one exact local account for process cleanup.' -or
+            $associationProof.DeadlineFailure -ne
+                'Principal process discovery reached its cleanup deadline.' -or
+            $associationProof.AccountCalls -ne $associationProof.CallsBeforeExpired) {
+            throw "Exact-account association weakened identity, bounds, or fail-closed behavior."
+        }
 
         $dotSourceStateDirectory = [System.IO.Directory]::CreateDirectory(
             [System.IO.Path]::Combine(
@@ -852,10 +859,20 @@ public static class ProjectAtlasConstructionAdmissionFixture
                 ReturnMissingState = $false
             }
             $fixtureState = [pscustomobject]@{
+                schema_version = 1
                 sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
                 username = 'projectatlas-cleanup-checkpoint-fixture'
                 firewall_rule = 'ProjectAtlas-cleanup-checkpoint-fixture'
                 acl_paths = @()
+                stage = 'identity'
+            }
+            $fixtureAccount = [pscustomobject]@{
+                Name = $fixtureState.username
+                Sid = [System.Security.Principal.SecurityIdentifier]::new(
+                    $fixtureState.sid
+                )
+                Description = 'ProjectAtlas optional parser pack construction'
+                Enabled = $false
             }
             function Read-CleanupState {
                 if ($checkpointState.ReturnMissingState) {
@@ -866,8 +883,14 @@ public static class ProjectAtlasConstructionAdmissionFixture
             function Remove-StateStorage {
                 $checkpointState.RemoveState = $true
             }
-            function Find-LocalUserBySid { param([string]$Sid) return $null }
-            function Find-LocalUserByName { param([string]$Name) return $null }
+            function Write-ProtectedState {
+                param([hashtable]$State)
+                $fixtureState.stage = [string]$State.stage
+            }
+            function Find-LocalUserBySid { param([string]$Sid) return $fixtureAccount }
+            function Find-LocalUserByName { param([string]$Name) return $fixtureAccount }
+            function Disable-LocalUser { param($SID) }
+            function Initialize-PrincipalProcessNative { return $null }
             function Get-PrincipalProcesses {
                 param([string]$Sid, [DateTime]$Deadline)
                 return @()
@@ -910,6 +933,147 @@ public static class ProjectAtlasConstructionAdmissionFixture
                 -not $checkpointProof.Injected.DurableCleanup -and
                 $checkpointProof.NormalMissingStateRemoved) `
             "Construction cleanup checkpoint did not retain state or preserve normal cleanup behavior."
+
+        $presentAccountDisableFailureProof = & {
+            $placeholderSid = 'S-1-5-21-0-0-0-0'
+            $proofState = [pscustomobject]@{
+                ProcessCheckpoint = $false
+                AccountCheckpoint = $false
+                AccountRemoved = $false
+                StateRewritten = $false
+                StateRemoved = $false
+            }
+            $fixtureState = [pscustomobject]@{
+                schema_version = 1
+                sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                username = 'projectatlas-present-account-fixture'
+                firewall_rule = 'ProjectAtlas-present-account-fixture'
+                acl_paths = @()
+                stage = 'processes_absent'
+            }
+            $fixtureAccount = [pscustomobject]@{
+                Name = $fixtureState.username
+                Sid = [System.Security.Principal.SecurityIdentifier]::new(
+                    $fixtureState.sid
+                )
+                Description = 'ProjectAtlas optional parser pack construction'
+                Enabled = $true
+            }
+            function Read-CleanupState { return $fixtureState }
+            function Remove-StateStorage { $proofState.StateRemoved = $true }
+            function Write-ProtectedState { $proofState.StateRewritten = $true }
+            function Find-LocalUserBySid { param([string]$Sid) return $fixtureAccount }
+            function Find-LocalUserByName { param([string]$Name) return $fixtureAccount }
+            function Disable-LocalUser { throw 'disable-injected' }
+            function Initialize-PrincipalProcessNative { return $null }
+            function Get-PrincipalProcesses {
+                param([string]$Sid, [DateTime]$Deadline)
+                return @()
+            }
+            function Get-CimInstance {
+                [CmdletBinding()]
+                param([string]$ClassName, [string]$Filter)
+                return @()
+            }
+            function Remove-LocalUser { $proofState.AccountRemoved = $true }
+            Invoke-Expression $cleanupDefinition.Extent.Text
+
+            $failure = $null
+            try {
+                Invoke-Cleanup `
+                    -AfterProcessTermination {
+                        $proofState.ProcessCheckpoint = $true
+                    } `
+                    -AfterAccountRemoval {
+                        $proofState.AccountCheckpoint = $true
+                    }
+            }
+            catch {
+                $failure = $_.Exception.Message
+            }
+            return [pscustomobject]@{
+                Failure = $failure
+                State = $proofState
+            }
+        }
+        Require `
+            ($presentAccountDisableFailureProof.Failure -eq
+                'Construction cleanup failed: disable-account,retain-account,retain-firewall.' -and
+                -not $presentAccountDisableFailureProof.State.ProcessCheckpoint -and
+                -not $presentAccountDisableFailureProof.State.AccountCheckpoint -and
+                -not $presentAccountDisableFailureProof.State.AccountRemoved -and
+                -not $presentAccountDisableFailureProof.State.StateRewritten -and
+                -not $presentAccountDisableFailureProof.State.StateRemoved) `
+            "Present account reused stale process-absence authority after disable failure."
+
+        $presentAccountQueryFailureProof = & {
+            $placeholderSid = 'S-1-5-21-0-0-0-0'
+            $proofState = [pscustomobject]@{
+                ProcessCheckpoint = $false
+                AccountCheckpoint = $false
+                AccountRemoved = $false
+                StateRewritten = $false
+                StateRemoved = $false
+            }
+            $fixtureState = [pscustomobject]@{
+                schema_version = 1
+                sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                username = 'projectatlas-query-failure-fixture'
+                firewall_rule = 'ProjectAtlas-query-failure-fixture'
+                acl_paths = @()
+                stage = 'processes_absent'
+            }
+            $fixtureAccount = [pscustomobject]@{
+                Name = $fixtureState.username
+                Sid = [System.Security.Principal.SecurityIdentifier]::new(
+                    $fixtureState.sid
+                )
+                Description = 'ProjectAtlas optional parser pack construction'
+                Enabled = $true
+            }
+            function Read-CleanupState { return $fixtureState }
+            function Remove-StateStorage { $proofState.StateRemoved = $true }
+            function Write-ProtectedState { $proofState.StateRewritten = $true }
+            function Find-LocalUserBySid { param([string]$Sid) return $fixtureAccount }
+            function Find-LocalUserByName { param([string]$Name) return $fixtureAccount }
+            function Disable-LocalUser { $fixtureAccount.Enabled = $false }
+            function Initialize-PrincipalProcessNative { return $null }
+            function Get-PrincipalProcesses { throw 'association-query-injected' }
+            function Get-CimInstance {
+                [CmdletBinding()]
+                param([string]$ClassName, [string]$Filter)
+                return @()
+            }
+            function Remove-LocalUser { $proofState.AccountRemoved = $true }
+            Invoke-Expression $cleanupDefinition.Extent.Text
+
+            $failure = $null
+            try {
+                Invoke-Cleanup `
+                    -AfterProcessTermination {
+                        $proofState.ProcessCheckpoint = $true
+                    } `
+                    -AfterAccountRemoval {
+                        $proofState.AccountCheckpoint = $true
+                    }
+            }
+            catch {
+                $failure = $_.Exception.Message
+            }
+            return [pscustomobject]@{
+                Failure = $failure
+                State = $proofState
+            }
+        }
+        Require `
+            ($presentAccountQueryFailureProof.Failure -eq
+                'Construction cleanup failed: query-principal-processes,retain-account,retain-firewall.' -and
+                -not $presentAccountQueryFailureProof.State.ProcessCheckpoint -and
+                -not $presentAccountQueryFailureProof.State.AccountCheckpoint -and
+                -not $presentAccountQueryFailureProof.State.AccountRemoved -and
+                -not $presentAccountQueryFailureProof.State.StateRewritten -and
+                -not $presentAccountQueryFailureProof.State.StateRemoved) `
+            "Present account reused stale process-absence authority after query failure."
 
         $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
         $currentPrincipal = [System.Security.Principal.WindowsPrincipal]::new($currentIdentity)

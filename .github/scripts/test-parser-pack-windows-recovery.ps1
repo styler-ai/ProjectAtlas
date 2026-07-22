@@ -22,6 +22,105 @@ $usernamePattern = '\Apa[0-9a-f]{12}\z'
 $ruleNamePattern = '\AProjectAtlas-ParserPack-Construction-[0-9a-f]{12}\z'
 $sidPattern = '\AS-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+\z'
 $processTimeoutSeconds = 60
+$exactSidAuditSource = @'
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$Sid,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateSet("present", "absent")]
+    [string]$Expectation,
+
+    [ValidateRange(0, 60000)]
+    [int]$DelayMilliseconds = 0
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+if ($DelayMilliseconds -gt 0) {
+    Start-Sleep -Milliseconds $DelayMilliseconds
+}
+$auditNativeSource = @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+
+public static class ProjectAtlasWtsProcessAudit
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WtsProcessInfo
+    {
+        internal uint SessionId;
+        internal uint ProcessId;
+        internal IntPtr ProcessName;
+        internal IntPtr UserSid;
+    }
+
+    [DllImport("Wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WTSEnumerateProcessesW(
+        IntPtr server,
+        uint reserved,
+        uint version,
+        out IntPtr processInformation,
+        out uint count);
+
+    [DllImport("Wtsapi32.dll")]
+    private static extern void WTSFreeMemory(IntPtr memory);
+
+    public static int CountExactSid(string expectedSid)
+    {
+        SecurityIdentifier expected = new SecurityIdentifier(expectedSid);
+        IntPtr processInformation = IntPtr.Zero;
+        uint count = 0;
+        if (!WTSEnumerateProcessesW(
+                IntPtr.Zero,
+                0,
+                1,
+                out processInformation,
+                out count))
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "enumerate-wts-processes");
+        }
+        try
+        {
+            int matches = 0;
+            int size = Marshal.SizeOf<WtsProcessInfo>();
+            for (uint index = 0; index < count; index++)
+            {
+                IntPtr rowAddress = IntPtr.Add(
+                    processInformation,
+                    checked((int)index * size));
+                WtsProcessInfo row = Marshal.PtrToStructure<WtsProcessInfo>(rowAddress);
+                if (row.UserSid != IntPtr.Zero &&
+                    new SecurityIdentifier(row.UserSid).Equals(expected))
+                {
+                    matches++;
+                }
+            }
+            return matches;
+        }
+        finally
+        {
+            if (processInformation != IntPtr.Zero)
+            {
+                WTSFreeMemory(processInformation);
+            }
+        }
+    }
+}
+"@
+Add-Type -TypeDefinition $auditNativeSource -Language CSharp
+$matches = [ProjectAtlasWtsProcessAudit]::CountExactSid($Sid)
+if (($Expectation -eq "present" -and $matches -lt 1) -or
+    ($Expectation -eq "absent" -and $matches -ne 0)) {
+    throw "Exact-SID WTS process audit did not satisfy its expected state."
+}
+'@
 
 function Require {
     param(
@@ -80,7 +179,15 @@ function Assert-ProductionRecoveryContracts {
         [System.StringComparison]::Ordinal
     )
     $checkpointIndex = $cleanupText.IndexOf(
-        'if ($zeroProcesses -and $null -ne $AfterProcessTermination)',
+        '$null -ne $AfterProcessTermination)',
+        [System.StringComparison]::Ordinal
+    )
+    $processAbsenceIndex = $cleanupText.IndexOf(
+        '$state.stage = "processes_absent"',
+        [System.StringComparison]::Ordinal
+    )
+    $accountCheckpointIndex = $cleanupText.IndexOf(
+        'if ($accountAbsent -and $null -ne $AfterAccountRemoval)',
         [System.StringComparison]::Ordinal
     )
     $durableCleanupIndex = $cleanupText.IndexOf(
@@ -89,8 +196,10 @@ function Assert-ProductionRecoveryContracts {
     )
     Require `
         ($zeroProcessIndex -ge 0 -and
-            $checkpointIndex -gt $zeroProcessIndex -and
-            $durableCleanupIndex -gt $checkpointIndex) `
+            $processAbsenceIndex -gt $zeroProcessIndex -and
+            $checkpointIndex -gt $processAbsenceIndex -and
+            $durableCleanupIndex -gt $checkpointIndex -and
+            $accountCheckpointIndex -gt $durableCleanupIndex) `
         "Production cleanup checkpoint moved outside its recovery boundary."
 
     $dotSourceGuard = @($Ast.FindAll(
@@ -179,6 +288,16 @@ function Assert-AccountJournalConstructionContract {
 $productionAst = Get-ProductionWrapperAst
 $nativeSourceAssignment = Assert-ProductionRecoveryContracts -Ast $productionAst
 Assert-AccountJournalConstructionContract -Ast $productionAst
+$auditTokens = $null
+$auditParseErrors = $null
+[void][System.Management.Automation.Language.Parser]::ParseInput(
+    $exactSidAuditSource,
+    [ref]$auditTokens,
+    [ref]$auditParseErrors
+)
+Require `
+    ($auditParseErrors.Count -eq 0) `
+    "Exact-SID WTS audit helper did not parse."
 if ($StaticOnly) {
     Write-Output "Windows parser-pack recovery static validation passed."
     return
@@ -226,6 +345,61 @@ Require `
     )) `
     "Windows parser-pack recovery root escaped RUNNER_TEMP."
 [System.IO.Directory]::CreateDirectory($RecoveryRoot) | Out-Null
+$exactSidAuditOwnerSid =
+    [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$exactSidAuditDirectory = [System.IO.Path]::Combine(
+    $RecoveryRoot,
+    'exact-sid-audit-helper'
+)
+[System.IO.Directory]::CreateDirectory($exactSidAuditDirectory) | Out-Null
+$auditDirectorySecurity = [System.Security.AccessControl.DirectorySecurity]::new()
+$auditDirectorySecurity.SetOwner($exactSidAuditOwnerSid)
+$auditDirectorySecurity.SetAccessRuleProtection($true, $false)
+foreach ($allowedSid in @(
+    $exactSidAuditOwnerSid,
+    [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+    [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+)) {
+    $auditDirectorySecurity.AddAccessRule(
+        [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $allowedSid,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            [System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit',
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+    )
+}
+Set-Acl -LiteralPath $exactSidAuditDirectory -AclObject $auditDirectorySecurity
+$exactSidAuditPath = [System.IO.Path]::Combine(
+    $exactSidAuditDirectory,
+    'audit-exact-sid-processes.ps1'
+)
+[System.IO.File]::WriteAllText(
+    $exactSidAuditPath,
+    $exactSidAuditSource,
+    [System.Text.UTF8Encoding]::new($false)
+)
+$auditFileSecurity = [System.Security.AccessControl.FileSecurity]::new()
+$auditFileSecurity.SetOwner($exactSidAuditOwnerSid)
+$auditFileSecurity.SetAccessRuleProtection($true, $false)
+foreach ($allowedSid in @(
+    $exactSidAuditOwnerSid,
+    [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+    [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+)) {
+    $auditFileSecurity.AddAccessRule(
+        [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $allowedSid,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+    )
+}
+Set-Acl -LiteralPath $exactSidAuditPath -AclObject $auditFileSecurity
+$exactSidAuditSha256 = (Get-FileHash `
+    -LiteralPath $exactSidAuditPath `
+    -Algorithm SHA256).Hash
 
 $scenarioStatePaths = [ordered]@{
     AccountJournal = [System.IO.Path]::Combine(
@@ -269,11 +443,17 @@ function Invoke-BoundedProcess {
     foreach ($argument in $Arguments) {
         $start.ArgumentList.Add($argument)
     }
-    $process = [System.Diagnostics.Process]::Start($start)
-    if ($null -eq $process) {
-        throw "Could not start one bounded recovery process."
-    }
+    $process = $null
+    $processId = 0
+    $exitCode = $null
+    $operationFailure = $null
+    $cleanupFailures = [System.Collections.Generic.List[System.Exception]]::new()
     try {
+        $process = [System.Diagnostics.Process]::Start($start)
+        if ($null -eq $process) {
+            throw "Could not start one bounded recovery process."
+        }
+        $processId = $process.Id
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             $process.Kill($true)
             if (-not $process.WaitForExit(5000)) {
@@ -281,15 +461,113 @@ function Invoke-BoundedProcess {
             }
             throw "Recovery process exceeded its fixed deadline."
         }
-        return $process.ExitCode
+        if ($null -ne (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+            throw "Bounded recovery process PID survived completion."
+        }
+        $exitCode = $process.ExitCode
+    }
+    catch {
+        $operationFailure = $_.Exception
     }
     finally {
-        if (-not $process.HasExited) {
-            $process.Kill($true)
-            $process.WaitForExit(5000) | Out-Null
+        if ($null -ne $process) {
+            try {
+                if (-not $process.HasExited) {
+                    $process.Kill($true)
+                    if (-not $process.WaitForExit(5000)) {
+                        throw "Fallback bounded recovery process termination could not be reaped."
+                    }
+                }
+                if ($processId -gt 0 -and
+                    $null -ne (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+                    throw "Fallback bounded recovery process PID survived."
+                }
+            }
+            catch {
+                $cleanupFailures.Add($_.Exception)
+            }
+            try {
+                $process.Dispose()
+            }
+            catch {
+                $cleanupFailures.Add($_.Exception)
+            }
         }
-        $process.Dispose()
     }
+    if ($null -ne $operationFailure) {
+        if ($cleanupFailures.Count -ne 0) {
+            throw [System.AggregateException]::new(
+                "Bounded recovery operation and cleanup failed.",
+                @($operationFailure) + @($cleanupFailures)
+            )
+        }
+        throw $operationFailure
+    }
+    if ($cleanupFailures.Count -ne 0) {
+        throw [System.AggregateException]::new(
+            "Bounded recovery cleanup failed.",
+            @($cleanupFailures)
+        )
+    }
+    return $exitCode
+}
+
+function Invoke-ExactSidProcessAudit {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Sid,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('present', 'absent')]
+        [string]$Expectation,
+
+        [ValidateRange(0, 60000)]
+        [int]$DelayMilliseconds = 0,
+
+        [ValidateRange(1, 60)]
+        [int]$TimeoutSeconds = 10
+    )
+
+    $auditDirectoryItem = Get-Item -LiteralPath $exactSidAuditDirectory -Force
+    $auditItem = Get-Item -LiteralPath $exactSidAuditPath -Force
+    $auditDirectoryAcl = Get-Acl -LiteralPath $auditDirectoryItem.FullName
+    $auditAcl = Get-Acl -LiteralPath $auditItem.FullName
+    Require `
+        ($auditDirectoryItem.PSIsContainer -and
+            (($auditDirectoryItem.Attributes -band
+                [System.IO.FileAttributes]::ReparsePoint) -eq 0) -and
+            -not $auditItem.PSIsContainer -and
+            (($auditItem.Attributes -band
+                [System.IO.FileAttributes]::ReparsePoint) -eq 0) -and
+            $auditItem.FullName -eq $exactSidAuditPath -and
+            $auditItem.Length -gt 0 -and
+            $auditItem.Length -le 32768 -and
+            $auditDirectoryAcl.AreAccessRulesProtected -and
+            $auditAcl.AreAccessRulesProtected -and
+            $auditDirectoryAcl.GetOwner(
+                [System.Security.Principal.SecurityIdentifier]
+            ).Value -eq $exactSidAuditOwnerSid.Value -and
+            $auditAcl.GetOwner(
+                [System.Security.Principal.SecurityIdentifier]
+            ).Value -eq $exactSidAuditOwnerSid.Value -and
+            (Get-FileHash `
+                -LiteralPath $auditItem.FullName `
+                -Algorithm SHA256).Hash -eq $exactSidAuditSha256) `
+        "Exact-SID WTS audit helper changed before launch."
+
+    $exitCode = Invoke-BoundedProcess `
+        -FilePath ([string]$ConstructionParameters.PwshPath) `
+        -Arguments @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', $exactSidAuditPath,
+            '-Sid', $Sid,
+            '-Expectation', $Expectation,
+            '-DelayMilliseconds', $DelayMilliseconds
+        ) `
+        -TimeoutSeconds $TimeoutSeconds
+    Require `
+        ($exitCode -eq 0) `
+        "Exact-SID WTS process audit failed."
 }
 
 function New-RecoveryIdentity {
@@ -374,17 +652,21 @@ function Invoke-ScenarioCleanup {
         [Parameter(Mandatory = $true)]
         [string]$StatePath,
 
-        [scriptblock]$AfterProcessTermination
+        [scriptblock]$AfterProcessTermination,
+
+        [scriptblock]$AfterAccountRemoval
     )
 
-    if ($null -eq $AfterProcessTermination) {
+    if ($null -eq $AfterProcessTermination -and $null -eq $AfterAccountRemoval) {
         Invoke-WithCleanupDefinitions -StatePath $StatePath -Operation {
             Invoke-Cleanup
         }
         return
     }
     Invoke-WithCleanupDefinitions -StatePath $StatePath -Operation {
-        Invoke-Cleanup -AfterProcessTermination $AfterProcessTermination
+        Invoke-Cleanup `
+            -AfterProcessTermination $AfterProcessTermination `
+            -AfterAccountRemoval $AfterAccountRemoval
     }
 }
 
@@ -406,84 +688,6 @@ function Get-ExactLocalAccount {
         return $null
     }
     return $matches[0]
-}
-
-function Get-ExactSidProcesses {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Sid,
-
-        [Parameter(Mandatory = $true)]
-        [DateTime]$Deadline
-    )
-
-    $remainingSeconds = [Math]::Floor(($Deadline - [DateTime]::UtcNow).TotalSeconds)
-    if ($remainingSeconds -lt 1) {
-        throw "Exact-SID process scan reached its deadline."
-    }
-    $matches = [System.Collections.Generic.List[object]]::new()
-    foreach ($process in @(Get-CimInstance `
-        -ClassName Win32_Process `
-        -OperationTimeoutSec ([uint32]$remainingSeconds) `
-        -ErrorAction Stop)) {
-        try {
-            $remainingSeconds = [Math]::Floor(
-                ($Deadline - [DateTime]::UtcNow).TotalSeconds
-            )
-            if ($remainingSeconds -lt 1) {
-                throw "Exact-SID process scan reached its deadline."
-            }
-            $owner = Invoke-CimMethod `
-                -InputObject $process `
-                -MethodName GetOwnerSid `
-                -OperationTimeoutSec ([uint32]$remainingSeconds) `
-                -ErrorAction Stop
-            if ($owner.ReturnValue -ne 0) {
-                throw [System.InvalidOperationException]::new(
-                    "Exact-SID process owner query returned a nonzero status."
-                )
-            }
-            if ([string]$owner.Sid -eq $Sid) {
-                $matches.Add($process)
-            }
-        }
-        catch {
-            $ownerFailure = $_.Exception
-            $processId = [int]$process.ProcessId
-            $remainingProcesses = $null
-            try {
-                $remainingSeconds = [Math]::Floor(
-                    ($Deadline - [DateTime]::UtcNow).TotalSeconds
-                )
-                if ($remainingSeconds -lt 1) {
-                    throw [System.TimeoutException]::new(
-                        "Exact-SID process requery reached its deadline."
-                    )
-                }
-                $remainingProcesses = @(
-                    Get-CimInstance `
-                        -ClassName Win32_Process `
-                        -Filter "ProcessId = $processId" `
-                        -OperationTimeoutSec ([uint32]$remainingSeconds) `
-                        -ErrorAction Stop
-                )
-            }
-            catch {
-                throw [System.AggregateException]::new(
-                    "Could not requery one process after its exact-SID owner query failed.",
-                    @($ownerFailure, $_.Exception)
-                )
-            }
-            if ($remainingProcesses.Count -eq 0) {
-                continue
-            }
-            throw [System.InvalidOperationException]::new(
-                "Could not prove one running process was not owned by the exact SID.",
-                $ownerFailure
-            )
-        }
-    }
-    return @($matches)
 }
 
 function Get-ExactProfile {
@@ -557,10 +761,7 @@ function Assert-ScenarioAbsent {
                 ($null -ne $_.Sid -and $_.Sid.Value -eq $Sid)
         }).Count -eq 0) `
         "Recovery cleanup left its exact account."
-    $processDeadline = [DateTime]::UtcNow.AddSeconds(10)
-    Require `
-        (@(Get-ExactSidProcesses -Sid $Sid -Deadline $processDeadline).Count -eq 0) `
-        "Recovery cleanup left an exact-SID process."
+    Invoke-ExactSidProcessAudit -Sid $Sid -Expectation absent
     Require `
         (@(Get-ExactProfile -Sid $Sid).Count -eq 0) `
         "Recovery cleanup left its exact profile."
@@ -1144,7 +1345,7 @@ throw "Construction wrapper returned after the durable account proxy."
         ([string]$boundState.username -eq [string]$placeholderState.username -and
             [string]$boundState.sid -eq $account.Sid.Value -and
             [string]$boundState.firewall_rule -eq [string]$placeholderState.firewall_rule -and
-            [string]$boundState.stage -eq 'identity' -and
+            [string]$boundState.stage -eq 'processes_absent' -and
             @($boundState.acl_paths).Count -eq 0) `
         "Production cleanup did not bind only the validated account SID."
 
@@ -1588,14 +1789,12 @@ function Invoke-CleanupRetryRecoveryScenario {
         -TimeoutSeconds 15 `
         -FailureMessage "Profile-backed exact-SID process did not become observable." `
         -Condition {
-            $scanDeadline = [DateTime]::UtcNow.AddSeconds(5)
-            @(Get-ExactSidProcesses `
-                -Sid $identity.Sid `
-                -Deadline $scanDeadline | Where-Object {
-                [int]$_.ProcessId -eq $launchReceipt.ProcessId
-            }).Count -eq 1 -and
+            $null -ne (Get-Process `
+                -Id $launchReceipt.ProcessId `
+                -ErrorAction SilentlyContinue) -and
                 @(Get-ExactProfile -Sid $identity.Sid).Count -eq 1
         }
+    Invoke-ExactSidProcessAudit -Sid $identity.Sid -Expectation present
 
     $checkpointFailure = $null
     try {
@@ -1609,13 +1808,12 @@ function Invoke-CleanupRetryRecoveryScenario {
     Require `
         ($checkpointFailure -eq 'cleanup-retry-checkpoint') `
         "Cleanup retry scenario did not fail at the exact checkpoint."
-    $checkpointProcessDeadline = [DateTime]::UtcNow.AddSeconds(10)
     Require `
-        (@(Get-ExactSidProcesses `
-            -Sid $identity.Sid `
-            -Deadline $checkpointProcessDeadline).Count -eq 0 -and
-            $null -eq (Get-Process -Id $launchReceipt.ProcessId -ErrorAction SilentlyContinue)) `
+        ($null -eq (Get-Process `
+            -Id $launchReceipt.ProcessId `
+            -ErrorAction SilentlyContinue)) `
         "Cleanup retry checkpoint left its exact process alive."
+    Invoke-ExactSidProcessAudit -Sid $identity.Sid -Expectation absent
     Wait-ForRecoveryCondition `
         -TimeoutSeconds 10 `
         -FailureMessage "Profile-backed process did not release its loaded profile." `
@@ -1637,6 +1835,90 @@ function Invoke-CleanupRetryRecoveryScenario {
             @(Get-ExactFirewallRules -Name $identity.FirewallRule -PolicyStore ActiveStore).Count -eq 1 -and
             @(Get-ExactAclRules -Path $fixtureRoot -Sid $sid).Count -gt 0) `
         "Cleanup retry checkpoint did not retain every durable recovery artifact."
+
+    $accountRemovalFailure = $null
+    try {
+        Invoke-ScenarioCleanup `
+            -StatePath $StatePath `
+            -AfterAccountRemoval { throw 'account-removal-crash-checkpoint' }
+    }
+    catch {
+        $accountRemovalFailure = $_.Exception.Message
+    }
+    Require `
+        ($accountRemovalFailure -eq 'account-removal-crash-checkpoint') `
+        "Cleanup retry scenario did not reach its post-account-removal checkpoint."
+    $accountRemovalState = Read-ScenarioState -StatePath $StatePath
+    Require `
+        ($null -ne $accountRemovalState -and
+            [string]$accountRemovalState.sid -eq $identity.Sid -and
+            [string]$accountRemovalState.stage -eq 'processes_absent' -and
+            $null -eq (Get-ExactLocalAccount `
+                -Username $identity.Username `
+                -Sid $identity.Sid) -and
+            @(Get-ExactProfile -Sid $identity.Sid).Count -eq 0 -and
+            @(Get-ExactFirewallRules `
+                -Name $identity.FirewallRule `
+                -PolicyStore PersistentStore).Count -eq 1 -and
+            @(Get-ExactFirewallRules `
+                -Name $identity.FirewallRule `
+                -PolicyStore ActiveStore).Count -eq 1 -and
+            @(Get-ExactAclRules -Path $fixtureRoot -Sid $sid).Count -eq 0) `
+        "Post-account-removal crash did not retain only retry-safe durable state."
+    Invoke-ExactSidProcessAudit -Sid $identity.Sid -Expectation absent
+
+    $corruptState = @{
+        schema_version = [int]$accountRemovalState.schema_version
+        username = [string]$accountRemovalState.username
+        sid = [string]$accountRemovalState.sid
+        firewall_rule = [string]$accountRemovalState.firewall_rule
+        acl_paths = @($accountRemovalState.acl_paths)
+        stage = 'corrupt'
+    }
+    $corruptTestFailure = $null
+    $restoreStateFailure = $null
+    try {
+        try {
+            Write-ScenarioState -StatePath $StatePath -State $corruptState
+            $corruptStateFailure = $null
+            try {
+                Invoke-ScenarioCleanup -StatePath $StatePath
+            }
+            catch {
+                $corruptStateFailure = $_.Exception.Message
+            }
+            Require `
+                ($corruptStateFailure -eq
+                    'Construction cleanup state contains invalid values.') `
+                "Missing-account retry did not reject corrupted process-absence state."
+        }
+        catch {
+            $corruptTestFailure = $_.Exception
+        }
+    }
+    finally {
+        try {
+            $corruptState.stage = [string]$accountRemovalState.stage
+            Write-ScenarioState `
+                -StatePath $StatePath `
+                -State $corruptState
+        }
+        catch {
+            $restoreStateFailure = $_.Exception
+        }
+    }
+    if ($null -ne $corruptTestFailure -and $null -ne $restoreStateFailure) {
+        throw [System.AggregateException]::new(
+            "Corrupted-state proof and valid-state restoration failed.",
+            @($corruptTestFailure, $restoreStateFailure)
+        )
+    }
+    if ($null -ne $corruptTestFailure) {
+        throw $corruptTestFailure
+    }
+    if ($null -ne $restoreStateFailure) {
+        throw $restoreStateFailure
+    }
 
     Invoke-ScenarioCleanup -StatePath $StatePath
     Assert-ScenarioAbsent `
@@ -1663,6 +1945,33 @@ try {
             (-not (Test-Path -LiteralPath (Split-Path -Parent $statePath))) `
             "Windows parser-pack recovery found stale scenario state."
     }
+
+    $runnerSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    Invoke-ExactSidProcessAudit -Sid $runnerSid -Expectation present
+    $auditFailure = $null
+    try {
+        Invoke-ExactSidProcessAudit -Sid $runnerSid -Expectation absent
+    }
+    catch {
+        $auditFailure = $_.Exception.Message
+    }
+    Require `
+        ($auditFailure -eq 'Exact-SID WTS process audit failed.') `
+        "Exact-SID WTS process audit did not propagate child failure."
+    $auditTimeout = $null
+    try {
+        Invoke-ExactSidProcessAudit `
+            -Sid $runnerSid `
+            -Expectation present `
+            -DelayMilliseconds 30000 `
+            -TimeoutSeconds 1
+    }
+    catch {
+        $auditTimeout = $_.Exception.Message
+    }
+    Require `
+        ($auditTimeout -eq 'Recovery process exceeded its fixed deadline.') `
+        "Exact-SID WTS process audit did not enforce its parent deadline."
 
     Invoke-AccountJournalRecoveryScenario `
         -StatePath $scenarioStatePaths.AccountJournal
@@ -1691,6 +2000,33 @@ finally {
         catch {
             $cleanupFailures.Add($_.Exception)
         }
+    }
+    try {
+        if ([System.IO.Directory]::Exists($exactSidAuditDirectory)) {
+            $resolvedAuditDirectory = [System.IO.Path]::GetFullPath(
+                $exactSidAuditDirectory
+            )
+            $auditDirectoryItem = Get-Item `
+                -LiteralPath $resolvedAuditDirectory `
+                -Force
+            Require `
+                ($resolvedAuditDirectory.StartsWith(
+                    "$RecoveryRoot$([System.IO.Path]::DirectorySeparatorChar)",
+                    [System.StringComparison]::OrdinalIgnoreCase
+                ) -and
+                    $auditDirectoryItem.PSIsContainer -and
+                    (($auditDirectoryItem.Attributes -band
+                        [System.IO.FileAttributes]::ReparsePoint) -eq 0)) `
+                "Refused to remove an unsafe exact-SID audit helper directory."
+            Remove-Item -LiteralPath $resolvedAuditDirectory -Recurse -Force
+        }
+        Require `
+            (-not [System.IO.Directory]::Exists($exactSidAuditDirectory) -and
+                -not [System.IO.File]::Exists($exactSidAuditPath)) `
+            "Exact-SID WTS audit helper survived suite cleanup."
+    }
+    catch {
+        $cleanupFailures.Add($_.Exception)
     }
     if ($suiteSucceeded -and $cleanupFailures.Count -eq 0 -and
         [System.IO.Directory]::Exists($RecoveryRoot)) {
