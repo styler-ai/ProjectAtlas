@@ -284,6 +284,8 @@ try {
                 $nativeSource.Contains('construction-broker-job-required') -and
                 $nativeSource.Contains('construction-broker-job-membership') -and
                 $nativeSource.Contains('construction-broker-job-policy') -and
+                $nativeSource.Contains('ValidateBrokerJobMembership(') -and
+                $nativeSource.Contains('construction-process-retained-inherited-job') -and
                 $wrapperText.Contains(
                     '[ProjectAtlasConstructionProcess]::ConfigureBrokerJob($BrokerJobName)'
                 ) -and
@@ -409,6 +411,7 @@ try {
                 $tokenCloseIndex -gt $admissionCleanupIndex -and
                 $nativeSource.Contains('return CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;') -and
                 $nativeSource.Contains('ValidateCurrentBrokerJob(brokerJobName);') -and
+                $nativeSource.Contains('process.Process,') -and
                 $nativeSource.Contains('limits.BasicLimitInformation.LimitFlags != expectedFlags') -and
                 $nativeSource.Contains('JobObjectLimitKillOnJobClose | JobObjectLimitBreakawayOk') -and
                 $nativeSource.Contains('MaximumLogonCommandLineCharacters = 1023;') -and

@@ -1663,9 +1663,11 @@ SID, creation identity, and named-pipe peer, and admits it to an ephemeral
 runner-SID-owned Job with `KILL_ON_JOB_CLOSE | BREAKAWAY_OK`. Recovery and production
 construction both use that same broker implementation. Only after proving membership
 in that exact Job may the construction adapter create its alternate-logon process
-suspended with explicit breakaway, verify that the child is Job-free, assign it
-before resume to the stricter no-breakaway kill-on-close construction Job, and clean
-it by exact SID. The hosted-runner broker is trusted CI orchestration and is never
+suspended with explicit breakaway. It accepts only a Job-free child or a child proven
+to have inherited that exact authenticated broker Job, assigns it before resume to the
+stricter no-breakaway kill-on-close construction Job (nested beneath the broker Job
+when alternate-logon creation retains the parent Job), and cleans it by exact SID. The
+hosted-runner broker is trusted CI orchestration and is never
 packaged with, or substituted for, the artifact-bound AppContainer broker. This is
 the construction egress and lifecycle boundary. Fresh
 verification and normal untrusted grammar execution retain the stronger artifact-

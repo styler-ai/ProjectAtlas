@@ -1544,11 +1544,7 @@ public static class ProjectAtlasConstructionProcess
 
     private static uint GetConstructionCreationFlags()
     {
-        string brokerJobName;
-        lock (BrokerJobSync)
-        {
-            brokerJobName = configuredBrokerJobName;
-        }
+        string brokerJobName = GetConfiguredBrokerJobName();
         if (!string.IsNullOrEmpty(brokerJobName))
         {
             ValidateCurrentBrokerJob(brokerJobName);
@@ -1560,6 +1556,14 @@ public static class ProjectAtlasConstructionProcess
 
         RequireCurrentProcessJobFree();
         return CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;
+    }
+
+    private static string GetConfiguredBrokerJobName()
+    {
+        lock (BrokerJobSync)
+        {
+            return configuredBrokerJobName;
+        }
     }
 
     private static void RequireCurrentProcessJobFree()
@@ -1596,6 +1600,17 @@ public static class ProjectAtlasConstructionProcess
 
     private static void ValidateCurrentBrokerJob(string brokerJobName)
     {
+        ValidateBrokerJobMembership(
+            brokerJobName,
+            GetCurrentProcess(),
+            "construction-broker-job-membership");
+    }
+
+    private static void ValidateBrokerJobMembership(
+        string brokerJobName,
+        IntPtr process,
+        string membershipFailure)
+    {
         IntPtr brokerJob = OpenJobObject(
             JobObjectQuery,
             false,
@@ -1624,17 +1639,17 @@ public static class ProjectAtlasConstructionProcess
             {
                 throw new InvalidOperationException("construction-broker-job-policy");
             }
-            bool currentProcessInBrokerJob;
+            bool processInBrokerJob;
             if (!IsProcessInJob(
-                GetCurrentProcess(),
+                process,
                 brokerJob,
-                out currentProcessInBrokerJob))
+                out processInBrokerJob))
             {
                 throw Failure("inspect-construction-broker-membership");
             }
-            if (!currentProcessInBrokerJob)
+            if (!processInBrokerJob)
             {
-                throw new InvalidOperationException("construction-broker-job-membership");
+                throw new InvalidOperationException(membershipFailure);
             }
         }
         finally
@@ -1852,9 +1867,25 @@ public static class ProjectAtlasConstructionProcess
                 int inheritedJobError = Marshal.GetLastWin32Error();
                 throw new Win32Exception(inheritedJobError, "inspect-inherited-job");
             }
-            if (inheritedJob)
+            if (admissionScenario == AdmissionScenario.RetainedJobBeforeAdmission)
             {
                 throw new InvalidOperationException("construction-process-retained-inherited-job");
+            }
+            if (inheritedJob)
+            {
+                // Some alternate-logon hosts retain the authenticated parent Job despite the
+                // explicit breakaway flag. Only that exact broker Job is a valid parent for
+                // the empty, stricter construction Job that AssignProcessToJobObject nests.
+                string brokerJobName = GetConfiguredBrokerJobName();
+                if (string.IsNullOrEmpty(brokerJobName))
+                {
+                    throw new InvalidOperationException(
+                        "construction-process-retained-inherited-job");
+                }
+                ValidateBrokerJobMembership(
+                    brokerJobName,
+                    process.Process,
+                    "construction-process-retained-inherited-job");
             }
             if (admissionScenario == AdmissionScenario.FailBeforeJobAssignment ||
                 admissionScenario == AdmissionScenario.FailBeforeJobAssignmentAndCleanupFailure)
