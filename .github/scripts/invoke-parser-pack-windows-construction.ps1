@@ -995,7 +995,6 @@ using System.Text;
 public static class ProjectAtlasConstructionProcess
 {
     private const uint CreateSuspended = 0x00000004;
-    private const uint CreateBreakawayFromJob = 0x01000000;
     private const uint CreateNoWindow = 0x08000000;
     private const uint CreateUnicodeEnvironment = 0x00000400;
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
@@ -1010,8 +1009,6 @@ public static class ProjectAtlasConstructionProcess
     private const uint DesktopAllAccess = 0x000F01FF;
     private const uint SddlRevision1 = 1;
     private const uint TokenQuery = 0x0008;
-    private const int Logon32LogonInteractive = 2;
-    private const int Logon32ProviderDefault = 0;
     private const int TokenUserInformation = 1;
     private const int TokenGroupsInformation = 2;
     private const int TokenIntegrityLevelInformation = 25;
@@ -1021,6 +1018,7 @@ public static class ProjectAtlasConstructionProcess
     private const int ErrorInsufficientBuffer = 122;
     private const int MaximumTokenInformationBytes = 64 * 1024;
     private const int MaximumTokenGroupCount = 1024;
+    private const int MaximumLogonCommandLineCharacters = 1023;
     private const string RequiredIntegritySid = "S-1-16-8192";
 
     public static uint LastTotalProcesses { get; private set; }
@@ -1028,6 +1026,7 @@ public static class ProjectAtlasConstructionProcess
     private enum AdmissionScenario
     {
         Normal,
+        RetainedJobBeforeAdmission,
         FailBeforeJobAssignment,
         FailBeforeJobAssignmentAndCleanupFailure
     }
@@ -1168,24 +1167,12 @@ public static class ProjectAtlasConstructionProcess
         "advapi32.dll",
         CharSet = CharSet.Unicode,
         SetLastError = true,
-        EntryPoint = "LogonUserW")]
+        EntryPoint = "CreateProcessWithLogonW")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool LogonUser(
+    private static extern bool CreateProcessWithLogon(
         string username,
         string domain,
         IntPtr password,
-        int logonType,
-        int logonProvider,
-        out SafeAccessTokenHandle tokenHandle);
-
-    [DllImport(
-        "advapi32.dll",
-        CharSet = CharSet.Unicode,
-        SetLastError = true,
-        EntryPoint = "CreateProcessWithTokenW")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CreateProcessWithToken(
-        SafeAccessTokenHandle tokenHandle,
         uint logonFlags,
         string applicationName,
         StringBuilder commandLine,
@@ -1194,6 +1181,13 @@ public static class ProjectAtlasConstructionProcess
         string currentDirectory,
         ref StartupInfo startupInfo,
         out ProcessInformation processInformation);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool OpenProcessToken(
+        IntPtr process,
+        uint desiredAccess,
+        out SafeAccessTokenHandle tokenHandle);
 
     [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -1323,49 +1317,6 @@ public static class ProjectAtlasConstructionProcess
                 Length = 0;
             }
         }
-    }
-
-    private static SafeAccessTokenHandle LogonConstructionUser(
-        string username,
-        SecureString password)
-    {
-        IntPtr passwordPointer = IntPtr.Zero;
-        SafeAccessTokenHandle token = null;
-        try
-        {
-            passwordPointer = Marshal.SecureStringToGlobalAllocUnicode(password);
-            if (!LogonUser(
-                username,
-                ".",
-                passwordPointer,
-                Logon32LogonInteractive,
-                Logon32ProviderDefault,
-                out token))
-            {
-                int logonError = Marshal.GetLastWin32Error();
-                if (token != null)
-                {
-                    token.Dispose();
-                }
-                throw new Win32Exception(logonError, "logon-construction-user");
-            }
-        }
-        finally
-        {
-            if (passwordPointer != IntPtr.Zero)
-            {
-                Marshal.ZeroFreeGlobalAllocUnicode(passwordPointer);
-            }
-        }
-        if (token == null || token.IsInvalid)
-        {
-            if (token != null)
-            {
-                token.Dispose();
-            }
-            throw new InvalidOperationException("logon-construction-user-returned-invalid-token");
-        }
-        return token;
     }
 
     private static void ValidateConstructionToken(
@@ -1659,36 +1610,76 @@ public static class ProjectAtlasConstructionProcess
             startup.Size = Marshal.SizeOf<StartupInfo>();
             startup.Desktop = windowStationName + "\\" + desktopName;
             StringBuilder commandLine = new StringBuilder(BuildCommandLine(executable, arguments));
-            uint flags = CreateSuspended | CreateBreakawayFromJob |
-                CreateNoWindow | CreateUnicodeEnvironment;
-            constructionToken = LogonConstructionUser(
-                username,
-                password);
-            if (admissionReceipt != null)
-            {
-                admissionReceipt.ConstructionTokenHandleOwned = true;
-            }
-            ValidateConstructionToken(constructionToken, principalSid);
+            uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;
             environment = Marshal.StringToHGlobalUni(environmentBlock);
-            bool created = CreateProcessWithToken(
-                constructionToken,
-                0,
-                executable,
-                commandLine,
-                flags,
-                environment,
-                workingDirectory,
-                ref startup,
-                out process);
+            IntPtr passwordPointer = IntPtr.Zero;
+            bool created = false;
+            int createError = 0;
+            try
+            {
+                passwordPointer = Marshal.SecureStringToGlobalAllocUnicode(password);
+                created = CreateProcessWithLogon(
+                    username,
+                    ".",
+                    passwordPointer,
+                    0,
+                    executable,
+                    commandLine,
+                    flags,
+                    environment,
+                    workingDirectory,
+                    ref startup,
+                    out process);
+                if (!created)
+                {
+                    createError = Marshal.GetLastWin32Error();
+                }
+            }
+            finally
+            {
+                if (passwordPointer != IntPtr.Zero)
+                {
+                    Marshal.ZeroFreeGlobalAllocUnicode(passwordPointer);
+                }
+            }
             if (!created)
             {
-                int createError = Marshal.GetLastWin32Error();
                 throw new Win32Exception(createError, "create-process");
             }
             processCreated = true;
             if (admissionReceipt != null)
             {
                 admissionReceipt.ProcessId = checked((int)process.ProcessId);
+            }
+            if (!OpenProcessToken(process.Process, TokenQuery, out constructionToken))
+            {
+                int tokenError = Marshal.GetLastWin32Error();
+                throw new Win32Exception(tokenError, "open-construction-process-token");
+            }
+            if (constructionToken == null || constructionToken.IsInvalid)
+            {
+                if (constructionToken != null)
+                {
+                    constructionToken.Close();
+                }
+                constructionToken = null;
+                throw new InvalidOperationException(
+                    "open-construction-process-token-returned-invalid-token");
+            }
+            if (admissionReceipt != null)
+            {
+                admissionReceipt.ConstructionTokenHandleOwned = true;
+            }
+            ValidateConstructionToken(constructionToken, principalSid);
+            if (admissionScenario == AdmissionScenario.RetainedJobBeforeAdmission)
+            {
+                if (!AssignProcessToJobObject(job, process.Process))
+                {
+                    int retainedJobError = Marshal.GetLastWin32Error();
+                    throw new Win32Exception(
+                        retainedJobError,
+                        "inject-retained-job-before-admission");
+                }
             }
             bool inheritedJob;
             if (!IsProcessInJob(process.Process, IntPtr.Zero, out inheritedJob))
@@ -2097,7 +2088,12 @@ public static class ProjectAtlasConstructionProcess
         {
             command.Append(' ').Append(Quote(argument));
         }
-        return command.ToString();
+        string value = command.ToString();
+        if (value.Length > MaximumLogonCommandLineCharacters)
+        {
+            throw new InvalidOperationException("construction-command-line-too-long");
+        }
+        return value;
     }
 
     private static string Quote(string value)

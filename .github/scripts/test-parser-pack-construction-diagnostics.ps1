@@ -167,40 +167,36 @@ try {
         Require ($nativeSourceAssignments.Count -eq 1) "Expected one native adapter source assignment."
         Invoke-Expression $nativeSourceAssignments[0].Extent.Text
         Require `
-            (-not $nativeSource.Contains('CreateProcessWithLogonW(') -and
-                -not $nativeSource.Contains('OpenConstructionToken') -and
+            ($nativeSource.Contains('EntryPoint = "CreateProcessWithLogonW"') -and
+                $nativeSource.Contains('private static extern bool OpenProcessToken(') -and
                 -not $nativeSource.Contains('SeDebugPrivilege') -and
                 -not $nativeSource.Contains('AdjustTokenPrivileges') -and
-                $nativeSource.Contains('EntryPoint = "LogonUserW"') -and
-                $nativeSource.Contains('EntryPoint = "CreateProcessWithTokenW"') -and
+                -not $nativeSource.Contains('EntryPoint = "LogonUserW"') -and
+                -not $nativeSource.Contains('EntryPoint = "CreateProcessWithTokenW"') -and
+                -not $nativeSource.Contains('CreateBreakawayFromJob') -and
                 $nativeSource -match
-                    'LogonUser\(\s*username,\s*"\.",\s*passwordPointer,\s*Logon32LogonInteractive,\s*Logon32ProviderDefault,\s*out token\)' -and
-                $nativeSource -match
-                    'CreateProcessWithToken\(\s*constructionToken,\s*0,\s*executable,' -and
+                    'CreateProcessWithLogon\(\s*username,\s*"\.",\s*passwordPointer,\s*0,\s*executable,' -and
                 $nativeSource.Contains(
                     'Marshal.ZeroFreeGlobalAllocUnicode(passwordPointer);'
                 )) `
-            "Windows construction adapter did not retain one owned exact logon token."
-        $tokenLogonStart = $nativeSource.IndexOf(
-            'private static SafeAccessTokenHandle LogonConstructionUser(',
+            "Windows construction adapter did not use the bounded alternate-logon process boundary."
+        $processCreationStart = $nativeSource.IndexOf(
+            'created = CreateProcessWithLogon(',
+            [System.StringComparison]::Ordinal
+        )
+        $processTokenOpenStart = $nativeSource.IndexOf(
+            'if (!OpenProcessToken(process.Process, TokenQuery, out constructionToken))',
             [System.StringComparison]::Ordinal
         )
         $tokenValidationStart = $nativeSource.IndexOf(
-            'private static void ValidateConstructionToken(',
+            'ValidateConstructionToken(constructionToken, principalSid);',
             [System.StringComparison]::Ordinal
         )
         Require `
-            ($tokenLogonStart -ge 0 -and
-                $tokenValidationStart -gt $tokenLogonStart) `
+            ($processCreationStart -ge 0 -and
+                $processTokenOpenStart -gt $processCreationStart -and
+                $tokenValidationStart -gt $processTokenOpenStart) `
             "Construction token ownership boundaries were missing."
-        $tokenLogonSource = $nativeSource.Substring(
-            $tokenLogonStart,
-            $tokenValidationStart - $tokenLogonStart
-        )
-        Require `
-            ($tokenLogonSource.Contains('SafeAccessTokenHandle token = null;') -and
-                $tokenLogonSource.Contains('return token;')) `
-            "Cross-account construction did not retain one owned primary token."
         if (-not ('ProjectAtlasConstructionProcess' -as [type])) {
             Add-Type -TypeDefinition $nativeSource -Language CSharp
         }
@@ -226,7 +222,7 @@ try {
         Require ($null -ne $processInformationType) "Construction process information was missing."
         Require `
             (([enum]::GetNames($admissionScenarioType) -join ',') -eq
-                'Normal,FailBeforeJobAssignment,FailBeforeJobAssignmentAndCleanupFailure') `
+                'Normal,RetainedJobBeforeAdmission,FailBeforeJobAssignment,FailBeforeJobAssignmentAndCleanupFailure') `
             "Construction admission failure domain was not closed."
 
         $publicRunMethods = @($adapterType.GetMethods(
@@ -241,16 +237,24 @@ try {
             ($null -ne $privateRunCore -and
                 $privateRunCore.GetParameters().Count -eq 10) `
             "Construction adapter private recovery boundary changed."
-        $tokenValidationIndex = $nativeSource.IndexOf(
-            'ValidateConstructionToken(constructionToken, principalSid);',
-            [System.StringComparison]::Ordinal
-        )
         $processCreationIndex = $nativeSource.IndexOf(
-            'bool created = CreateProcessWithToken(',
+            'created = CreateProcessWithLogon(',
             [System.StringComparison]::Ordinal
         )
         $processCreatedIndex = $nativeSource.IndexOf(
             'processCreated = true;',
+            [System.StringComparison]::Ordinal
+        )
+        $processTokenOpenIndex = $nativeSource.IndexOf(
+            'if (!OpenProcessToken(process.Process, TokenQuery, out constructionToken))',
+            [System.StringComparison]::Ordinal
+        )
+        $tokenValidationIndex = $nativeSource.IndexOf(
+            'ValidateConstructionToken(constructionToken, principalSid);',
+            [System.StringComparison]::Ordinal
+        )
+        $retainedJobInjectionIndex = $nativeSource.IndexOf(
+            'if (admissionScenario == AdmissionScenario.RetainedJobBeforeAdmission)',
             [System.StringComparison]::Ordinal
         )
         $inheritedJobCheckIndex = $nativeSource.IndexOf(
@@ -263,6 +267,7 @@ try {
         )
         $jobAssignmentIndex = $nativeSource.IndexOf(
             'if (!AssignProcessToJobObject(job, process.Process))',
+            $admissionFailureIndex,
             [System.StringComparison]::Ordinal
         )
         $admissionCleanupIndex = $nativeSource.IndexOf(
@@ -274,17 +279,21 @@ try {
             [System.StringComparison]::Ordinal
         )
         Require `
-            ($tokenValidationIndex -ge 0 -and
-                $processCreationIndex -gt $tokenValidationIndex -and
+            ($processCreationIndex -ge 0 -and
                 $processCreatedIndex -gt $processCreationIndex -and
-                $inheritedJobCheckIndex -gt $processCreatedIndex -and
+                $processTokenOpenIndex -gt $processCreatedIndex -and
+                $tokenValidationIndex -gt $processTokenOpenIndex -and
+                $retainedJobInjectionIndex -gt $tokenValidationIndex -and
+                $inheritedJobCheckIndex -gt $retainedJobInjectionIndex -and
                 $admissionFailureIndex -gt $inheritedJobCheckIndex -and
                 $jobAssignmentIndex -gt $admissionFailureIndex -and
                 $admissionCleanupIndex -gt $jobAssignmentIndex -and
                 $tokenCloseIndex -gt $admissionCleanupIndex -and
                 $nativeSource.Contains(
-                    'uint flags = CreateSuspended | CreateBreakawayFromJob |'
+                    'uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;'
                 ) -and
+                $nativeSource.Contains('MaximumLogonCommandLineCharacters = 1023;') -and
+                $nativeSource.Contains('construction-command-line-too-long') -and
                 $nativeSource.Contains('ConstructionTokenHandleOwned') -and
                 $nativeSource.Contains('ConstructionTokenHandleClosed') -and
                 $nativeSource.Contains('AdmissionCleanupWaitMilliseconds = 5000;') -and
@@ -316,53 +325,36 @@ try {
                 $composedRunFailure.InnerExceptions[1].Message -eq 'cleanup-failure') `
             "Construction adapter did not preserve operation and cleanup failures together."
 
-        $logonConstructionUser = $adapterType.GetMethod(
-            'LogonConstructionUser',
-            $nestedTypeFlags
+        $buildCommandLine = $adapterType.GetMethod('BuildCommandLine', $nestedTypeFlags)
+        Require ($null -ne $buildCommandLine) "Construction command-line boundary was missing."
+        $maximumCommandLine = $buildCommandLine.Invoke(
+            $null,
+            [object[]]@('x', [string[]]@('a' * 1021))
         )
         Require `
-            ($null -ne $logonConstructionUser) `
-            "Construction token logon boundary was missing."
-        $invalidPassword = [System.Security.SecureString]::new()
-        $invalidPassword.AppendChar('x')
-        $invalidPassword.MakeReadOnly()
-        $invalidLogonFailure = $null
+            ($maximumCommandLine.Length -eq 1023) `
+            "Construction command-line boundary rejected its documented maximum."
+        $oversizedCommandFailure = $null
         try {
-            $unexpectedToken = $logonConstructionUser.Invoke(
+            $buildCommandLine.Invoke(
                 $null,
-                [object[]]@(
-                    "PAMissing$([guid]::NewGuid().ToString('N').Substring(0, 8))",
-                    $invalidPassword
-                )
-            )
-            if ($null -ne $unexpectedToken) {
-                $unexpectedToken.Dispose()
-            }
+                [object[]]@('x', [string[]]@('a' * 1022))
+            ) | Out-Null
         }
         catch {
-            $invalidLogonFailure = $_.Exception
-            while (($invalidLogonFailure -is
+            $oversizedCommandFailure = $_.Exception
+            while (($oversizedCommandFailure -is
                     [System.Management.Automation.MethodInvocationException] -or
-                    $invalidLogonFailure -is
+                    $oversizedCommandFailure -is
                     [System.Reflection.TargetInvocationException]) -and
-                $null -ne $invalidLogonFailure.InnerException) {
-                $invalidLogonFailure = $invalidLogonFailure.InnerException
+                $null -ne $oversizedCommandFailure.InnerException) {
+                $oversizedCommandFailure = $oversizedCommandFailure.InnerException
             }
         }
-        finally {
-            $invalidPassword.Dispose()
-        }
-        $invalidLogonFailureDescription = if ($null -eq $invalidLogonFailure) {
-            'no failure'
-        }
-        else {
-            "$($invalidLogonFailure.GetType().FullName) $($invalidLogonFailure.Message)"
-        }
         Require `
-            ($invalidLogonFailure -is [System.ComponentModel.Win32Exception] -and
-                $invalidLogonFailure.NativeErrorCode -eq 1326 -and
-                $invalidLogonFailure.Message -match '^logon-construction-user') `
-            "Construction token logon did not fail closed for invalid credentials: $invalidLogonFailureDescription"
+            ($oversizedCommandFailure -is [System.InvalidOperationException] -and
+                $oversizedCommandFailure.Message -eq 'construction-command-line-too-long') `
+            "Construction command-line boundary accepted an oversized alternate-logon request."
 
         $admissionFixtureSource = @'
 using System;

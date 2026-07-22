@@ -164,12 +164,24 @@ function Assert-ProductionRecoveryContracts {
     ))
     Require ($nativeSources.Count -eq 1) "Expected one construction native adapter source."
     $nativeText = $nativeSources[0].Right.Extent.Text
-    $breakawayFlagIndex = $nativeText.IndexOf(
-        'CreateBreakawayFromJob = 0x01000000',
+    $processCreationIndex = $nativeText.IndexOf(
+        'created = CreateProcessWithLogon(',
         [System.StringComparison]::Ordinal
     )
-    $breakawayUseIndex = $nativeText.IndexOf(
-        'CreateSuspended | CreateBreakawayFromJob',
+    $processCreatedIndex = $nativeText.IndexOf(
+        'processCreated = true;',
+        [System.StringComparison]::Ordinal
+    )
+    $processTokenOpenIndex = $nativeText.IndexOf(
+        'OpenProcessToken(process.Process, TokenQuery, out constructionToken)',
+        [System.StringComparison]::Ordinal
+    )
+    $tokenValidationIndex = $nativeText.IndexOf(
+        'ValidateConstructionToken(constructionToken, principalSid);',
+        [System.StringComparison]::Ordinal
+    )
+    $retainedJobInjectionIndex = $nativeText.IndexOf(
+        'if (admissionScenario == AdmissionScenario.RetainedJobBeforeAdmission)',
         [System.StringComparison]::Ordinal
     )
     $inheritedJobCheckIndex = $nativeText.IndexOf(
@@ -178,14 +190,26 @@ function Assert-ProductionRecoveryContracts {
     )
     $ownJobAssignmentIndex = $nativeText.IndexOf(
         'AssignProcessToJobObject(job, process.Process)',
+        $inheritedJobCheckIndex,
         [System.StringComparison]::Ordinal
     )
     Require `
-        ($breakawayFlagIndex -ge 0 -and
-            $breakawayUseIndex -gt $breakawayFlagIndex -and
-            $inheritedJobCheckIndex -gt $breakawayUseIndex -and
-            $ownJobAssignmentIndex -gt $inheritedJobCheckIndex) `
-        "Construction admission no longer breaks away while suspended before assigning its owned Job."
+        ($processCreationIndex -ge 0 -and
+            $processCreatedIndex -gt $processCreationIndex -and
+            $processTokenOpenIndex -gt $processCreatedIndex -and
+            $tokenValidationIndex -gt $processTokenOpenIndex -and
+            $retainedJobInjectionIndex -gt $tokenValidationIndex -and
+            $inheritedJobCheckIndex -gt $retainedJobInjectionIndex -and
+            $ownJobAssignmentIndex -gt $inheritedJobCheckIndex -and
+            $nativeText.Contains(
+                'uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;'
+            ) -and
+            $nativeText.Contains('Marshal.ZeroFreeGlobalAllocUnicode(passwordPointer);') -and
+            $nativeText.Contains('MaximumLogonCommandLineCharacters = 1023;') -and
+            $nativeText.Contains('construction-process-retained-inherited-job') -and
+            -not $nativeText.Contains('CreateBreakawayFromJob') -and
+            -not $nativeText.Contains('CreateProcessWithTokenW')) `
+        "Construction admission no longer validates the suspended alternate-logon child before assigning its owned Job."
 
     $cleanupDefinitions = @($Ast.FindAll(
         {
@@ -1513,7 +1537,7 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         "Construction adapter lost its private recovery boundary."
     Require `
         (([enum]::GetNames($scenarioType) -join ',') -eq
-            'Normal,FailBeforeJobAssignment,FailBeforeJobAssignmentAndCleanupFailure') `
+            'Normal,RetainedJobBeforeAdmission,FailBeforeJobAssignment,FailBeforeJobAssignmentAndCleanupFailure') `
         "Construction adapter recovery scenario domain changed."
 
     $failureArguments = [string[]]@(
@@ -1525,10 +1549,48 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         '-Command', 'exit 0'
     )
     $environmentBlock = New-MinimalUserEnvironmentBlock
+    $invalidPassword = [System.Security.SecureString]::new()
+    $invalidPassword.AppendChar('x')
+    $invalidPassword.MakeReadOnly()
+    try {
+        $invalidReceipt = [Activator]::CreateInstance($receiptType, $true)
+        $invalidArguments = [object[]]::new(10)
+        $invalidArguments[0] = $identity.Username
+        $invalidArguments[1] = $identity.Sid
+        $invalidArguments[2] = $invalidPassword
+        $invalidArguments[3] = [string]$ConstructionParameters.PwshPath
+        $invalidArguments[4] = $normalArguments
+        $invalidArguments[5] = $env:SystemRoot
+        $invalidArguments[6] = $environmentBlock
+        $invalidArguments[7] = 30
+        $invalidArguments[8] = [enum]::Parse($scenarioType, 'Normal')
+        $invalidArguments[9] = $invalidReceipt
+        $invalidCredentialFailure = Get-ReflectedOperationFailure `
+            -Method $runCore `
+            -Arguments $invalidArguments
+        Require `
+            ($invalidCredentialFailure -is [System.ComponentModel.Win32Exception] -and
+                $invalidCredentialFailure.NativeErrorCode -eq 1326 -and
+                $invalidCredentialFailure.Message -match '^create-process' -and
+                [int](Get-ReflectedReceiptValue `
+                    -ReceiptType $receiptType `
+                    -Receipt $invalidReceipt `
+                    -Name ProcessId) -eq 0) `
+            "Construction alternate-logon process creation did not fail closed for invalid credentials."
+        Invoke-ExactSidProcessAudit -Sid $identity.Sid -Expectation absent
+    }
+    finally {
+        $invalidPassword.Dispose()
+    }
+
     foreach ($scenarioRow in @(
         [pscustomobject]@{
             Name = 'Normal'
             Arguments = $normalArguments
+        },
+        [pscustomobject]@{
+            Name = 'RetainedJobBeforeAdmission'
+            Arguments = $failureArguments
         },
         [pscustomobject]@{
             Name = 'FailBeforeJobAssignment'
@@ -1580,13 +1642,20 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
                 -ReceiptType $receiptType `
                 -Receipt $receipt `
                 -ExpectTermination $false
+            Invoke-ExactSidProcessAudit -Sid $identity.Sid -Expectation absent
             continue
         }
 
         $failure = Get-ReflectedOperationFailure `
             -Method $runCore `
             -Arguments $invokeArguments
-        if ($scenarioName -eq 'FailBeforeJobAssignment') {
+        if ($scenarioName -eq 'RetainedJobBeforeAdmission') {
+            Require `
+                ($failure -is [System.InvalidOperationException] -and
+                    $failure.Message -eq 'construction-process-retained-inherited-job') `
+                "Construction retained-Job admission failure returned the wrong operation error."
+        }
+        elseif ($scenarioName -eq 'FailBeforeJobAssignment') {
             Require `
                 ($failure -is [System.InvalidOperationException] -and
                     $failure.Message -eq 'construction-self-test-before-job-assignment') `
@@ -1603,6 +1672,7 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
                 "Construction adapter did not preserve operation and cleanup failures."
         }
         Assert-AdmissionReceipt -ReceiptType $receiptType -Receipt $receipt
+        Invoke-ExactSidProcessAudit -Sid $identity.Sid -Expectation absent
     }
     $launcherExit = Invoke-BoundedProcess `
         -FilePath $LauncherPath `
