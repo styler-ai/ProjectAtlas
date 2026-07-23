@@ -3693,8 +3693,11 @@ mod tests {
             .arg(descriptor.to_string());
         close_inherited_descriptors_on_exec(&mut command);
 
-        assert!(command.status()?.success());
-        Ok(())
+        if command.status()?.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other("worker inherited an injected descriptor").into())
+        }
     }
 
     #[test]
