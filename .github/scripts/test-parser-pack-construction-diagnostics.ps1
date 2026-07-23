@@ -259,6 +259,18 @@ try {
             ($buildContractClassifierDefinitions.Count -eq 1) `
             "Expected one build-contract receipt classifier."
         Invoke-Expression $buildContractClassifierDefinitions[0].Extent.Text
+        $buildContractProbeDefinitions = @($containmentBuilderAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -eq 'Invoke-BuildContractProbe'
+            },
+            $true
+        ))
+        Require `
+            ($buildContractProbeDefinitions.Count -eq 1) `
+            "Expected one build-contract native probe."
+        Invoke-Expression $buildContractProbeDefinitions[0].Extent.Text
         $validBuildContract =
             'projectatlas-parser-containment-build-contract-v1|' +
             'runtime=windows-net-framework-clr-v4|' +
@@ -282,6 +294,79 @@ try {
                 -Rows @('[parser-containment] failed at native-jobserver-open-denied (5)')) -eq
                 'build-contract-smoke-child-native-jobserver-open-denied') `
             "Build-contract classifier lost a child stage with a bounded error code."
+        $probeRoot = [System.IO.Path]::Combine($testRoot, 'build-contract-probe')
+        [System.IO.Directory]::CreateDirectory($probeRoot) | Out-Null
+        $probeChild = [System.IO.Path]::Combine($probeRoot, 'probe.cmd')
+        [System.IO.File]::WriteAllText(
+            $probeChild,
+            "@echo off`r`n>&2 echo [parser-containment] failed at native-probe-test (5)`r`nexit /b 125`r`n",
+            [System.Text.Encoding]::ASCII
+        )
+        $probe = Invoke-BuildContractProbe -Path $probeChild
+        Require `
+            ($ErrorActionPreference -eq 'Stop') `
+            "Build-contract probe did not restore the caller error policy."
+        Require ($probe.ExitCode -eq 125) "Build-contract probe lost the native exit code."
+        Require `
+            ((Get-BuildContractFailureStage `
+                -ExitCode $probe.ExitCode `
+                -Rows $probe.Rows) -eq 'build-contract-smoke-child-native-probe-test') `
+            "Build-contract probe lost native stderr under the Stop error policy."
+
+        $probeHarness = [System.IO.Path]::Combine($probeRoot, 'probe-harness.ps1')
+        $escapedProbeChild = $probeChild.Replace("'", "''")
+        $probeHarnessText = @(
+            'Set-StrictMode -Version Latest',
+            '$ErrorActionPreference = ''Stop''',
+            $buildContractProbeDefinitions[0].Extent.Text,
+            "`$probe = Invoke-BuildContractProbe -Path '$escapedProbeChild'",
+            'if ($ErrorActionPreference -ne ''Stop'' -or $probe.ExitCode -ne 125 -or ' +
+                '$probe.Rows.Count -ne 1 -or [string]$probe.Rows[0] -cne ' +
+                '''[parser-containment] failed at native-probe-test (5)'') { exit 91 }',
+            '[Console]::Out.WriteLine(''projectatlas-build-contract-probe-ok'')'
+        ) -join "`r`n"
+        [System.IO.File]::WriteAllText(
+            $probeHarness,
+            $probeHarnessText,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        $windowsPowerShell = [System.IO.Path]::Combine(
+            $env:SystemRoot,
+            'System32',
+            'WindowsPowerShell',
+            'v1.0',
+            'powershell.exe'
+        )
+        $probeStart = [System.Diagnostics.ProcessStartInfo]::new()
+        $probeStart.FileName = $windowsPowerShell
+        $probeStart.UseShellExecute = $false
+        $probeStart.CreateNoWindow = $true
+        $probeStart.RedirectStandardOutput = $true
+        $probeStart.RedirectStandardError = $true
+        foreach ($argument in @(
+            '-NoLogo',
+            '-NoProfile',
+            '-NonInteractive',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            $probeHarness
+        )) {
+            $probeStart.ArgumentList.Add($argument)
+        }
+        $desktopProbe = Invoke-BoundedDiagnosticChild `
+            -StartInfo $probeStart `
+            -OperationTimeoutMilliseconds 10000
+        Require `
+            (-not $desktopProbe.TimedOut -and
+                $desktopProbe.ReapedBeforePipeCollection -and
+                $desktopProbe.PipeCompleted -and
+                $desktopProbe.Disposed -and
+                $desktopProbe.ExitCode -eq 0 -and
+                $desktopProbe.StandardError.Length -eq 0 -and
+                $desktopProbe.StandardOutput.Trim() -ceq
+                    'projectatlas-build-contract-probe-ok') `
+            "Windows PowerShell Desktop did not preserve the bounded native failure receipt."
         Require `
             ((Get-BuildContractFailureStage -ExitCode 125 -Rows @('opaque')) -eq
                 'build-contract-smoke-exit-125') `

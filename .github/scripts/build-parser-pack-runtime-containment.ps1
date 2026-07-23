@@ -608,79 +608,97 @@ namespace ProjectAtlas.Release
 
         private static string BuildContract()
         {
-            List<string> identities = new List<string>();
-            HashSet<string> uniqueIdentities = new HashSet<string>(StringComparer.Ordinal);
-            SortedSet<string> modules = new SortedSet<string>(StringComparer.Ordinal);
-            foreach (Type type in Assembly.GetExecutingAssembly().GetTypes())
+            string phase = "build-contract-types";
+            try
             {
-                MethodInfo[] methods = type.GetMethods(
-                    BindingFlags.Public
-                    | BindingFlags.NonPublic
-                    | BindingFlags.Static
-                    | BindingFlags.Instance
-                    | BindingFlags.DeclaredOnly);
-                foreach (MethodInfo method in methods)
+                List<string> identities = new List<string>();
+                HashSet<string> uniqueIdentities = new HashSet<string>(StringComparer.Ordinal);
+                SortedSet<string> modules = new SortedSet<string>(StringComparer.Ordinal);
+                foreach (Type type in Assembly.GetExecutingAssembly().GetTypes())
                 {
-                    if ((method.Attributes & MethodAttributes.PinvokeImpl) == 0)
+                    phase = "build-contract-methods";
+                    MethodInfo[] methods = type.GetMethods(
+                        BindingFlags.Public
+                        | BindingFlags.NonPublic
+                        | BindingFlags.Static
+                        | BindingFlags.Instance
+                        | BindingFlags.DeclaredOnly);
+                    foreach (MethodInfo method in methods)
                     {
-                        continue;
+                        if ((method.Attributes & MethodAttributes.PinvokeImpl) == 0)
+                        {
+                            continue;
+                        }
+                        phase = "build-contract-import-reflection";
+                        DllImportAttribute import = (DllImportAttribute)Attribute.GetCustomAttribute(
+                            method,
+                            typeof(DllImportAttribute));
+                        if (import == null || String.IsNullOrEmpty(import.Value))
+                        {
+                            throw new ContainmentFailure("build-contract-import-metadata");
+                        }
+                        string module = import.Value.ToLowerInvariant();
+                        string entryPoint = String.IsNullOrEmpty(import.EntryPoint)
+                            ? method.Name
+                            : import.EntryPoint;
+                        if (String.IsNullOrEmpty(module) || String.IsNullOrEmpty(entryPoint))
+                        {
+                            throw new ContainmentFailure("build-contract-empty-import-identity");
+                        }
+                        string identity = module + "!" + entryPoint.ToLowerInvariant();
+                        if (!uniqueIdentities.Add(identity))
+                        {
+                            throw new ContainmentFailure("build-contract-duplicate-import-identity");
+                        }
+                        modules.Add(module);
+                        identities.Add(identity);
                     }
-                    DllImportAttribute import = (DllImportAttribute)Attribute.GetCustomAttribute(
-                        method,
-                        typeof(DllImportAttribute));
-                    if (import == null || String.IsNullOrEmpty(import.Value))
-                    {
-                        throw new ContainmentFailure("build-contract-import-metadata");
-                    }
-                    string module = import.Value.ToLowerInvariant();
-                    string entryPoint = String.IsNullOrEmpty(import.EntryPoint)
-                        ? method.Name
-                        : import.EntryPoint;
-                    if (String.IsNullOrEmpty(module) || String.IsNullOrEmpty(entryPoint))
-                    {
-                        throw new ContainmentFailure("build-contract-empty-import-identity");
-                    }
-                    string identity = module + "!" + entryPoint.ToLowerInvariant();
-                    if (!uniqueIdentities.Add(identity))
-                    {
-                        throw new ContainmentFailure("build-contract-duplicate-import-identity");
-                    }
-                    modules.Add(module);
-                    identities.Add(identity);
                 }
-            }
-            if (identities.Count == 0)
-            {
-                throw new ContainmentFailure("build-contract-empty-imports");
-            }
-            identities.Sort(StringComparer.Ordinal);
-            string identityDigest;
-            // The construction principal intentionally has no loaded Windows profile. Instantiate
-            // the managed implementation directly so hashing bypasses the configurable
-            // CryptoConfig factory and machine-configuration lookup. CLR FIPS policy remains
-            // authoritative; any policy or provider failure is terminal.
-            using (SHA256 sha256 = new SHA256Managed())
-            {
-                byte[] canonical = Encoding.UTF8.GetBytes(String.Join("\n", identities.ToArray()));
-                byte[] digest = sha256.ComputeHash(canonical);
-                StringBuilder hex = new StringBuilder(64);
-                foreach (byte value in digest)
+                if (identities.Count == 0)
                 {
-                    hex.Append(value.ToString("x2", CultureInfo.InvariantCulture));
+                    throw new ContainmentFailure("build-contract-empty-imports");
                 }
-                identityDigest = hex.ToString();
+                phase = "build-contract-canonicalize";
+                identities.Sort(StringComparer.Ordinal);
+                string identityDigest;
+                phase = "build-contract-digest";
+                // The construction principal intentionally has no loaded Windows profile. Instantiate
+                // the managed implementation directly so hashing bypasses the configurable
+                // CryptoConfig factory and machine-configuration lookup. CLR FIPS policy remains
+                // authoritative; any policy or provider failure is terminal.
+                using (SHA256 sha256 = new SHA256Managed())
+                {
+                    byte[] canonical = Encoding.UTF8.GetBytes(String.Join("\n", identities.ToArray()));
+                    byte[] digest = sha256.ComputeHash(canonical);
+                    StringBuilder hex = new StringBuilder(64);
+                    foreach (byte value in digest)
+                    {
+                        hex.Append(value.ToString("x2", CultureInfo.InvariantCulture));
+                    }
+                    identityDigest = hex.ToString();
+                }
+                phase = "build-contract-format";
+                string line = "projectatlas-parser-containment-build-contract-v1"
+                    + "|runtime=windows-net-framework-clr-v4"
+                    + "|architecture=x86_64"
+                    + "|modules=" + String.Join(",", new List<string>(modules).ToArray())
+                    + "|methods=" + identities.Count.ToString(CultureInfo.InvariantCulture)
+                    + "|imports_sha256=" + identityDigest;
+                if (line.Length > 512
+                    || Encoding.ASCII.GetString(Encoding.ASCII.GetBytes(line)) != line)
+                {
+                    throw new ContainmentFailure("build-contract-output-bound");
+                }
+                return line;
             }
-            string line = "projectatlas-parser-containment-build-contract-v1"
-                + "|runtime=windows-net-framework-clr-v4"
-                + "|architecture=x86_64"
-                + "|modules=" + String.Join(",", new List<string>(modules).ToArray())
-                + "|methods=" + identities.Count.ToString(CultureInfo.InvariantCulture)
-                + "|imports_sha256=" + identityDigest;
-            if (line.Length > 512 || Encoding.ASCII.GetString(Encoding.ASCII.GetBytes(line)) != line)
+            catch (ContainmentFailure)
             {
-                throw new ContainmentFailure("build-contract-output-bound");
+                throw;
             }
-            return line;
+            catch
+            {
+                throw new ContainmentFailure(phase);
+            }
         }
 
         private static ServeConfiguration ParseServeConfiguration(string[] arguments)
@@ -2292,6 +2310,30 @@ function Get-BuildContractFailureStage {
     return $null
 }
 
+function Invoke-BuildContractProbe {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    # Windows PowerShell 5.1 promotes redirected native stderr to a terminating
+    # RemoteException under Stop. Limit Continue to this trusted, bounded probe
+    # so its canonical failure receipt reaches the fail-closed classifier.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $rows = @(& $Path --build-contract 2>&1)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    return [pscustomobject]@{
+        ExitCode = [int] $exitCode
+        Rows = [object[]] $rows
+    }
+}
+
 $fullOutputPath = $null
 $mayDeleteOutput = $false
 $buildStage = 'validate-output'
@@ -2372,11 +2414,10 @@ try {
         throw 'version-smoke'
     }
     $buildStage = 'build-contract-smoke'
-    $buildContract = @(& $fullOutputPath --build-contract 2>&1)
-    $buildContractExit = $LASTEXITCODE
+    $buildContractProbe = Invoke-BuildContractProbe -Path $fullOutputPath
     $buildContractFailure = Get-BuildContractFailureStage `
-        -ExitCode $buildContractExit `
-        -Rows $buildContract
+        -ExitCode $buildContractProbe.ExitCode `
+        -Rows $buildContractProbe.Rows
     if ($null -ne $buildContractFailure) {
         $buildStage = $buildContractFailure
         throw 'build-contract-smoke'
