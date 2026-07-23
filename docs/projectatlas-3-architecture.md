@@ -1804,6 +1804,49 @@ memory cost for optional grammars, and all accepted 0.3.26 behavior remains
 available. Version 0.4 does not add a generic multi-pack framework; a split is
 reconsidered only if a measured package, installation, or platform ceiling fails.
 
+#### CI Dependency-Layer Reuse And Clean Release Proof
+
+The optional-pack workflow may reuse only sanitized Cargo dependency build state.
+An exact key binds the target, Rust and native toolchains, Cargo lockfile and
+manifests, and the cache-policy implementation. ProjectAtlas source revision is not
+part of that key because every owned crate is removed from the restored target
+before the exact candidate is freshly compiled. The pinned grammar bundles,
+constructed archives, candidate binaries, receipts, ProjectAtlas databases, and
+workspace state never enter this cache.
+
+Restored trees are untrusted input. Contained construction bounds and validates the
+tree, quarantines invalid state without recursive traversal, and falls back to an
+empty target. Pull requests can restore but cannot save. A successful trusted
+dispatch can save only after every existing construction and verification gate
+passes and candidate outputs are removed again. Explicit clean construction bypasses
+both actions and remains the final release-acceptance path.
+
+```mermaid
+flowchart TB
+    Candidate[Exact clean candidate] --> Key[Exact dependency-layer key]
+    Dispatch{Explicit clean construction?}
+    Key --> Dispatch
+    Dispatch -->|yes| Empty[Empty Cargo target]
+    Dispatch -->|no| Lookup{Exact cache hit?}
+    Lookup -->|yes| Restore[Restore exact cache key]
+    Lookup -->|no| Empty
+    Restore --> Validate{Bounded regular tree?}
+    Validate -->|no| Quarantine[Quarantine root without traversal]
+    Quarantine --> Empty
+    Validate -->|yes| CleanBefore[Remove all seven owned crate artifacts]
+    Empty --> Build
+    CleanBefore --> Build[Contained offline candidate build]
+    Build --> Assemble[Two independent audits and assemblies]
+    Assemble --> Verify[Digest, license, native, containment, lifecycle, package, and fresh-runner proof]
+    Verify --> Publish[Immutable construction artifact]
+    Verify --> CleanAfter[Remove owned outputs and Windows broker]
+    Publish --> Receipt[Bounded target disposition receipt]
+    CleanAfter --> Receipt
+    Receipt --> Trust{Trusted successful non-clean dispatch?}
+    Trust -->|no: pull request or clean run| NoSave[Do not save cache state]
+    Trust -->|yes| Save[Save exact dependency layer]
+```
+
 ```mermaid
 sequenceDiagram
     participant R as Hosted runner

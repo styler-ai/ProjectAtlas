@@ -127,12 +127,17 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile(
     [ref]$parseErrors
 )
 Require ($parseErrors.Count -eq 0) "Production construction script did not parse."
+$workflowText = [System.IO.File]::ReadAllText(
+    (Get-Item -LiteralPath $OptionalParserPackWorkflow -Force).FullName
+)
 foreach ($name in @(
     "Add-BoundedDiagnosticTail",
     "Write-BoundedConstructionDiagnostic",
     "Invoke-Checked",
     "Write-ConstructionStatus",
-    "Assert-CargoConstructionEnvironment"
+    "Assert-CargoConstructionEnvironment",
+    "Assert-ReusableCargoTarget",
+    "Initialize-ReusableCargoTarget"
 )) {
     $definitions = @($ast.FindAll(
         {
@@ -217,6 +222,217 @@ try {
         if ($hadMakeflags) { $env:CARGO_MAKEFLAGS = $previousMakeflags }
         else { Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS -ErrorAction SilentlyContinue }
     }
+
+    $cacheOutput = [System.IO.Directory]::CreateDirectory(
+        [System.IO.Path]::Combine($testRoot, "cargo-cache-valid")
+    ).FullName
+    $cacheBuild = [System.IO.Path]::Combine($cacheOutput, "build")
+    $miss = Initialize-ReusableCargoTarget `
+        -OutputDirectory $cacheOutput `
+        -BuildDirectory $cacheBuild `
+        -MaximumEntries 8 `
+        -MaximumBytes 1024
+    Require `
+        ($miss.disposition -eq "miss" -and
+            [System.IO.Directory]::Exists($cacheBuild)) `
+        "Absent reusable Cargo target did not produce a clean miss."
+    $cacheDependency = [System.IO.Directory]::CreateDirectory(
+        [System.IO.Path]::Combine($cacheBuild, "release", "deps")
+    ).FullName
+    [System.IO.File]::WriteAllText(
+        [System.IO.Path]::Combine($cacheDependency, "dependency.rlib"),
+        "dependency"
+    )
+    $hit = Initialize-ReusableCargoTarget `
+        -OutputDirectory $cacheOutput `
+        -BuildDirectory $cacheBuild `
+        -MaximumEntries 8 `
+        -MaximumBytes 1024
+    Require `
+        ($hit.disposition -eq "hit" -and
+            $hit.entries -eq 3 -and
+            $hit.bytes -eq 10) `
+        "Valid reusable Cargo target was not admitted with exact metrics."
+
+    $fileRootOutput = [System.IO.Directory]::CreateDirectory(
+        [System.IO.Path]::Combine($testRoot, "cargo-cache-file-root")
+    ).FullName
+    $fileRootBuild = [System.IO.Path]::Combine($fileRootOutput, "build")
+    [System.IO.File]::WriteAllText($fileRootBuild, "unexpected")
+    $fileRoot = Initialize-ReusableCargoTarget `
+        -OutputDirectory $fileRootOutput `
+        -BuildDirectory $fileRootBuild `
+        -MaximumEntries 8 `
+        -MaximumBytes 1024
+    Require `
+        ($fileRoot.disposition -eq "rejected" -and
+            [System.IO.Directory]::Exists($fileRootBuild)) `
+        "Unexpected reusable Cargo target root was not quarantined."
+
+    $entryLimitOutput = [System.IO.Directory]::CreateDirectory(
+        [System.IO.Path]::Combine($testRoot, "cargo-cache-entry-limit")
+    ).FullName
+    $entryLimitBuild = [System.IO.Directory]::CreateDirectory(
+        [System.IO.Path]::Combine($entryLimitOutput, "build")
+    ).FullName
+    [System.IO.File]::WriteAllText(
+        [System.IO.Path]::Combine($entryLimitBuild, "first"),
+        "1"
+    )
+    [System.IO.File]::WriteAllText(
+        [System.IO.Path]::Combine($entryLimitBuild, "second"),
+        "2"
+    )
+    $entryLimitRejected = $false
+    try {
+        Assert-ReusableCargoTarget `
+            -OutputDirectory $entryLimitOutput `
+            -BuildDirectory $entryLimitBuild `
+            -MaximumEntries 1 `
+            -MaximumBytes 1024 | Out-Null
+    }
+    catch {
+        $entryLimitRejected = $_.Exception.Message -eq
+            "Reusable Cargo target exceeds its entry limit."
+    }
+    Require $entryLimitRejected "Reusable Cargo target entry bound was not enforced."
+
+    $byteLimitOutput = [System.IO.Directory]::CreateDirectory(
+        [System.IO.Path]::Combine($testRoot, "cargo-cache-byte-limit")
+    ).FullName
+    $byteLimitBuild = [System.IO.Directory]::CreateDirectory(
+        [System.IO.Path]::Combine($byteLimitOutput, "build")
+    ).FullName
+    [System.IO.File]::WriteAllText(
+        [System.IO.Path]::Combine($byteLimitBuild, "oversized"),
+        "12"
+    )
+    $byteLimitRejected = $false
+    try {
+        Assert-ReusableCargoTarget `
+            -OutputDirectory $byteLimitOutput `
+            -BuildDirectory $byteLimitBuild `
+            -MaximumEntries 8 `
+            -MaximumBytes 1 | Out-Null
+    }
+    catch {
+        $byteLimitRejected = $_.Exception.Message -eq
+            "Reusable Cargo target exceeds its byte limit."
+    }
+    Require $byteLimitRejected "Reusable Cargo target byte bound was not enforced."
+
+    $linkOutput = [System.IO.Directory]::CreateDirectory(
+        [System.IO.Path]::Combine($testRoot, "cargo-cache-link")
+    ).FullName
+    $linkBuild = [System.IO.Directory]::CreateDirectory(
+        [System.IO.Path]::Combine($linkOutput, "build")
+    ).FullName
+    $linkTarget = [System.IO.Directory]::CreateDirectory(
+        [System.IO.Path]::Combine($testRoot, "cargo-cache-link-target")
+    ).FullName
+    $linkType = if ($IsWindows) { "Junction" } else { "SymbolicLink" }
+    New-Item `
+        -ItemType $linkType `
+        -Path ([System.IO.Path]::Combine($linkBuild, "escaped")) `
+        -Target $linkTarget | Out-Null
+    $link = Initialize-ReusableCargoTarget `
+        -OutputDirectory $linkOutput `
+        -BuildDirectory $linkBuild `
+        -MaximumEntries 8 `
+        -MaximumBytes 1024
+    $quarantines = @(
+        Get-ChildItem `
+            -LiteralPath $linkOutput `
+            -Directory `
+            -Filter "rejected-build-*" `
+            -Force
+    )
+    Require `
+        ($link.disposition -eq "rejected" -and
+            $quarantines.Count -eq 1 -and
+            [System.IO.Directory]::Exists($linkBuild) -and
+            @(Get-ChildItem -LiteralPath $linkBuild -Force).Count -eq 0) `
+        "Path-indirected reusable Cargo target did not fall back to an empty build."
+
+    Require `
+        ($workflowText.Contains("clean_construction:") -and
+            $workflowText.Contains(
+                "uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0"
+            ) -and
+            $workflowText.Contains(
+                "uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0"
+            ) -and
+            -not $workflowText.Contains("restore-keys:")) `
+        "Reusable Cargo layer must use pinned official actions with exact keys and clean bypass."
+    foreach ($keyInput in @(
+        '${{ matrix.target }}',
+        '${{ steps.identity.outputs.rustc_commit_hash }}',
+        '${{ steps.native-toolchain.outputs.sha256 }}',
+        "hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml')",
+        "hashFiles('.github/workflows/optional-parser-pack.yml', '.github/scripts/run-parser-pack-contained-construction.ps1')",
+        'image_os=$env:ImageOS',
+        'image_version=$env:ImageVersion',
+        'visual_studio=$vsVersion',
+        'vc_tools=$vcVersion',
+        'windows_sdk=$sdkVersion',
+        '@("cc", "ld", "ldd")'
+    )) {
+        Require `
+            ($workflowText.Contains($keyInput)) `
+            "Reusable Cargo layer key lost input category: $keyInput"
+    }
+    Require `
+        ($workflowText.Contains("github.event_name != 'workflow_dispatch' || !inputs.clean_construction") -and
+            $workflowText.Contains("github.event_name == 'workflow_dispatch' &&") -and
+            $workflowText.Contains("steps.cargo-cache-restore.outputs.cache-hit != 'true'") -and
+            $workflowText.Contains("steps.cargo-cache-disposition.outputs.value != 'rejected'") -and
+            $workflowText.Contains('path: ${{ runner.temp }}/parser-pack-output/build')) `
+        "Reusable Cargo layer trust, miss, rejection, or path boundary drifted."
+    foreach ($package in @(
+        "projectatlas-lints",
+        "projectatlas-cli",
+        "projectatlas-core",
+        "projectatlas-db",
+        "projectatlas-fs",
+        "projectatlas-service",
+        "projectatlas-symbols"
+    )) {
+        Require `
+            ($workflowText.Contains('foreach ($package in @(') -and
+                $workflowText.Contains("""$package""")) `
+            "Reusable Cargo layer cleanup lost owned package $package."
+    }
+    $restoreIndex = $workflowText.IndexOf(
+        "- name: Restore exact reusable Cargo layer",
+        [System.StringComparison]::Ordinal
+    )
+    $acquireIndex = $workflowText.IndexOf(
+        "- name: Acquire pinned inputs and vendor dependencies",
+        [System.StringComparison]::Ordinal
+    )
+    $sanitizeIndex = $workflowText.IndexOf(
+        "- name: Remove candidate outputs from reusable Cargo layer",
+        [System.StringComparison]::Ordinal
+    )
+    $receiptIndex = $workflowText.IndexOf(
+        "- name: Record reusable Cargo layer disposition",
+        [System.StringComparison]::Ordinal
+    )
+    $saveIndex = $workflowText.IndexOf(
+        "- name: Save exact reusable Cargo layer",
+        [System.StringComparison]::Ordinal
+    )
+    Require `
+        ($restoreIndex -ge 0 -and
+            $restoreIndex -lt $acquireIndex -and
+            $sanitizeIndex -gt $acquireIndex -and
+            $receiptIndex -gt $sanitizeIndex -and
+            $saveIndex -gt $receiptIndex -and
+            $workflowText.Contains("ProjectAtlas candidate artifacts remain in the reusable Cargo layer.") -and
+            $workflowText.Contains("construction-cache-disposition.json") -and
+            $workflowText.Contains("key_sha256 =")) `
+        "Reusable Cargo layer ordering, candidate sanitation, or receipt contract drifted."
+
     if ($env:OS -eq "Windows_NT") {
         $wrapperTokens = $null
         $wrapperParseErrors = $null
@@ -579,9 +795,6 @@ Add-Type -Path $SourcePath -OutputAssembly $OutputPath -OutputType ConsoleApplic
             ($containmentVerifierParseErrors.Count -eq 0) `
             "Runtime-containment artifact verifier did not parse."
         $containmentVerifierText = $containmentVerifierAst.Extent.Text
-        $workflowText = [System.IO.File]::ReadAllText(
-            (Get-Item -LiteralPath $OptionalParserPackWorkflow -Force).FullName
-        )
         $recoveryTokens = $null
         $recoveryParseErrors = $null
         $recoveryAst = [System.Management.Automation.Language.Parser]::ParseFile(

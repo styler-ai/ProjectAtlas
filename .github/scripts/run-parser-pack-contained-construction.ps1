@@ -61,6 +61,8 @@ $sha256Pattern = '\A[0-9a-f]{64}\z'
 $rustcReleasePattern = '\A[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?\z'
 $commandDiagnosticTailBytes = 24 * 1024
 $constructionDiagnosticMaxBytes = 64 * 1024
+$reusableCargoTargetMaxEntries = 200000
+$reusableCargoTargetMaxBytes = [uint64](8GB)
 
 function Get-CanonicalDirectory {
     param(
@@ -96,6 +98,130 @@ function Get-RegularFile {
         throw "$Role must be one non-empty regular file."
     }
     return $item.FullName
+}
+
+function Assert-ReusableCargoTarget {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OutputDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BuildDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 1000000)]
+        [int]$MaximumEntries,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, [long]::MaxValue)]
+        [long]$MaximumBytes
+    )
+
+    $expected = [System.IO.Path]::GetFullPath(
+        [System.IO.Path]::Combine($OutputDirectory, "build")
+    )
+    $candidate = [System.IO.Path]::GetFullPath($BuildDirectory)
+    $comparison = if ($IsWindows) {
+        [System.StringComparison]::OrdinalIgnoreCase
+    }
+    else {
+        [System.StringComparison]::Ordinal
+    }
+    if (-not $candidate.Equals($expected, $comparison)) {
+        throw "Reusable Cargo target is outside the fixed construction output."
+    }
+
+    $root = Get-Item -LiteralPath $candidate -Force
+    if (-not $root.PSIsContainer -or
+        (($root.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "Reusable Cargo target root is not one direct non-reparse directory."
+    }
+    $prefix = "$($root.FullName.TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    ))$([System.IO.Path]::DirectorySeparatorChar)"
+    $entryCount = 0
+    [uint64]$totalBytes = 0
+    foreach ($entry in (Get-ChildItem -LiteralPath $root.FullName -Force -Recurse)) {
+        $entryCount++
+        if ($entryCount -gt $MaximumEntries) {
+            throw "Reusable Cargo target exceeds its entry limit."
+        }
+        if (-not $entry.FullName.StartsWith($prefix, $comparison) -or
+            (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            throw "Reusable Cargo target contains path indirection."
+        }
+        if ($entry.PSIsContainer) {
+            continue
+        }
+        if (-not ($entry -is [System.IO.FileInfo])) {
+            throw "Reusable Cargo target contains an unexpected entry type."
+        }
+        $length = [uint64]$entry.Length
+        if ($length -gt ([uint64]$MaximumBytes - $totalBytes)) {
+            throw "Reusable Cargo target exceeds its byte limit."
+        }
+        $totalBytes += $length
+    }
+
+    return [pscustomobject]@{
+        entries = $entryCount
+        bytes = $totalBytes
+    }
+}
+
+function Initialize-ReusableCargoTarget {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OutputDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BuildDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 1000000)]
+        [int]$MaximumEntries,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, [long]::MaxValue)]
+        [long]$MaximumBytes
+    )
+
+    $existing = Get-Item -LiteralPath $BuildDirectory -Force -ErrorAction SilentlyContinue
+    if ($null -eq $existing) {
+        [System.IO.Directory]::CreateDirectory($BuildDirectory) | Out-Null
+        return [pscustomobject]@{
+            disposition = "miss"
+            entries = 0
+            bytes = 0
+        }
+    }
+
+    try {
+        $metrics = Assert-ReusableCargoTarget `
+            -OutputDirectory $OutputDirectory `
+            -BuildDirectory $BuildDirectory `
+            -MaximumEntries $MaximumEntries `
+            -MaximumBytes $MaximumBytes
+        return [pscustomobject]@{
+            disposition = "hit"
+            entries = $metrics.entries
+            bytes = $metrics.bytes
+        }
+    }
+    catch {
+        $quarantine = [System.IO.Path]::Combine(
+            $OutputDirectory,
+            "rejected-build-$([guid]::NewGuid().ToString("N"))"
+        )
+        Move-Item -LiteralPath $BuildDirectory -Destination $quarantine
+        [System.IO.Directory]::CreateDirectory($BuildDirectory) | Out-Null
+        return [pscustomobject]@{
+            disposition = "rejected"
+            entries = 0
+            bytes = 0
+        }
+    }
 }
 
 function Add-BoundedDiagnosticTail {
@@ -617,6 +743,10 @@ $script:constructionDiagnosticPath = [System.IO.Path]::Combine(
     $output,
     "construction-diagnostic.txt"
 )
+$script:constructionCacheDispositionPath = [System.IO.Path]::Combine(
+    $output,
+    "construction-cache-disposition.json"
+)
 $script:constructionStage = "validate-inputs"
 $script:constructionFailureRecorded = $false
 $script:constructionFailureExitCode = 1
@@ -682,7 +812,17 @@ $workingDirectory = [System.IO.Path]::Combine($output, "work")
 $publishDirectory = [System.IO.Path]::Combine($output, "publish")
 $script:constructionStage = "output-preparation"
 Write-ConstructionStatus -Stage $script:constructionStage -State "running"
-foreach ($directory in @($buildDirectory, $workingDirectory, $publishDirectory)) {
+$cargoTarget = Initialize-ReusableCargoTarget `
+    -OutputDirectory $output `
+    -BuildDirectory $buildDirectory `
+    -MaximumEntries $reusableCargoTargetMaxEntries `
+    -MaximumBytes $reusableCargoTargetMaxBytes
+[System.IO.File]::WriteAllText(
+    $script:constructionCacheDispositionPath,
+    (($cargoTarget | ConvertTo-Json -Compress) + "`n"),
+    [System.Text.UTF8Encoding]::new($false)
+)
+foreach ($directory in @($workingDirectory, $publishDirectory)) {
     if ([System.IO.Directory]::Exists($directory) -or [System.IO.File]::Exists($directory)) {
         throw "Contained construction output already exists: $directory"
     }
@@ -715,6 +855,33 @@ $env:CARGO_NET_OFFLINE = "true"
 $env:CARGO_TARGET_DIR = $buildDirectory
 $env:TSLP_OFFLINE = "1"
 $env:TSLP_LINK_MODE = "dynamic"
+
+$ownedPackages = @(
+    "projectatlas-lints",
+    "projectatlas-cli",
+    "projectatlas-core",
+    "projectatlas-db",
+    "projectatlas-fs",
+    "projectatlas-service",
+    "projectatlas-symbols"
+)
+if ($cargoTarget.disposition -eq "hit") {
+    $cleanArguments = @(
+        "clean",
+        "--frozen",
+        "--target-dir",
+        $buildDirectory
+    )
+    foreach ($package in $ownedPackages) {
+        $cleanArguments += @("--package", $package)
+    }
+    $script:constructionStage = "reusable-cargo-target-clean"
+    Write-ConstructionStatus -Stage $script:constructionStage -State "running"
+    Invoke-Checked `
+        -Executable $cargo `
+        -Arguments $cleanArguments `
+        -Role "ProjectAtlas candidate artifact cleanup before reuse"
+}
 
 $workerBuildArguments = @(
         "build",

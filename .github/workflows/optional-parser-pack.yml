@@ -2,6 +2,12 @@ name: optional-parser-pack
 
 on:
   workflow_dispatch:
+    inputs:
+      clean_construction:
+        description: Bypass dependency-cache restore and save for release acceptance
+        required: true
+        default: false
+        type: boolean
   pull_request:
     branches: [dev]
     types: [labeled]
@@ -112,6 +118,111 @@ jobs:
           "rustc_commit_hash=$rustcCommit" >> $env:GITHUB_OUTPUT
           "toolchain_root=$toolchainRoot" >> $env:GITHUB_OUTPUT
           "pwsh_path=$pwshPath" >> $env:GITHUB_OUTPUT
+
+      - name: Bind native construction toolchain identity
+        id: native-toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $identity = [System.Collections.Generic.List[string]]::new()
+          foreach ($value in @($env:ImageOS, $env:ImageVersion)) {
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              throw "Hosted runner image identity is unavailable."
+            }
+          }
+          $identity.Add("image_os=$env:ImageOS")
+          $identity.Add("image_version=$env:ImageVersion")
+
+          if ($env:RUNNER_OS -eq "Windows") {
+            $programFilesX86 = [System.Environment]::GetFolderPath(
+              [System.Environment+SpecialFolder]::ProgramFilesX86
+            )
+            $vswhere = Join-Path $programFilesX86 "Microsoft Visual Studio/Installer/vswhere.exe"
+            $vsInstall = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+            $vsVersion = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationVersion).Trim()
+            if ($LASTEXITCODE -ne 0 -or
+                [string]::IsNullOrWhiteSpace($vsInstall) -or
+                [string]::IsNullOrWhiteSpace($vsVersion)) {
+              throw "Visual Studio C++ toolchain identity is unavailable."
+            }
+            $vcVersionFile = Join-Path $vsInstall "VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt"
+            $vcVersion = (Get-Content -Raw -LiteralPath $vcVersionFile).Trim()
+            $sdkRoot = Join-Path $programFilesX86 "Windows Kits/10/Lib"
+            $sdkVersion = Get-ChildItem -LiteralPath $sdkRoot -Directory |
+              Sort-Object Name |
+              Select-Object -Last 1 -ExpandProperty Name
+            if ([string]::IsNullOrWhiteSpace($vcVersion) -or
+                [string]::IsNullOrWhiteSpace($sdkVersion)) {
+              throw "Windows native compiler or SDK identity is unavailable."
+            }
+            $identity.Add("visual_studio=$vsVersion")
+            $identity.Add("vc_tools=$vcVersion")
+            $identity.Add("windows_sdk=$sdkVersion")
+          }
+          else {
+            foreach ($tool in @("cc", "ld", "ldd")) {
+              $command = Get-Command $tool -CommandType Application -ErrorAction Stop
+              $version = @(& $command.Source --version)
+              if ($LASTEXITCODE -ne 0 -or $version.Count -eq 0) {
+                throw "Linux native toolchain identity is unavailable for $tool."
+              }
+              $identity.Add("$tool=$($version[0])")
+            }
+          }
+
+          $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes(
+            (($identity | Sort-Object) -join "`n") + "`n"
+          )
+          $digest = [System.Convert]::ToHexString(
+            [System.Security.Cryptography.SHA256]::HashData($bytes)
+          ).ToLowerInvariant()
+          "sha256=$digest" >> $env:GITHUB_OUTPUT
+
+      - name: Derive exact reusable Cargo layer key
+        id: cargo-cache-key
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $manifestHash = "${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml') }}"
+          $policyHash = "${{ hashFiles('.github/workflows/optional-parser-pack.yml', '.github/scripts/run-parser-pack-contained-construction.ps1') }}"
+          $rustcCommit = "${{ steps.identity.outputs.rustc_commit_hash }}"
+          if ($rustcCommit -cnotmatch '\A[0-9a-f]{40}\z') {
+            throw "Reusable Cargo layer key contains an invalid rustc commit."
+          }
+          foreach ($digest in @(
+            "${{ steps.native-toolchain.outputs.sha256 }}",
+            $manifestHash,
+            $policyHash
+          )) {
+            if ($digest -cnotmatch '\A[0-9a-f]{64}\z') {
+              throw "Reusable Cargo layer key contains an invalid digest."
+            }
+          }
+          $key = @(
+            "parser-pack-cargo-v1",
+            "${{ matrix.target }}",
+            $rustcCommit,
+            "${{ steps.native-toolchain.outputs.sha256 }}",
+            $manifestHash,
+            $policyHash
+          ) -join "-"
+          if ($key.Length -gt 512) {
+            throw "Reusable Cargo layer key exceeds the GitHub cache limit."
+          }
+          $keyBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($key)
+          $keyDigest = [System.Convert]::ToHexString(
+            [System.Security.Cryptography.SHA256]::HashData($keyBytes)
+          ).ToLowerInvariant()
+          "key=$key" >> $env:GITHUB_OUTPUT
+          "sha256=$keyDigest" >> $env:GITHUB_OUTPUT
+
+      - name: Restore exact reusable Cargo layer
+        id: cargo-cache-restore
+        if: github.event_name != 'workflow_dispatch' || !inputs.clean_construction
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/parser-pack-output/build
+          key: ${{ steps.cargo-cache-key.outputs.key }}
 
       - name: Test bounded construction diagnostics
         shell: pwsh
@@ -312,6 +423,58 @@ jobs:
           & .github/scripts/verify-parser-pack-runtime-containment.ps1 `
             -OutputRoot (Join-Path $env:RUNNER_TEMP "parser-pack-output")
 
+      - name: Remove candidate outputs from reusable Cargo layer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $build = Join-Path $env:RUNNER_TEMP "parser-pack-output/build"
+          if (-not (Test-Path -LiteralPath $build -PathType Container)) {
+            throw "Reusable Cargo target is missing after construction."
+          }
+          $cleanArguments = @(
+            "clean",
+            "--frozen",
+            "--target-dir",
+            $build
+          )
+          foreach ($package in @(
+            "projectatlas-lints",
+            "projectatlas-cli",
+            "projectatlas-core",
+            "projectatlas-db",
+            "projectatlas-fs",
+            "projectatlas-service",
+            "projectatlas-symbols"
+          )) {
+            $cleanArguments += @("--package", $package)
+          }
+          $env:CARGO_NET_OFFLINE = "true"
+          cargo @cleanArguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $broker = Join-Path $build "release/projectatlas-parser-containment.exe"
+          if (Test-Path -LiteralPath $broker) {
+            $brokerItem = Get-Item -LiteralPath $broker -Force
+            if ($brokerItem.PSIsContainer -or
+                (($brokerItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+              throw "Reusable Cargo layer broker output is not one regular file."
+            }
+            [System.IO.File]::Delete($brokerItem.FullName)
+          }
+          $candidateEntries = @(
+            Get-ChildItem -LiteralPath $build -Force -Recurse |
+              Where-Object {
+                $_.Name -cmatch (
+                  '\A(?:(?:lib)?projectatlas(?:_|-)|' +
+                  'optional_parser_pack_release(?:-|\.|$)|' +
+                  'assemble_optional_parser_artifact(?:-|\.|$))'
+                )
+              }
+          )
+          if ($candidateEntries.Count -ne 0) {
+            throw "ProjectAtlas candidate artifacts remain in the reusable Cargo layer."
+          }
+
       - name: Revalidate exact candidate after construction
         shell: pwsh
         run: |
@@ -326,6 +489,60 @@ jobs:
             throw "Candidate source changed during contained construction."
           }
 
+      - name: Record reusable Cargo layer disposition
+        id: cargo-cache-disposition
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $source = Join-Path $env:RUNNER_TEMP "parser-pack-output/construction-cache-disposition.json"
+          $state = Get-Content -Raw -LiteralPath $source | ConvertFrom-Json -Depth 4
+          if ($state.disposition -notin @("miss", "hit", "rejected") -or
+              [uint64]$state.entries -gt 200000 -or
+              [uint64]$state.bytes -gt [uint64](8GB)) {
+            throw "Contained construction returned an invalid cache disposition."
+          }
+          $clean = "${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction }}" -eq "true"
+          $restoreAttempted = -not $clean
+          $exactHit = "${{ steps.cargo-cache-restore.outputs.cache-hit }}" -eq "true"
+          $saveEligible = (
+            "${{ github.event_name }}" -eq "workflow_dispatch" -and
+            -not $clean -and
+            -not $exactHit -and
+            $state.disposition -ne "rejected"
+          )
+          $effectiveDisposition = if ($clean) { "clean" } else { [string]$state.disposition }
+          $receiptDirectory = Join-Path $env:RUNNER_TEMP "parser-pack-cache-receipt"
+          [System.IO.Directory]::CreateDirectory($receiptDirectory) | Out-Null
+          $receipt = [ordered]@{
+            schema_version = 1
+            target = "${{ matrix.target }}"
+            revision = "${{ steps.identity.outputs.revision }}"
+            key_sha256 = "${{ steps.cargo-cache-key.outputs.sha256 }}"
+            disposition = $effectiveDisposition
+            restore_attempted = $restoreAttempted
+            exact_hit = $exactHit
+            restored_entries = [uint64]$state.entries
+            restored_bytes = [uint64]$state.bytes
+            save_eligible = $saveEligible
+          }
+          $receiptPath = Join-Path $receiptDirectory "cargo-layer-${{ matrix.target }}.json"
+          [System.IO.File]::WriteAllText(
+            $receiptPath,
+            (($receipt | ConvertTo-Json -Depth 4) + "`n"),
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          "value=$($state.disposition)" >> $env:GITHUB_OUTPUT
+          "effective=$effectiveDisposition" >> $env:GITHUB_OUTPUT
+          @(
+            "### Reusable Cargo layer: ${{ matrix.target }}",
+            "",
+            "- disposition: ``$effectiveDisposition``",
+            "- key SHA-256: ``${{ steps.cargo-cache-key.outputs.sha256 }}``",
+            "- restored entries: ``$([uint64]$state.entries)``",
+            "- restored bytes: ``$([uint64]$state.bytes)``",
+            "- save eligible: ``$saveEligible``"
+          ) >> $env:GITHUB_STEP_SUMMARY
+
       - name: Upload immutable construction output
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -334,6 +551,26 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+
+      - name: Upload reusable Cargo layer receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: parser-pack-${{ matrix.target }}-cargo-layer-receipt
+          path: ${{ runner.temp }}/parser-pack-cache-receipt/cargo-layer-${{ matrix.target }}.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Save exact reusable Cargo layer
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          !inputs.clean_construction &&
+          steps.cargo-cache-restore.outputs.cache-hit != 'true' &&
+          steps.cargo-cache-disposition.outputs.value != 'rejected'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/parser-pack-output/build
+          key: ${{ steps.cargo-cache-key.outputs.key }}
 
   verify:
     name: verify ${{ matrix.target }}
