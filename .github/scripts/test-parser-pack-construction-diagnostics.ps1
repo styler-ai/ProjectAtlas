@@ -150,6 +150,24 @@ foreach ($name in @(
     Require ($definitions.Count -eq 1) "Expected one $name definition."
     Invoke-Expression $definitions[0].Extent.Text
 }
+$assignedConstructionStages = @(
+    $ast.FindAll(
+        {
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -eq '$script:constructionStage' -and
+                $node.Right -is [System.Management.Automation.Language.CommandExpressionAst] -and
+                $node.Right.Expression -is
+                    [System.Management.Automation.Language.StringConstantExpressionAst]
+        },
+        $true
+    ) |
+        ForEach-Object { $_.Right.Expression.Value } |
+        Sort-Object -Unique
+)
+Require `
+    ($assignedConstructionStages.Count -gt 0) `
+    "Production construction script has no literal bounded status stages."
 
 $testBase = [System.IO.Path]::GetFullPath(
     [System.IO.Path]::Combine(
@@ -178,21 +196,21 @@ try {
     $output = [System.IO.Directory]::CreateDirectory(
         [System.IO.Path]::Combine($testRoot, "output")
     ).FullName
-    $script:constructionStatusPath = [System.IO.Path]::Combine(
-        $output,
-        "reusable-cargo-target-validation-status.json"
-    )
-    Write-ConstructionStatus `
-        -Stage "reusable-cargo-target-validation" `
-        -State "running"
-    $cacheValidationStatus =
-        Get-Content -Raw -LiteralPath $script:constructionStatusPath |
-            ConvertFrom-Json -Depth 4
-    Require `
-        ($cacheValidationStatus.stage -eq "reusable-cargo-target-validation" -and
-            $cacheValidationStatus.state -eq "running") `
-        "Reusable Cargo target validation is not one writable bounded status stage."
-    [System.IO.File]::Delete($script:constructionStatusPath)
+    foreach ($stage in $assignedConstructionStages) {
+        $script:constructionStatusPath = [System.IO.Path]::Combine(
+            $output,
+            "$stage-status.json"
+        )
+        Write-ConstructionStatus -Stage $stage -State "running"
+        $writtenStatus =
+            Get-Content -Raw -LiteralPath $script:constructionStatusPath |
+                ConvertFrom-Json -Depth 4
+        Require `
+            ($writtenStatus.stage -eq $stage -and
+                $writtenStatus.state -eq "running") `
+            "Construction stage is not writable through the bounded status contract: $stage"
+        [System.IO.File]::Delete($script:constructionStatusPath)
+    }
 
     $hadBuildJobs = Test-Path -LiteralPath Env:CARGO_BUILD_JOBS
     $previousBuildJobs = [string]$env:CARGO_BUILD_JOBS
@@ -486,6 +504,11 @@ try {
         )
         Require ($wrapperParseErrors.Count -eq 0) "Windows construction wrapper did not parse."
         $wrapperText = $wrapperAst.Extent.Text
+        foreach ($stage in $assignedConstructionStages) {
+            Require `
+                ($wrapperText.Contains("""$stage""")) `
+                "Windows construction failure reader does not admit stage: $stage"
+        }
         $brokerTokens = $null
         $brokerParseErrors = $null
         $brokerAst = [System.Management.Automation.Language.Parser]::ParseFile(

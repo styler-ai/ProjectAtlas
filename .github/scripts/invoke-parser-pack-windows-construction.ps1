@@ -3735,6 +3735,7 @@ function Write-BoundedConstructionFailure {
         "network-denial-canaries",
         "output-preparation",
         "cargo-jobserver-bootstrap",
+        "reusable-cargo-target-clean",
         "optional-parser-worker-build",
         "artifact-assembler-build",
         "release-verifier-build",
