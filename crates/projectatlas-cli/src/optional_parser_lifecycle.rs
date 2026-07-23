@@ -2995,14 +2995,14 @@ fn stage_parser_pack_for_atomic_publication(
     for entry in fs::read_dir(&*pack_root).map_err(|source| {
         io_error(
             "list parser-pack extraction for publication",
-            pack_root,
+            pack_root.as_path(),
             source,
         )
     })? {
         let entry = entry.map_err(|source| {
             io_error(
                 "read parser-pack extraction entry for publication",
-                pack_root,
+                pack_root.as_path(),
                 source,
             )
         })?;
@@ -3018,7 +3018,7 @@ fn stage_parser_pack_for_atomic_publication(
     fs::remove_dir(&*pack_root).map_err(|source| {
         io_error(
             "remove empty parser-pack extraction root",
-            pack_root,
+            pack_root.as_path(),
             source,
         )
     })?;
