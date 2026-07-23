@@ -187,13 +187,15 @@ jobs:
           $manifestHash = "${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml') }}"
           # Bump only when reusable Cargo artifact compatibility changes.
           $cachePolicy = "parser-pack-cargo-v2"
+          $compatibleV1PolicyDigest = "ec8ceb19be347cb3a1bec0766a1d8dfc2a9f404c8838057af8aeab05f6ba6c43"
           $rustcCommit = "${{ steps.identity.outputs.rustc_commit_hash }}"
           if ($rustcCommit -cnotmatch '\A[0-9a-f]{40}\z') {
             throw "Reusable Cargo layer key contains an invalid rustc commit."
           }
           foreach ($digest in @(
             "${{ steps.native-toolchain.outputs.sha256 }}",
-            $manifestHash
+            $manifestHash,
+            $compatibleV1PolicyDigest
           )) {
             if ($digest -cnotmatch '\A[0-9a-f]{64}\z') {
               throw "Reusable Cargo layer key contains an invalid digest."
@@ -206,8 +208,18 @@ jobs:
             "${{ steps.native-toolchain.outputs.sha256 }}",
             $manifestHash
           ) -join "-"
-          if ($key.Length -gt 512) {
-            throw "Reusable Cargo layer key exceeds the GitHub cache limit."
+          $compatibleV1Key = @(
+            "parser-pack-cargo-v1",
+            "${{ matrix.target }}",
+            $rustcCommit,
+            "${{ steps.native-toolchain.outputs.sha256 }}",
+            $manifestHash,
+            $compatibleV1PolicyDigest
+          ) -join "-"
+          foreach ($candidateKey in @($key, $compatibleV1Key)) {
+            if ($candidateKey.Length -gt 512) {
+              throw "Reusable Cargo layer key exceeds the GitHub cache limit."
+            }
           }
           $keyBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($key)
           $keyDigest = [System.Convert]::ToHexString(
@@ -215,6 +227,7 @@ jobs:
           ).ToLowerInvariant()
           "key=$key" >> $env:GITHUB_OUTPUT
           "sha256=$keyDigest" >> $env:GITHUB_OUTPUT
+          "compatible_v1_key=$compatibleV1Key" >> $env:GITHUB_OUTPUT
 
       - name: Restore exact reusable Cargo layer
         id: cargo-cache-restore
@@ -223,6 +236,16 @@ jobs:
         with:
           path: ${{ runner.temp }}/parser-pack-output/build
           key: ${{ steps.cargo-cache-key.outputs.key }}
+
+      - name: Restore exact compatible v1 Cargo layer
+        id: cargo-cache-compatible-restore
+        if: >-
+          (github.event_name != 'workflow_dispatch' || !inputs.clean_construction) &&
+          steps.cargo-cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/parser-pack-output/build
+          key: ${{ steps.cargo-cache-key.outputs.compatible_v1_key }}
 
       - name: Test bounded construction diagnostics
         shell: pwsh
@@ -525,6 +548,7 @@ jobs:
           $clean = "${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction }}" -eq "true"
           $restoreAttempted = -not $clean
           $exactHit = "${{ steps.cargo-cache-restore.outputs.cache-hit }}" -eq "true"
+          $compatibleHit = "${{ steps.cargo-cache-compatible-restore.outputs.cache-hit }}" -eq "true"
           $saveEligible = (
             "${{ github.event_name }}" -eq "workflow_dispatch" -and
             -not $clean -and
@@ -542,6 +566,7 @@ jobs:
             disposition = $effectiveDisposition
             restore_attempted = $restoreAttempted
             exact_hit = $exactHit
+            compatible_hit = $compatibleHit
             restored_entries = [uint64]$state.entries
             restored_bytes = [uint64]$state.bytes
             save_eligible = $saveEligible
@@ -559,6 +584,7 @@ jobs:
             "",
             "- disposition: ``$effectiveDisposition``",
             "- key SHA-256: ``${{ steps.cargo-cache-key.outputs.sha256 }}``",
+            "- compatible v1 hit: ``$compatibleHit``",
             "- restored entries: ``$([uint64]$state.entries)``",
             "- restored bytes: ``$([uint64]$state.bytes)``",
             "- save eligible: ``$saveEligible``"

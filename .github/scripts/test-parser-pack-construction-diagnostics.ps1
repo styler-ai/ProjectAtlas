@@ -386,6 +386,8 @@ try {
         '${{ steps.native-toolchain.outputs.sha256 }}',
         "hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml')",
         'parser-pack-cargo-v2',
+        'parser-pack-cargo-v1',
+        'ec8ceb19be347cb3a1bec0766a1d8dfc2a9f404c8838057af8aeab05f6ba6c43',
         'image_os=$env:ImageOS',
         'image_version=$env:ImageVersion',
         'visual_studio=$vsVersion',
@@ -405,6 +407,8 @@ try {
             $workflowText.Contains("github.event_name != 'workflow_dispatch' || !inputs.clean_construction") -and
             $workflowText.Contains("github.event_name == 'workflow_dispatch' &&") -and
             $workflowText.Contains("steps.cargo-cache-restore.outputs.cache-hit != 'true'") -and
+            $workflowText.Contains("steps.cargo-cache-key.outputs.compatible_v1_key") -and
+            $workflowText.Contains("steps.cargo-cache-compatible-restore.outputs.cache-hit") -and
             $workflowText.Contains("steps.cargo-cache-disposition.outputs.value != 'rejected'") -and
             $workflowText.Contains('construction_exit=$?') -and
             $workflowText.Contains('"--release",') -and
@@ -442,6 +446,10 @@ try {
         "- name: Acquire pinned inputs and vendor dependencies",
         [System.StringComparison]::Ordinal
     )
+    $compatibleRestoreIndex = $workflowText.IndexOf(
+        "- name: Restore exact compatible v1 Cargo layer",
+        [System.StringComparison]::Ordinal
+    )
     $sanitizeIndex = $workflowText.IndexOf(
         "- name: Remove candidate outputs from reusable Cargo layer",
         [System.StringComparison]::Ordinal
@@ -457,11 +465,14 @@ try {
     Require `
         ($restoreIndex -ge 0 -and
             $restoreIndex -lt $acquireIndex -and
+            $compatibleRestoreIndex -gt $restoreIndex -and
+            $compatibleRestoreIndex -lt $acquireIndex -and
             $sanitizeIndex -gt $acquireIndex -and
             $receiptIndex -gt $sanitizeIndex -and
             $saveIndex -gt $receiptIndex -and
             $workflowText.Contains("ProjectAtlas candidate artifacts remain in the reusable Cargo layer.") -and
             $workflowText.Contains("construction-cache-disposition.json") -and
+            $workflowText.Contains("compatible_hit =") -and
             $workflowText.Contains("key_sha256 =")) `
         "Reusable Cargo layer ordering, candidate sanitation, or receipt contract drifted."
 

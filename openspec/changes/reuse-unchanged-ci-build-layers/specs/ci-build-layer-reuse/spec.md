@@ -7,6 +7,10 @@ The optional parser-pack workflow SHALL reuse only Cargo target state left after
 - **WHEN** a trusted run uses the same target, toolchains, lockfile, manifests, and cache-policy ABI as a previously saved run
 - **THEN** the workflow restores that target's dependency build layer and reports an exact cache hit
 
+#### Scenario: One exact compatible v1 layer exists
+- **WHEN** the v2 key misses but the same target, toolchains, lockfile, and manifests have an exact sanitized v1 layer under the frozen compatible policy digest
+- **THEN** the workflow restores and validates that exact layer, rebuilds all candidate-owned outputs, and may save the sanitized result under v2 after every trusted gate succeeds
+
 #### Scenario: One cache input changes
 - **WHEN** any declared target, toolchain, lockfile, manifest, feature, or cache-policy ABI input changes
 - **THEN** the workflow reports a cache miss and constructs from an empty Cargo target directory

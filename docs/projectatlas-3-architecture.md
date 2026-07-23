@@ -1818,6 +1818,10 @@ compatibility changes. Whole workflow and diagnostic-script hashes are deliberat
 excluded, so unrelated proof improvements do not rebuild unchanged dependencies.
 ProjectAtlas source revision is not part of that key because every owned crate is
 removed from the restored target before the exact candidate is freshly compiled.
+After a v2 miss, one exact compatible v1 key derived from the same target, Rust,
+native-toolchain, lockfile, and manifest inputs may migrate an already sanitized
+layer into v2. There are no prefix fallbacks, and the restored tree still crosses
+the same untrusted-input validation and owned-output cleanup boundaries.
 The pinned grammar bundles, constructed archives, candidate binaries, receipts,
 ProjectAtlas databases, and workspace state never enter this cache.
 
@@ -1834,9 +1838,11 @@ flowchart TB
     Dispatch{Explicit clean construction?}
     Key --> Dispatch
     Dispatch -->|yes| Empty[Empty Cargo target]
-    Dispatch -->|no| Lookup{Exact cache hit?}
-    Lookup -->|yes| Restore[Restore exact cache key]
-    Lookup -->|no| Empty
+    Dispatch -->|no| Lookup{Exact v2 cache hit?}
+    Lookup -->|yes| Restore[Restore exact selected key]
+    Lookup -->|no| Compatible{Exact compatible v1 hit?}
+    Compatible -->|yes| Restore
+    Compatible -->|no| Empty
     Restore --> Validate{Bounded regular tree?}
     Validate -->|no| Quarantine[Quarantine root without traversal]
     Quarantine --> Empty

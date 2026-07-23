@@ -45,6 +45,13 @@ containment checks, and candidate assembly can change without changing Cargo
 dependency artifact compatibility. Such edits must still run against the exact
 candidate, but must not force an unrelated dependency rebuild.
 
+After a v2 miss, the workflow may try one exact compatible v1 key composed from the
+same target, Rust, native-toolchain, lockfile, and manifest inputs plus the frozen
+v1 policy digest. A hit crosses the current bounded validation and owned-package
+cleanup gates, then a trusted successful dispatch saves the sanitized layer under
+v2. This migrates existing compatible state without a broad fallback or another
+dependency compile.
+
 Caching package archives or grammar binaries was rejected because those bytes are already acquired by pinned digest and would broaden the trust boundary without addressing the dominant Cargo rebuild.
 
 ### Clean owned packages before use and before save
