@@ -42,14 +42,16 @@ use crate::{
 use projectatlas_core::graph::{GraphLimits, ProjectInstanceId, RepositoryFilePath};
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
+use projectatlas_core::symbols::ParserKind;
 use projectatlas_core::telemetry::{TokenTrendWindow, UsageInstanceOwner};
 use projectatlas_core::toon::{
     encode_agent_payload, render_outline, render_overview, render_ranked_nodes,
     render_symbol_relations, render_symbols, render_token_overview, render_token_trends,
 };
 use projectatlas_core::{
-    IndexWorkControl, IndexWorkFailure, NavigationNextCall, NavigationNextCapability, Overview,
-    PurposeSource, PurposeStatus, RankedConnection, RankedConnectionCount, RankedNode,
+    IndexGeneration, IndexWorkControl, IndexWorkFailure, NavigationNextCall,
+    NavigationNextCapability, Overview, PurposeSource, PurposeStatus, RankedConnection,
+    RankedConnectionCount, RankedConnectionKind, RankedConnectionTarget, RankedNode,
     RankedReasonCode, normalize_native_path_display, normalize_repo_path,
     normalize_repo_path_prefix, validated_repo_file_key, validated_repo_node_key,
 };
@@ -58,14 +60,16 @@ use projectatlas_db::{
     read_project_root_read_only, verify_project_database,
 };
 use projectatlas_service::{
-    COVERAGE_PAGE_MAX_LIMIT, CodeSliceBudget, DetailedRelationBudget, DetailedRelationQuery,
-    GitImpactSelection, RelationAnalysisMode, RelationAnalysisQuery, RelationAnchor, SearchQuery,
-    ServiceError, SymbolSliceSelector, TokenReport, TokenReportRequest,
-    build_file_summary_from_source, load_coverage_discovery, load_detailed_relation_page,
-    load_relation_analysis, load_token_report, parse_coverage_parser, parse_coverage_relation,
-    parse_coverage_state, parse_relation_confidence, parse_relation_direction,
-    parse_relation_resolution, parse_symbol_kind, read_indexed_code_slice_from_source_bounded,
-    read_symbol_slice_from_source_bounded, search_indexed_files_with_control,
+    COVERAGE_PAGE_MAX_LIMIT, CodeSliceBudget, CoverageDigest, CoverageTrustState,
+    DetailedRelationBudget, DetailedRelationQuery, FileCallSummary, FileSummaryReport,
+    FileSymbolSummary, GitImpactSelection, RelationAnalysisMode, RelationAnalysisQuery,
+    RelationAnchor, SearchQuery, ServiceError, SymbolSliceSelector, TokenReport,
+    TokenReportRequest, build_file_summary_from_source, load_coverage_discovery,
+    load_detailed_relation_page, load_relation_analysis, load_token_report, parse_coverage_parser,
+    parse_coverage_relation, parse_coverage_state, parse_relation_confidence,
+    parse_relation_direction, parse_relation_resolution, parse_symbol_kind,
+    read_indexed_code_slice_from_source_bounded, read_symbol_slice_from_source_bounded,
+    search_indexed_files_with_control,
 };
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
@@ -309,6 +313,10 @@ const MCP_BRIEF_ARG_PATTERN: &str = "pattern";
 const MCP_BRIEF_ARG_VIEW: &str = "view";
 /// Session-brief argument key for row limits.
 const MCP_BRIEF_ARG_LIMIT: &str = "limit";
+/// Session-brief argument key for host-owned purpose-curation tasks.
+const MCP_BRIEF_ARG_TASK: &str = "task";
+/// Compact-response argument key used by typed startup recommendations.
+const MCP_BRIEF_ARG_COMPACT: &str = "compact";
 /// Session-brief recommendation target for normal filesystem reads.
 const MCP_BRIEF_TARGET_FILESYSTEM_TOOLS: &str = "filesystem_tools";
 /// Session-brief reason for missing selected indexes.
@@ -326,6 +334,8 @@ const MCP_BRIEF_REASON_SEARCH_FALLBACK: &str = "no_ranked_file_candidate_search_
 const MCP_BRIEF_REASON_NO_FILE_CANDIDATE: &str = "no_ranked_file_candidate";
 /// Session-brief reason for health follow-up.
 const MCP_BRIEF_REASON_HEALTH_BLOCKERS: &str = "unresolved_health_blockers_present";
+/// Session-brief reason for following an actionable purpose-curator handoff.
+const MCP_BRIEF_REASON_PURPOSE_QUEUE: &str = "purpose_queue_ready";
 /// Built-in task-progress contract message.
 const MCP_TASK_PROGRESS_CONTRACT_MESSAGE: &str = "task progress contract available";
 /// MCP telemetry event for overview calls.
@@ -517,6 +527,8 @@ const WATCH_STATUS_SCAN_RECOMMENDATION: &str =
     " Run `atlas_scan` first when no ProjectAtlas index exists for this project.";
 /// Default number of rows in an agent startup brief section.
 const SESSION_BRIEF_DEFAULT_LIMIT: usize = 5;
+/// Default number of rows in an explicitly compact startup brief section.
+const COMPACT_SESSION_BRIEF_DEFAULT_LIMIT: usize = 3;
 /// Maximum number of rows in an agent startup brief section.
 const SESSION_BRIEF_MAX_LIMIT: usize = 8;
 /// Bounded MCP task registry capacity.
@@ -572,6 +584,8 @@ struct AtlasSessionBriefParams {
     query: Option<String>,
     /// Optional host-owned task label for the purpose-curator handoff.
     purpose_task: Option<String>,
+    /// Return the additive compact startup projection when true.
+    compact: Option<bool>,
     /// Maximum folder candidates to return.
     folder_limit: Option<usize>,
     /// Maximum file candidates to return.
@@ -717,6 +731,7 @@ pub(crate) fn required_mcp_surface_present() -> bool {
 pub(crate) fn mcp_tool_route_present(name: &str) -> bool {
     ProjectAtlasMcpServer::tool_router().has_route(name)
 }
+
 /// MCP parameter payload for scanning and symbol refresh.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct AtlasScanParams {
@@ -809,6 +824,8 @@ struct AtlasFileSummaryParams {
     file: String,
     /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute file paths.
     nearest_project: Option<bool>,
+    /// Return the additive compact summary projection when true.
+    compact: Option<bool>,
     /// Maximum rows per functions/methods/classes/types/calls section.
     limit: Option<usize>,
 }
@@ -885,11 +902,11 @@ struct AtlasSymbolsParams {
 struct AtlasSymbolRelationsParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
-    /// Optional repository-relative file path; required for detailed navigation.
+    /// Optional repository-relative file path.
     file: Option<String>,
-    /// Opt in to nearest indexed project discovery for absolute file paths.
+    /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute file paths.
     nearest_project: Option<bool>,
-    /// Optional legacy source, target, context, or path query.
+    /// Optional symbol, signature, relation, or path query.
     query: Option<String>,
     /// Preserve `legacy`, opt in to `detailed`, or select closed `analysis`.
     view: Option<String>,
@@ -955,7 +972,7 @@ struct AtlasSymbolRelationsParams {
     include_cycles: Option<bool>,
     /// Include conservative dead-code candidates.
     include_dead_code: Option<bool>,
-    /// Maximum legacy or detailed relation rows to return.
+    /// Maximum rows to return.
     limit: Option<usize>,
 }
 
@@ -1074,7 +1091,7 @@ fn relation_analysis_vcs(
 struct AtlasTokenParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
-    /// Optional caller-visible compatibility-label filter.
+    /// Optional session id filter.
     session: Option<String>,
     /// Include a readable ASCII chart in the MCP result.
     include_chart: Option<bool>,
@@ -1705,7 +1722,7 @@ struct McpPrivacyPolicy {
 }
 
 /// Two-state policy enum serialized for MCP contracts.
-#[derive(Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum McpPolicyState {
     /// Policy is enabled.
@@ -1715,7 +1732,7 @@ enum McpPolicyState {
 }
 
 /// Selected index availability.
-#[derive(Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum McpIndexStatus {
     /// The selected index file exists.
@@ -1725,13 +1742,237 @@ enum McpIndexStatus {
 }
 
 /// Absolute path routing scope.
-#[derive(Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum McpPathScope {
     /// Calls stay within the selected project.
     SelectedProject,
     /// Absolute paths may route to the nearest indexed project.
     NearestIndexedProject,
+}
+
+/// Explicit compact file-summary payload with actionable facts and redundant state removed.
+#[derive(Debug, Serialize)]
+struct McpFileSummaryPayload<'a> {
+    /// Explicit compact file intelligence.
+    file_summary: McpFileSummary<'a>,
+}
+
+/// Compact projection used when an agent follows a default startup recommendation.
+#[derive(Debug, Serialize)]
+struct McpFileSummary<'a> {
+    /// Repository-relative file path.
+    file_path: &'a str,
+    /// Detected language or file family.
+    language: &'a str,
+    /// Source line count.
+    line_count: usize,
+    /// Non-default source state when live source was unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_status: Option<&'a str>,
+    /// Source read diagnostic when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_error: Option<&'a str>,
+    /// Parser family that produced the summary.
+    parser_kind: &'a str,
+    /// Summary quality state agents must inspect before trusting generated prose.
+    summary_status: &'a str,
+    /// Durable file responsibility when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_purpose: Option<&'a str>,
+    /// Purpose status for suggestions or other unreviewed rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_purpose_status: Option<&'a str>,
+    /// Purpose source for suggestions or other unreviewed rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_purpose_source: Option<&'a str>,
+    /// Whether an agent approved the retained responsibility.
+    #[serde(skip_serializing_if = "is_false")]
+    file_purpose_agent_reviewed: bool,
+    /// Current deterministic content summary.
+    content_summary: &'a str,
+    /// Package or module name when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    package: Option<&'a str>,
+    /// File documentation when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    docstring: Option<&'a str>,
+    /// Whether the default bounded repeated sections omitted rows.
+    #[serde(skip_serializing_if = "is_false")]
+    truncated: bool,
+    /// Indexed functions when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    functions: Option<&'a [FileSymbolSummary]>,
+    /// Indexed methods when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    methods: Option<&'a [FileSymbolSummary]>,
+    /// Indexed classes when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    classes: Option<&'a [FileSymbolSummary]>,
+    /// Indexed type declarations when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    types: Option<&'a [FileSymbolSummary]>,
+    /// Imports when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    imports: Option<&'a [String]>,
+    /// Manifest dependencies when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dependencies: Option<&'a [String]>,
+    /// Exported declarations when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exports: Option<&'a [String]>,
+    /// Call rows when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    calls: Option<&'a [FileCallSummary]>,
+    /// Coverage details only when they require agent attention.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<McpCompactCoverageDigest<'a>>,
+}
+
+impl<'a> From<&'a FileSummaryReport> for McpFileSummary<'a> {
+    fn from(report: &'a FileSummaryReport) -> Self {
+        let reviewed_purpose = report.file_purpose_agent_reviewed;
+        let coverage_requires_attention = !report.coverage.available
+            || report.coverage.trust != CoverageTrustState::Trusted
+            || report.coverage.omitted > 0
+            || report.coverage.truncated;
+        Self {
+            file_path: &report.file_path,
+            language: &report.language,
+            line_count: report.line_count,
+            source_status: (report.source_status != "live-source")
+                .then_some(report.source_status.as_str()),
+            source_error: nonempty_str(&report.source_error),
+            parser_kind: &report.parser_kind,
+            summary_status: &report.summary_status,
+            file_purpose: nonempty_str(&report.file_purpose),
+            file_purpose_status: (!reviewed_purpose).then_some(report.file_purpose_status.as_str()),
+            file_purpose_source: (!reviewed_purpose).then_some(report.file_purpose_source.as_str()),
+            file_purpose_agent_reviewed: reviewed_purpose,
+            content_summary: &report.content_summary,
+            package: nonempty_str(&report.package),
+            docstring: nonempty_str(&report.docstring),
+            truncated: report.truncated,
+            functions: nonempty_slice(&report.functions),
+            methods: nonempty_slice(&report.methods),
+            classes: nonempty_slice(&report.classes),
+            types: nonempty_slice(&report.types),
+            imports: nonempty_slice(&report.imports),
+            dependencies: nonempty_slice(&report.dependencies),
+            exports: nonempty_slice(&report.exports),
+            calls: nonempty_slice(&report.calls),
+            coverage: coverage_requires_attention
+                .then(|| McpCompactCoverageDigest::from(&report.coverage)),
+        }
+    }
+}
+
+/// Adapter-local sparse coverage counts for the explicit compact summary.
+#[derive(Debug, Serialize)]
+struct McpCompactCoverageStateCounts {
+    /// Complete coverage rows.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    complete: u32,
+    /// Partial coverage rows.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    partial: u32,
+    /// Failed coverage rows.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    failed: u32,
+    /// Intentionally ignored coverage rows.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    ignored: u32,
+    /// Oversized coverage rows.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    oversized: u32,
+    /// Quarantined coverage rows.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    quarantined: u32,
+    /// Stale coverage rows.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    stale: u32,
+}
+
+/// Adapter-local compact coverage projection that leaves shared serialization unchanged.
+#[derive(Debug, Serialize)]
+struct McpCompactCoverageDigest<'a> {
+    /// False when no current coverage rows exist.
+    #[serde(skip_serializing_if = "is_true")]
+    available: bool,
+    /// Active generation shared by retained rows.
+    active_generation: &'a IndexGeneration,
+    /// Source parser pass recorded for the file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parser: Option<&'a ParserKind>,
+    /// Fact provider pass recorded for the file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<&'a ParserKind>,
+    /// Sparse per-state counts.
+    states: McpCompactCoverageStateCounts,
+    /// Total items declared by retained rows.
+    total: u64,
+    /// Covered items declared by retained rows.
+    covered: u64,
+    /// Omitted or untrusted items declared by retained rows.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    omitted: u64,
+    /// Number of retained relation-family rows.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    relation_rows: u32,
+    /// Whether digest bounds omitted additional selected-file rows.
+    #[serde(skip_serializing_if = "is_false")]
+    truncated: bool,
+    /// Conservative trust state across retained rows.
+    trust: &'a CoverageTrustState,
+    /// Existing opt-in health call for deeper coverage discovery.
+    next_call: &'a NavigationNextCall,
+}
+
+impl<'a> From<&'a CoverageDigest> for McpCompactCoverageDigest<'a> {
+    fn from(coverage: &'a CoverageDigest) -> Self {
+        Self {
+            available: coverage.available,
+            active_generation: &coverage.active_generation,
+            parser: coverage.parser.as_ref(),
+            provider: coverage.provider.as_ref(),
+            states: McpCompactCoverageStateCounts {
+                complete: coverage.states.complete,
+                partial: coverage.states.partial,
+                failed: coverage.states.failed,
+                ignored: coverage.states.ignored,
+                oversized: coverage.states.oversized,
+                quarantined: coverage.states.quarantined,
+                stale: coverage.states.stale,
+            },
+            total: coverage.total,
+            covered: coverage.covered,
+            omitted: coverage.omitted,
+            relation_rows: coverage.relation_rows,
+            truncated: coverage.truncated,
+            trust: &coverage.trust,
+            next_call: &coverage.next_call,
+        }
+    }
+}
+
+/// Borrow non-empty text into one optional compact field.
+fn nonempty_str(value: &str) -> Option<&str> {
+    (!value.is_empty()).then_some(value)
+}
+
+/// Borrow non-empty rows into one optional compact section.
+fn nonempty_slice<T>(value: &[T]) -> Option<&[T]> {
+    (!value.is_empty()).then_some(value)
+}
+
+/// Return whether a compact unsigned count is zero.
+const fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+/// Return whether a compact unsigned total is zero.
+const fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Agent startup brief payload.
@@ -1757,13 +1998,69 @@ struct McpSessionBrief {
     limits: McpBriefLimits,
 }
 
-/// Brief policy fields.
+/// Additive compact projection of the compatibility-preserving startup brief.
 #[derive(Debug, Serialize)]
+struct McpCompactSessionBrief {
+    /// Selected project identity needed for routing.
+    project: McpCompactBriefProject,
+    /// Non-default route-affecting startup policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy: Option<McpBriefPolicy>,
+    /// Compact overview counts when an index exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    overview: Option<McpCompactBriefOverview>,
+    /// Folder candidates only when no ready file candidate exists.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    folders: Vec<McpCompactBriefCandidate>,
+    /// Ready file candidates for the task.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    files: Vec<McpCompactBriefCandidate>,
+    /// Unsafe health blockers when any exist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blockers: Option<McpBriefBlockers>,
+    /// Exact host-owned purpose-curator follow-up when work is actionable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    purpose_handoff: Option<McpCompactBriefPurposeHandoff>,
+    /// Recommended next calls.
+    recommendations: Vec<McpCompactBriefRecommendation>,
+    /// Non-default limits and truncation metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limits: Option<McpCompactBriefLimits>,
+}
+
+/// Compact selected-project state for the startup path.
+#[derive(Debug, Serialize)]
+struct McpCompactBriefProject {
+    /// Canonical repository root.
+    root: String,
+    /// Whether the durable index is available.
+    index_status: McpIndexStatus,
+}
+
+/// Compact project counts for task startup.
+#[derive(Debug, Serialize)]
+struct McpCompactBriefOverview {
+    /// Number of indexed files.
+    files: usize,
+    /// Number of indexed folders.
+    folders: usize,
+}
+
+/// Brief policy fields.
+#[derive(Clone, Copy, Debug, Serialize)]
 struct McpBriefPolicy {
     /// Whether nearest indexed project routing is enabled by default.
     nearest_project: McpPolicyState,
     /// Absolute-path routing scope.
     path_scope: McpPathScope,
+}
+
+impl McpBriefPolicy {
+    /// Return whether routing uses the ordinary selected-project policy.
+    fn is_default(&self) -> bool {
+        self.nearest_project == McpPolicyState::Disabled
+            && self.path_scope == McpPathScope::SelectedProject
+    }
 }
 
 /// Bounded ranked candidate row for startup briefs.
@@ -1797,8 +2094,63 @@ struct McpBriefCandidate {
     next_call: NavigationNextCall,
 }
 
-/// Bounded health blocker section.
+/// Bounded compact ranked candidate row for task startup.
 #[derive(Debug, Serialize)]
+struct McpCompactBriefCandidate {
+    /// Repository-relative path.
+    path: String,
+    /// Purpose lifecycle status when it is not already agent-approved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    purpose_status: Option<PurposeStatus>,
+    /// Purpose source when it is not already agent-approved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    purpose_source: Option<PurposeSource>,
+    /// Whether the purpose is current agent-approved authored responsibility state.
+    #[serde(skip_serializing_if = "is_false")]
+    purpose_agent_reviewed: bool,
+    /// Purpose one-liner when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    purpose: Option<String>,
+    /// Strongest bounded compact ranking reason codes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    reason_codes: Vec<RankedReasonCode>,
+    /// Sparse stable-order connection counts.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    connection_counts: Vec<RankedConnectionCount>,
+    /// One high-value current connection when available.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    connections: Vec<RankedConnection>,
+    /// Whether the bounded sample omitted any validated relation through family or global overflow.
+    #[serde(skip_serializing_if = "is_false")]
+    connections_truncated: bool,
+    /// Existing navigation capability recommended after this row.
+    next_call: NavigationNextCall,
+}
+
+/// Compact host-owned purpose-curator handoff for startup briefs.
+#[derive(Debug, Serialize)]
+struct McpCompactBriefPurposeHandoff {
+    /// Whether this report is intended for an agent harness.
+    #[serde(skip_serializing_if = "is_true")]
+    agent_harness_expected: bool,
+    /// Whether the current main agent may process the same bounded batch.
+    #[serde(skip_serializing_if = "is_true")]
+    main_agent_fallback: bool,
+    /// Explicitly records that `ProjectAtlas` did not spawn a host agent.
+    #[serde(skip_serializing_if = "is_false")]
+    server_started_curator: bool,
+    /// Successful maintenance should not add ordinary conversation output.
+    #[serde(skip_serializing_if = "is_true")]
+    silent_on_success: bool,
+    /// Whether the queue call has more rows after this bounded batch.
+    #[serde(skip_serializing_if = "is_false")]
+    truncated: bool,
+    /// Exact existing MCP call that returns conditional-review tokens and bounded row context.
+    next_call: McpCompactBriefRecommendation,
+}
+
+/// Bounded health blocker section.
+#[derive(Clone, Debug, Serialize)]
 struct McpBriefBlockers {
     /// Findings after filters are applied.
     total: usize,
@@ -1810,8 +2162,18 @@ struct McpBriefBlockers {
     items: Vec<McpBriefBlocker>,
 }
 
+/// Return whether a serialized optional fact is false and can be omitted.
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Return whether a serialized invariant is true and can be omitted.
+const fn is_true(value: &bool) -> bool {
+    *value
+}
+
 /// One health blocker row for startup briefs.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct McpBriefBlocker {
     /// Stable finding id.
     id: String,
@@ -1842,8 +2204,21 @@ struct McpBriefRecommendation {
     arguments: serde_json::Value,
 }
 
-/// Startup recommendation kinds.
+/// One typed recommendation in the compact startup projection.
 #[derive(Debug, Serialize)]
+struct McpCompactBriefRecommendation {
+    /// Stable recommendation kind.
+    kind: McpBriefRecommendationKind,
+    /// MCP tool name or filesystem/tool family.
+    target: String,
+    /// Concise machine-readable reason.
+    reason: String,
+    /// Suggested arguments for the target.
+    arguments: serde_json::Value,
+}
+
+/// Startup recommendation kinds.
+#[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum McpBriefRecommendationKind {
     /// Refresh or create the `ProjectAtlas` index.
@@ -1856,6 +2231,8 @@ enum McpBriefRecommendationKind {
     Relations,
     /// Inspect structural health.
     Health,
+    /// Load one bounded task-scoped purpose-curation queue.
+    PurposeQueue,
     /// Read exact source or non-indexed files with normal filesystem tools.
     FilesystemTools,
 }
@@ -1877,6 +2254,37 @@ struct McpBriefLimits {
     files_truncated: bool,
     /// Whether more actionable low-scope purpose rows exist.
     purposes_truncated: bool,
+}
+
+/// Non-default limits and truncation state in the compact startup projection.
+#[derive(Debug, Serialize)]
+struct McpCompactBriefLimits {
+    /// Effective folder row limit.
+    #[serde(skip_serializing_if = "is_compact_brief_default_limit")]
+    folder_limit: usize,
+    /// Effective file row limit.
+    #[serde(skip_serializing_if = "is_compact_brief_default_limit")]
+    file_limit: usize,
+    /// Effective blocker row limit.
+    #[serde(skip_serializing_if = "is_compact_brief_default_limit")]
+    blocker_limit: usize,
+    /// Effective actionable purpose row limit.
+    #[serde(skip_serializing_if = "is_compact_brief_default_limit")]
+    purpose_limit: usize,
+    /// Whether folder candidates were omitted or truncated.
+    #[serde(skip_serializing_if = "is_false")]
+    folders_truncated: bool,
+    /// Whether file candidates were truncated.
+    #[serde(skip_serializing_if = "is_false")]
+    files_truncated: bool,
+    /// Whether more actionable low-scope purpose rows exist.
+    #[serde(skip_serializing_if = "is_false")]
+    purposes_truncated: bool,
+}
+
+/// Return whether a startup row limit is the compact projection default.
+const fn is_compact_brief_default_limit(value: &usize) -> bool {
+    *value == COMPACT_SESSION_BRIEF_DEFAULT_LIMIT
 }
 
 /// Bounded in-memory registry for MCP task-progress records.
@@ -2930,7 +3338,96 @@ impl ProjectAtlasMcpServer {
         }
     }
 
-    /// Convert a ranked node into a compact startup candidate.
+    /// Build the additive compact projection without changing legacy defaults or query behavior.
+    fn build_compact_session_brief(
+        &self,
+        mut params: AtlasSessionBriefParams,
+        context: Option<RequestContext<RoleServer>>,
+    ) -> Result<McpCompactSessionBrief, CliError> {
+        let project_path = params.project_path.clone();
+        params.compact = None;
+        params
+            .folder_limit
+            .get_or_insert(COMPACT_SESSION_BRIEF_DEFAULT_LIMIT);
+        params
+            .file_limit
+            .get_or_insert(COMPACT_SESSION_BRIEF_DEFAULT_LIMIT);
+        params
+            .blocker_limit
+            .get_or_insert(COMPACT_SESSION_BRIEF_DEFAULT_LIMIT);
+        params
+            .purpose_limit
+            .get_or_insert(COMPACT_SESSION_BRIEF_DEFAULT_LIMIT);
+        let brief = self.build_session_brief(params, context)?;
+        Ok(Self::compact_session_brief(&brief, project_path))
+    }
+
+    /// Project the compatibility report into the explicit compact response shape.
+    fn compact_session_brief(
+        brief: &McpSessionBrief,
+        project_path: Option<String>,
+    ) -> McpCompactSessionBrief {
+        let omit_folders = !brief.files.is_empty();
+        let folders_truncated =
+            brief.limits.folders_truncated || (omit_folders && !brief.folders.is_empty());
+        let compact_limits = McpCompactBriefLimits {
+            folder_limit: brief.limits.folder_limit,
+            file_limit: brief.limits.file_limit,
+            blocker_limit: brief.limits.blocker_limit,
+            purpose_limit: brief.limits.purpose_limit,
+            folders_truncated,
+            files_truncated: brief.limits.files_truncated,
+            purposes_truncated: brief.limits.purposes_truncated,
+        };
+        let limits_are_default = is_compact_brief_default_limit(&compact_limits.folder_limit)
+            && is_compact_brief_default_limit(&compact_limits.file_limit)
+            && is_compact_brief_default_limit(&compact_limits.blocker_limit)
+            && is_compact_brief_default_limit(&compact_limits.purpose_limit)
+            && !compact_limits.folders_truncated
+            && !compact_limits.files_truncated
+            && !compact_limits.purposes_truncated;
+        McpCompactSessionBrief {
+            project: McpCompactBriefProject {
+                root: brief.project.root.clone(),
+                index_status: brief.project.index_status,
+            },
+            policy: (!brief.policy.is_default()).then_some(brief.policy),
+            overview: brief
+                .overview
+                .as_ref()
+                .map(|overview| McpCompactBriefOverview {
+                    files: overview.files,
+                    folders: overview.folders,
+                }),
+            folders: if omit_folders {
+                Vec::new()
+            } else {
+                brief
+                    .folders
+                    .iter()
+                    .map(Self::compact_brief_candidate)
+                    .collect()
+            },
+            files: brief
+                .files
+                .iter()
+                .map(Self::compact_brief_candidate)
+                .collect(),
+            blockers: (brief.blockers.total > 0).then(|| brief.blockers.clone()),
+            purpose_handoff: brief
+                .purpose_handoff
+                .as_ref()
+                .map(|handoff| Self::compact_brief_purpose_handoff(handoff, project_path.clone())),
+            recommendations: brief
+                .recommendations
+                .iter()
+                .map(Self::compact_brief_recommendation)
+                .collect(),
+            limits: (!limits_are_default).then_some(compact_limits),
+        }
+    }
+
+    /// Convert a ranked node into the compatibility-preserving startup candidate.
     fn brief_candidate(row: RankedNode) -> McpBriefCandidate {
         let purpose_agent_reviewed = row.node.purpose.agent_reviewed();
         McpBriefCandidate {
@@ -2947,6 +3444,138 @@ impl ProjectAtlasMcpServer {
             connections: row.connections,
             connections_truncated: row.connections_truncated,
             next_call: row.next_call,
+        }
+    }
+
+    /// Project one compatibility candidate into the bounded compact shape.
+    fn compact_brief_candidate(row: &McpBriefCandidate) -> McpCompactBriefCandidate {
+        let connections = row
+            .connections
+            .iter()
+            .find(|connection| Self::brief_connection_is_crisp(connection))
+            .cloned()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let next_call = if row.next_call.capability == NavigationNextCapability::Relations {
+            NavigationNextCall {
+                capability: NavigationNextCapability::Summary,
+                path: row.path.clone(),
+            }
+        } else {
+            row.next_call.clone()
+        };
+        McpCompactBriefCandidate {
+            path: row.path.clone(),
+            purpose_status: (!row.purpose_agent_reviewed).then_some(row.purpose_status),
+            purpose_source: (!row.purpose_agent_reviewed).then_some(row.purpose_source),
+            purpose_agent_reviewed: row.purpose_agent_reviewed,
+            purpose: row.purpose.clone(),
+            reason_codes: Self::compact_brief_reason_codes(&row.reason_codes),
+            connection_counts: row.connection_counts.clone(),
+            connections_truncated: row.connections_truncated
+                || connections.len() < row.connections.len(),
+            connections,
+            next_call,
+        }
+    }
+
+    /// Prefer a resolved non-import edge as the single default startup connection sample.
+    fn brief_connection_is_crisp(connection: &RankedConnection) -> bool {
+        connection.kind != RankedConnectionKind::Import
+            && !matches!(
+                &connection.target,
+                RankedConnectionTarget::Unresolved { .. }
+            )
+    }
+
+    /// Retain only the strongest bounded ranking signals in the default startup response.
+    fn compact_brief_reason_codes(codes: &[RankedReasonCode]) -> Vec<RankedReasonCode> {
+        const PRIORITY: &[RankedReasonCode] = &[
+            RankedReasonCode::ExactPath,
+            RankedReasonCode::ExactName,
+            RankedReasonCode::Path,
+            RankedReasonCode::ReviewedPurpose,
+            RankedReasonCode::GraphRoute,
+            RankedReasonCode::GraphTest,
+            RankedReasonCode::GraphConfig,
+            RankedReasonCode::GraphCall,
+            RankedReasonCode::GraphReference,
+            RankedReasonCode::GraphPackage,
+            RankedReasonCode::Summary,
+            RankedReasonCode::PairedFile,
+            RankedReasonCode::GraphImport,
+            RankedReasonCode::Symbol,
+            RankedReasonCode::IndexedText,
+        ];
+        PRIORITY
+            .iter()
+            .filter_map(|candidate| codes.iter().find(|code| *code == candidate))
+            .take(4)
+            .copied()
+            .collect()
+    }
+
+    /// Project an actionable handoff into one exact follow-up call instead of duplicating rows.
+    fn compact_brief_purpose_handoff(
+        handoff: &PurposeCuratorHandoff,
+        project_path: Option<String>,
+    ) -> McpCompactBriefPurposeHandoff {
+        McpCompactBriefPurposeHandoff {
+            agent_harness_expected: handoff.agent_harness_expected,
+            main_agent_fallback: handoff.main_agent_fallback,
+            server_started_curator: handoff.server_started_curator,
+            silent_on_success: handoff.silent_on_success,
+            truncated: handoff.queue.truncated,
+            next_call: McpCompactBriefRecommendation {
+                kind: McpBriefRecommendationKind::PurposeQueue,
+                target: MCP_TOOL_ATLAS_PURPOSE_QUEUE.to_string(),
+                reason: MCP_BRIEF_REASON_PURPOSE_QUEUE.to_string(),
+                arguments: Self::brief_call_arguments(
+                    project_path,
+                    &[(MCP_BRIEF_ARG_TASK, &handoff.queue.task)],
+                    Some((MCP_BRIEF_ARG_LIMIT, handoff.queue.limit)),
+                ),
+            },
+        }
+    }
+
+    /// Add compact opt-ins to one legacy recommendation without changing its source report.
+    fn compact_brief_recommendation(
+        recommendation: &McpBriefRecommendation,
+    ) -> McpCompactBriefRecommendation {
+        let relation_to_summary =
+            matches!(recommendation.kind, McpBriefRecommendationKind::Relations);
+        let mut arguments = recommendation.arguments.clone();
+        if let Some(object) = arguments.as_object_mut() {
+            if relation_to_summary {
+                object.remove(MCP_BRIEF_ARG_VIEW);
+            }
+            if relation_to_summary
+                || matches!(recommendation.kind, McpBriefRecommendationKind::Summary)
+            {
+                object.insert(
+                    MCP_BRIEF_ARG_COMPACT.to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
+        }
+        McpCompactBriefRecommendation {
+            kind: if relation_to_summary {
+                McpBriefRecommendationKind::Summary
+            } else {
+                recommendation.kind
+            },
+            target: if relation_to_summary {
+                MCP_TOOL_ATLAS_FILE_SUMMARY.to_string()
+            } else {
+                recommendation.target.clone()
+            },
+            reason: if relation_to_summary {
+                MCP_BRIEF_REASON_RANKED_FILE_SUMMARY.to_string()
+            } else {
+                recommendation.reason.clone()
+            },
+            arguments,
         }
     }
 
@@ -4519,7 +5148,7 @@ impl ProjectAtlasMcpServer {
     /// Bind, move, or detach a project root and then make it active.
     #[tool(
         name = "atlas_root_set",
-        description = "Bind a repository root by default, or explicitly move/detach an existing copied database, then generate project-local MCP configs and make the successfully transitioned root active."
+        description = "Bind a repository root, generate project-local MCP configs, and make it active for later MCP calls."
     )]
     fn atlas_root_set(&self, Parameters(params): Parameters<AtlasRootSetParams>) -> String {
         Self::as_mcp_text((|| {
@@ -4927,11 +5556,15 @@ impl ProjectAtlasMcpServer {
                     params.limit.unwrap_or(DEFAULT_FILE_SUMMARY_LIMIT),
                     &content,
                 )?;
-                let toon = Self::with_selected_project_audit(
-                    &state,
-                    resolved.routed_project,
-                    render_file_summary(&report),
-                )?;
+                let rendered = if params.compact.unwrap_or(false) {
+                    encode_agent_payload(&McpFileSummaryPayload {
+                        file_summary: McpFileSummary::from(&report),
+                    })
+                } else {
+                    render_file_summary(&report)
+                };
+                let toon =
+                    Self::with_selected_project_audit(&state, resolved.routed_project, rendered)?;
                 let usage = Some(McpUsageIntent::text(
                     MCP_EVENT_ATLAS_FILE_SUMMARY,
                     Some(report.file_path),
@@ -5457,7 +6090,7 @@ impl ProjectAtlasMcpServer {
     /// List indexed symbol relations.
     #[tool(
         name = "atlas_symbol_relations",
-        description = "List legacy symbol relations unchanged, opt in to bounded detailed inbound/outbound normalized-graph navigation, or select the closed analysis view for architecture, VCS impact, or static trace with exact anchors and hard relation/output limits."
+        description = "List imports, calls, dependencies, and containment edges as compact TOON."
     )]
     fn atlas_symbol_relations(
         &self,
@@ -5470,7 +6103,7 @@ impl ProjectAtlasMcpServer {
     /// Return structural health findings.
     #[tool(
         name = "atlas_health",
-        description = "Return a bounded ProjectAtlas structural health page, or opt in to current coverage discovery with path, parser/provider, relation, state, and reason filters."
+        description = "Return a bounded ProjectAtlas structural health page with optional category, severity, and path-prefix filters."
     )]
     fn atlas_health(
         &self,
@@ -5847,8 +6480,13 @@ impl ProjectAtlasMcpServer {
         context: RequestContext<RoleServer>,
     ) -> String {
         Self::as_mcp_text((|| {
-            let brief = self.build_session_brief(params, Some(context))?;
-            Self::encode_named_payload(MCP_PAYLOAD_SESSION_BRIEF, &brief)
+            if params.compact.unwrap_or(false) {
+                let brief = self.build_compact_session_brief(params, Some(context))?;
+                Self::encode_named_payload(MCP_PAYLOAD_SESSION_BRIEF, &brief)
+            } else {
+                let brief = self.build_session_brief(params, Some(context))?;
+                Self::encode_named_payload(MCP_PAYLOAD_SESSION_BRIEF, &brief)
+            }
         })())
     }
 
@@ -6709,6 +7347,7 @@ mod tests {
                 project_path: Some(project_path.to_string()),
                 file: "src/lib.rs".to_string(),
                 nearest_project: Some(false),
+                compact: None,
                 limit: Some(25),
             },
             None,
@@ -7220,6 +7859,7 @@ mod tests {
                 project_path: None,
                 query: Some("startup".to_string()),
                 purpose_task: None,
+                compact: None,
                 folder_limit: None,
                 file_limit: None,
                 blocker_limit: None,
@@ -7345,6 +7985,7 @@ mod tests {
                 project_path: None,
                 query: Some("hiddenNeedle".to_string()),
                 purpose_task: None,
+                compact: None,
                 folder_limit: Some(5),
                 file_limit: Some(5),
                 blocker_limit: Some(5),
@@ -7372,6 +8013,7 @@ mod tests {
                 project_path: None,
                 query: Some("owner".to_string()),
                 purpose_task: None,
+                compact: None,
                 folder_limit: Some(5),
                 file_limit: Some(5),
                 blocker_limit: Some(5),
@@ -7476,6 +8118,7 @@ mod tests {
                 project_path: None,
                 query: Some("navigation".to_string()),
                 purpose_task: None,
+                compact: None,
                 folder_limit: Some(10),
                 file_limit: Some(10),
                 blocker_limit: Some(10),
@@ -7506,6 +8149,60 @@ mod tests {
                 && owner.next_call.capability
                     == projectatlas_core::NavigationNextCapability::Relations,
             "MCP file or session brief lost graph truncation or relations navigation",
+        )?;
+
+        let compact = server.build_compact_session_brief(
+            AtlasSessionBriefParams {
+                project_path: None,
+                query: Some("navigation_owner".to_string()),
+                purpose_task: None,
+                compact: Some(true),
+                folder_limit: None,
+                file_limit: None,
+                blocker_limit: None,
+                purpose_limit: None,
+            },
+            None,
+        )?;
+        let compact_owner = compact
+            .files
+            .iter()
+            .find(|candidate| candidate.path == "src/navigation_owner.rs")
+            .ok_or_else(|| io::Error::other("compact graph owner file is missing"))?;
+        require(
+            compact_owner.connections.len() == 1
+                && compact_owner.connections.iter().all(|connection| {
+                    connection.kind != RankedConnectionKind::Import
+                        && !matches!(
+                            &connection.target,
+                            RankedConnectionTarget::Unresolved { .. }
+                        )
+                })
+                && compact_owner.next_call.capability == NavigationNextCapability::Summary
+                && compact_owner.reason_codes.len() <= 4,
+            "compact session brief did not retain one crisp edge and summary-first routing",
+        )?;
+        let expanded_text =
+            ProjectAtlasMcpServer::encode_named_payload(MCP_PAYLOAD_SESSION_BRIEF, &brief)?;
+        require(
+            expanded_text.contains("missing_purposes:")
+                && expanded_text.contains("stale_purposes:")
+                && expanded_text.contains("approved_purposes:")
+                && expanded_text.contains("suggested_purposes:"),
+            "compatibility session brief lost purpose lifecycle counts",
+        )?;
+        let compact_text =
+            ProjectAtlasMcpServer::encode_named_payload(MCP_PAYLOAD_SESSION_BRIEF, &compact)?;
+        require(
+            !compact_text.contains("\n    db:")
+                && !compact_text.contains("\n    config:")
+                && !compact_text.contains("\n  policy:")
+                && !compact_text.contains("agent_harness_expected")
+                && !compact_text.contains("server_started_curator")
+                && !compact_text.contains("missing_purposes")
+                && !compact_text.contains("recommended_subagent_reasoning")
+                && compact_text.len() <= 4_096,
+            &format!("compact session brief retained default-only chatter: {compact_text}"),
         )?;
 
         let families = brief
@@ -7740,6 +8437,7 @@ mod tests {
                 project_path: None,
                 query: Some("startup".to_string()),
                 purpose_task: Some("startup-task".to_string()),
+                compact: None,
                 folder_limit: Some(5),
                 file_limit: Some(5),
                 blocker_limit: Some(5),
@@ -7772,8 +8470,9 @@ mod tests {
                 && handoff.queue.curation_scope == "low"
                 && handoff.queue.actionable
                 && handoff.queue.returned == 1
+                && handoff.queue.limit == 1
                 && handoff.queue.truncated,
-            "session handoff lost task, low-scope, or bound metadata",
+            "compatibility session handoff lost its bounded purpose queue metadata",
         )?;
         require(
             handoff.queue.items.iter().all(|item| {
@@ -7782,6 +8481,34 @@ mod tests {
                     && !item.purpose_agent_reviewed
             }),
             "session handoff item tokens or lifecycle state were incomplete",
+        )?;
+        let compact = server.build_compact_session_brief(
+            AtlasSessionBriefParams {
+                project_path: None,
+                query: Some("startup".to_string()),
+                purpose_task: Some("startup-task".to_string()),
+                compact: Some(true),
+                folder_limit: Some(5),
+                file_limit: Some(5),
+                blocker_limit: Some(5),
+                purpose_limit: Some(1),
+            },
+            None,
+        )?;
+        let compact_handoff = compact
+            .purpose_handoff
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("compact purpose handoff missing"))?;
+        require(
+            matches!(
+                compact_handoff.next_call.kind,
+                McpBriefRecommendationKind::PurposeQueue
+            ) && compact_handoff.next_call.target == MCP_TOOL_ATLAS_PURPOSE_QUEUE
+                && compact_handoff.next_call.arguments.get(MCP_BRIEF_ARG_TASK)
+                    == Some(&serde_json::json!("startup-task"))
+                && compact_handoff.next_call.arguments.get(MCP_BRIEF_ARG_LIMIT)
+                    == Some(&serde_json::json!(1)),
+            "compact handoff did not preserve the exact bounded purpose-queue call",
         )?;
         require(
             brief.limits.purpose_limit == 1 && brief.limits.purposes_truncated,

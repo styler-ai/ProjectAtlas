@@ -44,7 +44,13 @@ namespace ProjectAtlas.Release
         private const uint ErrorAlreadyExists = 183;
         private const uint ErrorFileNotFound = 2;
         private const uint ErrorNotFound = 1168;
+        private const uint ErrorNotEnoughQuota = 1816;
+        private const uint TokenDuplicate = 0x0002;
         private const uint TokenQuery = 0x0008;
+        private const uint MaximumAllowed = 0x02000000;
+        private const int SecurityIdentification = 1;
+        private const uint AppContainerAccess = 0x00000001;
+        private const uint LessPrivilegedAppContainerAccess = 0x00000002;
         private const uint ProcessSynchronize = 0x00100000;
         private const int StandardInputHandle = -10;
         private const int StandardOutputHandle = -11;
@@ -69,11 +75,7 @@ namespace ProjectAtlas.Release
         private const uint JobObjectMessageProcessMemoryLimit = 9;
         private const uint JobObjectMessageJobMemoryLimit = 10;
         private const uint JobCompletionKey = 0x5041544c;
-        private const uint ProcessCreationChildProcessRestricted = 0x00000001;
         private const uint ProcessCreationAllApplicationPackagesOptOut = 0x00000001;
-        private const uint ProcessChildProcessPolicy = 13;
-        private const uint ProcessMitigationNoChildProcessCreation = 0x00000001;
-        private const uint TokenGroups = 2;
         private const uint TokenIsAppContainer = 29;
         private const uint TokenCapabilities = 30;
         private const uint TokenAppContainerSid = 31;
@@ -88,9 +90,9 @@ namespace ProjectAtlas.Release
         private const string SelfTestPreAssignmentFaultMarker =
             "projectatlas-containment-self-test-pre-assignment-fault-v1";
         private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
+        private static readonly IntPtr ProcThreadAttributeParentProcess = new IntPtr(0x00020000);
         private static readonly IntPtr ProcThreadAttributeHandleList = new IntPtr(0x00020002);
         private static readonly IntPtr ProcThreadAttributeSecurityCapabilities = new IntPtr(0x00020009);
-        private static readonly IntPtr ProcThreadAttributeChildProcessPolicy = new IntPtr(0x0002000e);
         private static readonly IntPtr ProcThreadAttributeAllApplicationPackagesPolicy = new IntPtr(0x0002000f);
         private static readonly byte[] AdmissionRecord = new byte[]
         {
@@ -201,6 +203,15 @@ namespace ProjectAtlas.Release
             public IntPtr CompletionPort;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct GenericMapping
+        {
+            public uint GenericRead;
+            public uint GenericWrite;
+            public uint GenericExecute;
+            public uint GenericAll;
+        }
+
         private sealed class ContainmentFailure : Exception
         {
             internal ContainmentFailure(string stage)
@@ -249,14 +260,14 @@ namespace ProjectAtlas.Release
             internal void Build(SecurityIdentifier sid, IntPtr[] handles)
             {
                 IntPtr size = IntPtr.Zero;
-                if (InitializeProcThreadAttributeList(IntPtr.Zero, 4, 0, ref size)
+                if (InitializeProcThreadAttributeList(IntPtr.Zero, 3, 0, ref size)
                     || Marshal.GetLastWin32Error() != ErrorInsufficientBuffer)
                 {
                     throw Win32Failure("measure-attribute-list");
                 }
                 List = Marshal.AllocHGlobal(size);
                 allocations.Add(List);
-                if (!InitializeProcThreadAttributeList(List, 4, 0, ref size))
+                if (!InitializeProcThreadAttributeList(List, 3, 0, ref size))
                 {
                     throw Win32Failure("initialize-attribute-list");
                 }
@@ -290,14 +301,6 @@ namespace ProjectAtlas.Release
                     handleList,
                     new UIntPtr((uint)checked(handles.Length * IntPtr.Size)),
                     "set-handle-list");
-
-                IntPtr childPolicy = AllocateUInt32(ProcessCreationChildProcessRestricted);
-                UpdateAttribute(
-                    ProcThreadAttributeChildProcessPolicy,
-                    childPolicy,
-                    new UIntPtr(sizeof(uint)),
-                    "set-child-process-policy");
-
             }
 
             public void Dispose()
@@ -392,6 +395,25 @@ namespace ProjectAtlas.Release
 
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DuplicateToken(
+            IntPtr existingToken,
+            int impersonationLevel,
+            out IntPtr duplicateToken);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AccessCheck(
+            IntPtr securityDescriptor,
+            IntPtr clientToken,
+            uint desiredAccess,
+            ref GenericMapping genericMapping,
+            IntPtr privilegeSet,
+            ref uint privilegeSetLength,
+            out uint grantedAccess,
+            [MarshalAs(UnmanagedType.Bool)] out bool accessStatus);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool EqualSid(IntPtr firstSid, IntPtr secondSid);
 
         [DllImport("advapi32.dll", SetLastError = true)]
@@ -479,14 +501,6 @@ namespace ProjectAtlas.Release
             IntPtr process,
             IntPtr job,
             [MarshalAs(UnmanagedType.Bool)] out bool result);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetProcessMitigationPolicy(
-            IntPtr process,
-            uint mitigationPolicy,
-            out uint policy,
-            UIntPtr length);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -919,6 +933,7 @@ namespace ProjectAtlas.Release
                 VerifyWorkerIdentity(process.Process, profile.Sid);
                 if (SelfTestMarkerMatches(packRoot, SelfTestMarker))
                 {
+                    ProveJobChildCreationBoundary(process.Process, worker, packRoot);
                     // The builder is managed code and cannot stand in for the native Rust
                     // worker after LPAC resume: CLR initialization needs system files that
                     // the zero-capability LPAC intentionally cannot read. Prove suspended
@@ -1195,7 +1210,7 @@ namespace ProjectAtlas.Release
             IntPtr tokenBuffer = IntPtr.Zero;
             try
             {
-                if (!OpenProcessToken(process, TokenQuery, out token))
+                if (!OpenProcessToken(process, TokenQuery | TokenDuplicate, out token))
                 {
                     throw Win32Failure("open-worker-token");
                 }
@@ -1203,8 +1218,7 @@ namespace ProjectAtlas.Release
                 {
                     throw new ContainmentFailure("worker-not-appcontainer");
                 }
-                VerifyLessPrivilegedAppContainerGroups(token);
-                VerifyChildProcessPolicy(process);
+                VerifyLessPrivilegedAppContainerAccess(token);
 
                 uint capabilitiesLength;
                 tokenBuffer = ReadTokenBuffer(token, TokenCapabilities, "read-capabilities-token", out capabilitiesLength);
@@ -1245,63 +1259,100 @@ namespace ProjectAtlas.Release
             }
         }
 
-        private static void VerifyLessPrivilegedAppContainerGroups(IntPtr token)
+        private static void VerifyLessPrivilegedAppContainerAccess(IntPtr token)
         {
-            uint length;
-            IntPtr buffer = ReadTokenBuffer(token, TokenGroups, "read-token-groups", out length);
+            IntPtr impersonationToken = IntPtr.Zero;
+            IntPtr securityDescriptor = IntPtr.Zero;
+            IntPtr privilegeSet = IntPtr.Zero;
             try
             {
-                if (length < sizeof(uint))
+                if (!DuplicateToken(token, SecurityIdentification, out impersonationToken))
                 {
-                    throw new ContainmentFailure("worker-token-groups-missing");
+                    throw Win32Failure("duplicate-worker-token");
                 }
-                uint count = unchecked((uint)Marshal.ReadInt32(buffer));
-                int offset = IntPtr.Size;
-                int entrySize = checked(IntPtr.Size * 2);
-                ulong required = checked((ulong)offset + ((ulong)count * (ulong)entrySize));
-                if (required > length)
+
+                SecurityIdentifier localSystem =
+                    new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                DiscretionaryAcl dacl = new DiscretionaryAcl(false, false, 3);
+                dacl.AddAccess(
+                    AccessControlType.Allow,
+                    new SecurityIdentifier(WellKnownSidType.WorldSid, null),
+                    unchecked((int)(AppContainerAccess | LessPrivilegedAppContainerAccess)),
+                    InheritanceFlags.None,
+                    PropagationFlags.None);
+                dacl.AddAccess(
+                    AccessControlType.Allow,
+                    new SecurityIdentifier(AllApplicationPackagesSid),
+                    unchecked((int)AppContainerAccess),
+                    InheritanceFlags.None,
+                    PropagationFlags.None);
+                dacl.AddAccess(
+                    AccessControlType.Allow,
+                    new SecurityIdentifier(AllRestrictedApplicationPackagesSid),
+                    unchecked((int)LessPrivilegedAppContainerAccess),
+                    InheritanceFlags.None,
+                    PropagationFlags.None);
+                CommonSecurityDescriptor descriptor = new CommonSecurityDescriptor(
+                    false,
+                    false,
+                    ControlFlags.DiscretionaryAclPresent,
+                    localSystem,
+                    localSystem,
+                    null,
+                    dacl);
+                byte[] descriptorBytes = new byte[descriptor.BinaryLength];
+                descriptor.GetBinaryForm(descriptorBytes, 0);
+                securityDescriptor = Marshal.AllocHGlobal(descriptorBytes.Length);
+                Marshal.Copy(descriptorBytes, 0, securityDescriptor, descriptorBytes.Length);
+
+                GenericMapping mapping = new GenericMapping();
+                uint privilegeSetLength = 0;
+                uint grantedAccess;
+                bool accessStatus;
+                if (AccessCheck(
+                        securityDescriptor,
+                        impersonationToken,
+                        MaximumAllowed,
+                        ref mapping,
+                        IntPtr.Zero,
+                        ref privilegeSetLength,
+                        out grantedAccess,
+                        out accessStatus)
+                    || Marshal.GetLastWin32Error() != ErrorInsufficientBuffer
+                    || privilegeSetLength == 0
+                    || privilegeSetLength > MaximumTokenInformationBytes)
                 {
-                    throw new ContainmentFailure("worker-token-groups-size");
+                    throw new ContainmentFailure("measure-worker-lpac-access-check");
                 }
-                for (uint index = 0; index < count; index += 1)
+                privilegeSet = Marshal.AllocHGlobal(checked((int)privilegeSetLength));
+                if (!AccessCheck(
+                    securityDescriptor,
+                    impersonationToken,
+                    MaximumAllowed,
+                    ref mapping,
+                    privilegeSet,
+                    ref privilegeSetLength,
+                    out grantedAccess,
+                    out accessStatus))
                 {
-                    int entryOffset = checked(offset + checked((int)index * entrySize));
-                    IntPtr sidPointer = Marshal.ReadIntPtr(buffer, entryOffset);
-                    if (sidPointer == IntPtr.Zero)
-                    {
-                        throw new ContainmentFailure("worker-token-group-sid-missing");
-                    }
-                    string sid = new SecurityIdentifier(sidPointer).Value;
-                    if (String.Equals(sid, AllApplicationPackagesSid, StringComparison.Ordinal)
-                        || String.Equals(
-                            sid,
-                            AllRestrictedApplicationPackagesSid,
-                            StringComparison.Ordinal))
-                    {
-                        throw new ContainmentFailure("worker-not-lpac");
-                    }
+                    throw Win32Failure("check-worker-lpac-access");
+                }
+                if (!accessStatus || grantedAccess != LessPrivilegedAppContainerAccess)
+                {
+                    throw new ContainmentFailure("worker-not-lpac");
                 }
             }
             finally
             {
-                Marshal.FreeHGlobal(buffer);
-            }
-        }
-
-        private static void VerifyChildProcessPolicy(IntPtr process)
-        {
-            uint policy;
-            if (!GetProcessMitigationPolicy(
-                process,
-                ProcessChildProcessPolicy,
-                out policy,
-                new UIntPtr(sizeof(uint))))
-            {
-                throw Win32Failure("read-child-process-policy");
-            }
-            if (policy != ProcessMitigationNoChildProcessCreation)
-            {
-                throw new ContainmentFailure("worker-child-policy-mismatch");
+                if (privilegeSet != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(privilegeSet);
+                }
+                if (securityDescriptor != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(securityDescriptor);
+                }
+                CloseIfPresent(ref impersonationToken);
             }
         }
 
@@ -1643,6 +1694,104 @@ namespace ProjectAtlas.Release
                 TerminateProcess(process, FailureExitCode);
             }
             return WaitForSingleObject(process, CleanupWaitMilliseconds) == WaitObject0;
+        }
+
+        private static void ProveJobChildCreationBoundary(
+            IntPtr workerProcess,
+            string worker,
+            string packRoot)
+        {
+            IntPtr attributeList = IntPtr.Zero;
+            IntPtr parentValue = IntPtr.Zero;
+            bool attributeListInitialized = false;
+            ProcessInformation child = new ProcessInformation();
+            try
+            {
+                IntPtr attributeListSize = IntPtr.Zero;
+                if (InitializeProcThreadAttributeList(
+                        IntPtr.Zero,
+                        1,
+                        0,
+                        ref attributeListSize)
+                    || Marshal.GetLastWin32Error() != ErrorInsufficientBuffer)
+                {
+                    throw Win32Failure("self-test-measure-parent-attribute-list");
+                }
+                attributeList = Marshal.AllocHGlobal(attributeListSize);
+                if (!InitializeProcThreadAttributeList(
+                    attributeList,
+                    1,
+                    0,
+                    ref attributeListSize))
+                {
+                    throw Win32Failure("self-test-initialize-parent-attribute-list");
+                }
+                attributeListInitialized = true;
+                parentValue = Marshal.AllocHGlobal(IntPtr.Size);
+                Marshal.WriteIntPtr(parentValue, workerProcess);
+                if (!UpdateProcThreadAttribute(
+                    attributeList,
+                    0,
+                    ProcThreadAttributeParentProcess,
+                    parentValue,
+                    new UIntPtr((uint)IntPtr.Size),
+                    IntPtr.Zero,
+                    IntPtr.Zero))
+                {
+                    throw Win32Failure("self-test-set-parent-process");
+                }
+
+                StartupInfoEx startup = new StartupInfoEx();
+                startup.StartupInfo.cb = (uint)Marshal.SizeOf(typeof(StartupInfoEx));
+                startup.AttributeList = attributeList;
+                StringBuilder commandLine =
+                    new StringBuilder(QuoteArgument(worker) + " --version");
+                bool created = CreateProcessW(
+                    worker,
+                    commandLine,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    false,
+                    CreateSuspended | CreateNoWindow | ExtendedStartupInfoPresent,
+                    IntPtr.Zero,
+                    packRoot,
+                    ref startup,
+                    out child);
+                int error = Marshal.GetLastWin32Error();
+                if (created)
+                {
+                    throw new ContainmentFailure("self-test-job-created-child");
+                }
+                if (unchecked((uint)error) != ErrorNotEnoughQuota)
+                {
+                    throw new ContainmentFailure(
+                        "self-test-job-child-denial",
+                        error.ToString(CultureInfo.InvariantCulture));
+                }
+            }
+            finally
+            {
+                if (!IsInvalidHandle(child.Process)
+                    && WaitForSingleObject(child.Process, 0) != WaitObject0)
+                {
+                    TerminateProcess(child.Process, FailureExitCode);
+                    WaitForSingleObject(child.Process, CleanupWaitMilliseconds);
+                }
+                CloseIfPresent(ref child.Thread);
+                CloseIfPresent(ref child.Process);
+                if (attributeListInitialized)
+                {
+                    DeleteProcThreadAttributeList(attributeList);
+                }
+                if (parentValue != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(parentValue);
+                }
+                if (attributeList != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(attributeList);
+                }
+            }
         }
 
         private static bool SelfTestMarkerMatches(string packRoot, string expected)

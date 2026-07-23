@@ -2882,6 +2882,48 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
 }
 
 #[test]
+fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<dyn Error>> {
+    let skill = fs::read_to_string(
+        workspace_root()?
+            .join("plugins")
+            .join("projectatlas")
+            .join(PROJECTATLAS_SKILL_DIR)
+            .join(PROJECTATLAS_SKILL_NAME)
+            .join(SKILL_FILE_NAME),
+    )?;
+    for required in [
+        "For task-directed work in an existing indexed repository",
+        "`atlas_session_brief` at task-oriented startup",
+        "`atlas_session_brief` at task-oriented startup with `query`, `project_path` when needed, and `compact: true`",
+        "returned `atlas_file_summary` recommendation with `compact: true`",
+        "Follow its typed next call directly",
+        "`connections_truncated` describes the compact sample",
+        "Do not guess a symbol line or other disambiguator",
+        "Fall back to `atlas_overview` only when the session-brief MCP tool is unavailable",
+    ] {
+        if !skill.contains(required) {
+            return Err(io::Error::other(format!(
+                "packaged skill is missing task-oriented session-brief guidance {required:?}"
+            ))
+            .into());
+        }
+    }
+    for stale in [
+        "otherwise call `atlas_overview`",
+        "New session after scan: call `atlas_overview`",
+        "`atlas_overview` at startup",
+    ] {
+        if skill.contains(stale) {
+            return Err(io::Error::other(format!(
+                "packaged skill still contains stale startup routing {stale:?}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
 -> Result<(), Box<dyn Error>> {
     let workspace_root = workspace_root()?;
@@ -7794,9 +7836,13 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"atlas_health","arguments":{"coverage":true,"path_prefix":"src/lib.rs","parser":"tree-sitter","provider":"tree-sitter","coverage_state":"complete","limit":1}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","file":"src/lib.rs","symbol":"indexed","direction":"outbound","depth":2,"limit":50,"output_bytes":65536,"include_communities":true,"include_cycles":true}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"atlas_slice","arguments":{"file":"src/lib.rs","symbol":"helper","symbol_kind":"function","symbol_signature":"fn helper ( )"}}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":25,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":"src/lib.rs"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":25,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":"src/lib.rs","compact":true}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":26,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","analysis_mode":"impact","vcs":"working_tree","file":"src/lib.rs","symbol":"indexed","direction":"outbound","depth":2,"limit":50,"output_bytes":65536}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":27,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","analysis_mode":"trace","file":"src/lib.rs","symbol":"indexed","direction":"outbound","depth":2,"limit":50,"output_bytes":65536,"trace_target":"helper","trace_target_file":"src/lib.rs","trace_target_kind":"function","trace_target_signature":"fn helper ( )"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":28,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":"src/lib.rs","limit":25}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":29,"method":"tools/call","params":{"name":"atlas_session_brief","arguments":{"query":"src/lib.rs","compact":true}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"atlas_session_brief","arguments":{"query":"src/lib.rs"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":"src/lib.rs"}}}"#.to_string(),
     ];
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let stdout = run_mcp_stdio(
@@ -7809,12 +7855,17 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         ],
         &messages,
     )?;
+    assert_legacy_mcp_surface_compatible(&stdout)?;
     let session_brief_text = mcp_tool_text(&stdout, 19)?;
     let analysis_text = mcp_tool_text(&stdout, 23)?;
     let next_call_text = mcp_tool_text(&stdout, 24)?;
     let recommended_summary_text = mcp_tool_text(&stdout, 25)?;
     let impact_text = mcp_tool_text(&stdout, 26)?;
     let trace_text = mcp_tool_text(&stdout, 27)?;
+    let expanded_summary_text = mcp_tool_text(&stdout, 28)?;
+    let compact_session_brief_text = mcp_tool_text(&stdout, 29)?;
+    let legacy_default_brief_text = mcp_tool_text(&stdout, 30)?;
+    let legacy_default_summary_text = mcp_tool_text(&stdout, 31)?;
     let session_brief_has_ready_call = session_brief_text.contains("target: atlas_file_summary")
         && session_brief_text.contains("file: src/lib.rs");
     if !stdout.contains(r#""id":1"#)
@@ -7822,6 +7873,8 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains(r#""name":"atlas_files""#)
         || !stdout.contains(r#""name":"atlas_next""#)
         || !stdout.contains(r#""name":"atlas_session_brief""#)
+        || !stdout.contains("Return selected project identity, index state, ranked candidates, blockers, and typed next-call recommendations for agent startup.")
+        || !stdout.contains(r#""project_path":{"description":""#)
         || !stdout.contains(r#""name":"atlas_task_status""#)
         || !stdout.contains(r#""name":"atlas_task_cancel""#)
         || !stdout.contains("overview:")
@@ -7833,6 +7886,19 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !session_brief_has_ready_call
         || session_brief_text.contains("target: atlas_folders")
         || session_brief_text.contains("target: atlas_files")
+        || !compact_session_brief_text.contains("target: atlas_file_summary")
+        || !compact_session_brief_text.contains("compact: true")
+        || compact_session_brief_text.contains("\n    db:")
+        || compact_session_brief_text.contains("\n    config:")
+        || !legacy_default_brief_text.contains("folder_limit: 5")
+        || !legacy_default_brief_text.contains("file_limit: 5")
+        || !legacy_default_brief_text.contains("blocker_limit: 5")
+        || !legacy_default_brief_text.contains("purpose_limit: 5")
+        || !legacy_default_brief_text.contains("\n    db:")
+        || !legacy_default_brief_text.contains("\n  policy:")
+        || !legacy_default_summary_text.contains("source_status: \"live-source\"")
+        || !legacy_default_summary_text.contains("total_functions:")
+        || !legacy_default_summary_text.contains("coverage:")
         || !stdout.contains("task_status:")
         || !stdout.contains("task_cancel:")
         || !stdout.contains("task-progress-contract")
@@ -7859,6 +7925,13 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !recommended_summary_text.contains("file_summary:")
         || !recommended_summary_text.contains("src/lib.rs")
         || !recommended_summary_text.contains("indexed")
+        || !recommended_summary_text.contains("file_purpose_agent_reviewed: true")
+        || recommended_summary_text.contains("source_status:")
+        || recommended_summary_text.contains("total_functions:")
+        || recommended_summary_text.contains("coverage:")
+        || !expanded_summary_text.contains("source_status: \"live-source\"")
+        || !expanded_summary_text.contains("total_functions:")
+        || !expanded_summary_text.contains("coverage:")
         || !impact_text.contains("mode: impact")
         || (!impact_text.contains("state: available")
             && !impact_text.contains("state: unavailable"))
@@ -14370,6 +14443,121 @@ fn mcp_tool_text(stdout: &str, id: i64) -> Result<String, Box<dyn Error>> {
             .ok_or_else(|| io::Error::other(format!("MCP tool response {id} has no text")).into());
     }
     Err(io::Error::other(format!("MCP tool response {id} is missing")).into())
+}
+
+/// Return one complete MCP response envelope by numeric request id.
+fn mcp_response(stdout: &str, id: i64) -> Result<Value, Box<dyn Error>> {
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let response: Value = serde_json::from_str(line)?;
+        if response.get("id").and_then(Value::as_i64) == Some(id) {
+            return Ok(response);
+        }
+    }
+    Err(io::Error::other(format!("MCP response {id} is missing")).into())
+}
+
+/// Prove that every frozen v0.3.26 tool and request-schema contract remains intact.
+fn assert_legacy_mcp_surface_compatible(stdout: &str) -> Result<(), Box<dyn Error>> {
+    let baseline: Value = serde_json::from_str(include_str!("fixtures/mcp-v0.3.26-tools.json"))?;
+    let baseline_tools = baseline
+        .get("tools")
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("frozen MCP fixture has no tools array"))?;
+    let response = mcp_response(stdout, 2)?;
+    let current_tools = response
+        .get("result")
+        .and_then(|result| result.get("tools"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("current MCP tools/list response has no tools array"))?;
+    let baseline_by_name = mcp_tools_by_name(baseline_tools)?;
+    let current_by_name = mcp_tools_by_name(current_tools)?;
+    if baseline_by_name.keys().collect::<Vec<_>>() != current_by_name.keys().collect::<Vec<_>>() {
+        return Err(io::Error::other(format!(
+            "MCP inventory drifted from v0.3.26: baseline={:?}, current={:?}",
+            baseline_by_name.keys().collect::<Vec<_>>(),
+            current_by_name.keys().collect::<Vec<_>>()
+        ))
+        .into());
+    }
+    for (name, baseline_tool) in baseline_by_name {
+        let current_tool = current_by_name
+            .get(name)
+            .ok_or_else(|| io::Error::other(format!("current MCP tool {name} is missing")))?;
+        if baseline_tool.get("description") != current_tool.get("description") {
+            return Err(io::Error::other(format!(
+                "MCP tool description drifted for {name}: baseline={:?}, current={:?}",
+                baseline_tool.get("description"),
+                current_tool.get("description")
+            ))
+            .into());
+        }
+        assert_json_contract_subset(
+            &format!("{name}.inputSchema"),
+            baseline_tool
+                .get("inputSchema")
+                .ok_or_else(|| io::Error::other(format!("baseline schema missing for {name}")))?,
+            current_tool
+                .get("inputSchema")
+                .ok_or_else(|| io::Error::other(format!("current schema missing for {name}")))?,
+        )?;
+    }
+    for name in ["atlas_session_brief", "atlas_file_summary"] {
+        let properties = current_by_name[name]
+            .get("inputSchema")
+            .and_then(|schema| schema.get("properties"))
+            .and_then(Value::as_object)
+            .ok_or_else(|| io::Error::other(format!("current properties missing for {name}")))?;
+        if !properties.contains_key("compact") {
+            return Err(io::Error::other(format!(
+                "additive compact opt-in is missing from {name}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Index MCP tool definitions by their stable public name.
+fn mcp_tools_by_name(tools: &[Value]) -> Result<BTreeMap<&str, &Value>, Box<dyn Error>> {
+    let mut indexed = BTreeMap::new();
+    for tool in tools {
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| io::Error::other("MCP tool has no name"))?;
+        if indexed.insert(name, tool).is_some() {
+            return Err(io::Error::other(format!("duplicate MCP tool name {name}")).into());
+        }
+    }
+    Ok(indexed)
+}
+
+/// Require every frozen JSON contract member while permitting additive object properties.
+fn assert_json_contract_subset(
+    path: &str,
+    baseline: &Value,
+    current: &Value,
+) -> Result<(), Box<dyn Error>> {
+    match (baseline, current) {
+        (Value::Object(baseline), Value::Object(current)) => {
+            for (key, baseline_value) in baseline {
+                let current_value = current.get(key).ok_or_else(|| {
+                    io::Error::other(format!("legacy MCP schema member {path}.{key} is missing"))
+                })?;
+                assert_json_contract_subset(
+                    &format!("{path}.{key}"),
+                    baseline_value,
+                    current_value,
+                )?;
+            }
+            Ok(())
+        }
+        _ if baseline == current => Ok(()),
+        _ => Err(io::Error::other(format!(
+            "legacy MCP schema value drifted at {path}: baseline={baseline}, current={current}"
+        ))
+        .into()),
+    }
 }
 
 /// Require that a real CLI summary reports a caller for a named function.

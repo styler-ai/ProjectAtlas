@@ -2,7 +2,7 @@
 
 ## Status
 
-This document defines the required agent-navigation contract for ProjectAtlas 0.4.0. ProjectAtlas 0.3.26 provides the baseline workflow described below. Automatic read freshness, normalized graph publication, purpose-plus-connection enrichment, direct relationship navigation, and closed analysis views are current v0.4 implementation behavior. Representative agent evaluation and combined release verification remain target behavior until issue #308 is complete. Version 0.4 preserves the complete compatible MCP inventory. Any later compact/default inventory or breaking rationalization belongs to post-v0.4 issue #310.
+This document defines the required agent-navigation contract for ProjectAtlas 0.4.0. ProjectAtlas 0.3.26 provides the baseline workflow described below. Automatic read freshness, normalized graph publication, purpose-plus-connection enrichment, direct relationship navigation, and closed analysis views are current v0.4 implementation behavior. The representative clean, dirty-worktree, and non-Git task-5.8 checkpoint has passed for correctness, fewer calls, and lower cold-session context against 0.3.26; its [interim three-way evaluation](benchmarks/v0.4-agent-navigation-evaluation.md) also reports the larger compatible discovery/runtime payload and expected fixed-cost loss to plain source reads on tiny repositories. Combined release verification and the publication-quality task-7.6 rerun after the final task-7 surface remain target behavior until issue #308 is complete. Version 0.4 preserves the complete compatible MCP inventory. Any later compact/default inventory or breaking rationalization belongs to post-v0.4 issue #310.
 
 ## Product Goal
 
@@ -385,6 +385,32 @@ The preserved baseline is ProjectAtlas `v0.3.26` at commit `d3b3e157f954c7d360d8
 | Non-Git freshness | Indexed directory without `.git`; saved edit/add/delete occurs | Explicit refresh is required | First normal indexed read reconciles safely or returns `refresh_required` | Filesystem fingerprints provide the same current-source guarantee as a Git worktree |
 
 For every row, correctness is decided before performance. No row may increase mandatory calls, full-file reads, broad-read escapes, or total context. Aggregate discovery bytes, calls, wrong selections, backtracking, and context must improve.
+
+### Interim Task-5.8 Checkpoint
+
+The 2026-07-23 controlled checkpoint used the same clean, saved-dirty, and
+non-Git source-navigation tasks for the v0.4 candidate, frozen v0.3.26, and a
+no-ProjectAtlas shell/source-reading control. Every arm reached the exact
+correctness oracle. Against v0.3.26, v0.4 reduced aggregate ProjectAtlas calls
+from 32 to 18, removed all three recorded backtracks, and reduced task-evidence
+bytes by 12.3%. Preserving all compatible tool descriptions and request schemas
+increased per-session discovery from 28,933 to 37,011 bytes, so runtime
+navigation bytes increased 20.4%. The packaged skill shrank from 33,977 to
+13,666 bytes; including the matching skill once per independent cold session
+reduced aggregate cold-session bytes by 18.8%.
+
+The no-ProjectAtlas control needed 25 navigation/source-reading commands versus
+18 v0.4 calls, but only 6,935 emitted bytes on these tiny fixtures. It used broad
+listings/searches and displayed 11 effectively complete tiny source files. The
+[full interim report](benchmarks/v0.4-agent-navigation-evaluation.md) preserves
+the exact tasks, call traces, compatibility boundary, excluded runs, metrics,
+methodology, and limitations.
+
+This checkpoint closes only the representative task-5.8 workflow requirement.
+It is not a release headline. Task 7.6 requires a fresh, repeated three-way
+benchmark after tasks 7.1 through 7.5 and the exact release candidate stabilize,
+including medium and pinned real-source large/huge work, system resource costs,
+break-even behavior, raw results, and a prominent reviewed GitHub summary.
 
 ## Acceptance Contract
 

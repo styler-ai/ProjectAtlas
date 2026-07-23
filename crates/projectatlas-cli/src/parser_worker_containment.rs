@@ -26,6 +26,8 @@ use thiserror::Error;
 
 use projectatlas_core::optional_parser_protocol::PARSER_WORKER_PROCESS_MEMORY_BYTES;
 
+use super::is_runtime_library_basename;
+
 /// Maximum cumulative CPU time before the supervisor must replace the worker.
 const CPU_SECONDS: rlim_t = 300;
 /// Maximum file bytes the worker may create.
@@ -703,15 +705,6 @@ fn validate_runtime_mappings(
     Ok(())
 }
 
-/// Return whether one artifact-provided runtime identity is a safe basename.
-fn is_runtime_library_basename(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 255
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-}
-
 /// Consume one fixed whitespace-delimited procfs mapping column.
 fn take_mapping_field<'a>(remaining: &mut &'a str) -> Option<&'a str> {
     *remaining = remaining.trim_start_matches(|character: char| character.is_ascii_whitespace());
@@ -1081,14 +1074,18 @@ mod tests {
     fn runtime_mapping_policy_is_fail_closed() {
         let accepted = "00400000-00401000 r-xp 00000000 00:00 1 /opt/pack/projectatlas-parser-worker\n\
                         7f000000-7f001000 r-xp 00000000 00:00 2 /usr/lib/libc.so.6\n\
-                        7f000100-7f001100 r-xp 00000000 00:00 4 /usr/lib/libm.so.6\n\
+                        7f000100-7f001100 r-xp 00000000 00:00 4 /usr/lib/libgcc_s.so.1\n\
+                        7f000200-7f001200 r-xp 00000000 00:00 5 /usr/lib/libm.so.6\n\
+                        7f000300-7f001300 r-xp 00000000 00:00 6 /usr/lib/libstdc++.so.6\n\
                         7f001000-7f002000 r-xp 00000000 00:00 3 /lib64/ld-linux-x86-64.so.2\n\
                         7f002000-7f003000 r-xp 00000000 00:00 0 [vdso]\n\
                         7f001000-7f002000 rw-p 00000000 00:00 0\n";
         let expected = vec![
             "ld-linux-x86-64.so.2".to_owned(),
             "libc.so.6".to_owned(),
+            "libgcc_s.so.1".to_owned(),
             "libm.so.6".to_owned(),
+            "libstdc++.so.6".to_owned(),
         ];
         assert!(
             validate_runtime_mappings(

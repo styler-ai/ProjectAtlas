@@ -367,24 +367,28 @@ fn executable_pack_root(executable: &Path) -> Result<PathBuf, WorkerStartupError
         .ok_or_else(|| WorkerStartupError::MissingExecutableParent(executable.to_path_buf()))
 }
 
-/// Canonicalize and require the executable-relative pack directory.
+/// Require the broker-canonicalized executable-relative Windows pack directory.
+///
+/// The Windows broker resolves the exact worker path before launch. Reopening
+/// the worker's parent with `canonicalize` after AppContainer admission fails
+/// even though the artifact-scoped package ACE authorizes direct pack reads.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-fn canonical_pack_root(pack_root: &Path) -> Result<PathBuf, WorkerStartupError> {
-    let canonical = pack_root
-        .canonicalize()
+fn validated_pack_root(pack_root: &Path) -> Result<PathBuf, WorkerStartupError> {
+    let metadata = pack_root
+        .metadata()
         .map_err(|error| WorkerStartupError::PackFileRead {
             role: "pack root",
             path: pack_root.to_path_buf(),
             message: error.to_string(),
         })?;
-    if !canonical.is_dir() {
+    if !metadata.is_dir() {
         return Err(WorkerStartupError::PackFileRead {
             role: "pack root",
-            path: canonical,
+            path: pack_root.to_path_buf(),
             message: "expected a directory".to_string(),
         });
     }
-    Ok(canonical)
+    Ok(pack_root.to_path_buf())
 }
 
 /// Parse exactly one closed worker operation without accepting grammar or path input.
@@ -512,13 +516,13 @@ fn load_runtime_mapping_policy(pack_root: &Path) -> Result<Vec<String>, WorkerSt
 }
 
 /// Return whether one runtime identity is a bounded platform-neutral basename.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(test, all(target_os = "linux", target_arch = "x86_64")))]
 fn is_runtime_library_basename(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 255
         && value
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+'))
 }
 
 /// Render one exact lowercase SHA-256 digest.
@@ -906,7 +910,7 @@ fn serve_worker(pack_root: &Path) -> Result<(), WorkerStartupError> {
 /// Serve the already admitted Windows x86-64 `AppContainer` worker.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 fn serve_worker(pack_root: &Path) -> Result<(), WorkerStartupError> {
-    let pack_root = canonical_pack_root(pack_root)?;
+    let pack_root = validated_pack_root(pack_root)?;
     let mut runtime = PreparedParserRuntime::new(&pack_root);
     serve_standard_streams(
         &pack_root,
@@ -1040,6 +1044,73 @@ mod tests {
     #[test]
     fn compiled_worker_registry_is_empty() -> Result<(), WorkerStartupError> {
         validate_worker_build_contract()
+    }
+
+    /// Keep accepted ELF SONAMEs bounded while rejecting paths and unsafe bytes.
+    #[test]
+    fn runtime_library_basename_accepts_sonames_and_rejects_paths() {
+        for accepted in ["libc.so.6", "libgcc_s.so.1", "libm.so.6", "libstdc++.so.6"] {
+            assert!(is_runtime_library_basename(accepted), "{accepted}");
+        }
+        for rejected in [
+            "",
+            "../libc.so.6",
+            "lib/libc.so.6",
+            r"lib\libc.so.6",
+            "lib c.so.6",
+            "libc.so.6\n",
+            "libc.sø.6",
+        ] {
+            assert!(!is_runtime_library_basename(rejected), "{rejected:?}");
+        }
+        assert!(!is_runtime_library_basename(&"a".repeat(256)));
+    }
+
+    /// Prove the committed Linux policy is consumable by the packaged worker.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn packaged_linux_runtime_policy_matches_worker_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .ok_or("CLI crate is not inside the workspace")?;
+        let bytes =
+            std::fs::read(workspace_root.join("packaging/parser-pack/native-import-policy.json"))?;
+        let policy = serde_json::from_slice::<RuntimeMappingPolicy>(&bytes)?;
+        let linux_rows = policy
+            .platforms
+            .into_iter()
+            .filter(|row| row.platform == PackPlatform::LinuxX86_64)
+            .collect::<Vec<_>>();
+        require(linux_rows.len() == 1, "policy must contain one Linux row")?;
+        let libraries = &linux_rows[0].worker_preloaded_libraries;
+        require(!libraries.is_empty(), "Linux runtime policy is empty")?;
+        require(
+            libraries.windows(2).all(|pair| pair[0] < pair[1]),
+            "Linux runtime policy is not sorted and unique",
+        )?;
+        require(
+            libraries
+                .iter()
+                .all(|library| is_runtime_library_basename(library)),
+            "Linux runtime policy contains an unsafe basename",
+        )?;
+        require(
+            libraries
+                .iter()
+                .all(|library| library != OPTIONAL_PARSER_PACK_LINUX_RUNTIME_LOADER_BASENAME),
+            "Linux runtime policy includes the separately admitted loader",
+        )?;
+        let mut completed = libraries.clone();
+        completed.push(OPTIONAL_PARSER_PACK_LINUX_RUNTIME_LOADER_BASENAME.to_owned());
+        completed.sort_unstable();
+        completed.dedup();
+        require(
+            completed.len() == libraries.len() + 1,
+            "Linux runtime loader was not added exactly once",
+        )?;
+        Ok(())
     }
 
     /// Reject any worker build whose dependency exposes a grammar identity.

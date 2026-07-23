@@ -548,52 +548,62 @@ Index ownership follows accepted queries rather than columns in isolation:
 
 ### Bounded Graph Read With Purpose Projection
 
+#### Indexed snapshot read
+
 ```mermaid
 sequenceDiagram
     actor Agent
-    participant Service as Query, traversal, and analysis service
-    participant Git as Optional bounded Git context
-    box Exactly one projectatlas.db
-        participant DB as projectatlas-db owner
-        participant Graph as Graph tables in the same DB
-        participant Atlas as Node and purpose tables in the same DB
-    end
+    participant Service as Query and traversal service
+    participant DB as projectatlas-db snapshot owner
+    participant Graph as Graph tables
+    participant Purpose as Node and purpose tables
 
-    Agent->>Service: anchored detailed-relation or closed-analysis request plus hard limits
-    Service->>DB: begin complete-generation read snapshot
-    DB->>Graph: resolve exact stable key or typed selector
+    Agent->>Service: exact anchor, mode, and hard limits
+    Service->>DB: begin generation-bound snapshot
+    DB->>Graph: resolve exact anchor
     alt one-hop outbound
-        DB->>Graph: source-first adjacency, ordered, LIMIT + 1
+        DB->>Graph: ordered source-first adjacency, LIMIT + 1
     else one-hop inbound
-        DB->>Graph: target-first adjacency, ordered, LIMIT + 1
-    else bounded multi-hop path or closed architecture, impact, or trace analysis
+        DB->>Graph: ordered target-first adjacency, LIMIT + 1
+    else multi-hop or closed analysis
         loop each bounded Rust frontier
-            Service->>DB: direction-specific frontier keys plus remaining DB envelope
-            DB->>Graph: batched indexed adjacency within the captured snapshot
+            Service->>DB: frontier keys and remaining DB budget
+            DB->>Graph: batched indexed adjacency
         end
     end
-    DB->>Graph: batch unique endpoint selectors for the bounded result
-    DB->>Atlas: batch current file/folder purposes and review state
+    DB->>Graph: batch endpoints and optional evidence
+    DB->>Purpose: batch owner purposes and review state
+    Graph-->>DB: bounded rows or terminal error
+    Purpose-->>DB: purpose rows or terminal error
+    DB-->>Service: rows, totals, truncation, selectors, and trust
+```
+
+#### Buffered composition and terminal cleanup
+
+```mermaid
+sequenceDiagram
+    participant Service as Query and analysis service
+    participant Git as Optional bounded Git context
+    participant DB as Captured database snapshot
+    actor Agent
+
     opt exact evidence requested
-        DB->>Graph: bounded occurrence spans and coverage
+        Service->>DB: load bounded occurrences and coverage
     end
-    Graph-->>DB: typed bounded graph rows or terminal error
-    Atlas-->>DB: authoritative batched purpose projection or terminal error
-    DB-->>Service: generation-bound rows, total state, truncation, selectors, trust
-    opt impact mode requests VCS context
-        Service->>Git: shell-free bounded status or revision diff
-        Git-->>Service: bounded normalized paths or typed unavailable reason
+    opt impact requests VCS context
+        Service->>Git: bounded shell-free status or revision diff
+        Git-->>Service: normalized paths or typed unavailable reason
     end
-    Service->>Service: compose detailed rows or candidate-labeled analysis and fit exact output
+    Service->>Service: compose and fit the complete output in memory
     alt complete result and cancellation still clear
-        Service->>DB: end captured snapshot after final composition
-        DB->>DB: release read snapshot
-        Service-->>Agent: compact TOON rows or typed topology with exact next call
-    else SQLite/row-conversion/cancellation terminal error
-        Service->>Service: discard partial composition
-        Service->>DB: end captured snapshot
-        DB->>DB: release read snapshot
-        Service-->>Agent: error without a partial-success payload
+        Service->>DB: finish captured snapshot
+        DB-->>Service: snapshot released
+        Service-->>Agent: one complete payload with exact next call
+    else database, conversion, limit, or cancellation error
+        Service->>Service: discard the buffered composition
+        Service->>DB: close captured snapshot
+        DB-->>Service: snapshot released or cleanup error
+        Service-->>Agent: terminal error without partial payload
     end
 ```
 
@@ -1670,16 +1680,20 @@ capability sandboxes.
 The launch mechanism is proven before runtime integration. The accepted optional-
 pack targets are Linux x86-64 and Windows x86-64. On Windows, Rust owns one
 artifact-bound containment broker as its direct child. The broker creates exactly
-one LPAC worker suspended with zero capabilities, child-process denial, and only the
-supervisor-created stdin/stdout/stderr endpoints; attaches a no-breakaway Job Object
-with active-process limit one, per-process/job committed-memory ceilings, and
-kill-on-close; associates that Job with a completion port before resume; verifies
-admission; resumes; and emits one fixed bounded adapter-local record. Rust validates
-that record before delivering `SessionOpen`, owns all parser protocol bytes and its
-direct broker child, and relies on the broker only for exact worker/job wait and
-cleanup. A Windows memory-boundary result is accepted only when the completion port
-reports the expected worker's process-memory or Job-memory limit event; an ordinary
-worker exit, including the reserved broker status, cannot impersonate that proof.
+one LPAC worker suspended with zero capabilities and only the supervisor-created
+stdin/stdout/stderr endpoints; attaches a no-breakaway Job Object with active-process
+limit one, per-process/job committed-memory ceilings, and kill-on-close; associates
+that Job with a completion port before resume; verifies LPAC admission through the
+token's effective access rather than undocumented group layout; resumes; and emits
+one fixed bounded adapter-local record. The Job's active-process limit is the
+child-creation boundary and is self-tested by making the admitted worker the
+OS-level parent of a second creation attempt and requiring
+`ERROR_NOT_ENOUGH_QUOTA`. Rust validates the admission record before delivering
+`SessionOpen`, owns all parser protocol bytes and its direct broker child, and
+relies on the broker only for exact worker/job wait and cleanup. A Windows
+memory-boundary result is accepted only when the completion port reports the
+expected worker's process-memory or Job-memory limit event; an ordinary worker
+exit, including the reserved broker status, cannot impersonate that proof.
 The empty artifact-scoped AppContainer profile is
 bounded unavoidable Windows sandbox state, exposes no repository/user data, and is
 removed through the optional-pack lifecycle. Linux artifact construction eagerly
@@ -1693,6 +1707,15 @@ is the first acknowledgement that binds the fresh session, artifact, and contain
 the supervisor sends no grammar identity or source bytes before it. Delegated cgroup
 v2 improves accounting when available but is not a hidden ordinary-user prerequisite.
 Missing primitives fail closed.
+
+The Windows PowerShell surface is release-harness code, not a normal runtime
+dependency. Separate scripts remain only where authority changes: pinned input
+acquisition, disposable-account construction, runner-Job brokering, runtime LPAC
+broker compilation, post-cleanup artifact verification, recovery injection, and
+default-runtime measurement. Their diagnostic and verifier scripts are not shipped
+in the optional pack. Repeated bounded-process or cleanup plumbing inside the same
+authority is maintenance debt, but merging across these boundaries is valid only
+when the replacement preserves the existing fault, survivor, and cleanup proofs.
 
 Each platform receipt also runs the exact packaged worker under a deliberately
 reduced, schema-validated memory ceiling through the same supervisor and OS adapter.
