@@ -393,9 +393,9 @@
         "negative": {
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/comment.txt",
-          "case_name": "Top level comment incomplete",
-          "source": "# Hello\n",
-          "source_sha256": "90f8ec5669cd34183b9b0fdf8b94f5efb4c3672876330f4aa76088c2b4ad17be",
+          "case_name": "Top level comment with incomplete block",
+          "source": "# Hello\n{\n",
+          "source_sha256": "ce41dc431f0e84be53050d2eebcd0a54a1139d91ef7bffe6a35720c9feb8eeac",
           "expected_error": true
         }
       }

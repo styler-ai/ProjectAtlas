@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "source_manifest_sha256": "51f772d7a12d162c8350cf994f3ec30d0e9345710d984904daf4b0ab5a49cc42",
+  "source_manifest_sha256": "6e530ca5fb0bc5cfb2e73dbade346d6591adbb8a9b6a1722f2ae19080723c8b4",
   "rows": [
     {
       "language_id": "abl",
@@ -193,9 +193,9 @@
         "negative": {
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/comment.txt",
-          "case_name": "Top level comment incomplete",
-          "source": "# Hello\n",
-          "source_sha256": "90f8ec5669cd34183b9b0fdf8b94f5efb4c3672876330f4aa76088c2b4ad17be",
+          "case_name": "Top level comment with incomplete block",
+          "source": "# Hello\n{\n",
+          "source_sha256": "ce41dc431f0e84be53050d2eebcd0a54a1139d91ef7bffe6a35720c9feb8eeac",
           "expected_error": true
         }
       }

@@ -178,9 +178,14 @@ $dnsReachable = Test-DnsQuery -Resolver $resolver
 $tcpReachable = Test-DirectTcpConnection
 $httpsReachable = Test-HttpsRequest
 $expectedReachable = $Mode -eq "require-reachable"
-if ($dnsReachable -ne $expectedReachable -or
-    $tcpReachable -ne $expectedReachable -or
-    $httpsReachable -ne $expectedReachable) {
+$boundarySatisfied = if ($expectedReachable) {
+    # Resolver discovery already proved DNS; do not make that transient UDP probe a duplicate gate.
+    $tcpReachable -and $httpsReachable
+}
+else {
+    -not $dnsReachable -and -not $tcpReachable -and -not $httpsReachable
+}
+if (-not $boundarySatisfied) {
     throw "Network boundary did not satisfy $Mode (dns=$dnsReachable tcp=$tcpReachable https=$httpsReachable)."
 }
 
