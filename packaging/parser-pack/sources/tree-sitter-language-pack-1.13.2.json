@@ -341,18 +341,18 @@
         "positive": {
           "origin": "upstream-tree-sitter-corpus",
           "source_path": "test/corpus/comment.test",
-          "case_name": "Line comment",
-          "source": "; This is a comment\n",
-          "source_sha256": "9916092724c019f046d5b1581736f528c836d7a4e39de65f09a315aaa08f60c0",
-          "expected_tree": "(program\n    (line_comment))\n",
-          "expected_tree_sha256": "46bc22708e178dd1e595b3a8d9e70b1bb16a8705072a5d6e67bcc8bc12c0e9b1"
+          "case_name": "Inline comment with instr one reg arg, no space between",
+          "source": "pushq %rbp; This is an in-line comment\n",
+          "source_sha256": "401f90db05c718ffc61749f32ce35108cecd0dc84c0eabb7b081ca0f7b04c494",
+          "expected_tree": "(program\n    (instruction \n        kind: (word)\n        (ident (reg)))\n    (line_comment))\n",
+          "expected_tree_sha256": "3b7f77c17a824fdc4b8db9fbf2dce309d92f93863d03c1d75a0fac7952157025"
         },
         "negative": {
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/comment.test",
-          "case_name": "Line comment incomplete",
-          "source": "; This is a c\n",
-          "source_sha256": "a9da519dc6e441fd0b1a9ca7c60559c4f6c9547ac3223b40db5a535f5e24d0ff",
+          "case_name": "Inline comment with instr one reg arg incomplete",
+          "source": "pushq %\n",
+          "source_sha256": "f72f9e08c71bd60be807c5829089376ac7cb0d688eb4f21ab07a3e5c6e70f648",
           "expected_error": true
         }
       }

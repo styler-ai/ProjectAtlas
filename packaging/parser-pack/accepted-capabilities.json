@@ -1749,16 +1749,16 @@
         "positive": {
           "origin": "upstream-tree-sitter-corpus",
           "path": "test/corpus/comment.test",
-          "case_name": "Line comment",
-          "source": "; This is a comment\n",
-          "source_blake3": "1653194d302fcd0368563d5d1ab7b4adb5c105efc59bbe483b4e0802e422d179"
+          "case_name": "Inline comment with instr one reg arg, no space between",
+          "source": "pushq %rbp; This is an in-line comment\n",
+          "source_blake3": "71fa4763ba9ccc4ab54574446fde057ba6a6eb5d90a56d5068c14c2a5ac6d143"
         },
         "negative": {
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/comment.test",
-          "case_name": "Line comment incomplete",
-          "source": "; This is a c\n",
-          "source_blake3": "2a4cb66a245ca1b0cc24e4cf08b8c25bd44c26eafaa051da9e9f7d64f2101b2d"
+          "case_name": "Inline comment with instr one reg arg incomplete",
+          "source": "pushq %\n",
+          "source_blake3": "9f824af19bfc5829543a0269b673b7a561ca589dfaebd4a679055a0b6184b172"
         }
       },
       "required_platforms": [
@@ -1766,7 +1766,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "362f677e1e48e79b42d2704d301a4e6daa2f4b19eb404ab79db188f6a2ec5e79"
+      "capability_digest": "cb659a4fa748034eda51319fe56191e55279e22544a71646d1577be1b2f11fa6"
     },
     {
       "language_id": "awk",
@@ -7597,5 +7597,5 @@
       "capability_digest": "d11ac33f63f87c732d6bcac6b300eace2a4eba4775097f03c0f835f5fa2db4e9"
     }
   ],
-  "capability_set_digest": "49199f4db338fbf5dc30f57a81834b52f8ac3d01a9812e8b71a375241feeccc0"
+  "capability_set_digest": "0d634f1f085c95d338996b8ca6f5401d00412135044b61ab178c1337ba1f0d6d"
 }

@@ -685,12 +685,25 @@ fn validate_runtime_mappings(
                     reason: "a system runtime mapping has no UTF-8 basename",
                 },
             )?;
-            if !expected.contains(library) {
+            let admitted = expected.iter().copied().find(|expected_library| {
+                library == *expected_library
+                    || library
+                        .strip_prefix(*expected_library)
+                        .and_then(|suffix| suffix.strip_prefix('.'))
+                        .is_some_and(|version| {
+                            !version.is_empty()
+                                && version.split('.').all(|part| {
+                                    !part.is_empty()
+                                        && part.bytes().all(|byte| byte.is_ascii_digit())
+                                })
+                        })
+            });
+            let Some(admitted) = admitted else {
                 return Err(ParserWorkerContainmentError::InvalidRuntimeMappings {
                     reason: "a system runtime mapping is absent from the artifact policy",
                 });
-            }
-            observed_runtime_libraries.insert(library);
+            };
+            observed_runtime_libraries.insert(admitted);
         } else {
             return Err(ParserWorkerContainmentError::InvalidRuntimeMappings {
                 reason: "a mapped runtime object is outside admitted roots",
@@ -1096,6 +1109,30 @@ mod tests {
             )
             .is_ok()
         );
+
+        let versioned_system_runtime =
+            accepted.replace("/usr/lib/libstdc++.so.6", "/usr/lib/libstdc++.so.6.0.33");
+        assert!(
+            validate_runtime_mappings(
+                &versioned_system_runtime,
+                Path::new("/opt/pack"),
+                Path::new("/opt/pack/projectatlas-parser-worker"),
+                &expected,
+            )
+            .is_ok()
+        );
+
+        let unbound_system_runtime =
+            accepted.replace("/usr/lib/libstdc++.so.6", "/usr/lib/libstdc++.so.6.backup");
+        assert!(matches!(
+            validate_runtime_mappings(
+                &unbound_system_runtime,
+                Path::new("/opt/pack"),
+                Path::new("/opt/pack/projectatlas-parser-worker"),
+                &expected,
+            ),
+            Err(ParserWorkerContainmentError::InvalidRuntimeMappings { .. })
+        ));
 
         let spaced_pack = accepted.replace(
             "/opt/pack/projectatlas-parser-worker",
