@@ -816,10 +816,9 @@ $workerBuildArguments = @(
                 "-NonInteractive",
                 "-ExecutionPolicy", "Bypass",
                 "-File", $brokerBuilder,
-                "-OutputPath", $brokerOutput,
-                "-RunSelfTest"
+                "-OutputPath", $brokerOutput
             ) `
-            -Role "runtime-containment broker build and self-test"
+            -Role "runtime-containment broker build and contract audit"
     }
 $executableSuffix = ""
 if ($Target -eq "x86_64-pc-windows-msvc") {

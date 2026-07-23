@@ -1726,13 +1726,18 @@ namespace ProjectAtlas.Release
                 File.WriteAllBytes(Path.Combine(packRoot, ArtifactManifestFileName), manifest);
                 profileName = ProfileName(manifest);
 
-                RunBrokerSelfTest(packRoot, 0, SelfTestAdmissionRecord);
+                RunBrokerSelfTest(
+                    packRoot,
+                    "admission-success",
+                    0,
+                    SelfTestAdmissionRecord);
                 File.WriteAllText(
                     Path.Combine(packRoot, SelfTestMarkerFileName),
                     SelfTestPreAssignmentFaultMarker,
                     Encoding.ASCII);
                 RunBrokerSelfTest(
                     packRoot,
+                    "pre-assignment-failure",
                     FailureExitCode,
                     Encoding.ASCII.GetBytes(
                         "[parser-containment] failed at self-test-before-job-assignment\n"));
@@ -1853,6 +1858,7 @@ namespace ProjectAtlas.Release
 
         private static void RunBrokerSelfTest(
             string packRoot,
+            string contractCase,
             int expectedExitCode,
             byte[] expectedStderr)
         {
@@ -1916,9 +1922,33 @@ namespace ProjectAtlas.Release
                 {
                     throw new ContainmentFailure(
                         "self-test-broker-contract",
-                        "exit=" + broker.ExitCode.ToString(CultureInfo.InvariantCulture));
+                        "case=" + contractCase
+                            + ";expected_exit="
+                            + expectedExitCode.ToString(CultureInfo.InvariantCulture)
+                            + ";actual_exit="
+                            + broker.ExitCode.ToString(CultureInfo.InvariantCulture)
+                            + ";stdout_hex=" + BytesToHex(stdout)
+                            + ";stderr_hex=" + BytesToHex(stderr));
                 }
             }
+        }
+
+        private static string BytesToHex(byte[] bytes)
+        {
+            if (bytes == null)
+            {
+                return "null";
+            }
+            if (bytes.Length == 0)
+            {
+                return "empty";
+            }
+            StringBuilder hex = new StringBuilder(checked(bytes.Length * 2));
+            foreach (byte value in bytes)
+            {
+                hex.Append(value.ToString("x2", CultureInfo.InvariantCulture));
+            }
+            return hex.ToString();
         }
 
         private static void RunCleanupProfileSelfTest(string packRoot)

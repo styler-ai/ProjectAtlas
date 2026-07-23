@@ -5,7 +5,13 @@ param(
     [string]$WindowsRunnerJobBroker =
         (Join-Path $PSScriptRoot "invoke-parser-pack-windows-runner-job-broker.ps1"),
     [string]$WindowsRecovery =
-        (Join-Path $PSScriptRoot "test-parser-pack-windows-recovery.ps1")
+        (Join-Path $PSScriptRoot "test-parser-pack-windows-recovery.ps1"),
+    [string]$RuntimeContainmentBuilder =
+        (Join-Path $PSScriptRoot "build-parser-pack-runtime-containment.ps1"),
+    [string]$RuntimeContainmentVerifier =
+        (Join-Path $PSScriptRoot "verify-parser-pack-runtime-containment.ps1"),
+    [string]$OptionalParserPackWorkflow =
+        (Join-Path (Split-Path -Parent $PSScriptRoot) "workflows/optional-parser-pack.yml")
 )
 
 Set-StrictMode -Version Latest
@@ -230,6 +236,31 @@ try {
         )
         Require ($brokerParseErrors.Count -eq 0) "Windows runner Job broker did not parse."
         $brokerText = $brokerAst.Extent.Text
+        $containmentBuilderTokens = $null
+        $containmentBuilderParseErrors = $null
+        $containmentBuilderAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Get-Item -LiteralPath $RuntimeContainmentBuilder -Force).FullName,
+            [ref]$containmentBuilderTokens,
+            [ref]$containmentBuilderParseErrors
+        )
+        Require `
+            ($containmentBuilderParseErrors.Count -eq 0) `
+            "Runtime-containment broker builder did not parse."
+        $containmentBuilderText = $containmentBuilderAst.Extent.Text
+        $containmentVerifierTokens = $null
+        $containmentVerifierParseErrors = $null
+        $containmentVerifierAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Get-Item -LiteralPath $RuntimeContainmentVerifier -Force).FullName,
+            [ref]$containmentVerifierTokens,
+            [ref]$containmentVerifierParseErrors
+        )
+        Require `
+            ($containmentVerifierParseErrors.Count -eq 0) `
+            "Runtime-containment artifact verifier did not parse."
+        $containmentVerifierText = $containmentVerifierAst.Extent.Text
+        $workflowText = [System.IO.File]::ReadAllText(
+            (Get-Item -LiteralPath $OptionalParserPackWorkflow -Force).FullName
+        )
         $recoveryTokens = $null
         $recoveryParseErrors = $null
         $recoveryAst = [System.Management.Automation.Language.Parser]::ParseFile(
@@ -755,6 +786,86 @@ try {
                 $targetFailure -notmatch 'broker-frame-size|broker-pipe-closed') `
             "Windows runner Job broker lost one escaped Unicode target failure."
         $productionText = $ast.Extent.Text
+        Require `
+            (-not $productionText.Contains('"-RunSelfTest"') -and
+                $productionText.Contains(
+                    '-Role "runtime-containment broker build and contract audit"'
+                ) -and
+                $containmentBuilderText.Contains('"admission-success"') -and
+                $containmentBuilderText.Contains('"pre-assignment-failure"') -and
+                $containmentBuilderText.Contains('"case=" + contractCase') -and
+                $containmentBuilderText.Contains('";expected_exit="') -and
+                $containmentBuilderText.Contains('";actual_exit="') -and
+                $containmentBuilderText.Contains('";stdout_hex=" + BytesToHex(stdout)') -and
+                $containmentBuilderText.Contains('";stderr_hex=" + BytesToHex(stderr)') -and
+                $containmentBuilderText.Contains('!BytesEqual(stderr, expectedStderr)')) `
+            "Runtime-containment construction did not preserve exact comparison and bounded case diagnostics."
+        $cleanupStepIndex = $workflowText.IndexOf(
+            '- name: Remove disposable Windows construction identity',
+            [System.StringComparison]::Ordinal
+        )
+        $containmentVerificationStepIndex = $workflowText.IndexOf(
+            '- name: Verify exact constructed Windows runtime containment',
+            [System.StringComparison]::Ordinal
+        )
+        $candidateRevalidationStepIndex = $workflowText.IndexOf(
+            '- name: Revalidate exact candidate after construction',
+            [System.StringComparison]::Ordinal
+        )
+        $artifactUploadStepIndex = $workflowText.IndexOf(
+            '- name: Upload immutable construction output',
+            [System.StringComparison]::Ordinal
+        )
+        Require `
+            ($cleanupStepIndex -ge 0 -and
+                $containmentVerificationStepIndex -gt $cleanupStepIndex -and
+                $candidateRevalidationStepIndex -gt $containmentVerificationStepIndex -and
+                $artifactUploadStepIndex -gt $candidateRevalidationStepIndex -and
+                $workflowText.Contains(
+                    '& .github/scripts/verify-parser-pack-runtime-containment.ps1'
+                ) -and
+                $workflowText.Contains(
+                    '-OutputRoot (Join-Path $env:RUNNER_TEMP "parser-pack-output")'
+                )) `
+            "Runtime-containment profile self-test was not gated after cleanup and before upload."
+        Require `
+            ($containmentVerifierText.Contains(
+                    '"build/release/$brokerFileName"'
+                ) -and
+                $containmentVerifierText.Contains(
+                    '"work/$assembly/$artifactManifestFileName"'
+                ) -and
+                $containmentVerifierText.Contains(
+                    '"work/$assembly/$nativeAuditFileName"'
+                ) -and
+                $containmentVerifierText.Contains(
+                    '[string]$brokerRows[0].role.kind -cne "containment-broker"'
+                ) -and
+                $containmentVerifierText.Contains(
+                    '[string]$nativeAudit.containment_broker.file.sha256 -cne $brokerDigest'
+                ) -and
+                $containmentVerifierText.Contains(
+                    '$start.Environment.Clear()'
+                ) -and
+                $containmentVerifierText.Contains(
+                    '$start.WorkingDirectory = $WorkingDirectory.FullName'
+                ) -and
+                $containmentVerifierText.Contains(
+                    '$maximumCommandOutputBytes = 4 * 1024'
+                ) -and
+                $containmentVerifierText.Contains(
+                    'Stop-BoundedProcess -Process $process'
+                ) -and
+                $containmentVerifierText.Contains(
+                    '-Arguments @("self-test")'
+                ) -and
+                $containmentVerifierText.Contains(
+                    '"[parser-containment] self-test passed`r`n"'
+                ) -and
+                $containmentVerifierText.Contains(
+                    '"projectatlas-parser-containment-*"'
+                )) `
+            "Runtime-containment artifact verifier lost identity, environment, process, or cleanup bounds."
         Require `
             ([System.Text.RegularExpressions.Regex]::Matches(
                 $wrapperText,
@@ -2814,6 +2925,9 @@ exit 7
             $status.exit_code -eq 7 -and
             $script:constructionFailureExitCode -eq 7) `
         "Failure diagnostic changed the authoritative status record."
+    if ($env:OS -eq "Windows_NT") {
+        & (Join-Path $PSScriptRoot "test-parser-pack-runtime-containment-verifier.ps1")
+    }
     Write-Output "Parser-pack construction diagnostic self-test passed."
 }
 finally {

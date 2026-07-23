@@ -304,6 +304,14 @@ jobs:
             )
           }
 
+      - name: Verify exact constructed Windows runtime containment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .github/scripts/verify-parser-pack-runtime-containment.ps1 `
+            -OutputRoot (Join-Path $env:RUNNER_TEMP "parser-pack-output")
+
       - name: Revalidate exact candidate after construction
         shell: pwsh
         run: |
