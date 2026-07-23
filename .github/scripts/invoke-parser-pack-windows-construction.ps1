@@ -622,7 +622,14 @@ public static class ProjectAtlasConstructionObjectDirectoryAcl
 
     public static string GetCurrentPath()
     {
-        return "\\BaseNamedObjects";
+        int sessionId = Process.GetCurrentProcess().SessionId;
+        if (sessionId == 0)
+        {
+            return "\\BaseNamedObjects";
+        }
+        return "\\Sessions\\" +
+            sessionId.ToString(CultureInfo.InvariantCulture) +
+            "\\BaseNamedObjects";
     }
 
     public static void GrantExactCreateObject(string path, string principalSid)

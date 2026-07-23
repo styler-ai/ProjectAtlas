@@ -539,7 +539,7 @@ try {
             operation_error = $null
             cleanup_error = $null
             session_id = 1
-            directory_path = '\BaseNamedObjects'
+            directory_path = '\Sessions\1\BaseNamedObjects'
             directory_traverse_ntstatus = 0
             directory_create_object_ntstatus = 0
             directory_traverse_create_ntstatus = 0
@@ -1770,11 +1770,18 @@ public static class ProjectAtlasConstructionAdmissionFixture
         if (-not ('ProjectAtlasConstructionObjectDirectoryAcl' -as [type])) {
             Add-Type -TypeDefinition $constructionObjectDirectoryAclSource -Language CSharp
         }
+        $currentProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+        $expectedObjectDirectory = if ($currentProcess.SessionId -eq 0) {
+            '\BaseNamedObjects'
+        }
+        else {
+            "\Sessions\$($currentProcess.SessionId)\BaseNamedObjects"
+        }
         $currentObjectDirectory =
             [ProjectAtlasConstructionObjectDirectoryAcl]::GetCurrentPath()
         Require `
-            ($currentObjectDirectory -ceq '\BaseNamedObjects') `
-            "Construction object-directory ACL adapter did not target the global namespace."
+            ($currentObjectDirectory -ceq $expectedObjectDirectory) `
+            "Construction object-directory ACL adapter did not target the current session namespace."
         [ProjectAtlasConstructionObjectDirectoryAcl]::AssertExactPrincipalAbsent(
             $currentObjectDirectory,
             'S-1-5-21-0-0-0-0'
@@ -1793,7 +1800,6 @@ public static class ProjectAtlasConstructionAdmissionFixture
         Require `
             $invalidObjectDirectoryRejected `
             "Construction object-directory ACL adapter accepted a non-canonical path."
-        $currentProcess = [System.Diagnostics.Process]::GetCurrentProcess()
         $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         $mismatchedSid = if ($currentSid -eq 'S-1-5-18') { 'S-1-5-19' } else { 'S-1-5-18' }
         $currentProcess.Refresh()

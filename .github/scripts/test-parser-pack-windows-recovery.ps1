@@ -323,7 +323,10 @@ function Assert-ProductionRecoveryContracts {
             $objectDirectoryText.Contains('NtOpenDirectoryObject(') -and
             $objectDirectoryText.Contains('GetKernelObjectSecurity(') -and
             $objectDirectoryText.Contains('SetKernelObjectSecurity(') -and
+            $objectDirectoryText.Contains('Process.GetCurrentProcess().SessionId') -and
+            $objectDirectoryText.Contains('sessionId.ToString(CultureInfo.InvariantCulture)') -and
             $objectDirectoryText.Contains('return "\\BaseNamedObjects";') -and
+            $objectDirectoryText.Contains('"\\Sessions\\" +') -and
             $objectDirectoryText.Contains('construction-object-directory-target-mismatch') -and
             -not $objectDirectoryText.Contains('construction-object-directory-session-mismatch') -and
             $objectDirectoryText.Contains('construction-object-directory-principal-already-present') -and
@@ -1163,13 +1166,7 @@ function Test-DefaultSecuritySemaphoreProbe {
         [long]$CloseWin32
     )
 
-    if ($CreateWin32 -eq 0L) {
-        return $CreatedNew -and $CloseWin32 -eq 0L
-    }
-    if ($CreateWin32 -eq 183L) {
-        return -not $CreatedNew -and $CloseWin32 -eq 0L
-    }
-    return $CreateWin32 -gt 0L -and -not $CreatedNew -and $CloseWin32 -eq -1L
+    return $CreateWin32 -eq 0L -and $CreatedNew -and $CloseWin32 -eq 0L
 }
 
 function Read-NamedObjectProbeRecord {
@@ -1276,7 +1273,11 @@ function Read-NamedObjectProbeRecord {
             $record.seeded_create_close_win32 -ge -1L -and
             $record.seeded_create_close_win32 -le [int32]::MaxValue -and
             ([string]::IsNullOrEmpty($record.directory_path) -or
-                $record.directory_path -ceq '\BaseNamedObjects') -and
+                ($record.session_id -eq 0L -and
+                    $record.directory_path -ceq '\BaseNamedObjects') -or
+                ($record.session_id -gt 0L -and
+                    $record.directory_path -ceq
+                        "\Sessions\$($record.session_id)\BaseNamedObjects")) -and
             ([string]::IsNullOrEmpty($record.semaphore_name) -or
                 $record.semaphore_name -match
                     '\AProjectAtlasParserPack-[0-9a-f]{32}\z') -and
@@ -1298,6 +1299,9 @@ function Read-NamedObjectProbeRecord {
         $record.session_id -ge 0L -and
         -not [string]::IsNullOrEmpty($record.directory_path) -and
         -not [string]::IsNullOrEmpty($record.native_semaphore_name) -and
+        $record.directory_traverse_ntstatus -eq 0L -and
+        $record.directory_create_object_ntstatus -eq 0L -and
+        $record.directory_traverse_create_ntstatus -eq 0L -and
         $record.session_directory_traverse_ntstatus -eq 0L -and
         $record.seeded_direct_open_ntstatus -eq 0L -and
         $record.seeded_direct_open_close_ntstatus -eq 0L -and
@@ -1391,7 +1395,7 @@ function Assert-NamedObjectProbeRecordFixtures {
             operation_error = $null
             cleanup_error = $null
             session_id = 1
-            directory_path = '\BaseNamedObjects'
+            directory_path = '\Sessions\1\BaseNamedObjects'
             directory_traverse_ntstatus = 0
             directory_create_object_ntstatus = 0
             directory_traverse_create_ntstatus = 0
@@ -1421,7 +1425,6 @@ function Assert-NamedObjectProbeRecordFixtures {
         $defaultSecurityDenied.post_job_native_create_win32 = 5
         $defaultSecurityDenied.post_job_native_created_new = $false
         $defaultSecurityDenied.post_job_native_close_win32 = -1
-        $records.Add($defaultSecurityDenied)
         foreach ($failureRow in @(
             [pscustomobject]@{
                 Stage = 'native-semaphore-create'
@@ -1483,6 +1486,27 @@ function Assert-NamedObjectProbeRecordFixtures {
             )
             Read-NamedObjectProbeRecord -Path $path | Out-Null
         }
+
+        $defaultSecurityDeniedPath = [System.IO.Path]::Combine(
+            $fixtureRoot,
+            'default-security-denied.json'
+        )
+        [System.IO.File]::WriteAllText(
+            $defaultSecurityDeniedPath,
+            ($defaultSecurityDenied | ConvertTo-Json -Compress -Depth 8),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        $defaultSecurityDeniedRejected = $false
+        try {
+            Read-NamedObjectProbeRecord -Path $defaultSecurityDeniedPath | Out-Null
+        }
+        catch {
+            $defaultSecurityDeniedRejected = $_.Exception.Message -match
+                'stage, exit, or error relationship was invalid'
+        }
+        Require `
+            $defaultSecurityDeniedRejected `
+            "Named-object probe reader accepted denied session object creation as success."
 
         $legacy = [ordered]@{}
         foreach ($entry in $success.GetEnumerator()) {
@@ -3072,7 +3096,12 @@ try {
     $actualIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $actualSid = $actualIdentity.User.Value
     $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
-    $directoryPath = '\BaseNamedObjects'
+    $directoryPath = if ($sessionId -eq 0) {
+        '\BaseNamedObjects'
+    }
+    else {
+        "\Sessions\$sessionId\BaseNamedObjects"
+    }
     if (-not [string]::Equals(
             $actualSid,
             $ExpectedPrincipalSid,
@@ -3104,7 +3133,7 @@ try {
         [ProjectAtlasNamedObjectAccessProbe]::OpenDirectory($directoryPath, 0x00000004)
     $directoryTraverseCreateNtStatus =
         [ProjectAtlasNamedObjectAccessProbe]::OpenDirectory($directoryPath, 0x00000006)
-    $sessionDirectoryPath = "\Sessions\$sessionId\BaseNamedObjects"
+    $sessionDirectoryPath = $directoryPath
     $sessionDirectoryTraverseNtStatus =
         [ProjectAtlasNamedObjectAccessProbe]::OpenDirectory(
             $sessionDirectoryPath,
@@ -3682,7 +3711,12 @@ exit 0
                     "Construction Job changed token namespace field $namespaceField."
             }
             Invoke-ExactSidProcessAudit -Sid $identity.Sid -Expectation absent
-            $expectedDirectoryPath = '\BaseNamedObjects'
+            $expectedDirectoryPath = if ($probeResult.session_id -eq 0L) {
+                '\BaseNamedObjects'
+            }
+            else {
+                "\Sessions\$($probeResult.session_id)\BaseNamedObjects"
+            }
             Require `
                 ($probeResult.schema_version -eq 5L -and
                     $probeResult.status -ceq 'success' -and
