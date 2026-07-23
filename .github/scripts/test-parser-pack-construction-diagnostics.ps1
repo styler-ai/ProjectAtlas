@@ -487,7 +487,7 @@ try {
             "Named-object diagnostic fault did not atomically publish one bounded record."
         $probeRecord = Read-NamedObjectProbeRecord -Path $probeResultItem.FullName
         Require `
-            ($probeRecord.schema_version -eq 6L -and
+            ($probeRecord.schema_version -eq 7L -and
                 $probeRecord.status -ceq 'failure' -and
                 $probeRecord.stage -ceq 'ambient-environment' -and
                 $probeRecord.exit_code -eq 122L -and
@@ -530,7 +530,7 @@ try {
             "projectatlas-object-namespace-probe-$([Guid]::NewGuid().ToString('N')).json"
         )
         $stringBooleanPayload = [ordered]@{
-            schema_version = 6
+            schema_version = 7
             status = 'success'
             stage = 'complete'
             exit_code = 0
@@ -545,6 +545,7 @@ try {
             directory_create_object_ntstatus = 0
             directory_traverse_create_ntstatus = 0
             session_directory_traverse_ntstatus = 0
+            session_directory_named_object_access_ntstatus = 0
             native_semaphore_name =
                 "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
             post_job_native_create_win32 = 0

@@ -560,10 +560,15 @@ using System.Security.Principal;
 
 public static class ProjectAtlasConstructionObjectDirectoryAcl
 {
+    private const uint DirectoryQuery = 0x00000001;
     private const uint DirectoryTraverse = 0x00000002;
     private const uint DirectoryCreateObject = 0x00000004;
-    private const uint NamedObjectCreationAccess =
-        DirectoryTraverse | DirectoryCreateObject;
+    private const uint DirectoryCreateSubdirectory = 0x00000008;
+    private const uint NamedObjectDirectoryAccess =
+        DirectoryQuery |
+        DirectoryTraverse |
+        DirectoryCreateObject |
+        DirectoryCreateSubdirectory;
     private const uint ReadControl = 0x00020000;
     private const uint WriteDac = 0x00040000;
     private const uint ObjCaseInsensitive = 0x00000040;
@@ -632,7 +637,7 @@ public static class ProjectAtlasConstructionObjectDirectoryAcl
             "\\BaseNamedObjects";
     }
 
-    public static void GrantExactCreateObject(string path, string principalSid)
+    public static void GrantExactNamedObjectAccess(string path, string principalSid)
     {
         ValidatePath(path);
         if (!String.Equals(path, GetCurrentPath(), StringComparison.Ordinal))
@@ -674,7 +679,7 @@ public static class ProjectAtlasConstructionObjectDirectoryAcl
                     new CommonAce(
                         AceFlags.None,
                         AceQualifier.AccessAllowed,
-                        checked((int)NamedObjectCreationAccess),
+                        checked((int)NamedObjectDirectoryAccess),
                         principal,
                         false,
                         null));
@@ -991,7 +996,7 @@ public static class ProjectAtlasConstructionObjectDirectoryAcl
             exact = common != null &&
                 common.AceQualifier == AceQualifier.AccessAllowed &&
                 common.AceFlags == AceFlags.None &&
-                common.AccessMask == checked((int)NamedObjectCreationAccess) &&
+                common.AccessMask == checked((int)NamedObjectDirectoryAccess) &&
                 !common.IsCallback;
         }
         if (matching != 1 || !exact)
@@ -1043,7 +1048,10 @@ function Add-ConstructionObjectDirectoryPrincipalAccess {
     )
 
     Initialize-ConstructionObjectDirectoryAclNative | Out-Null
-    [ProjectAtlasConstructionObjectDirectoryAcl]::GrantExactCreateObject($Path, $Sid.Value)
+    [ProjectAtlasConstructionObjectDirectoryAcl]::GrantExactNamedObjectAccess(
+        $Path,
+        $Sid.Value
+    )
 }
 
 function Assert-ConstructionObjectDirectoryPrincipalAccess {
