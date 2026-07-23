@@ -387,6 +387,7 @@ try {
             $workflowText.Contains("github.event_name == 'workflow_dispatch' &&") -and
             $workflowText.Contains("steps.cargo-cache-restore.outputs.cache-hit != 'true'") -and
             $workflowText.Contains("steps.cargo-cache-disposition.outputs.value != 'rejected'") -and
+            $workflowText.Contains('"--release",') -and
             $workflowText.Contains('path: ${{ runner.temp }}/parser-pack-output/build')) `
         "Reusable Cargo layer trust, miss, rejection, or path boundary drifted."
     foreach ($package in @(

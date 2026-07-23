@@ -435,6 +435,7 @@ jobs:
           $cleanArguments = @(
             "clean",
             "--frozen",
+            "--release",
             "--target-dir",
             $build
           )

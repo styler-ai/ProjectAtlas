@@ -869,6 +869,7 @@ if ($cargoTarget.disposition -eq "hit") {
     $cleanArguments = @(
         "clean",
         "--frozen",
+        "--release",
         "--target-dir",
         $buildDirectory
     )
