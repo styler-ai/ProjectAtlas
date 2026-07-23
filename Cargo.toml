@@ -18,7 +18,7 @@ repository = "https://github.com/styler-ai/ProjectAtlas"
 homepage = "https://styler-ai.github.io/ProjectAtlas/"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 missing_docs = "deny"
 
 [workspace.lints.rustdoc]
@@ -84,6 +84,7 @@ ignore = "0.4"
 jsonc-parser = { version = "0.32", features = ["serde"] }
 landlock = "=0.4.5"
 nix = { version = "=0.31.3", default-features = false, features = [
+    "fs",
     "process",
     "resource",
     "signal",

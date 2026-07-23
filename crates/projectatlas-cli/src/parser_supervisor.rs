@@ -2502,6 +2502,36 @@ impl ResidentParserSession {
     }
 }
 
+/// Mark every child descriptor above stderr close-on-exec without mutating the parent.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[expect(
+    unsafe_code,
+    reason = "Command has no safe descriptor-sanitizing hook; this pre-exec closure performs one async-signal-safe Linux syscall"
+)]
+fn close_inherited_descriptors_on_exec(command: &mut Command) {
+    use nix::libc;
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: `pre_exec` runs after fork. The closure performs only the
+    // allocation-free `close_range` syscall and constructs an OS error from
+    // errno. CLOEXEC preserves Rust's spawn-error pipe until a successful exec.
+    unsafe {
+        command.pre_exec(|| {
+            let result = libc::syscall(
+                libc::SYS_close_range,
+                3_u32,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC | libc::CLOSE_RANGE_UNSHARE,
+            );
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        });
+    }
+}
+
 /// Build the one accepted platform command with closed arguments and environment.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn platform_command(
@@ -2525,6 +2555,7 @@ fn platform_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    close_inherited_descriptors_on_exec(&mut command);
     Ok(command)
 }
 
@@ -3639,6 +3670,31 @@ mod tests {
         assert!(supervisor.accepts_language("zeta"));
         assert!(!supervisor.accepts_language("missing"));
         assert!(!supervisor.accepts_language("INVALID"));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn linux_worker_launch_closes_inherited_descriptors_on_exec()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::fd::AsRawFd;
+
+        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+
+        let inherited = File::open("/dev/null")?;
+        fcntl(&inherited, FcntlArg::F_SETFD(FdFlag::empty()))?;
+        let descriptor = inherited.as_raw_fd();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "test ! -e \"/proc/self/fd/$1\"",
+                "parser-worker-fd-check",
+            ])
+            .arg(descriptor.to_string());
+        close_inherited_descriptors_on_exec(&mut command);
+
+        assert!(command.status()?.success());
+        Ok(())
     }
 
     #[test]
