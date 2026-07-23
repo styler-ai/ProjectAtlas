@@ -68,8 +68,9 @@ Linux keeps the worker's required linker-specific `cargo rustc` invocation separ
 then builds both release tools in one Cargo invocation.
 
 Windows Cargo runs through the existing SID-restricted protected jobserver with a
-fixed two-worker budget. This uses the hosted runner without restoring ambient
-jobserver authority or allowing unbounded host-wide parallelism.
+fixed four-worker budget matching the public `windows-2025` runner's CPU allocation.
+This uses the hosted runner without restoring ambient jobserver authority or allowing
+unbounded host-wide parallelism.
 
 The two required assembly and archive passes run concurrently with separate inputs,
 staging directories, and output paths. Both lanes still perform the complete native,

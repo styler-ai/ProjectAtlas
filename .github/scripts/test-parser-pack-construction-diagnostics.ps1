@@ -219,8 +219,8 @@ try {
     try {
         foreach ($invalidEnvironment in @(
             [pscustomobject]@{ Jobs = $null; Makeflags = $null },
-            [pscustomobject]@{ Jobs = '1'; Makeflags = $null },
-            [pscustomobject]@{ Jobs = '2'; Makeflags = '--jobserver-auth=obsolete' }
+            [pscustomobject]@{ Jobs = '2'; Makeflags = $null },
+            [pscustomobject]@{ Jobs = '4'; Makeflags = '--jobserver-auth=obsolete' }
         )) {
             if ($null -eq $invalidEnvironment.Jobs) {
                 Remove-Item -LiteralPath Env:CARGO_BUILD_JOBS -ErrorAction SilentlyContinue
@@ -244,7 +244,7 @@ try {
             }
             Require $rejected "Windows construction accepted an invalid Cargo environment."
         }
-        $env:CARGO_BUILD_JOBS = '2'
+        $env:CARGO_BUILD_JOBS = '4'
         Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS -ErrorAction SilentlyContinue
         Assert-CargoConstructionEnvironment -Target 'x86_64-pc-windows-msvc'
         Remove-Item -LiteralPath Env:CARGO_BUILD_JOBS -ErrorAction SilentlyContinue
@@ -1471,9 +1471,9 @@ Add-Type -Path $SourcePath -OutputAssembly $OutputPath -OutputType ConsoleApplic
         Require `
             ([System.Text.RegularExpressions.Regex]::Matches(
                 $wrapperText,
-                'CARGO_BUILD_JOBS = "2"'
+                'CARGO_BUILD_JOBS = "4"'
             ).Count -eq 1 -and
-                $productionText.Contains('[string]$env:CARGO_BUILD_JOBS -cne "2"') -and
+                $productionText.Contains('[string]$env:CARGO_BUILD_JOBS -cne "4"') -and
                 $productionText.Contains('Open-ContainedCargoJobserver') -and
                 $productionText.Contains('Invoke-ContainedCargoJobserverCanary') -and
                 $productionText.Contains('EntryPoint = "OpenSemaphoreW"') -and
@@ -1486,7 +1486,7 @@ Add-Type -Path $SourcePath -OutputAssembly $OutputPath -OutputType ConsoleApplic
                 $productionText.Contains('Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS') -and
                 $wrapperText.Contains('CreateSeededSemaphore(') -and
                 $wrapperText -match
-                    'CreateProtectedSemaphore\(\s*ref attributes,\s*2,\s*2,' -and
+                    'CreateProtectedSemaphore\(\s*ref attributes,\s*4,\s*4,' -and
                 $wrapperText.Contains('TransferSeededSemaphore(') -and
                 $wrapperText.Contains('SeededSemaphorePlaceholder') -and
                 $wrapperText.Contains('DiagnosticSemaphorePrefix = "Local\\ProjectAtlasParserPack-";') -and
@@ -1494,7 +1494,7 @@ Add-Type -Path $SourcePath -OutputAssembly $OutputPath -OutputType ConsoleApplic
                 -not $wrapperText.Contains('DiagnosticSemaphorePrefix = "ProjectAtlasParserPack-";') -and
                 $wrapperText.Contains('Add-ConstructionObjectDirectoryPrincipalAccess') -and
                 $wrapperText.Contains('Assert-ConstructionObjectDirectoryPrincipalAbsent')) `
-            "Windows construction did not use its transferred protected two-worker jobserver and exact namespace grant."
+            "Windows construction did not use its transferred protected four-worker jobserver and exact namespace grant."
         Require `
             ($wrapperText.Contains('ValidateConstructionToken(') -and
                 $wrapperText.Contains('RequiredIntegritySid = "S-1-16-8192";') -and
@@ -2316,7 +2316,7 @@ public static class ProjectAtlasConstructionAdmissionFixture
             [System.StringComparison]::Ordinal
         )
         $cargoJobBudgetCheckIndex = $probeSource.IndexOf(
-            '[string]$env:CARGO_BUILD_JOBS -cne ''2''',
+            '[string]$env:CARGO_BUILD_JOBS -cne ''4''',
             [System.StringComparison]::Ordinal
         )
         $cargoMakeflagsCheckIndex = $probeSource.IndexOf(
