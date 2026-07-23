@@ -33,12 +33,12 @@ use projectatlas_core::optional_parser_pack::{ParserPackMemoryControl, ParserPac
 use projectatlas_core::optional_parser_protocol::PARSER_WINDOWS_BROKER_MEMORY_LIMIT_EXIT_CODE;
 use projectatlas_core::optional_parser_protocol::{
     PARSER_FRAME_HEADER_BYTES, PARSER_MAX_NODE_COUNT, PARSER_MAX_OUTPUT_BYTES,
-    PARSER_MAX_STDERR_BYTES, PARSER_MAX_TREE_DEPTH, PARSER_SESSION_ENTROPY_BYTES,
-    PARSER_WINDOWS_BROKER_ADMISSION_RECORD, ParserArtifactIdentity, ParserCompletionEvidence,
-    ParserContainmentKind, ParserControl, ParserFailureCode, ParserFrame, ParserFrameHeader,
-    ParserFrameKind, ParserLanguageIdentity, ParserProgress, ParserProgressDisposition,
-    ParserProtocolError, ParserRequest, ParserRequestIdentity, ParserRequestLimits,
-    ParserSessionIdentity, ParserSessionOpen, ParserSourceIdentity,
+    PARSER_MAX_SOURCE_BYTES, PARSER_MAX_STDERR_BYTES, PARSER_MAX_TREE_DEPTH,
+    PARSER_SESSION_ENTROPY_BYTES, PARSER_WINDOWS_BROKER_ADMISSION_RECORD, ParserArtifactIdentity,
+    ParserCompletionEvidence, ParserContainmentKind, ParserControl, ParserFailureCode, ParserFrame,
+    ParserFrameHeader, ParserFrameKind, ParserLanguageIdentity, ParserProgress,
+    ParserProgressDisposition, ParserProtocolError, ParserRequest, ParserRequestIdentity,
+    ParserRequestLimits, ParserSessionIdentity, ParserSessionOpen, ParserSourceIdentity,
     decode_parser_completion_for_request, decode_parser_failure_for_request,
     decode_parser_progress_for_request, decode_parser_ready_for_launch, encode_parser_control,
 };
@@ -70,6 +70,8 @@ const ARTIFACT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(15);
 const ARTIFACT_ADMISSION_AGGREGATE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 /// Maximum interval without meaningful worker progress during artifact admission.
 const ARTIFACT_ADMISSION_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
+/// Source bytes that force post-admission parser allocation through the Windows job limit.
+const WINDOWS_MEMORY_PROBE_SOURCE_BYTES: usize = 1024 * 1024;
 /// Declared maximum interval between sampled Linux resident-memory observations.
 pub const PARSER_LINUX_RSS_OBSERVATION_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -3110,6 +3112,7 @@ pub fn probe_optional_parser_memory_boundary(
         process_tree_bytes: process_bytes,
     }
     .checked()?;
+    let probe_source = memory_probe_source(platform, grammar.fixtures.positive.source.as_bytes());
     let mut supervisor =
         OptionalParserSupervisor::open_with_memory_limits(pack_root, memory_limits)?;
     let limits = ParserRequestLimits::new(
@@ -3124,7 +3127,7 @@ pub fn probe_optional_parser_memory_boundary(
         })?;
     let operation = supervisor.parse(
         &grammar.language_id,
-        grammar.fixtures.positive.source.as_bytes(),
+        &probe_source,
         limits,
         deadline,
         ARTIFACT_ADMISSION_NO_PROGRESS_TIMEOUT,
@@ -3191,6 +3194,19 @@ pub fn probe_optional_parser_memory_boundary(
     }
 
     Err(failure)
+}
+
+/// Keep Linux's startup probe small while forcing post-admission allocation on Windows.
+fn memory_probe_source(platform: PackPlatform, fixture: &[u8]) -> Vec<u8> {
+    match platform {
+        PackPlatform::LinuxX86_64 => fixture.to_vec(),
+        PackPlatform::WindowsX86_64 => fixture
+            .iter()
+            .copied()
+            .cycle()
+            .take(WINDOWS_MEMORY_PROBE_SOURCE_BYTES.min(PARSER_MAX_SOURCE_BYTES as usize))
+            .collect(),
+    }
 }
 
 /// Admit every accepted grammar through its exact positive and negative fixtures.
@@ -3647,6 +3663,19 @@ mod tests {
             ));
         }
         assert!(ParserMemoryLimits::PRODUCTION.checked().is_ok());
+    }
+
+    #[test]
+    fn memory_probe_source_preserves_linux_and_bounds_windows() {
+        let fixture = b".\n";
+        assert_eq!(
+            memory_probe_source(PackPlatform::LinuxX86_64, fixture),
+            fixture
+        );
+        let windows = memory_probe_source(PackPlatform::WindowsX86_64, fixture);
+        assert_eq!(windows.len(), WINDOWS_MEMORY_PROBE_SOURCE_BYTES);
+        assert_eq!(&windows[..4], b".\n.\n");
+        assert!(windows.len() <= PARSER_MAX_SOURCE_BYTES as usize);
     }
 
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
