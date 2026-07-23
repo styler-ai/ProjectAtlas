@@ -627,6 +627,29 @@ function Assert-NamedObjectProbeDiagnosticContract {
             $namedObjectAccessMaskIndex -gt $namedObjectAccessIndex -and
             $firstWin32SemaphoreIndex -gt $namedObjectAccessMaskIndex) `
         "Exact named-object directory access was not probed before Win32 semaphore access."
+    $selfText = [string]$selfAst.Extent.Text
+    $normalSuccessIndex = $selfText.LastIndexOf(
+        'Require $semaphoreAbsent "Construction named-object probe left a semaphore handle survivor."',
+        [System.StringComparison]::Ordinal
+    )
+    Require `
+        ($normalSuccessIndex -ge 0) `
+        "Successful construction admission lost its final survivor assertion."
+    $normalContinueIndex = $selfText.IndexOf(
+        'continue',
+        $normalSuccessIndex,
+        [System.StringComparison]::Ordinal
+    )
+    $faultScenarioIndex = $selfText.IndexOf(
+        '$failure = Get-ReflectedOperationFailure',
+        $normalSuccessIndex,
+        [System.StringComparison]::Ordinal
+    )
+    Require `
+        ($normalSuccessIndex -ge 0 -and
+            $normalContinueIndex -gt $normalSuccessIndex -and
+            $faultScenarioIndex -gt $normalContinueIndex) `
+        "Successful construction admission did not advance to the next recovery scenario."
     Require `
         ($probeText -notmatch '(?m)^\s*exit\s+1\s*$') `
         "Named-object probe retained an unclassified exit path."
@@ -4152,6 +4175,7 @@ exit 0
                 $survivingSemaphore.Dispose()
             }
             Require $semaphoreAbsent "Construction named-object probe left a semaphore handle survivor."
+            continue
         }
 
         $failure = Get-ReflectedOperationFailure `
