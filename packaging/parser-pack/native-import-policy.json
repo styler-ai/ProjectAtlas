@@ -154,13 +154,17 @@
     {
       "platform": "x86_64-pc-windows-msvc",
       "allowed_libraries": [
+        "api-ms-win-core-synch-l1-2-0.dll",
         "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-locale-l1-1-0.dll",
         "api-ms-win-crt-math-l1-1-0.dll",
         "api-ms-win-crt-runtime-l1-1-0.dll",
         "api-ms-win-crt-stdio-l1-1-0.dll",
         "api-ms-win-crt-string-l1-1-0.dll",
+        "bcryptprimitives.dll",
         "KERNEL32.dll",
         "MSVCP140.dll",
+        "ntdll.dll",
         "VCRUNTIME140.dll"
       ],
       "worker_preloaded_libraries": [],

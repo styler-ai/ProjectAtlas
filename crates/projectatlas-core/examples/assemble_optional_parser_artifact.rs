@@ -4190,9 +4190,9 @@ mod tests {
         Ok(())
     }
 
-    /// Keep exact execution primitives denied without matching unrelated CRT setup helpers.
+    /// Keep the checked-in native policy digest-bound, closed, and narrowly named.
     #[test]
-    fn checked_in_execution_policy_does_not_use_an_ambiguous_prefix() -> ToolResult<()> {
+    fn checked_in_native_policy_is_digest_bound_and_exact() -> ToolResult<()> {
         let bytes = include_bytes!("../../../packaging/parser-pack/native-import-policy.json");
         let sidecar =
             include_str!("../../../packaging/parser-pack/native-import-policy.json.sha256");
@@ -4214,6 +4214,23 @@ mod tests {
         assert!(!linux.containment_broker_clr_runtime_header_required);
         assert!(linux.containment_broker_managed_modules.is_empty());
         let windows = validate_policy(&policy, PackPlatform::WindowsX86_64)?;
+        assert_eq!(
+            windows.allowed_libraries,
+            [
+                "api-ms-win-core-synch-l1-2-0.dll",
+                "api-ms-win-crt-heap-l1-1-0.dll",
+                "api-ms-win-crt-locale-l1-1-0.dll",
+                "api-ms-win-crt-math-l1-1-0.dll",
+                "api-ms-win-crt-runtime-l1-1-0.dll",
+                "api-ms-win-crt-stdio-l1-1-0.dll",
+                "api-ms-win-crt-string-l1-1-0.dll",
+                "bcryptprimitives.dll",
+                "KERNEL32.dll",
+                "MSVCP140.dll",
+                "ntdll.dll",
+                "VCRUNTIME140.dll",
+            ]
+        );
         assert!(windows.worker_preloaded_libraries.is_empty());
         assert!(windows.containment_broker_pe_loader_libraries.is_empty());
         assert!(windows.containment_broker_clr_runtime_header_required);
