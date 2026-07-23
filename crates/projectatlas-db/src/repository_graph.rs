@@ -24,7 +24,7 @@ use projectatlas_core::{
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::Path;
 
 /// One bounded page of typed normalized graph rows.
@@ -34,6 +34,173 @@ pub struct RepositoryGraphPage<T> {
     pub rows: Vec<T>,
     /// Whether at least one additional validated row exists.
     pub truncated: bool,
+}
+
+/// Validated resource envelope for one bounded repository-graph database read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepositoryGraphReadBudget {
+    /// Maximum input keys, frontier selectors, or purpose-owner paths.
+    requested_rows: NonZeroU32,
+    /// Maximum fully reconstructed rows returned to the caller.
+    returned_rows: NonZeroU32,
+    /// Maximum raw `SQLite` payload bytes decoded by the complete batch.
+    decoded_bytes: NonZeroU64,
+    /// Maximum unique entities reconstructed by the complete batch.
+    hydrated_entities: NonZeroU32,
+    /// Maximum unique purpose-owning repository paths retained from entities.
+    hydrated_paths: NonZeroU32,
+}
+
+impl RepositoryGraphReadBudget {
+    /// Absolute compact-key or purpose-path request ceiling for one batch.
+    pub const MAX_REQUESTED_ROWS: u32 = GraphLimits::MAX_ROWS;
+    /// Absolute reconstructed-row ceiling for one batch.
+    pub const MAX_RETURNED_ROWS: u32 = GraphLimits::MAX_ROWS;
+    /// Absolute decoded payload ceiling for one hydration batch.
+    pub const MAX_DECODED_BYTES: u64 = 32 * 1_024 * 1_024;
+    /// Absolute unique-entity ceiling including one adjacency sentinel.
+    pub const MAX_HYDRATED_ENTITIES: u32 = 2 * (GraphLimits::MAX_ROWS + 1);
+    /// Absolute unique purpose-owner path ceiling for one hydration batch.
+    pub const MAX_HYDRATED_PATHS: u32 = 2 * (GraphLimits::MAX_ROWS + 1);
+
+    /// Construct one bounded repository-graph read envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a limit is zero or above its absolute batch
+    /// ceiling.
+    pub fn new(
+        requested_rows: u32,
+        returned_rows: u32,
+        decoded_bytes: u64,
+        hydrated_entities: u32,
+        hydrated_paths: u32,
+    ) -> Result<Self, GraphContractError> {
+        if requested_rows == 0 || requested_rows > Self::MAX_REQUESTED_ROWS {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph read requested-row budget is zero or above the batch ceiling",
+            });
+        }
+        if returned_rows == 0 || returned_rows > Self::MAX_RETURNED_ROWS {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph read returned-row budget is zero or above the batch ceiling",
+            });
+        }
+        if decoded_bytes == 0 || decoded_bytes > Self::MAX_DECODED_BYTES {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph read decoded-byte budget is zero or above the batch ceiling",
+            });
+        }
+        if hydrated_entities == 0 || hydrated_entities > Self::MAX_HYDRATED_ENTITIES {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph read entity budget is zero or above the batch ceiling",
+            });
+        }
+        if hydrated_paths == 0 || hydrated_paths > Self::MAX_HYDRATED_PATHS {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph read path budget is zero or above the batch ceiling",
+            });
+        }
+        Ok(Self {
+            requested_rows: NonZeroU32::new(requested_rows).ok_or(
+                GraphContractError::InvalidLimits {
+                    reason: "graph read requested-row budget must be nonzero",
+                },
+            )?,
+            returned_rows: NonZeroU32::new(returned_rows).ok_or(
+                GraphContractError::InvalidLimits {
+                    reason: "graph read returned-row budget must be nonzero",
+                },
+            )?,
+            decoded_bytes: NonZeroU64::new(decoded_bytes).ok_or(
+                GraphContractError::InvalidLimits {
+                    reason: "graph read decoded-byte budget must be nonzero",
+                },
+            )?,
+            hydrated_entities: NonZeroU32::new(hydrated_entities).ok_or(
+                GraphContractError::InvalidLimits {
+                    reason: "graph read entity budget must be nonzero",
+                },
+            )?,
+            hydrated_paths: NonZeroU32::new(hydrated_paths).ok_or(
+                GraphContractError::InvalidLimits {
+                    reason: "graph read path budget must be nonzero",
+                },
+            )?,
+        })
+    }
+
+    /// Maximum input keys, frontier selectors, or purpose-owner paths.
+    #[must_use]
+    pub const fn requested_rows(self) -> u32 {
+        self.requested_rows.get()
+    }
+
+    /// Maximum fully reconstructed rows.
+    #[must_use]
+    pub const fn returned_rows(self) -> u32 {
+        self.returned_rows.get()
+    }
+
+    /// Maximum decoded raw payload bytes.
+    #[must_use]
+    pub const fn decoded_bytes(self) -> u64 {
+        self.decoded_bytes.get()
+    }
+
+    /// Maximum unique hydrated entities.
+    #[must_use]
+    pub const fn hydrated_entities(self) -> u32 {
+        self.hydrated_entities.get()
+    }
+
+    /// Maximum unique purpose-owner paths.
+    #[must_use]
+    pub const fn hydrated_paths(self) -> u32 {
+        self.hydrated_paths.get()
+    }
+}
+
+/// Exact work observed while hydrating one stable-key graph batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepositoryGraphReadWork {
+    /// Input keys, frontier selectors, or purpose-owner paths supplied.
+    pub requested_rows: u32,
+    /// Fully reconstructed rows returned to the caller.
+    pub returned_rows: u32,
+    /// Raw `SQLite` BLOB, TEXT, and fixed scalar bytes decoded.
+    pub decoded_bytes: u64,
+    /// Unique entities reconstructed from normalized rows.
+    pub hydrated_entities: u32,
+    /// Unique purpose-owning repository paths retained from those entities.
+    pub hydrated_paths: u32,
+}
+
+/// Fully reconstructed graph rows plus their exact bounded read work.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryGraphReadBatch<T> {
+    /// Fully validated rows in caller key order.
+    pub rows: Vec<T>,
+    /// Exact resource use for the complete successful batch.
+    pub work: RepositoryGraphReadWork,
+}
+
+/// One stable paged graph result plus exact database work for the page attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryGraphReadPage<T> {
+    /// Stable bounded page, including its truncation sentinel result.
+    pub page: RepositoryGraphPage<T>,
+    /// Exact work for all decoded rows, including a removed sentinel.
+    pub work: RepositoryGraphReadWork,
+}
+
+/// Ordered per-owner graph pages plus exact aggregate database work.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryGraphReadPages<T> {
+    /// Pages in caller owner order.
+    pub pages: Vec<RepositoryGraphPage<T>>,
+    /// Exact aggregate work across every page and truncation sentinel.
+    pub work: RepositoryGraphReadWork,
 }
 
 /// Bounded filters for opt-in project-wide coverage discovery.
@@ -159,7 +326,7 @@ pub enum RepositoryGraphRelationQuery {
 }
 
 /// Direction of one batched normalized-graph adjacency read.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum RepositoryGraphDirection {
     /// Relations whose source is in the selected frontier.
     Outbound,
@@ -179,7 +346,7 @@ pub struct RepositoryGraphRelationRow {
 }
 
 /// Opaque keyset used only to continue one bounded adjacency request.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct RepositoryGraphAdjacencyContinuation {
     /// Project whose read snapshot produced this keyset.
     project: ProjectInstanceId,
@@ -225,6 +392,15 @@ pub struct RepositoryGraphAdjacencyPage {
     pub truncated: bool,
     /// Opaque continuation for the same frontier and direction when truncated.
     pub continuation: Option<RepositoryGraphAdjacencyContinuation>,
+}
+
+/// One bounded adjacency page plus exact database work for the page attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryGraphAdjacencyReadPage {
+    /// Stable direction-specific page and continuation state.
+    pub page: RepositoryGraphAdjacencyPage,
+    /// Exact raw-row and endpoint hydration work for the complete page.
+    pub work: RepositoryGraphReadWork,
 }
 
 /// Maximum unique entities admitted to one batched adjacency statement.
@@ -348,6 +524,128 @@ struct CoverageRow {
     parser: Option<String>,
     /// Optional derived-fact provider pass joined from file metadata.
     provider: Option<String>,
+}
+
+/// Mutable accounting retained only for one bounded hydration call.
+pub(crate) struct RepositoryGraphReadMeter {
+    /// Validated caller envelope.
+    budget: RepositoryGraphReadBudget,
+    /// Input selectors admitted before any query runs.
+    requested_rows: u32,
+    /// Raw payload bytes decoded so far.
+    decoded_bytes: u64,
+    /// Unique entities reconstructed so far.
+    hydrated_entities: u32,
+    /// Unique purpose-owning paths retained from hydrated entities.
+    hydrated_paths: HashSet<String>,
+}
+
+impl RepositoryGraphReadMeter {
+    /// Admit one request before any `SQLite` work begins.
+    pub(crate) fn new(budget: RepositoryGraphReadBudget, requested_rows: usize) -> DbResult<Self> {
+        let requested_rows =
+            u32::try_from(requested_rows).map_err(|_source| GraphContractError::InvalidLimits {
+                reason: "graph read requested-row count overflowed",
+            })?;
+        if requested_rows > budget.requested_rows() {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph read requested rows exceed the batch budget",
+            }
+            .into());
+        }
+        Ok(Self {
+            budget,
+            requested_rows,
+            decoded_bytes: 0,
+            hydrated_entities: 0,
+            hydrated_paths: HashSet::new(),
+        })
+    }
+
+    /// Charge one decoded raw row before it leaves the row iterator.
+    pub(crate) fn record_decoded_bytes(&mut self, bytes: u64) -> DbResult<()> {
+        let decoded_bytes =
+            self.decoded_bytes
+                .checked_add(bytes)
+                .ok_or(GraphContractError::InvalidLimits {
+                    reason: "graph read decoded-byte accounting overflowed",
+                })?;
+        if decoded_bytes > self.budget.decoded_bytes() {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph read decoded bytes exceed the batch budget",
+            }
+            .into());
+        }
+        self.decoded_bytes = decoded_bytes;
+        Ok(())
+    }
+
+    /// Charge one unique reconstructed entity and its exact purpose owner path.
+    fn record_entity(&mut self, entity: &GraphEntity) -> DbResult<()> {
+        let hydrated_entities =
+            self.hydrated_entities
+                .checked_add(1)
+                .ok_or(GraphContractError::InvalidLimits {
+                    reason: "graph read entity accounting overflowed",
+                })?;
+        if hydrated_entities > self.budget.hydrated_entities() {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph read hydrated entities exceed the batch budget",
+            }
+            .into());
+        }
+        if let Some(path) = graph_entity_purpose_owner(entity) {
+            self.record_hydrated_path(path)?;
+        }
+        self.hydrated_entities = hydrated_entities;
+        Ok(())
+    }
+
+    /// Charge one unique repository path hydrated from authoritative node state.
+    pub(crate) fn record_hydrated_path(&mut self, path: &str) -> DbResult<()> {
+        if self.hydrated_paths.contains(path) {
+            return Ok(());
+        }
+        let hydrated_paths = u32::try_from(self.hydrated_paths.len()).map_err(|_source| {
+            GraphContractError::InvalidLimits {
+                reason: "graph read path accounting overflowed",
+            }
+        })?;
+        if hydrated_paths >= self.budget.hydrated_paths() {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph read hydrated paths exceed the batch budget",
+            }
+            .into());
+        }
+        self.hydrated_paths.insert(path.to_string());
+        Ok(())
+    }
+
+    /// Finish exact work only after every requested row was reconstructed.
+    pub(crate) fn finish(self, returned_rows: usize) -> DbResult<RepositoryGraphReadWork> {
+        let returned_rows =
+            u32::try_from(returned_rows).map_err(|_source| GraphContractError::InvalidLimits {
+                reason: "graph read returned-row count overflowed",
+            })?;
+        if returned_rows > self.budget.returned_rows() {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph read returned rows exceed the batch budget",
+            }
+            .into());
+        }
+        let hydrated_paths = u32::try_from(self.hydrated_paths.len()).map_err(|_source| {
+            GraphContractError::InvalidLimits {
+                reason: "graph read path accounting overflowed",
+            }
+        })?;
+        Ok(RepositoryGraphReadWork {
+            requested_rows: self.requested_rows,
+            returned_rows,
+            decoded_bytes: self.decoded_bytes,
+            hydrated_entities: self.hydrated_entities,
+            hydrated_paths,
+        })
+    }
 }
 
 /// One bounded flattened relation row used only for navigation enrichment.
@@ -907,7 +1205,87 @@ impl AtlasStore {
         if !verify_project_identity(&self.connection, key.project())? {
             return Ok(None);
         }
-        load_entity_by_digest(self, key.project(), &key.digest_bytes()?, generation)
+        Ok(self
+            .repository_graph_entity_bounded(
+                key,
+                generation,
+                maximum_repository_graph_read_budget()?,
+                None,
+            )?
+            .rows
+            .into_iter()
+            .next())
+    }
+
+    /// Load one optional exact entity under a stable graph read envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale project or generation, cancellation,
+    /// `SQLite` failure, corrupt entity state, or any decoded-byte, entity, or
+    /// path hydration overrun. A missing exact key returns an empty successful
+    /// batch with exact zero returned work.
+    pub fn repository_graph_entity_bounded(
+        &self,
+        key: &GraphEntityKey,
+        generation: IndexGeneration,
+        budget: RepositoryGraphReadBudget,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphReadBatch<GraphEntity>> {
+        self.require_repository_graph_snapshot(key.project(), generation)?;
+        let digest = key.digest_bytes()?;
+        let mut meter = RepositoryGraphReadMeter::new(budget, 1)?;
+        let mut entities = load_graph_entities_by_digest_metered(
+            self,
+            &[digest],
+            key.project(),
+            generation,
+            control,
+            Some(&mut meter),
+        )?;
+        let rows = entities.remove(&digest).into_iter().collect::<Vec<_>>();
+        let work = meter.finish(rows.len())?;
+        Ok(RepositoryGraphReadBatch { rows, work })
+    }
+
+    /// Hydrate an ordered unique set of graph entities from compact stable keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for duplicate or oversized input, a stale project or
+    /// generation, cancellation, a missing entity, `SQLite` failure, or any
+    /// invalid persisted key or canonical identity. No partial set is returned.
+    pub fn repository_graph_entities_by_digest(
+        &self,
+        project: ProjectInstanceId,
+        generation: IndexGeneration,
+        digests: &[[u8; 32]],
+        budget: RepositoryGraphReadBudget,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphReadBatch<GraphEntity>> {
+        validate_graph_hydration_request(digests)?;
+        self.require_repository_graph_snapshot(project, generation)?;
+        let mut meter = RepositoryGraphReadMeter::new(budget, digests.len())?;
+        let mut entities = load_graph_entities_by_digest_metered(
+            self,
+            digests,
+            project,
+            generation,
+            control,
+            Some(&mut meter),
+        )?;
+        let mut ordered = Vec::with_capacity(digests.len());
+        for digest in digests {
+            ordered.push(entities.remove(digest).ok_or(DbError::GraphRowShape {
+                table: "graph_entities",
+                reason: "requested graph entity is missing",
+            })?);
+        }
+        let work = meter.finish(ordered.len())?;
+        Ok(RepositoryGraphReadBatch {
+            rows: ordered,
+            work,
+        })
     }
 
     /// Load a bounded page of entities that use one exact repository path.
@@ -922,7 +1300,7 @@ impl AtlasStore {
         path: &RepositoryNodePath,
         limit: u32,
     ) -> DbResult<RepositoryGraphPage<GraphEntity>> {
-        let limit_plus_one = validated_limit_plus_one(
+        validated_limit_plus_one(
             limit,
             GraphLimits::MAX_ROWS,
             "graph rows must be nonzero and within the product ceiling",
@@ -933,24 +1311,74 @@ impl AtlasStore {
         if !verify_project_identity(&self.connection, project)? {
             return Ok(empty_page());
         }
-        let raw = {
-            let mut statement = self.connection.prepare_cached(
-                "SELECT entity_key, project_instance_id, canonical_identity, entity_kind,
-                        repository_path, package_manager, package_name, manifest_path,
-                        symbol_name, symbol_kind, symbol_parent, symbol_signature,
-                        external_system, external_identity
-                   FROM graph_entities
-                  WHERE project_instance_id = ?1 AND repository_path = ?2
-                  ORDER BY entity_kind, canonical_identity, entity_key
-                  LIMIT ?3",
-            )?;
-            collect_entity_rows(statement.query(params![
-                &project.as_bytes()[..],
-                path.as_str(),
-                limit_plus_one
-            ])?)?
-        };
-        page_from_raw(raw, limit, |row| entity_from_row(row, project, generation))
+        Ok(self
+            .repository_graph_entities_by_path_bounded(
+                project,
+                generation,
+                path,
+                limit,
+                maximum_repository_graph_read_budget()?,
+                None,
+            )?
+            .page)
+    }
+
+    /// Load one exact-path entity page under a stable graph read envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same fail-closed errors as
+    /// [`Self::repository_graph_entities_by_path`], rejects a stale project or
+    /// generation and any returned-row, decoded-byte, entity, or path hydration
+    /// overrun, and meters the raw truncation sentinel.
+    pub fn repository_graph_entities_by_path_bounded(
+        &self,
+        project: ProjectInstanceId,
+        generation: IndexGeneration,
+        path: &RepositoryNodePath,
+        limit: u32,
+        budget: RepositoryGraphReadBudget,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphReadPage<GraphEntity>> {
+        let limit_plus_one = validated_limit_plus_one(
+            limit,
+            GraphLimits::MAX_ROWS,
+            "graph rows must be nonzero and within the product ceiling",
+        )?;
+        self.require_repository_graph_snapshot(project, generation)?;
+        let mut meter = RepositoryGraphReadMeter::new(budget, 1)?;
+        let raw = with_sqlite_read_progress(
+            &self.connection,
+            control,
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                let mut statement = self.connection.prepare_cached(
+                    "SELECT entity_key, project_instance_id, canonical_identity, entity_kind,
+                            repository_path, package_manager, package_name, manifest_path,
+                            symbol_name, symbol_kind, symbol_parent, symbol_signature,
+                            external_system, external_identity
+                       FROM graph_entities
+                      WHERE project_instance_id = ?1 AND repository_path = ?2
+                      ORDER BY entity_kind, canonical_identity, entity_key
+                      LIMIT ?3",
+                )?;
+                collect_entity_rows_metered(
+                    statement.query(params![
+                        &project.as_bytes()[..],
+                        path.as_str(),
+                        limit_plus_one
+                    ])?,
+                    &mut meter,
+                )
+            },
+        )?;
+        let page = page_from_raw(raw, limit, |row| {
+            let entity = entity_from_row(row, project, generation)?;
+            meter.record_entity(&entity)?;
+            Ok(entity)
+        })?;
+        let work = meter.finish(page.rows.len())?;
+        Ok(RepositoryGraphReadPage { page, work })
     }
 
     /// Load bounded graph entities that export one exact canonical resolution key.
@@ -1344,6 +1772,83 @@ impl AtlasStore {
         })
     }
 
+    /// Hydrate an ordered unique set of normalized relations from compact stable keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for duplicate or oversized input, a stale project or
+    /// generation, cancellation, a missing relation or endpoint, `SQLite`
+    /// failure, or any invalid persisted key or canonical identity. No partial
+    /// set is returned.
+    pub fn repository_graph_relation_rows_by_digest(
+        &self,
+        project: ProjectInstanceId,
+        generation: IndexGeneration,
+        digests: &[[u8; 32]],
+        budget: RepositoryGraphReadBudget,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphReadBatch<RepositoryGraphRelationRow>> {
+        validate_graph_hydration_request(digests)?;
+        self.require_repository_graph_snapshot(project, generation)?;
+        let mut meter = RepositoryGraphReadMeter::new(budget, digests.len())?;
+        if digests.is_empty() {
+            return Ok(RepositoryGraphReadBatch {
+                rows: Vec::new(),
+                work: meter.finish(0)?,
+            });
+        }
+        let sql = graph_relation_hydration_sql(digests.len());
+        let mut bindings = digests
+            .iter()
+            .map(|digest| Value::Blob(digest.to_vec()))
+            .collect::<Vec<_>>();
+        bindings.push(Value::Blob(project.as_bytes().to_vec()));
+        let raw = with_sqlite_read_progress(
+            &self.connection,
+            control,
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                let mut statement = self.connection.prepare(&sql)?;
+                collect_relation_rows_metered(
+                    statement.query(params_from_iter(bindings.iter()))?,
+                    &mut meter,
+                )
+            },
+        )?;
+        let mut relations = HashMap::with_capacity(raw.len());
+        for row in raw {
+            let digest = fixed_bytes::<32>("graph_relations.relation_key", row.key.clone())?;
+            if relations.insert(digest, row).is_some() {
+                return Err(DbError::GraphRowShape {
+                    table: "graph_relations",
+                    reason: "batched relation hydration returned a duplicate key",
+                });
+            }
+        }
+        let mut ordered = Vec::with_capacity(digests.len());
+        for digest in digests {
+            ordered.push(relations.remove(digest).ok_or(DbError::GraphRowShape {
+                table: "graph_relations",
+                reason: "requested graph relation is missing",
+            })?);
+        }
+        let references = ordered.iter().collect::<Vec<_>>();
+        let entities = load_relation_entity_references_metered(
+            self,
+            &references,
+            project,
+            generation,
+            control,
+            Some(&mut meter),
+        )?;
+        let rows = ordered
+            .into_iter()
+            .map(|row| relation_detail_from_row(&entities, row, project, generation))
+            .collect::<DbResult<Vec<_>>>()?;
+        let work = meter.finish(rows.len())?;
+        Ok(RepositoryGraphReadBatch { rows, work })
+    }
+
     /// Load one bounded direction-specific adjacency page for a unique frontier.
     ///
     /// The complete frontier is bound through one statement whose indexed
@@ -1365,12 +1870,41 @@ impl AtlasStore {
         limit: u32,
         control: Option<&IndexWorkControl>,
     ) -> DbResult<RepositoryGraphAdjacencyPage> {
-        self.repository_graph_adjacency_page_filtered(
+        Ok(self
+            .repository_graph_adjacency_page_bounded(
+                frontier,
+                direction,
+                continuation,
+                limit,
+                maximum_repository_graph_read_budget()?,
+                control,
+            )?
+            .page)
+    }
+
+    /// Load one bounded adjacency page and report exact database work.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same fail-closed errors as
+    /// [`Self::repository_graph_adjacency_page`] and rejects any page whose
+    /// returned, decoded, endpoint, or path hydration crosses `budget`.
+    pub fn repository_graph_adjacency_page_bounded(
+        &self,
+        frontier: &[GraphEntityKey],
+        direction: RepositoryGraphDirection,
+        continuation: Option<&RepositoryGraphAdjacencyContinuation>,
+        limit: u32,
+        budget: RepositoryGraphReadBudget,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphAdjacencyReadPage> {
+        self.repository_graph_adjacency_page_filtered_bounded(
             frontier,
             direction,
             None,
             continuation,
             limit,
+            budget,
             control,
         )
     }
@@ -1391,11 +1925,47 @@ impl AtlasStore {
         limit: u32,
         control: Option<&IndexWorkControl>,
     ) -> DbResult<RepositoryGraphAdjacencyPage> {
+        Ok(self
+            .repository_graph_adjacency_page_filtered_bounded(
+                frontier,
+                direction,
+                relation,
+                continuation,
+                limit,
+                maximum_repository_graph_read_budget()?,
+                control,
+            )?
+            .page)
+    }
+
+    /// Load one family-filtered adjacency page and report exact database work.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same fail-closed errors as
+    /// [`Self::repository_graph_adjacency_page_filtered`] and rejects any page
+    /// whose complete query work crosses `budget`.
+    pub fn repository_graph_adjacency_page_filtered_bounded(
+        &self,
+        frontier: &[GraphEntityKey],
+        direction: RepositoryGraphDirection,
+        relation: Option<GraphRelationKind>,
+        continuation: Option<&RepositoryGraphAdjacencyContinuation>,
+        limit: u32,
+        budget: RepositoryGraphReadBudget,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphAdjacencyReadPage> {
         let limit_plus_one = validated_limit_plus_one(
             limit,
             GraphLimits::MAX_ROWS,
             "graph adjacency rows must be nonzero and within the product ceiling",
         )?;
+        if limit > budget.returned_rows() {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph adjacency page limit exceeds the return budget",
+            }
+            .into());
+        }
         if frontier.len() > MAX_REPOSITORY_GRAPH_FRONTIER {
             return Err(GraphContractError::InvalidLimits {
                 reason: "graph adjacency frontier exceeds the product ceiling",
@@ -1409,8 +1979,13 @@ impl AtlasStore {
                 }
                 .into());
             }
-            return Ok(empty_adjacency_page());
+            let meter = RepositoryGraphReadMeter::new(budget, 0)?;
+            return Ok(RepositoryGraphAdjacencyReadPage {
+                page: empty_adjacency_page(),
+                work: meter.finish(0)?,
+            });
         }
+        let mut meter = RepositoryGraphReadMeter::new(budget, frontier.len())?;
         let limit_plus_one_usize = usize::try_from(limit_plus_one).map_err(|_source| {
             GraphContractError::InvalidLimits {
                 reason: "graph adjacency page limit overflowed",
@@ -1438,7 +2013,10 @@ impl AtlasStore {
                 }
                 .into());
             }
-            return Ok(empty_adjacency_page());
+            return Ok(RepositoryGraphAdjacencyReadPage {
+                page: empty_adjacency_page(),
+                work: meter.finish(0)?,
+            });
         };
         if !verify_project_identity(&self.connection, project)? {
             if continuation.is_some() {
@@ -1447,7 +2025,10 @@ impl AtlasStore {
                 }
                 .into());
             }
-            return Ok(empty_adjacency_page());
+            return Ok(RepositoryGraphAdjacencyReadPage {
+                page: empty_adjacency_page(),
+                work: meter.finish(0)?,
+            });
         }
 
         if let Some(continuation) = continuation
@@ -1514,7 +2095,10 @@ impl AtlasStore {
             IndexWorkStage::RepositoryTraversal,
             || {
                 let mut statement = self.connection.prepare(&sql)?;
-                collect_adjacency_relation_rows(statement.query(params_from_iter(bindings.iter()))?)
+                collect_adjacency_relation_rows_metered(
+                    statement.query(params_from_iter(bindings.iter()))?,
+                    &mut meter,
+                )
             },
         )?;
         let truncated = raw.len() > limit as usize;
@@ -1542,8 +2126,14 @@ impl AtlasStore {
             None
         };
         let relation_rows = raw.iter().map(|row| &row.relation).collect::<Vec<_>>();
-        let entities =
-            load_relation_entity_references(self, &relation_rows, project, generation, control)?;
+        let entities = load_relation_entity_references_metered(
+            self,
+            &relation_rows,
+            project,
+            generation,
+            control,
+            Some(&mut meter),
+        )?;
         let mut rows = Vec::with_capacity(raw.len());
         for row in raw {
             if let Some(control) = control {
@@ -1566,10 +2156,14 @@ impl AtlasStore {
         if truncated {
             rows.pop();
         }
-        Ok(RepositoryGraphAdjacencyPage {
-            rows,
-            truncated,
-            continuation: next,
+        let work = meter.finish(rows.len())?;
+        Ok(RepositoryGraphAdjacencyReadPage {
+            page: RepositoryGraphAdjacencyPage {
+                rows,
+                truncated,
+                continuation: next,
+            },
+            work,
         })
     }
 
@@ -1642,19 +2236,48 @@ impl AtlasStore {
         limit: u32,
         control: Option<&IndexWorkControl>,
     ) -> DbResult<Vec<RepositoryGraphPage<RelationOccurrence>>> {
+        Ok(self
+            .repository_graph_occurrence_pages_bounded(
+                relations,
+                limit,
+                maximum_repository_graph_read_budget()?,
+                control,
+            )?
+            .pages)
+    }
+
+    /// Load ordered per-relation occurrence pages under one exact read envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same fail-closed errors as
+    /// [`Self::repository_graph_occurrence_pages`] and rejects any aggregate
+    /// returned-row, decoded-byte, or occurrence-path hydration overrun. Raw
+    /// `limit + 1` sentinels are included in decoded and path work.
+    pub fn repository_graph_occurrence_pages_bounded(
+        &self,
+        relations: &[LogicalRelation],
+        limit: u32,
+        budget: RepositoryGraphReadBudget,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphReadPages<RelationOccurrence>> {
         let limit_plus_one = validated_limit_plus_one(
             limit,
             GraphLimits::MAX_OCCURRENCES,
             "graph occurrences must be nonzero and within the product ceiling",
         )?;
-        if relations.is_empty() {
-            return Ok(Vec::new());
-        }
         if relations.len() > MAX_REPOSITORY_GRAPH_FRONTIER {
             return Err(GraphContractError::InvalidLimits {
                 reason: "graph occurrence batch exceeds the product ceiling",
             }
             .into());
+        }
+        let mut meter = RepositoryGraphReadMeter::new(budget, relations.len())?;
+        if relations.is_empty() {
+            return Ok(RepositoryGraphReadPages {
+                pages: Vec::new(),
+                work: meter.finish(0)?,
+            });
         }
         let work_rows = relations.len().checked_mul(limit_plus_one as usize).ok_or(
             GraphContractError::InvalidLimits {
@@ -1668,11 +2291,17 @@ impl AtlasStore {
             .into());
         }
         let Some(generation) = self.repository_graph_generation()? else {
-            return Ok((0..relations.len()).map(|_| empty_page()).collect());
+            return Ok(RepositoryGraphReadPages {
+                pages: (0..relations.len()).map(|_| empty_page()).collect(),
+                work: meter.finish(0)?,
+            });
         };
         let project = relations[0].key().project();
         if !verify_project_identity(&self.connection, project)? {
-            return Ok((0..relations.len()).map(|_| empty_page()).collect());
+            return Ok(RepositoryGraphReadPages {
+                pages: (0..relations.len()).map(|_| empty_page()).collect(),
+                work: meter.finish(0)?,
+            });
         }
         let mut bindings = Vec::with_capacity(relations.len() * 2);
         for relation in relations {
@@ -1703,19 +2332,39 @@ impl AtlasStore {
                         table: "graph_relation_occurrences",
                         reason: "occurrence batch returned an invalid relation position",
                     })?;
-                    group.push(occurrence_row_at(row, 1)?);
+                    let occurrence = occurrence_row_at(row, 1)?;
+                    meter.record_decoded_bytes(
+                        occurrence_row_decoded_bytes(&occurrence)?
+                            .checked_add(8)
+                            .ok_or(GraphContractError::InvalidLimits {
+                                reason: "graph occurrence batch decoded row size overflowed",
+                            })?,
+                    )?;
+                    group.push(occurrence);
                 }
                 Ok(grouped)
             },
         )?;
-        raw.into_iter()
+        let pages = raw
+            .into_iter()
             .zip(relations)
             .map(|(rows, relation)| {
                 page_from_raw(rows, limit, |row| {
-                    occurrence_from_row(row, relation, generation)
+                    let occurrence = occurrence_from_row(row, relation, generation)?;
+                    meter.record_hydrated_path(occurrence.file().as_str())?;
+                    Ok(occurrence)
                 })
             })
-            .collect()
+            .collect::<DbResult<Vec<_>>>()?;
+        let returned_rows = pages.iter().try_fold(0_usize, |count, page| {
+            count
+                .checked_add(page.rows.len())
+                .ok_or(GraphContractError::InvalidLimits {
+                    reason: "graph occurrence returned-row accounting overflowed",
+                })
+        })?;
+        let work = meter.finish(returned_rows)?;
+        Ok(RepositoryGraphReadPages { pages, work })
     }
 
     /// Load bounded coverage rows for one exact project or path scope.
@@ -1786,23 +2435,9 @@ impl AtlasStore {
         paths: &[RepositoryNodePath],
         control: Option<&IndexWorkControl>,
     ) -> DbResult<RepositoryGraphPage<CoverageRecord>> {
-        if paths.len() > MAX_REPOSITORY_GRAPH_FRONTIER {
-            return Err(GraphContractError::InvalidLimits {
-                reason: "graph coverage path set exceeds the product ceiling",
-            }
-            .into());
-        }
+        validate_path_coverage_request(paths)?;
         if paths.is_empty() {
             return Ok(empty_page());
-        }
-        let mut unique = BTreeSet::new();
-        for path in paths {
-            if !unique.insert(path.as_str()) {
-                return Err(GraphContractError::InvalidLimits {
-                    reason: "graph coverage paths must be unique",
-                }
-                .into());
-            }
         }
         let Some(generation) = self.repository_graph_generation()? else {
             return Ok(empty_page());
@@ -1810,19 +2445,45 @@ impl AtlasStore {
         if !verify_project_identity(&self.connection, project)? {
             return Ok(empty_page());
         }
+        Ok(self
+            .repository_graph_path_coverage_bounded(
+                project,
+                generation,
+                paths,
+                maximum_repository_graph_read_budget()?,
+                control,
+            )?
+            .page)
+    }
 
-        let path_bindings = vec!["?"; paths.len()].join(", ");
-        let sql = format!(
-            "SELECT project_instance_id, scope_kind, scope_path, relation_scope,
-                    relation_kind, state, total, covered, omitted, reason, reached_limit,
-                    NULL, NULL
-               FROM graph_coverage
-              WHERE project_instance_id = ?
-                AND scope_kind = ?
-                AND scope_path IN ({path_bindings})
-              ORDER BY scope_path, relation_scope, relation_kind, state, id
-              LIMIT ?"
-        );
+    /// Load current exact-path coverage under one stable graph read envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same fail-closed errors as
+    /// [`Self::repository_graph_path_coverage`], rejects a stale project or
+    /// generation and any returned-row, decoded-byte, or coverage-path
+    /// hydration overrun, and never returns a partial batch. The raw truncation
+    /// sentinel is included in decoded and path work.
+    pub fn repository_graph_path_coverage_bounded(
+        &self,
+        project: ProjectInstanceId,
+        generation: IndexGeneration,
+        paths: &[RepositoryNodePath],
+        budget: RepositoryGraphReadBudget,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphReadPage<CoverageRecord>> {
+        validate_path_coverage_request(paths)?;
+        self.require_repository_graph_snapshot(project, generation)?;
+        let mut meter = RepositoryGraphReadMeter::new(budget, paths.len())?;
+        if paths.is_empty() {
+            return Ok(RepositoryGraphReadPage {
+                page: empty_page(),
+                work: meter.finish(0)?,
+            });
+        }
+
+        let sql = path_coverage_sql(paths.len());
         let mut bindings = Vec::with_capacity(paths.len() + 3);
         bindings.push(Value::Blob(project.as_bytes().to_vec()));
         bindings.push(Value::Text("path".to_string()));
@@ -1841,14 +2502,22 @@ impl AtlasStore {
                 let mut rows = statement.query(params_from_iter(bindings.iter()))?;
                 let mut collected = Vec::new();
                 while let Some(row) = rows.next()? {
-                    collected.push(coverage_row(row)?);
+                    let coverage = coverage_row(row)?;
+                    meter.record_decoded_bytes(coverage_row_decoded_bytes(&coverage)?)?;
+                    collected.push(coverage);
                 }
                 Ok(collected)
             },
         )?;
-        page_from_raw(raw, GraphLimits::MAX_ROWS, |row| {
-            coverage_from_row(row, project, generation)
-        })
+        let page = page_from_raw(raw, GraphLimits::MAX_ROWS, |row| {
+            let coverage = coverage_from_row(row, project, generation)?;
+            if let CoverageScope::Path { path } = coverage.scope() {
+                meter.record_hydrated_path(path.as_str())?;
+            }
+            Ok(coverage)
+        })?;
+        let work = meter.finish(page.rows.len())?;
+        Ok(RepositoryGraphReadPage { page, work })
     }
 
     /// Discover one bounded page of current coverage with optional typed filters.
@@ -1985,7 +2654,12 @@ impl AtlasStore {
     }
 
     /// Return the complete generation used to reconstruct normalized graph rows.
-    fn repository_graph_generation(&self) -> DbResult<Option<IndexGeneration>> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when publication metadata is incomplete or disagrees
+    /// with the project identity's active graph generation.
+    pub fn repository_graph_generation(&self) -> DbResult<Option<IndexGeneration>> {
         let Some(publication) = self.index_publication()? else {
             return Ok(None);
         };
@@ -2004,6 +2678,25 @@ impl AtlasStore {
             });
         }
         Ok(Some(graph_generation))
+    }
+
+    /// Require one exact published graph snapshot for cursor-owned hydration.
+    pub(crate) fn require_repository_graph_snapshot(
+        &self,
+        project: ProjectInstanceId,
+        generation: IndexGeneration,
+    ) -> DbResult<()> {
+        require_bound_project_identity(&self.connection, project)?;
+        let current = self
+            .repository_graph_generation()?
+            .ok_or(DbError::GraphPublicationUnavailable)?;
+        if current != generation {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph hydration generation does not match the current publication",
+            }
+            .into());
+        }
+        Ok(())
     }
 
     /// Collect one indexed relation page by source or target key.
@@ -3764,6 +4457,43 @@ fn graph_values_clause(rows: usize, columns: usize) -> String {
     vec![row; rows].join(", ")
 }
 
+/// Build one indexed stable-key entity hydration statement.
+fn graph_entity_hydration_sql(entity_count: usize) -> String {
+    format!(
+        "WITH requested(entity_key) AS (VALUES {})
+         SELECT entity.entity_key, entity.project_instance_id,
+                entity.canonical_identity, entity.entity_kind,
+                entity.repository_path, entity.package_manager,
+                entity.package_name, entity.manifest_path,
+                entity.symbol_name, entity.symbol_kind,
+                entity.symbol_parent, entity.symbol_signature,
+                entity.external_system, entity.external_identity
+           FROM requested
+           JOIN graph_entities AS entity
+             ON entity.entity_key = requested.entity_key
+          WHERE entity.project_instance_id = ?",
+        graph_values_clause(entity_count, 1),
+    )
+}
+
+/// Build one project-scoped stable-key relation hydration statement.
+fn graph_relation_hydration_sql(relation_count: usize) -> String {
+    format!(
+        "WITH requested(relation_key) AS (VALUES {})
+         SELECT relation.relation_key, relation.project_instance_id,
+                relation.canonical_identity, relation.source_entity_key,
+                relation.relation_scope, relation.relation_kind,
+                relation.resolution_status, relation.target_entity_key,
+                relation.reference_text, relation.candidate_count,
+                relation.confidence, relation.completeness
+           FROM requested
+           JOIN graph_relations AS relation INDEXED BY idx_graph_relations_project_key
+             ON relation.relation_key = requested.relation_key
+            AND relation.project_instance_id = ?",
+        graph_values_clause(relation_count, 1),
+    )
+}
+
 /// Build direction-independent per-relation occurrence branches.
 fn occurrence_pages_sql(relation_count: usize) -> String {
     let branches = (0..relation_count)
@@ -3791,6 +4521,22 @@ fn occurrence_pages_sql(relation_count: usize) -> String {
     )
 }
 
+/// Build the set-oriented exact-path coverage hydration statement.
+fn path_coverage_sql(path_count: usize) -> String {
+    let path_bindings = vec!["?"; path_count].join(", ");
+    format!(
+        "SELECT project_instance_id, scope_kind, scope_path, relation_scope,
+                relation_kind, state, total, covered, omitted, reason, reached_limit,
+                NULL, NULL
+           FROM graph_coverage
+          WHERE project_instance_id = ?
+            AND scope_kind = ?
+            AND scope_path IN ({path_bindings})
+          ORDER BY scope_path, relation_scope, relation_kind, state, id
+          LIMIT ?"
+    )
+}
+
 /// Load every unique relation endpoint through bounded set-oriented joins.
 fn load_relation_entities(
     store: &AtlasStore,
@@ -3811,6 +4557,18 @@ fn load_relation_entity_references(
     generation: IndexGeneration,
     control: Option<&IndexWorkControl>,
 ) -> DbResult<HashMap<[u8; 32], GraphEntity>> {
+    load_relation_entity_references_metered(store, rows, project, generation, control, None)
+}
+
+/// Load relation endpoint references with optional exact batch accounting.
+fn load_relation_entity_references_metered(
+    store: &AtlasStore,
+    rows: &[&RelationRow],
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    control: Option<&IndexWorkControl>,
+    meter: Option<&mut RepositoryGraphReadMeter>,
+) -> DbResult<HashMap<[u8; 32], GraphEntity>> {
     let mut digests = BTreeSet::new();
     for row in rows {
         let row_project =
@@ -3827,44 +4585,31 @@ fn load_relation_entity_references(
             )?);
         }
     }
-    load_graph_entities_by_digest(
+    load_graph_entities_by_digest_metered(
         store,
         &digests.into_iter().collect::<Vec<_>>(),
         project,
         generation,
         control,
+        meter,
     )
 }
 
-/// Hydrate one unique stable-key set without issuing one query per entity.
-fn load_graph_entities_by_digest(
+/// Hydrate one unique stable-key set with optional exact batch accounting.
+fn load_graph_entities_by_digest_metered(
     store: &AtlasStore,
     digests: &[[u8; 32]],
     project: ProjectInstanceId,
     generation: IndexGeneration,
     control: Option<&IndexWorkControl>,
+    mut meter: Option<&mut RepositoryGraphReadMeter>,
 ) -> DbResult<HashMap<[u8; 32], GraphEntity>> {
     let mut entities = HashMap::with_capacity(digests.len());
     for chunk in digests.chunks(GRAPH_ENTITY_HYDRATION_CHUNK) {
         if let Some(control) = control {
             control.check(IndexWorkStage::RepositoryTraversal)?;
         }
-        let sql = format!(
-            "WITH requested(entity_key) AS (VALUES {})
-             SELECT entity.entity_key, entity.project_instance_id,
-                    entity.canonical_identity, entity.entity_kind,
-                    entity.repository_path, entity.package_manager,
-                    entity.package_name, entity.manifest_path,
-                    entity.symbol_name, entity.symbol_kind,
-                    entity.symbol_parent, entity.symbol_signature,
-                    entity.external_system, entity.external_identity
-               FROM requested
-               JOIN graph_entities AS entity
-                 ON entity.entity_key = requested.entity_key
-              WHERE entity.project_instance_id = ?
-              ORDER BY entity.entity_key",
-            graph_values_clause(chunk.len(), 1),
-        );
+        let sql = graph_entity_hydration_sql(chunk.len());
         let mut bindings = chunk
             .iter()
             .map(|digest| Value::Blob(digest.to_vec()))
@@ -3876,21 +4621,93 @@ fn load_graph_entities_by_digest(
             IndexWorkStage::RepositoryTraversal,
             || {
                 let mut statement = store.connection.prepare(&sql)?;
-                collect_entity_rows(statement.query(params_from_iter(bindings.iter()))?)
+                let rows = statement.query(params_from_iter(bindings.iter()))?;
+                if let Some(meter) = meter.as_deref_mut() {
+                    collect_entity_rows_metered(rows, meter)
+                } else {
+                    collect_entity_rows(rows)
+                }
             },
         )?;
         for row in raw {
             let entity = entity_from_row(row, project, generation)?;
             let digest = entity.key().digest_bytes()?;
-            if entities.insert(digest, entity).is_some() {
+            if entities.contains_key(&digest) {
                 return Err(DbError::GraphRowShape {
                     table: "graph_entities",
                     reason: "batched entity hydration returned a duplicate key",
                 });
             }
+            if let Some(meter) = meter.as_deref_mut() {
+                meter.record_entity(&entity)?;
+            }
+            entities.insert(digest, entity);
         }
     }
     Ok(entities)
+}
+
+/// Construct the compatibility envelope used by legacy bounded read wrappers.
+fn maximum_repository_graph_read_budget() -> DbResult<RepositoryGraphReadBudget> {
+    Ok(RepositoryGraphReadBudget::new(
+        RepositoryGraphReadBudget::MAX_REQUESTED_ROWS,
+        RepositoryGraphReadBudget::MAX_RETURNED_ROWS,
+        RepositoryGraphReadBudget::MAX_DECODED_BYTES,
+        RepositoryGraphReadBudget::MAX_HYDRATED_ENTITIES,
+        RepositoryGraphReadBudget::MAX_HYDRATED_PATHS,
+    )?)
+}
+
+/// Validate one bounded unique exact-path coverage request.
+fn validate_path_coverage_request(paths: &[RepositoryNodePath]) -> DbResult<()> {
+    if paths.len() > MAX_REPOSITORY_GRAPH_FRONTIER {
+        return Err(GraphContractError::InvalidLimits {
+            reason: "graph coverage path set exceeds the product ceiling",
+        }
+        .into());
+    }
+    if paths
+        .iter()
+        .map(RepositoryNodePath::as_str)
+        .collect::<BTreeSet<_>>()
+        .len()
+        != paths.len()
+    {
+        return Err(GraphContractError::InvalidLimits {
+            reason: "graph coverage paths must be unique",
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Validate the bounded unique stable-key set shared by cursor hydration calls.
+fn validate_graph_hydration_request(digests: &[[u8; 32]]) -> DbResult<()> {
+    if digests.len() > MAX_REPOSITORY_GRAPH_FRONTIER {
+        return Err(GraphContractError::InvalidLimits {
+            reason: "graph hydration key set exceeds the product ceiling",
+        }
+        .into());
+    }
+    if digests.iter().copied().collect::<HashSet<_>>().len() != digests.len() {
+        return Err(GraphContractError::InvalidLimits {
+            reason: "graph hydration keys must be unique",
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Return the exact repository path that can own authored purpose for an entity.
+fn graph_entity_purpose_owner(entity: &GraphEntity) -> Option<&str> {
+    match entity.selector() {
+        EntitySelector::Project => Some("."),
+        EntitySelector::Folder { path } => Some(path.as_str()),
+        EntitySelector::File { path } => Some(path.as_str()),
+        EntitySelector::Package { package } => Some(package.manifest.as_str()),
+        EntitySelector::Symbol { symbol } => Some(symbol.file.as_str()),
+        EntitySelector::External { .. } => None,
+    }
 }
 
 /// Reconstruct one relation and retain its already-hydrated endpoint entities.
@@ -4162,30 +4979,6 @@ fn coverage_discovery_from_row(
     })
 }
 
-/// Load one entity through the stable-key primary index.
-fn load_entity_by_digest(
-    store: &AtlasStore,
-    project: ProjectInstanceId,
-    digest: &[u8; 32],
-    generation: IndexGeneration,
-) -> DbResult<Option<GraphEntity>> {
-    let raw = {
-        let mut statement = store.connection.prepare_cached(
-            "SELECT entity_key, project_instance_id, canonical_identity, entity_kind,
-                    repository_path, package_manager, package_name, manifest_path,
-                    symbol_name, symbol_kind, symbol_parent, symbol_signature,
-                    external_system, external_identity
-               FROM graph_entities
-              WHERE project_instance_id = ?1 AND entity_key = ?2",
-        )?;
-        statement
-            .query_row(params![&project.as_bytes()[..], &digest[..]], entity_row)
-            .optional()?
-    };
-    raw.map(|row| entity_from_row(row, project, generation))
-        .transpose()
-}
-
 /// Fail with both project identities when normalized ownership differs.
 fn require_project(expected: ProjectInstanceId, found: ProjectInstanceId) -> DbResult<()> {
     if expected != found {
@@ -4248,6 +5041,20 @@ fn collect_entity_rows(mut rows: rusqlite::Rows<'_>) -> DbResult<Vec<EntityRow>>
     Ok(collected)
 }
 
+/// Collect raw entity rows while enforcing decoded payload bytes.
+fn collect_entity_rows_metered(
+    mut rows: rusqlite::Rows<'_>,
+    meter: &mut RepositoryGraphReadMeter,
+) -> DbResult<Vec<EntityRow>> {
+    let mut collected = Vec::new();
+    while let Some(row) = rows.next()? {
+        let raw = entity_row(row)?;
+        meter.record_decoded_bytes(entity_row_decoded_bytes(&raw)?)?;
+        collected.push(raw);
+    }
+    Ok(collected)
+}
+
 /// Read one raw entity row without interpreting enum or selector values.
 fn entity_row(row: &Row<'_>) -> rusqlite::Result<EntityRow> {
     Ok(EntityRow {
@@ -4268,6 +5075,29 @@ fn entity_row(row: &Row<'_>) -> rusqlite::Result<EntityRow> {
     })
 }
 
+/// Count exact dynamic payload bytes decoded for one normalized entity row.
+fn entity_row_decoded_bytes(row: &EntityRow) -> DbResult<u64> {
+    decoded_payload_bytes(
+        [
+            row.key.len(),
+            row.project.len(),
+            row.canonical.len(),
+            row.kind.len(),
+            row.repository_path.as_ref().map_or(0, String::len),
+            row.package_manager.as_ref().map_or(0, String::len),
+            row.package_name.as_ref().map_or(0, String::len),
+            row.manifest_path.as_ref().map_or(0, String::len),
+            row.symbol_name.as_ref().map_or(0, String::len),
+            row.symbol_kind.as_ref().map_or(0, String::len),
+            row.symbol_parent.as_ref().map_or(0, String::len),
+            row.symbol_signature.as_ref().map_or(0, String::len),
+            row.external_system.as_ref().map_or(0, String::len),
+            row.external_identity.as_ref().map_or(0, String::len),
+        ],
+        0,
+    )
+}
+
 /// Collect every raw relation row, including the truncation sentinel row.
 fn collect_relation_rows(mut rows: rusqlite::Rows<'_>) -> DbResult<Vec<RelationRow>> {
     let mut collected = Vec::new();
@@ -4277,16 +5107,39 @@ fn collect_relation_rows(mut rows: rusqlite::Rows<'_>) -> DbResult<Vec<RelationR
     Ok(collected)
 }
 
-/// Collect every raw adjacency row, including the truncation sentinel row.
-fn collect_adjacency_relation_rows(
+/// Collect raw relation rows while enforcing decoded payload bytes.
+fn collect_relation_rows_metered(
     mut rows: rusqlite::Rows<'_>,
+    meter: &mut RepositoryGraphReadMeter,
+) -> DbResult<Vec<RelationRow>> {
+    let mut collected = Vec::new();
+    while let Some(row) = rows.next()? {
+        let raw = relation_row(row)?;
+        meter.record_decoded_bytes(relation_row_decoded_bytes(&raw)?)?;
+        collected.push(raw);
+    }
+    Ok(collected)
+}
+
+/// Collect raw adjacency rows and meter the truncation sentinel before return.
+fn collect_adjacency_relation_rows_metered(
+    mut rows: rusqlite::Rows<'_>,
+    meter: &mut RepositoryGraphReadMeter,
 ) -> DbResult<Vec<AdjacencyRelationRow>> {
     let mut collected = Vec::new();
     while let Some(row) = rows.next()? {
-        collected.push(AdjacencyRelationRow {
+        let raw = AdjacencyRelationRow {
             frontier_index: row.get(0)?,
             relation: relation_row_at(row, 1)?,
-        });
+        };
+        meter.record_decoded_bytes(
+            relation_row_decoded_bytes(&raw.relation)?
+                .checked_add(8)
+                .ok_or(GraphContractError::InvalidLimits {
+                    reason: "graph adjacency decoded row size overflowed",
+                })?,
+        )?;
+        collected.push(raw);
     }
     Ok(collected)
 }
@@ -4314,6 +5167,46 @@ fn relation_row_at(row: &Row<'_>, offset: usize) -> rusqlite::Result<RelationRow
     })
 }
 
+/// Count exact dynamic and fixed payload bytes decoded for one relation row.
+fn relation_row_decoded_bytes(row: &RelationRow) -> DbResult<u64> {
+    decoded_payload_bytes(
+        [
+            row.key.len(),
+            row.project.len(),
+            row.canonical.len(),
+            row.source.len(),
+            row.relation_scope.len(),
+            row.relation_kind.len(),
+            row.resolution_status.len(),
+            row.target.as_ref().map_or(0, Vec::len),
+            row.reference.as_ref().map_or(0, String::len),
+            row.confidence.len(),
+            row.completeness.len(),
+        ],
+        8,
+    )
+}
+
+/// Sum decoded variable-width values plus fixed scalar widths without overflow.
+fn decoded_payload_bytes(
+    lengths: impl IntoIterator<Item = usize>,
+    fixed_bytes: u64,
+) -> DbResult<u64> {
+    let mut decoded = fixed_bytes;
+    for length in lengths {
+        let length =
+            u64::try_from(length).map_err(|_source| GraphContractError::InvalidLimits {
+                reason: "graph read decoded field length overflowed",
+            })?;
+        decoded = decoded
+            .checked_add(length)
+            .ok_or(GraphContractError::InvalidLimits {
+                reason: "graph read decoded row size overflowed",
+            })?;
+    }
+    Ok(decoded)
+}
+
 /// Read one raw relation occurrence row.
 fn occurrence_row(row: &Row<'_>) -> rusqlite::Result<OccurrenceRow> {
     occurrence_row_at(row, 0)
@@ -4329,6 +5222,11 @@ fn occurrence_row_at(row: &Row<'_>, offset: usize) -> rusqlite::Result<Occurrenc
         end_line: row.get(offset + 4)?,
         end_column: row.get(offset + 5)?,
     })
+}
+
+/// Count exact occurrence payload bytes, including four fixed span scalars.
+fn occurrence_row_decoded_bytes(row: &OccurrenceRow) -> DbResult<u64> {
+    decoded_payload_bytes([row.relation.len(), row.file_path.len()], 32)
 }
 
 /// Read one raw graph coverage row.
@@ -4348,6 +5246,25 @@ fn coverage_row(row: &Row<'_>) -> rusqlite::Result<CoverageRow> {
         parser: row.get(11)?,
         provider: row.get(12)?,
     })
+}
+
+/// Count exact coverage payload bytes, including three fixed count scalars.
+fn coverage_row_decoded_bytes(row: &CoverageRow) -> DbResult<u64> {
+    decoded_payload_bytes(
+        [
+            row.project.len(),
+            row.scope_kind.len(),
+            row.scope_path.as_ref().map_or(0, String::len),
+            row.relation_scope.as_ref().map_or(0, String::len),
+            row.relation_kind.as_ref().map_or(0, String::len),
+            row.state.len(),
+            row.reason.as_ref().map_or(0, String::len),
+            row.reached_limit.as_ref().map_or(0, String::len),
+            row.parser.as_ref().map_or(0, String::len),
+            row.provider.as_ref().map_or(0, String::len),
+        ],
+        24,
+    )
 }
 
 /// Convert a fully collected raw page and validate the sentinel before truncating.
@@ -5340,6 +6257,87 @@ mod tests {
             return Err(io::Error::other(message.to_string()).into());
         };
         Ok(error)
+    }
+
+    /// Prove cursor hydration seeks through stable-key indexes.
+    fn assert_cursor_hydration_indexes(store: &AtlasStore) -> Result<(), Box<dyn Error>> {
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("bound fixture identity is missing"))?;
+        let cases = [
+            (
+                "entity cursor hydration",
+                graph_entity_hydration_sql(2),
+                vec![
+                    Value::Blob(vec![0; 32]),
+                    Value::Blob(vec![1; 32]),
+                    Value::Blob(project.as_bytes().to_vec()),
+                ],
+                "project_instance_id=? AND entity_key=?",
+                "SCAN entity",
+                false,
+            ),
+            (
+                "relation cursor hydration",
+                graph_relation_hydration_sql(2),
+                vec![
+                    Value::Blob(vec![0; 32]),
+                    Value::Blob(vec![1; 32]),
+                    Value::Blob(project.as_bytes().to_vec()),
+                ],
+                "idx_graph_relations_project_key",
+                "SCAN relation",
+                false,
+            ),
+            (
+                "batched occurrence hydration",
+                occurrence_pages_sql(2),
+                vec![
+                    Value::Blob(vec![0; 32]),
+                    Value::Integer(2),
+                    Value::Blob(vec![1; 32]),
+                    Value::Integer(2),
+                ],
+                "sqlite_autoindex_graph_relation_occurrences_1",
+                "SCAN graph_relation_occurrences",
+                true,
+            ),
+            (
+                "batched path coverage hydration",
+                path_coverage_sql(2),
+                vec![
+                    Value::Blob(project.as_bytes().to_vec()),
+                    Value::Text("path".to_string()),
+                    Value::Text("Cargo.toml".to_string()),
+                    Value::Text("src/Äuth.rs".to_string()),
+                    Value::Integer(i64::from(GraphLimits::MAX_ROWS) + 1),
+                ],
+                "idx_graph_coverage_scope_order",
+                "SCAN graph_coverage",
+                false,
+            ),
+        ];
+        for (context, sql, bindings, required_plan, forbidden_scan, allow_bounded_sort) in cases {
+            let mut statement = store
+                .connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+            let details = statement
+                .query_map(params_from_iter(bindings.iter()), |row| {
+                    row.get::<_, String>(3)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            require(
+                details.iter().any(|detail| detail.contains(required_plan))
+                    && details.iter().all(|detail| {
+                        !detail.contains(forbidden_scan)
+                            && (allow_bounded_sort || !detail.contains("USE TEMP B-TREE"))
+                    }),
+                &format!(
+                    "{context} did not use {required_plan} without a scan or sort: {details:?}"
+                ),
+            )?;
+        }
+        Ok(())
     }
 
     /// Prove each normal graph query shape enters through its owning index.
@@ -7693,6 +8691,1167 @@ mod tests {
             ),
             "adjacency cancellation was not typed",
         )?;
+        store.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_hydration_is_ordered_bounded_and_fail_closed() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("cursor-hydration");
+        let atlas_dir = project_root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        let mut writer = AtlasStore::open_for_project(&db_path, &project_root)?;
+        let fixture = publish_fixture(&mut writer, "cursor-hydration")?;
+        writer.connection.execute(
+            "INSERT INTO graph_relation_occurrences(
+                 relation_key, file_path, start_line, start_column, end_line, end_column
+             ) VALUES(?1, 'Cargo.toml', 1, 0, 1, 1)",
+            params![&fixture.relations[0].key().digest_bytes()?[..]],
+        )?;
+        writer.connection.execute(
+            "INSERT INTO graph_coverage(
+                 project_instance_id, scope_kind, scope_path, relation_scope,
+                 relation_kind, state, total, covered, omitted, reason, reached_limit
+             ) VALUES(?1, 'path', 'Cargo.toml', NULL, NULL,
+                      'complete', 1, 1, 0, NULL, NULL)",
+            params![&fixture.project.as_bytes()[..]],
+        )?;
+        drop(writer);
+        let store = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+        let generation = store
+            .repository_graph_generation()?
+            .ok_or_else(|| io::Error::other("graph generation missing"))?;
+        let full_budget = RepositoryGraphReadBudget::new(
+            MAX_REPOSITORY_GRAPH_FRONTIER as u32,
+            MAX_REPOSITORY_GRAPH_FRONTIER as u32,
+            RepositoryGraphReadBudget::MAX_DECODED_BYTES,
+            RepositoryGraphReadBudget::MAX_HYDRATED_ENTITIES,
+            RepositoryGraphReadBudget::MAX_HYDRATED_PATHS,
+        )?;
+
+        let expected_entities = fixture
+            .entities
+            .iter()
+            .rev()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>();
+        let entity_digests = expected_entities
+            .iter()
+            .map(|entity| entity.key().digest_bytes())
+            .collect::<Result<Vec<_>, _>>()?;
+        let entity_batch = store.repository_graph_entities_by_digest(
+            fixture.project,
+            generation,
+            &entity_digests,
+            full_budget,
+            None,
+        )?;
+        require_eq(
+            &entity_batch.rows,
+            &expected_entities,
+            "ordered entity cursor hydration",
+        )?;
+        require_eq(
+            &entity_batch.work,
+            &RepositoryGraphReadWork {
+                requested_rows: 3,
+                returned_rows: 3,
+                decoded_bytes: entity_batch.work.decoded_bytes,
+                hydrated_entities: 3,
+                hydrated_paths: 2,
+            },
+            "exact entity cursor work",
+        )?;
+        require(
+            entity_batch.work.decoded_bytes > 0,
+            "entity cursor decoded no SQLite payload bytes",
+        )?;
+
+        let file_entity = fixture
+            .entities
+            .iter()
+            .find(|entity| matches!(entity.selector(), EntitySelector::File { .. }))
+            .ok_or_else(|| io::Error::other("file anchor fixture missing"))?;
+        let file_anchor = store.repository_graph_entity_bounded(
+            file_entity.key(),
+            generation,
+            full_budget,
+            None,
+        )?;
+        require_eq(
+            &file_anchor.rows,
+            &vec![file_entity.clone()],
+            "exact file anchor hydration",
+        )?;
+        require_eq(
+            &file_anchor.work,
+            &RepositoryGraphReadWork {
+                requested_rows: 1,
+                returned_rows: 1,
+                decoded_bytes: file_anchor.work.decoded_bytes,
+                hydrated_entities: 1,
+                hydrated_paths: 1,
+            },
+            "exact file anchor work",
+        )?;
+        let exact_file_budget =
+            RepositoryGraphReadBudget::new(1, 1, file_anchor.work.decoded_bytes, 1, 1)?;
+        require_eq(
+            &store.repository_graph_entity_bounded(
+                file_entity.key(),
+                generation,
+                exact_file_budget,
+                None,
+            )?,
+            &file_anchor,
+            "exact file anchor envelope",
+        )?;
+        require_eq(
+            &store.repository_graph_entity(file_entity.key())?,
+            &Some(file_entity.clone()),
+            "legacy file anchor wrapper compatibility",
+        )?;
+        let file_decode_overrun = require_db_error(
+            store.repository_graph_entity_bounded(
+                file_entity.key(),
+                generation,
+                RepositoryGraphReadBudget::new(1, 1, file_anchor.work.decoded_bytes - 1, 1, 1)?,
+                None,
+            ),
+            "file anchor decoded-byte overrun was accepted",
+        )?;
+        require(
+            matches!(file_decode_overrun, DbError::GraphContract(_)),
+            &format!("unexpected file anchor envelope error: {file_decode_overrun}"),
+        )?;
+        let missing_file_selector = EntitySelector::File {
+            path: RepositoryFilePath::new(Path::new("missing-anchor.rs"))?,
+        };
+        let missing_file_key = GraphEntityKey::new(fixture.project, &missing_file_selector);
+        let missing_file = store.repository_graph_entity_bounded(
+            &missing_file_key,
+            generation,
+            full_budget,
+            None,
+        )?;
+        require(
+            missing_file.rows.is_empty()
+                && missing_file.work
+                    == (RepositoryGraphReadWork {
+                        requested_rows: 1,
+                        returned_rows: 0,
+                        decoded_bytes: 0,
+                        hydrated_entities: 0,
+                        hydrated_paths: 0,
+                    }),
+            "missing file anchor did not return exact empty work",
+        )?;
+
+        let anchor_path = RepositoryNodePath::new(Path::new("src/Äuth.rs"))?;
+        let path_anchors = store.repository_graph_entities_by_path_bounded(
+            fixture.project,
+            generation,
+            &anchor_path,
+            1,
+            full_budget,
+            None,
+        )?;
+        require(
+            path_anchors.page.rows.len() == 1
+                && path_anchors.page.truncated
+                && matches!(
+                    path_anchors.page.rows[0].selector(),
+                    EntitySelector::File { .. }
+                )
+                && path_anchors.work.requested_rows == 1
+                && path_anchors.work.returned_rows == 1
+                && path_anchors.work.decoded_bytes > 0
+                && path_anchors.work.hydrated_entities == 2
+                && path_anchors.work.hydrated_paths == 1,
+            "path anchor page lost stable order or sentinel work",
+        )?;
+        let exact_path_anchor_budget =
+            RepositoryGraphReadBudget::new(1, 1, path_anchors.work.decoded_bytes, 2, 1)?;
+        require_eq(
+            &store.repository_graph_entities_by_path_bounded(
+                fixture.project,
+                generation,
+                &anchor_path,
+                1,
+                exact_path_anchor_budget,
+                None,
+            )?,
+            &path_anchors,
+            "exact path anchor envelope",
+        )?;
+        require_eq(
+            &store.repository_graph_entities_by_path(fixture.project, &anchor_path, 1)?,
+            &path_anchors.page,
+            "legacy path anchor wrapper compatibility",
+        )?;
+        for (budget, limit, context) in [
+            (
+                RepositoryGraphReadBudget::new(1, 1, path_anchors.work.decoded_bytes - 1, 2, 1)?,
+                1,
+                "path anchor decoded-byte overrun was accepted",
+            ),
+            (
+                RepositoryGraphReadBudget::new(1, 1, path_anchors.work.decoded_bytes, 1, 1)?,
+                1,
+                "path anchor sentinel entity overrun was accepted",
+            ),
+            (
+                exact_path_anchor_budget,
+                2,
+                "path anchor returned-row overrun was accepted",
+            ),
+        ] {
+            let error = require_db_error(
+                store.repository_graph_entities_by_path_bounded(
+                    fixture.project,
+                    generation,
+                    &anchor_path,
+                    limit,
+                    budget,
+                    None,
+                ),
+                context,
+            )?;
+            require(
+                matches!(error, DbError::GraphContract(_)),
+                &format!("unexpected path anchor envelope error: {error}"),
+            )?;
+        }
+        let anchor_cancellation = projectatlas_core::IndexCancellation::new();
+        anchor_cancellation.cancel();
+        let anchor_control = IndexWorkControl::new(anchor_cancellation, None);
+        let cancelled_anchor = store.repository_graph_entities_by_path_bounded(
+            fixture.project,
+            generation,
+            &anchor_path,
+            1,
+            full_budget,
+            Some(&anchor_control),
+        );
+        require(
+            matches!(
+                cancelled_anchor,
+                Err(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::Cancelled {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    }
+                ))
+            ),
+            "path anchor cancellation was not typed",
+        )?;
+        let expired_anchor = IndexWorkControl::with_deadline(
+            projectatlas_core::IndexCancellation::new(),
+            Instant::now(),
+        );
+        let anchor_deadline = store.repository_graph_entity_bounded(
+            file_entity.key(),
+            generation,
+            full_budget,
+            Some(&expired_anchor),
+        );
+        require(
+            matches!(
+                anchor_deadline,
+                Err(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::DeadlineExceeded {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    }
+                ))
+            ),
+            "file anchor deadline was not typed",
+        )?;
+
+        let expected_relations = fixture.relations.iter().rev().cloned().collect::<Vec<_>>();
+        let relation_digests = expected_relations
+            .iter()
+            .map(|relation| relation.key().digest_bytes())
+            .collect::<Result<Vec<_>, _>>()?;
+        let relation_rows = store.repository_graph_relation_rows_by_digest(
+            fixture.project,
+            generation,
+            &relation_digests,
+            full_budget,
+            None,
+        )?;
+        require_eq(
+            &relation_rows
+                .rows
+                .iter()
+                .map(|row| row.relation.clone())
+                .collect::<Vec<_>>(),
+            &expected_relations,
+            "ordered relation cursor hydration",
+        )?;
+        require(
+            relation_rows.rows.iter().all(|row| {
+                row.source.key().project() == fixture.project
+                    && row
+                        .target
+                        .as_ref()
+                        .is_none_or(|target| target.key().project() == fixture.project)
+            }),
+            "relation cursor hydration returned an unvalidated endpoint",
+        )?;
+        require_eq(
+            &relation_rows.work,
+            &RepositoryGraphReadWork {
+                requested_rows: 4,
+                returned_rows: 4,
+                decoded_bytes: relation_rows.work.decoded_bytes,
+                hydrated_entities: 3,
+                hydrated_paths: 1,
+            },
+            "exact relation cursor work",
+        )?;
+        require(
+            relation_rows.work.decoded_bytes > entity_batch.work.decoded_bytes,
+            "relation cursor did not meter relation and endpoint payload bytes",
+        )?;
+
+        let exact_entity_budget =
+            RepositoryGraphReadBudget::new(3, 3, entity_batch.work.decoded_bytes, 3, 2)?;
+        require_eq(
+            &store
+                .repository_graph_entities_by_digest(
+                    fixture.project,
+                    generation,
+                    &entity_digests,
+                    exact_entity_budget,
+                    None,
+                )?
+                .work,
+            &entity_batch.work,
+            "exact entity envelope",
+        )?;
+        let exact_relation_budget =
+            RepositoryGraphReadBudget::new(4, 4, relation_rows.work.decoded_bytes, 3, 1)?;
+        require_eq(
+            &store
+                .repository_graph_relation_rows_by_digest(
+                    fixture.project,
+                    generation,
+                    &relation_digests,
+                    exact_relation_budget,
+                    None,
+                )?
+                .work,
+            &relation_rows.work,
+            "exact relation envelope",
+        )?;
+
+        for (budget, context) in [
+            (
+                RepositoryGraphReadBudget::new(3, 3, entity_batch.work.decoded_bytes - 1, 3, 2)?,
+                "decoded-byte envelope overrun was accepted",
+            ),
+            (
+                RepositoryGraphReadBudget::new(3, 3, entity_batch.work.decoded_bytes, 3, 1)?,
+                "purpose-path envelope overrun was accepted",
+            ),
+        ] {
+            let error = require_db_error(
+                store.repository_graph_entities_by_digest(
+                    fixture.project,
+                    generation,
+                    &entity_digests,
+                    budget,
+                    None,
+                ),
+                context,
+            )?;
+            require(
+                matches!(error, DbError::GraphContract(_)),
+                &format!("unexpected entity envelope error: {error}"),
+            )?;
+        }
+        let endpoint_budget =
+            RepositoryGraphReadBudget::new(4, 4, relation_rows.work.decoded_bytes, 2, 1)?;
+        let endpoint_error = require_db_error(
+            store.repository_graph_relation_rows_by_digest(
+                fixture.project,
+                generation,
+                &relation_digests,
+                endpoint_budget,
+                None,
+            ),
+            "endpoint entity envelope overrun was accepted",
+        )?;
+        require(
+            matches!(endpoint_error, DbError::GraphContract(_)),
+            &format!("unexpected endpoint envelope error: {endpoint_error}"),
+        )?;
+
+        for (budget, context) in [
+            (
+                RepositoryGraphReadBudget::new(
+                    2,
+                    3,
+                    RepositoryGraphReadBudget::MAX_DECODED_BYTES,
+                    3,
+                    2,
+                )?,
+                "requested-row envelope overrun was accepted",
+            ),
+            (
+                RepositoryGraphReadBudget::new(
+                    3,
+                    2,
+                    RepositoryGraphReadBudget::MAX_DECODED_BYTES,
+                    3,
+                    2,
+                )?,
+                "returned-row envelope overrun was accepted",
+            ),
+        ] {
+            let error = require_db_error(
+                store.repository_graph_entities_by_digest(
+                    fixture.project,
+                    generation,
+                    &entity_digests,
+                    budget,
+                    None,
+                ),
+                context,
+            )?;
+            require(
+                matches!(error, DbError::GraphContract(_)),
+                &format!("unexpected row-envelope error: {error}"),
+            )?;
+        }
+
+        for invalid in [
+            RepositoryGraphReadBudget::new(0, 1, 1, 1, 1),
+            RepositoryGraphReadBudget::new(
+                RepositoryGraphReadBudget::MAX_REQUESTED_ROWS + 1,
+                1,
+                1,
+                1,
+                1,
+            ),
+            RepositoryGraphReadBudget::new(
+                1,
+                RepositoryGraphReadBudget::MAX_RETURNED_ROWS + 1,
+                1,
+                1,
+                1,
+            ),
+            RepositoryGraphReadBudget::new(
+                1,
+                1,
+                RepositoryGraphReadBudget::MAX_DECODED_BYTES + 1,
+                1,
+                1,
+            ),
+            RepositoryGraphReadBudget::new(
+                1,
+                1,
+                1,
+                RepositoryGraphReadBudget::MAX_HYDRATED_ENTITIES + 1,
+                1,
+            ),
+            RepositoryGraphReadBudget::new(
+                1,
+                1,
+                1,
+                1,
+                RepositoryGraphReadBudget::MAX_HYDRATED_PATHS + 1,
+            ),
+        ] {
+            require(
+                matches!(invalid, Err(GraphContractError::InvalidLimits { .. })),
+                "invalid graph read budget was accepted",
+            )?;
+        }
+
+        let empty_entities = store.repository_graph_entities_by_digest(
+            fixture.project,
+            generation,
+            &[],
+            full_budget,
+            None,
+        )?;
+        let empty_relations = store.repository_graph_relation_rows_by_digest(
+            fixture.project,
+            generation,
+            &[],
+            full_budget,
+            None,
+        )?;
+        require(
+            empty_entities.rows.is_empty()
+                && empty_relations.rows.is_empty()
+                && empty_entities.work
+                    == (RepositoryGraphReadWork {
+                        requested_rows: 0,
+                        returned_rows: 0,
+                        decoded_bytes: 0,
+                        hydrated_entities: 0,
+                        hydrated_paths: 0,
+                    })
+                && empty_relations.work == empty_entities.work,
+            "empty cursor hydration was not stable",
+        )?;
+
+        let purpose_paths = vec![
+            "Cargo.toml".to_string(),
+            ".".to_string(),
+            "src/Äuth.rs".to_string(),
+            "src".to_string(),
+        ];
+        let purpose_batch = store.load_purpose_owner_nodes_by_paths_controlled(
+            fixture.project,
+            generation,
+            &purpose_paths,
+            full_budget,
+            None,
+        )?;
+        require_eq(
+            &purpose_batch
+                .rows
+                .iter()
+                .map(|node| node.node.path.clone())
+                .collect::<Vec<_>>(),
+            &purpose_paths,
+            "ordered purpose-owner hydration",
+        )?;
+        require_eq(
+            &purpose_batch.work,
+            &RepositoryGraphReadWork {
+                requested_rows: 4,
+                returned_rows: 4,
+                decoded_bytes: purpose_batch.work.decoded_bytes,
+                hydrated_entities: 0,
+                hydrated_paths: 4,
+            },
+            "exact purpose-owner work",
+        )?;
+        require(
+            purpose_batch.work.decoded_bytes > 0,
+            "purpose-owner hydration decoded no SQLite payload bytes",
+        )?;
+        let exact_purpose_budget =
+            RepositoryGraphReadBudget::new(4, 4, purpose_batch.work.decoded_bytes, 1, 4)?;
+        require_eq(
+            &store
+                .load_purpose_owner_nodes_by_paths_controlled(
+                    fixture.project,
+                    generation,
+                    &purpose_paths,
+                    exact_purpose_budget,
+                    None,
+                )?
+                .work,
+            &purpose_batch.work,
+            "exact purpose-owner envelope",
+        )?;
+        for (budget, context) in [
+            (
+                RepositoryGraphReadBudget::new(4, 4, purpose_batch.work.decoded_bytes - 1, 1, 4)?,
+                "purpose-owner decoded-byte overrun was accepted",
+            ),
+            (
+                RepositoryGraphReadBudget::new(4, 4, purpose_batch.work.decoded_bytes, 1, 3)?,
+                "purpose-owner path overrun was accepted",
+            ),
+        ] {
+            let error = require_db_error(
+                store.load_purpose_owner_nodes_by_paths_controlled(
+                    fixture.project,
+                    generation,
+                    &purpose_paths,
+                    budget,
+                    None,
+                ),
+                context,
+            )?;
+            require(
+                matches!(error, DbError::GraphContract(_)),
+                &format!("unexpected purpose-owner envelope error: {error}"),
+            )?;
+        }
+        let mut missing_purpose_paths = purpose_paths.clone();
+        missing_purpose_paths.push("missing/purpose-owner.rs".to_string());
+        let missing_purpose = store.load_purpose_owner_nodes_by_paths_controlled(
+            fixture.project,
+            generation,
+            &missing_purpose_paths,
+            full_budget,
+            None,
+        )?;
+        require_eq(
+            &missing_purpose
+                .rows
+                .iter()
+                .map(|node| node.node.path.clone())
+                .collect::<Vec<_>>(),
+            &purpose_paths,
+            "absent purpose-owner candidate ordering",
+        )?;
+        require(
+            missing_purpose.work.requested_rows == 5
+                && missing_purpose.work.returned_rows == 4
+                && missing_purpose.work.hydrated_paths == 4,
+            "absent purpose-owner candidate work was not exact",
+        )?;
+        let duplicate_purpose = require_db_error(
+            store.load_purpose_owner_nodes_by_paths_controlled(
+                fixture.project,
+                generation,
+                &[purpose_paths[0].clone(), purpose_paths[0].clone()],
+                full_budget,
+                None,
+            ),
+            "duplicate purpose-owner paths were accepted",
+        )?;
+        require(
+            matches!(duplicate_purpose, DbError::GraphContract(_)),
+            &format!("unexpected duplicate purpose-owner error: {duplicate_purpose}"),
+        )?;
+        let purpose_cancellation = projectatlas_core::IndexCancellation::new();
+        purpose_cancellation.cancel();
+        let purpose_control = IndexWorkControl::new(purpose_cancellation, None);
+        let cancelled_purpose = store.load_purpose_owner_nodes_by_paths_controlled(
+            fixture.project,
+            generation,
+            &purpose_paths,
+            full_budget,
+            Some(&purpose_control),
+        );
+        require(
+            matches!(
+                cancelled_purpose,
+                Err(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::Cancelled {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    }
+                ))
+            ),
+            "purpose-owner cancellation was not typed",
+        )?;
+
+        let occurrence_batch = store.repository_graph_occurrence_pages_bounded(
+            &fixture.relations,
+            1,
+            full_budget,
+            None,
+        )?;
+        require(
+            occurrence_batch.pages.len() == fixture.relations.len()
+                && occurrence_batch.pages[0].rows.len() == 1
+                && occurrence_batch.pages[0].truncated
+                && occurrence_batch.pages[1..]
+                    .iter()
+                    .all(|page| page.rows.is_empty() && !page.truncated),
+            "batched occurrence pages lost owner order or truncation state",
+        )?;
+        require_eq(
+            &occurrence_batch.work,
+            &RepositoryGraphReadWork {
+                requested_rows: 4,
+                returned_rows: 1,
+                decoded_bytes: occurrence_batch.work.decoded_bytes,
+                hydrated_entities: 0,
+                hydrated_paths: 2,
+            },
+            "exact occurrence batch work including sentinel path",
+        )?;
+        let exact_occurrence_budget =
+            RepositoryGraphReadBudget::new(4, 1, occurrence_batch.work.decoded_bytes, 1, 2)?;
+        require_eq(
+            &store.repository_graph_occurrence_pages_bounded(
+                &fixture.relations,
+                1,
+                exact_occurrence_budget,
+                None,
+            )?,
+            &occurrence_batch,
+            "exact occurrence envelope",
+        )?;
+        require_eq(
+            &store.repository_graph_occurrence_pages(&fixture.relations, 1, None)?,
+            &occurrence_batch.pages,
+            "legacy occurrence wrapper compatibility",
+        )?;
+        for (budget, limit, context) in [
+            (
+                RepositoryGraphReadBudget::new(
+                    4,
+                    1,
+                    occurrence_batch.work.decoded_bytes - 1,
+                    1,
+                    2,
+                )?,
+                1,
+                "occurrence decoded-byte overrun was accepted",
+            ),
+            (
+                RepositoryGraphReadBudget::new(4, 1, occurrence_batch.work.decoded_bytes, 1, 1)?,
+                1,
+                "occurrence sentinel path overrun was accepted",
+            ),
+            (
+                RepositoryGraphReadBudget::new(
+                    4,
+                    1,
+                    RepositoryGraphReadBudget::MAX_DECODED_BYTES,
+                    1,
+                    RepositoryGraphReadBudget::MAX_HYDRATED_PATHS,
+                )?,
+                3,
+                "occurrence returned-row overrun was accepted",
+            ),
+        ] {
+            let error = require_db_error(
+                store.repository_graph_occurrence_pages_bounded(
+                    &fixture.relations,
+                    limit,
+                    budget,
+                    None,
+                ),
+                context,
+            )?;
+            require(
+                matches!(error, DbError::GraphContract(_)),
+                &format!("unexpected occurrence envelope error: {error}"),
+            )?;
+        }
+        let occurrence_cancellation = projectatlas_core::IndexCancellation::new();
+        occurrence_cancellation.cancel();
+        let occurrence_control = IndexWorkControl::new(occurrence_cancellation, None);
+        let cancelled_occurrences = store.repository_graph_occurrence_pages_bounded(
+            &fixture.relations,
+            1,
+            full_budget,
+            Some(&occurrence_control),
+        );
+        require(
+            matches!(
+                cancelled_occurrences,
+                Err(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::Cancelled {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    }
+                ))
+            ),
+            "occurrence batch cancellation was not typed",
+        )?;
+        let expired_occurrences = IndexWorkControl::with_deadline(
+            projectatlas_core::IndexCancellation::new(),
+            Instant::now(),
+        );
+        let occurrence_deadline = store.repository_graph_occurrence_pages_bounded(
+            &fixture.relations,
+            1,
+            full_budget,
+            Some(&expired_occurrences),
+        );
+        require(
+            matches!(
+                occurrence_deadline,
+                Err(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::DeadlineExceeded {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    }
+                ))
+            ),
+            "occurrence batch deadline was not typed",
+        )?;
+
+        let coverage_paths = vec![
+            RepositoryNodePath::new(Path::new("src/Äuth.rs"))?,
+            RepositoryNodePath::new(Path::new("Cargo.toml"))?,
+        ];
+        let coverage_batch = store.repository_graph_path_coverage_bounded(
+            fixture.project,
+            generation,
+            &coverage_paths,
+            full_budget,
+            None,
+        )?;
+        require_eq(
+            &coverage_batch
+                .page
+                .rows
+                .iter()
+                .map(|coverage| match coverage.scope() {
+                    CoverageScope::Path { path } => path.as_str().to_string(),
+                    CoverageScope::Project => "project".to_string(),
+                })
+                .collect::<Vec<_>>(),
+            &vec!["Cargo.toml".to_string(), "src/Äuth.rs".to_string()],
+            "stable path coverage order",
+        )?;
+        require(
+            !coverage_batch.page.truncated
+                && coverage_batch.work
+                    == (RepositoryGraphReadWork {
+                        requested_rows: 2,
+                        returned_rows: 2,
+                        decoded_bytes: coverage_batch.work.decoded_bytes,
+                        hydrated_entities: 0,
+                        hydrated_paths: 2,
+                    })
+                && coverage_batch.work.decoded_bytes > 0,
+            "exact coverage batch work was incomplete",
+        )?;
+        let exact_coverage_budget =
+            RepositoryGraphReadBudget::new(2, 2, coverage_batch.work.decoded_bytes, 1, 2)?;
+        require_eq(
+            &store.repository_graph_path_coverage_bounded(
+                fixture.project,
+                generation,
+                &coverage_paths,
+                exact_coverage_budget,
+                None,
+            )?,
+            &coverage_batch,
+            "exact coverage envelope",
+        )?;
+        require_eq(
+            &store.repository_graph_path_coverage(fixture.project, &coverage_paths, None)?,
+            &coverage_batch.page,
+            "legacy coverage wrapper compatibility",
+        )?;
+        for (budget, context) in [
+            (
+                RepositoryGraphReadBudget::new(2, 2, coverage_batch.work.decoded_bytes - 1, 1, 2)?,
+                "coverage decoded-byte overrun was accepted",
+            ),
+            (
+                RepositoryGraphReadBudget::new(2, 1, coverage_batch.work.decoded_bytes, 1, 2)?,
+                "coverage returned-row overrun was accepted",
+            ),
+            (
+                RepositoryGraphReadBudget::new(2, 2, coverage_batch.work.decoded_bytes, 1, 1)?,
+                "coverage hydrated-path overrun was accepted",
+            ),
+        ] {
+            let error = require_db_error(
+                store.repository_graph_path_coverage_bounded(
+                    fixture.project,
+                    generation,
+                    &coverage_paths,
+                    budget,
+                    None,
+                ),
+                context,
+            )?;
+            require(
+                matches!(error, DbError::GraphContract(_)),
+                &format!("unexpected coverage envelope error: {error}"),
+            )?;
+        }
+        let coverage_cancellation = projectatlas_core::IndexCancellation::new();
+        coverage_cancellation.cancel();
+        let coverage_control = IndexWorkControl::new(coverage_cancellation, None);
+        let cancelled_coverage = store.repository_graph_path_coverage_bounded(
+            fixture.project,
+            generation,
+            &coverage_paths,
+            full_budget,
+            Some(&coverage_control),
+        );
+        require(
+            matches!(
+                cancelled_coverage,
+                Err(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::Cancelled {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    }
+                ))
+            ),
+            "coverage batch cancellation was not typed",
+        )?;
+        let expired_coverage = IndexWorkControl::with_deadline(
+            projectatlas_core::IndexCancellation::new(),
+            Instant::now(),
+        );
+        let coverage_deadline = store.repository_graph_path_coverage_bounded(
+            fixture.project,
+            generation,
+            &coverage_paths,
+            full_budget,
+            Some(&expired_coverage),
+        );
+        require(
+            matches!(
+                coverage_deadline,
+                Err(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::DeadlineExceeded {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    }
+                ))
+            ),
+            "coverage batch deadline was not typed",
+        )?;
+
+        let missing = [0xff; 32];
+        let missing_entity = require_db_error(
+            store.repository_graph_entities_by_digest(
+                fixture.project,
+                generation,
+                &[entity_digests[0], missing],
+                full_budget,
+                None,
+            ),
+            "missing entity cursor key returned a partial set",
+        )?;
+        require(
+            matches!(
+                missing_entity,
+                DbError::GraphRowShape {
+                    table: "graph_entities",
+                    ..
+                }
+            ),
+            &format!("unexpected missing-entity error: {missing_entity}"),
+        )?;
+        let missing_relation = require_db_error(
+            store.repository_graph_relation_rows_by_digest(
+                fixture.project,
+                generation,
+                &[relation_digests[0], missing],
+                full_budget,
+                None,
+            ),
+            "missing relation cursor key returned a partial set",
+        )?;
+        require(
+            matches!(
+                missing_relation,
+                DbError::GraphRowShape {
+                    table: "graph_relations",
+                    ..
+                }
+            ),
+            &format!("unexpected missing-relation error: {missing_relation}"),
+        )?;
+
+        let duplicate = require_db_error(
+            store.repository_graph_entities_by_digest(
+                fixture.project,
+                generation,
+                &[entity_digests[0], entity_digests[0]],
+                full_budget,
+                None,
+            ),
+            "duplicate entity cursor keys were accepted",
+        )?;
+        require(
+            matches!(duplicate, DbError::GraphContract(_)),
+            &format!("unexpected duplicate hydration error: {duplicate}"),
+        )?;
+        let oversized = vec![[0; 32]; MAX_REPOSITORY_GRAPH_FRONTIER + 1];
+        let oversized = require_db_error(
+            store.repository_graph_relation_rows_by_digest(
+                fixture.project,
+                generation,
+                &oversized,
+                full_budget,
+                None,
+            ),
+            "oversized relation cursor key set was accepted",
+        )?;
+        require(
+            matches!(oversized, DbError::GraphContract(_)),
+            &format!("unexpected oversized hydration error: {oversized}"),
+        )?;
+
+        let foreign_project = ProjectInstanceId::from_bytes([0x7f; 16])?;
+        let foreign = require_db_error(
+            store.repository_graph_entities_by_digest(
+                foreign_project,
+                generation,
+                &entity_digests,
+                full_budget,
+                None,
+            ),
+            "cross-project entity cursor hydration was accepted",
+        )?;
+        require(
+            matches!(foreign, DbError::GraphProjectIdentityMismatch { .. }),
+            &format!("unexpected cross-project hydration error: {foreign}"),
+        )?;
+        let stale_generation = generation
+            .checked_next()
+            .ok_or_else(|| io::Error::other("fixture generation overflowed"))?;
+        let stale = require_db_error(
+            store.repository_graph_relation_rows_by_digest(
+                fixture.project,
+                stale_generation,
+                &relation_digests,
+                full_budget,
+                None,
+            ),
+            "stale-generation relation cursor hydration was accepted",
+        )?;
+        require(
+            matches!(stale, DbError::GraphContract(_)),
+            &format!("unexpected stale-generation hydration error: {stale}"),
+        )?;
+        for entities in [true, false] {
+            let cancellation = projectatlas_core::IndexCancellation::new();
+            cancellation.cancel();
+            let control = IndexWorkControl::new(cancellation, None);
+            let cancelled = if entities {
+                store
+                    .repository_graph_entities_by_digest(
+                        fixture.project,
+                        generation,
+                        &entity_digests,
+                        full_budget,
+                        Some(&control),
+                    )
+                    .map(|_| ())
+            } else {
+                store
+                    .repository_graph_relation_rows_by_digest(
+                        fixture.project,
+                        generation,
+                        &relation_digests,
+                        full_budget,
+                        Some(&control),
+                    )
+                    .map(|_| ())
+            };
+            require(
+                matches!(
+                    cancelled,
+                    Err(DbError::IndexWork(
+                        projectatlas_core::IndexWorkFailure::Cancelled {
+                            stage: IndexWorkStage::RepositoryTraversal
+                        }
+                    ))
+                ),
+                "cursor hydration cancellation was not typed",
+            )?;
+        }
+        let expired = IndexWorkControl::with_deadline(
+            projectatlas_core::IndexCancellation::new(),
+            Instant::now(),
+        );
+        let deadline = store.repository_graph_entities_by_digest(
+            fixture.project,
+            generation,
+            &entity_digests,
+            full_budget,
+            Some(&expired),
+        );
+        require(
+            matches!(
+                deadline,
+                Err(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::DeadlineExceeded {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    }
+                ))
+            ),
+            "cursor hydration deadline was not typed",
+        )?;
+
+        let source = fixture
+            .entities
+            .iter()
+            .find(|entity| matches!(entity.selector(), EntitySelector::File { .. }))
+            .ok_or_else(|| io::Error::other("source file fixture missing"))?;
+        let adjacency = store.repository_graph_adjacency_page_bounded(
+            &[source.key().clone()],
+            RepositoryGraphDirection::Outbound,
+            None,
+            1,
+            full_budget,
+            None,
+        )?;
+        require(
+            adjacency.page.rows.len() == 1
+                && adjacency.page.truncated
+                && adjacency.work.requested_rows == 1
+                && adjacency.work.returned_rows == 1
+                && adjacency.work.decoded_bytes > 0
+                && adjacency.work.hydrated_entities > 0
+                && adjacency.work.hydrated_paths > 0,
+            "bounded adjacency page omitted exact raw or endpoint work",
+        )?;
+        let exact_adjacency_budget = RepositoryGraphReadBudget::new(
+            1,
+            1,
+            adjacency.work.decoded_bytes,
+            adjacency.work.hydrated_entities,
+            adjacency.work.hydrated_paths,
+        )?;
+        require_eq(
+            &store.repository_graph_adjacency_page_bounded(
+                &[source.key().clone()],
+                RepositoryGraphDirection::Outbound,
+                None,
+                1,
+                exact_adjacency_budget,
+                None,
+            )?,
+            &adjacency,
+            "exact adjacency envelope",
+        )?;
+        let adjacency_overrun = require_db_error(
+            store.repository_graph_adjacency_page_bounded(
+                &[source.key().clone()],
+                RepositoryGraphDirection::Outbound,
+                None,
+                1,
+                RepositoryGraphReadBudget::new(
+                    1,
+                    1,
+                    adjacency.work.decoded_bytes - 1,
+                    adjacency.work.hydrated_entities,
+                    adjacency.work.hydrated_paths,
+                )?,
+                None,
+            ),
+            "adjacency decoded-byte overrun was accepted",
+        )?;
+        require(
+            matches!(adjacency_overrun, DbError::GraphContract(_)),
+            &format!("unexpected adjacency envelope error: {adjacency_overrun}"),
+        )?;
+        let adjacency_return_limit = require_db_error(
+            store.repository_graph_adjacency_page_bounded(
+                &[source.key().clone()],
+                RepositoryGraphDirection::Outbound,
+                None,
+                2,
+                exact_adjacency_budget,
+                None,
+            ),
+            "adjacency page limit exceeded the return budget",
+        )?;
+        require(
+            matches!(adjacency_return_limit, DbError::GraphContract(_)),
+            &format!("unexpected adjacency return-budget error: {adjacency_return_limit}"),
+        )?;
+        let continuation = adjacency
+            .page
+            .continuation
+            .ok_or_else(|| io::Error::other("adjacency continuation missing"))?;
+        let encoded =
+            serde_json::to_vec(&(RepositoryGraphDirection::Outbound, continuation.clone()))?;
+        let decoded: (
+            RepositoryGraphDirection,
+            RepositoryGraphAdjacencyContinuation,
+        ) = serde_json::from_slice(&encoded)?;
+        require_eq(
+            &decoded,
+            &(RepositoryGraphDirection::Outbound, continuation),
+            "opaque relation cursor serde round trip",
+        )?;
+
+        assert_cursor_hydration_indexes(&store)?;
         store.finish_index_read_snapshot()?;
         Ok(())
     }

@@ -36,13 +36,14 @@ use projectatlas_db::{
     ProjectRootTransitionResult, RepositoryCoverageQuery, verify_project_database,
 };
 use projectatlas_service::{
-    COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CoverageDiscoveryReport, DetailedRelationQuery,
-    FileSummaryReport, RelationAnchor, RelationDirection, RelationResolutionFilter, SearchQuery,
-    SearchReport, SearchRetrievalMode, ServiceError, SymbolSliceSelector, TokenReport,
-    TokenReportRequest, build_file_summary_from_source, load_coverage_discovery,
-    load_detailed_relations, load_token_report, parse_coverage_parser, parse_coverage_relation,
-    parse_coverage_state, parse_symbol_kind, read_indexed_code_slice_from_source,
-    read_symbol_slice_from_source, search_indexed_files_with_control,
+    COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CoverageDiscoveryReport, DetailedRelationBudget,
+    DetailedRelationQuery, FileSummaryReport, RelationAnchor, RelationDirection,
+    RelationResolutionFilter, SearchQuery, SearchReport, SearchRetrievalMode, ServiceError,
+    SymbolSliceSelector, TokenReport, TokenReportRequest, build_file_summary_from_source,
+    load_coverage_discovery, load_detailed_relation_page, load_token_report, parse_coverage_parser,
+    parse_coverage_relation, parse_coverage_state, parse_symbol_kind,
+    read_indexed_code_slice_from_source, read_symbol_slice_from_source,
+    search_indexed_files_with_control,
 };
 use rmcp::schemars;
 use runtime::{
@@ -399,6 +400,9 @@ impl From<RelationResolutionArg> for RelationResolutionFilter {
 /// Additive options used only by the detailed relation view.
 #[derive(Args, Debug)]
 struct DetailedRelationArgs {
+    /// Resume one exact generation- and purpose-bound detailed page.
+    #[arg(long)]
+    cursor: Option<String>,
     /// Exact local anchor controls.
     #[command(flatten)]
     anchor: DetailedRelationAnchorArgs,
@@ -1685,6 +1689,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 query,
                 detailed:
                     DetailedRelationArgs {
+                        cursor,
                         anchor:
                             DetailedRelationAnchorArgs {
                                 symbol,
@@ -1783,7 +1788,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         .map_err(|error| {
                         CliError::Service(ServiceError::InvalidInput(error.to_string()))
                     })?;
-                    let report = load_detailed_relations(
+                    let draft = load_detailed_relation_page(
                         &store,
                         &DetailedRelationQuery {
                             anchor,
@@ -1795,13 +1800,17 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                             minimum_confidence: (*minimum_confidence).into(),
                             resolution: (*resolution).into(),
                             include_occurrences: *include_occurrences,
-                            limits,
+                            budget: DetailedRelationBudget::from_graph_limits(limits),
+                            cursor: cursor.clone(),
                         },
                         None,
                     )?;
-                    let payload = json!({ "symbol_relations": report });
-                    let toon = encode_agent_payload(&payload);
-                    print_output(cli.format, &toon, &payload)?;
+                    let (_report, output) = draft.fit_output(None, |report| {
+                        let payload = json!({ "symbol_relations": report });
+                        let toon = encode_agent_payload(&payload);
+                        serialized_output(cli.format, &toon, &payload)
+                    })?;
+                    write_stdout(&output)?;
                 }
             }
             SymbolsCommand::Slice {

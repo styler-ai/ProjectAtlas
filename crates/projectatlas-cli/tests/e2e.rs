@@ -151,6 +151,177 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
     Ok(())
 }
 
+#[test]
+fn detailed_relation_cli_bounds_the_exact_json_envelope() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let source_dir = repo.join(SRC_DIR_NAME);
+    fs::create_dir_all(&source_dir)?;
+    fs::write(
+        source_dir.join("lib.rs"),
+        "pub fn first() { second(); third(); fourth(); fifth(); sixth(); seventh(); eighth(); ninth(); }\n\
+         fn second() {}\nfn third() {}\nfn fourth() {}\nfn fifth() {}\n\
+         fn sixth() {}\nfn seventh() {}\nfn eighth() {}\nfn ninth() {}\n",
+    )?;
+
+    let scan = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "json", "scan"])
+        .output()?;
+    if !scan.status.success() {
+        return Err(io::Error::other(format!(
+            "relation CLI fixture scan failed: {}",
+            String::from_utf8_lossy(&scan.stderr)
+        ))
+        .into());
+    }
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let store = AtlasStore::open_for_project(&database, &repo)?;
+    store.set_purpose(
+        "src/lib.rs",
+        "Own café λ relation navigation",
+        PurposeSource::Agent,
+    )?;
+    drop(store);
+
+    let page_output_bytes = 64 * 1024_usize;
+    let first_page = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "--format",
+            "json",
+            "symbols",
+            "relations",
+            "--view",
+            "detailed",
+            "--file",
+            "src/lib.rs",
+            "--symbol",
+            "first",
+            "--direction",
+            "outbound",
+            "--depth",
+            "2",
+            "--limit",
+            "1",
+            "--output-bytes",
+            &page_output_bytes.to_string(),
+        ])
+        .output()?;
+    if !first_page.status.success() {
+        return Err(io::Error::other(format!(
+            "first detailed relation cursor page failed: {}",
+            String::from_utf8_lossy(&first_page.stderr)
+        ))
+        .into());
+    }
+    let first_payload: Value = serde_json::from_slice(&first_page.stdout)?;
+    require_json_usize(&first_payload, &["symbol_relations", "returned"], 1)?;
+    require_json_string(
+        &first_payload,
+        &["symbol_relations", "anchor", "purpose", "purpose"],
+        "Own café λ relation navigation",
+    )?;
+    let continuation = first_payload
+        .pointer("/symbol_relations/continuation")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| io::Error::other("first detailed relation page omitted its cursor"))?;
+    let second_page = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "--format",
+            "json",
+            "symbols",
+            "relations",
+            "--view",
+            "detailed",
+            "--file",
+            "src/lib.rs",
+            "--symbol",
+            "first",
+            "--direction",
+            "outbound",
+            "--depth",
+            "2",
+            "--limit",
+            "1",
+            "--output-bytes",
+            &page_output_bytes.to_string(),
+            "--cursor",
+            continuation,
+        ])
+        .output()?;
+    if !second_page.status.success() {
+        return Err(io::Error::other(format!(
+            "second detailed relation cursor page failed: {}",
+            String::from_utf8_lossy(&second_page.stderr)
+        ))
+        .into());
+    }
+    let second_payload: Value = serde_json::from_slice(&second_page.stdout)?;
+    require_json_usize(&second_payload, &["symbol_relations", "returned"], 1)?;
+    if first_payload.pointer("/symbol_relations/rows/0")
+        == second_payload.pointer("/symbol_relations/rows/0")
+    {
+        return Err(io::Error::other("detailed relation cursor replayed the first row").into());
+    }
+
+    let maximum_output_bytes = 4 * 1024_usize;
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "--format",
+            "json",
+            "symbols",
+            "relations",
+            "--view",
+            "detailed",
+            "--file",
+            "src/lib.rs",
+            "--direction",
+            "outbound",
+            "--depth",
+            "2",
+            "--limit",
+            "50",
+            "--output-bytes",
+            &maximum_output_bytes.to_string(),
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "bounded detailed relation CLI failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    if output.stdout.len() > maximum_output_bytes {
+        return Err(io::Error::other(format!(
+            "bounded detailed relation CLI emitted {} bytes above its {maximum_output_bytes}-byte ceiling",
+            output.stdout.len()
+        ))
+        .into());
+    }
+    let payload: Value = serde_json::from_slice(&output.stdout)?;
+    require_json_usize(
+        &payload,
+        &["symbol_relations", "work", "rendered_output_bytes"],
+        output.stdout.len(),
+    )?;
+    require_json_string(
+        &payload,
+        &["symbol_relations", "anchor", "purpose", "purpose"],
+        "Own café λ relation navigation",
+    )?;
+    require_json_usize(&payload, &["symbol_relations", "returned"], 0)?;
+    Ok(())
+}
+
 #[cfg(feature = "optional-parser-supervisor")]
 #[test]
 fn parser_pack_disable_does_not_require_default_user_storage() -> Result<(), Box<dyn Error>> {

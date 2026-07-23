@@ -57,12 +57,12 @@ use projectatlas_db::{
     read_project_root_read_only, verify_project_database,
 };
 use projectatlas_service::{
-    COVERAGE_PAGE_MAX_LIMIT, DetailedRelationQuery, RelationAnchor, SearchQuery, ServiceError,
-    SymbolSliceSelector, TokenReport, TokenReportRequest, build_file_summary_from_source,
-    load_coverage_discovery, load_detailed_relations, load_token_report, parse_coverage_parser,
-    parse_coverage_relation, parse_coverage_state, parse_relation_confidence,
-    parse_relation_direction, parse_relation_resolution, parse_symbol_kind,
-    read_indexed_code_slice_from_source, read_symbol_slice_from_source,
+    COVERAGE_PAGE_MAX_LIMIT, DetailedRelationBudget, DetailedRelationQuery, RelationAnchor,
+    SearchQuery, ServiceError, SymbolSliceSelector, TokenReport, TokenReportRequest,
+    build_file_summary_from_source, load_coverage_discovery, load_detailed_relation_page,
+    load_token_report, parse_coverage_parser, parse_coverage_relation, parse_coverage_state,
+    parse_relation_confidence, parse_relation_direction, parse_relation_resolution,
+    parse_symbol_kind, read_indexed_code_slice_from_source, read_symbol_slice_from_source,
     search_indexed_files_with_control,
 };
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
@@ -845,6 +845,8 @@ struct AtlasSymbolRelationsParams {
     query: Option<String>,
     /// Preserve `legacy` rows or opt in to `detailed` normalized-graph navigation.
     view: Option<String>,
+    /// Resume one exact generation- and purpose-bound detailed page.
+    cursor: Option<String>,
     /// Exact symbol name used as the detailed anchor; omit for a file anchor.
     symbol: Option<String>,
     /// Optional exact parent used to disambiguate the detailed symbol anchor.
@@ -867,6 +869,18 @@ struct AtlasSymbolRelationsParams {
     include_occurrences: Option<bool>,
     /// Maximum exact occurrences retained per detailed relation.
     occurrence_limit: Option<u32>,
+    /// Maximum adjacency rows inspected by one detailed page.
+    edge_limit: Option<u32>,
+    /// Maximum unique traversal nodes retained across continuation state.
+    node_limit: Option<u32>,
+    /// Maximum unique visited-node state retained across continuation state.
+    visited_limit: Option<u32>,
+    /// Maximum exact occurrences retained across the complete page.
+    occurrence_total_limit: Option<u32>,
+    /// Maximum decoded, cursor, and service-composition intermediate bytes.
+    intermediate_bytes: Option<u64>,
+    /// Maximum service-owned elapsed milliseconds.
+    deadline_ms: Option<u64>,
     /// Maximum encoded bytes admitted to the detailed response.
     output_bytes: Option<u32>,
     /// Maximum legacy or detailed relation rows to return.
@@ -5059,7 +5073,7 @@ impl ProjectAtlasMcpServer {
                         .map_err(|error| {
                             CliError::Service(ServiceError::InvalidInput(error.to_string()))
                         })?;
-                        let report = load_detailed_relations(
+                        let draft = load_detailed_relation_page(
                             store,
                             &DetailedRelationQuery {
                                 anchor,
@@ -5087,15 +5101,26 @@ impl ProjectAtlasMcpServer {
                                         .unwrap_or(MCP_SYMBOL_RELATION_RESOLUTION_DEFAULT),
                                 )?,
                                 include_occurrences: params.include_occurrences.unwrap_or(false),
-                                limits,
+                                budget: DetailedRelationBudget::from_graph_limits(limits)
+                                    .with_aggregate_limits(
+                                        params.edge_limit,
+                                        params.node_limit,
+                                        params.visited_limit,
+                                        params.occurrence_total_limit,
+                                        params.intermediate_bytes,
+                                        params.deadline_ms,
+                                    )?,
+                                cursor: params.cursor.clone(),
                             },
                             Some(control),
                         )?;
-                        let toon = Self::with_selected_project_audit(
-                            &state,
-                            routed_project,
-                            Self::encode_named_payload(MCP_PAYLOAD_SYMBOL_RELATIONS, &report)?,
-                        )?;
+                        let (_report, toon) = draft.fit_output(Some(control), |report| {
+                            Self::with_selected_project_audit(
+                                &state,
+                                routed_project,
+                                Self::encode_named_payload(MCP_PAYLOAD_SYMBOL_RELATIONS, report)?,
+                            )
+                        })?;
                         let usage = Self::telemetry_enabled()
                             .then(|| {
                                 estimated_source_tokens_for_paths(store, std::iter::once(file))
@@ -6484,6 +6509,100 @@ mod tests {
         require(
             detailed.contains("symbol_relations:") && detailed.contains("anchor:"),
             "detailed MCP relation route did not return the bounded graph envelope",
+        )?;
+        if expected_symbol == "third" {
+            let first_detailed_page = server.atlas_symbol_relations_response(
+                &AtlasSymbolRelationsParams {
+                    project_path: Some(project_path.to_string()),
+                    file: Some("src/lib.rs".to_string()),
+                    nearest_project: Some(false),
+                    view: Some("detailed".to_string()),
+                    symbol: Some("first".to_string()),
+                    direction: Some("outbound".to_string()),
+                    depth: Some(2),
+                    limit: Some(1),
+                    output_bytes: Some(64 * 1024),
+                    ..AtlasSymbolRelationsParams::default()
+                },
+                None,
+            );
+            let first_detailed_value: serde_json::Value =
+                toon_format::decode_default(&first_detailed_page)?;
+            let first_detailed_report = first_detailed_value
+                .get("symbol_relations")
+                .ok_or_else(|| io::Error::other("first detailed MCP page omitted its envelope"))?;
+            let continuation = first_detailed_report
+                .get("continuation")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| io::Error::other("first detailed MCP page omitted its cursor"))?;
+            require(
+                first_detailed_report
+                    .get("returned")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(1)
+                    && first_detailed_report
+                        .get("rows")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|rows| rows.len() == 1),
+                "first detailed MCP page was not a nonempty bounded symbol result",
+            )?;
+            let second_detailed_page = server.atlas_symbol_relations_response(
+                &AtlasSymbolRelationsParams {
+                    project_path: Some(project_path.to_string()),
+                    file: Some("src/lib.rs".to_string()),
+                    nearest_project: Some(false),
+                    view: Some("detailed".to_string()),
+                    cursor: Some(continuation.to_string()),
+                    symbol: Some("first".to_string()),
+                    direction: Some("outbound".to_string()),
+                    depth: Some(2),
+                    limit: Some(1),
+                    output_bytes: Some(64 * 1024),
+                    ..AtlasSymbolRelationsParams::default()
+                },
+                None,
+            );
+            let second_detailed_value: serde_json::Value =
+                toon_format::decode_default(&second_detailed_page)?;
+            let second_detailed_report = second_detailed_value
+                .get("symbol_relations")
+                .ok_or_else(|| io::Error::other("second detailed MCP page omitted its envelope"))?;
+            require(
+                second_detailed_report
+                    .get("returned")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(1)
+                    && second_detailed_report.get("rows") != first_detailed_report.get("rows")
+                    && second_detailed_page.contains("Own café λ relation navigation"),
+                "detailed MCP cursor did not resume a distinct Unicode-safe symbol row",
+            )?;
+        }
+        let bounded_output_bytes = 4 * 1024_u32;
+        let bounded = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                project_path: Some(project_path.to_string()),
+                file: Some("src/lib.rs".to_string()),
+                nearest_project: Some(false),
+                view: Some("detailed".to_string()),
+                direction: Some("outbound".to_string()),
+                limit: Some(50),
+                edge_limit: Some(50),
+                node_limit: Some(50),
+                visited_limit: Some(50),
+                occurrence_total_limit: Some(50),
+                intermediate_bytes: Some(128 * 1024),
+                deadline_ms: Some(2_000),
+                output_bytes: Some(bounded_output_bytes),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            bounded.contains("symbol_relations:")
+                && bounded.len() <= bounded_output_bytes as usize
+                && bounded.contains("Own café λ relation navigation")
+                && bounded.contains(&format!("rendered_output_bytes: {}", bounded.len())),
+            "detailed MCP relation output did not enforce or report the exact routed envelope bytes",
         )
     }
 
@@ -7643,6 +7762,13 @@ mod tests {
                 McpTaskOperation::WatchOnce => "third",
                 McpTaskOperation::Contract | McpTaskOperation::Search => unreachable!(),
             };
+            let store = open_atlas_store_for_project(&db_path, &repo)?;
+            store.set_purpose(
+                "src/lib.rs",
+                "Own café λ relation navigation",
+                PurposeSource::Agent,
+            )?;
+            drop(store);
             require_agent_index_reads(&server, &project_path, expected_symbol)?;
         }
 

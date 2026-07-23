@@ -4,10 +4,11 @@ mod import_aliases;
 mod relations;
 
 pub use relations::{
-    DetailedRelationNode, DetailedRelationQuery, DetailedRelationReport, DetailedRelationRow,
-    RelationAnchor, RelationDirection, RelationNextCall, RelationPurpose, RelationResolutionFilter,
-    load_detailed_relations, parse_relation_confidence, parse_relation_direction,
-    parse_relation_resolution,
+    DetailedRelationBudget, DetailedRelationNode, DetailedRelationPageDraft, DetailedRelationQuery,
+    DetailedRelationReport, DetailedRelationRow, DetailedRelationWork, RelationAnchor,
+    RelationDirection, RelationNextCall, RelationPurpose, RelationResolutionFilter,
+    RelationTotalState, load_detailed_relation_page, load_detailed_relations,
+    parse_relation_confidence, parse_relation_direction, parse_relation_resolution,
 };
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
@@ -144,6 +145,24 @@ pub enum ServiceError {
         state: &'static str,
         /// Actionable recovery guidance.
         guidance: &'static str,
+    },
+    /// A detailed-relation cursor is malformed or violates its bounded state invariants.
+    #[error("invalid detailed relation cursor: {reason}; restart the relation request")]
+    RelationCursorInvalid {
+        /// Bounded validation reason safe to expose to the caller.
+        reason: &'static str,
+    },
+    /// A detailed-relation cursor belongs to another normalized request.
+    #[error("detailed relation cursor does not match {field}; restart the relation request")]
+    RelationCursorMismatched {
+        /// Result-defining request field that changed.
+        field: &'static str,
+    },
+    /// A detailed-relation cursor belongs to stale repository or purpose state.
+    #[error("detailed relation cursor is stale for {field}; restart the relation request")]
+    RelationCursorStale {
+        /// Captured state field that changed.
+        field: &'static str,
     },
 }
 

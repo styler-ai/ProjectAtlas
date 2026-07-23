@@ -18,7 +18,9 @@ pub use project_identity::{ProjectRootTransition, ProjectRootTransitionResult};
 pub use repository_graph::{
     MAX_REPOSITORY_GRAPH_FRONTIER, RepositoryAffectedSourceFootprint, RepositoryCoverageQuery,
     RepositoryCoverageRow, RepositoryGraphAdjacencyContinuation, RepositoryGraphAdjacencyPage,
-    RepositoryGraphAdjacencyRow, RepositoryGraphDirection, RepositoryGraphPage,
+    RepositoryGraphAdjacencyReadPage, RepositoryGraphAdjacencyRow, RepositoryGraphDirection,
+    RepositoryGraphPage, RepositoryGraphReadBatch, RepositoryGraphReadBudget,
+    RepositoryGraphReadPage, RepositoryGraphReadPages, RepositoryGraphReadWork,
     RepositoryGraphRelationQuery, RepositoryGraphRelationRow, RepositoryNavigationConnections,
     RepositoryNavigationNode, RepositoryResolutionCandidate,
 };
@@ -2757,6 +2759,110 @@ impl AtlasStore {
             nodes.extend(hydrated);
         }
         Ok(nodes)
+    }
+
+    /// Hydrate every exact purpose-owner path under one graph read envelope.
+    ///
+    /// Rows are returned in caller order. Unlike the compatibility path loader,
+    /// this graph-facing boundary evaluates every unique requested path in the
+    /// selected project and generation. Existing rows retain caller order;
+    /// absent ancestor candidates are represented by omission rather than a
+    /// partial-query failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for duplicate paths, a stale project or generation,
+    /// cancellation, corrupt node or purpose state, `SQLite`
+    /// failure, or any returned-row, decoded-byte, or hydrated-path budget
+    /// overrun. No partial batch is returned.
+    pub fn load_purpose_owner_nodes_by_paths_controlled(
+        &self,
+        project: ProjectInstanceId,
+        generation: IndexGeneration,
+        paths: &[String],
+        budget: RepositoryGraphReadBudget,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphReadBatch<IndexedNode>> {
+        if paths
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>()
+            .len()
+            != paths.len()
+        {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "purpose-owner hydration paths must be unique",
+            }
+            .into());
+        }
+        self.require_repository_graph_snapshot(project, generation)?;
+        let mut meter = repository_graph::RepositoryGraphReadMeter::new(budget, paths.len())?;
+        let path_count =
+            u32::try_from(paths.len()).map_err(|_source| GraphContractError::InvalidLimits {
+                reason: "purpose-owner hydration path count overflowed",
+            })?;
+        if path_count > budget.returned_rows() {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "purpose-owner paths exceed the return budget",
+            }
+            .into());
+        }
+        if path_count > budget.hydrated_paths() {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "purpose-owner paths exceed the hydration budget",
+            }
+            .into());
+        }
+        if paths.is_empty() {
+            return Ok(RepositoryGraphReadBatch {
+                rows: Vec::new(),
+                work: meter.finish(0)?,
+            });
+        }
+
+        let mut selected = HashMap::with_capacity(paths.len());
+        for chunk in paths.chunks(MAX_PURPOSE_CURATION_BATCH_ROWS) {
+            let hydrated = with_sqlite_read_progress(
+                &self.connection,
+                control,
+                IndexWorkStage::RepositoryTraversal,
+                || {
+                    let sql = load_nodes_by_paths_sql(chunk.len());
+                    let mut statement = self.connection.prepare(&sql)?;
+                    let mut rows = statement.query(params_from_iter(chunk))?;
+                    let mut nodes = Vec::new();
+                    while let Some(row) = rows.next()? {
+                        let parts = indexed_node_parts_from_sql_row(row)?;
+                        meter.record_decoded_bytes(indexed_node_parts_decoded_bytes(&parts)?)?;
+                        let node = indexed_node_from_parts(parts)?;
+                        meter.record_hydrated_path(&node.node.path)?;
+                        nodes.push(node);
+                    }
+                    Ok(nodes)
+                },
+            )?;
+            for node in hydrated {
+                let path = node.node.path.clone();
+                if selected.insert(path, node).is_some() {
+                    return Err(DbError::GraphRowShape {
+                        table: "nodes",
+                        reason: "purpose-owner hydration returned a duplicate path",
+                    });
+                }
+            }
+        }
+
+        let mut ordered = Vec::with_capacity(paths.len());
+        for path in paths {
+            if let Some(node) = selected.remove(path) {
+                ordered.push(node);
+            }
+        }
+        let work = meter.finish(ordered.len())?;
+        Ok(RepositoryGraphReadBatch {
+            rows: ordered,
+            work,
+        })
     }
 
     /// Load one bounded stale-safe purpose-curation batch for exact paths.
@@ -5936,12 +6042,28 @@ where
     Ok(())
 }
 
-/// Build an indexed node from the standard node select column order.
-fn indexed_node_from_sql_row(row: &rusqlite::Row<'_>) -> DbResult<IndexedNode> {
+/// Raw standard node columns retained until typed enum validation succeeds.
+type IndexedNodeParts = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<u64>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+);
+
+/// Decode the standard node select column order without interpreting enums.
+fn indexed_node_parts_from_sql_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedNodeParts> {
     let kind_value: String = row.get(1)?;
     let source_value: String = row.get(9)?;
     let status_value: String = row.get(10)?;
-    indexed_node_from_parts((
+    Ok((
         row.get::<_, String>(0)?,
         kind_value,
         row.get::<_, Option<String>>(2)?,
@@ -5957,23 +6079,42 @@ fn indexed_node_from_sql_row(row: &rusqlite::Row<'_>) -> DbResult<IndexedNode> {
     ))
 }
 
+/// Build an indexed node from the standard node select column order.
+fn indexed_node_from_sql_row(row: &rusqlite::Row<'_>) -> DbResult<IndexedNode> {
+    indexed_node_from_parts(indexed_node_parts_from_sql_row(row)?)
+}
+
+/// Count exact variable-width payload and fixed scalar slots for one node row.
+fn indexed_node_parts_decoded_bytes(row: &IndexedNodeParts) -> DbResult<u64> {
+    let lengths = [
+        row.0.len(),
+        row.1.len(),
+        row.2.as_ref().map_or(0, String::len),
+        row.3.as_ref().map_or(0, String::len),
+        row.4.as_ref().map_or(0, String::len),
+        row.7.as_ref().map_or(0, String::len),
+        row.8.as_ref().map_or(0, String::len),
+        row.9.len(),
+        row.10.len(),
+        row.11.as_ref().map_or(0, String::len),
+    ];
+    let mut bytes = 16_u64;
+    for length in lengths {
+        let length =
+            u64::try_from(length).map_err(|_source| GraphContractError::InvalidLimits {
+                reason: "purpose-owner decoded field length overflowed",
+            })?;
+        bytes = bytes
+            .checked_add(length)
+            .ok_or(GraphContractError::InvalidLimits {
+                reason: "purpose-owner decoded row size overflowed",
+            })?;
+    }
+    Ok(bytes)
+}
+
 /// Build an indexed node from database row parts.
-fn indexed_node_from_parts(
-    row: (
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<u64>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        String,
-        String,
-        Option<String>,
-    ),
-) -> DbResult<IndexedNode> {
+fn indexed_node_from_parts(row: IndexedNodeParts) -> DbResult<IndexedNode> {
     let (
         path,
         kind_value,
