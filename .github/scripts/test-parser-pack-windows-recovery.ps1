@@ -273,6 +273,7 @@ function Assert-ProductionRecoveryContracts {
             $nativeText.Contains('SeededSemaphoreDuplicated') -and
             $nativeText.Contains('SeededSemaphoreParentHandleClosed') -and
             $nativeText.Contains('TokenNamespaceSnapshot') -and
+            $nativeText.Contains('internal bool PrivateNamespaceEnabled { get; set; }') -and
             $nativeText.Contains('TokenBnoIsolationInformation') -and
             $nativeText.Contains('[MarshalAs(UnmanagedType.U1)]') -and
             $nativeText.Contains('MaximumTokenInformationBytes = 64 * 1024;') -and
@@ -287,6 +288,8 @@ function Assert-ProductionRecoveryContracts {
                 'snapshot\.IsSandboxed\s*=\s*ReadExactTokenDword\(' -and
             $nativeText -match
                 'snapshot\.IsAppSilo\s*=\s*ReadExactTokenDword\(' -and
+            $nativeText.Contains('DecodeExactTokenDwordBoolean(') -and
+            $nativeText.Contains('informationLength != sizeof(uint)') -and
             $nativeText.Contains('ambient-construction-jobserver') -and
             $nativeText.Contains('EntryPoint = "CreateSemaphoreExW"') -and
             $nativeText.Contains('string sddl = "D:P(A;;0x00100002;;;"') -and
@@ -539,8 +542,10 @@ function Assert-NamedObjectProbeDiagnosticContract {
         'SemaphoreSynchronizeAndModify = 0x00100002',
         'NtOpenDirectoryObject(',
         'NtOpenSemaphore(',
+        'ReadCurrentPrivateNamespaceEnabled(',
         'CreateAndCloseSemaphore(',
         'OpenAndCloseSemaphoreByPath(',
+        'OpenAndCloseSemaphoreRelativeToDirectory(',
         'OpenAndCloseSemaphore(',
         'OpenOwnedSemaphore(',
         'directory_traverse_ntstatus = $directoryTraverseNtStatus',
@@ -549,6 +554,10 @@ function Assert-NamedObjectProbeDiagnosticContract {
         'session_directory_traverse_ntstatus = $sessionDirectoryTraverseNtStatus',
         'seeded_direct_open_ntstatus = $seededDirectOpenNtStatus',
         'seeded_direct_open_close_ntstatus = $seededDirectOpenCloseNtStatus',
+        'seeded_relative_open_ntstatus = $seededRelativeOpenNtStatus',
+        'seeded_relative_open_close_ntstatus = $seededRelativeOpenCloseNtStatus',
+        'seeded_relative_directory_close_ntstatus =',
+        'current_private_namespace_enabled = $currentPrivateNamespaceEnabled',
         'construction-token-owner-sid-mismatch',
         'post_job_native_create_win32 = $postJobNativeCreateWin32',
         'post_job_native_created_new = $postJobNativeCreatedNew',
@@ -556,7 +565,7 @@ function Assert-NamedObjectProbeDiagnosticContract {
         'seeded_semaphore_name = $SeededSemaphoreName',
         'seeded_open_win32 = $seededOpenWin32',
         'seeded_create_win32 = $seededCreateWin32',
-        'schema_version = 5',
+        'schema_version = 6',
         '$probeStage = ''cleanup''',
         '$probeStage = ''result-write''',
         '[Console]::Error.WriteLine($fallbackJson)',
@@ -671,6 +680,8 @@ function Assert-NamedObjectProbeDiagnosticContract {
             $selfText.Contains('function Assert-NamedObjectProbeRecordFixtures') -and
             $selfText.Contains('post_job_native_create_win32') -and
             $selfText.Contains('seeded_name_matches=') -and
+            $selfText.Contains('logon_private_namespace=') -and
+            $selfText.Contains('current_private_namespace=') -and
             $selfText.Contains('operation_error_type=$operationType') -and
             $selfText.Contains('cleanup_error_type=$cleanupType') -and
             $selfText.Contains('function Remove-NamedObjectProbeTemporaryRecords') -and
@@ -1189,13 +1200,16 @@ function Read-NamedObjectProbeRecord {
     $record = [System.IO.File]::ReadAllText($item.FullName) |
         ConvertFrom-Json -Depth 8
     $expectedKeys = @(
-        'cleanup_error', 'created_new', 'descendant_exit_code', 'directory_path',
+        'cleanup_error', 'created_new', 'current_private_namespace_enabled',
+        'descendant_exit_code', 'directory_path',
         'directory_create_object_ntstatus', 'directory_traverse_create_ntstatus',
         'directory_traverse_ntstatus', 'error', 'exit_code', 'native_semaphore_name',
         'operation_error', 'operation_stage', 'post_job_native_close_win32',
         'post_job_native_create_win32', 'post_job_native_created_new', 'schema_version',
         'seeded_create_close_win32', 'seeded_create_created_new',
         'seeded_direct_open_close_ntstatus', 'seeded_direct_open_ntstatus',
+        'seeded_relative_directory_close_ntstatus',
+        'seeded_relative_open_close_ntstatus', 'seeded_relative_open_ntstatus',
         'seeded_create_win32', 'seeded_open_close_win32', 'seeded_open_win32',
         'seeded_semaphore_name', 'semaphore_name', 'session_directory_traverse_ntstatus',
         'session_id', 'stage', 'status'
@@ -1217,7 +1231,7 @@ function Read-NamedObjectProbeRecord {
     }
     Require `
         ((Test-ExactJsonInteger $record.schema_version) -and
-            $record.schema_version -eq 5L -and
+            $record.schema_version -eq 6L -and
             (Test-ExactJsonString $record.status) -and
             (Test-ExactJsonString $record.stage) -and
             (Test-ExactJsonInteger $record.exit_code) -and
@@ -1234,6 +1248,13 @@ function Read-NamedObjectProbeRecord {
             (Test-ExactJsonString $record.seeded_semaphore_name) -and
             (Test-ExactJsonInteger $record.seeded_direct_open_ntstatus) -and
             (Test-ExactJsonInteger $record.seeded_direct_open_close_ntstatus) -and
+            (Test-ExactJsonInteger $record.seeded_relative_open_ntstatus) -and
+            (Test-ExactJsonInteger $record.seeded_relative_open_close_ntstatus) -and
+            (Test-ExactJsonInteger `
+                $record.seeded_relative_directory_close_ntstatus) -and
+            ($null -eq $record.current_private_namespace_enabled -or
+                (Test-ExactJsonBoolean `
+                    $record.current_private_namespace_enabled)) -and
             (Test-ExactJsonInteger $record.seeded_open_win32) -and
             (Test-ExactJsonInteger $record.seeded_open_close_win32) -and
             (Test-ExactJsonInteger $record.seeded_create_win32) -and
@@ -1268,6 +1289,12 @@ function Read-NamedObjectProbeRecord {
             $record.seeded_direct_open_ntstatus -le [int32]::MaxValue -and
             $record.seeded_direct_open_close_ntstatus -ge [int32]::MinValue -and
             $record.seeded_direct_open_close_ntstatus -le [int32]::MaxValue -and
+            $record.seeded_relative_open_ntstatus -ge [int32]::MinValue -and
+            $record.seeded_relative_open_ntstatus -le [int32]::MaxValue -and
+            $record.seeded_relative_open_close_ntstatus -ge [int32]::MinValue -and
+            $record.seeded_relative_open_close_ntstatus -le [int32]::MaxValue -and
+            $record.seeded_relative_directory_close_ntstatus -ge [int32]::MinValue -and
+            $record.seeded_relative_directory_close_ntstatus -le [int32]::MaxValue -and
             $record.seeded_create_win32 -ge -1L -and
             $record.seeded_create_win32 -le [int32]::MaxValue -and
             $record.seeded_create_close_win32 -ge -1L -and
@@ -1303,8 +1330,12 @@ function Read-NamedObjectProbeRecord {
         $record.directory_create_object_ntstatus -eq 0L -and
         $record.directory_traverse_create_ntstatus -eq 0L -and
         $record.session_directory_traverse_ntstatus -eq 0L -and
+        $null -ne $record.current_private_namespace_enabled -and
         $record.seeded_direct_open_ntstatus -eq 0L -and
         $record.seeded_direct_open_close_ntstatus -eq 0L -and
+        $record.seeded_relative_open_ntstatus -eq 0L -and
+        $record.seeded_relative_open_close_ntstatus -eq 0L -and
+        $record.seeded_relative_directory_close_ntstatus -eq 0L -and
         (Test-DefaultSecuritySemaphoreProbe `
             -CreateWin32 $record.post_job_native_create_win32 `
             -CreatedNew $record.post_job_native_created_new `
@@ -1386,7 +1417,7 @@ function Assert-NamedObjectProbeRecordFixtures {
         $nativeName = 'ProjectAtlasParserPack-00000000000000000000000000000001'
         $managedName = 'ProjectAtlasParserPack-00000000000000000000000000000002'
         $success = [ordered]@{
-            schema_version = 5
+            schema_version = 6
             status = 'success'
             stage = 'complete'
             exit_code = 0
@@ -1394,6 +1425,7 @@ function Assert-NamedObjectProbeRecordFixtures {
             operation_stage = $null
             operation_error = $null
             cleanup_error = $null
+            current_private_namespace_enabled = $false
             session_id = 1
             directory_path = '\Sessions\1\BaseNamedObjects'
             directory_traverse_ntstatus = 0
@@ -1407,6 +1439,9 @@ function Assert-NamedObjectProbeRecordFixtures {
             seeded_semaphore_name = $managedName
             seeded_direct_open_ntstatus = 0
             seeded_direct_open_close_ntstatus = 0
+            seeded_relative_open_ntstatus = 0
+            seeded_relative_open_close_ntstatus = 0
+            seeded_relative_directory_close_ntstatus = 0
             seeded_open_win32 = 0
             seeded_open_close_win32 = 0
             seeded_create_win32 = 183
@@ -2457,7 +2492,8 @@ function Assert-TokenNamespaceSnapshot {
     foreach ($name in @(
         'HasRestrictions', 'RestrictedSidCount', 'IsAppContainer', 'IsSandboxed',
         'IsAppSilo', 'BnoIsolationEnabled', 'BnoIsolationPrefix',
-        'PrivateNamespaceQueryWin32', 'PrivateNamespaceInformationLength'
+        'PrivateNamespaceEnabled', 'PrivateNamespaceQueryWin32',
+        'PrivateNamespaceInformationLength'
     )) {
         $property = $Snapshot.GetType().GetProperty($name, $flags)
         Require ($null -ne $property) "Token namespace snapshot lost $name."
@@ -2471,9 +2507,32 @@ function Assert-TokenNamespaceSnapshot {
             -not [bool]$values.IsAppSilo -and
             -not [bool]$values.BnoIsolationEnabled -and
             [string]$values.BnoIsolationPrefix -ceq '' -and
-            [int]$values.PrivateNamespaceInformationLength -ge 0) `
+            $values.PrivateNamespaceEnabled -is [bool] -and
+            [int]$values.PrivateNamespaceQueryWin32 -eq 0 -and
+            [int]$values.PrivateNamespaceInformationLength -eq 4) `
         "Construction token entered an isolated or restricted namespace."
     return $values
+}
+
+function Get-PrivateNamespaceSnapshotValue {
+    param(
+        [AllowNull()]
+        [object]$Snapshot
+    )
+
+    if ($null -eq $Snapshot) {
+        return ''
+    }
+    $property = $Snapshot.GetType().GetProperty(
+        'PrivateNamespaceEnabled',
+        [System.Reflection.BindingFlags]'NonPublic,Instance'
+    )
+    Require ($null -ne $property) `
+        "Token namespace snapshot lost PrivateNamespaceEnabled."
+    $value = $property.GetValue($Snapshot)
+    Require ($value -is [bool]) `
+        "Token private namespace value was not Boolean."
+    return [string][bool]$value
 }
 
 function Format-NamedObjectAccessComparison {
@@ -2504,6 +2563,24 @@ function Format-NamedObjectAccessComparison {
         -ReceiptType $ReceiptType `
         -Receipt $Receipt `
         -Name SeededSemaphoreParentHandleClosed)
+    $logonPrivateNamespace = Get-PrivateNamespaceSnapshotValue -Snapshot (
+        Get-ReflectedReceiptValue `
+            -ReceiptType $ReceiptType `
+            -Receipt $Receipt `
+            -Name LogonTokenNamespace
+    )
+    $childBeforePrivateNamespace = Get-PrivateNamespaceSnapshotValue -Snapshot (
+        Get-ReflectedReceiptValue `
+            -ReceiptType $ReceiptType `
+            -Receipt $Receipt `
+            -Name ChildTokenNamespaceBeforeJob
+    )
+    $childAfterPrivateNamespace = Get-PrivateNamespaceSnapshotValue -Snapshot (
+        Get-ReflectedReceiptValue `
+            -ReceiptType $ReceiptType `
+            -Receipt $Receipt `
+            -Name ChildTokenNamespaceAfterJob
+    )
     $postCreate = if ($null -eq $Record) { '' } else { [string]$Record.post_job_native_create_win32 }
     $postCreated = if ($null -eq $Record) { '' } else { [string]$Record.post_job_native_created_new }
     $postClose = if ($null -eq $Record) { '' } else { [string]$Record.post_job_native_close_win32 }
@@ -2514,6 +2591,16 @@ function Format-NamedObjectAccessComparison {
     $sessionDirectoryTraverse = if ($null -eq $Record) { '' } else { [string]$Record.session_directory_traverse_ntstatus }
     $seededDirectOpen = if ($null -eq $Record) { '' } else { [string]$Record.seeded_direct_open_ntstatus }
     $seededDirectClose = if ($null -eq $Record) { '' } else { [string]$Record.seeded_direct_open_close_ntstatus }
+    $seededRelativeOpen = if ($null -eq $Record) { '' } else { [string]$Record.seeded_relative_open_ntstatus }
+    $seededRelativeClose = if ($null -eq $Record) { '' } else { [string]$Record.seeded_relative_open_close_ntstatus }
+    $seededRelativeDirectoryClose = if ($null -eq $Record) { '' } else { [string]$Record.seeded_relative_directory_close_ntstatus }
+    $currentPrivateNamespace = if ($null -eq $Record -or
+        $null -eq $Record.current_private_namespace_enabled) {
+        ''
+    }
+    else {
+        [string][bool]$Record.current_private_namespace_enabled
+    }
     $sameName = if ($null -eq $Record) {
         ''
     }
@@ -2524,7 +2611,7 @@ function Format-NamedObjectAccessComparison {
             [System.StringComparison]::Ordinal
         )
     }
-    return "seed_created=$seedCreated seed_duplicated=$seedDuplicated parent_seed_closed=$parentClosed seeded_name_matches=$sameName session_id=$sessionId post_job_create_win32=$postCreate post_job_created_new=$postCreated post_job_close_win32=$postClose directory_traverse_ntstatus=$directoryTraverse directory_create_object_ntstatus=$directoryCreate directory_traverse_create_ntstatus=$directoryCombined session_directory_traverse_ntstatus=$sessionDirectoryTraverse seeded_direct_open_ntstatus=$seededDirectOpen seeded_direct_open_close_ntstatus=$seededDirectClose"
+    return "seed_created=$seedCreated seed_duplicated=$seedDuplicated parent_seed_closed=$parentClosed seeded_name_matches=$sameName logon_private_namespace=$logonPrivateNamespace child_before_private_namespace=$childBeforePrivateNamespace child_after_private_namespace=$childAfterPrivateNamespace current_private_namespace=$currentPrivateNamespace session_id=$sessionId post_job_create_win32=$postCreate post_job_created_new=$postCreated post_job_close_win32=$postClose directory_traverse_ntstatus=$directoryTraverse directory_create_object_ntstatus=$directoryCreate directory_traverse_create_ntstatus=$directoryCombined session_directory_traverse_ntstatus=$sessionDirectoryTraverse seeded_direct_open_ntstatus=$seededDirectOpen seeded_direct_open_close_ntstatus=$seededDirectClose seeded_relative_open_ntstatus=$seededRelativeOpen seeded_relative_open_close_ntstatus=$seededRelativeClose seeded_relative_directory_close_ntstatus=$seededRelativeDirectoryClose"
 }
 
 function Get-ReflectedOperationFailure {
@@ -2833,8 +2920,11 @@ using Microsoft.Win32.SafeHandles;
 public static class ProjectAtlasNamedObjectAccessProbe
 {
     private const uint ObjCaseInsensitive = 0x00000040;
+    private const uint DirectoryTraverse = 0x00000002;
     private const uint SemaphoreSynchronizeAndModify = 0x00100002;
     private const int ErrorAlreadyExists = 183;
+    private const int ErrorInsufficientBuffer = 122;
+    private const int TokenPrivateNameSpaceInformation = 42;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct UnicodeString
@@ -2870,6 +2960,15 @@ public static class ProjectAtlasNamedObjectAccessProbe
     [DllImport("ntdll.dll")]
     private static extern int NtClose(IntPtr handle);
 
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetTokenInformation(
+        SafeAccessTokenHandle token,
+        int informationClass,
+        IntPtr information,
+        int informationLength,
+        out int returnLength);
+
     [DllImport(
         "kernel32.dll",
         CharSet = CharSet.Unicode,
@@ -2896,6 +2995,58 @@ public static class ProjectAtlasNamedObjectAccessProbe
         uint desiredAccess,
         [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
         string name);
+
+    public static bool ReadCurrentPrivateNamespaceEnabled(
+        SafeAccessTokenHandle token)
+    {
+        if (token == null || token.IsInvalid || token.IsClosed)
+        {
+            throw new InvalidOperationException("private-namespace-token");
+        }
+        int requiredBytes;
+        bool measured = GetTokenInformation(
+            token,
+            TokenPrivateNameSpaceInformation,
+            IntPtr.Zero,
+            0,
+            out requiredBytes);
+        int measurementError = Marshal.GetLastWin32Error();
+        if (measured || measurementError != ErrorInsufficientBuffer ||
+            requiredBytes != sizeof(uint))
+        {
+            throw new InvalidOperationException("private-namespace-measurement");
+        }
+        IntPtr information = Marshal.AllocHGlobal(requiredBytes);
+        try
+        {
+            int returnedBytes;
+            if (!GetTokenInformation(
+                    token,
+                    TokenPrivateNameSpaceInformation,
+                    information,
+                    requiredBytes,
+                    out returnedBytes))
+            {
+                throw new System.ComponentModel.Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "read-current-private-namespace");
+            }
+            if (returnedBytes != sizeof(uint))
+            {
+                throw new InvalidOperationException("private-namespace-length");
+            }
+            uint value = unchecked((uint)Marshal.ReadInt32(information));
+            if (value > 1)
+            {
+                throw new InvalidOperationException("private-namespace-value");
+            }
+            return value != 0;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(information);
+        }
+    }
 
     public static int OpenDirectory(string path, uint desiredAccess)
     {
@@ -3004,6 +3155,104 @@ public static class ProjectAtlasNamedObjectAccessProbe
         }
     }
 
+    public static int OpenAndCloseSemaphoreRelativeToDirectory(
+        string directoryPath,
+        string semaphoreName,
+        out int semaphoreCloseStatus,
+        out int directoryCloseStatus)
+    {
+        semaphoreCloseStatus = -1;
+        directoryCloseStatus = -1;
+        IntPtr directoryPathBuffer = IntPtr.Zero;
+        IntPtr directoryUnicodePointer = IntPtr.Zero;
+        IntPtr semaphoreNameBuffer = IntPtr.Zero;
+        IntPtr semaphoreUnicodePointer = IntPtr.Zero;
+        IntPtr directoryHandle = IntPtr.Zero;
+        IntPtr semaphoreHandle = IntPtr.Zero;
+        try
+        {
+            directoryPathBuffer = Marshal.StringToHGlobalUni(directoryPath);
+            UnicodeString directoryUnicode = new UnicodeString();
+            directoryUnicode.Length = checked(
+                (ushort)(directoryPath.Length * sizeof(char)));
+            directoryUnicode.MaximumLength = checked(
+                (ushort)((directoryPath.Length + 1) * sizeof(char)));
+            directoryUnicode.Buffer = directoryPathBuffer;
+            directoryUnicodePointer = Marshal.AllocHGlobal(
+                Marshal.SizeOf<UnicodeString>());
+            Marshal.StructureToPtr(directoryUnicode, directoryUnicodePointer, false);
+            ObjectAttributes directoryAttributes = new ObjectAttributes();
+            directoryAttributes.Length = Marshal.SizeOf<ObjectAttributes>();
+            directoryAttributes.RootDirectory = IntPtr.Zero;
+            directoryAttributes.ObjectName = directoryUnicodePointer;
+            directoryAttributes.Attributes = ObjCaseInsensitive;
+            int directoryStatus = NtOpenDirectoryObject(
+                out directoryHandle,
+                DirectoryTraverse,
+                ref directoryAttributes);
+            if (directoryStatus < 0)
+            {
+                return directoryStatus;
+            }
+
+            semaphoreNameBuffer = Marshal.StringToHGlobalUni(semaphoreName);
+            UnicodeString semaphoreUnicode = new UnicodeString();
+            semaphoreUnicode.Length = checked(
+                (ushort)(semaphoreName.Length * sizeof(char)));
+            semaphoreUnicode.MaximumLength = checked(
+                (ushort)((semaphoreName.Length + 1) * sizeof(char)));
+            semaphoreUnicode.Buffer = semaphoreNameBuffer;
+            semaphoreUnicodePointer = Marshal.AllocHGlobal(
+                Marshal.SizeOf<UnicodeString>());
+            Marshal.StructureToPtr(semaphoreUnicode, semaphoreUnicodePointer, false);
+            ObjectAttributes semaphoreAttributes = new ObjectAttributes();
+            semaphoreAttributes.Length = Marshal.SizeOf<ObjectAttributes>();
+            semaphoreAttributes.RootDirectory = directoryHandle;
+            semaphoreAttributes.ObjectName = semaphoreUnicodePointer;
+            semaphoreAttributes.Attributes = ObjCaseInsensitive;
+            int semaphoreStatus = NtOpenSemaphore(
+                out semaphoreHandle,
+                SemaphoreSynchronizeAndModify,
+                ref semaphoreAttributes);
+            if (semaphoreStatus < 0)
+            {
+                return semaphoreStatus;
+            }
+            semaphoreCloseStatus = NtClose(semaphoreHandle);
+            semaphoreHandle = IntPtr.Zero;
+            directoryCloseStatus = NtClose(directoryHandle);
+            directoryHandle = IntPtr.Zero;
+            return semaphoreStatus;
+        }
+        finally
+        {
+            if (semaphoreHandle != IntPtr.Zero)
+            {
+                NtClose(semaphoreHandle);
+            }
+            if (directoryHandle != IntPtr.Zero)
+            {
+                NtClose(directoryHandle);
+            }
+            if (semaphoreUnicodePointer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(semaphoreUnicodePointer);
+            }
+            if (semaphoreNameBuffer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(semaphoreNameBuffer);
+            }
+            if (directoryUnicodePointer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(directoryUnicodePointer);
+            }
+            if (directoryPathBuffer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(directoryPathBuffer);
+            }
+        }
+    }
+
     public static int CreateAndCloseSemaphore(
         string name,
         out bool createdNew,
@@ -3079,6 +3328,9 @@ $seededOpenWin32 = -1
 $seededOpenCloseWin32 = -1
 $seededDirectOpenNtStatus = -1
 $seededDirectOpenCloseNtStatus = -1
+$seededRelativeOpenNtStatus = -1
+$seededRelativeOpenCloseNtStatus = -1
+$seededRelativeDirectoryCloseNtStatus = -1
 $seededCreateWin32 = -1
 $seededCreateCreatedNew = $false
 $seededCreateCloseWin32 = -1
@@ -3092,6 +3344,7 @@ $childErrorTask = $null
 $operationStage = $null
 $operationError = $null
 $cleanupError = $null
+$currentPrivateNamespaceEnabled = $null
 try {
     $actualIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $actualSid = $actualIdentity.User.Value
@@ -3126,6 +3379,10 @@ try {
 
     $probeStage = 'native-semaphore-create'
     Add-Type -TypeDefinition $nativeProbeSource -Language CSharp -ErrorAction Stop
+    $currentPrivateNamespaceEnabled =
+        [ProjectAtlasNamedObjectAccessProbe]::ReadCurrentPrivateNamespaceEnabled(
+            $actualIdentity.AccessToken
+        )
     $probeStage = 'native-semaphore-close'
     $directoryTraverseNtStatus =
         [ProjectAtlasNamedObjectAccessProbe]::OpenDirectory($directoryPath, 0x00000002)
@@ -3144,6 +3401,13 @@ try {
         [ProjectAtlasNamedObjectAccessProbe]::OpenAndCloseSemaphoreByPath(
             $seededNativePath,
             [ref]$seededDirectOpenCloseNtStatus
+        )
+    $seededRelativeOpenNtStatus =
+        [ProjectAtlasNamedObjectAccessProbe]::OpenAndCloseSemaphoreRelativeToDirectory(
+            $sessionDirectoryPath,
+            $SeededSemaphoreName,
+            [ref]$seededRelativeOpenCloseNtStatus,
+            [ref]$seededRelativeDirectoryCloseNtStatus
         )
 
     $probeStage = 'native-semaphore-create'
@@ -3346,7 +3610,7 @@ else {
     $finalError = $null
 }
 $record = [ordered]@{
-    schema_version = 5
+    schema_version = 6
     status = $status
     stage = $finalStage
     exit_code = $exitCode
@@ -3354,6 +3618,7 @@ $record = [ordered]@{
     operation_stage = $operationStage
     operation_error = $operationError
     cleanup_error = $cleanupError
+    current_private_namespace_enabled = $currentPrivateNamespaceEnabled
     session_id = $sessionId
     directory_path = $directoryPath
     directory_traverse_ntstatus = $directoryTraverseNtStatus
@@ -3367,6 +3632,10 @@ $record = [ordered]@{
     seeded_semaphore_name = $SeededSemaphoreName
     seeded_direct_open_ntstatus = $seededDirectOpenNtStatus
     seeded_direct_open_close_ntstatus = $seededDirectOpenCloseNtStatus
+    seeded_relative_open_ntstatus = $seededRelativeOpenNtStatus
+    seeded_relative_open_close_ntstatus = $seededRelativeOpenCloseNtStatus
+    seeded_relative_directory_close_ntstatus =
+        $seededRelativeDirectoryCloseNtStatus
     seeded_open_win32 = $seededOpenWin32
     seeded_open_close_win32 = $seededOpenCloseWin32
     seeded_create_win32 = $seededCreateWin32
@@ -3383,7 +3652,7 @@ try {
 catch {
     $writeError = ConvertTo-BoundedProbeError -Exception $_.Exception
     $fallback = [ordered]@{
-        schema_version = 5
+        schema_version = 6
         status = 'failure'
         stage = 'result-write'
         exit_code = [int]$probeExitCodes['result-write']
@@ -3710,6 +3979,14 @@ exit 0
                         $childNamespaceAfter[$namespaceField]) `
                     "Construction Job changed token namespace field $namespaceField."
             }
+            Require `
+                ([bool]$logonNamespace.PrivateNamespaceEnabled -eq
+                    [bool]$childNamespaceBefore.PrivateNamespaceEnabled -and
+                    [bool]$childNamespaceBefore.PrivateNamespaceEnabled -eq
+                        [bool]$childNamespaceAfter.PrivateNamespaceEnabled -and
+                    [bool]$childNamespaceAfter.PrivateNamespaceEnabled -eq
+                        [bool]$probeResult.current_private_namespace_enabled) `
+                "Construction private namespace state changed across token use."
             Invoke-ExactSidProcessAudit -Sid $identity.Sid -Expectation absent
             $expectedDirectoryPath = if ($probeResult.session_id -eq 0L) {
                 '\BaseNamedObjects'
@@ -3718,7 +3995,7 @@ exit 0
                 "\Sessions\$($probeResult.session_id)\BaseNamedObjects"
             }
             Require `
-                ($probeResult.schema_version -eq 5L -and
+                ($probeResult.schema_version -eq 6L -and
                     $probeResult.status -ceq 'success' -and
                     $probeResult.stage -ceq 'complete' -and
                     $probeResult.exit_code -eq 0L -and
@@ -3738,6 +4015,9 @@ exit 0
                     $probeResult.session_directory_traverse_ntstatus -eq 0L -and
                     $probeResult.seeded_direct_open_ntstatus -eq 0L -and
                     $probeResult.seeded_direct_open_close_ntstatus -eq 0L -and
+                    $probeResult.seeded_relative_open_ntstatus -eq 0L -and
+                    $probeResult.seeded_relative_open_close_ntstatus -eq 0L -and
+                    $probeResult.seeded_relative_directory_close_ntstatus -eq 0L -and
                     (Test-DefaultSecuritySemaphoreProbe `
                         -CreateWin32 $probeResult.post_job_native_create_win32 `
                         -CreatedNew $probeResult.post_job_native_created_new `

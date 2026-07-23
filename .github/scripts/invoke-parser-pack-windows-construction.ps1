@@ -1738,6 +1738,7 @@ public static class ProjectAtlasConstructionProcess
         internal bool IsAppSilo { get; set; }
         internal bool BnoIsolationEnabled { get; set; }
         internal string BnoIsolationPrefix { get; set; }
+        internal bool PrivateNamespaceEnabled { get; set; }
         internal int PrivateNamespaceQueryWin32 { get; set; }
         internal int PrivateNamespaceInformationLength { get; set; }
     }
@@ -2366,43 +2367,34 @@ public static class ProjectAtlasConstructionProcess
         SafeAccessTokenHandle token,
         TokenNamespaceSnapshot snapshot)
     {
-        int requiredBytes;
-        bool measured = GetTokenInformation(
-            token,
-            TokenPrivateNameSpaceInformation,
-            IntPtr.Zero,
-            0,
-            out requiredBytes);
-        int measurementError = Marshal.GetLastWin32Error();
-        if (measured)
-        {
-            if (requiredBytes < 0 || requiredBytes > MaximumTokenInformationBytes)
-            {
-                throw new InvalidOperationException(
-                    "bound-construction-token-private-namespace");
-            }
-            snapshot.PrivateNamespaceQueryWin32 = 0;
-            snapshot.PrivateNamespaceInformationLength = requiredBytes;
-            return;
-        }
-        if (measurementError != ErrorInsufficientBuffer)
-        {
-            snapshot.PrivateNamespaceQueryWin32 = measurementError;
-            snapshot.PrivateNamespaceInformationLength = 0;
-            return;
-        }
-        if (requiredBytes <= 0 || requiredBytes > MaximumTokenInformationBytes)
-        {
-            throw new InvalidOperationException(
-                "bound-construction-token-private-namespace");
-        }
         using (TokenInformationBuffer information = GetBoundedTokenInformation(
             token,
             TokenPrivateNameSpaceInformation))
         {
             snapshot.PrivateNamespaceQueryWin32 = 0;
             snapshot.PrivateNamespaceInformationLength = information.Length;
+            snapshot.PrivateNamespaceEnabled = DecodeExactTokenDwordBoolean(
+                information.Pointer,
+                information.Length,
+                "read-construction-token-private-namespace");
         }
+    }
+
+    private static bool DecodeExactTokenDwordBoolean(
+        IntPtr information,
+        int informationLength,
+        string operation)
+    {
+        if (information == IntPtr.Zero || informationLength != sizeof(uint))
+        {
+            throw new InvalidOperationException(operation);
+        }
+        uint value = unchecked((uint)Marshal.ReadInt32(information));
+        if (value > 1)
+        {
+            throw new InvalidOperationException(operation);
+        }
+        return value != 0;
     }
 
     private static void ValidateConstructionNamespace(
@@ -2434,6 +2426,7 @@ public static class ProjectAtlasConstructionProcess
                 left.BnoIsolationPrefix,
                 right.BnoIsolationPrefix,
                 StringComparison.Ordinal) &&
+            left.PrivateNamespaceEnabled == right.PrivateNamespaceEnabled &&
             left.PrivateNamespaceQueryWin32 == right.PrivateNamespaceQueryWin32 &&
             left.PrivateNamespaceInformationLength ==
                 right.PrivateNamespaceInformationLength;

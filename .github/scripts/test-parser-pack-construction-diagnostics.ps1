@@ -487,7 +487,7 @@ try {
             "Named-object diagnostic fault did not atomically publish one bounded record."
         $probeRecord = Read-NamedObjectProbeRecord -Path $probeResultItem.FullName
         Require `
-            ($probeRecord.schema_version -eq 5L -and
+            ($probeRecord.schema_version -eq 6L -and
                 $probeRecord.status -ceq 'failure' -and
                 $probeRecord.stage -ceq 'ambient-environment' -and
                 $probeRecord.exit_code -eq 122L -and
@@ -508,7 +508,7 @@ try {
         )
         $stringSchemaPayload = [System.IO.File]::ReadAllText($probeResult) |
             ConvertFrom-Json -Depth 8
-        $stringSchemaPayload.schema_version = '5'
+        $stringSchemaPayload.schema_version = '6'
         [System.IO.File]::WriteAllText(
             $stringSchemaRecord,
             ($stringSchemaPayload | ConvertTo-Json -Depth 8 -Compress)
@@ -530,7 +530,7 @@ try {
             "projectatlas-object-namespace-probe-$([Guid]::NewGuid().ToString('N')).json"
         )
         $stringBooleanPayload = [ordered]@{
-            schema_version = 5
+            schema_version = 6
             status = 'success'
             stage = 'complete'
             exit_code = 0
@@ -538,6 +538,7 @@ try {
             operation_stage = $null
             operation_error = $null
             cleanup_error = $null
+            current_private_namespace_enabled = 'false'
             session_id = 1
             directory_path = '\Sessions\1\BaseNamedObjects'
             directory_traverse_ntstatus = 0
@@ -552,13 +553,16 @@ try {
             seeded_semaphore_name = $diagnosticSeedName
             seeded_direct_open_ntstatus = 0
             seeded_direct_open_close_ntstatus = 0
+            seeded_relative_open_ntstatus = 0
+            seeded_relative_open_close_ntstatus = 0
+            seeded_relative_directory_close_ntstatus = 0
             seeded_open_win32 = 0
             seeded_open_close_win32 = 0
             seeded_create_win32 = 183
             seeded_create_created_new = $false
             seeded_create_close_win32 = 0
             semaphore_name = $diagnosticSeedName
-            created_new = 'false'
+            created_new = $false
             descendant_exit_code = 0
         }
         [System.IO.File]::WriteAllText(
@@ -575,7 +579,7 @@ try {
         }
         Require `
             $stringBooleanRejected `
-            "Named-object diagnostic reader coerced a string Boolean."
+            "Named-object diagnostic reader coerced a string private namespace Boolean."
 
         $mismatchedRelationshipRecord = [System.IO.Path]::Combine(
             $testRoot,
@@ -780,6 +784,7 @@ try {
                 $wrapperText.Contains('SeGroupLogonId = 0xC0000000;') -and
                 $wrapperText.Contains('private sealed class TokenInformationBuffer : IDisposable') -and
                 $wrapperText.Contains('private sealed class TokenNamespaceSnapshot') -and
+                $wrapperText.Contains('internal bool PrivateNamespaceEnabled { get; set; }') -and
                 $wrapperText.Contains('TokenBnoIsolationInformation') -and
                 $wrapperText.Contains('[MarshalAs(UnmanagedType.U1)]') -and
                 $wrapperText.Contains('MaximumTokenInformationBytes = 64 * 1024;') -and
@@ -796,6 +801,8 @@ try {
                     'snapshot\.IsSandboxed\s*=\s*ReadExactTokenDword\(' -and
                 $wrapperText -match
                     'snapshot\.IsAppSilo\s*=\s*ReadExactTokenDword\(' -and
+                $wrapperText.Contains('DecodeExactTokenDwordBoolean(') -and
+                $wrapperText.Contains('informationLength != sizeof(uint)') -and
                 $wrapperText.Contains('availableCharacters') -and
                 $wrapperText.Contains('requiredGroupBytes > groupsInformation.Length') -and
                 $wrapperText.Contains('!IsValidSid(sid)') -and
@@ -946,6 +953,74 @@ try {
             $nestedTypeFlags
         )
         Require ($null -ne $namespaceCapture) "Construction token namespace capture was missing."
+        $privateNamespaceDecoder = $adapterType.GetMethod(
+            'DecodeExactTokenDwordBoolean',
+            $nestedTypeFlags
+        )
+        Require ($null -ne $privateNamespaceDecoder) `
+            "Construction private namespace decoder was missing."
+        $privateNamespaceFixture = [System.Runtime.InteropServices.Marshal]::AllocHGlobal(4)
+        try {
+            [System.Runtime.InteropServices.Marshal]::WriteInt32(
+                $privateNamespaceFixture,
+                0
+            )
+            Require `
+                ($privateNamespaceDecoder.Invoke(
+                        $null,
+                        [object[]]@($privateNamespaceFixture, 4, 'private-fixture')
+                    ) -eq $false) `
+                "Canonical disabled private namespace fixture did not decode."
+            [System.Runtime.InteropServices.Marshal]::WriteInt32(
+                $privateNamespaceFixture,
+                1
+            )
+            Require `
+                ($privateNamespaceDecoder.Invoke(
+                        $null,
+                        [object[]]@($privateNamespaceFixture, 4, 'private-fixture')
+                    ) -eq $true) `
+                "Canonical enabled private namespace fixture did not decode."
+            foreach ($invalidFixture in @(
+                [pscustomobject]@{ Length = 1; Value = 1 },
+                [pscustomobject]@{ Length = 4; Value = 2 }
+            )) {
+                [System.Runtime.InteropServices.Marshal]::WriteInt32(
+                    $privateNamespaceFixture,
+                    [int]$invalidFixture.Value
+                )
+                $invalidFailure = $null
+                try {
+                    [void]$privateNamespaceDecoder.Invoke(
+                        $null,
+                        [object[]]@(
+                            $privateNamespaceFixture,
+                            [int]$invalidFixture.Length,
+                            'private-fixture'
+                        )
+                    )
+                }
+                catch {
+                    $invalidFailure = $_.Exception
+                    while (($invalidFailure -is
+                                [System.Reflection.TargetInvocationException] -or
+                            $invalidFailure -is
+                                [System.Management.Automation.MethodInvocationException]) -and
+                        $null -ne $invalidFailure.InnerException) {
+                        $invalidFailure = $invalidFailure.InnerException
+                    }
+                }
+                Require `
+                    ($invalidFailure -is [System.InvalidOperationException] -and
+                        $invalidFailure.Message -ceq 'private-fixture') `
+                    "Invalid private namespace fixture was accepted."
+            }
+        }
+        finally {
+            [System.Runtime.InteropServices.Marshal]::FreeHGlobal(
+                $privateNamespaceFixture
+            )
+        }
         $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
         try {
             $currentPrincipalSid = $currentIdentity.User.Value
@@ -961,6 +1036,18 @@ try {
             ).GetValue($currentSnapshot)
             Require ($currentHasRestrictions -is [bool]) `
                 "Current Windows TokenHasRestrictions payload was not decoded as a Boolean."
+            $currentPrivateNamespace = $namespaceSnapshotType.GetProperty(
+                'PrivateNamespaceEnabled',
+                $instanceMemberFlags
+            ).GetValue($currentSnapshot)
+            $currentPrivateNamespaceLength = $namespaceSnapshotType.GetProperty(
+                'PrivateNamespaceInformationLength',
+                $instanceMemberFlags
+            ).GetValue($currentSnapshot)
+            Require `
+                ($currentPrivateNamespace -is [bool] -and
+                    [int]$currentPrivateNamespaceLength -eq 4) `
+                "Current Windows TokenPrivateNameSpace payload was not canonical."
         }
         finally {
             $currentIdentity.Dispose()
