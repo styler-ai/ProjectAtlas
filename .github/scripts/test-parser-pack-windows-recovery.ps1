@@ -557,6 +557,10 @@ function Assert-NamedObjectProbeDiagnosticContract {
         'seeded_relative_open_ntstatus = $seededRelativeOpenNtStatus',
         'seeded_relative_open_close_ntstatus = $seededRelativeOpenCloseNtStatus',
         'seeded_relative_directory_close_ntstatus =',
+        '$win32SessionPrefix = ''Local\''',
+        '$seededNativeLeaf = $SeededSemaphoreName.Substring(',
+        'seeded-cargo-jobserver-session-prefix',
+        'seeded-cargo-jobserver-native-leaf',
         'current_private_namespace_enabled = $currentPrivateNamespaceEnabled',
         'construction-token-owner-sid-mismatch',
         'post_job_native_create_win32 = $postJobNativeCreateWin32',
@@ -1306,14 +1310,14 @@ function Read-NamedObjectProbeRecord {
                     $record.directory_path -ceq
                         "\Sessions\$($record.session_id)\BaseNamedObjects")) -and
             ([string]::IsNullOrEmpty($record.semaphore_name) -or
-                $record.semaphore_name -match
-                    '\AProjectAtlasParserPack-[0-9a-f]{32}\z') -and
+                $record.semaphore_name -cmatch
+                    '\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z') -and
             ([string]::IsNullOrEmpty($record.native_semaphore_name) -or
-                $record.native_semaphore_name -match
-                    '\AProjectAtlasParserPack-[0-9a-f]{32}\z') -and
+                $record.native_semaphore_name -cmatch
+                    '\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z') -and
             ([string]::IsNullOrEmpty($record.seeded_semaphore_name) -or
-                $record.seeded_semaphore_name -match
-                    '\AProjectAtlasParserPack-[0-9a-f]{32}\z')) `
+                $record.seeded_semaphore_name -cmatch
+                    '\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')) `
         "Named-object probe diagnostic field types or values were invalid."
 
     $isSuccess = $record.status -ceq 'success' -and
@@ -1414,8 +1418,8 @@ function Assert-NamedObjectProbeRecordFixtures {
     )
     [System.IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
     try {
-        $nativeName = 'ProjectAtlasParserPack-00000000000000000000000000000001'
-        $managedName = 'ProjectAtlasParserPack-00000000000000000000000000000002'
+        $nativeName = 'Local\ProjectAtlasParserPack-00000000000000000000000000000001'
+        $managedName = 'Local\ProjectAtlasParserPack-00000000000000000000000000000002'
         $success = [ordered]@{
             schema_version = 6
             status = 'success'
@@ -2789,11 +2793,11 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$CanaryPath,
 
-    [ValidatePattern('\A(?:|ProjectAtlasParserPack-[0-9a-f]{32})\z')]
+    [ValidatePattern('\A(?:|Local\\ProjectAtlasParserPack-[0-9a-f]{32})\z')]
     [string]$ComparisonSemaphoreName = '',
 
     [Parameter(Mandatory = $true)]
-    [ValidatePattern('\AProjectAtlasParserPack-[0-9a-f]{32}\z')]
+    [ValidatePattern('\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
     [string]$SeededSemaphoreName,
 
     [ValidateSet('none', 'operation-and-cleanup', 'descendant-open-not-found')]
@@ -3396,7 +3400,22 @@ try {
             $sessionDirectoryPath,
             0x00000002
         )
-    $seededNativePath = "$sessionDirectoryPath\$SeededSemaphoreName"
+    $win32SessionPrefix = 'Local\'
+    if (-not $SeededSemaphoreName.StartsWith(
+            $win32SessionPrefix,
+            [System.StringComparison]::Ordinal
+        )) {
+        throw [System.InvalidOperationException]::new(
+            'seeded-cargo-jobserver-session-prefix'
+        )
+    }
+    $seededNativeLeaf = $SeededSemaphoreName.Substring($win32SessionPrefix.Length)
+    if ($seededNativeLeaf -cnotmatch '\AProjectAtlasParserPack-[0-9a-f]{32}\z') {
+        throw [System.InvalidOperationException]::new(
+            'seeded-cargo-jobserver-native-leaf'
+        )
+    }
+    $seededNativePath = "$sessionDirectoryPath\$seededNativeLeaf"
     $seededDirectOpenNtStatus =
         [ProjectAtlasNamedObjectAccessProbe]::OpenAndCloseSemaphoreByPath(
             $seededNativePath,
@@ -3405,14 +3424,14 @@ try {
     $seededRelativeOpenNtStatus =
         [ProjectAtlasNamedObjectAccessProbe]::OpenAndCloseSemaphoreRelativeToDirectory(
             $sessionDirectoryPath,
-            $SeededSemaphoreName,
+            $seededNativeLeaf,
             [ref]$seededRelativeOpenCloseNtStatus,
             [ref]$seededRelativeDirectoryCloseNtStatus
         )
 
     $probeStage = 'native-semaphore-create'
     $nativeSemaphoreName = if ([string]::IsNullOrEmpty($ComparisonSemaphoreName)) {
-        "ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+        "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
     }
     else {
         $ComparisonSemaphoreName
@@ -3476,7 +3495,7 @@ try {
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
     $descendantName = if ($DiagnosticFault -ceq 'descendant-open-not-found') {
-        "ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+        "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
     }
     else {
         $name
@@ -3671,7 +3690,7 @@ exit [int]$record.exit_code
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidatePattern('\AProjectAtlasParserPack-[0-9a-f]{32}\z')]
+    [ValidatePattern('\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
     [string]$Name,
 
     [Parameter(Mandatory = $true)]
@@ -3750,7 +3769,7 @@ exit 0
         [System.Text.UTF8Encoding]::new($false)
     )
     $comparisonSemaphoreName =
-        "ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+        "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
     $normalArguments = [string[]]@(
         '-NoLogo', '-NoProfile', '-NonInteractive',
         '-File', $probeScriptPath,
@@ -3833,7 +3852,7 @@ exit 0
                 "Construction receipt lost its seeded semaphore name."
             $seededNameProperty.SetValue(
                 $receipt,
-                "ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+                "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
             )
         }
         $invokeArguments = [object[]]::new(10)
@@ -3947,8 +3966,8 @@ exit 0
                         -ReceiptType $receiptType `
                         -Receipt $receipt `
                         -Name SeededSemaphoreParentHandleClosed) -eq $true -and
-                    $seededSemaphoreName -match
-                        '\AProjectAtlasParserPack-[0-9a-f]{32}\z' -and
+                    $seededSemaphoreName -cmatch
+                        '\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z' -and
                     [string]::Equals(
                         $seededSemaphoreName,
                         [string]$probeResult.seeded_semaphore_name,
@@ -4010,8 +4029,8 @@ exit 0
                         $objectDirectory,
                         [System.StringComparison]::Ordinal
                     ) -and
-                    $probeResult.native_semaphore_name -match
-                        '\AProjectAtlasParserPack-[0-9a-f]{32}\z' -and
+                    $probeResult.native_semaphore_name -cmatch
+                        '\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z' -and
                     $probeResult.session_directory_traverse_ntstatus -eq 0L -and
                     $probeResult.seeded_direct_open_ntstatus -eq 0L -and
                     $probeResult.seeded_direct_open_close_ntstatus -eq 0L -and
@@ -4029,8 +4048,8 @@ exit 0
                     $probeResult.seeded_create_close_win32 -eq 0L -and
                     $probeResult.created_new -eq $false -and
                     $probeResult.descendant_exit_code -eq 0L -and
-                    $probeResult.semaphore_name -match
-                        '\AProjectAtlasParserPack-[0-9a-f]{32}\z') `
+                    $probeResult.semaphore_name -cmatch
+                        '\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z') `
                 "Construction named-object probe result identity was invalid. comparison=$comparison"
             $survivingSemaphore = $null
             $semaphoreAbsent = -not [System.Threading.SemaphoreAcl]::TryOpenExisting(

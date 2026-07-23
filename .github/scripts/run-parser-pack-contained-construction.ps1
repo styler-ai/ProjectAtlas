@@ -44,7 +44,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ResolverAddress,
 
-    [ValidatePattern('\A(?:|ProjectAtlasParserPack-[0-9a-f]{32})\z')]
+    [ValidatePattern('\A(?:|Local\\ProjectAtlasParserPack-[0-9a-f]{32})\z')]
     [string]$SeededSemaphoreName = ''
 )
 
@@ -346,7 +346,7 @@ function Open-ContainedCargoJobserver {
         [System.Security.Principal.SecurityIdentifier]$Sid,
 
         [Parameter(Mandatory = $true)]
-        [ValidatePattern('\AProjectAtlasParserPack-[0-9a-f]{32}\z')]
+        [ValidatePattern('\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
         [string]$Name
     )
 
@@ -464,7 +464,7 @@ function Invoke-ContainedCargoJobserverCanary {
         [string]$Pwsh,
 
         [Parameter(Mandatory = $true)]
-        [ValidatePattern('\AProjectAtlasParserPack-[0-9a-f]{32}\z')]
+        [ValidatePattern('\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
         [string]$Name,
 
         [Parameter(Mandatory = $true)]
@@ -478,7 +478,7 @@ function Invoke-ContainedCargoJobserverCanary {
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidatePattern('\AProjectAtlasParserPack-[0-9a-f]{32}\z')]
+    [ValidatePattern('\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
     [string]$Name,
 
     [Parameter(Mandatory = $true)]
@@ -602,7 +602,7 @@ foreach ($forbiddenVariable in @("TSLP_LANGUAGES", "TSLP_ALLOW_FAILED_GRAMMARS")
 }
 Assert-CargoConstructionEnvironment -Target $Target
 if ($Target -eq "x86_64-pc-windows-msvc" -and
-    $SeededSemaphoreName -notmatch '\AProjectAtlasParserPack-[0-9a-f]{32}\z') {
+    $SeededSemaphoreName -cnotmatch '\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z') {
     throw "Windows construction requires one protected seeded Cargo jobserver."
 }
 

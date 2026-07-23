@@ -422,7 +422,7 @@ try {
             [System.Text.UTF8Encoding]::new($false)
         )
         $diagnosticSeedName =
-            "ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+            "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
         $diagnosticSeedRights =
             [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
             [System.Security.AccessControl.SemaphoreRights]::Modify
@@ -546,7 +546,7 @@ try {
             directory_traverse_create_ntstatus = 0
             session_directory_traverse_ntstatus = 0
             native_semaphore_name =
-                "ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+                "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
             post_job_native_create_win32 = 0
             post_job_native_created_new = $true
             post_job_native_close_win32 = 0
@@ -773,8 +773,9 @@ try {
                 $wrapperText.Contains('CreateSeededSemaphore(') -and
                 $wrapperText.Contains('TransferSeededSemaphore(') -and
                 $wrapperText.Contains('SeededSemaphorePlaceholder') -and
-                $wrapperText.Contains('DiagnosticSemaphorePrefix = "ProjectAtlasParserPack-";') -and
+                $wrapperText.Contains('DiagnosticSemaphorePrefix = "Local\\ProjectAtlasParserPack-";') -and
                 -not $wrapperText.Contains('DiagnosticSemaphorePrefix = "Global\\ProjectAtlasParserPack-";') -and
+                -not $wrapperText.Contains('DiagnosticSemaphorePrefix = "ProjectAtlasParserPack-";') -and
                 $wrapperText.Contains('Add-ConstructionObjectDirectoryPrincipalAccess') -and
                 $wrapperText.Contains('Assert-ConstructionObjectDirectoryPrincipalAbsent')) `
             "Windows construction did not use its transferred protected one-worker jobserver and exact namespace grant."
@@ -1056,7 +1057,7 @@ try {
         $localFree = $adapterType.GetMethod('LocalFree', $nestedTypeFlags)
         Require ($null -ne $seedCreator -and $null -ne $localFree) `
             "Construction seed ownership boundary was missing."
-        $seedName = "ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+        $seedName = "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
         $seedArguments = [object[]]@($seedName, $currentPrincipalSid, [IntPtr]::Zero)
         $seedRawHandle = [IntPtr]::Zero
         $seedSecurityDescriptor = [IntPtr]::Zero
@@ -2560,7 +2561,7 @@ public static class ProjectAtlasConstructionAdmissionFixture
             try {
                 $unexpectedOwnerJobserver = Open-ContainedCargoJobserver `
                     -Sid $currentSid `
-                    -Name "ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+                    -Name "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
                 $unexpectedOwnerJobserver.Dispose()
             }
             catch {
@@ -2573,7 +2574,7 @@ public static class ProjectAtlasConstructionAdmissionFixture
         }
         $jobserverRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
             [System.Security.AccessControl.SemaphoreRights]::Modify
-        $jobserverName = "ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+        $jobserverName = "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
         $jobserverSecurity = [System.Security.AccessControl.SemaphoreSecurity]::new()
         $jobserverSecurity.SetAccessRuleProtection($true, $false)
         $jobserverSecurity.AddAccessRule(
@@ -2629,27 +2630,31 @@ public static class ProjectAtlasConstructionAdmissionFixture
             try {
                 $unexpectedJobserver = Open-ContainedCargoJobserver `
                     -Sid $jobserverSecuritySid `
-                    -Name "ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+                    -Name "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
                 $unexpectedJobserver.Dispose()
             }
             catch {
                 $absentSeedRejected = $true
             }
             Require $absentSeedRejected "Contained Cargo jobserver fabricated an absent seed."
-            foreach ($namespacePrefix in @('Local\', 'Global\')) {
-                $prefixedNameRejected = $false
+            foreach ($forbiddenName in @(
+                "ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))",
+                "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))",
+                "local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+            )) {
+                $nonLocalNameRejected = $false
                 try {
-                    $unexpectedPrefixedJobserver = Open-ContainedCargoJobserver `
+                    $unexpectedNonLocalJobserver = Open-ContainedCargoJobserver `
                         -Sid $jobserverSecuritySid `
-                        -Name "${namespacePrefix}ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
-                    $unexpectedPrefixedJobserver.Dispose()
+                        -Name $forbiddenName
+                    $unexpectedNonLocalJobserver.Dispose()
                 }
                 catch {
-                    $prefixedNameRejected = $true
+                    $nonLocalNameRejected = $true
                 }
                 Require `
-                    $prefixedNameRejected `
-                    "Contained Cargo jobserver accepted an explicit namespace prefix."
+                    $nonLocalNameRejected `
+                    "Contained Cargo jobserver accepted a non-local namespace."
             }
         }
         finally {
