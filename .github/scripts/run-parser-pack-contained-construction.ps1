@@ -210,11 +210,24 @@ function Initialize-ReusableCargoTarget {
         }
     }
     catch {
+        $rejection = [string]$_.Exception.Message
+        foreach ($privatePath in @($BuildDirectory, $OutputDirectory)) {
+            $rejection = $rejection.Replace($privatePath, "<private>")
+        }
+        if ($rejection.Length -gt 512) {
+            $rejection = $rejection.Substring(0, 512)
+        }
         $quarantine = [System.IO.Path]::Combine(
             $OutputDirectory,
             "rejected-build-$([guid]::NewGuid().ToString("N"))"
         )
-        Move-Item -LiteralPath $BuildDirectory -Destination $quarantine
+        if ($existing.PSIsContainer) {
+            [System.IO.Directory]::Move($BuildDirectory, $quarantine)
+        }
+        else {
+            [System.IO.File]::Move($BuildDirectory, $quarantine)
+        }
+        Write-Warning "Reusable Cargo target rejected: $rejection"
         [System.IO.Directory]::CreateDirectory($BuildDirectory) | Out-Null
         return [pscustomobject]@{
             disposition = "rejected"
@@ -1202,6 +1215,14 @@ $publishedNetworkCheck = [System.IO.Path]::Combine(
 )
 [System.IO.File]::Copy($acceptedManifest, $publishedManifest, $false)
 [System.IO.File]::Copy($networkCheck, $publishedNetworkCheck, $false)
+$script:constructionStage = "reusable-cargo-target-validation"
+Write-ConstructionStatus -Stage $script:constructionStage -State "running"
+Assert-ReusableCargoTarget `
+    -OutputDirectory $output `
+    -BuildDirectory $buildDirectory `
+    -MaximumEntries $reusableCargoTargetMaxEntries `
+    -MaximumBytes $reusableCargoTargetMaxBytes |
+    Out-Null
 Close-ContainedCargoJobserver
 [System.IO.File]::Delete($script:constructionStatusPath)
 

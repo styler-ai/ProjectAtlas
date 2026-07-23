@@ -185,27 +185,26 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $manifestHash = "${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml') }}"
-          $policyHash = "${{ hashFiles('.github/workflows/optional-parser-pack.yml', '.github/scripts/run-parser-pack-contained-construction.ps1') }}"
+          # Bump only when reusable Cargo artifact compatibility changes.
+          $cachePolicy = "parser-pack-cargo-v2"
           $rustcCommit = "${{ steps.identity.outputs.rustc_commit_hash }}"
           if ($rustcCommit -cnotmatch '\A[0-9a-f]{40}\z') {
             throw "Reusable Cargo layer key contains an invalid rustc commit."
           }
           foreach ($digest in @(
             "${{ steps.native-toolchain.outputs.sha256 }}",
-            $manifestHash,
-            $policyHash
+            $manifestHash
           )) {
             if ($digest -cnotmatch '\A[0-9a-f]{64}\z') {
               throw "Reusable Cargo layer key contains an invalid digest."
             }
           }
           $key = @(
-            "parser-pack-cargo-v1",
+            $cachePolicy,
             "${{ matrix.target }}",
             $rustcCommit,
             "${{ steps.native-toolchain.outputs.sha256 }}",
-            $manifestHash,
-            $policyHash
+            $manifestHash
           ) -join "-"
           if ($key.Length -gt 512) {
             throw "Reusable Cargo layer key exceeds the GitHub cache limit."
@@ -292,6 +291,7 @@ jobs:
           runner_uid="$(id -u)"
           runner_gid="$(id -g)"
           cd "$GITHUB_WORKSPACE"
+          set +e
           sudo --non-interactive unshare --net -- \
             "$setpriv_path" --no-new-privs --reuid="$runner_uid" --regid="$runner_gid" --clear-groups \
             /usr/bin/env -i \
@@ -315,6 +315,25 @@ jobs:
               -RustcCommitHash '${{ steps.identity.outputs.rustc_commit_hash }}' \
               -NetworkIsolation '${{ matrix.isolation }}' \
               -ResolverAddress '${{ steps.network.outputs.resolver_address }}'
+          construction_exit=$?
+          set -e
+          if (( construction_exit != 0 )); then
+            for diagnostic in \
+              construction-status.json \
+              construction-cache-disposition.json \
+              construction-diagnostic.txt
+            do
+              diagnostic_path="$RUNNER_TEMP/parser-pack-output/$diagnostic"
+              if [[ -f "$diagnostic_path" && ! -L "$diagnostic_path" ]] &&
+                (( $(stat -c '%s' "$diagnostic_path") <= 65536 ))
+              then
+                printf '%s\n' "[contained-construction:$diagnostic]"
+                head -c 65536 "$diagnostic_path"
+                printf '\n'
+              fi
+            done
+            exit "$construction_exit"
+          fi
 
       - name: Construct under a disposable Windows principal
         if: runner.os == 'Windows'

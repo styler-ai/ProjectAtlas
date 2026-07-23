@@ -369,7 +369,7 @@ try {
         '${{ steps.identity.outputs.rustc_commit_hash }}',
         '${{ steps.native-toolchain.outputs.sha256 }}',
         "hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml')",
-        "hashFiles('.github/workflows/optional-parser-pack.yml', '.github/scripts/run-parser-pack-contained-construction.ps1')",
+        'parser-pack-cargo-v2',
         'image_os=$env:ImageOS',
         'image_version=$env:ImageVersion',
         'visual_studio=$vsVersion',
@@ -383,13 +383,27 @@ try {
             "Reusable Cargo layer key lost input category: $keyInput"
     }
     Require `
-        ($workflowText.Contains("github.event_name != 'workflow_dispatch' || !inputs.clean_construction") -and
+        (-not $workflowText.Contains(
+                "hashFiles('.github/workflows/optional-parser-pack.yml', '.github/scripts/run-parser-pack-contained-construction.ps1')"
+            ) -and
+            $workflowText.Contains("github.event_name != 'workflow_dispatch' || !inputs.clean_construction") -and
             $workflowText.Contains("github.event_name == 'workflow_dispatch' &&") -and
             $workflowText.Contains("steps.cargo-cache-restore.outputs.cache-hit != 'true'") -and
             $workflowText.Contains("steps.cargo-cache-disposition.outputs.value != 'rejected'") -and
+            $workflowText.Contains('construction_exit=$?') -and
             $workflowText.Contains('"--release",') -and
             $workflowText.Contains('path: ${{ runner.temp }}/parser-pack-output/build')) `
         "Reusable Cargo layer trust, miss, rejection, or path boundary drifted."
+    Require `
+        ($ast.Extent.Text.Contains('"reusable-cargo-target-validation"') -and
+            $ast.Extent.Text.LastIndexOf(
+                "Assert-ReusableCargoTarget",
+                [System.StringComparison]::Ordinal
+            ) -gt $ast.Extent.Text.IndexOf(
+                '"publication"',
+                [System.StringComparison]::Ordinal
+            )) `
+        "Reusable Cargo target is not revalidated before cache sanitation and save."
     foreach ($package in @(
         "projectatlas-lints",
         "projectatlas-cli",

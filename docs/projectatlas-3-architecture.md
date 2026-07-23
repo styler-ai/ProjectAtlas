@@ -1808,11 +1808,13 @@ reconsidered only if a measured package, installation, or platform ceiling fails
 
 The optional-pack workflow may reuse only sanitized Cargo dependency build state.
 An exact key binds the target, Rust and native toolchains, Cargo lockfile and
-manifests, and the cache-policy implementation. ProjectAtlas source revision is not
-part of that key because every owned crate is removed from the restored target
-before the exact candidate is freshly compiled. The pinned grammar bundles,
-constructed archives, candidate binaries, receipts, ProjectAtlas databases, and
-workspace state never enter this cache.
+manifests, and an explicit cache-policy ABI that changes only when reusable artifact
+compatibility changes. Whole workflow and diagnostic-script hashes are deliberately
+excluded, so unrelated proof improvements do not rebuild unchanged dependencies.
+ProjectAtlas source revision is not part of that key because every owned crate is
+removed from the restored target before the exact candidate is freshly compiled.
+The pinned grammar bundles, constructed archives, candidate binaries, receipts,
+ProjectAtlas databases, and workspace state never enter this cache.
 
 Restored trees are untrusted input. Contained construction bounds and validates the
 tree, quarantines invalid state without recursive traversal, and falls back to an

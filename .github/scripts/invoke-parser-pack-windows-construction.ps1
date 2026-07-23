@@ -3713,7 +3713,14 @@ function Write-BoundedConstructionFailure {
         [string]$FirewallRule
     )
 
-    $statusItem = Get-Item -LiteralPath (Join-Path $output "construction-status.json") -Force
+    $statusItem = Get-Item `
+        -LiteralPath (Join-Path $output "construction-status.json") `
+        -Force `
+        -ErrorAction SilentlyContinue
+    if ($null -eq $statusItem) {
+        Write-Host "[contained-construction] startup-before-status exit_code=$ObservedExitCode"
+        return "startup-before-status"
+    }
     if ($statusItem.PSIsContainer -or
         (($statusItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) -or
         $statusItem.Length -le 0 -or
@@ -3738,7 +3745,8 @@ function Write-BoundedConstructionFailure {
         "artifact-assembly-b",
         "archive-creation-b",
         "deterministic-archive-comparison",
-        "publication"
+        "publication",
+        "reusable-cargo-target-validation"
     )
     $integerTypes = @([int], [long])
     if ($status -isnot [pscustomobject] -or

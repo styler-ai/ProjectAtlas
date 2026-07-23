@@ -35,9 +35,15 @@ The cache path is `${{ runner.temp }}/parser-pack-output/build`. The key is vers
 - pinned `rustc` commit;
 - runner image plus native compiler/SDK identity;
 - hashes of `Cargo.lock` and all workspace Cargo manifests;
-- hashes of the optional-parser workflow and contained-construction cache policy.
+- one explicit cache-policy ABI version, bumped only when reusable artifact
+  compatibility changes.
 
 Keys are exact; there are no prefix restore keys. Grammar bundle inputs are excluded because they never enter the cached Cargo target layer. ProjectAtlas source revision is excluded because all seven owned packages are forcibly cleaned before use.
+
+Hashing the whole workflow or construction script was rejected because diagnostics,
+containment checks, and candidate assembly can change without changing Cargo
+dependency artifact compatibility. Such edits must still run against the exact
+candidate, but must not force an unrelated dependency rebuild.
 
 Caching package archives or grammar binaries was rejected because those bytes are already acquired by pinned digest and would broaden the trust boundary without addressing the dominant Cargo rebuild.
 
@@ -66,7 +72,7 @@ The workflow records a bounded JSON receipt per target with the cache dispositio
 
 ## Risks / Trade-offs
 
-- **A missing key input reuses incompatible native objects** → include toolchain, lock/manifest, target, runner/native identity, and policy hashes; use no prefix fallback.
+- **A missing key input reuses incompatible native objects** → include toolchain, lock/manifest, target, runner/native identity, and an explicit reviewed cache-policy ABI; use no prefix fallback.
 - **A restored build tree contains hostile filesystem objects** → validate in containment, quarantine without traversal, then rebuild clean.
 - **Candidate artifacts survive package cleanup** → name every owned crate in one tested command and assert known candidate binaries are absent before save.
 - **Cache transfer and validation cost approaches rebuild cost** → require measured 60 percent contained-step improvement on each target before keeping reuse enabled.

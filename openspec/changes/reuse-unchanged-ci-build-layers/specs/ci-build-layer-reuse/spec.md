@@ -1,14 +1,14 @@
 ## ADDED Requirements
 
 ### Requirement: Cache scope is exact and independently invalidated
-The optional parser-pack workflow SHALL reuse only Cargo target state left after all ProjectAtlas-owned package outputs have been removed. The cache key SHALL include the target ABI, pinned Rust identity, native compiler and SDK identity, Cargo lockfile and workspace manifest state, and the cache-policy implementation state. The workflow SHALL use exact keys without broad fallback prefixes.
+The optional parser-pack workflow SHALL reuse only Cargo target state left after all ProjectAtlas-owned package outputs have been removed. The cache key SHALL include the target ABI, pinned Rust identity, native compiler and SDK identity, Cargo lockfile and workspace manifest state, and an explicit cache-policy ABI version that changes when reusable artifact compatibility changes. The workflow SHALL use exact keys without broad fallback prefixes and SHALL NOT invalidate dependency state for unrelated workflow or diagnostic edits.
 
 #### Scenario: Every cache input is unchanged
-- **WHEN** a trusted run uses the same target, toolchains, lockfile, manifests, and cache-policy implementation as a previously saved run
+- **WHEN** a trusted run uses the same target, toolchains, lockfile, manifests, and cache-policy ABI as a previously saved run
 - **THEN** the workflow restores that target's dependency build layer and reports an exact cache hit
 
 #### Scenario: One cache input changes
-- **WHEN** any declared target, toolchain, lockfile, manifest, feature, or cache-policy input changes
+- **WHEN** any declared target, toolchain, lockfile, manifest, feature, or cache-policy ABI input changes
 - **THEN** the workflow reports a cache miss and constructs from an empty Cargo target directory
 
 ### Requirement: Candidate code is always rebuilt and reverified
