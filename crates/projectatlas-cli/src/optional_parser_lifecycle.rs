@@ -775,15 +775,10 @@ impl OptionalParserPackLifecycle {
         let mut verified = Self::verify_archive(archive, platform, Some(&versions_root))?;
         let slot = verified.slot_identity();
         let operation = (|| {
-            ensure_direct_directory(
-                &versions_root,
-                &versions_root.join(&slot.projectatlas_version),
-            )?;
+            let version_root = versions_root.join(&slot.projectatlas_version);
+            ensure_direct_directory(&versions_root, &version_root)?;
             #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-            if windows_slot_cleanup_in_progress(
-                &versions_root.join(&slot.projectatlas_version),
-                &slot.artifact,
-            )? {
+            if windows_slot_cleanup_in_progress(&version_root, &slot.artifact)? {
                 return Err(invalid_data(
                     "the selected parser-pack artifact still has a cleanup tombstone",
                 ));
@@ -798,6 +793,18 @@ impl OptionalParserPackLifecycle {
                     "immutable slot path is occupied by a non-directory entry",
                 ));
             }
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            let _publication_staging = {
+                let staging = stage_parser_pack_for_atomic_publication(
+                    &mut verified.pack_root,
+                    &version_root,
+                )?;
+                verified
+                    .temporary_profile
+                    .pack_root
+                    .clone_from(&verified.pack_root);
+                staging
+            };
             if let Err(operation) = seal_immutable_tree(&verified.pack_root) {
                 return finish_with_cleanup(
                     Err(operation),
@@ -2965,6 +2972,60 @@ fn remove_symlink_leaf(path: &Path) -> Result<(), OptionalParserPackLifecycleErr
         .map_err(|source| io_error("remove parser-pack storage symlink", path, source))
 }
 
+/// Move one writable Linux extraction into a unique direct publication sibling.
+///
+/// Linux requires write permission on a directory moved across parents because
+/// its `..` entry changes. Staging before sealing lets the final immutable
+/// rename stay within one parent and preserves atomic slot publication.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn stage_parser_pack_for_atomic_publication(
+    pack_root: &mut PathBuf,
+    publication_parent: &Path,
+) -> Result<TempDir, OptionalParserPackLifecycleError> {
+    let staging = tempfile::Builder::new()
+        .prefix(".projectatlas-install-")
+        .tempdir_in(publication_parent)
+        .map_err(|source| {
+            io_error(
+                "create parser-pack publication staging directory",
+                publication_parent,
+                source,
+            )
+        })?;
+    for entry in fs::read_dir(&*pack_root).map_err(|source| {
+        io_error(
+            "list parser-pack extraction for publication",
+            pack_root,
+            source,
+        )
+    })? {
+        let entry = entry.map_err(|source| {
+            io_error(
+                "read parser-pack extraction entry for publication",
+                pack_root,
+                source,
+            )
+        })?;
+        let destination = staging.path().join(entry.file_name());
+        fs::rename(entry.path(), &destination).map_err(|source| {
+            io_error(
+                "stage parser-pack extraction entry for publication",
+                destination,
+                source,
+            )
+        })?;
+    }
+    fs::remove_dir(&*pack_root).map_err(|source| {
+        io_error(
+            "remove empty parser-pack extraction root",
+            pack_root,
+            source,
+        )
+    })?;
+    pack_root.clone_from(&staging.path().to_path_buf());
+    Ok(staging)
+}
+
 /// Recursively remove write permissions so a published slot is immutable to normal lifecycle code.
 fn seal_immutable_tree(path: &Path) -> Result<(), OptionalParserPackLifecycleError> {
     let metadata = fs::symlink_metadata(path)
@@ -3266,6 +3327,35 @@ mod tests {
             projectatlas_version: OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION.to_owned(),
             artifact: std::iter::repeat_n(byte, 64).collect(),
         }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn linux_publication_stages_before_immutable_same_parent_rename() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let versions = root.path().join("versions");
+        let version = versions.join(OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION);
+        fs::create_dir_all(&version)?;
+        let extraction = TempDir::new_in(&versions)?;
+        let mut pack_root = extraction.path().join(ARCHIVE_ROOT);
+        fs::create_dir(&pack_root)?;
+        fs::write(pack_root.join("payload"), b"parser")?;
+
+        let staging = stage_parser_pack_for_atomic_publication(&mut pack_root, &version)?;
+        require(
+            pack_root.parent() == Some(version.as_path()),
+            "Linux publication staging was not a direct destination sibling",
+        )?;
+        seal_immutable_tree(&pack_root)?;
+        let destination = version.join(std::iter::repeat_n('a', 64).collect::<String>());
+        fs::rename(&pack_root, &destination)?;
+        drop(staging);
+
+        verify_immutable_tree(&destination)?;
+        require(
+            fs::read(destination.join("payload"))? == b"parser",
+            "Linux immutable publication changed staged bytes",
+        )
     }
 
     #[test]

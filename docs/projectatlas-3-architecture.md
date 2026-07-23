@@ -1658,6 +1658,11 @@ with a per-grammar deadline and one aggregate admission deadline. Any artifact,
 fixture, protocol, deadline, containment, or cleanup failure leaves the prior
 lifecycle selection byte-for-byte unchanged.
 
+On Linux, verified extraction moves into a unique direct slot sibling while it is
+still writable. Recursive sealing then precedes one same-parent atomic rename, so
+publication never needs to mutate the sealed directory and never exposes a mutable
+canonical slot.
+
 On Windows, a temporary admission explicitly owns the artifact-global AppContainer
 profile and its pack-root grant. Verify-only and every pre-publication failure make
 one bounded explicit cleanup attempt while the extraction and exact broker still
