@@ -60,6 +60,19 @@ On a cache hit, contained construction runs one `cargo clean` invocation naming 
 
 Keeping candidate artifacts and relying only on Cargo fingerprints was rejected because a release proof should not execute a cached ProjectAtlas binary.
 
+### Schedule required candidate work without weakening proof
+
+Candidate-owned targets remain fresh, but they do not need separate serial Cargo
+graphs. Windows builds the worker, assembler, and verifier in one Cargo invocation.
+Linux keeps the worker's required linker-specific `cargo rustc` invocation separate,
+then builds both release tools in one Cargo invocation.
+
+The two required assembly and archive passes run concurrently with separate inputs,
+staging directories, and output paths. Both lanes still perform the complete native,
+license, manifest, and archive audit, and the workflow still requires byte-identical
+archives before publication. Concurrency is fixed at two lanes; it changes elapsed
+time, not the proof boundary or output authority.
+
 ### Validate restored trees inside the contained construction boundary
 
 The existing contained-construction script will accept an existing build directory only after checking that:

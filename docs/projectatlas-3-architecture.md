@@ -1830,7 +1830,10 @@ tree, quarantines invalid state without recursive traversal, and falls back to a
 empty target. Pull requests can restore but cannot save. A successful trusted
 dispatch can save only after every existing construction and verification gate
 passes and candidate outputs are removed again. Explicit clean construction bypasses
-both actions and remains the final release-acceptance path.
+both actions and remains the final release-acceptance path. Candidate-owned build
+targets share the smallest valid Cargo invocation for their platform, while the two
+required audit-and-archive constructions run concurrently in isolated lanes. Both
+lanes still start from the pinned inputs and must produce byte-identical archives.
 
 ```mermaid
 flowchart TB
@@ -1848,8 +1851,8 @@ flowchart TB
     Quarantine --> Empty
     Validate -->|yes| CleanBefore[Remove all seven owned crate artifacts]
     Empty --> Build
-    CleanBefore --> Build[Contained offline candidate build]
-    Build --> Assemble[Two independent audits and assemblies]
+    CleanBefore --> Build[Contained offline candidate build<br/>batched owned targets]
+    Build --> Assemble[Two concurrent independent<br/>audit, assembly, and archive lanes]
     Assemble --> Verify[Digest, license, native, containment, lifecycle, package, and fresh-runner proof]
     Verify --> Publish[Immutable construction artifact]
     Verify --> CleanAfter[Remove owned outputs and Windows broker]

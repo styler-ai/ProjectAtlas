@@ -436,14 +436,10 @@ function Write-ConstructionStatus {
             "cargo-jobserver-bootstrap",
             "reusable-cargo-target-clean",
             "optional-parser-worker-build",
-            "artifact-assembler-build",
-            "release-verifier-build",
+            "release-tool-builds",
             "runtime-containment-broker-build",
             "artifact-input-validation",
-            "artifact-assembly-a",
-            "archive-creation-a",
-            "artifact-assembly-b",
-            "archive-creation-b",
+            "parallel-artifact-construction",
             "deterministic-archive-comparison",
             "publication",
             "reusable-cargo-target-validation"
@@ -909,7 +905,7 @@ $workerBuildArguments = @(
         "--bin",
         "projectatlas-parser-worker",
         "--features",
-        "optional-parser-worker"
+        "projectatlas-cli/optional-parser-worker"
     )
     if ($Target -eq "x86_64-unknown-linux-gnu") {
         # The untrusted grammar is loaded only after Landlock. Keep every
@@ -927,44 +923,45 @@ $workerBuildArguments = @(
             "-Clink-arg=-Wl,-z,relro"
         )
     }
+    else {
+        $workerBuildArguments += @(
+            "--package",
+            "projectatlas-core",
+            "--example",
+            "assemble_optional_parser_artifact",
+            "--example",
+            "optional_parser_pack_release"
+        )
+    }
     $script:constructionStage = "optional-parser-worker-build"
     Write-ConstructionStatus -Stage $script:constructionStage -State "running"
     Invoke-Checked `
         -Executable $cargo `
         -Arguments $workerBuildArguments `
         -Role "optional parser worker build"
-    $script:constructionStage = "artifact-assembler-build"
-    Write-ConstructionStatus -Stage $script:constructionStage -State "running"
-    Invoke-Checked `
-        -Executable $cargo `
-        -Arguments @(
-            "build",
-            "--frozen",
-            "--offline",
-            "--release",
-            "--package",
-            "projectatlas-core",
-            "--example",
-            "assemble_optional_parser_artifact"
-        ) `
-        -Role "parser-pack artifact assembler build"
-    $script:constructionStage = "release-verifier-build"
-    Write-ConstructionStatus -Stage $script:constructionStage -State "running"
-    Invoke-Checked `
-        -Executable $cargo `
-        -Arguments @(
-            "build",
-            "--frozen",
-            "--offline",
-            "--release",
-            "--package",
-            "projectatlas-cli",
-            "--features",
-            "optional-parser-supervisor",
-            "--example",
-            "optional_parser_pack_release"
-        ) `
-        -Role "parser-pack release verifier build"
+    if ($Target -eq "x86_64-unknown-linux-gnu") {
+        $script:constructionStage = "release-tool-builds"
+        Write-ConstructionStatus -Stage $script:constructionStage -State "running"
+        Invoke-Checked `
+            -Executable $cargo `
+            -Arguments @(
+                "build",
+                "--frozen",
+                "--offline",
+                "--release",
+                "--package",
+                "projectatlas-core",
+                "--package",
+                "projectatlas-cli",
+                "--features",
+                "projectatlas-cli/optional-parser-supervisor",
+                "--example",
+                "assemble_optional_parser_artifact",
+                "--example",
+                "optional_parser_pack_release"
+            ) `
+            -Role "parser-pack release tool builds"
+    }
 
     if ($Target -eq "x86_64-pc-windows-msvc") {
         $script:constructionStage = "runtime-containment-broker-build"
@@ -1140,14 +1137,12 @@ $archives = @(
     [System.IO.Path]::Combine($archiveDirectories[0], $archiveName),
     [System.IO.Path]::Combine($archiveDirectories[1], $archiveName)
 )
-for ($index = 0; $index -lt 2; $index += 1) {
+$artifactConstructions = for ($index = 0; $index -lt 2; $index += 1) {
     [System.IO.Directory]::CreateDirectory($archiveDirectories[$index]) | Out-Null
-    $assemblyStage = if ($index -eq 0) { "artifact-assembly-a" } else { "artifact-assembly-b" }
-    $script:constructionStage = $assemblyStage
-    Write-ConstructionStatus -Stage $script:constructionStage -State "running"
-    Invoke-Checked `
-        -Executable $assembler `
-        -Arguments @(
+    [pscustomobject]@{
+        index = $index
+        assembler = $assembler
+        assembly_arguments = @(
             $acceptedManifest,
             $fixtureCorpus,
             $sourceEvidence,
@@ -1161,20 +1156,29 @@ for ($index = 0; $index -lt 2; $index += 1) {
             $containmentBroker,
             $Target,
             $stagedDirectories[$index]
-        ) `
-        -Role "artifact assembly $index"
-    $archiveStage = if ($index -eq 0) { "archive-creation-a" } else { "archive-creation-b" }
-    $script:constructionStage = $archiveStage
-    Write-ConstructionStatus -Stage $script:constructionStage -State "running"
-    Invoke-Checked `
-        -Executable $releaseTool `
-        -Arguments @(
-            "create",
-            $stagedDirectories[$index],
-            $archives[$index]
-        ) `
-        -Role "deterministic archive creation $index"
+        )
+        release_tool = $releaseTool
+        staged_directory = $stagedDirectories[$index]
+        archive = $archives[$index]
+    }
 }
+$script:constructionStage = "parallel-artifact-construction"
+Write-ConstructionStatus -Stage $script:constructionStage -State "running"
+$artifactConstructions |
+    ForEach-Object -Parallel {
+        $assembler = [string]$_.assembler
+        $assemblyArguments = [string[]]$_.assembly_arguments
+        & $assembler @assemblyArguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "artifact assembly $($_.index) failed with exit code $LASTEXITCODE."
+        }
+        $releaseTool = [string]$_.release_tool
+        & $releaseTool "create" ([string]$_.staged_directory) ([string]$_.archive)
+        if ($LASTEXITCODE -ne 0) {
+            throw "deterministic archive creation $($_.index) failed with exit code $LASTEXITCODE."
+        }
+    } `
+    -ThrottleLimit 2
 
 $script:constructionStage = "deterministic-archive-comparison"
 Write-ConstructionStatus -Stage $script:constructionStage -State "running"
