@@ -7,7 +7,7 @@ use object::read::elf::{
     SectionHeader as _,
 };
 use object::read::macho::{MachHeader, MachOFile};
-use object::read::pe::{ImageNtHeaders, Import as PeImport, PeFile};
+use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, Import as PeImport, PeFile};
 use object::{Architecture, BinaryFormat, File as NativeObject, Object, ObjectKind, ObjectSymbol};
 use projectatlas_core::optional_parser_pack::{
     AcceptedGrammar, GrammarFixture, GrammarFixtureOrigin,
@@ -2650,7 +2650,7 @@ fn inspect_containment_broker(
         ));
     }
     let object = NativeObject::parse(bytes)?;
-    validate_managed_windows_broker_identity(&object)?;
+    let entry_point = validate_managed_windows_broker_identity(&object)?;
     let (clr_runtime_header_rva, clr_runtime_header_size) = inspect_clr_runtime_header(&object)?;
     let (native_libraries, imported_symbols) = inspect_imports(&object, platform)?;
     if let Some(library) = native_libraries
@@ -2677,7 +2677,7 @@ fn inspect_containment_broker(
         binary_format: binary_format_name(object.format()).to_owned(),
         architecture: architecture_name(object.architecture()).to_owned(),
         object_kind: object_kind_name(object.kind()).to_owned(),
-        entry_point: format!("0x{:016x}", object.entry()),
+        entry_point,
         clr_runtime_header_rva,
         clr_runtime_header_size,
         pe_loader_libraries: native_libraries.into_iter().collect(),
@@ -2784,15 +2784,23 @@ fn validate_executable_identity(
 }
 
 /// Require the managed Windows broker's PE32+ identity without inventing a native entry point.
-fn validate_managed_windows_broker_identity(object: &NativeObject<'_>) -> ToolResult<()> {
+fn validate_managed_windows_broker_identity(object: &NativeObject<'_>) -> ToolResult<String> {
     validate_object_identity(object, PackPlatform::WindowsX86_64, ObjectKind::Executable)?;
-    let entry_point = format!("0x{:016x}", object.entry());
+    let NativeObject::Pe64(file) = object else {
+        return Err(invalid(
+            "runtime-containment broker must be an x86-64 PE32+ image",
+        ));
+    };
+    let entry_point = format!(
+        "0x{:016x}",
+        file.nt_headers().optional_header().address_of_entry_point()
+    );
     if entry_point != OPTIONAL_PARSER_PACK_WINDOWS_BROKER_NATIVE_ENTRY_POINT {
         return Err(invalid(
-            "runtime-containment broker must use its managed CLR entry point",
+            "runtime-containment broker PE entry-point RVA must be zero",
         ));
     }
-    Ok(())
+    Ok(entry_point)
 }
 
 /// Validate and retain the managed broker's bounded CLR runtime header evidence.
@@ -3289,6 +3297,58 @@ mod tests {
     const FIXTURE_DYNAMIC_ADDRESS: u64 = 0x0050_0000;
     const FIXTURE_STRINGS_ADDRESS: u64 = 0x0040_0000;
     const FIXTURE_FILE_BYTES: usize = 0x400;
+
+    /// Build the smallest parseable PE32+ executable needed to distinguish a raw entry RVA
+    /// from `Object::entry()`, which adds the image base for PE images.
+    fn synthetic_windows_pe64(entry_point_rva: u32) -> Vec<u8> {
+        const NT_HEADERS_OFFSET: usize = 0x40;
+        const FILE_HEADER_OFFSET: usize = NT_HEADERS_OFFSET + 4;
+        const OPTIONAL_HEADER_OFFSET: usize = FILE_HEADER_OFFSET + 20;
+        const OPTIONAL_HEADER_BYTES: u16 = 112;
+
+        let mut bytes = vec![0; OPTIONAL_HEADER_OFFSET + usize::from(OPTIONAL_HEADER_BYTES)];
+        write_fixture_u16(&mut bytes, 0, object::pe::IMAGE_DOS_SIGNATURE);
+        write_fixture_u32(
+            &mut bytes,
+            0x3c,
+            u32::try_from(NT_HEADERS_OFFSET).expect("bounded fixture offset"),
+        );
+        write_fixture_u32(
+            &mut bytes,
+            NT_HEADERS_OFFSET,
+            object::pe::IMAGE_NT_SIGNATURE,
+        );
+        write_fixture_u16(
+            &mut bytes,
+            FILE_HEADER_OFFSET,
+            object::pe::IMAGE_FILE_MACHINE_AMD64,
+        );
+        write_fixture_u16(&mut bytes, FILE_HEADER_OFFSET + 16, OPTIONAL_HEADER_BYTES);
+        write_fixture_u16(
+            &mut bytes,
+            FILE_HEADER_OFFSET + 18,
+            object::pe::IMAGE_FILE_EXECUTABLE_IMAGE | object::pe::IMAGE_FILE_LARGE_ADDRESS_AWARE,
+        );
+        write_fixture_u16(
+            &mut bytes,
+            OPTIONAL_HEADER_OFFSET,
+            object::pe::IMAGE_NT_OPTIONAL_HDR64_MAGIC,
+        );
+        write_fixture_u32(&mut bytes, OPTIONAL_HEADER_OFFSET + 16, entry_point_rva);
+        write_fixture_u64(
+            &mut bytes,
+            OPTIONAL_HEADER_OFFSET + 24,
+            0x0000_0001_4000_0000,
+        );
+        write_fixture_u32(&mut bytes, OPTIONAL_HEADER_OFFSET + 32, 0x1000);
+        write_fixture_u32(&mut bytes, OPTIONAL_HEADER_OFFSET + 36, 0x200);
+        write_fixture_u16(
+            &mut bytes,
+            OPTIONAL_HEADER_OFFSET + 68,
+            object::pe::IMAGE_SUBSYSTEM_WINDOWS_CUI,
+        );
+        bytes
+    }
 
     /// Build one bounded synthetic ELF64 worker with configurable loader duplication.
     fn synthetic_linux_worker(loader_dependencies: usize, interpreter: &str) -> Vec<u8> {
@@ -4115,6 +4175,29 @@ mod tests {
         assert_eq!(
             parse_containment_broker_input(&broker, PackPlatform::WindowsX86_64)?,
             Some(PathBuf::from(&broker))
+        );
+        Ok(())
+    }
+
+    /// Validate the managed broker against the raw PE entry-point RVA, not its loaded address.
+    #[test]
+    fn managed_windows_broker_identity_uses_the_raw_pe_entry_point_rva() -> ToolResult<()> {
+        let managed = synthetic_windows_pe64(0);
+        let managed_object = NativeObject::parse(managed.as_slice())?;
+        assert_eq!(managed_object.entry(), 0x0000_0001_4000_0000);
+        assert_eq!(
+            validate_managed_windows_broker_identity(&managed_object)?,
+            OPTIONAL_PARSER_PACK_WINDOWS_BROKER_NATIVE_ENTRY_POINT
+        );
+
+        let native_entry = synthetic_windows_pe64(0x1000);
+        let native_entry_object = NativeObject::parse(native_entry.as_slice())?;
+        let error = validate_managed_windows_broker_identity(&native_entry_object)
+            .expect_err("nonzero native PE entry-point RVA must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("PE entry-point RVA must be zero")
         );
         Ok(())
     }
