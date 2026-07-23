@@ -63,7 +63,7 @@ use rusqlite::{
 };
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::{ParseIntError, TryFromIntError};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -550,6 +550,106 @@ impl DbError {
 
 /// Convenient result alias for database operations.
 pub type DbResult<T> = Result<T, DbError>;
+
+/// Maximum exact paths admitted to one bounded symbol hydration request.
+pub const MAX_SYMBOL_BATCH_PATHS: u32 = 64;
+/// Maximum symbol rows admitted to one bounded hydration request.
+pub const MAX_SYMBOL_BATCH_ROWS: u32 = 4_096;
+/// Maximum decoded symbol bytes admitted to one bounded hydration request.
+pub const MAX_SYMBOL_BATCH_DECODED_BYTES: u64 = 4 * 1_024 * 1_024;
+/// Paths bound per statement, below supported `SQLite` variable ceilings.
+const SYMBOL_BATCH_BIND_PATHS: usize = 48;
+
+/// Typed database envelope for one exact-path symbol batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SymbolBatchReadBudget {
+    /// Maximum unique exact repository paths.
+    paths: u32,
+    /// Maximum decoded symbol rows.
+    rows: u32,
+    /// Maximum retained Rust row and owned string allocation bytes.
+    decoded_bytes: u64,
+}
+
+impl SymbolBatchReadBudget {
+    /// Construct one bounded exact-path symbol read envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a limit is zero or above its product ceiling.
+    pub fn new(paths: u32, rows: u32, decoded_bytes: u64) -> DbResult<Self> {
+        if paths == 0
+            || paths > MAX_SYMBOL_BATCH_PATHS
+            || rows == 0
+            || rows > MAX_SYMBOL_BATCH_ROWS
+            || decoded_bytes == 0
+            || decoded_bytes > MAX_SYMBOL_BATCH_DECODED_BYTES
+        {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "symbol batch limit is zero or above the product ceiling",
+            }
+            .into());
+        }
+        Ok(Self {
+            paths,
+            rows,
+            decoded_bytes,
+        })
+    }
+
+    /// Return the exact-path ceiling.
+    #[must_use]
+    pub const fn paths(self) -> u32 {
+        self.paths
+    }
+
+    /// Return the decoded-row ceiling.
+    #[must_use]
+    pub const fn rows(self) -> u32 {
+        self.rows
+    }
+
+    /// Return the decoded-byte ceiling.
+    #[must_use]
+    pub const fn decoded_bytes(self) -> u64 {
+        self.decoded_bytes
+    }
+}
+
+/// Exact work retained by one bounded symbol batch read.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SymbolBatchReadWork {
+    /// Unique exact paths supplied to `SQLite`.
+    pub requested_paths: u32,
+    /// Symbol rows retained after all bounds.
+    pub returned_rows: u32,
+    /// Retained Rust row and owned string allocation bytes after all bounds.
+    pub decoded_bytes: u64,
+}
+
+/// Bounded symbols and truncation state returned for exact paths.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SymbolBatchRead {
+    /// Deterministically ordered persisted symbols.
+    pub rows: Vec<CodeSymbol>,
+    /// Whether a path, row, or decoded-byte bound omitted rows.
+    pub truncated: bool,
+    /// First deterministic database limit that omitted symbol rows.
+    pub reached_limit: Option<SymbolBatchReadLimit>,
+    /// Exact work retained by this database read.
+    pub work: SymbolBatchReadWork,
+}
+
+/// Closed database limits that can truncate an exact-path symbol batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SymbolBatchReadLimit {
+    /// More unique paths were requested than the batch admits.
+    Paths,
+    /// More symbol rows matched than the batch admits.
+    Rows,
+    /// The next symbol row crossed the decoded-byte envelope.
+    DecodedBytes,
+}
 
 /// Durable state of the multi-projection derived index publication.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2469,6 +2569,131 @@ impl AtlasStore {
         }
     }
 
+    /// Load one bounded deterministic symbol set for exact repository paths.
+    ///
+    /// The request uses indexed `symbols.path` predicates, chunks bindings
+    /// below the `SQLite` variable ceiling, and preserves the store's active
+    /// read snapshot. The service remains responsible for matching exact
+    /// declaration identities within these admitted owning paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a path/budget is invalid, cancellation or the
+    /// request deadline fires, a row is corrupt, or `SQLite` iteration fails.
+    pub fn load_symbols_for_paths_bounded(
+        &self,
+        paths: &[String],
+        budget: SymbolBatchReadBudget,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<SymbolBatchRead> {
+        let path_limit =
+            usize::try_from(budget.paths()).map_err(|source| DbError::InvalidCount {
+                field: "symbol batch paths",
+                value: i64::from(budget.paths()),
+                source,
+            })?;
+        let mut exact_paths = BTreeSet::new();
+        let mut reached_limit = None;
+        for path in paths {
+            if let Some(control) = control {
+                control.check(IndexWorkStage::RepositoryTraversal)?;
+            }
+            exact_paths.insert(path.clone());
+            if exact_paths.len() > path_limit {
+                exact_paths.pop_last();
+                reached_limit.get_or_insert(SymbolBatchReadLimit::Paths);
+            }
+        }
+        if exact_paths.is_empty() {
+            return Ok(SymbolBatchRead::default());
+        }
+        let exact_paths = exact_paths.into_iter().collect::<Vec<_>>();
+        let row_limit = usize::try_from(budget.rows()).map_err(|source| DbError::InvalidCount {
+            field: "symbol batch rows",
+            value: i64::from(budget.rows()),
+            source,
+        })?;
+        let mut symbols = Vec::new();
+        let mut decoded_bytes = 0_u64;
+        'chunks: for chunk in exact_paths.chunks(SYMBOL_BATCH_BIND_PATHS) {
+            if let Some(control) = control {
+                control.check(IndexWorkStage::RepositoryTraversal)?;
+            }
+            let remaining_rows = row_limit.saturating_sub(symbols.len());
+            if remaining_rows == 0 {
+                reached_limit.get_or_insert(SymbolBatchReadLimit::Rows);
+                break;
+            }
+            let placeholders = numbered_placeholders(1, chunk.len());
+            let limit_parameter = chunk.len().saturating_add(1);
+            let sql = format!(
+                "
+                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+                FROM symbols
+                WHERE path IN ({placeholders})
+                ORDER BY path, line_start, name
+                LIMIT ?{limit_parameter}
+                "
+            );
+            let mut bindings = chunk.iter().cloned().map(Value::Text).collect::<Vec<_>>();
+            bindings.push(Value::Integer(usize_to_i64(
+                remaining_rows.saturating_add(1),
+            )));
+            with_sqlite_read_progress(
+                &self.connection,
+                control,
+                IndexWorkStage::RepositoryTraversal,
+                || {
+                    let mut statement = self.connection.prepare(&sql)?;
+                    let mut rows = statement.query(params_from_iter(bindings.iter()))?;
+                    while let Some(row) = rows.next()? {
+                        if let Some(control) = control {
+                            control.check(IndexWorkStage::RepositoryTraversal)?;
+                        }
+                        if symbols.len() >= row_limit {
+                            reached_limit.get_or_insert(SymbolBatchReadLimit::Rows);
+                            break;
+                        }
+                        let symbol = code_symbol_from_row(row)?;
+                        let row_bytes = code_symbol_decoded_bytes(&symbol)?;
+                        if decoded_bytes.saturating_add(row_bytes) > budget.decoded_bytes() {
+                            reached_limit.get_or_insert(SymbolBatchReadLimit::DecodedBytes);
+                            break;
+                        }
+                        decoded_bytes = decoded_bytes.saturating_add(row_bytes);
+                        symbols.push(symbol);
+                    }
+                    Ok(())
+                },
+            )?;
+            if matches!(
+                reached_limit,
+                Some(SymbolBatchReadLimit::Rows | SymbolBatchReadLimit::DecodedBytes)
+            ) {
+                break 'chunks;
+            }
+        }
+        symbols.sort_by(|left, right| {
+            (&left.path, left.line_start, &left.name, &left.signature).cmp(&(
+                &right.path,
+                right.line_start,
+                &right.name,
+                &right.signature,
+            ))
+        });
+        let symbols = symbols.into_boxed_slice().into_vec();
+        Ok(SymbolBatchRead {
+            work: SymbolBatchReadWork {
+                requested_paths: u32::try_from(exact_paths.len()).unwrap_or(u32::MAX),
+                returned_rows: u32::try_from(symbols.len()).unwrap_or(u32::MAX),
+                decoded_bytes,
+            },
+            rows: symbols,
+            truncated: reached_limit.is_some(),
+            reached_limit,
+        })
+    }
+
     /// Load symbols for a file and one or more exact kinds.
     ///
     /// # Errors
@@ -3436,22 +3661,7 @@ impl AtlasStore {
         P: rusqlite::Params,
     {
         let mut statement = self.connection.prepare(sql)?;
-        let rows = statement.query_map(params, |row| {
-            Ok(CodeSymbol {
-                path: row.get(0)?,
-                language: row.get(1)?,
-                name: row.get(2)?,
-                kind: SymbolKind::from_db(&row.get::<_, String>(3)?),
-                signature: row.get(4)?,
-                line_start: i64_to_usize(row.get::<_, i64>(5)?),
-                line_end: i64_to_usize(row.get::<_, i64>(6)?),
-                parent: row.get(7)?,
-                parser: ParserKind::from_db(&row.get::<_, String>(8)?),
-                detail: row.get(9)?,
-                exported: row.get::<_, i64>(10)? != 0,
-                documentation: row.get(11)?,
-            })
-        })?;
+        let rows = statement.query_map(params, code_symbol_from_row)?;
         let mut symbols = Vec::new();
         for row in rows {
             symbols.push(row?);
@@ -6573,6 +6783,57 @@ fn usize_to_i64(value: usize) -> i64 {
 /// Convert a non-negative i64 to usize for database reads.
 fn i64_to_usize(value: i64) -> usize {
     usize::try_from(value.max(0)).unwrap_or(usize::MAX)
+}
+
+/// Decode one persisted symbol row through the shared column contract.
+fn code_symbol_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSymbol> {
+    Ok(CodeSymbol {
+        path: row.get(0)?,
+        language: row.get(1)?,
+        name: row.get(2)?,
+        kind: SymbolKind::from_db(&row.get::<_, String>(3)?),
+        signature: row.get(4)?,
+        line_start: i64_to_usize(row.get::<_, i64>(5)?),
+        line_end: i64_to_usize(row.get::<_, i64>(6)?),
+        parent: row.get(7)?,
+        parser: ParserKind::from_db(&row.get::<_, String>(8)?),
+        detail: row.get(9)?,
+        exported: row.get::<_, i64>(10)? != 0,
+        documentation: row.get(11)?,
+    })
+}
+
+/// Count the retained Rust row plus its owned string allocation capacities.
+fn code_symbol_decoded_bytes(symbol: &CodeSymbol) -> DbResult<u64> {
+    let capacities = [
+        symbol.path.capacity(),
+        symbol.language.as_ref().map_or(0, String::capacity),
+        symbol.name.capacity(),
+        symbol.signature.capacity(),
+        symbol.documentation.as_ref().map_or(0, String::capacity),
+        symbol.parent.as_ref().map_or(0, String::capacity),
+        symbol.detail.as_ref().map_or(0, String::capacity),
+    ];
+    let mut bytes = u64::try_from(std::mem::size_of::<CodeSymbol>()).map_err(|source| {
+        DbError::InvalidCount {
+            field: "symbol decoded field bytes",
+            value: i64::MAX,
+            source,
+        }
+    })?;
+    for capacity in capacities {
+        let capacity = u64::try_from(capacity).map_err(|source| DbError::InvalidCount {
+            field: "symbol decoded field bytes",
+            value: i64::MAX,
+            source,
+        })?;
+        bytes = bytes
+            .checked_add(capacity)
+            .ok_or(GraphContractError::InvalidLimits {
+                reason: "symbol decoded row bytes overflowed",
+            })?;
+    }
+    Ok(bytes)
 }
 
 /// Wrap a query string for a SQL LIKE expression.
@@ -11609,6 +11870,203 @@ mod tests {
     }
 
     #[test]
+    fn bounded_symbol_batch_streams_exact_paths_and_uses_path_index() -> Result<(), Box<dyn Error>>
+    {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+        ])?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/a.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![
+                batch_test_symbol("src/a.rs", "alpha", 1, 32),
+                batch_test_symbol("src/a.rs", "beta", 2, 32),
+            ],
+            relations: Vec::new(),
+        })?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/b.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![batch_test_symbol("src/b.rs", "gamma", 1, 32)],
+            relations: Vec::new(),
+        })?;
+
+        let complete = store.load_symbols_for_paths_bounded(
+            &[
+                "src/b.rs".to_string(),
+                "src/a.rs".to_string(),
+                "src/a.rs".to_string(),
+            ],
+            SymbolBatchReadBudget::new(2, 3, MAX_SYMBOL_BATCH_DECODED_BYTES)?,
+            None,
+        )?;
+        require_eq(
+            &complete
+                .rows
+                .iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["alpha", "beta", "gamma"],
+            "deterministic exact-path symbol order",
+        )?;
+        require_eq(&complete.truncated, &false, "complete symbol batch")?;
+        require_eq(&complete.reached_limit, &None, "complete batch limit")?;
+        require_eq(&complete.work.requested_paths, &2, "unique admitted paths")?;
+        require_eq(&complete.work.returned_rows, &3, "complete returned rows")?;
+
+        let row_limited = store.load_symbols_for_paths_bounded(
+            &["src/b.rs".to_string(), "src/a.rs".to_string()],
+            SymbolBatchReadBudget::new(2, 1, MAX_SYMBOL_BATCH_DECODED_BYTES)?,
+            None,
+        )?;
+        require_eq(
+            &row_limited.reached_limit,
+            &Some(SymbolBatchReadLimit::Rows),
+            "row-bound classification",
+        )?;
+        require_eq(&row_limited.rows.len(), &1, "row-bound retained rows")?;
+
+        let byte_limited = store.load_symbols_for_paths_bounded(
+            &["src/a.rs".to_string()],
+            SymbolBatchReadBudget::new(1, 3, 1)?,
+            None,
+        )?;
+        require_eq(
+            &byte_limited.reached_limit,
+            &Some(SymbolBatchReadLimit::DecodedBytes),
+            "decoded-byte-bound classification",
+        )?;
+        require_eq(
+            &byte_limited.rows.len(),
+            &0,
+            "tiny byte budget retained no partial row",
+        )?;
+        require_eq(
+            &byte_limited.work.decoded_bytes,
+            &0,
+            "tiny byte budget retained no row payload",
+        )?;
+
+        let gamma_bytes = code_symbol_decoded_bytes(&complete.rows[2])?;
+        let exact_byte_boundary = store.load_symbols_for_paths_bounded(
+            &["src/b.rs".to_string()],
+            SymbolBatchReadBudget::new(1, 1, gamma_bytes)?,
+            None,
+        )?;
+        require_eq(
+            &exact_byte_boundary.rows.len(),
+            &1,
+            "exact decoded-byte boundary retained the complete row",
+        )?;
+        require_eq(
+            &exact_byte_boundary.work.decoded_bytes,
+            &gamma_bytes,
+            "exact decoded-byte boundary accounting",
+        )?;
+
+        let many_paths = (0..65)
+            .rev()
+            .map(|index| format!("generated/{index:04}.rs"))
+            .collect::<Vec<_>>();
+        for index in 0..65 {
+            let path = format!("generated/{index:04}.rs");
+            store.replace_symbol_graph(&SymbolGraph {
+                path: path.clone(),
+                language: Some("rust".to_string()),
+                parser: ParserKind::TreeSitter,
+                symbols: vec![batch_test_symbol(
+                    &path,
+                    &format!("generated_{index:04}"),
+                    1,
+                    0,
+                )],
+                relations: Vec::new(),
+            })?;
+        }
+        let path_limited = store.load_symbols_for_paths_bounded(
+            &many_paths,
+            SymbolBatchReadBudget::new(
+                MAX_SYMBOL_BATCH_PATHS,
+                MAX_SYMBOL_BATCH_ROWS,
+                MAX_SYMBOL_BATCH_DECODED_BYTES,
+            )?,
+            None,
+        )?;
+        require_eq(
+            &path_limited.reached_limit,
+            &Some(SymbolBatchReadLimit::Paths),
+            "path-bound classification",
+        )?;
+        require_eq(
+            &path_limited.work.requested_paths,
+            &MAX_SYMBOL_BATCH_PATHS,
+            "bounded path admission",
+        )?;
+        require_eq(
+            &path_limited.rows.len(),
+            &usize::try_from(MAX_SYMBOL_BATCH_PATHS)?,
+            "all admitted paths loaded across binding chunks",
+        )?;
+        require(
+            path_limited
+                .rows
+                .iter()
+                .any(|symbol| symbol.name == "generated_0063"),
+            "last deterministically admitted path was not loaded",
+        )?;
+        require(
+            path_limited
+                .rows
+                .iter()
+                .all(|symbol| symbol.name != "generated_0064"),
+            "path outside the deterministic admission set was loaded",
+        )?;
+
+        let expired = IndexWorkControl::with_deadline(
+            projectatlas_core::IndexCancellation::new(),
+            Instant::now(),
+        );
+        let expired_result = store.load_symbols_for_paths_bounded(
+            &["src/a.rs".to_string()],
+            SymbolBatchReadBudget::new(1, 3, MAX_SYMBOL_BATCH_DECODED_BYTES)?,
+            Some(&expired),
+        );
+        require(
+            matches!(
+                expired_result,
+                Err(DbError::IndexWork(IndexWorkFailure::DeadlineExceeded {
+                    stage: IndexWorkStage::RepositoryTraversal
+                }))
+            ),
+            "expired symbol control returned a partial batch instead of a typed error",
+        )?;
+
+        let mut plan_statement = store.connection.prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+             FROM symbols
+             WHERE path IN (?1, ?2)
+             ORDER BY path, line_start, name
+             LIMIT ?3",
+        )?;
+        let plan = plan_statement
+            .query_map(params!["src/a.rs", "src/b.rs", 4], |row| {
+                row.get::<_, String>(3)
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        require(
+            plan.contains("idx_symbols_path"),
+            &format!("bounded symbol batch missed idx_symbols_path: {plan}"),
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn full_scan_removal_clears_source_parse_metadata() -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::in_memory()?;
         store.replace_scan(&[test_file_node("src/a.rs", "hash-a")])?;
@@ -11965,6 +12423,29 @@ mod tests {
             size_bytes: Some(12),
             mtime_ns: Some(10),
             content_hash: Some(hash.to_string()),
+        }
+    }
+
+    /// Build one persisted symbol with configurable retained payload.
+    fn batch_test_symbol(
+        path: &str,
+        name: &str,
+        line_start: usize,
+        documentation_bytes: usize,
+    ) -> CodeSymbol {
+        CodeSymbol {
+            path: path.to_string(),
+            language: Some("rust".to_string()),
+            name: name.to_string(),
+            kind: SymbolKind::Function,
+            signature: format!("fn {name}()"),
+            exported: false,
+            documentation: Some("d".repeat(documentation_bytes)),
+            line_start,
+            line_end: line_start.saturating_add(1),
+            parent: None,
+            parser: ParserKind::TreeSitter,
+            detail: Some("function_item".to_string()),
         }
     }
 

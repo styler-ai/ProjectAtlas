@@ -2,7 +2,7 @@
 
 ## Status
 
-This document defines the required agent-navigation contract for ProjectAtlas 0.4.0. ProjectAtlas 0.3.26 provides the baseline workflow described below. Automatic read freshness and the initial normalized graph publication are current v0.4 implementation behavior; richer graph enrichment, direct relationship navigation, and final agent evaluation remain target behavior until issue #308 is complete. Version 0.4 preserves the complete compatible MCP inventory. Any later compact/default inventory or breaking rationalization belongs to post-v0.4 issue #310.
+This document defines the required agent-navigation contract for ProjectAtlas 0.4.0. ProjectAtlas 0.3.26 provides the baseline workflow described below. Automatic read freshness, normalized graph publication, purpose-plus-connection enrichment, direct relationship navigation, and closed analysis views are current v0.4 implementation behavior. Representative agent evaluation and combined release verification remain target behavior until issue #308 is complete. Version 0.4 preserves the complete compatible MCP inventory. Any later compact/default inventory or breaking rationalization belongs to post-v0.4 issue #310.
 
 ## Product Goal
 
@@ -59,15 +59,19 @@ context as bounded supporting evidence:
 
 ```mermaid
 flowchart TD
-    Task[Agent task] --> Brief[Session brief or overview]
-    Brief --> Confident{Candidate ready?}
-    Confident -->|no| Folders[Rank folders by authoritative purpose plus state and graph role;<br/>use deterministic fallback when unavailable]
-    Folders --> Files[Rank files by authoritative purpose plus state and crisp connections;<br/>use deterministic fallback when unavailable]
-    Confident -->|yes| Summary[Selected-file summary plus trust]
+    Task[Agent task] --> Brief[Session brief ranks folders and files once<br/>with purpose plus graph evidence]
+    Brief --> Confident{Direct file candidate ready?}
+    Confident -->|yes; complete graph| Summary[Selected-file summary plus trust]
+    Confident -->|yes; truncated graph| Relations[Detailed bounded relations]
+    Confident -->|no; query available| Search[Indexed search with the task query]
+    Confident -->|no file candidate| Filesystem[Normal filesystem tools for exact context]
+    Search --> Summary
+    Task -. explicit manual discovery .-> Folders[Rank folders by authoritative purpose plus state and graph role]
+    Folders --> Files[Rank files by authoritative purpose plus state and crisp connections]
     Files --> Summary
     Summary --> CrossFile{Need cross-file context?}
     CrossFile -->|no| Slice[Exact source slice]
-    CrossFile -->|yes| Relations[Bounded relation or ranked path]
+    CrossFile -->|yes| Relations
     Relations --> Anchored[Continue with anchored target traversal]
 ```
 
@@ -112,6 +116,38 @@ explains why the target exists. The summary confirms what is currently there,
 trust fields state how much to rely on it, and the slice provides exact source.
 An external or unresolved target reports purpose as not applicable or
 unavailable instead of inheriting or fabricating local responsibility.
+
+### Anchored Analysis Views
+
+Architecture, impact, and trace remain closed views of the existing relation
+service. They reuse one exact anchor and the same generation, purpose revision,
+cursor, work-control, and aggregate-budget contracts as detailed traversal:
+
+```mermaid
+flowchart LR
+    Request[Exact file or symbol anchor<br/>plus closed analysis mode and budgets]
+    Snapshot[(One freshness-checked SQLite read snapshot)]
+    Direct[Indexed entity resolution, one-hop adjacency,<br/>coverage, purpose, occurrence, and symbol batches]
+    Service[Rust service:<br/>bounded multi-hop topology, SCC/community,<br/>purpose alignment, structural candidates,<br/>impact/dead-code, or node-simple trace]
+    Git[Optional bounded shell-free Git context<br/>for impact only]
+    Control[Shared deadline, cancellation,<br/>rows, edges, memory, and output limits]
+    Result[Candidate-labeled findings with exact selectors,<br/>coverage/trust, exact-or-lower-bound total,<br/>continuation, work, and truncation]
+
+    Request --> Snapshot
+    Snapshot --> Direct
+    Direct --> Service
+    Git -. optional context; never local-source authority .-> Service
+    Control --> Direct
+    Control --> Service
+    Service --> Result
+    Result -. bound cursor replay .-> Request
+```
+
+SQLite owns indexed facts and bounded batches; the service owns traversal and
+composition. `candidate` is review evidence, `confirmed` is reserved for facts
+proved by the admitted complete scope, `absent` is a complete bounded negative,
+and `inconclusive` makes missing coverage or a reached limit explicit. Static
+trace never claims runtime execution evidence.
 
 ### Background Purpose Curator
 
@@ -302,12 +338,12 @@ Optional branches are:
 
 - `atlas_search` when the identifier or text is uncertain;
 - `atlas_symbol_relations` when callers, impact, architecture, or a path is material;
-- `atlas_folders` then `atlas_files` only when the brief cannot confidently choose the work area;
+- `atlas_folders` then `atlas_files` for explicit manual work-area discovery when the caller intentionally does not use the brief's already-ranked candidates;
 - purpose queue/set/review for missing/suggested intent or an explicit correction of accepted intent.
 
 `atlas_session_brief` must not recommend rerunning folder/file ranking it already performed. Its next call should be a ready-to-use summary, search, relation, or exact-slice request.
 
-No new mandatory MCP tool is justified. Architecture, impact, and trace should first use a closed view on the existing bounded relation service. At most one optional analysis tool may be added later if real agent tasks prove that extending the relation request makes tool selection or schema size worse.
+No new mandatory MCP tool is justified. Architecture, impact, and trace use a closed view on the existing bounded relation service. A separate analysis tool remains unjustified unless later measured agent tasks prove that the relation route harms tool selection or schema cost.
 
 ## Output Shapes
 

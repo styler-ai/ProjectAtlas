@@ -1,8 +1,14 @@
 //! Purpose: Provide shared `ProjectAtlas` query services for CLI and MCP adapters.
 
+mod analysis;
 mod import_aliases;
 mod relations;
 
+pub use analysis::{
+    AnalysisFinding, AnalysisFindingKind, AnalysisNode, AnalysisStatus, GitImpactSelection,
+    RelationAnalysisDraft, RelationAnalysisMode, RelationAnalysisQuery, RelationAnalysisReport,
+    RelationAnalysisWork, VcsImpact, load_relation_analysis,
+};
 pub use relations::{
     DetailedRelationBudget, DetailedRelationNode, DetailedRelationPageDraft, DetailedRelationQuery,
     DetailedRelationReport, DetailedRelationRow, DetailedRelationWork, RelationAnchor,
@@ -903,6 +909,87 @@ pub struct CodeSlice {
     pub estimated_tokens: usize,
     /// Slice content.
     pub content: String,
+}
+
+/// Unrendered exact slice with its selected adapter-output ceiling.
+#[derive(Debug)]
+pub struct CodeSliceDraft {
+    /// Compatibility-preserving exact slice payload.
+    slice: CodeSlice,
+    /// Exact adapter-output ceiling selected for this slice.
+    output_budget: CodeSliceBudget,
+}
+
+impl CodeSliceDraft {
+    /// Borrow the compatibility-preserving slice payload.
+    #[must_use]
+    pub const fn slice(&self) -> &CodeSlice {
+        &self.slice
+    }
+
+    /// Encode this slice and enforce the selected adapter-output ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when encoding fails or the exact encoded
+    /// output exceeds the selected byte ceiling.
+    pub fn fit_output<F, E, O>(&self, encode: F) -> Result<O, E>
+    where
+        F: FnOnce(&CodeSlice) -> Result<O, E>,
+        E: From<ServiceError>,
+        O: AsRef<[u8]>,
+    {
+        let output = encode(&self.slice)?;
+        if output.as_ref().len() > self.output_budget.output_bytes() as usize {
+            return Err(E::from(ServiceError::InvalidInput(format!(
+                "slice output exceeds the requested {}-byte ceiling; narrow the line or symbol range or raise output-bytes",
+                self.output_budget.output_bytes()
+            ))));
+        }
+        Ok(output)
+    }
+}
+
+/// Encoded-output ceiling shared by line and symbol slices.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CodeSliceBudget {
+    /// Maximum bytes emitted by the selected adapter.
+    output_bytes: u32,
+}
+
+impl CodeSliceBudget {
+    /// Compatibility-preserving default for callers that omit a byte ceiling.
+    pub const DEFAULT_OUTPUT_BYTES: u32 = 256 * 1_024;
+
+    /// Validate one requested exact-output ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the limit is zero or above the shared product
+    /// output ceiling.
+    pub fn new(output_bytes: u32) -> ServiceResult<Self> {
+        if output_bytes == 0 || output_bytes > GraphLimits::MAX_OUTPUT_BYTES {
+            return Err(ServiceError::InvalidInput(format!(
+                "slice output byte limit must be between 1 and {}",
+                GraphLimits::MAX_OUTPUT_BYTES
+            )));
+        }
+        Ok(Self { output_bytes })
+    }
+
+    /// Return the exact adapter-output ceiling.
+    #[must_use]
+    pub const fn output_bytes(self) -> u32 {
+        self.output_bytes
+    }
+}
+
+impl Default for CodeSliceBudget {
+    fn default() -> Self {
+        Self {
+            output_bytes: Self::DEFAULT_OUTPUT_BYTES,
+        }
+    }
 }
 
 /// Optional selectors for disambiguating a symbol slice.
@@ -2375,8 +2462,33 @@ pub fn read_indexed_code_slice_from_source(
     end_line: Option<usize>,
     source: &str,
 ) -> ServiceResult<CodeSlice> {
+    read_indexed_code_slice_from_source_bounded(
+        store,
+        file,
+        start_line,
+        end_line,
+        source,
+        CodeSliceBudget::default(),
+    )
+    .map(|draft| draft.slice)
+}
+
+/// Read a byte-bounded exact line slice from caller-verified source bytes.
+///
+/// # Errors
+///
+/// Returns an error when the file is not indexed, line numbers are invalid,
+/// or the verbatim slice cannot fit the requested output budget.
+pub fn read_indexed_code_slice_from_source_bounded(
+    store: &AtlasStore,
+    file: &Path,
+    start_line: usize,
+    end_line: Option<usize>,
+    source: &str,
+    output_budget: CodeSliceBudget,
+) -> ServiceResult<CodeSliceDraft> {
     let file_key = validated_indexed_file_key(store, file)?;
-    read_code_slice(source, &file_key, start_line, end_line)
+    read_code_slice(source, &file_key, start_line, end_line, output_budget)
 }
 
 /// Read a symbol body by exact symbol name and optional disambiguators.
@@ -2408,6 +2520,24 @@ pub fn read_symbol_slice_from_source(
     selector: &SymbolSliceSelector<'_>,
     source: &str,
 ) -> ServiceResult<CodeSlice> {
+    read_symbol_slice_from_source_bounded(store, file, selector, source, CodeSliceBudget::default())
+        .map(|draft| draft.slice)
+}
+
+/// Read a byte-bounded symbol body from caller-verified source bytes.
+///
+/// # Errors
+///
+/// Returns an error when the symbol is absent, ambiguous, filtered out by the
+/// selector, its indexed range is invalid, or its verbatim body cannot fit the
+/// requested output budget.
+pub fn read_symbol_slice_from_source_bounded(
+    store: &AtlasStore,
+    file: &Path,
+    selector: &SymbolSliceSelector<'_>,
+    source: &str,
+    output_budget: CodeSliceBudget,
+) -> ServiceResult<CodeSliceDraft> {
     let file_key = validated_indexed_file_key(store, file)?;
     let requested_kind = selector.kind.map(parse_symbol_kind).transpose()?;
     let mut symbols = store.load_symbols_by_exact_file_and_name(&file_key, selector.name)?;
@@ -2439,7 +2569,13 @@ pub fn read_symbol_slice_from_source(
             )));
         }
     };
-    read_code_slice(source, &file_key, symbol.line_start, Some(symbol.line_end))
+    read_code_slice(
+        source,
+        &file_key,
+        symbol.line_start,
+        Some(symbol.line_end),
+        output_budget,
+    )
 }
 
 /// Normalize and validate a user-supplied path as a repository-relative file key.
@@ -2770,34 +2906,74 @@ fn read_code_slice(
     file_key: &str,
     start_line: usize,
     end_line: Option<usize>,
-) -> ServiceResult<CodeSlice> {
+    output_budget: CodeSliceBudget,
+) -> ServiceResult<CodeSliceDraft> {
     if start_line == 0 {
         return Err(ServiceError::InvalidInput(
             "start-line must be one or greater".to_string(),
         ));
     }
-    let lines = content.lines().collect::<Vec<_>>();
-    let line_count = lines.len();
-    let end_line = end_line.unwrap_or(start_line);
-    if end_line < start_line {
+    let requested_end_line = end_line.unwrap_or(start_line);
+    if requested_end_line < start_line {
         return Err(ServiceError::InvalidInput(
             "end-line must be greater than or equal to start-line".to_string(),
         ));
+    }
+    let mut line_count = 0usize;
+    let mut offset = 0usize;
+    let mut selected_start = None;
+    let mut selected_end = None;
+    for line in content.split_inclusive('\n') {
+        line_count = line_count.saturating_add(1);
+        let line_start = offset;
+        let line_end_with_terminator = offset.checked_add(line.len()).ok_or_else(|| {
+            ServiceError::InvalidInput("slice source byte offset overflowed".to_string())
+        })?;
+        let line_end = if line.ends_with("\r\n") {
+            line_end_with_terminator - 2
+        } else if line.ends_with('\n') {
+            line_end_with_terminator - 1
+        } else {
+            line_end_with_terminator
+        };
+        if line_count == start_line {
+            selected_start = Some(line_start);
+        }
+        if line_count >= start_line && line_count <= requested_end_line {
+            selected_end = Some(line_end);
+        }
+        offset = line_end_with_terminator;
     }
     if start_line > line_count {
         return Err(ServiceError::InvalidInput(format!(
             "start-line {start_line} exceeds file line count {line_count}"
         )));
     }
-    let end_index = end_line.min(line_count);
-    let content = lines[start_line - 1..end_index].join("\n");
-    Ok(CodeSlice {
-        path: file_key.to_string(),
-        start_line,
-        end_line: end_index,
-        line_count,
-        estimated_tokens: estimate_tokens(&content),
-        content,
+    let end_index = requested_end_line.min(line_count);
+    let selected_start = selected_start
+        .ok_or_else(|| ServiceError::InvalidInput("slice start byte was not found".to_string()))?;
+    let selected_end = selected_end
+        .ok_or_else(|| ServiceError::InvalidInput("slice end byte was not found".to_string()))?;
+    let content_bytes = selected_end.checked_sub(selected_start).ok_or_else(|| {
+        ServiceError::InvalidInput("slice content byte range was invalid".to_string())
+    })?;
+    if content_bytes > output_budget.output_bytes() as usize {
+        return Err(ServiceError::InvalidInput(format!(
+            "verbatim slice content exceeds the requested {}-byte output ceiling; narrow the line or symbol range or raise output-bytes",
+            output_budget.output_bytes()
+        )));
+    }
+    let content = content[selected_start..selected_end].to_string();
+    Ok(CodeSliceDraft {
+        slice: CodeSlice {
+            path: file_key.to_string(),
+            start_line,
+            end_line: end_index,
+            line_count,
+            estimated_tokens: estimate_tokens(&content),
+            content,
+        },
+        output_budget,
     })
 }
 
@@ -5385,6 +5561,70 @@ mod tests {
         )?;
         if !signature_slice.content.contains("a();") || signature_slice.content.contains("b();") {
             return Err(io::Error::other("signature selector returned wrong symbol slice").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn code_slice_budget_preserves_verbatim_utf8_and_rejects_oversized_output()
+    -> Result<(), Box<dyn Error>> {
+        let source = "fn café() {\r\n    println!(\"λ\");\r\n}\r\n";
+        let budget = CodeSliceBudget::new(512)?;
+        let slice = read_code_slice(source, "src/lib.rs", 1, Some(3), budget)?;
+        require_eq(
+            &slice.slice().content,
+            &source
+                .strip_suffix("\r\n")
+                .ok_or_else(|| io::Error::other("CRLF fixture terminator missing"))?
+                .to_string(),
+            "verbatim UTF-8 slice",
+        )?;
+        let encoded = slice.fit_output::<_, ServiceError, _>(|slice| {
+            serde_json::to_vec(slice).map_err(ServiceError::from)
+        })?;
+        if encoded.len() > budget.output_bytes() as usize {
+            return Err(io::Error::other(
+                "accepted slice exceeded its exact encoded-output ceiling",
+            )
+            .into());
+        }
+        let payload: serde_json::Value = serde_json::from_slice(&encoded)?;
+        if payload.get("output_budget").is_some() {
+            return Err(io::Error::other(
+                "additive slice budget changed the compatibility payload",
+            )
+            .into());
+        }
+
+        let content_error =
+            read_code_slice(source, "src/lib.rs", 1, Some(3), CodeSliceBudget::new(8)?);
+        if !matches!(
+            content_error,
+            Err(ServiceError::InvalidInput(message))
+                if message.contains("verbatim slice content exceeds")
+        ) {
+            return Err(io::Error::other(
+                "oversized verbatim slice content was allocated or truncated",
+            )
+            .into());
+        }
+
+        let envelope_budget = CodeSliceBudget::new(64)?;
+        let envelope = read_code_slice("λ", "src/lib.rs", 1, Some(1), envelope_budget)?;
+        let envelope_error = envelope.fit_output::<_, ServiceError, _>(|slice| {
+            serde_json::to_vec(slice).map_err(ServiceError::from)
+        });
+        if !matches!(
+            envelope_error,
+            Err(ServiceError::InvalidInput(message))
+                if message.contains("slice output exceeds")
+        ) {
+            return Err(io::Error::other("oversized encoded slice envelope was accepted").into());
+        }
+        if CodeSliceBudget::new(0).is_ok()
+            || CodeSliceBudget::new(GraphLimits::MAX_OUTPUT_BYTES + 1).is_ok()
+        {
+            return Err(io::Error::other("invalid slice output ceilings were accepted").into());
         }
         Ok(())
     }

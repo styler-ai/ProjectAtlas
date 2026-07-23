@@ -57,8 +57,9 @@ use projectatlas_db::{
     AtlasStore, DatabasePublicationContractState, DatabasePublicationReport,
     DatabaseSchemaCompatibility, DatabaseSettingsReport, HealthFindingsPage, HealthQuery,
     HealthScope, IndexPublication, IndexPublicationGuard, IndexPublicationState, IndexedFileText,
-    PurposeConditionalApplyRequest, PurposeConditionalApplyState, TelemetryRetentionState,
-    database_settings_report, read_project_root_read_only, validate_database_location,
+    MAX_PURPOSE_CURATION_BATCH_ROWS, PurposeConditionalApplyRequest, PurposeConditionalApplyState,
+    TelemetryRetentionState, database_settings_report, read_project_root_read_only,
+    validate_database_location,
 };
 use projectatlas_fs::{
     FsError, ScanLimits, ScanOptions, gitignore_excludes_path, scan_path_controlled, scan_repo,
@@ -92,6 +93,8 @@ pub(crate) const MAX_SYMBOL_FILE_BYTES: u64 = 2_000_000;
 pub(crate) const DEFAULT_HEALTH_LIMIT: usize = 50;
 /// Maximum health rows returned in one payload.
 pub(crate) const MAX_HEALTH_LIMIT: usize = 200;
+/// Maximum JSON bytes read for one CLI purpose-review batch.
+pub(crate) const MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES: u64 = 2 * 1_024 * 1_024;
 
 /// Default whole-operation deadline when no narrower parser limit is supplied.
 const DEFAULT_INDEX_WORK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -124,6 +127,14 @@ const CONTROLLED_SOURCE_READ_BUFFER_BYTES: usize = 8_192;
 const MAX_PURPOSE_IMPORT_BYTES: u64 = 512 * 1_024 * 1_024;
 /// Maximum complete config, map, or non-source purpose input size.
 const MAX_PURPOSE_INPUT_FILE_BYTES: u64 = 16 * 1_024 * 1_024;
+/// Maximum bytes in one repository path supplied to purpose review.
+const MAX_PURPOSE_REVIEW_PATH_BYTES: usize = 4 * 1_024;
+/// Maximum bytes in one non-path purpose-review string field.
+const MAX_PURPOSE_REVIEW_FIELD_BYTES: usize = 64 * 1_024;
+/// Maximum aggregate string bytes admitted to one purpose-review batch.
+const MAX_PURPOSE_REVIEW_INPUT_BYTES: usize = 512 * 1_024;
+/// Maximum retained item/output bytes for one purpose-review report.
+const MAX_PURPOSE_REVIEW_REPORT_BYTES: usize = 4 * 1_024 * 1_024;
 /// Maximum source prefix inspected for a legacy purpose header.
 const MAX_PURPOSE_HEADER_BYTES: u64 = 256 * 1_024;
 /// Maximum normalized legacy purpose rows admitted by one publication.
@@ -224,6 +235,8 @@ const INDEX_FRESHNESS_SAMPLE_LIMIT: usize = 8;
 const NORMAL_READ_REFRESH_MAX_PATHS: usize = 64;
 /// Maximum current source bytes a normal read may reconcile before answering.
 const NORMAL_READ_REFRESH_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Maximum current source bytes one navigation read may allocate and inspect.
+const MAX_INDEXED_NAVIGATION_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 /// Explicit version of the built-in derived-index projection contract.
 const INDEX_DERIVATION_CONTRACT_VERSION: &str = "2";
 
@@ -308,6 +321,8 @@ pub(crate) enum IndexVerificationReason {
     PolicyUnavailable,
     /// A root or source path could not be inspected completely.
     SourceInspectionFailed,
+    /// The selected source exceeds the bounded navigation-read ceiling.
+    SourceTooLarge,
     /// The opened index does not contain a usable project identity.
     ProjectIdentityUnavailable,
     /// A prior multi-projection publication did not complete.
@@ -2808,20 +2823,178 @@ pub(crate) fn review_purposes(
     requests: &[PurposeReviewRequest],
     apply: bool,
 ) -> Result<PurposeReviewReport, CliError> {
-    if apply && requests.iter().any(has_conditional_purpose_review_field) {
-        if requests.iter().all(is_complete_conditional_purpose_review) {
-            return apply_conditional_purpose_reviews(store, requests);
-        }
+    validate_purpose_review_admission(requests)?;
+    let has_conditional_fields = requests.iter().any(has_conditional_purpose_review_field);
+    if apply
+        && has_conditional_fields
+        && !requests.iter().all(is_complete_conditional_purpose_review)
+    {
         return Err(CliError::InvalidInput(
             "an applied purpose review batch must be entirely conditional or entirely explicit correction; conditional rows require task, work_key, state_token, and a reviewed purpose"
                 .to_string(),
         ));
     }
+
+    // Explicit correction remains item-oriented. Preflight every row and the
+    // complete report before the first write so an admission failure cannot
+    // partially apply an otherwise valid batch.
+    if apply && !has_conditional_fields {
+        let preview = collect_purpose_reviews(store, requests, false)?;
+        validate_purpose_review_report(&preview)?;
+    }
+
+    let report = if apply && has_conditional_fields {
+        apply_conditional_purpose_reviews(store, requests)?
+    } else {
+        collect_purpose_reviews(store, requests, apply)?
+    };
+    validate_purpose_review_report(&report)?;
+    Ok(report)
+}
+
+/// Enforce shared CLI/MCP purpose-review request limits before database work.
+pub(crate) fn validate_purpose_review_admission(
+    requests: &[PurposeReviewRequest],
+) -> Result<(), CliError> {
+    if requests.is_empty() {
+        return Err(CliError::InvalidInput(
+            "purpose review input must contain at least one item".to_string(),
+        ));
+    }
+    if requests.len() > MAX_PURPOSE_CURATION_BATCH_ROWS {
+        return Err(CliError::InvalidInput(format!(
+            "purpose review input contains {} items; maximum is {}",
+            requests.len(),
+            MAX_PURPOSE_CURATION_BATCH_ROWS
+        )));
+    }
+
+    let mut aggregate_bytes = 0usize;
+    for (index, request) in requests.iter().enumerate() {
+        validate_purpose_review_field(index, "path", &request.path, MAX_PURPOSE_REVIEW_PATH_BYTES)?;
+        aggregate_bytes = aggregate_bytes
+            .checked_add(request.path.len())
+            .ok_or_else(|| purpose_review_input_too_large(usize::MAX))?;
+        for (name, value) in [
+            ("purpose", request.purpose.as_deref()),
+            ("task", request.task.as_deref()),
+            ("work_key", request.work_key.as_deref()),
+            ("state_token", request.state_token.as_deref()),
+        ] {
+            if let Some(value) = value {
+                validate_purpose_review_field(index, name, value, MAX_PURPOSE_REVIEW_FIELD_BYTES)?;
+                aggregate_bytes = aggregate_bytes
+                    .checked_add(value.len())
+                    .ok_or_else(|| purpose_review_input_too_large(usize::MAX))?;
+            }
+        }
+        if aggregate_bytes > MAX_PURPOSE_REVIEW_INPUT_BYTES {
+            return Err(purpose_review_input_too_large(aggregate_bytes));
+        }
+    }
+    Ok(())
+}
+
+/// Validate one caller-controlled purpose-review string before retaining output.
+fn validate_purpose_review_field(
+    index: usize,
+    name: &str,
+    value: &str,
+    maximum: usize,
+) -> Result<(), CliError> {
+    if value.len() > maximum {
+        return Err(CliError::InvalidInput(format!(
+            "purpose review item {index} field {name} contains {} bytes; maximum is {maximum}",
+            value.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Build the stable aggregate-byte admission failure.
+fn purpose_review_input_too_large(actual: usize) -> CliError {
+    CliError::InvalidInput(format!(
+        "purpose review input contains {actual} aggregate string bytes; maximum is {MAX_PURPOSE_REVIEW_INPUT_BYTES}"
+    ))
+}
+
+/// Review one admitted item-oriented batch while bounding retained report data.
+fn collect_purpose_reviews(
+    store: &AtlasStore,
+    requests: &[PurposeReviewRequest],
+    apply: bool,
+) -> Result<PurposeReviewReport, CliError> {
     let mut items = Vec::with_capacity(requests.len());
+    let mut retained_bytes = 0usize;
     for request in requests {
-        items.push(review_purpose_request(store, request, apply)?);
+        let item = review_purpose_request(store, request, apply)?;
+        retained_bytes = retained_bytes
+            .checked_add(purpose_review_item_bytes(&item)?)
+            .ok_or_else(|| purpose_review_report_too_large(usize::MAX))?;
+        if retained_bytes > MAX_PURPOSE_REVIEW_REPORT_BYTES {
+            return Err(purpose_review_report_too_large(retained_bytes));
+        }
+        items.push(item);
     }
     Ok(summarize_purpose_review(requests.len(), apply, items))
+}
+
+/// Return retained string bytes for one report row after per-field admission.
+fn purpose_review_item_bytes(item: &PurposeReviewItem) -> Result<usize, CliError> {
+    let mut total = 0usize;
+    for (name, value, maximum) in [
+        ("path", item.path.as_str(), MAX_PURPOSE_REVIEW_PATH_BYTES),
+        (
+            "current_status",
+            item.current_status.as_str(),
+            MAX_PURPOSE_REVIEW_FIELD_BYTES,
+        ),
+        (
+            "current_source",
+            item.current_source.as_str(),
+            MAX_PURPOSE_REVIEW_FIELD_BYTES,
+        ),
+        (
+            "purpose",
+            item.purpose.as_str(),
+            MAX_PURPOSE_REVIEW_FIELD_BYTES,
+        ),
+        ("error", item.error.as_str(), MAX_PURPOSE_REVIEW_FIELD_BYTES),
+    ] {
+        if value.len() > maximum {
+            return Err(CliError::InvalidInput(format!(
+                "purpose review report field {name} contains {} bytes; maximum is {maximum}",
+                value.len()
+            )));
+        }
+        total = total
+            .checked_add(value.len())
+            .ok_or_else(|| purpose_review_report_too_large(usize::MAX))?;
+    }
+    Ok(total)
+}
+
+/// Enforce exact supported adapter output caps for one completed report.
+fn validate_purpose_review_report(report: &PurposeReviewReport) -> Result<(), CliError> {
+    let json_bytes = serde_json::to_string_pretty(report)?
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| purpose_review_report_too_large(usize::MAX))?;
+    if json_bytes > MAX_PURPOSE_REVIEW_REPORT_BYTES {
+        return Err(purpose_review_report_too_large(json_bytes));
+    }
+    let toon_bytes = render_purpose_review_report(report).len();
+    if toon_bytes > MAX_PURPOSE_REVIEW_REPORT_BYTES {
+        return Err(purpose_review_report_too_large(toon_bytes));
+    }
+    Ok(())
+}
+
+/// Build the stable purpose-review report/output limit failure.
+fn purpose_review_report_too_large(actual: usize) -> CliError {
+    CliError::InvalidInput(format!(
+        "purpose review report contains {actual} bytes; maximum is {MAX_PURPOSE_REVIEW_REPORT_BYTES}"
+    ))
 }
 
 /// Apply one host-selected conditional batch with one database writer transaction.
@@ -5502,8 +5675,8 @@ pub(crate) fn read_indexed_file_content(
         CliError::InvalidInput(format!("indexed file {file_key:?} was not found"))
     })?;
     let project_root = normalize_native_path_display(indexed_project_root(store)?);
-    let bytes = match fs::read(&native) {
-        Ok(bytes) => bytes,
+    let metadata = match fs::metadata(&native) {
+        Ok(metadata) => metadata,
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
             return Err(CliError::RefreshRequired(Box::new(IndexRefreshRequired {
                 project_root,
@@ -5529,6 +5702,73 @@ pub(crate) fn read_indexed_file_content(
             )));
         }
     };
+    if indexed
+        .node
+        .size_bytes
+        .is_some_and(|indexed_bytes| indexed_bytes != metadata.len())
+    {
+        return Err(CliError::RefreshRequired(Box::new(IndexRefreshRequired {
+            project_root,
+            status: IndexReadStatus::RefreshRequired,
+            reason: IndexRefreshReason::SourceChanged,
+            scope: IndexRefreshScope::Full,
+            changed: 1,
+            added: 0,
+            removed: 0,
+            modified: 1,
+            sample_paths: vec![file_key.to_string()],
+        })));
+    }
+    if metadata.len() > MAX_INDEXED_NAVIGATION_SOURCE_BYTES {
+        return Err(CliError::VerificationIncomplete(Box::new(
+            IndexVerificationIncomplete {
+                project_root,
+                status: IndexReadStatus::VerificationIncomplete,
+                reason: IndexVerificationReason::SourceTooLarge,
+                scope: IndexRefreshScope::Full,
+                message: format!(
+                    "indexed file {file_key:?} contains {} bytes; bounded navigation reads admit at most {MAX_INDEXED_NAVIGATION_SOURCE_BYTES} bytes",
+                    metadata.len()
+                ),
+            },
+        )));
+    }
+    let file = fs::File::open(&native).map_err(|source| {
+        CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+            project_root: project_root.clone(),
+            status: IndexReadStatus::VerificationIncomplete,
+            reason: IndexVerificationReason::SourceInspectionFailed,
+            scope: IndexRefreshScope::Full,
+            message: format!("failed to open '{}': {source}", native.display()),
+        }))
+    })?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_INDEXED_NAVIGATION_SOURCE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| {
+            CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+                project_root: project_root.clone(),
+                status: IndexReadStatus::VerificationIncomplete,
+                reason: IndexVerificationReason::SourceInspectionFailed,
+                scope: IndexRefreshScope::Full,
+                message: format!("failed to read '{}': {source}", native.display()),
+            }))
+        })?;
+    if bytes.len() as u64 != metadata.len()
+        || bytes.len() as u64 > MAX_INDEXED_NAVIGATION_SOURCE_BYTES
+    {
+        return Err(CliError::RefreshRequired(Box::new(IndexRefreshRequired {
+            project_root,
+            status: IndexReadStatus::RefreshRequired,
+            reason: IndexRefreshReason::SourceChanged,
+            scope: IndexRefreshScope::Full,
+            changed: 1,
+            added: 0,
+            removed: 0,
+            modified: 1,
+            sample_paths: vec![file_key.to_string()],
+        })));
+    }
     let current_hash = blake3::hash(&bytes).to_hex().to_string();
     if indexed.node.content_hash.as_deref() != Some(current_hash.as_str()) {
         return Err(CliError::RefreshRequired(Box::new(IndexRefreshRequired {
@@ -9142,6 +9382,191 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             &corrected.purpose.purpose.as_deref(),
             &Some("Explicit corrected purpose"),
             "explicit correction value",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn purpose_review_admission_bounds_input_and_prevents_partial_apply()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        store.replace_scan(&[
+            Node {
+                path: "src/first.rs".to_string(),
+                kind: NodeKind::File,
+                parent_path: Some("src".to_string()),
+                extension: Some(".rs".to_string()),
+                language: Some("rust".to_string()),
+                size_bytes: Some(12),
+                mtime_ns: Some(10),
+                content_hash: Some("hash-first".to_string()),
+            },
+            Node {
+                path: "src/second.rs".to_string(),
+                kind: NodeKind::File,
+                parent_path: Some("src".to_string()),
+                extension: Some(".rs".to_string()),
+                language: Some("rust".to_string()),
+                size_bytes: Some(12),
+                mtime_ns: Some(10),
+                content_hash: Some("hash-second".to_string()),
+            },
+        ])?;
+        store.set_suggested_purpose("src/first.rs", "Generated first purpose")?;
+        store.set_purpose(
+            "src/second.rs",
+            &"x".repeat(MAX_PURPOSE_REVIEW_FIELD_BYTES + 1),
+            PurposeSource::Imported,
+        )?;
+
+        let valid_first = PurposeReviewRequest {
+            path: "src/first.rs".to_string(),
+            purpose: Some("Reviewed café λ purpose".to_string()),
+            confirm_existing: false,
+            task: None,
+            work_key: None,
+            state_token: None,
+        };
+        let oversized_report = PurposeReviewRequest {
+            path: "src/second.rs".to_string(),
+            purpose: None,
+            confirm_existing: true,
+            task: None,
+            work_key: None,
+            state_token: None,
+        };
+        let Err(error) = review_purposes(&store, &[valid_first.clone(), oversized_report], true)
+        else {
+            return Err(io::Error::other(
+                "oversized retained report field was accepted before apply",
+            )
+            .into());
+        };
+        require_eq(
+            &error
+                .to_string()
+                .contains("purpose review report field purpose"),
+            &true,
+            "oversized report field error",
+        )?;
+        let unchanged = store
+            .load_node_by_path("src/first.rs")?
+            .ok_or_else(|| io::Error::other("first review fixture disappeared"))?;
+        require_eq(
+            &unchanged.purpose.agent_reviewed(),
+            &false,
+            "report admission failure prevented partial apply",
+        )?;
+
+        let oversized_field = PurposeReviewRequest {
+            purpose: Some("x".repeat(MAX_PURPOSE_REVIEW_FIELD_BYTES + 1)),
+            ..valid_first.clone()
+        };
+        let Err(error) = review_purposes(&store, &[oversized_field], true) else {
+            return Err(io::Error::other("oversized request field passed admission").into());
+        };
+        require_eq(
+            &error.to_string().contains("field purpose"),
+            &true,
+            "oversized input field error",
+        )?;
+
+        let too_many = vec![valid_first.clone(); MAX_PURPOSE_CURATION_BATCH_ROWS + 1];
+        let Err(error) = review_purposes(&store, &too_many, true) else {
+            return Err(io::Error::other("oversized request count passed admission").into());
+        };
+        require_eq(
+            &error.to_string().contains("maximum is 200"),
+            &true,
+            "oversized item count error",
+        )?;
+
+        let aggregate = (0..9)
+            .map(|index| PurposeReviewRequest {
+                path: format!("src/{index}.rs"),
+                purpose: Some("x".repeat(MAX_PURPOSE_REVIEW_FIELD_BYTES)),
+                confirm_existing: false,
+                task: None,
+                work_key: None,
+                state_token: None,
+            })
+            .collect::<Vec<_>>();
+        let Err(error) = review_purposes(&store, &aggregate, false) else {
+            return Err(io::Error::other("oversized aggregate request passed admission").into());
+        };
+        require_eq(
+            &error.to_string().contains("aggregate string bytes"),
+            &true,
+            "oversized aggregate input error",
+        )?;
+
+        let preview = review_purposes(&store, &[valid_first], false)?;
+        require_eq(
+            &preview.items[0].purpose,
+            &"Reviewed café λ purpose".to_string(),
+            "UTF-8 purpose compatibility",
+        )?;
+        require_eq(
+            &render_purpose_review_report(&preview).contains("Reviewed café λ purpose"),
+            &true,
+            "UTF-8 TOON compatibility",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_navigation_read_rejects_stale_or_oversized_source_before_allocation()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        let source_dir = root.join("src");
+        fs::create_dir_all(&source_dir)?;
+        let source = source_dir.join("large.rs");
+        fs::File::create(&source)?.set_len(MAX_INDEXED_NAVIGATION_SOURCE_BYTES + 1)?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        store.replace_scan(&[Node {
+            path: "src/large.rs".to_string(),
+            kind: NodeKind::File,
+            parent_path: Some("src".to_string()),
+            extension: Some(".rs".to_string()),
+            language: Some("rust".to_string()),
+            size_bytes: Some(MAX_INDEXED_NAVIGATION_SOURCE_BYTES + 1),
+            mtime_ns: Some(10),
+            content_hash: Some("unused-oversized-hash".to_string()),
+        }])?;
+
+        let Err(error) = read_indexed_file_content(&store, "src/large.rs") else {
+            return Err(
+                io::Error::other("oversized indexed source was allocated and accepted").into(),
+            );
+        };
+        let CliError::VerificationIncomplete(details) = error else {
+            return Err(io::Error::other("oversized source returned the wrong error type").into());
+        };
+        require_eq(
+            &details.reason,
+            &IndexVerificationReason::SourceTooLarge,
+            "oversized source reason",
+        )?;
+
+        fs::File::create(&source)?.set_len(1)?;
+        let Err(error) = read_indexed_file_content(&store, "src/large.rs") else {
+            return Err(io::Error::other("changed source size did not require refresh").into());
+        };
+        let CliError::RefreshRequired(details) = error else {
+            return Err(
+                io::Error::other("changed source size returned the wrong error type").into(),
+            );
+        };
+        require_eq(
+            &details.reason,
+            &IndexRefreshReason::SourceChanged,
+            "changed source size reason",
         )?;
         Ok(())
     }

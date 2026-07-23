@@ -36,22 +36,24 @@ use projectatlas_db::{
     ProjectRootTransitionResult, RepositoryCoverageQuery, verify_project_database,
 };
 use projectatlas_service::{
-    COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CoverageDiscoveryReport, DetailedRelationBudget,
-    DetailedRelationQuery, FileSummaryReport, RelationAnchor, RelationDirection,
+    COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CodeSliceBudget, CodeSliceDraft, CoverageDiscoveryReport,
+    DetailedRelationBudget, DetailedRelationQuery, FileSummaryReport, GitImpactSelection,
+    RelationAnalysisMode, RelationAnalysisQuery, RelationAnchor, RelationDirection,
     RelationResolutionFilter, SearchQuery, SearchReport, SearchRetrievalMode, ServiceError,
     SymbolSliceSelector, TokenReport, TokenReportRequest, build_file_summary_from_source,
-    load_coverage_discovery, load_detailed_relation_page, load_token_report, parse_coverage_parser,
-    parse_coverage_relation, parse_coverage_state, parse_symbol_kind,
-    read_indexed_code_slice_from_source, read_symbol_slice_from_source,
-    search_indexed_files_with_control,
+    load_coverage_discovery, load_detailed_relation_page, load_relation_analysis,
+    load_token_report, parse_coverage_parser, parse_coverage_relation, parse_coverage_state,
+    parse_symbol_kind, read_indexed_code_slice_from_source_bounded,
+    read_symbol_slice_from_source_bounded, search_indexed_files_with_control,
 };
 use rmcp::schemars;
 use runtime::{
     DEFAULT_HEALTH_LIMIT, InitBootstrapOptions, InitHostConfigStatus, InitSetupReport,
-    MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel, PurposeReviewRequest,
-    ScanRuntimePlan, SettingsReport, SymbolBuildOptions, UsageRuntimeInstance, WatchStatusReport,
-    absolute_path, build_settings_report, byte_count_to_tokens, canonical_project_root,
-    config_root_mismatch_error, default_mcp_project_root, defaultable_cli_project_root,
+    MAX_HEALTH_LIMIT, MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel,
+    PurposeReviewRequest, ScanRuntimePlan, SettingsReport, SymbolBuildOptions,
+    UsageRuntimeInstance, WatchStatusReport, absolute_path, build_settings_report,
+    byte_count_to_tokens, canonical_project_root, config_root_mismatch_error,
+    default_mcp_project_root, defaultable_cli_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     index_work_control, init_config_path, init_path_status, lint_database_if_present,
     next_step_report, next_step_report_payload, normalized_folder_filter,
@@ -63,13 +65,13 @@ use runtime::{
     render_purpose_review_report, reset_index_files, resolved_mcp_config_path, review_purposes,
     run_init_bootstrap, run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
     run_symbol_build_pipeline_controlled, run_watch_loop, strip_legacy_purpose,
-    validated_indexed_file_key, watcher_status_report,
+    validate_purpose_review_admission, validated_indexed_file_key, watcher_status_report,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 #[cfg(test)]
@@ -326,6 +328,29 @@ enum RelationViewArg {
     Legacy,
     /// Use bounded normalized-graph navigation.
     Detailed,
+    /// Project one closed architecture, impact, or static-trace analysis.
+    Analysis,
+}
+
+/// Closed relation analysis selected on the existing symbol-relations route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RelationAnalysisModeArg {
+    /// Components, communities, cycles, purpose, complexity, and bottlenecks.
+    Architecture,
+    /// VCS-aware affected nodes and conservative dead-code candidates.
+    Impact,
+    /// One node-simple static relationship path.
+    Trace,
+}
+
+impl From<RelationAnalysisModeArg> for RelationAnalysisMode {
+    fn from(value: RelationAnalysisModeArg) -> Self {
+        match value {
+            RelationAnalysisModeArg::Architecture => Self::Architecture,
+            RelationAnalysisModeArg::Impact => Self::Impact,
+            RelationAnalysisModeArg::Trace => Self::Trace,
+        }
+    }
 }
 
 /// Detailed relation traversal direction.
@@ -412,6 +437,32 @@ struct DetailedRelationArgs {
     /// Traversal and output ceilings.
     #[command(flatten)]
     limits: DetailedRelationLimitArgs,
+    /// Optional controls used only by the analysis view.
+    #[command(flatten)]
+    analysis: Box<RelationAnalysisArgs>,
+}
+
+/// Closed controls accepted only by `symbols relations --view analysis`.
+#[derive(Args, Debug)]
+struct RelationAnalysisArgs {
+    /// Closed analysis projection computed over the bounded relation traversal.
+    #[arg(long, value_enum)]
+    analysis_mode: Option<RelationAnalysisModeArg>,
+    /// Exact JSON `RelationAnchor` (`file` or fully disambiguated `symbol`) for trace mode.
+    #[arg(long)]
+    trace_target: Option<String>,
+    /// Git scope: `working-tree`, `index`, or exact `base..head`; defaults to working-tree.
+    #[arg(long)]
+    vcs: Option<String>,
+    /// Include relationship-derived communities with containment excluded.
+    #[arg(long)]
+    include_communities: bool,
+    /// Include iterative SCC dependency-cycle findings.
+    #[arg(long)]
+    include_cycles: bool,
+    /// Include conservative dead-code candidates in impact mode.
+    #[arg(long)]
+    include_dead_code: bool,
 }
 
 /// Exact local anchor controls for detailed relation navigation.
@@ -483,6 +534,9 @@ struct OptionalSymbolSelectorArgs {
     /// Optional source line for disambiguating `--symbol`.
     #[arg(long)]
     symbol_line: Option<usize>,
+    /// Maximum encoded bytes admitted to the slice response.
+    #[arg(long, default_value_t = CodeSliceBudget::DEFAULT_OUTPUT_BYTES)]
+    output_bytes: u32,
 }
 
 /// Required exact symbol selector shared by the symbol slice command.
@@ -502,6 +556,9 @@ struct RequiredSymbolSelectorArgs {
     /// Optional source line for disambiguation.
     #[arg(long)]
     symbol_line: Option<usize>,
+    /// Maximum encoded bytes admitted to the slice response.
+    #[arg(long, default_value_t = CodeSliceBudget::DEFAULT_OUTPUT_BYTES)]
+    output_bytes: u32,
 }
 
 /// Token report presentation mode.
@@ -724,7 +781,7 @@ struct Cli {
     require_version: Option<String>,
     /// Subcommand to execute.
     #[command(subcommand)]
-    command: Command,
+    command: Box<Command>,
 }
 
 /// Supported `ProjectAtlas` CLI commands.
@@ -858,7 +915,7 @@ enum Command {
     Symbols {
         /// Symbol graph subcommand to run.
         #[command(subcommand)]
-        command: SymbolsCommand,
+        command: Box<SymbolsCommand>,
     },
     /// Print local `ProjectAtlas` settings and cache/index locations.
     Settings,
@@ -1269,7 +1326,7 @@ enum SymbolsCommand {
         query: Option<String>,
         /// Additive normalized-graph traversal controls.
         #[command(flatten)]
-        detailed: DetailedRelationArgs,
+        detailed: Box<DetailedRelationArgs>,
         /// Maximum relations to return.
         #[arg(long, default_value_t = 50)]
         limit: usize,
@@ -1321,7 +1378,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         validate_required_runtime_version(required_version)?;
     }
     let usage_instance = UsageRuntimeInstance::new(UsageInstanceOwner::CliInvocation);
-    match &cli.command {
+    match cli.command.as_ref() {
         Command::Init {
             no_scan,
             force_rescan,
@@ -1580,13 +1637,15 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     symbol_kind,
                     symbol_signature,
                     symbol_line,
+                    output_bytes,
                 },
         } => {
             let store = open_index_for_read(cli)?;
             let file_key = validated_indexed_file_key(&store, file)?;
             let content = read_indexed_file_content(&store, &file_key)?;
+            let output_budget = CodeSliceBudget::new(*output_bytes)?;
             let report = if let Some(symbol) = symbol {
-                read_symbol_slice_from_source(
+                read_symbol_slice_from_source_bounded(
                     &store,
                     Path::new(&file_key),
                     &SymbolSliceSelector {
@@ -1597,6 +1656,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         line: *symbol_line,
                     },
                     &content,
+                    output_budget,
                 )?
             } else {
                 if symbol_parent.is_some()
@@ -1613,29 +1673,28 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         "start-line is required unless --symbol is provided".to_string(),
                     )
                 })?;
-                read_indexed_code_slice_from_source(
+                read_indexed_code_slice_from_source_bounded(
                     &store,
                     Path::new(&file_key),
                     start_line,
                     *end_line,
                     &content,
+                    output_budget,
                 )?
             };
-            let toon = render_code_slice(&report);
-            print_tracked_output_text(
+            print_tracked_slice_output(
                 cli.format,
                 &store,
                 usage_instance,
                 &cli.session,
                 "slice",
-                Some(report.path.clone()),
+                Some(report.slice().path.clone()),
                 None,
                 &content,
-                &toon,
                 &report,
             )?;
         }
-        Command::Symbols { command } => match command {
+        Command::Symbols { command } => match command.as_ref() {
             SymbolsCommand::Build {
                 path,
                 max_bytes,
@@ -1687,34 +1746,54 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 view,
                 file,
                 query,
-                detailed:
-                    DetailedRelationArgs {
-                        cursor,
-                        anchor:
-                            DetailedRelationAnchorArgs {
-                                symbol,
-                                symbol_parent,
-                                symbol_kind,
-                                symbol_signature,
-                            },
-                        filters:
-                            DetailedRelationFilterArgs {
-                                direction,
-                                relation,
-                                minimum_confidence,
-                                resolution,
-                            },
-                        limits:
-                            DetailedRelationLimitArgs {
-                                depth,
-                                include_occurrences,
-                                occurrence_limit,
-                                output_bytes,
-                            },
-                    },
+                detailed,
                 limit,
             } => {
+                let DetailedRelationArgs {
+                    cursor,
+                    anchor:
+                        DetailedRelationAnchorArgs {
+                            symbol,
+                            symbol_parent,
+                            symbol_kind,
+                            symbol_signature,
+                        },
+                    filters:
+                        DetailedRelationFilterArgs {
+                            direction,
+                            relation,
+                            minimum_confidence,
+                            resolution,
+                        },
+                    limits:
+                        DetailedRelationLimitArgs {
+                            depth,
+                            include_occurrences,
+                            occurrence_limit,
+                            output_bytes,
+                        },
+                    analysis,
+                } = detailed.as_ref();
+                let RelationAnalysisArgs {
+                    analysis_mode,
+                    trace_target,
+                    vcs,
+                    include_communities,
+                    include_cycles,
+                    include_dead_code,
+                } = analysis.as_ref();
                 let store = open_index_for_read(cli)?;
+                let analysis_controls_explicit = analysis_mode.is_some()
+                    || trace_target.is_some()
+                    || vcs.is_some()
+                    || *include_communities
+                    || *include_cycles
+                    || *include_dead_code;
+                if *view != RelationViewArg::Analysis && analysis_controls_explicit {
+                    return Err(CliError::Service(ServiceError::InvalidInput(
+                        "analysis controls require --view analysis".to_string(),
+                    )));
+                }
                 if *view == RelationViewArg::Legacy {
                     let relations =
                         store.load_symbol_relations(file.as_deref(), query.as_deref(), *limit)?;
@@ -1788,28 +1867,78 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         .map_err(|error| {
                         CliError::Service(ServiceError::InvalidInput(error.to_string()))
                     })?;
-                    let draft = load_detailed_relation_page(
-                        &store,
-                        &DetailedRelationQuery {
-                            anchor,
-                            direction: (*direction).into(),
-                            relation: relation
-                                .as_deref()
-                                .map(parse_coverage_relation)
-                                .transpose()?,
-                            minimum_confidence: (*minimum_confidence).into(),
-                            resolution: (*resolution).into(),
-                            include_occurrences: *include_occurrences,
-                            budget: DetailedRelationBudget::from_graph_limits(limits),
-                            cursor: cursor.clone(),
-                        },
-                        None,
-                    )?;
-                    let (_report, output) = draft.fit_output(None, |report| {
-                        let payload = json!({ "symbol_relations": report });
-                        let toon = encode_agent_payload(&payload);
-                        serialized_output(cli.format, &toon, &payload)
-                    })?;
+                    let relations = DetailedRelationQuery {
+                        anchor,
+                        direction: (*direction).into(),
+                        relation: relation
+                            .as_deref()
+                            .map(parse_coverage_relation)
+                            .transpose()?,
+                        minimum_confidence: (*minimum_confidence).into(),
+                        resolution: (*resolution).into(),
+                        include_occurrences: *include_occurrences,
+                        budget: DetailedRelationBudget::from_graph_limits(limits),
+                        cursor: cursor.clone(),
+                    };
+                    let output = if *view == RelationViewArg::Detailed {
+                        let draft = load_detailed_relation_page(&store, &relations, None)?;
+                        let (_report, output) = draft.fit_output(None, |report| {
+                            let payload = json!({ "symbol_relations": report });
+                            let toon = encode_agent_payload(&payload);
+                            serialized_output(cli.format, &toon, &payload)
+                        })?;
+                        output
+                    } else {
+                        let vcs_explicit = vcs.is_some();
+                        let vcs = match vcs.as_deref().unwrap_or("working-tree") {
+                            "working-tree" => GitImpactSelection::WorkingTree,
+                            "index" => GitImpactSelection::Index,
+                            range => {
+                                let (base, head) = range.split_once("..").ok_or_else(|| {
+                                    CliError::Service(ServiceError::InvalidInput(
+                                        "--vcs must be working-tree, index, or an exact base..head range"
+                                            .to_string(),
+                                    ))
+                                })?;
+                                GitImpactSelection::RevisionRange {
+                                    base: base.to_string(),
+                                    head: head.to_string(),
+                                }
+                            }
+                        };
+                        let mode: RelationAnalysisMode = analysis_mode
+                            .unwrap_or(RelationAnalysisModeArg::Architecture)
+                            .into();
+                        let trace_target = trace_target
+                            .as_deref()
+                            .map(serde_json::from_str::<RelationAnchor>)
+                            .transpose()
+                            .map_err(|error| {
+                                CliError::Service(ServiceError::InvalidInput(format!(
+                                    "--trace-target must be an exact RelationAnchor JSON object: {error}"
+                                )))
+                            })?;
+                        let draft = load_relation_analysis(
+                            &store,
+                            &RelationAnalysisQuery {
+                                relations,
+                                mode,
+                                trace_target,
+                                vcs: (mode == RelationAnalysisMode::Impact || vcs_explicit)
+                                    .then_some(vcs),
+                                include_communities: *include_communities,
+                                include_cycles: *include_cycles,
+                                include_dead_code: *include_dead_code,
+                            },
+                            None,
+                        )?;
+                        let (_report, output) = draft.fit_output(|report| {
+                            let payload = json!({ "symbol_relations": report });
+                            let toon = encode_agent_payload(&payload);
+                            serialized_output(cli.format, &toon, &payload)
+                        })?;
+                        output
+                    };
                     write_stdout(&output)?;
                 }
             }
@@ -1822,12 +1951,13 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         symbol_kind,
                         symbol_signature,
                         symbol_line,
+                        output_bytes,
                     },
             } => {
                 let store = open_index_for_read(cli)?;
                 let file_key = validated_indexed_file_key(&store, file)?;
                 let content = read_indexed_file_content(&store, &file_key)?;
-                let report = read_symbol_slice_from_source(
+                let report = read_symbol_slice_from_source_bounded(
                     &store,
                     Path::new(&file_key),
                     &SymbolSliceSelector {
@@ -1838,18 +1968,17 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         line: *symbol_line,
                     },
                     &content,
+                    CodeSliceBudget::new(*output_bytes)?,
                 )?;
-                let toon = render_code_slice(&report);
-                print_tracked_output_text(
+                print_tracked_slice_output(
                     cli.format,
                     &store,
                     usage_instance,
                     &cli.session,
                     "symbol-slice",
-                    Some(report.path.clone()),
+                    Some(report.slice().path.clone()),
                     Some(symbol.clone()),
                     &content,
-                    &toon,
                     &report,
                 )?;
             }
@@ -2275,12 +2404,13 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 print_output(cli.format, &encode_agent_payload(&report), &report)?;
             }
             PurposeCommand::Review { from_file, apply } => {
+                let requests = load_purpose_review_requests(from_file)?;
+                validate_purpose_review_admission(&requests)?;
                 let store = if *apply {
                     open_index_for_mutation(cli)?
                 } else {
                     open_index_for_read(cli)?
                 };
-                let requests = load_purpose_review_requests(from_file)?;
                 let report = review_purposes(&store, &requests, *apply)?;
                 print_output(cli.format, &render_purpose_review_report(&report), &report)?;
                 if report.failed > 0 {
@@ -2822,18 +2952,45 @@ fn write_mcp_config_file(
 
 /// Load batch purpose review requests from a JSON file.
 fn load_purpose_review_requests(path: &Path) -> Result<Vec<PurposeReviewRequest>, CliError> {
-    let text = fs::read_to_string(path).map_err(|source| CliError::Io {
+    let metadata = fs::metadata(path).map_err(|source| CliError::Io {
         path: path.to_path_buf(),
         source,
+    })?;
+    if metadata.len() > MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES {
+        return Err(CliError::InvalidInput(format!(
+            "purpose review input file contains {} bytes; maximum is {MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES}",
+            metadata.len()
+        )));
+    }
+    let file = fs::File::open(path).map_err(|source| CliError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .unwrap_or(MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES as usize)
+            .min(MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES as usize),
+    );
+    file.take(MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| CliError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if bytes.len() as u64 > MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES {
+        return Err(CliError::InvalidInput(format!(
+            "purpose review input file exceeds {MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES} bytes"
+        )));
+    }
+    let text = String::from_utf8(bytes).map_err(|source| {
+        CliError::InvalidInput(format!(
+            "purpose review input file {} is not UTF-8: {source}",
+            path.display()
+        ))
     })?;
     let value: serde_json::Value = serde_json::from_str(&text)?;
     let items = value.get("items").cloned().unwrap_or(value);
     let requests: Vec<PurposeReviewRequest> = serde_json::from_value(items)?;
-    if requests.is_empty() {
-        return Err(CliError::InvalidInput(
-            "purpose review input must contain at least one item".to_string(),
-        ));
-    }
     Ok(requests)
 }
 
@@ -3144,6 +3301,36 @@ fn print_tracked_output_text<T: serde::Serialize>(
     Ok(())
 }
 
+/// Emit a bounded exact slice and record telemetry for the accepted bytes.
+fn print_tracked_slice_output(
+    format: OutputFormat,
+    store: &AtlasStore,
+    usage_instance: Option<UsageRuntimeInstance>,
+    session: &str,
+    command: &str,
+    path: Option<String>,
+    query: Option<String>,
+    baseline_text: &str,
+    report: &CodeSliceDraft,
+) -> Result<(), CliError> {
+    let output = report.fit_output(|report| {
+        let toon = render_code_slice(report);
+        serialized_output(format, &toon, report)
+    })?;
+    write_stdout(&output)?;
+    drop(record_usage_text(
+        store,
+        usage_instance,
+        session,
+        command,
+        path,
+        query,
+        baseline_text,
+        &output,
+    ));
+    Ok(())
+}
+
 /// Agent-facing payload for a CLI purpose update.
 #[derive(Debug, Serialize)]
 struct PurposeSetReport {
@@ -3391,14 +3578,15 @@ impl RequiredCliCommand {
                     symbol_kind: None,
                     symbol_signature: None,
                     symbol_line: None,
+                    output_bytes: CodeSliceBudget::DEFAULT_OUTPUT_BYTES,
                 },
             },
             Self::Symbols => Command::Symbols {
-                command: SymbolsCommand::List {
+                command: Box::new(SymbolsCommand::List {
                     file: None,
                     query: None,
                     limit: 1,
-                },
+                }),
             },
             Self::Settings => Command::Settings,
             #[cfg(feature = "optional-parser-supervisor")]
@@ -4310,7 +4498,7 @@ mod tests {
         ])?;
         require_condition(
             matches!(
-                cli.command,
+                *cli.command,
                 Command::Search {
                     retrieval_mode: SearchRetrievalModeArg::Semantic,
                     ..
@@ -4397,7 +4585,7 @@ mod tests {
             let parsed = Cli::try_parse_from(arguments)?;
             require_condition(
                 matches!(
-                    parsed.command,
+                    *parsed.command,
                     Command::ParserPack {
                         command: ParserPackCommand::Verify { .. }
                             | ParserPackCommand::Install { .. }

@@ -24,7 +24,8 @@ use crate::runtime::{
     render_health_page, render_purpose_curation_page, render_purpose_review_report,
     reset_index_files, review_purposes, run_init_bootstrap, run_scan_pipeline_controlled,
     run_single_watch_refresh_controlled, run_symbol_build_pipeline_controlled,
-    strip_legacy_purpose, telemetry_disabled, validated_indexed_file_key, watcher_status_report,
+    strip_legacy_purpose, telemetry_disabled, validate_purpose_review_admission,
+    validated_indexed_file_key, watcher_status_report,
 };
 use crate::token_tui::{
     TokenDashboardTheme, render_token_dashboard_plain_with_theme,
@@ -47,23 +48,24 @@ use projectatlas_core::toon::{
     render_symbol_relations, render_symbols, render_token_overview, render_token_trends,
 };
 use projectatlas_core::{
-    IndexWorkControl, IndexWorkFailure, NavigationNextCall, Overview, PurposeSource, PurposeStatus,
-    RankedConnection, RankedConnectionCount, RankedNode, RankedReasonCode,
-    normalize_native_path_display, normalize_repo_path, normalize_repo_path_prefix,
-    validated_repo_file_key, validated_repo_node_key,
+    IndexWorkControl, IndexWorkFailure, NavigationNextCall, NavigationNextCapability, Overview,
+    PurposeSource, PurposeStatus, RankedConnection, RankedConnectionCount, RankedNode,
+    RankedReasonCode, normalize_native_path_display, normalize_repo_path,
+    normalize_repo_path_prefix, validated_repo_file_key, validated_repo_node_key,
 };
 use projectatlas_db::{
     AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, RepositoryCoverageQuery,
     read_project_root_read_only, verify_project_database,
 };
 use projectatlas_service::{
-    COVERAGE_PAGE_MAX_LIMIT, DetailedRelationBudget, DetailedRelationQuery, RelationAnchor,
-    SearchQuery, ServiceError, SymbolSliceSelector, TokenReport, TokenReportRequest,
+    COVERAGE_PAGE_MAX_LIMIT, CodeSliceBudget, DetailedRelationBudget, DetailedRelationQuery,
+    GitImpactSelection, RelationAnalysisMode, RelationAnalysisQuery, RelationAnchor, SearchQuery,
+    ServiceError, SymbolSliceSelector, TokenReport, TokenReportRequest,
     build_file_summary_from_source, load_coverage_discovery, load_detailed_relation_page,
-    load_token_report, parse_coverage_parser, parse_coverage_relation, parse_coverage_state,
-    parse_relation_confidence, parse_relation_direction, parse_relation_resolution,
-    parse_symbol_kind, read_indexed_code_slice_from_source, read_symbol_slice_from_source,
-    search_indexed_files_with_control,
+    load_relation_analysis, load_token_report, parse_coverage_parser, parse_coverage_relation,
+    parse_coverage_state, parse_relation_confidence, parse_relation_direction,
+    parse_relation_resolution, parse_symbol_kind, read_indexed_code_slice_from_source_bounded,
+    read_symbol_slice_from_source_bounded, search_indexed_files_with_control,
 };
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
@@ -299,8 +301,12 @@ const MCP_PAYLOAD_TASK_CANCEL: &str = "task_cancel";
 const MCP_PAYLOAD_SESSION_CAPABILITIES: &str = "mcp_session";
 /// Session-brief argument key for per-call project roots.
 const MCP_BRIEF_ARG_PROJECT_PATH: &str = "project_path";
-/// Session-brief argument key for ranked query text.
-const MCP_BRIEF_ARG_QUERY: &str = "query";
+/// Session-brief argument key for exact repository-relative files.
+const MCP_BRIEF_ARG_FILE: &str = "file";
+/// Session-brief argument key for indexed search patterns.
+const MCP_BRIEF_ARG_PATTERN: &str = "pattern";
+/// Session-brief argument key for relation view selection.
+const MCP_BRIEF_ARG_VIEW: &str = "view";
 /// Session-brief argument key for row limits.
 const MCP_BRIEF_ARG_LIMIT: &str = "limit";
 /// Session-brief recommendation target for normal filesystem reads.
@@ -310,10 +316,14 @@ const MCP_BRIEF_REASON_SELECTED_INDEX_MISSING: &str = "selected_index_missing";
 /// Session-brief reason for filesystem fallback before an index exists.
 const MCP_BRIEF_REASON_FILESYSTEM_UNTIL_INDEX: &str =
     "use_filesystem_until_projectatlas_index_exists";
-/// Session-brief reason for choosing folders first.
-const MCP_BRIEF_REASON_CHOOSE_WORK_AREA: &str = "choose_work_area_before_source_reads";
-/// Session-brief reason for choosing files before details.
-const MCP_BRIEF_REASON_CHOOSE_FILES: &str = "choose_files_before_summary_or_slice";
+/// Session-brief reason for following the selected file into its summary.
+const MCP_BRIEF_REASON_RANKED_FILE_SUMMARY: &str = "ranked_file_ready_for_summary";
+/// Session-brief reason for following truncated graph evidence into detailed relations.
+const MCP_BRIEF_REASON_RANKED_FILE_RELATIONS: &str = "ranked_file_ready_for_relations";
+/// Session-brief reason for searching when ranking found no directly navigable file.
+const MCP_BRIEF_REASON_SEARCH_FALLBACK: &str = "no_ranked_file_candidate_search_index";
+/// Session-brief reason for normal filesystem orientation in an indexed empty project.
+const MCP_BRIEF_REASON_NO_FILE_CANDIDATE: &str = "no_ranked_file_candidate";
 /// Session-brief reason for health follow-up.
 const MCP_BRIEF_REASON_HEALTH_BLOCKERS: &str = "unresolved_health_blockers_present";
 /// Built-in task-progress contract message.
@@ -342,6 +352,8 @@ const MCP_EVENT_ATLAS_SYMBOL_RELATIONS: &str = "mcp.atlas_symbol_relations";
 const MCP_SYMBOL_RELATION_VIEW_LEGACY: &str = "legacy";
 /// Additive detailed MCP symbol-relation view name.
 const MCP_SYMBOL_RELATION_VIEW_DETAILED: &str = "detailed";
+/// Additive closed analysis view on the existing relation route.
+const MCP_SYMBOL_RELATION_VIEW_ANALYSIS: &str = "analysis";
 /// Default direction for detailed MCP symbol-relation requests.
 const MCP_SYMBOL_RELATION_DIRECTION_DEFAULT: &str = "outbound";
 /// Default minimum confidence for detailed MCP symbol-relation requests.
@@ -815,6 +827,8 @@ struct AtlasSliceParams {
     symbol_signature: Option<String>,
     /// Optional source line for disambiguating `symbol`.
     symbol_line: Option<usize>,
+    /// Maximum encoded bytes admitted to the slice response.
+    output_bytes: Option<u32>,
 }
 
 /// MCP parameter payload for symbol and relation lookup.
@@ -832,7 +846,7 @@ struct AtlasSymbolsParams {
     limit: Option<usize>,
 }
 
-/// MCP parameters for legacy or detailed symbol-relation navigation.
+/// MCP parameters for legacy, detailed, or closed-analysis relation navigation.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct AtlasSymbolRelationsParams {
     /// Optional project root for this call. Defaults to the active MCP project.
@@ -843,7 +857,7 @@ struct AtlasSymbolRelationsParams {
     nearest_project: Option<bool>,
     /// Optional legacy source, target, context, or path query.
     query: Option<String>,
-    /// Preserve `legacy` rows or opt in to `detailed` normalized-graph navigation.
+    /// Preserve `legacy`, opt in to `detailed`, or select closed `analysis`.
     view: Option<String>,
     /// Resume one exact generation- and purpose-bound detailed page.
     cursor: Option<String>,
@@ -883,8 +897,138 @@ struct AtlasSymbolRelationsParams {
     deadline_ms: Option<u64>,
     /// Maximum encoded bytes admitted to the detailed response.
     output_bytes: Option<u32>,
+    /// Closed analysis mode: `architecture`, `impact`, or `trace`.
+    analysis_mode: Option<String>,
+    /// Exact target symbol name for trace mode.
+    trace_target: Option<String>,
+    /// Exact target file for trace mode; alone selects a file target.
+    trace_target_file: Option<String>,
+    /// Exact target parent for symbol trace mode.
+    trace_target_parent: Option<String>,
+    /// Exact target kind required by symbol trace mode.
+    trace_target_kind: Option<String>,
+    /// Exact target signature required by symbol trace mode.
+    trace_target_signature: Option<String>,
+    /// Impact VCS scope: `working_tree`, `index`, or `revision_range`.
+    vcs: Option<String>,
+    /// Older Git revision used by `revision_range`.
+    vcs_base: Option<String>,
+    /// Newer Git revision used by `revision_range`.
+    vcs_head: Option<String>,
+    /// Include communities with containment excluded.
+    include_communities: Option<bool>,
+    /// Include dependency SCC findings.
+    include_cycles: Option<bool>,
+    /// Include conservative dead-code candidates.
+    include_dead_code: Option<bool>,
     /// Maximum legacy or detailed relation rows to return.
     limit: Option<usize>,
+}
+
+/// Return whether any closed analysis-only control was supplied.
+fn relation_analysis_controls_present(params: &AtlasSymbolRelationsParams) -> bool {
+    params.analysis_mode.is_some()
+        || params.trace_target.is_some()
+        || params.trace_target_file.is_some()
+        || params.trace_target_parent.is_some()
+        || params.trace_target_kind.is_some()
+        || params.trace_target_signature.is_some()
+        || params.vcs.is_some()
+        || params.vcs_base.is_some()
+        || params.vcs_head.is_some()
+        || params.include_communities.is_some()
+        || params.include_cycles.is_some()
+        || params.include_dead_code.is_some()
+}
+
+/// Decode and validate the optional exact trace target.
+fn relation_analysis_trace_target(
+    store: &AtlasStore,
+    params: &AtlasSymbolRelationsParams,
+) -> Result<Option<RelationAnchor>, CliError> {
+    match (&params.trace_target, &params.trace_target_file) {
+        (Some(name), Some(file)) => {
+            let file = validated_indexed_file_key(store, Path::new(file))?;
+            let kind = params.trace_target_kind.as_deref().ok_or_else(|| {
+                CliError::Service(ServiceError::InvalidInput(
+                    "symbol trace targets require trace_target_kind".to_string(),
+                ))
+            })?;
+            let signature = params.trace_target_signature.clone().ok_or_else(|| {
+                CliError::Service(ServiceError::InvalidInput(
+                    "symbol trace targets require trace_target_signature".to_string(),
+                ))
+            })?;
+            Ok(Some(RelationAnchor::Symbol {
+                file: RepositoryFilePath::new(Path::new(&file)).map_err(|error| {
+                    CliError::Service(ServiceError::InvalidInput(error.to_string()))
+                })?,
+                name: name.clone(),
+                symbol_kind: Some(parse_symbol_kind(kind)?),
+                parent: params.trace_target_parent.clone(),
+                signature: Some(signature),
+            }))
+        }
+        (None, Some(file)) => {
+            if params.trace_target_parent.is_some()
+                || params.trace_target_kind.is_some()
+                || params.trace_target_signature.is_some()
+            {
+                return Err(CliError::Service(ServiceError::InvalidInput(
+                    "trace target symbol disambiguators require trace_target".to_string(),
+                )));
+            }
+            let file = validated_indexed_file_key(store, Path::new(file))?;
+            Ok(Some(RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new(&file)).map_err(|error| {
+                    CliError::Service(ServiceError::InvalidInput(error.to_string()))
+                })?,
+            }))
+        }
+        (Some(_), None) => Err(CliError::Service(ServiceError::InvalidInput(
+            "trace_target requires trace_target_file".to_string(),
+        ))),
+        (None, None) => Ok(None),
+    }
+}
+
+/// Decode and validate the optional VCS impact selector.
+fn relation_analysis_vcs(
+    params: &AtlasSymbolRelationsParams,
+) -> Result<GitImpactSelection, CliError> {
+    match params.vcs.as_deref().unwrap_or("working_tree") {
+        "working_tree" => {
+            if params.vcs_base.is_some() || params.vcs_head.is_some() {
+                return Err(CliError::Service(ServiceError::InvalidInput(
+                    "vcs_base and vcs_head require vcs=revision_range".to_string(),
+                )));
+            }
+            Ok(GitImpactSelection::WorkingTree)
+        }
+        "index" => {
+            if params.vcs_base.is_some() || params.vcs_head.is_some() {
+                return Err(CliError::Service(ServiceError::InvalidInput(
+                    "vcs_base and vcs_head require vcs=revision_range".to_string(),
+                )));
+            }
+            Ok(GitImpactSelection::Index)
+        }
+        "revision_range" => Ok(GitImpactSelection::RevisionRange {
+            base: params.vcs_base.clone().ok_or_else(|| {
+                CliError::Service(ServiceError::InvalidInput(
+                    "vcs=revision_range requires vcs_base".to_string(),
+                ))
+            })?,
+            head: params.vcs_head.clone().ok_or_else(|| {
+                CliError::Service(ServiceError::InvalidInput(
+                    "vcs=revision_range requires vcs_head".to_string(),
+                ))
+            })?,
+        }),
+        value => Err(CliError::Service(ServiceError::InvalidInput(format!(
+            "unsupported analysis VCS selection {value:?}"
+        )))),
+    }
 }
 
 /// MCP parameter payload for token savings reports.
@@ -1666,10 +1810,12 @@ struct McpBriefRecommendation {
 enum McpBriefRecommendationKind {
     /// Refresh or create the `ProjectAtlas` index.
     Scan,
-    /// Rank folders.
-    Folders,
-    /// Rank files.
-    Files,
+    /// Inspect the already-ranked file summary.
+    Summary,
+    /// Search the index when ranking has no directly navigable file.
+    Search,
+    /// Inspect detailed relations for the already-ranked file.
+    Relations,
     /// Inspect structural health.
     Health,
     /// Read exact source or non-indexed files with normal filesystem tools.
@@ -2698,6 +2844,7 @@ impl ProjectAtlasMcpServer {
             let purposes_truncated = purpose_queue.truncated;
             let folders_truncated = folder_rows.len() > folder_limit;
             let files_truncated = file_rows.len() > file_limit;
+            let next_navigation_call = file_rows.first().map(|row| row.next_call.clone());
             Ok(McpSessionBrief {
                 project: Self::selected_project_capability(&state),
                 policy: self.brief_policy(),
@@ -2714,6 +2861,7 @@ impl ProjectAtlasMcpServer {
                     .collect(),
                 recommendations: Self::indexed_project_recommendations(
                     &query,
+                    next_navigation_call,
                     blockers.total,
                     blocker_limit,
                     selected_project_path.clone(),
@@ -2822,32 +2970,56 @@ impl ProjectAtlasMcpServer {
     /// Recommend next calls for an indexed project.
     fn indexed_project_recommendations(
         query: &str,
+        next_navigation_call: Option<NavigationNextCall>,
         blocker_total: usize,
         blocker_limit: usize,
         project_path: Option<String>,
     ) -> Vec<McpBriefRecommendation> {
-        let mut recommendations = vec![
-            McpBriefRecommendation {
-                kind: McpBriefRecommendationKind::Folders,
-                target: MCP_TOOL_ATLAS_FOLDERS.to_string(),
-                reason: MCP_BRIEF_REASON_CHOOSE_WORK_AREA.to_string(),
+        let mut recommendations = match next_navigation_call {
+            Some(next_call) if next_call.capability == NavigationNextCapability::Summary => {
+                vec![McpBriefRecommendation {
+                    kind: McpBriefRecommendationKind::Summary,
+                    target: MCP_TOOL_ATLAS_FILE_SUMMARY.to_string(),
+                    reason: MCP_BRIEF_REASON_RANKED_FILE_SUMMARY.to_string(),
+                    arguments: Self::brief_call_arguments(
+                        project_path.clone(),
+                        &[(MCP_BRIEF_ARG_FILE, &next_call.path)],
+                        None,
+                    ),
+                }]
+            }
+            Some(next_call) if next_call.capability == NavigationNextCapability::Relations => {
+                vec![McpBriefRecommendation {
+                    kind: McpBriefRecommendationKind::Relations,
+                    target: MCP_TOOL_ATLAS_SYMBOL_RELATIONS.to_string(),
+                    reason: MCP_BRIEF_REASON_RANKED_FILE_RELATIONS.to_string(),
+                    arguments: Self::brief_call_arguments(
+                        project_path.clone(),
+                        &[
+                            (MCP_BRIEF_ARG_FILE, &next_call.path),
+                            (MCP_BRIEF_ARG_VIEW, "detailed"),
+                        ],
+                        None,
+                    ),
+                }]
+            }
+            _ if !query.trim().is_empty() => vec![McpBriefRecommendation {
+                kind: McpBriefRecommendationKind::Search,
+                target: MCP_TOOL_ATLAS_SEARCH.to_string(),
+                reason: MCP_BRIEF_REASON_SEARCH_FALLBACK.to_string(),
                 arguments: Self::brief_call_arguments(
                     project_path.clone(),
-                    Some((MCP_BRIEF_ARG_QUERY, query)),
+                    &[(MCP_BRIEF_ARG_PATTERN, query)],
                     None,
                 ),
-            },
-            McpBriefRecommendation {
-                kind: McpBriefRecommendationKind::Files,
-                target: MCP_TOOL_ATLAS_FILES.to_string(),
-                reason: MCP_BRIEF_REASON_CHOOSE_FILES.to_string(),
-                arguments: Self::brief_call_arguments(
-                    project_path.clone(),
-                    Some((MCP_BRIEF_ARG_QUERY, query)),
-                    None,
-                ),
-            },
-        ];
+            }],
+            _ => vec![McpBriefRecommendation {
+                kind: McpBriefRecommendationKind::FilesystemTools,
+                target: MCP_BRIEF_TARGET_FILESYSTEM_TOOLS.to_string(),
+                reason: MCP_BRIEF_REASON_NO_FILE_CANDIDATE.to_string(),
+                arguments: Self::project_path_arguments(project_path.clone()),
+            }],
+        };
         if blocker_total > 0 {
             recommendations.push(McpBriefRecommendation {
                 kind: McpBriefRecommendationKind::Health,
@@ -2855,7 +3027,7 @@ impl ProjectAtlasMcpServer {
                 reason: MCP_BRIEF_REASON_HEALTH_BLOCKERS.to_string(),
                 arguments: Self::brief_call_arguments(
                     project_path,
-                    None,
+                    &[],
                     Some((MCP_BRIEF_ARG_LIMIT, blocker_limit)),
                 ),
             });
@@ -2874,7 +3046,7 @@ impl ProjectAtlasMcpServer {
     /// Build recommendation call arguments with optional project path and one payload argument.
     fn brief_call_arguments(
         project_path: Option<String>,
-        string_arg: Option<(&'static str, &str)>,
+        string_args: &[(&'static str, &str)],
         usize_arg: Option<(&'static str, usize)>,
     ) -> serde_json::Value {
         let mut arguments = serde_json::Map::new();
@@ -2884,10 +3056,10 @@ impl ProjectAtlasMcpServer {
                 serde_json::Value::String(path),
             );
         }
-        if let Some((key, value)) = string_arg {
+        for (key, value) in string_args {
             arguments.insert(
-                key.to_string(),
-                serde_json::Value::String(value.to_string()),
+                (*key).to_string(),
+                serde_json::Value::String((*value).to_string()),
             );
         }
         if let Some((key, value)) = usize_arg {
@@ -4811,8 +4983,13 @@ impl ProjectAtlasMcpServer {
                 let file_key = validated_indexed_file_key(store, Path::new(&resolved.key))?;
                 let file = PathBuf::from(&file_key);
                 let content = read_indexed_file_content(store, &file_key)?;
+                let output_budget = CodeSliceBudget::new(
+                    params
+                        .output_bytes
+                        .unwrap_or(CodeSliceBudget::DEFAULT_OUTPUT_BYTES),
+                )?;
                 let report = if let Some(symbol) = params.symbol.as_ref() {
-                    read_symbol_slice_from_source(
+                    read_symbol_slice_from_source_bounded(
                         store,
                         &file,
                         &SymbolSliceSelector {
@@ -4823,6 +5000,7 @@ impl ProjectAtlasMcpServer {
                             line: params.symbol_line,
                         },
                         &content,
+                        output_budget,
                     )?
                 } else {
                     if params.symbol_parent.is_some()
@@ -4837,22 +5015,25 @@ impl ProjectAtlasMcpServer {
                     let start_line = params.start_line.ok_or_else(|| {
                         CliError::InvalidInput(START_LINE_REQUIRED_ERROR.to_string())
                     })?;
-                    read_indexed_code_slice_from_source(
+                    read_indexed_code_slice_from_source_bounded(
                         store,
                         &file,
                         start_line,
                         params.end_line,
                         &content,
+                        output_budget,
                     )?
                 };
-                let toon = Self::with_selected_project_audit(
-                    &state,
-                    resolved.routed_project,
-                    render_code_slice(&report),
-                )?;
+                let toon = report.fit_output(|report| {
+                    Self::with_selected_project_audit(
+                        &state,
+                        resolved.routed_project,
+                        render_code_slice(report),
+                    )
+                })?;
                 let usage = Some(McpUsageIntent::text(
                     MCP_EVENT_ATLAS_SLICE,
-                    Some(report.path),
+                    Some(report.slice().path.clone()),
                     content,
                 ));
                 Ok((toon, usage))
@@ -4988,19 +5169,25 @@ impl ProjectAtlasMcpServer {
         context: Option<RequestContext<RoleServer>>,
     ) -> String {
         Self::as_mcp_text((|| {
-            let detailed = match params
+            let (detailed, analysis) = match params
                 .view
                 .as_deref()
                 .unwrap_or(MCP_SYMBOL_RELATION_VIEW_LEGACY)
             {
-                MCP_SYMBOL_RELATION_VIEW_LEGACY => false,
-                MCP_SYMBOL_RELATION_VIEW_DETAILED => true,
+                MCP_SYMBOL_RELATION_VIEW_LEGACY => (false, false),
+                MCP_SYMBOL_RELATION_VIEW_DETAILED => (true, false),
+                MCP_SYMBOL_RELATION_VIEW_ANALYSIS => (true, true),
                 _unsupported => {
                     return Err(CliError::Service(ServiceError::InvalidInput(
                         MCP_ERROR_SYMBOL_RELATION_VIEW.to_string(),
                     )));
                 }
             };
+            if !analysis && relation_analysis_controls_present(params) {
+                return Err(CliError::Service(ServiceError::InvalidInput(
+                    "analysis controls require view=analysis".to_string(),
+                )));
+            }
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let (state, file, routed_project) = self.state_and_optional_file_key(
                 params.project_path.as_deref(),
@@ -5073,47 +5260,102 @@ impl ProjectAtlasMcpServer {
                         .map_err(|error| {
                             CliError::Service(ServiceError::InvalidInput(error.to_string()))
                         })?;
-                        let draft = load_detailed_relation_page(
-                            store,
-                            &DetailedRelationQuery {
-                                anchor,
-                                direction: parse_relation_direction(
-                                    params
-                                        .direction
-                                        .as_deref()
-                                        .unwrap_or(MCP_SYMBOL_RELATION_DIRECTION_DEFAULT),
-                                )?,
-                                relation: params
-                                    .relation
+                        let relations = DetailedRelationQuery {
+                            anchor,
+                            direction: parse_relation_direction(
+                                params
+                                    .direction
                                     .as_deref()
-                                    .map(parse_coverage_relation)
-                                    .transpose()?,
-                                minimum_confidence: parse_relation_confidence(
-                                    params
-                                        .minimum_confidence
-                                        .as_deref()
-                                        .unwrap_or(MCP_SYMBOL_RELATION_CONFIDENCE_DEFAULT),
+                                    .unwrap_or(MCP_SYMBOL_RELATION_DIRECTION_DEFAULT),
+                            )?,
+                            relation: params
+                                .relation
+                                .as_deref()
+                                .map(parse_coverage_relation)
+                                .transpose()?,
+                            minimum_confidence: parse_relation_confidence(
+                                params
+                                    .minimum_confidence
+                                    .as_deref()
+                                    .unwrap_or(MCP_SYMBOL_RELATION_CONFIDENCE_DEFAULT),
+                            )?,
+                            resolution: parse_relation_resolution(
+                                params
+                                    .resolution
+                                    .as_deref()
+                                    .unwrap_or(MCP_SYMBOL_RELATION_RESOLUTION_DEFAULT),
+                            )?,
+                            include_occurrences: params.include_occurrences.unwrap_or(false),
+                            budget: DetailedRelationBudget::from_graph_limits(limits)
+                                .with_aggregate_limits(
+                                    params.edge_limit,
+                                    params.node_limit,
+                                    params.visited_limit,
+                                    params.occurrence_total_limit,
+                                    params.intermediate_bytes,
+                                    params.deadline_ms,
                                 )?,
-                                resolution: parse_relation_resolution(
-                                    params
-                                        .resolution
-                                        .as_deref()
-                                        .unwrap_or(MCP_SYMBOL_RELATION_RESOLUTION_DEFAULT),
-                                )?,
-                                include_occurrences: params.include_occurrences.unwrap_or(false),
-                                budget: DetailedRelationBudget::from_graph_limits(limits)
-                                    .with_aggregate_limits(
-                                        params.edge_limit,
-                                        params.node_limit,
-                                        params.visited_limit,
-                                        params.occurrence_total_limit,
-                                        params.intermediate_bytes,
-                                        params.deadline_ms,
+                            cursor: params.cursor.clone(),
+                        };
+                        if analysis {
+                            let mode =
+                                match params.analysis_mode.as_deref().unwrap_or("architecture") {
+                                    "architecture" => RelationAnalysisMode::Architecture,
+                                    "impact" => RelationAnalysisMode::Impact,
+                                    "trace" => RelationAnalysisMode::Trace,
+                                    value => {
+                                        return Err(CliError::Service(ServiceError::InvalidInput(
+                                            format!("unsupported relation analysis mode {value:?}"),
+                                        )));
+                                    }
+                                };
+                            let trace_target = relation_analysis_trace_target(store, params)?;
+                            let vcs_explicit = params.vcs.is_some()
+                                || params.vcs_base.is_some()
+                                || params.vcs_head.is_some();
+                            let vcs = relation_analysis_vcs(params)?;
+                            let draft = load_relation_analysis(
+                                store,
+                                &RelationAnalysisQuery {
+                                    relations,
+                                    mode,
+                                    trace_target,
+                                    vcs: (mode == RelationAnalysisMode::Impact || vcs_explicit)
+                                        .then_some(vcs),
+                                    include_communities: params
+                                        .include_communities
+                                        .unwrap_or(false),
+                                    include_cycles: params.include_cycles.unwrap_or(false),
+                                    include_dead_code: params.include_dead_code.unwrap_or(false),
+                                },
+                                Some(control),
+                            )?;
+                            let (_report, toon) = draft.fit_output(|report| {
+                                Self::with_selected_project_audit(
+                                    &state,
+                                    routed_project,
+                                    Self::encode_named_payload(
+                                        MCP_PAYLOAD_SYMBOL_RELATIONS,
+                                        report,
                                     )?,
-                                cursor: params.cursor.clone(),
-                            },
-                            Some(control),
-                        )?;
+                                )
+                            })?;
+                            let usage = Self::telemetry_enabled()
+                                .then(|| {
+                                    estimated_source_tokens_for_paths(store, std::iter::once(file))
+                                })
+                                .and_then(Result::ok)
+                                .map(|baseline_tokens| {
+                                    McpUsageIntent::estimate(
+                                        MCP_EVENT_ATLAS_SYMBOL_RELATIONS,
+                                        Some(file.to_string()),
+                                        params.symbol.clone(),
+                                        baseline_tokens,
+                                    )
+                                });
+                            return Ok((toon, usage));
+                        }
+                        let draft = load_detailed_relation_page(store, &relations, Some(control))?;
                         let (_report, toon) = draft.fit_output(Some(control), |report| {
                             Self::with_selected_project_audit(
                                 &state,
@@ -5172,7 +5414,7 @@ impl ProjectAtlasMcpServer {
     /// List indexed symbol relations.
     #[tool(
         name = "atlas_symbol_relations",
-        description = "List legacy symbol relations unchanged, or opt in to bounded detailed inbound/outbound normalized-graph navigation with exact anchors, relation, confidence, resolution, occurrence, depth, and output limits."
+        description = "List legacy symbol relations unchanged, opt in to bounded detailed inbound/outbound normalized-graph navigation, or select the closed analysis view for architecture, VCS impact, or static trace with exact anchors and hard relation/output limits."
     )]
     fn atlas_symbol_relations(
         &self,
@@ -5663,7 +5905,6 @@ impl ProjectAtlasMcpServer {
     ) -> String {
         Self::as_mcp_text((|| {
             let apply = params.apply.unwrap_or(false);
-            let state = self.state_for_project_path(params.project_path)?;
             let requests = params
                 .items
                 .into_iter()
@@ -5676,6 +5917,8 @@ impl ProjectAtlasMcpServer {
                     state_token: item.state_token,
                 })
                 .collect::<Vec<_>>();
+            validate_purpose_review_admission(&requests)?;
+            let state = self.state_for_project_path(params.project_path)?;
             if apply {
                 let store = Self::open_existing_mut_store(&state)?;
                 let report = review_purposes(&store, &requests, true)?;
@@ -6603,6 +6846,131 @@ mod tests {
                 && bounded.contains("Own café λ relation navigation")
                 && bounded.contains(&format!("rendered_output_bytes: {}", bounded.len())),
             "detailed MCP relation output did not enforce or report the exact routed envelope bytes",
+        )?;
+
+        let analysis = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                project_path: Some(project_path.to_string()),
+                file: Some("src/lib.rs".to_string()),
+                nearest_project: Some(false),
+                view: Some("analysis".to_string()),
+                symbol: Some("first".to_string()),
+                direction: Some("outbound".to_string()),
+                depth: Some(2),
+                limit: Some(50),
+                output_bytes: Some(64 * 1024),
+                include_communities: Some(true),
+                include_cycles: Some(true),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            analysis.contains("symbol_relations:")
+                && analysis.contains("mode: architecture")
+                && analysis.contains("findings[")
+                && analysis.contains("next_call:")
+                && analysis.contains("work:"),
+            "MCP relation analysis omitted its closed mode, findings, work, or reusable next call",
+        )?;
+
+        let impact = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                project_path: Some(project_path.to_string()),
+                file: Some("src/lib.rs".to_string()),
+                nearest_project: Some(false),
+                view: Some("analysis".to_string()),
+                symbol: Some("first".to_string()),
+                direction: Some("outbound".to_string()),
+                depth: Some(2),
+                limit: Some(50),
+                analysis_mode: Some("impact".to_string()),
+                vcs: Some("working_tree".to_string()),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            impact.contains("mode: impact")
+                && (impact.contains("state: available") || impact.contains("state: unavailable")),
+            "MCP impact analysis omitted its closed mode or typed VCS state",
+        )?;
+
+        let trace = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                project_path: Some(project_path.to_string()),
+                file: Some("src/lib.rs".to_string()),
+                nearest_project: Some(false),
+                view: Some("analysis".to_string()),
+                symbol: Some("first".to_string()),
+                direction: Some("outbound".to_string()),
+                depth: Some(2),
+                limit: Some(50),
+                analysis_mode: Some("trace".to_string()),
+                trace_target: Some("second".to_string()),
+                trace_target_file: Some("src/lib.rs".to_string()),
+                trace_target_kind: Some("function".to_string()),
+                trace_target_signature: Some("fn second ( )".to_string()),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            trace.contains("mode: trace")
+                && trace.contains("kind: static_trace")
+                && trace.contains("status: confirmed")
+                && trace.contains("name: second")
+                && trace.contains("capability: symbol_slice"),
+            "MCP trace analysis omitted its confirmed path or reusable exact selector",
+        )?;
+
+        let misplaced = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                project_path: Some(project_path.to_string()),
+                file: Some("src/lib.rs".to_string()),
+                nearest_project: Some(false),
+                view: Some("detailed".to_string()),
+                analysis_mode: Some("impact".to_string()),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            misplaced.contains("analysis controls require view=analysis"),
+            "MCP detailed relation view accepted analysis-only controls",
+        )?;
+
+        let missing_trace_target = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                project_path: Some(project_path.to_string()),
+                file: Some("src/lib.rs".to_string()),
+                nearest_project: Some(false),
+                view: Some("analysis".to_string()),
+                analysis_mode: Some("trace".to_string()),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            missing_trace_target.contains("analysis trace requires an exact file or symbol target"),
+            "MCP trace analysis accepted a missing exact target",
+        )?;
+
+        let misplaced_vcs = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                project_path: Some(project_path.to_string()),
+                file: Some("src/lib.rs".to_string()),
+                nearest_project: Some(false),
+                view: Some("analysis".to_string()),
+                analysis_mode: Some("architecture".to_string()),
+                vcs: Some("working_tree".to_string()),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            misplaced_vcs.contains("VCS selection is valid only for impact analysis"),
+            "MCP silently dropped an explicit VCS selector outside impact mode",
         )
     }
 
@@ -6845,6 +7213,10 @@ mod tests {
         let project_path = "F:/example/repo-b".to_string();
         let recommendations = ProjectAtlasMcpServer::indexed_project_recommendations(
             "startup",
+            Some(NavigationNextCall {
+                capability: NavigationNextCapability::Summary,
+                path: "src/lib.rs".to_string(),
+            }),
             1,
             7,
             Some(project_path.clone()),
@@ -6859,11 +7231,19 @@ mod tests {
         )?;
         require(
             recommendations.iter().any(|recommendation| {
-                matches!(recommendation.kind, McpBriefRecommendationKind::Folders)
-                    && recommendation.arguments.get(MCP_BRIEF_ARG_QUERY)
-                        == Some(&serde_json::Value::String("startup".to_string()))
+                matches!(recommendation.kind, McpBriefRecommendationKind::Summary)
+                    && recommendation.target == MCP_TOOL_ATLAS_FILE_SUMMARY
+                    && recommendation.arguments.get(MCP_BRIEF_ARG_FILE)
+                        == Some(&serde_json::Value::String("src/lib.rs".to_string()))
             }),
-            "folder recommendation did not preserve query",
+            "summary recommendation did not preserve the ranked file selector",
+        )?;
+        require(
+            recommendations.iter().all(|recommendation| {
+                recommendation.target != MCP_TOOL_ATLAS_FOLDERS
+                    && recommendation.target != MCP_TOOL_ATLAS_FILES
+            }),
+            "indexed brief recommended rerunning folder or file ranking",
         )?;
         require(
             recommendations.iter().any(|recommendation| {
@@ -6872,6 +7252,28 @@ mod tests {
                         == Some(&serde_json::json!(7))
             }),
             "health recommendation did not preserve limit",
+        )?;
+
+        let relation_recommendations = ProjectAtlasMcpServer::indexed_project_recommendations(
+            "startup",
+            Some(NavigationNextCall {
+                capability: NavigationNextCapability::Relations,
+                path: "src/graph.rs".to_string(),
+            }),
+            0,
+            7,
+            Some(project_path),
+        );
+        require(
+            relation_recommendations.iter().any(|recommendation| {
+                matches!(recommendation.kind, McpBriefRecommendationKind::Relations)
+                    && recommendation.target == MCP_TOOL_ATLAS_SYMBOL_RELATIONS
+                    && recommendation.arguments.get(MCP_BRIEF_ARG_FILE)
+                        == Some(&serde_json::Value::String("src/graph.rs".to_string()))
+                    && recommendation.arguments.get(MCP_BRIEF_ARG_VIEW)
+                        == Some(&serde_json::Value::String("detailed".to_string()))
+            }),
+            "relation recommendation did not preserve the ranked file and detailed view",
         )?;
 
         Ok(())
@@ -6912,6 +7314,15 @@ mod tests {
             brief.files.is_empty(),
             "session brief returned a content-only indexed-text hit",
         )?;
+        require(
+            brief.recommendations.iter().any(|recommendation| {
+                matches!(recommendation.kind, McpBriefRecommendationKind::Search)
+                    && recommendation.target == MCP_TOOL_ATLAS_SEARCH
+                    && recommendation.arguments.get(MCP_BRIEF_ARG_PATTERN)
+                        == Some(&serde_json::Value::String("hiddenNeedle".to_string()))
+            }),
+            "session brief did not route a content-only query directly to indexed search",
+        )?;
 
         let navigable = server.build_session_brief(
             AtlasSessionBriefParams {
@@ -6931,10 +7342,21 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("navigable brief file is missing"))?;
         require(
             candidate.reason_codes.contains(&RankedReasonCode::Path)
-                && candidate.next_call.capability
-                    == projectatlas_core::NavigationNextCapability::Summary
+                && candidate.next_call.capability == NavigationNextCapability::Summary
                 && !candidate.purpose_agent_reviewed,
             "session brief dropped ranked navigation evidence",
+        )?;
+        require(
+            navigable.recommendations.iter().any(|recommendation| {
+                matches!(recommendation.kind, McpBriefRecommendationKind::Summary)
+                    && recommendation.target == MCP_TOOL_ATLAS_FILE_SUMMARY
+                    && recommendation.arguments.get(MCP_BRIEF_ARG_FILE)
+                        == Some(&serde_json::Value::String(candidate.path.clone()))
+            }) && navigable.recommendations.iter().all(|recommendation| {
+                recommendation.target != MCP_TOOL_ATLAS_FOLDERS
+                    && recommendation.target != MCP_TOOL_ATLAS_FILES
+            }),
+            "session brief recommendation did not follow its returned ranked file directly",
         )?;
 
         Ok(())

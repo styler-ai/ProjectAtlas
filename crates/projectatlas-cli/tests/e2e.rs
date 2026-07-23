@@ -319,6 +319,213 @@ fn detailed_relation_cli_bounds_the_exact_json_envelope() -> Result<(), Box<dyn 
         "Own café λ relation navigation",
     )?;
     require_json_usize(&payload, &["symbol_relations", "returned"], 0)?;
+
+    let analysis = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "--format",
+            "json",
+            "symbols",
+            "relations",
+            "--view",
+            "analysis",
+            "--file",
+            "src/lib.rs",
+            "--symbol",
+            "first",
+            "--direction",
+            "outbound",
+            "--depth",
+            "2",
+            "--limit",
+            "50",
+            "--output-bytes",
+            &page_output_bytes.to_string(),
+            "--include-communities",
+            "--include-cycles",
+        ])
+        .output()?;
+    if !analysis.status.success() {
+        return Err(io::Error::other(format!(
+            "public relation analysis CLI failed: {}",
+            String::from_utf8_lossy(&analysis.stderr)
+        ))
+        .into());
+    }
+    let analysis_payload: Value = serde_json::from_slice(&analysis.stdout)?;
+    require_json_string(
+        &analysis_payload,
+        &["symbol_relations", "mode"],
+        "architecture",
+    )?;
+    require_json_usize(
+        &analysis_payload,
+        &["symbol_relations", "work", "rendered_output_bytes"],
+        analysis.stdout.len(),
+    )?;
+    if analysis_payload
+        .pointer("/symbol_relations/findings")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+        || !String::from_utf8_lossy(&analysis.stdout).contains("next_call")
+    {
+        return Err(io::Error::other(
+            "public relation analysis CLI omitted findings or reusable next-call routing",
+        )
+        .into());
+    }
+
+    let impact = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "--format",
+            "json",
+            "symbols",
+            "relations",
+            "--view",
+            "analysis",
+            "--file",
+            "src/lib.rs",
+            "--symbol",
+            "first",
+            "--direction",
+            "outbound",
+            "--depth",
+            "2",
+            "--limit",
+            "50",
+            "--analysis-mode",
+            "impact",
+            "--vcs",
+            "working-tree",
+        ])
+        .output()?;
+    if !impact.status.success() {
+        return Err(io::Error::other(format!(
+            "public impact analysis CLI failed: {}",
+            String::from_utf8_lossy(&impact.stderr)
+        ))
+        .into());
+    }
+    let impact_payload: Value = serde_json::from_slice(&impact.stdout)?;
+    require_json_string(&impact_payload, &["symbol_relations", "mode"], "impact")?;
+    if !matches!(
+        impact_payload.pointer("/symbol_relations/vcs/state"),
+        Some(Value::String(state)) if state == "available" || state == "unavailable"
+    ) {
+        return Err(io::Error::other("impact CLI omitted typed VCS state").into());
+    }
+
+    let trace_target = serde_json::json!({
+        "kind": "symbol",
+        "file": "src/lib.rs",
+        "name": "second",
+        "symbol_kind": "function",
+        "parent": null,
+        "signature": "fn second ( )"
+    })
+    .to_string();
+    let trace = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "--format",
+            "json",
+            "symbols",
+            "relations",
+            "--view",
+            "analysis",
+            "--file",
+            "src/lib.rs",
+            "--symbol",
+            "first",
+            "--direction",
+            "outbound",
+            "--depth",
+            "2",
+            "--limit",
+            "50",
+            "--analysis-mode",
+            "trace",
+            "--trace-target",
+            &trace_target,
+        ])
+        .output()?;
+    if !trace.status.success() {
+        return Err(io::Error::other(format!(
+            "public trace analysis CLI failed: {}",
+            String::from_utf8_lossy(&trace.stderr)
+        ))
+        .into());
+    }
+    let trace_payload: Value = serde_json::from_slice(&trace.stdout)?;
+    require_json_string(&trace_payload, &["symbol_relations", "mode"], "trace")?;
+    if !trace_payload
+        .pointer("/symbol_relations/findings")
+        .and_then(Value::as_array)
+        .is_some_and(|findings| {
+            findings.iter().any(|finding| {
+                finding.get("kind").and_then(Value::as_str) == Some("static_trace")
+                    && finding.get("status").and_then(Value::as_str) == Some("confirmed")
+                    && finding
+                        .get("nodes")
+                        .and_then(Value::as_array)
+                        .is_some_and(|nodes| {
+                            nodes.iter().any(|node| {
+                                node.pointer("/node/entity/selector/symbol/name")
+                                    .and_then(Value::as_str)
+                                    == Some("second")
+                                    && node.get("next_call").is_some()
+                            })
+                        })
+            })
+        })
+    {
+        return Err(io::Error::other(
+            "trace CLI omitted the confirmed path or exact reusable symbol selector",
+        )
+        .into());
+    }
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "symbols",
+            "relations",
+            "--view",
+            "detailed",
+            "--file",
+            "src/lib.rs",
+            "--analysis-mode",
+            "impact",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "analysis controls require --view analysis",
+        ));
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "symbols",
+            "relations",
+            "--view",
+            "analysis",
+            "--file",
+            "src/lib.rs",
+            "--analysis-mode",
+            "trace",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "analysis trace requires an exact file or symbol target",
+        ));
     Ok(())
 }
 
@@ -7581,10 +7788,15 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"atlas_purpose_review","arguments":{"apply":true,"items":[{"path":"src/lib.rs","confirm_existing":true}]}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"atlas_next","arguments":{"query":"indexed","limit":1}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"atlas_settings","arguments":{}}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"atlas_session_brief","arguments":{"query":"indexed","folder_limit":1,"file_limit":1,"blocker_limit":1}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"atlas_session_brief","arguments":{"query":"src/lib.rs","folder_limit":1,"file_limit":1,"blocker_limit":1}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"atlas_task_status","arguments":{"task_id":"task-progress-contract"}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"atlas_task_cancel","arguments":{"task_id":"task-progress-contract"}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"atlas_health","arguments":{"coverage":true,"path_prefix":"src/lib.rs","parser":"tree-sitter","provider":"tree-sitter","coverage_state":"complete","limit":1}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","file":"src/lib.rs","symbol":"indexed","direction":"outbound","depth":2,"limit":50,"output_bytes":65536,"include_communities":true,"include_cycles":true}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"atlas_slice","arguments":{"file":"src/lib.rs","symbol":"helper","symbol_kind":"function","symbol_signature":"fn helper ( )"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":25,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":"src/lib.rs"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":26,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","analysis_mode":"impact","vcs":"working_tree","file":"src/lib.rs","symbol":"indexed","direction":"outbound","depth":2,"limit":50,"output_bytes":65536}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":27,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","analysis_mode":"trace","file":"src/lib.rs","symbol":"indexed","direction":"outbound","depth":2,"limit":50,"output_bytes":65536,"trace_target":"helper","trace_target_file":"src/lib.rs","trace_target_kind":"function","trace_target_signature":"fn helper ( )"}}}"#.to_string(),
     ];
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let stdout = run_mcp_stdio(
@@ -7597,6 +7809,14 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         ],
         &messages,
     )?;
+    let session_brief_text = mcp_tool_text(&stdout, 19)?;
+    let analysis_text = mcp_tool_text(&stdout, 23)?;
+    let next_call_text = mcp_tool_text(&stdout, 24)?;
+    let recommended_summary_text = mcp_tool_text(&stdout, 25)?;
+    let impact_text = mcp_tool_text(&stdout, 26)?;
+    let trace_text = mcp_tool_text(&stdout, 27)?;
+    let session_brief_has_ready_call = session_brief_text.contains("target: atlas_file_summary")
+        && session_brief_text.contains("file: src/lib.rs");
     if !stdout.contains(r#""id":1"#)
         || !stdout.contains(r#""serverInfo":{"name":"ProjectAtlas","version":"#)
         || !stdout.contains(r#""name":"atlas_files""#)
@@ -7610,6 +7830,9 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains("mcp_session:")
         || !stdout.contains("path_scope: selected_project")
         || !stdout.contains("session_brief:")
+        || !session_brief_has_ready_call
+        || session_brief_text.contains("target: atlas_folders")
+        || session_brief_text.contains("target: atlas_files")
         || !stdout.contains("task_status:")
         || !stdout.contains("task_cancel:")
         || !stdout.contains("task-progress-contract")
@@ -7627,6 +7850,23 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains("purpose_review:")
         || !stdout.contains("failed: 0")
         || !stdout.contains("src/lib.rs")
+        || !analysis_text.contains("symbol_relations:")
+        || !analysis_text.contains("mode: architecture")
+        || !analysis_text.contains("findings[")
+        || !analysis_text.contains("next_call:")
+        || !analysis_text.contains("symbol_slice")
+        || !next_call_text.contains("fn helper()")
+        || !recommended_summary_text.contains("file_summary:")
+        || !recommended_summary_text.contains("src/lib.rs")
+        || !recommended_summary_text.contains("indexed")
+        || !impact_text.contains("mode: impact")
+        || (!impact_text.contains("state: available")
+            && !impact_text.contains("state: unavailable"))
+        || !trace_text.contains("mode: trace")
+        || !trace_text.contains("kind: static_trace")
+        || !trace_text.contains("status: confirmed")
+        || !trace_text.contains("name: helper")
+        || !trace_text.contains("capability: symbol_slice")
     {
         return Err(io::Error::other(format!(
             "mcp stdout did not include expected payloads: {stdout}"
@@ -12607,6 +12847,212 @@ fn purpose_review_batch_applies_agent_review_without_raw_sql() -> Result<(), Box
 }
 
 #[test]
+fn purpose_review_adapters_enforce_shared_input_budgets() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("main.rs"),
+        "pub fn main_entry() {}\n",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    let valid_review = temp.path().join("valid-review.json");
+    fs::write(
+        &valid_review,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "items": [{
+                "path": "src/main.rs",
+                "purpose": "Reviewed café λ entry point."
+            }]
+        }))?,
+    )?;
+    let json_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json"])
+        .arg("--db")
+        .arg(&db)
+        .args(["purpose", "review", "--from-file"])
+        .arg(&valid_review)
+        .output()?;
+    if !json_output.status.success() {
+        return Err(io::Error::other(format!(
+            "bounded JSON purpose review failed: {}",
+            String::from_utf8_lossy(&json_output.stderr)
+        ))
+        .into());
+    }
+    let json_report: Value = serde_json::from_slice(&json_output.stdout)?;
+    require_json_bool(&json_report, &["applied"], false)?;
+    require_json_string(
+        &json_report,
+        &["items", "0", "purpose"],
+        "Reviewed café λ entry point.",
+    )?;
+    if json_report.get("max_output_bytes").is_some() {
+        return Err(io::Error::other("purpose review changed its legacy JSON schema").into());
+    }
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["purpose", "review", "--from-file"])
+        .arg(&valid_review)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("purpose_review:"))
+        .stdout(predicate::str::contains("Reviewed café λ entry point."));
+
+    let oversized_item = temp.path().join("oversized-item-review.json");
+    fs::write(
+        &oversized_item,
+        serde_json::to_vec(&serde_json::json!({
+            "items": [{
+                "path": "src/main.rs",
+                "purpose": "x".repeat(64 * 1_024 + 1)
+            }]
+        }))?,
+    )?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["purpose", "review", "--from-file"])
+        .arg(&oversized_item)
+        .arg("--apply")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("field purpose"))
+        .stderr(predicate::str::contains("maximum is 65536"));
+    let unchanged = json_summary_command(&repo, &db, "src/main.rs")?;
+    require_json_bool(&unchanged, &["file_purpose_agent_reviewed"], false)?;
+
+    let oversized_file = temp.path().join("oversized-review.json");
+    fs::write(&oversized_file, vec![b' '; 2 * 1_024 * 1_024 + 1])?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["purpose", "review", "--from-file"])
+        .arg(&oversized_file)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "purpose review input file contains",
+        ))
+        .stderr(predicate::str::contains("maximum is 2097152"));
+
+    let aggregate_items = (0..9)
+        .map(|index| {
+            serde_json::json!({
+                "path": format!("src/{index}.rs"),
+                "purpose": "x".repeat(64 * 1_024)
+            })
+        })
+        .collect::<Vec<_>>();
+    let aggregate_file = temp.path().join("aggregate-review.json");
+    fs::write(
+        &aggregate_file,
+        serde_json::to_vec(&serde_json::json!({ "items": aggregate_items }))?,
+    )?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["purpose", "review", "--from-file"])
+        .arg(&aggregate_file)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("aggregate string bytes"));
+
+    let repeated_item = serde_json::json!({
+        "path": "src/main.rs",
+        "purpose": "Bounded MCP review."
+    });
+    let messages = vec![
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "atlas_purpose_review",
+                "arguments": {
+                    "items": [{
+                        "path": "src/main.rs",
+                        "purpose": "Reviewed café λ entry point."
+                    }]
+                }
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "atlas_purpose_review",
+                "arguments": {
+                    "apply": true,
+                    "items": [{
+                        "path": "src/main.rs",
+                        "purpose": "x".repeat(64 * 1_024 + 1)
+                    }]
+                }
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "atlas_purpose_review",
+                "arguments": {
+                    "items": vec![repeated_item; 201]
+                }
+            }
+        })
+        .to_string(),
+    ];
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let stdout = run_mcp_stdio(
+        &executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &messages,
+    )?;
+    let success = mcp_tool_text(&stdout, 2)?;
+    let oversized = mcp_tool_text(&stdout, 3)?;
+    let too_many = mcp_tool_text(&stdout, 4)?;
+    if !success.contains("purpose_review:")
+        || !success.contains("Reviewed café λ entry point.")
+        || !oversized.contains("field purpose")
+        || !too_many.contains("maximum is 200")
+    {
+        return Err(io::Error::other(format!(
+            "MCP purpose-review admission responses were incomplete: {stdout}"
+        ))
+        .into());
+    }
+
+    Ok(())
+}
+
+#[test]
 fn conditional_purpose_review_cli_rejects_replayed_queue_work() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
@@ -13245,7 +13691,7 @@ fn search_and_symbol_slice_are_bounded_and_identity_safe() -> Result<(), Box<dyn
     let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
     fs::create_dir(repo.join(SRC_DIR_NAME))?;
-    fs::write(repo.join(SRC_DIR_NAME).join("a.rs"), "needle one\n")?;
+    fs::write(repo.join(SRC_DIR_NAME).join("a.rs"), "needle one café λ\n")?;
     fs::write(repo.join(SRC_DIR_NAME).join("b.rs"), "needle two\n")?;
     fs::write(
         repo.join(CARGO_LOCK_FILE_NAME),
@@ -13343,6 +13789,49 @@ fn search_and_symbol_slice_are_bounded_and_identity_safe() -> Result<(), Box<dyn
         "not-installed",
     )?;
 
+    let json_slice = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "slice",
+            "src/a.rs",
+            "--start-line",
+            "1",
+            "--output-bytes",
+            "1024",
+        ])
+        .output()?;
+    if !json_slice.status.success() || json_slice.stdout.len() > 1_024 {
+        return Err(io::Error::other(format!(
+            "bounded JSON slice failed or exceeded its envelope: {}",
+            String::from_utf8_lossy(&json_slice.stderr)
+        ))
+        .into());
+    }
+    let json_slice_payload: Value = serde_json::from_slice(&json_slice.stdout)?;
+    require_json_string(&json_slice_payload, &["content"], "needle one café λ")?;
+    if json_slice_payload.get("output_budget").is_some() {
+        return Err(io::Error::other("slice budget changed the compatibility JSON schema").into());
+    }
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "slice",
+            "src/a.rs",
+            "--start-line",
+            "1",
+            "--output-bytes",
+            "64",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("slice output exceeds"));
+
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let mcp_messages = [
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-search-e2e","version":"0.1.0"}}}"#,
@@ -13350,6 +13839,9 @@ fn search_and_symbol_slice_are_bounded_and_identity_safe() -> Result<(), Box<dyn
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_search","arguments":{"pattern":"needle","file_pattern":"*.rs","limit":1}}}"#,
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_search","arguments":{"pattern":"needle","retrieval_mode":"semantic"}}}"#,
         r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_search","arguments":{"pattern":"needle","retrieval_mode":"hybrid"}}}"#,
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_slice","arguments":{"file":"src/a.rs","start_line":1,"output_bytes":1024}}}"#,
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"atlas_slice","arguments":{"file":"src/a.rs","start_line":1,"output_bytes":64}}}"#,
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"atlas_slice","arguments":{"file":"src/lib.rs","symbol":"run","symbol_parent":"B","output_bytes":1024}}}"#,
     ];
     let mcp_stdout = run_mcp_stdio(
         &executable,
@@ -13385,6 +13877,28 @@ fn search_and_symbol_slice_are_bounded_and_identity_safe() -> Result<(), Box<dyn
             .into());
         }
     }
+    let line_slice = mcp_tool_text(&mcp_stdout, 5)?;
+    if line_slice.len() > 1_024 || !line_slice.contains("needle one café λ") {
+        return Err(io::Error::other(format!(
+            "bounded MCP line slice lost UTF-8 or exceeded its envelope: {line_slice}"
+        ))
+        .into());
+    }
+    let rejected_slice = mcp_tool_text(&mcp_stdout, 6)?;
+    if !rejected_slice.contains("slice output exceeds") {
+        return Err(io::Error::other(format!(
+            "MCP accepted an oversized slice envelope: {rejected_slice}"
+        ))
+        .into());
+    }
+    let symbol_slice = mcp_tool_text(&mcp_stdout, 7)?;
+    if symbol_slice.len() > 1_024 || !symbol_slice.contains("b();") || symbol_slice.contains("a();")
+    {
+        return Err(io::Error::other(format!(
+            "bounded MCP symbol slice lost selection or exceeded its envelope: {symbol_slice}"
+        ))
+        .into());
+    }
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -13413,6 +13927,24 @@ fn search_and_symbol_slice_are_bounded_and_identity_safe() -> Result<(), Box<dyn
         .success()
         .stdout(predicate::str::contains("b();"))
         .stdout(predicate::str::contains("a();").not());
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "symbols",
+            "slice",
+            "src/lib.rs",
+            "run",
+            "--symbol-parent",
+            "B",
+            "--output-bytes",
+            "64",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("slice output exceeds"));
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
