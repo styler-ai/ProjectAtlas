@@ -7870,7 +7870,7 @@ mod tests {
         blocking_writer.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         blocking_writer.execute_batch("BEGIN IMMEDIATE")?;
         let release = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(1_250));
             blocking_writer.execute_batch("ROLLBACK")
         });
 
@@ -7886,7 +7886,7 @@ mod tests {
             .map_err(|_panic| io::Error::other("blocking writer thread panicked"))??;
 
         require_eq(
-            &(elapsed >= Duration::from_millis(50)),
+            &(elapsed >= Duration::from_secs(1)),
             &true,
             "authored write waited for the existing writer",
         )?;
