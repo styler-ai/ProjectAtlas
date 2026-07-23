@@ -370,7 +370,7 @@ fn executable_pack_root(executable: &Path) -> Result<PathBuf, WorkerStartupError
 /// Require the broker-canonicalized executable-relative Windows pack directory.
 ///
 /// The Windows broker resolves the exact worker path before launch. Reopening
-/// the worker's parent with `canonicalize` after AppContainer admission fails
+/// the worker's parent with `canonicalize` after `AppContainer` admission fails
 /// even though the artifact-scoped package ACE authorizes direct pack reads.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 fn validated_pack_root(pack_root: &Path) -> Result<PathBuf, WorkerStartupError> {

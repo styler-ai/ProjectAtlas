@@ -1966,11 +1966,13 @@ fn nonempty_slice<T>(value: &[T]) -> Option<&[T]> {
 }
 
 /// Return whether a compact unsigned count is zero.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
 /// Return whether a compact unsigned total is zero.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
@@ -2057,7 +2059,7 @@ struct McpBriefPolicy {
 
 impl McpBriefPolicy {
     /// Return whether routing uses the ordinary selected-project policy.
-    fn is_default(&self) -> bool {
+    fn is_default(self) -> bool {
         self.nearest_project == McpPolicyState::Disabled
             && self.path_scope == McpPathScope::SelectedProject
     }
@@ -2129,6 +2131,7 @@ struct McpCompactBriefCandidate {
 
 /// Compact host-owned purpose-curator handoff for startup briefs.
 #[derive(Debug, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 struct McpCompactBriefPurposeHandoff {
     /// Whether this report is intended for an agent harness.
     #[serde(skip_serializing_if = "is_true")]
@@ -2163,11 +2166,13 @@ struct McpBriefBlockers {
 }
 
 /// Return whether a serialized optional fact is false and can be omitted.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_false(value: &bool) -> bool {
     !*value
 }
 
 /// Return whether a serialized invariant is true and can be omitted.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_true(value: &bool) -> bool {
     *value
 }
@@ -2283,6 +2288,7 @@ struct McpCompactBriefLimits {
 }
 
 /// Return whether a startup row limit is the compact projection default.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_compact_brief_default_limit(value: &usize) -> bool {
     *value == COMPACT_SESSION_BRIEF_DEFAULT_LIMIT
 }
@@ -3417,7 +3423,7 @@ impl ProjectAtlasMcpServer {
             purpose_handoff: brief
                 .purpose_handoff
                 .as_ref()
-                .map(|handoff| Self::compact_brief_purpose_handoff(handoff, project_path.clone())),
+                .map(|handoff| Self::compact_brief_purpose_handoff(handoff, project_path)),
             recommendations: brief
                 .recommendations
                 .iter()
