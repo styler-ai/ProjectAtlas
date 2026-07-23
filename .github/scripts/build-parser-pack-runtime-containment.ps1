@@ -655,7 +655,11 @@ namespace ProjectAtlas.Release
             }
             identities.Sort(StringComparer.Ordinal);
             string identityDigest;
-            using (SHA256 sha256 = SHA256.Create())
+            // The construction principal intentionally has no loaded Windows profile. Instantiate
+            // the managed implementation directly so hashing bypasses the configurable
+            // CryptoConfig factory and machine-configuration lookup. CLR FIPS policy remains
+            // authoritative; any policy or provider failure is terminal.
+            using (SHA256 sha256 = new SHA256Managed())
             {
                 byte[] canonical = Encoding.UTF8.GetBytes(String.Join("\n", identities.ToArray()));
                 byte[] digest = sha256.ComputeHash(canonical);
@@ -1370,7 +1374,7 @@ namespace ProjectAtlas.Release
 
         private static string ProfileName(byte[] artifactManifest)
         {
-            using (SHA256 sha256 = SHA256.Create())
+            using (SHA256 sha256 = new SHA256Managed())
             {
                 byte[] digest = sha256.ComputeHash(artifactManifest);
                 StringBuilder name = new StringBuilder("projectatlas.parser.");
@@ -2235,6 +2239,59 @@ function Test-X64Pe {
     return $machine -eq 0x8664 -and $optionalMagic -eq 0x020b
 }
 
+function Get-BuildContractFailureStage {
+    param(
+        [Parameter(Mandatory)]
+        [int] $ExitCode,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]] $Rows
+    )
+
+    if ($ExitCode -ne 0) {
+        foreach ($row in $Rows) {
+            $text = [string] $row
+            if ($text -cmatch '\[parser-containment\] failed at ([a-z0-9-]{1,64})(?:\s|\(|$)') {
+                return "build-contract-smoke-child-$($Matches[1])"
+            }
+        }
+        return "build-contract-smoke-exit-$ExitCode"
+    }
+    if ($Rows.Count -ne 1) {
+        return "build-contract-smoke-line-count-$([Math]::Min($Rows.Count, 999))"
+    }
+
+    $line = [string] $Rows[0]
+    if ($line.Length -gt 512 -or [System.Text.Encoding]::ASCII.GetString(
+            [System.Text.Encoding]::ASCII.GetBytes($line)
+        ) -cne $line) {
+        return 'build-contract-smoke-output-bound'
+    }
+    $fields = $line.Split('|')
+    if ($fields.Count -ne 6) {
+        return 'build-contract-smoke-field-count'
+    }
+    $expected = @(
+        'projectatlas-parser-containment-build-contract-v1',
+        'runtime=windows-net-framework-clr-v4',
+        'architecture=x86_64',
+        'modules=advapi32.dll,kernel32.dll,userenv.dll'
+    )
+    for ($index = 0; $index -lt $expected.Count; $index += 1) {
+        if ($fields[$index] -cne $expected[$index]) {
+            return "build-contract-smoke-field-$index"
+        }
+    }
+    if ($fields[4] -cnotmatch '^methods=[1-9][0-9]*$') {
+        return 'build-contract-smoke-methods'
+    }
+    if ($fields[5] -cnotmatch '^imports_sha256=[0-9a-f]{64}$') {
+        return 'build-contract-smoke-digest'
+    }
+    return $null
+}
+
 $fullOutputPath = $null
 $mayDeleteOutput = $false
 $buildStage = 'validate-output'
@@ -2315,10 +2372,13 @@ try {
         throw 'version-smoke'
     }
     $buildStage = 'build-contract-smoke'
-    $buildContract = @(& $fullOutputPath --build-contract)
-    if ($LASTEXITCODE -ne 0 `
-        -or $buildContract.Count -ne 1 `
-        -or $buildContract[0] -notmatch '^projectatlas-parser-containment-build-contract-v1\|runtime=windows-net-framework-clr-v4\|architecture=x86_64\|modules=advapi32\.dll,kernel32\.dll,userenv\.dll\|methods=[1-9][0-9]*\|imports_sha256=[0-9a-f]{64}$') {
+    $buildContract = @(& $fullOutputPath --build-contract 2>&1)
+    $buildContractExit = $LASTEXITCODE
+    $buildContractFailure = Get-BuildContractFailureStage `
+        -ExitCode $buildContractExit `
+        -Rows $buildContract
+    if ($null -ne $buildContractFailure) {
+        $buildStage = $buildContractFailure
         throw 'build-contract-smoke'
     }
     if ($RunSelfTest) {

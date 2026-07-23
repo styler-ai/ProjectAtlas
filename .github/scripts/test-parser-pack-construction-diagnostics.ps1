@@ -247,6 +247,85 @@ try {
             ($containmentBuilderParseErrors.Count -eq 0) `
             "Runtime-containment broker builder did not parse."
         $containmentBuilderText = $containmentBuilderAst.Extent.Text
+        $buildContractClassifierDefinitions = @($containmentBuilderAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -eq 'Get-BuildContractFailureStage'
+            },
+            $true
+        ))
+        Require `
+            ($buildContractClassifierDefinitions.Count -eq 1) `
+            "Expected one build-contract receipt classifier."
+        Invoke-Expression $buildContractClassifierDefinitions[0].Extent.Text
+        $validBuildContract =
+            'projectatlas-parser-containment-build-contract-v1|' +
+            'runtime=windows-net-framework-clr-v4|' +
+            'architecture=x86_64|' +
+            'modules=advapi32.dll,kernel32.dll,userenv.dll|' +
+            'methods=42|imports_sha256=' + ('a' * 64)
+        Require `
+            ($null -eq (Get-BuildContractFailureStage `
+                -ExitCode 0 `
+                -Rows @($validBuildContract))) `
+            "Build-contract classifier rejected one valid receipt."
+        Require `
+            ((Get-BuildContractFailureStage `
+                -ExitCode 125 `
+                -Rows @('[parser-containment] failed at unhandled-containment-error')) -eq
+                'build-contract-smoke-child-unhandled-containment-error') `
+            "Build-contract classifier lost the broker child failure stage."
+        Require `
+            ((Get-BuildContractFailureStage `
+                -ExitCode 125 `
+                -Rows @('[parser-containment] failed at native-jobserver-open-denied (5)')) -eq
+                'build-contract-smoke-child-native-jobserver-open-denied') `
+            "Build-contract classifier lost a child stage with a bounded error code."
+        Require `
+            ((Get-BuildContractFailureStage -ExitCode 125 -Rows @('opaque')) -eq
+                'build-contract-smoke-exit-125') `
+            "Build-contract classifier lost its unknown-exit fallback."
+        Require `
+            ((Get-BuildContractFailureStage -ExitCode 0 -Rows @()) -eq
+                'build-contract-smoke-line-count-0') `
+            "Build-contract classifier accepted a missing receipt line."
+        Require `
+            ((Get-BuildContractFailureStage `
+                -ExitCode 0 `
+                -Rows @($validBuildContract, $validBuildContract)) -eq
+                'build-contract-smoke-line-count-2') `
+            "Build-contract classifier accepted more than one receipt line."
+        Require `
+            ((Get-BuildContractFailureStage -ExitCode 0 -Rows @(('x' * 513))) -eq
+                'build-contract-smoke-output-bound') `
+            "Build-contract classifier accepted oversized output."
+        Require `
+            ((Get-BuildContractFailureStage -ExitCode 0 -Rows @('contract-路径')) -eq
+                'build-contract-smoke-output-bound') `
+            "Build-contract classifier accepted non-ASCII output."
+        Require `
+            ((Get-BuildContractFailureStage -ExitCode 0 -Rows @('wrong|field')) -eq
+                'build-contract-smoke-field-count') `
+            "Build-contract classifier accepted the wrong field count."
+        Require `
+            ((Get-BuildContractFailureStage `
+                -ExitCode 0 `
+                -Rows @($validBuildContract.Replace('projectatlas', 'ProjectAtlas'))) -eq
+                'build-contract-smoke-field-0') `
+            "Build-contract classifier accepted case drift in an exact field."
+        Require `
+            ((Get-BuildContractFailureStage `
+                -ExitCode 0 `
+                -Rows @($validBuildContract.Replace('methods=42', 'methods=0'))) -eq
+                'build-contract-smoke-methods') `
+            "Build-contract classifier accepted an invalid method count."
+        Require `
+            ((Get-BuildContractFailureStage `
+                -ExitCode 0 `
+                -Rows @($validBuildContract.Replace(('a' * 64), ('A' * 64)))) -eq
+                'build-contract-smoke-digest') `
+            "Build-contract classifier accepted a noncanonical digest."
         $containmentVerifierTokens = $null
         $containmentVerifierParseErrors = $null
         $containmentVerifierAst = [System.Management.Automation.Language.Parser]::ParseFile(
