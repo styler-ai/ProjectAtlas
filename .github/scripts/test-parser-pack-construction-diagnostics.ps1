@@ -296,46 +296,178 @@ try {
             "Build-contract classifier lost a child stage with a bounded error code."
         $probeRoot = [System.IO.Path]::Combine($testRoot, 'build-contract-probe')
         [System.IO.Directory]::CreateDirectory($probeRoot) | Out-Null
-        $probeChild = [System.IO.Path]::Combine($probeRoot, 'probe.cmd')
-        [System.IO.File]::WriteAllText(
-            $probeChild,
-            "@echo off`r`n>&2 echo [parser-containment] failed at native-probe-test (5)`r`nexit /b 125`r`n",
-            [System.Text.Encoding]::ASCII
-        )
-        $probe = Invoke-BuildContractProbe -Path $probeChild
-        Require `
-            ($ErrorActionPreference -eq 'Stop') `
-            "Build-contract probe did not restore the caller error policy."
-        Require ($probe.ExitCode -eq 125) "Build-contract probe lost the native exit code."
-        Require `
-            ((Get-BuildContractFailureStage `
-                -ExitCode $probe.ExitCode `
-                -Rows $probe.Rows) -eq 'build-contract-smoke-child-native-probe-test') `
-            "Build-contract probe lost native stderr under the Stop error policy."
-
-        $probeHarness = [System.IO.Path]::Combine($probeRoot, 'probe-harness.ps1')
-        $escapedProbeChild = $probeChild.Replace("'", "''")
-        $probeHarnessText = @(
-            'Set-StrictMode -Version Latest',
-            '$ErrorActionPreference = ''Stop''',
-            $buildContractProbeDefinitions[0].Extent.Text,
-            "`$probe = Invoke-BuildContractProbe -Path '$escapedProbeChild'",
-            'if ($ErrorActionPreference -ne ''Stop'' -or $probe.ExitCode -ne 125 -or ' +
-                '$probe.Rows.Count -ne 1 -or [string]$probe.Rows[0] -cne ' +
-                '''[parser-containment] failed at native-probe-test (5)'') { exit 91 }',
-            '[Console]::Out.WriteLine(''projectatlas-build-contract-probe-ok'')'
-        ) -join "`r`n"
-        [System.IO.File]::WriteAllText(
-            $probeHarness,
-            $probeHarnessText,
-            [System.Text.UTF8Encoding]::new($false)
-        )
         $windowsPowerShell = [System.IO.Path]::Combine(
             $env:SystemRoot,
             'System32',
             'WindowsPowerShell',
             'v1.0',
             'powershell.exe'
+        )
+        $probeBroker = [System.IO.Path]::Combine(
+            $probeRoot,
+            'projectatlas-parser-containment.exe'
+        )
+        & $windowsPowerShell `
+            -NoLogo `
+            -NoProfile `
+            -NonInteractive `
+            -ExecutionPolicy Bypass `
+            -File $RuntimeContainmentBuilder `
+            -OutputPath $probeBroker
+        Require `
+            ($LASTEXITCODE -eq 0 -and [System.IO.File]::Exists($probeBroker)) `
+            "Could not build the real runtime-containment broker probe."
+        $successfulProbe = Invoke-BuildContractProbe -Path $probeBroker
+        Require `
+            (-not $successfulProbe.TimedOut -and
+                $successfulProbe.ReapedBeforePipeCollection -and
+                $successfulProbe.PipeCompleted -and
+                $successfulProbe.Disposed -and
+                $successfulProbe.ExitCode -eq 0 -and
+                $successfulProbe.Rows.Count -eq 1 -and
+                $null -eq (Get-BuildContractFailureStage `
+                    -ExitCode $successfulProbe.ExitCode `
+                    -Rows $successfulProbe.Rows)) `
+            "Build-contract probe rejected the real broker success receipt."
+        $failedProbe = Invoke-BuildContractProbe `
+            -Path $probeBroker `
+            -Command 'invalid-command'
+        Require `
+            ((Get-BuildContractFailureStage `
+                -ExitCode $failedProbe.ExitCode `
+                -Rows $failedProbe.Rows) -eq 'build-contract-smoke-child-parse-command' -and
+                -not $failedProbe.TimedOut -and
+                $failedProbe.ReapedBeforePipeCollection -and
+                $failedProbe.PipeCompleted -and
+                $failedProbe.Disposed) `
+            "Build-contract probe lost the real broker's raw stderr failure receipt."
+
+        $faultProbeSource = [System.IO.Path]::Combine($probeRoot, 'fault-probe.cs')
+        $faultProbeCompiler = [System.IO.Path]::Combine($probeRoot, 'fault-probe.exe')
+        $faultProbeBuilder = [System.IO.Path]::Combine($probeRoot, 'build-fault-probe.ps1')
+        [System.IO.File]::WriteAllText(
+            $faultProbeSource,
+            @'
+using System;
+using System.IO;
+using System.Threading;
+
+public static class ProjectAtlasBuildContractFaultProbe
+{
+    public static int Main()
+    {
+        string executable = Path.GetFileNameWithoutExtension(
+            Environment.GetCommandLineArgs()[0]);
+        if (executable.IndexOf("timeout", StringComparison.Ordinal) >= 0)
+        {
+            Thread.Sleep(30000);
+            return 0;
+        }
+        if (executable.IndexOf("blank", StringComparison.Ordinal) >= 0)
+        {
+            Console.Out.Write("contract-row\r\n\r\n");
+            return 0;
+        }
+        Console.Out.Write(new string('a', 4096));
+        return 0;
+    }
+}
+'@,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        [System.IO.File]::WriteAllText(
+            $faultProbeBuilder,
+            @'
+param(
+    [Parameter(Mandatory = $true)]
+    [string] $SourcePath,
+
+    [Parameter(Mandatory = $true)]
+    [string] $OutputPath
+)
+$ErrorActionPreference = 'Stop'
+Add-Type -Path $SourcePath -OutputAssembly $OutputPath -OutputType ConsoleApplication
+'@,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        & $windowsPowerShell `
+            -NoLogo `
+            -NoProfile `
+            -NonInteractive `
+            -ExecutionPolicy Bypass `
+            -File $faultProbeBuilder `
+            -SourcePath $faultProbeSource `
+            -OutputPath $faultProbeCompiler
+        Require `
+            ($LASTEXITCODE -eq 0 -and [System.IO.File]::Exists($faultProbeCompiler)) `
+            "Could not build the bounded build-contract fault probe."
+
+        $overflowProbe = [System.IO.Path]::Combine($probeRoot, 'overflow-probe.exe')
+        [System.IO.File]::Copy($faultProbeCompiler, $overflowProbe)
+        $overflowReceipt = Invoke-BuildContractProbe -Path $overflowProbe
+        Require `
+            ($overflowReceipt.FailureStage -eq 'build-contract-smoke-probe-output-bound' -and
+                -not $overflowReceipt.TimedOut -and
+                $overflowReceipt.ReapedBeforePipeCollection -and
+                $overflowReceipt.PipeCompleted -and
+                $overflowReceipt.Disposed -and
+                $overflowReceipt.Rows.Count -eq 0) `
+            "Build-contract probe did not bound, reap, drain, and dispose oversized output."
+
+        $blankProbe = [System.IO.Path]::Combine($probeRoot, 'blank-probe.exe')
+        [System.IO.File]::Copy($faultProbeCompiler, $blankProbe)
+        $blankReceipt = Invoke-BuildContractProbe -Path $blankProbe
+        Require `
+            ($null -eq $blankReceipt.FailureStage -and
+                $blankReceipt.Rows.Count -eq 2 -and
+                [string] $blankReceipt.Rows[0] -ceq 'contract-row' -and
+                [string] $blankReceipt.Rows[1] -ceq '' -and
+                (Get-BuildContractFailureStage `
+                    -ExitCode $blankReceipt.ExitCode `
+                    -Rows $blankReceipt.Rows) -eq 'build-contract-smoke-line-count-2') `
+            "Build-contract probe normalized an extra blank receipt row away."
+
+        $timeoutProbe = [System.IO.Path]::Combine($probeRoot, 'timeout-probe.exe')
+        [System.IO.File]::Copy($faultProbeCompiler, $timeoutProbe)
+        $timeoutReceipt = Invoke-BuildContractProbe -Path $timeoutProbe
+        Require `
+            ($timeoutReceipt.FailureStage -eq 'build-contract-smoke-probe-timeout' -and
+                $timeoutReceipt.TimedOut -and
+                $timeoutReceipt.ReapedBeforePipeCollection -and
+                $timeoutReceipt.PipeCompleted -and
+                $timeoutReceipt.Disposed) `
+            "Build-contract probe did not terminate, reap, drain, and dispose a timeout."
+
+        $startFailureReceipt = $null
+        try {
+            Invoke-BuildContractProbe `
+                -Path ([System.IO.Path]::Combine($probeRoot, 'missing-probe.exe')) | Out-Null
+        }
+        catch {
+            $startFailureReceipt =
+                $_.Exception.Data['ProjectAtlasBuildContractProbeReceipt']
+        }
+        Require `
+            ($null -ne $startFailureReceipt -and $startFailureReceipt.Disposed) `
+            "Build-contract probe did not reject and dispose a failed process start."
+
+        $probeHarness = [System.IO.Path]::Combine($probeRoot, 'probe-harness.ps1')
+        $escapedProbeBroker = $probeBroker.Replace("'", "''")
+        $probeHarnessText = @(
+            'Set-StrictMode -Version Latest',
+            '$ErrorActionPreference = ''Stop''',
+            $buildContractProbeDefinitions[0].Extent.Text,
+            "`$probe = Invoke-BuildContractProbe -Path '$escapedProbeBroker' -Command 'invalid-command'",
+            'if ($ErrorActionPreference -ne ''Stop'' -or $probe.ExitCode -ne 125 -or ' +
+                '$probe.Rows.Count -ne 1 -or -not $probe.ReapedBeforePipeCollection -or ' +
+                '-not $probe.PipeCompleted -or -not $probe.Disposed -or [string]$probe.Rows[0] -cne ' +
+                '''[parser-containment] failed at parse-command'') { exit 91 }',
+            '[Console]::Out.WriteLine(''projectatlas-build-contract-probe-ok'')'
+        ) -join "`r`n"
+        [System.IO.File]::WriteAllText(
+            $probeHarness,
+            $probeHarnessText,
+            [System.Text.UTF8Encoding]::new($false)
         )
         $probeStart = [System.Diagnostics.ProcessStartInfo]::new()
         $probeStart.FileName = $windowsPowerShell

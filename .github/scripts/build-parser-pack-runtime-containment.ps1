@@ -2313,25 +2313,229 @@ function Get-BuildContractFailureStage {
 function Invoke-BuildContractProbe {
     param(
         [Parameter(Mandatory)]
-        [string] $Path
+        [string] $Path,
+
+        [ValidateSet('--build-contract', 'invalid-command')]
+        [string] $Command = '--build-contract'
     )
 
-    # Windows PowerShell 5.1 promotes redirected native stderr to a terminating
-    # RemoteException under Stop. Limit Continue to this trusted, bounded probe
-    # so its canonical failure receipt reaches the fail-closed classifier.
-    $previousErrorActionPreference = $ErrorActionPreference
+    $receipt = [pscustomobject]@{
+        TimedOut = $false
+        ReapedBeforePipeCollection = $false
+        PipeCompleted = $false
+        Disposed = $false
+        ExitCode = -1
+        Rows = [object[]] @()
+        FailureStage = $null
+    }
+    $process = $null
+    $processStarted = $false
+    $operationFailure = $null
     try {
-        $ErrorActionPreference = 'Continue'
-        $rows = @(& $Path --build-contract 2>&1)
-        $exitCode = $LASTEXITCODE
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $Path
+        $startInfo.Arguments = $Command
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) {
+            throw 'Build-contract probe did not start.'
+        }
+        $processStarted = $true
+        $streamStates = [object[]] @(
+            [pscustomobject]@{
+                Reader = $process.StandardOutput
+                Buffer = [char[]]::new(256)
+                Task = $null
+                Done = $false
+                CharacterCount = [long] 0
+                OutputContractExceeded = $false
+                NonAscii = $false
+                Captured = [System.Text.StringBuilder]::new(1024)
+            },
+            [pscustomobject]@{
+                Reader = $process.StandardError
+                Buffer = [char[]]::new(256)
+                Task = $null
+                Done = $false
+                CharacterCount = [long] 0
+                OutputContractExceeded = $false
+                NonAscii = $false
+                Captured = [System.Text.StringBuilder]::new(1024)
+            }
+        )
+        foreach ($state in $streamStates) {
+            $state.Task = $state.Reader.ReadAsync($state.Buffer, 0, $state.Buffer.Length)
+        }
+
+        function Receive-BuildContractProbeChunk {
+            param(
+                [Parameter(Mandatory)]
+                [pscustomobject] $State
+            )
+
+            if ($State.Done -or -not $State.Task.IsCompleted) {
+                return
+            }
+            $read = $State.Task.GetAwaiter().GetResult()
+            if ($read -eq 0) {
+                $State.Done = $true
+                $State.Task = $null
+                return
+            }
+            $State.CharacterCount += $read
+            if ($State.CharacterCount -gt 1024) {
+                $State.OutputContractExceeded = $true
+            }
+            for ($index = 0; $index -lt $read; $index += 1) {
+                if ([int] $State.Buffer[$index] -gt 127) {
+                    $State.NonAscii = $true
+                }
+            }
+            $remainingCapture = [Math]::Max(0, 1024 - $State.Captured.Length)
+            $captureCount = [Math]::Min($read, $remainingCapture)
+            if ($captureCount -gt 0) {
+                $State.Captured.Append($State.Buffer, 0, $captureCount) | Out-Null
+            }
+            $State.Task = $State.Reader.ReadAsync($State.Buffer, 0, $State.Buffer.Length)
+        }
+
+        function Wait-BuildContractProbePipes {
+            param(
+                [Parameter(Mandatory)]
+                [object[]] $States,
+
+                [Parameter(Mandatory)]
+                [int] $WaitMilliseconds
+            )
+
+            $activeTasks = [System.Collections.Generic.List[System.Threading.Tasks.Task]]::new()
+            foreach ($state in $States) {
+                Receive-BuildContractProbeChunk -State $state
+                if (-not $state.Done) {
+                    $activeTasks.Add($state.Task)
+                }
+            }
+            if ($activeTasks.Count -gt 0) {
+                [System.Threading.Tasks.Task]::WaitAny(
+                    $activeTasks.ToArray(),
+                    $WaitMilliseconds
+                ) | Out-Null
+            }
+        }
+
+        $operationClock = [System.Diagnostics.Stopwatch]::StartNew()
+        while (-not $process.WaitForExit(0) -and $operationClock.ElapsedMilliseconds -lt 10000) {
+            $remainingOperationMilliseconds = [Math]::Max(
+                1,
+                10000 - [int] $operationClock.ElapsedMilliseconds
+            )
+            Wait-BuildContractProbePipes `
+                -States $streamStates `
+                -WaitMilliseconds ([Math]::Min(25, $remainingOperationMilliseconds))
+        }
+        if (-not $process.WaitForExit(0)) {
+            $receipt.TimedOut = $true
+            $process.Kill()
+            if (-not $process.WaitForExit(5000)) {
+                throw 'Timed-out build-contract probe could not be reaped.'
+            }
+        }
+        $receipt.ReapedBeforePipeCollection = $process.HasExited
+        if (-not $receipt.ReapedBeforePipeCollection) {
+            throw 'Build-contract probe was not reaped before pipe collection.'
+        }
+        $pipeClock = [System.Diagnostics.Stopwatch]::StartNew()
+        while (
+            (-not $streamStates[0].Done -or -not $streamStates[1].Done) -and
+            $pipeClock.ElapsedMilliseconds -lt 5000
+        ) {
+            $remainingPipeMilliseconds = [Math]::Max(
+                1,
+                5000 - [int] $pipeClock.ElapsedMilliseconds
+            )
+            Wait-BuildContractProbePipes `
+                -States $streamStates `
+                -WaitMilliseconds ([Math]::Min(25, $remainingPipeMilliseconds))
+        }
+        foreach ($state in $streamStates) {
+            Receive-BuildContractProbeChunk -State $state
+        }
+        $receipt.PipeCompleted = $streamStates[0].Done -and $streamStates[1].Done
+        if (-not $receipt.PipeCompleted) {
+            throw 'Build-contract probe pipes did not close inside the fixed deadline.'
+        }
+        if ($receipt.TimedOut) {
+            $receipt.FailureStage = 'build-contract-smoke-probe-timeout'
+        }
+        if (
+            $streamStates[0].OutputContractExceeded -or
+            $streamStates[0].NonAscii -or
+            $streamStates[1].OutputContractExceeded -or
+            $streamStates[1].NonAscii
+        ) {
+            $receipt.FailureStage = 'build-contract-smoke-probe-output-bound'
+        }
+        if ($null -eq $receipt.FailureStage) {
+            $rows = [System.Collections.Generic.List[object]]::new()
+            foreach ($state in $streamStates) {
+                $stream = $state.Captured.ToString()
+                if ($stream.Length -eq 0) {
+                    continue
+                }
+                $reader = [System.IO.StringReader]::new($stream)
+                try {
+                    while (($line = $reader.ReadLine()) -ne $null) {
+                        $rows.Add($line)
+                    }
+                }
+                finally {
+                    $reader.Dispose()
+                }
+            }
+            $receipt.Rows = [object[]] $rows.ToArray()
+        }
+        $receipt.ExitCode = $process.ExitCode
+    }
+    catch {
+        $operationFailure = $_.Exception
     }
     finally {
-        $ErrorActionPreference = $previousErrorActionPreference
+        if ($null -ne $process) {
+            try {
+                if ($processStarted -and -not $process.HasExited) {
+                    $process.Kill()
+                    if (-not $process.WaitForExit(5000)) {
+                        throw 'Build-contract probe fallback termination could not be reaped.'
+                    }
+                }
+            }
+            catch {
+                $cleanupFailure = $_.Exception
+                if ($null -eq $operationFailure) {
+                    $operationFailure = $cleanupFailure
+                }
+                else {
+                    $operationFailure = [System.AggregateException]::new(
+                        'Build-contract probe operation and cleanup both failed.',
+                        [System.Exception[]] @($operationFailure, $cleanupFailure)
+                    )
+                }
+            }
+            finally {
+                $process.Dispose()
+                $receipt.Disposed = $true
+            }
+        }
     }
-    return [pscustomobject]@{
-        ExitCode = [int] $exitCode
-        Rows = [object[]] $rows
+    if ($null -ne $operationFailure) {
+        $operationFailure.Data['ProjectAtlasBuildContractProbeReceipt'] = $receipt
+        throw $operationFailure
     }
+    return $receipt
 }
 
 $fullOutputPath = $null
@@ -2413,8 +2617,13 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw 'version-smoke'
     }
-    $buildStage = 'build-contract-smoke'
+    $buildStage = 'build-contract-smoke-probe'
     $buildContractProbe = Invoke-BuildContractProbe -Path $fullOutputPath
+    if ($null -ne $buildContractProbe.FailureStage) {
+        $buildStage = $buildContractProbe.FailureStage
+        throw 'build-contract-smoke-probe'
+    }
+    $buildStage = 'build-contract-smoke-classify'
     $buildContractFailure = Get-BuildContractFailureStage `
         -ExitCode $buildContractProbe.ExitCode `
         -Rows $buildContractProbe.Rows
@@ -2422,6 +2631,7 @@ try {
         $buildStage = $buildContractFailure
         throw 'build-contract-smoke'
     }
+    $buildStage = 'build-contract-smoke-accepted'
     if ($RunSelfTest) {
         $buildStage = 'self-test'
         & $fullOutputPath self-test
@@ -2429,7 +2639,9 @@ try {
             throw 'self-test'
         }
     }
+    $buildStage = 'artifact-digest'
     $digest = (Get-FileHash -LiteralPath $fullOutputPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $buildStage = 'success-receipt-emission'
     [Console]::Out.WriteLine("[parser-containment-builder] sha256=$digest")
 }
 catch {
