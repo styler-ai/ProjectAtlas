@@ -7806,8 +7806,8 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         let store = AtlasStore::open(&db)?;
         store.set_purpose(
             "src/lib.rs",
-            "Imported Rust library purpose for MCP review.",
-            PurposeSource::Imported,
+            "Reviewed Rust library purpose for MCP navigation.",
+            PurposeSource::Agent,
         )?;
     }
 
@@ -7958,7 +7958,7 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
     require_json_string(
         &reviewed_summary,
         &["file_purpose"],
-        "Imported Rust library purpose for MCP review.",
+        "Reviewed Rust library purpose for MCP navigation.",
     )?;
     Ok(())
 }
