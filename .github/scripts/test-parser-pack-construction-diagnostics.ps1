@@ -247,6 +247,25 @@ try {
             ($containmentBuilderParseErrors.Count -eq 0) `
             "Runtime-containment broker builder did not parse."
         $containmentBuilderText = $containmentBuilderAst.Extent.Text
+        $artifactDigestDefinitions = @($containmentBuilderAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -ceq 'Get-ArtifactSha256'
+            },
+            $true
+        ))
+        Require `
+            ($artifactDigestDefinitions.Count -eq 1 -and
+                $artifactDigestDefinitions[0].Extent.Text.Contains(
+                    '[System.Security.Cryptography.SHA256Managed]::new()'
+                ) -and
+                $artifactDigestDefinitions[0].Extent.Text.Contains('$hasher.Dispose()') -and
+                $artifactDigestDefinitions[0].Extent.Text.Contains('$stream.Dispose()') -and
+                -not $containmentBuilderText.Contains('Get-FileHash') -and
+                -not $containmentBuilderText.Contains('SHA256]::Create()') -and
+                -not $containmentBuilderText.Contains('SHA256.Create()')) `
+            "Artifact digest must remain profile-independent and deterministically disposed."
         $buildContractClassifierDefinitions = @($containmentBuilderAst.FindAll(
             {
                 param($node)
@@ -307,16 +326,22 @@ try {
             $probeRoot,
             'projectatlas-parser-containment.exe'
         )
-        & $windowsPowerShell `
+        $builderRows = @(& $windowsPowerShell `
             -NoLogo `
             -NoProfile `
             -NonInteractive `
             -ExecutionPolicy Bypass `
             -File $RuntimeContainmentBuilder `
-            -OutputPath $probeBroker
+            -OutputPath $probeBroker)
         Require `
             ($LASTEXITCODE -eq 0 -and [System.IO.File]::Exists($probeBroker)) `
             "Could not build the real runtime-containment broker probe."
+        $probeDigest = (Get-FileHash -LiteralPath $probeBroker -Algorithm SHA256).Hash.ToLowerInvariant()
+        Require `
+            ($builderRows.Count -eq 1 -and
+                [string]$builderRows[0] -ceq
+                    "[parser-containment-builder] sha256=$probeDigest") `
+            "Runtime-containment builder did not emit the exact artifact digest."
         $successfulProbe = Invoke-BuildContractProbe -Path $probeBroker
         Require `
             (-not $successfulProbe.TimedOut -and

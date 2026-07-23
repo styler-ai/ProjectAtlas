@@ -2232,6 +2232,37 @@ function Write-BuildFailure {
     exit 125
 }
 
+function Get-ArtifactSha256 {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    $stream = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+    try {
+        # The disposable construction principal has no loaded profile. Match the broker's
+        # existing digest path and bypass the configurable CryptoConfig factory; CLR FIPS
+        # policy still remains authoritative and any provider failure is terminal.
+        $hasher = [System.Security.Cryptography.SHA256Managed]::new()
+        try {
+            return ([System.BitConverter]::ToString(
+                $hasher.ComputeHash($stream)
+            )).Replace('-', '').ToLowerInvariant()
+        }
+        finally {
+            $hasher.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 function Test-X64Pe {
     param(
         [Parameter(Mandatory)]
@@ -2640,7 +2671,7 @@ try {
         }
     }
     $buildStage = 'artifact-digest'
-    $digest = (Get-FileHash -LiteralPath $fullOutputPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $digest = Get-ArtifactSha256 -Path $fullOutputPath
     $buildStage = 'success-receipt-emission'
     [Console]::Out.WriteLine("[parser-containment-builder] sha256=$digest")
 }
