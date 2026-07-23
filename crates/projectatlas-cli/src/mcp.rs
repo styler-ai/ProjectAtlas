@@ -295,6 +295,8 @@ const MCP_PAYLOAD_SELECTED_PROJECT: &str = "selected_project";
 const MCP_PAYLOAD_SETTINGS: &str = "settings";
 /// MCP payload key for agent startup briefs.
 const MCP_PAYLOAD_SESSION_BRIEF: &str = "session_brief";
+/// Default source status omitted from compact file-summary payloads.
+const MCP_FILE_SOURCE_STATUS_LIVE: &str = "live-source";
 /// MCP payload key for accepted background tasks.
 const MCP_PAYLOAD_TASK_START: &str = "task_start";
 /// MCP payload key for task status lookups.
@@ -1840,7 +1842,7 @@ impl<'a> From<&'a FileSummaryReport> for McpFileSummary<'a> {
             file_path: &report.file_path,
             language: &report.language,
             line_count: report.line_count,
-            source_status: (report.source_status != "live-source")
+            source_status: (report.source_status != MCP_FILE_SOURCE_STATUS_LIVE)
                 .then_some(report.source_status.as_str()),
             source_error: nonempty_str(&report.source_error),
             parser_kind: &report.parser_kind,
