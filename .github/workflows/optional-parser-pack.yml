@@ -161,7 +161,8 @@ jobs:
           }
           else {
             foreach ($tool in @("cc", "ld", "ldd")) {
-              $command = Get-Command $tool -CommandType Application -ErrorAction Stop
+              $command = Get-Command $tool -CommandType Application -ErrorAction Stop |
+                Select-Object -First 1
               $version = @(& $command.Source --version)
               if ($LASTEXITCODE -ne 0 -or $version.Count -eq 0) {
                 throw "Linux native toolchain identity is unavailable for $tool."

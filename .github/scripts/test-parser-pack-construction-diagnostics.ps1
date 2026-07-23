@@ -375,7 +375,8 @@ try {
         'visual_studio=$vsVersion',
         'vc_tools=$vcVersion',
         'windows_sdk=$sdkVersion',
-        '@("cc", "ld", "ldd")'
+        '@("cc", "ld", "ldd")',
+        'Select-Object -First 1'
     )) {
         Require `
             ($workflowText.Contains($keyInput)) `
