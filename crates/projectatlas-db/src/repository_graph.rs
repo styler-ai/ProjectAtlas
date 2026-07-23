@@ -4663,7 +4663,12 @@ fn parse_parser_kind(field: &'static str, value: &str) -> DbResult<ParserKind> {
 const fn limit_kind_name(limit: GraphLimitKind) -> &'static str {
     match limit {
         GraphLimitKind::Rows => "rows",
+        GraphLimitKind::Nodes => "nodes",
+        GraphLimitKind::Edges => "edges",
         GraphLimitKind::Occurrences => "occurrences",
+        GraphLimitKind::Visited => "visited",
+        GraphLimitKind::IntermediateBytes => "intermediate_bytes",
+        GraphLimitKind::Deadline => "deadline",
         GraphLimitKind::Depth => "depth",
         GraphLimitKind::OutputBytes => "output_bytes",
     }
@@ -4673,7 +4678,12 @@ const fn limit_kind_name(limit: GraphLimitKind) -> &'static str {
 pub(crate) fn parse_limit_kind(value: &str) -> DbResult<GraphLimitKind> {
     match value {
         "rows" => Ok(GraphLimitKind::Rows),
+        "nodes" => Ok(GraphLimitKind::Nodes),
+        "edges" => Ok(GraphLimitKind::Edges),
         "occurrences" => Ok(GraphLimitKind::Occurrences),
+        "visited" => Ok(GraphLimitKind::Visited),
+        "intermediate_bytes" => Ok(GraphLimitKind::IntermediateBytes),
+        "deadline" => Ok(GraphLimitKind::Deadline),
         "depth" => Ok(GraphLimitKind::Depth),
         "output_bytes" => Ok(GraphLimitKind::OutputBytes),
         _ => Err(DbError::InvalidEnum {
@@ -4693,6 +4703,70 @@ mod tests {
     use std::fmt::Debug;
     use std::fs;
     use std::io;
+    use std::time::{Duration, Instant};
+
+    /// Traverse one relation family with the same bounded adjacency primitive used by the service.
+    fn collect_bounded_outbound_calls(
+        store: &AtlasStore,
+        anchor: &GraphEntityKey,
+    ) -> Result<(Vec<[u8; 32]>, usize, usize), Box<dyn Error>> {
+        let mut visited = BTreeMap::new();
+        visited.insert(anchor.digest_bytes()?, anchor.clone());
+        let mut frontier = vec![anchor.clone()];
+        let mut inspected_edges = 0_usize;
+        let mut peak_frontier = frontier.len();
+        let calls = GraphRelationKind::Legacy(RelationKind::Calls);
+
+        while !frontier.is_empty() {
+            let mut next = BTreeMap::new();
+            for chunk in frontier.chunks(MAX_REPOSITORY_GRAPH_FRONTIER) {
+                let work_per_row = MAX_REPOSITORY_GRAPH_ADJACENCY_WORK_ROWS / chunk.len();
+                let page_limit = work_per_row
+                    .saturating_sub(1)
+                    .min(GraphLimits::MAX_ROWS as usize)
+                    .max(1) as u32;
+                let mut continuation = None;
+                loop {
+                    let page = store.repository_graph_adjacency_page_filtered(
+                        chunk,
+                        RepositoryGraphDirection::Outbound,
+                        Some(calls),
+                        continuation.as_ref(),
+                        page_limit,
+                        None,
+                    )?;
+                    inspected_edges = inspected_edges
+                        .checked_add(page.rows.len())
+                        .ok_or_else(|| io::Error::other("measured edge count overflowed"))?;
+                    for row in page.rows {
+                        if let Some(target) = row.detail.target {
+                            let digest = target.key().digest_bytes()?;
+                            if !visited.contains_key(&digest) {
+                                next.entry(digest).or_insert_with(|| target.key().clone());
+                            }
+                        }
+                    }
+                    if !page.truncated {
+                        break;
+                    }
+                    continuation = Some(page.continuation.ok_or_else(|| {
+                        io::Error::other("truncated adjacency page omitted its continuation")
+                    })?);
+                }
+            }
+            frontier = next.into_values().collect();
+            peak_frontier = peak_frontier.max(frontier.len());
+            for key in &frontier {
+                visited.insert(key.digest_bytes()?, key.clone());
+            }
+        }
+
+        Ok((
+            visited.into_keys().collect(),
+            inspected_edges,
+            peak_frontier,
+        ))
+    }
 
     /// Coherent typed graph fixture used by storage, corruption, and publication tests.
     struct GraphFixture {
@@ -7746,6 +7820,229 @@ mod tests {
         require(
             deep_steps.load(std::sync::atomic::Ordering::Relaxed) < 100_000,
             "continued adjacency rescanned a high-degree keyset prefix",
+        )?;
+        store.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_rust_frontier_matches_indexed_recursive_cte_on_cycles_and_high_degree()
+    -> Result<(), Box<dyn Error>> {
+        const HIGH_DEGREE: usize = 4_096;
+        const RECURSIVE_CTE: &str = "WITH RECURSIVE walk(entity_key) AS (
+                VALUES(?2)
+                UNION
+                SELECT relation.target_entity_key
+                  FROM graph_relations AS relation INDEXED BY idx_graph_relations_source_kind
+                  JOIN walk ON relation.source_entity_key = walk.entity_key
+                 WHERE relation.project_instance_id = ?1
+                   AND relation.relation_scope = 'legacy'
+                   AND relation.relation_kind = 'calls'
+                   AND relation.target_entity_key IS NOT NULL
+            )
+            SELECT entity_key FROM walk ORDER BY entity_key";
+
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("frontier-cte-comparison");
+        let atlas_dir = project_root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        let mut writer = AtlasStore::open_for_project(&db_path, &project_root)?;
+        let fixture = publish_fixture(&mut writer, "frontier-cte-comparison")?;
+        let source = fixture
+            .entities
+            .iter()
+            .find(|entity| matches!(entity.selector(), EntitySelector::File { .. }))
+            .ok_or_else(|| io::Error::other("source file fixture missing"))?;
+        let generation = source.generation();
+        let mut high_degree_entities = Vec::with_capacity(HIGH_DEGREE);
+        let mut cyclic_relations = Vec::with_capacity(HIGH_DEGREE * 2);
+        for index in 0..HIGH_DEGREE {
+            let target = GraphEntity::new(
+                fixture.project,
+                EntitySelector::External {
+                    external: ExternalSelector {
+                        system: GraphIdentityText::new("frontier-measurement")?,
+                        identity: GraphIdentityText::new(format!("node-{index:05}"))?,
+                    },
+                },
+                generation,
+            )?;
+            cyclic_relations.push(LogicalRelation::new(
+                source,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::external(&target)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?);
+            cyclic_relations.push(LogicalRelation::new(
+                &target,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::resolved(source)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?);
+            high_degree_entities.push(target);
+        }
+        let transaction = writer.connection.transaction()?;
+        insert_entities(&transaction, fixture.project, &high_degree_entities)?;
+        insert_relations(&transaction, fixture.project, &cyclic_relations)?;
+        transaction.commit()?;
+        drop(writer);
+
+        let store = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+        let project = fixture.project.as_bytes();
+        let source_key = source.key().digest_bytes()?;
+        let plan_sql = format!("EXPLAIN QUERY PLAN {RECURSIVE_CTE}");
+        let cte_plan = store
+            .connection
+            .prepare(&plan_sql)?
+            .query_map(params![&project[..], &source_key[..]], |row| {
+                row.get::<_, String>(3)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        require(
+            cte_plan
+                .iter()
+                .any(|detail| detail.contains("idx_graph_relations_source_kind"))
+                && cte_plan
+                    .iter()
+                    .all(|detail| !detail.contains("SCAN relation")),
+            &format!("recursive CTE did not retain the source-owned index: {cte_plan:?}"),
+        )?;
+
+        let cte_steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cte_counter = std::sync::Arc::clone(&cte_steps);
+        store.connection.progress_handler(
+            1_000,
+            Some(move || {
+                cte_counter.fetch_add(1_000, std::sync::atomic::Ordering::Relaxed);
+                false
+            }),
+        );
+        let cte_started = Instant::now();
+        let cte_result = store
+            .connection
+            .prepare(RECURSIVE_CTE)?
+            .query_map(params![&project[..], &source_key[..]], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })?
+            .map(|row| fixed_bytes::<32>("recursive_cte.entity_key", row?))
+            .collect::<DbResult<Vec<_>>>();
+        let cte_elapsed = cte_started.elapsed();
+        store.connection.progress_handler(0, None::<fn() -> bool>);
+        let cte_nodes = cte_result?;
+
+        let rust_steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rust_counter = std::sync::Arc::clone(&rust_steps);
+        store.connection.progress_handler(
+            1_000,
+            Some(move || {
+                rust_counter.fetch_add(1_000, std::sync::atomic::Ordering::Relaxed);
+                false
+            }),
+        );
+        let rust_started = Instant::now();
+        let rust_result = collect_bounded_outbound_calls(&store, source.key());
+        let rust_elapsed = rust_started.elapsed();
+        store.connection.progress_handler(0, None::<fn() -> bool>);
+        let (rust_nodes, inspected_edges, peak_frontier) = rust_result?;
+        let (repeated_nodes, repeated_edges, repeated_peak) =
+            collect_bounded_outbound_calls(&store, source.key())?;
+
+        require_eq(
+            &rust_nodes,
+            &cte_nodes,
+            "Rust frontier versus recursive CTE topology",
+        )?;
+        require_eq(
+            &repeated_nodes,
+            &rust_nodes,
+            "deterministic Rust frontier order",
+        )?;
+        require_eq(
+            &repeated_edges,
+            &inspected_edges,
+            "deterministic inspected edges",
+        )?;
+        require_eq(
+            &repeated_peak,
+            &peak_frontier,
+            "deterministic peak frontier",
+        )?;
+        require_eq(
+            &rust_nodes.len(),
+            &(HIGH_DEGREE + 2),
+            "cycle-safe high-degree topology",
+        )?;
+        require_eq(
+            &inspected_edges,
+            &(HIGH_DEGREE * 2 + 1),
+            "bounded frontier inspected every call edge once",
+        )?;
+        require(
+            cte_steps.load(std::sync::atomic::Ordering::Relaxed) > 0
+                && rust_steps.load(std::sync::atomic::Ordering::Relaxed) > 0
+                && cte_elapsed > Duration::ZERO
+                && rust_elapsed > Duration::ZERO,
+            "frontier comparison did not record VM work and elapsed time",
+        )?;
+        let retained_key_bytes = rust_nodes
+            .len()
+            .checked_add(peak_frontier)
+            .and_then(|keys| keys.checked_mul(std::mem::size_of::<[u8; 32]>()))
+            .ok_or_else(|| io::Error::other("retained key measurement overflowed"))?;
+        let output_key_bytes = rust_nodes
+            .len()
+            .checked_mul(std::mem::size_of::<[u8; 32]>())
+            .ok_or_else(|| io::Error::other("output key measurement overflowed"))?;
+        require(
+            retained_key_bytes <= GraphLimits::MAX_OUTPUT_BYTES as usize
+                && output_key_bytes <= GraphLimits::MAX_OUTPUT_BYTES as usize,
+            "bounded Rust frontier exceeded the shared compact byte ceiling",
+        )?;
+
+        store.connection.progress_handler(1, Some(|| true));
+        let cancelled_cte = (|| -> Result<Vec<Vec<u8>>, rusqlite::Error> {
+            let mut statement = store.connection.prepare(RECURSIVE_CTE)?;
+            statement
+                .query_map(params![&project[..], &source_key[..]], |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })?
+                .collect()
+        })();
+        store.connection.progress_handler(0, None::<fn() -> bool>);
+        require(
+            matches!(
+                cancelled_cte,
+                Err(rusqlite::Error::SqliteFailure(ref failure, _))
+                    if failure.code == rusqlite::ErrorCode::OperationInterrupted
+            ),
+            "recursive CTE did not stop through the SQLite progress handler",
+        )?;
+        let cancellation = projectatlas_core::IndexCancellation::new();
+        cancellation.cancel();
+        let control = IndexWorkControl::new(cancellation, None);
+        let cancelled_rust = store.repository_graph_adjacency_page_filtered(
+            &[source.key().clone()],
+            RepositoryGraphDirection::Outbound,
+            Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+            None,
+            1,
+            Some(&control),
+        );
+        require(
+            matches!(
+                cancelled_rust,
+                Err(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::Cancelled {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    }
+                ))
+            ),
+            "bounded Rust frontier did not retain typed cancellation",
         )?;
         store.finish_index_read_snapshot()?;
         Ok(())

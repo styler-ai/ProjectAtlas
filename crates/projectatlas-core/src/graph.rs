@@ -1620,8 +1620,18 @@ pub enum CoverageScope {
 pub enum GraphLimitKind {
     /// Result-row limit.
     Rows,
+    /// Unique or active node limit.
+    Nodes,
+    /// Inspected logical-edge limit.
+    Edges,
     /// Per-relation source-occurrence limit.
     Occurrences,
+    /// Node-simple visited-state limit.
+    Visited,
+    /// Decoded or retained intermediate-memory byte limit.
+    IntermediateBytes,
+    /// Elapsed request deadline.
+    Deadline,
     /// Traversal-depth limit.
     Depth,
     /// Encoded-output byte limit.

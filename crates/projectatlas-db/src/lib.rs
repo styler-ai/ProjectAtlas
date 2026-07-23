@@ -112,6 +112,8 @@ const PURPOSE_CURATION_ITEM_KEY_DOMAIN: &str = "projectatlas:purpose-curation:it
 const PURPOSE_CURATION_STATE_TOKEN_DOMAIN: &str = "projectatlas:purpose-curation:state:v1";
 /// Domain separator for deterministic purpose-curation batch work keys.
 const PURPOSE_CURATION_BATCH_KEY_DOMAIN: &str = "projectatlas:purpose-curation:batch:v1";
+/// Monotonic metadata revision for accepted authored-purpose mutations.
+const AUTHORED_PURPOSE_REVISION_KEY: &str = "purpose.authored_revision";
 /// Select create capability only for a path proven absent by preflight.
 fn writable_open_flags(state: SchemaState, database_exists: bool) -> OpenFlags {
     match (state, database_exists) {
@@ -421,6 +423,14 @@ pub enum DbError {
         value: String,
         /// Source parse failure.
         source: ParseIntError,
+    },
+    /// Unsigned integer metadata could not advance without overflow.
+    #[error("integer metadata for {field} overflowed at {value}")]
+    IntegerMetadataOverflow {
+        /// Metadata key owning the monotonic value.
+        field: &'static str,
+        /// Largest persisted value that could not advance.
+        value: u64,
     },
     /// A caller supplied a path that is not in the current index.
     #[error("path {path:?} is not indexed; run scan, fix the path, or choose an indexed path")]
@@ -3385,7 +3395,7 @@ impl AtlasStore {
     pub fn set_purpose(&self, path: &str, purpose: &str, source: PurposeSource) -> DbResult<()> {
         self.with_validated_write(|connection| {
             let node_id = self.node_id_for_path(path)?;
-            connection
+            let changed = connection
                 .prepare_cached(
                     "
             INSERT INTO purposes(node_id, purpose, source, status, updated_at)
@@ -3395,11 +3405,29 @@ impl AtlasStore {
                 source = excluded.source,
                 status = 'approved',
                 updated_at = CURRENT_TIMESTAMP
+            WHERE purposes.purpose <> excluded.purpose
+               OR purposes.source <> excluded.source
+               OR purposes.status <> 'approved'
             ",
                 )?
                 .execute(params![node_id, purpose, source.to_string()])?;
+            if changed > 0 {
+                advance_authored_purpose_revision(connection)?;
+            }
             Ok(())
         })
+    }
+
+    /// Return the accepted authored-purpose revision captured by this connection.
+    ///
+    /// Databases created before the revision contract have revision zero until
+    /// their first accepted purpose mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the metadata value is corrupt.
+    pub fn authored_purpose_revision(&self) -> DbResult<u64> {
+        load_authored_purpose_revision(&self.connection)
     }
 
     /// Approve one purpose only while its curator work and unapproved row are current.
@@ -3476,7 +3504,7 @@ impl AtlasStore {
         self.with_validated_write(|connection| {
             let (project_instance_id, active_generation) =
                 self.purpose_curation_context(connection)?;
-            normalized
+            let results = normalized
                 .iter()
                 .map(|request| {
                     apply_conditional_purpose(
@@ -3486,7 +3514,14 @@ impl AtlasStore {
                         request,
                     )
                 })
-                .collect()
+                .collect::<DbResult<Vec<_>>>()?;
+            if results
+                .iter()
+                .any(|result| matches!(result.state, PurposeConditionalApplyState::Applied))
+            {
+                advance_authored_purpose_revision(connection)?;
+            }
+            Ok(results)
         })
     }
 
@@ -5347,6 +5382,42 @@ fn set_metadata(connection: &Connection, key: &str, value: &str) -> DbResult<()>
         [key, value],
     )?;
     Ok(())
+}
+
+/// Load the accepted authored-purpose revision without scanning purpose rows.
+fn load_authored_purpose_revision(connection: &Connection) -> DbResult<u64> {
+    let value = connection
+        .prepare_cached("SELECT value FROM metadata WHERE key = ?1")?
+        .query_row([AUTHORED_PURPOSE_REVISION_KEY], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()?;
+    value.map_or(Ok(0), |value| {
+        value
+            .parse::<u64>()
+            .map_err(|source| DbError::InvalidInteger {
+                field: AUTHORED_PURPOSE_REVISION_KEY,
+                value,
+                source,
+            })
+    })
+}
+
+/// Advance the accepted authored-purpose revision in the caller's transaction.
+fn advance_authored_purpose_revision(connection: &Connection) -> DbResult<u64> {
+    let current = load_authored_purpose_revision(connection)?;
+    let revision = current
+        .checked_add(1)
+        .ok_or(DbError::IntegerMetadataOverflow {
+            field: AUTHORED_PURPOSE_REVISION_KEY,
+            value: current,
+        })?;
+    set_metadata(
+        connection,
+        AUTHORED_PURPOSE_REVISION_KEY,
+        &revision.to_string(),
+    )?;
+    Ok(revision)
 }
 
 /// Load the authoritative and projection revisions without scanning text rows.
@@ -10703,6 +10774,11 @@ mod tests {
         store.replace_scan(&nodes)?;
         store.set_suggested_purpose("src/b.rs", "Generated B suggestion")?;
         store.set_suggested_purpose("src/changed.rs", "Original suggestion")?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &0,
+            "suggestions do not advance authored-purpose revision",
+        )?;
         let task = "issue-308-purpose-curation";
 
         let apply_batch = store
@@ -10740,6 +10816,11 @@ mod tests {
             &true,
             "applied transaction-owned purpose metadata",
         )?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &1,
+            "one accepted batch advances one authored-purpose revision",
+        )?;
 
         let changed = store
             .load_purpose_curation_batch(task, &["src/changed.rs".to_string()])?
@@ -10773,6 +10854,11 @@ mod tests {
             )),
             "stale transaction-owned purpose metadata",
         )?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &1,
+            "stale conditional purpose leaves revision unchanged",
+        )?;
 
         let accepted = store
             .load_purpose_curation_batch(task, &["src/accepted.rs".to_string()])?
@@ -10784,6 +10870,21 @@ mod tests {
             "src/accepted.rs",
             "Concurrent accepted purpose",
             PurposeSource::Agent,
+        )?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &2,
+            "explicit accepted correction advances the authored-purpose revision",
+        )?;
+        store.set_purpose(
+            "src/accepted.rs",
+            "Concurrent accepted purpose",
+            PurposeSource::Agent,
+        )?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &2,
+            "identical accepted purpose leaves the authored-purpose revision unchanged",
         )?;
         let accepted_result = store
             .conditionally_set_purposes(&[conditional_purpose_request(
@@ -10809,6 +10910,11 @@ mod tests {
                 Some("Concurrent accepted purpose"),
             )),
             "accepted transaction-owned purpose metadata",
+        )?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &2,
+            "accepted conditional no-op leaves revision unchanged",
         )?;
 
         let unavailable_result = store

@@ -7,9 +7,9 @@ use projectatlas_core::graph::{
     RelationResolution, RepositoryFilePath, RepositoryNodePath, SymbolSelector,
 };
 use projectatlas_core::symbols::SymbolKind;
-use projectatlas_core::{IndexWorkControl, Purpose, PurposeSource, PurposeStatus};
+use projectatlas_core::{IndexWorkControl, IndexWorkStage, Purpose, PurposeSource, PurposeStatus};
 use projectatlas_db::{
-    AtlasStore, MAX_REPOSITORY_GRAPH_FRONTIER, RepositoryGraphAdjacencyContinuation,
+    AtlasStore, DbError, MAX_REPOSITORY_GRAPH_FRONTIER, RepositoryGraphAdjacencyContinuation,
     RepositoryGraphDirection, RepositoryGraphRelationRow,
 };
 use serde::Serialize;
@@ -218,7 +218,7 @@ pub struct DetailedRelationRow {
     /// Purpose disposition for the target, including unresolved identities.
     pub target_purpose: RelationPurpose,
     /// Stable node-simple path from the anchor through this step.
-    pub path: Vec<GraphEntityKey>,
+    pub path: Vec<DetailedRelationNode>,
     /// Exact supporting source occurrences when requested.
     pub occurrences: Vec<RelationOccurrence>,
     /// Whether the per-relation occurrence ceiling omitted additional rows.
@@ -255,7 +255,7 @@ struct TraversalRow {
     /// Fully hydrated normalized relation row.
     detail: RepositoryGraphRelationRow,
     /// Node-simple entity-key path reaching this row.
-    path: Vec<GraphEntityKey>,
+    path: Vec<GraphEntity>,
 }
 
 /// Load one detailed relation traversal through a stable store snapshot.
@@ -269,11 +269,12 @@ pub fn load_detailed_relations(
     query: &DetailedRelationQuery,
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<DetailedRelationReport> {
+    check_relation_control(control)?;
     let binding = selected_project_binding(store)?;
     let anchor = resolve_anchor(store, binding.project_instance_id, &query.anchor)?;
     let anchor_digest = anchor.key().digest_bytes().map_err(invalid_graph_input)?;
     let mut visited = HashSet::from([anchor_digest]);
-    let mut paths = HashMap::from([(anchor_digest, vec![anchor.key().clone()])]);
+    let mut paths = HashMap::from([(anchor_digest, vec![anchor.clone()])]);
     let mut frontier = vec![anchor.key().clone()];
     let mut retained = Vec::new();
     let mut inspected_edges = 0usize;
@@ -282,7 +283,16 @@ pub fn load_detailed_relations(
     let row_limit = query.limits.rows() as usize;
 
     for depth in 1..=query.limits.depth() {
-        if frontier.is_empty() || inspected_edges >= row_limit || retained.len() >= row_limit {
+        check_relation_control(control)?;
+        if frontier.is_empty() {
+            break;
+        }
+        if inspected_edges >= row_limit {
+            push_limit(&mut reached_limits, GraphLimitKind::Edges);
+            break;
+        }
+        if retained.len() >= row_limit {
+            push_limit(&mut reached_limits, GraphLimitKind::Rows);
             break;
         }
         let mut depth_rows = read_frontier(
@@ -294,11 +304,13 @@ pub fn load_detailed_relations(
             &mut inspected_edges,
             &mut reached_limits,
         )?;
+        check_relation_control(control)?;
         depth_rows.retain(|row| relation_matches(&row.detail.relation, query));
         depth_rows.sort_by(|left, right| relation_rank_order(&left.detail, &right.detail));
 
         let mut next_frontier = Vec::new();
         for row in depth_rows {
+            check_relation_control(control)?;
             if retained.len() >= row_limit {
                 push_limit(&mut reached_limits, GraphLimitKind::Rows);
                 break;
@@ -318,12 +330,12 @@ pub fn load_detailed_relations(
                     continue;
                 }
                 visited.insert(digest);
-                path.push(next.key().clone());
+                path.push(next.clone());
                 paths.insert(digest, path.clone());
                 if next_frontier.len() < MAX_REPOSITORY_GRAPH_FRONTIER {
                     next_frontier.push(next.key().clone());
                 } else {
-                    push_limit(&mut reached_limits, GraphLimitKind::Rows);
+                    push_limit(&mut reached_limits, GraphLimitKind::Nodes);
                 }
             }
             retained.push(TraversalRow {
@@ -351,11 +363,11 @@ pub fn load_detailed_relations(
     if occurrence_pages.iter().any(|(_, truncated)| *truncated) {
         push_limit(&mut reached_limits, GraphLimitKind::Occurrences);
     }
-    let rows = retained
-        .into_iter()
-        .zip(occurrence_pages)
-        .map(|(row, occurrences)| detailed_row(row, query, &purposes, &coverage, occurrences))
-        .collect::<Vec<_>>();
+    let mut rows = Vec::with_capacity(retained.len());
+    for (row, occurrences) in retained.into_iter().zip(occurrence_pages) {
+        check_relation_control(control)?;
+        rows.push(detailed_row(row, query, &purposes, &coverage, occurrences));
+    }
     let truncated = !reached_limits.is_empty();
     let mut report = DetailedRelationReport {
         anchor: anchor_node,
@@ -367,7 +379,7 @@ pub fn load_detailed_relations(
         reached_limits,
         rows,
     };
-    enforce_output_limit(&mut report, query.limits.output_bytes())?;
+    enforce_output_limit(&mut report, query.limits.output_bytes(), control)?;
     Ok(report)
 }
 
@@ -414,7 +426,7 @@ fn read_frontier(
         }));
         if *inspected_edges >= query.limits.rows() as usize {
             if page.truncated {
-                push_limit(reached_limits, GraphLimitKind::Rows);
+                push_limit(reached_limits, GraphLimitKind::Edges);
             }
             break;
         }
@@ -596,17 +608,15 @@ fn load_purposes(
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<BTreeMap<String, Purpose>> {
     let mut paths = BTreeSet::new();
-    if let Some(path) = purpose_owner(anchor) {
-        paths.insert(path);
-    }
+    paths.extend(purpose_candidates(anchor));
     for row in rows {
-        if let Some(path) = purpose_owner(&row.detail.source) {
-            paths.insert(path);
+        check_relation_control(control)?;
+        paths.extend(purpose_candidates(&row.detail.source));
+        if let Some(target) = &row.detail.target {
+            paths.extend(purpose_candidates(target));
         }
-        if let Some(target) = &row.detail.target
-            && let Some(path) = purpose_owner(target)
-        {
-            paths.insert(path);
+        for entity in &row.path {
+            paths.extend(purpose_candidates(entity));
         }
     }
     let selected = paths.into_iter().collect::<Vec<_>>();
@@ -615,6 +625,23 @@ fn load_purposes(
         .into_iter()
         .map(|node| (node.node.path.clone(), node.purpose))
         .collect())
+}
+
+/// Return exact and nearest-ancestor paths that may own an accepted purpose.
+fn purpose_candidates(entity: &GraphEntity) -> Vec<String> {
+    let Some(exact) = purpose_owner(entity) else {
+        return Vec::new();
+    };
+    let mut candidates = vec![exact.clone()];
+    let mut cursor = exact.as_str();
+    while let Some((parent, _name)) = cursor.rsplit_once('/') {
+        candidates.push(parent.to_string());
+        cursor = parent;
+    }
+    if exact != "." {
+        candidates.push(".".to_string());
+    }
+    candidates
 }
 
 /// Return the file or folder path that authoritatively owns an entity purpose.
@@ -634,24 +661,26 @@ fn purpose_projection(
     entity: &GraphEntity,
     purposes: &BTreeMap<String, Purpose>,
 ) -> RelationPurpose {
-    let Some(path) = purpose_owner(entity) else {
+    let Some(exact_path) = purpose_owner(entity) else {
         return RelationPurpose::NotApplicable;
     };
-    let Some(purpose) = purposes.get(&path) else {
-        return RelationPurpose::Unavailable { path: Some(path) };
-    };
-    if purpose.status == PurposeStatus::Approved
-        && purpose.source == PurposeSource::Agent
-        && let Some(text) = &purpose.purpose
-    {
-        return RelationPurpose::Approved {
-            path,
-            purpose: text.clone(),
-            source: purpose.source,
-            status: purpose.status,
-        };
+    for path in purpose_candidates(entity) {
+        if let Some(purpose) = purposes.get(&path)
+            && purpose.status == PurposeStatus::Approved
+            && purpose.source == PurposeSource::Agent
+            && let Some(text) = &purpose.purpose
+        {
+            return RelationPurpose::Approved {
+                path,
+                purpose: text.clone(),
+                source: purpose.source,
+                status: purpose.status,
+            };
+        }
     }
-    RelationPurpose::Unavailable { path: Some(path) }
+    RelationPurpose::Unavailable {
+        path: Some(exact_path),
+    }
 }
 
 /// Compose one hydrated response node from graph, purpose, and coverage state.
@@ -688,6 +717,11 @@ fn detailed_row(
         .map_or(RelationPurpose::Unavailable { path: None }, |target| {
             purpose_projection(target, purposes)
         });
+    let path = row
+        .path
+        .into_iter()
+        .map(|entity| detailed_node(entity, purposes, coverage))
+        .collect();
     DetailedRelationRow {
         depth: row.depth,
         direction: query.direction,
@@ -698,7 +732,7 @@ fn detailed_row(
             .target
             .map(|target| detailed_node(target, purposes, coverage)),
         target_purpose,
-        path: row.path,
+        path,
         occurrences,
         occurrences_truncated,
         next_call,
@@ -809,9 +843,11 @@ fn next_call_for_entity(entity: &GraphEntity) -> Option<RelationNextCall> {
 fn enforce_output_limit(
     report: &mut DetailedRelationReport,
     output_bytes: u32,
+    control: Option<&IndexWorkControl>,
 ) -> ServiceResult<()> {
     let maximum = output_bytes as usize;
     while serde_json::to_vec(report)?.len() > maximum {
+        check_relation_control(control)?;
         if report.rows.pop().is_none() {
             return Err(ServiceError::InvalidInput(
                 "graph output byte limit is too small for the empty response envelope".to_string(),
@@ -820,6 +856,16 @@ fn enforce_output_limit(
         push_limit(&mut report.reached_limits, GraphLimitKind::OutputBytes);
         report.returned = report.rows.len();
         report.truncated = true;
+    }
+    Ok(())
+}
+
+/// Observe cancellation and the caller deadline during service-owned traversal work.
+fn check_relation_control(control: Option<&IndexWorkControl>) -> ServiceResult<()> {
+    if let Some(control) = control {
+        control
+            .check(IndexWorkStage::RepositoryTraversal)
+            .map_err(DbError::from)?;
     }
     Ok(())
 }
@@ -929,6 +975,7 @@ mod tests {
         let mut publication = store.begin_index_publication("relation-service")?;
         publication.begin_scan_replacement()?;
         publication.upsert_scan_node_batch(&[
+            test_folder_node("src"),
             test_node("src/a.rs", "hash-a"),
             test_node("src/b.rs", "hash-b"),
         ])?;
@@ -942,7 +989,7 @@ mod tests {
         )?;
         publication.complete()?;
         store.set_purpose("src/a.rs", "Own source calls", PurposeSource::Agent)?;
-        store.set_purpose("src/b.rs", "Own target behavior", PurposeSource::Agent)?;
+        store.set_purpose("src", "Own source folder", PurposeSource::Agent)?;
         drop(store);
 
         let store = AtlasStore::open_read_only_for_project(&database, &root)?;
@@ -996,11 +1043,31 @@ mod tests {
             matches!(
                 report.rows[0].target,
                 Some(DetailedRelationNode {
-                    purpose: RelationPurpose::Approved { ref purpose, .. },
+                    purpose: RelationPurpose::Approved {
+                        ref path,
+                        ref purpose,
+                        ..
+                    },
                     ..
-                }) if purpose == "Own target behavior"
+                }) if path == "src" && purpose == "Own source folder"
             ),
-            "target purpose projection changed",
+            "target did not inherit the nearest accepted folder purpose",
+        )?;
+        require(
+            matches!(
+                report.rows[0].path.as_slice(),
+                [
+                    DetailedRelationNode {
+                        purpose: RelationPurpose::Approved { path: source, .. },
+                        ..
+                    },
+                    DetailedRelationNode {
+                        purpose: RelationPurpose::Approved { path: target, .. },
+                        ..
+                    }
+                ] if source == "src/a.rs" && target == "src"
+            ),
+            "node-simple path omitted authoritative purpose projection",
         )?;
         require(
             matches!(
@@ -1103,6 +1170,19 @@ mod tests {
             size_bytes: Some(16),
             mtime_ns: Some(1),
             content_hash: Some(hash.to_string()),
+        }
+    }
+
+    fn test_folder_node(path: &str) -> Node {
+        Node {
+            path: path.to_string(),
+            kind: NodeKind::Folder,
+            parent_path: Some(".".to_string()),
+            extension: None,
+            language: None,
+            size_bytes: None,
+            mtime_ns: Some(1),
+            content_hash: None,
         }
     }
 }

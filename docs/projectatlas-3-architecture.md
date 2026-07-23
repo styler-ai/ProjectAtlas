@@ -620,6 +620,38 @@ cancellation, selectors, or visited/edge/time/memory/output accounting. Neither
 mechanism may use one broad `source OR target` predicate that defeats the owning
 indexes or rely on depth alone to control cycles.
 
+##### Recursive CTE comparison
+
+The owning `projectatlas-db` regression compares the two mechanisms against the
+same persisted calls graph: one source with 4,096 distinct outbound targets,
+one return edge from every target, and the existing resolved call. The graph
+therefore contains 4,098 reachable nodes, 8,193 inspected edges, a high-degree
+frontier, and 4,096 cycles. Both mechanisms use
+`idx_graph_relations_source_kind`, return the same stable key order, terminate
+the cycles, and stop through a SQLite progress callback; the Rust mechanism
+additionally proves typed `RepositoryTraversal` cancellation.
+
+One optimized Windows x86-64 run recorded the following diagnostic sample. The
+elapsed values are observations rather than regression thresholds; topology,
+plan ownership, bounded state, cancellation, and deterministic order are the
+portable assertions.
+
+| Mechanism | SQLite VM steps | Elapsed | Explicit retained/output state |
+| --- | ---: | ---: | --- |
+| Indexed recursive CTE | 188,000 | 33.023 ms | SQLite owns the recursive distinct set and its temporary-state accounting |
+| Batched Rust frontier | 20,007,000 | 1,705.933 ms | 4,097-key peak frontier; 262,240 estimated retained key bytes; 131,136 output key bytes |
+
+The CTE wins raw transitive-closure latency on this deliberately simple graph.
+It does not win the product mechanism: moving relation trust and resolution
+filters, stable per-edge ranking and path choice, node-simple visited state,
+continuations, aggregate row/node/edge/occurrence/memory/deadline/output
+budgets, purpose and coverage hydration, and typed cancellation into recursive
+SQL would hide or duplicate the service-owned policy. ProjectAtlas therefore
+keeps the direction-indexed CTE as a performance guard and keeps bounded Rust
+frontier control as the responsibility-coherent implementation. The measured
+gap is tracked by the huge-source matrix; it is not disguised as a Rust speed
+advantage.
+
 Traversal cost follows the visited frontier and can grow roughly with branching
 factor raised to depth even when every lookup is indexed. The huge-source matrix
 therefore includes skewed high-degree nodes, diamonds, cycles, disconnected
