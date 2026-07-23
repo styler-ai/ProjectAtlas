@@ -276,6 +276,17 @@ function Assert-ProductionRecoveryContracts {
             $nativeText.Contains('TokenBnoIsolationInformation') -and
             $nativeText.Contains('[MarshalAs(UnmanagedType.U1)]') -and
             $nativeText.Contains('MaximumTokenInformationBytes = 64 * 1024;') -and
+            $nativeText -match
+                'snapshot\.HasRestrictions\s*=\s*ReadExactTokenBoolean\(' -and
+            $nativeText.Contains('if (information.Length != sizeof(byte))') -and
+            $nativeText.Contains('byte value = Marshal.ReadByte(information.Pointer);') -and
+            $nativeText.Contains('if (value > 1)') -and
+            $nativeText -match
+                'snapshot\.IsAppContainer\s*=\s*ReadExactTokenDword\(' -and
+            $nativeText -match
+                'snapshot\.IsSandboxed\s*=\s*ReadExactTokenDword\(' -and
+            $nativeText -match
+                'snapshot\.IsAppSilo\s*=\s*ReadExactTokenDword\(' -and
             $nativeText.Contains('ambient-construction-jobserver') -and
             $nativeText.Contains('EntryPoint = "CreateSemaphoreExW"') -and
             $nativeText.Contains('DuplicateHandle(') -and

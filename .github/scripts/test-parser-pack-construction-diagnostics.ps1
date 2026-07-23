@@ -780,6 +780,17 @@ try {
                 $wrapperText.Contains('MaximumTokenInformationBytes = 64 * 1024;') -and
                 $wrapperText.Contains('MaximumBnoIsolationPrefixCharacters = 256;') -and
                 $wrapperText.Contains('ReadBoundedUnicodeString(') -and
+                $wrapperText -match
+                    'snapshot\.HasRestrictions\s*=\s*ReadExactTokenBoolean\(' -and
+                $wrapperText.Contains('if (information.Length != sizeof(byte))') -and
+                $wrapperText.Contains('byte value = Marshal.ReadByte(information.Pointer);') -and
+                $wrapperText.Contains('if (value > 1)') -and
+                $wrapperText -match
+                    'snapshot\.IsAppContainer\s*=\s*ReadExactTokenDword\(' -and
+                $wrapperText -match
+                    'snapshot\.IsSandboxed\s*=\s*ReadExactTokenDword\(' -and
+                $wrapperText -match
+                    'snapshot\.IsAppSilo\s*=\s*ReadExactTokenDword\(' -and
                 $wrapperText.Contains('availableCharacters') -and
                 $wrapperText.Contains('requiredGroupBytes > groupsInformation.Length') -and
                 $wrapperText.Contains('!IsValidSid(sid)') -and
@@ -924,6 +935,29 @@ try {
         Require `
             ($null -ne $namespaceSnapshotType -and $null -ne $namespaceComparator) `
             "Construction token namespace comparator was missing."
+        $namespaceCapture = $adapterType.GetMethod(
+            'CaptureTokenNamespaceSnapshot',
+            $nestedTypeFlags
+        )
+        Require ($null -ne $namespaceCapture) "Construction token namespace capture was missing."
+        $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        try {
+            $currentSnapshot = $namespaceCapture.Invoke(
+                $null,
+                [object[]]@($currentIdentity.AccessToken)
+            )
+            Require ($null -ne $currentSnapshot) `
+                "Current Windows token namespace capture returned no snapshot."
+            $currentHasRestrictions = $namespaceSnapshotType.GetProperty(
+                'HasRestrictions',
+                $instanceMemberFlags
+            ).GetValue($currentSnapshot)
+            Require ($currentHasRestrictions -is [bool]) `
+                "Current Windows TokenHasRestrictions payload was not decoded as a Boolean."
+        }
+        finally {
+            $currentIdentity.Dispose()
+        }
         $leftSnapshot = [Activator]::CreateInstance($namespaceSnapshotType, $true)
         $rightSnapshot = [Activator]::CreateInstance($namespaceSnapshotType, $true)
         foreach ($snapshot in @($leftSnapshot, $rightSnapshot)) {

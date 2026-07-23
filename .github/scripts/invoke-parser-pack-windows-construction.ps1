@@ -2191,10 +2191,10 @@ public static class ProjectAtlasConstructionProcess
         SafeAccessTokenHandle token)
     {
         TokenNamespaceSnapshot snapshot = new TokenNamespaceSnapshot();
-        snapshot.HasRestrictions = ReadExactTokenDword(
+        snapshot.HasRestrictions = ReadExactTokenBoolean(
             token,
             TokenHasRestrictionsInformation,
-            "read-construction-token-restriction-state") != 0;
+            "read-construction-token-restriction-state");
         snapshot.RestrictedSidCount = ReadBoundedRestrictedSidCount(token);
         snapshot.IsAppContainer = ReadExactTokenDword(
             token,
@@ -2228,6 +2228,28 @@ public static class ProjectAtlasConstructionProcess
         }
         CapturePrivateNamespaceStatus(token, snapshot);
         return snapshot;
+    }
+
+    private static bool ReadExactTokenBoolean(
+        SafeAccessTokenHandle token,
+        int informationClass,
+        string operation)
+    {
+        using (TokenInformationBuffer information = GetBoundedTokenInformation(
+            token,
+            informationClass))
+        {
+            if (information.Length != sizeof(byte))
+            {
+                throw new InvalidOperationException(operation);
+            }
+            byte value = Marshal.ReadByte(information.Pointer);
+            if (value > 1)
+            {
+                throw new InvalidOperationException(operation);
+            }
+            return value != 0;
+        }
     }
 
     private static uint ReadExactTokenDword(
