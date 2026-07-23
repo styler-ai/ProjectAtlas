@@ -289,6 +289,8 @@ function Assert-ProductionRecoveryContracts {
                 'snapshot\.IsAppSilo\s*=\s*ReadExactTokenDword\(' -and
             $nativeText.Contains('ambient-construction-jobserver') -and
             $nativeText.Contains('EntryPoint = "CreateSemaphoreExW"') -and
+            $nativeText.Contains('string sddl = "D:P(A;;0x00100002;;;"') -and
+            $nativeText.Contains('")S:(ML;;NW;;;" + RequiredIntegritySid + ")";') -and
             $nativeText.Contains('DuplicateHandle(') -and
             $nativeText.Contains('DuplicateSameAccess') -and
             $nativeText.Contains('RequireEquivalentTokenNamespaces(') -and

@@ -840,6 +840,7 @@ try {
                 -not $nativeSource.Contains('0x001F0003') -and
                 $nativeSource.Contains('EntryPoint = "CreateSemaphoreExW"') -and
                 $nativeSource.Contains('string sddl = "D:P(A;;0x00100002;;;"') -and
+                $nativeSource.Contains('")S:(ML;;NW;;;" + RequiredIntegritySid + ")";') -and
                 $nativeSource.Contains('EntryPoint = "QueryInformationJobObject"') -and
                 $nativeSource.Contains('DuplicateHandle(') -and
                 $nativeSource.Contains('false,') -and
@@ -942,6 +943,7 @@ try {
         Require ($null -ne $namespaceCapture) "Construction token namespace capture was missing."
         $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
         try {
+            $currentPrincipalSid = $currentIdentity.User.Value
             $currentSnapshot = $namespaceCapture.Invoke(
                 $null,
                 [object[]]@($currentIdentity.AccessToken)
@@ -958,6 +960,79 @@ try {
         finally {
             $currentIdentity.Dispose()
         }
+        $seedCreator = $adapterType.GetMethod('CreateSeededSemaphore', $nestedTypeFlags)
+        $localFree = $adapterType.GetMethod('LocalFree', $nestedTypeFlags)
+        Require ($null -ne $seedCreator -and $null -ne $localFree) `
+            "Construction seed ownership boundary was missing."
+        $seedName = "Global\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+        $seedArguments = [object[]]@($seedName, $currentPrincipalSid, [IntPtr]::Zero)
+        $seedRawHandle = [IntPtr]::Zero
+        $seedSecurityDescriptor = [IntPtr]::Zero
+        $seedOwner = $null
+        $seedOpen = $null
+        $forbiddenSeedOpen = $null
+        try {
+            $seedRawHandle = [IntPtr]$seedCreator.Invoke($null, $seedArguments)
+            $seedSecurityDescriptor = [IntPtr]$seedArguments[2]
+            Require `
+                ($seedRawHandle -ne [IntPtr]::Zero -and
+                    $seedSecurityDescriptor -ne [IntPtr]::Zero) `
+                "Construction seed creation returned invalid ownership."
+            $seedOwner = [Microsoft.Win32.SafeHandles.SafeWaitHandle]::new(
+                $seedRawHandle,
+                $true
+            )
+            $seedRawHandle = [IntPtr]::Zero
+            $seedRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
+                [System.Security.AccessControl.SemaphoreRights]::Modify
+            Require `
+                ([System.Threading.SemaphoreAcl]::TryOpenExisting(
+                    $seedName,
+                    $seedRights,
+                    [ref]$seedOpen
+                )) `
+                "Mandatory-labeled construction seed could not be reopened."
+            $fullControlDenied = $false
+            try {
+                [void][System.Threading.SemaphoreAcl]::TryOpenExisting(
+                    $seedName,
+                    [System.Security.AccessControl.SemaphoreRights]::FullControl,
+                    [ref]$forbiddenSeedOpen
+                )
+            }
+            catch [System.UnauthorizedAccessException] {
+                $fullControlDenied = $true
+            }
+            Require $fullControlDenied `
+                "Construction seed DACL granted more than synchronize and modify."
+        }
+        finally {
+            if ($null -ne $forbiddenSeedOpen) { $forbiddenSeedOpen.Dispose() }
+            if ($null -ne $seedOpen) { $seedOpen.Dispose() }
+            if ($null -ne $seedOwner) { $seedOwner.Dispose() }
+            if ($seedRawHandle -ne [IntPtr]::Zero) {
+                [Microsoft.Win32.SafeHandles.SafeWaitHandle]::new(
+                    $seedRawHandle,
+                    $true
+                ).Dispose()
+            }
+            if ($seedSecurityDescriptor -ne [IntPtr]::Zero) {
+                Require `
+                    ([IntPtr]$localFree.Invoke(
+                        $null,
+                        [object[]]@($seedSecurityDescriptor)
+                    ) -eq [IntPtr]::Zero) `
+                    "Construction seed security descriptor was not freed."
+            }
+        }
+        $survivingSeed = $null
+        $seedAbsent = -not [System.Threading.SemaphoreAcl]::TryOpenExisting(
+            $seedName,
+            [System.Security.AccessControl.SemaphoreRights]::Synchronize,
+            [ref]$survivingSeed
+        )
+        if ($null -ne $survivingSeed) { $survivingSeed.Dispose() }
+        Require $seedAbsent "Construction seed survived owning-handle cleanup."
         $leftSnapshot = [Activator]::CreateInstance($namespaceSnapshotType, $true)
         $rightSnapshot = [Activator]::CreateInstance($namespaceSnapshotType, $true)
         foreach ($snapshot in @($leftSnapshot, $rightSnapshot)) {

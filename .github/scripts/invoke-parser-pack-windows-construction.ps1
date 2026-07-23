@@ -2706,7 +2706,8 @@ public static class ProjectAtlasConstructionProcess
         string principalSid,
         out IntPtr securityDescriptor)
     {
-        string sddl = "D:P(A;;0x00100002;;;" + principalSid + ")";
+        string sddl = "D:P(A;;0x00100002;;;" + principalSid +
+            ")S:(ML;;NW;;;" + RequiredIntegritySid + ")";
         if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
             sddl,
             SddlRevision1,
