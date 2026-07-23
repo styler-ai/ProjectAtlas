@@ -67,6 +67,10 @@ graphs. Windows builds the worker, assembler, and verifier in one Cargo invocati
 Linux keeps the worker's required linker-specific `cargo rustc` invocation separate,
 then builds both release tools in one Cargo invocation.
 
+Windows Cargo runs through the existing SID-restricted protected jobserver with a
+fixed two-worker budget. This uses the hosted runner without restoring ambient
+jobserver authority or allowing unbounded host-wide parallelism.
+
 The two required assembly and archive passes run concurrently with separate inputs,
 staging directories, and output paths. Both lanes still perform the complete native,
 license, manifest, and archive audit, and the workflow still requires byte-identical

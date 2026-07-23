@@ -2783,7 +2783,7 @@ function Assert-AdmissionReceipt {
 
 function New-MinimalUserEnvironmentBlock {
     $values = [ordered]@{
-        CARGO_BUILD_JOBS = '1'
+        CARGO_BUILD_JOBS = '2'
         ComSpec = $env:ComSpec
         LOCALAPPDATA = (Join-Path $env:SystemRoot 'Temp')
         OS = 'Windows_NT'

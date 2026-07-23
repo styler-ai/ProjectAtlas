@@ -713,7 +713,7 @@ function Assert-CargoConstructionEnvironment {
     )
 
     if ($Target -eq "x86_64-pc-windows-msvc") {
-        if ([string]$env:CARGO_BUILD_JOBS -cne "1" -or
+        if ([string]$env:CARGO_BUILD_JOBS -cne "2" -or
             (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS)) {
             throw "Windows construction must create its Cargo jobserver inside the contained child."
         }
@@ -1182,11 +1182,25 @@ $artifactConstructions |
 
 $script:constructionStage = "deterministic-archive-comparison"
 Write-ConstructionStatus -Stage $script:constructionStage -State "running"
-$archiveA = Get-Item -LiteralPath $archives[0] -Force
-$archiveB = Get-Item -LiteralPath $archives[1] -Force
-$archiveAHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archiveA.FullName).Hash.ToLowerInvariant()
-$archiveBHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archiveB.FullName).Hash.ToLowerInvariant()
-if ($archiveA.Length -ne $archiveB.Length -or $archiveAHash -ne $archiveBHash) {
+$archiveMeasurements = @(
+    $artifactConstructions |
+        ForEach-Object -Parallel {
+            $archive = Get-Item -LiteralPath ([string]$_.archive) -Force
+            [pscustomobject]@{
+                index = [int]$_.index
+                path = $archive.FullName
+                byte_length = $archive.Length
+                sha256 = (
+                    Get-FileHash -Algorithm SHA256 -LiteralPath $archive.FullName
+                ).Hash.ToLowerInvariant()
+            }
+        } `
+        -ThrottleLimit 2
+)
+$archiveA = $archiveMeasurements | Where-Object index -EQ 0
+$archiveB = $archiveMeasurements | Where-Object index -EQ 1
+if ($archiveA.byte_length -ne $archiveB.byte_length -or
+    $archiveA.sha256 -ne $archiveB.sha256) {
     throw "Independent parser-pack assembly did not produce byte-identical archives."
 }
 
@@ -1212,7 +1226,7 @@ $publishedNetworkCheck = [System.IO.Path]::Combine(
     $publishDirectory,
     "check-parser-pack-network-boundary.ps1"
 )
-[System.IO.File]::Copy($archiveA.FullName, $publishedArchive, $false)
+[System.IO.File]::Move($archiveA.path, $publishedArchive)
 [System.IO.File]::Copy($releaseTool, $publishedVerifier, $false)
 [System.IO.File]::WriteAllText(
     $publishedVerifierDigest,
@@ -1236,8 +1250,8 @@ Close-ContainedCargoJobserver
     target = $Target
     network_isolation = $NetworkIsolation
     archive = [System.IO.Path]::GetFileName($publishedArchive)
-    archive_bytes = $archiveA.Length
-    archive_sha256 = $archiveAHash
+    archive_bytes = $archiveA.byte_length
+    archive_sha256 = $archiveA.sha256
     verifier = [System.IO.Path]::GetFileName($publishedVerifier)
     verifier_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $releaseTool).Hash.ToLowerInvariant()
     accepted_manifest = [System.IO.Path]::GetFileName($publishedManifest)

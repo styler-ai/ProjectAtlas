@@ -1797,7 +1797,7 @@ grants only the disposable token's exact enabled logon SID the synchronize and m
 rights that Cargo and `rustc` require, and its mandatory label prevents lower-integrity
 writes. Ambient jobserver state is rejected. The broker retains the only owner handle
 until the assigned process tree is reaped and then closes it, so the semaphore cannot
-outlive construction. This preserves the one-worker budget without adding broader
+outlive construction. This preserves a fixed two-worker budget without adding broader
 named-object or global-namespace permission to the disposable principal. The
 hosted-runner broker is trusted CI orchestration and is never
 packaged with, or substituted for, the artifact-bound AppContainer broker. This is
