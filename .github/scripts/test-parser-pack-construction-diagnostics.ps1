@@ -791,6 +791,8 @@ try {
                 $productionText.Contains(
                     '-Role "runtime-containment broker build and contract audit"'
                 ) -and
+                $containmentBuilderText.Contains('code-dom-compile-hresult-') -and
+                $containmentBuilderText.Contains('$buildFailure.InnerException') -and
                 $containmentBuilderText.Contains('"admission-success"') -and
                 $containmentBuilderText.Contains('"pre-assignment-failure"') -and
                 $containmentBuilderText.Contains('"case=" + contractCase') -and

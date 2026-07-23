@@ -2237,6 +2237,7 @@ function Test-X64Pe {
 
 $fullOutputPath = $null
 $mayDeleteOutput = $false
+$buildStage = 'validate-output'
 
 if ($env:OS -ne 'Windows_NT' -or -not [System.Environment]::Is64BitProcess) {
     Write-BuildFailure -Stage 'require-windows-x64'
@@ -2258,6 +2259,7 @@ try {
         throw 'output-name'
     }
     $mayDeleteOutput = $true
+    $buildStage = 'code-dom-compile'
     $provider = New-Object Microsoft.CSharp.CSharpCodeProvider
     try {
         $compiler = New-Object System.CodeDom.Compiler.CompilerParameters
@@ -2268,27 +2270,51 @@ try {
         $compiler.CompilerOptions = '/platform:x64 /optimize+'
         $compiler.TreatWarningsAsErrors = $true
         $compiler.WarningLevel = 4
+        # A disposable construction principal has no loaded Windows profile. Keep CodeDOM's
+        # transient source and response files beside the already-writable build output instead
+        # of allowing the framework to resolve a profile-dependent default temporary directory.
+        $compiler.TempFiles = New-Object System.CodeDom.Compiler.TempFileCollection(
+            $outputParent,
+            $false
+        )
         [void] $compiler.ReferencedAssemblies.Add('System.dll')
         [void] $compiler.ReferencedAssemblies.Add('System.Core.dll')
         $compileResult = $provider.CompileAssemblyFromSource($compiler, $brokerSource)
         if ($compileResult.Errors.HasErrors) {
-            throw 'compile-errors'
+            $compilerErrorCodes = @(
+                $compileResult.Errors |
+                    Where-Object { -not $_.IsWarning } |
+                    ForEach-Object { $_.ErrorNumber } |
+                    Sort-Object -Unique |
+                    Select-Object -First 8
+            )
+            $buildStage = if ($compilerErrorCodes.Count -eq 0) {
+                'code-dom-compile-errors'
+            }
+            else {
+                'code-dom-compile-errors-' + ($compilerErrorCodes -join '-')
+            }
+            throw $buildStage
         }
     }
     finally {
         $provider.Dispose()
     }
     if (-not [System.IO.File]::Exists($fullOutputPath)) {
+        $buildStage = 'missing-output'
         throw 'missing-output'
     }
     if (-not (Test-X64Pe -Path $fullOutputPath)) {
+        $buildStage = 'x64-pe-contract'
         throw 'x64-pe-contract'
     }
 
+    $buildStage = 'version-smoke'
     & $fullOutputPath --version | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw 'version-smoke'
     }
+    $buildStage = 'build-contract-smoke'
     $buildContract = @(& $fullOutputPath --build-contract)
     if ($LASTEXITCODE -ne 0 `
         -or $buildContract.Count -ne 1 `
@@ -2296,6 +2322,7 @@ try {
         throw 'build-contract-smoke'
     }
     if ($RunSelfTest) {
+        $buildStage = 'self-test'
         & $fullOutputPath self-test
         if ($LASTEXITCODE -ne 0) {
             throw 'self-test'
@@ -2305,8 +2332,26 @@ try {
     [Console]::Out.WriteLine("[parser-containment-builder] sha256=$digest")
 }
 catch {
-    if ($mayDeleteOutput -and $null -ne $fullOutputPath -and [System.IO.File]::Exists($fullOutputPath)) {
-        [System.IO.File]::Delete($fullOutputPath)
+    $buildFailure = $_.Exception
+    if ($buildStage -eq 'code-dom-compile') {
+        while ($null -ne $buildFailure.InnerException) {
+            $buildFailure = $buildFailure.InnerException
+        }
+        $hresult = [System.BitConverter]::ToUInt32(
+            [System.BitConverter]::GetBytes([int]$buildFailure.HResult),
+            0
+        )
+        $buildStage = "code-dom-compile-hresult-$($hresult.ToString('x8'))"
     }
-    Write-BuildFailure -Stage 'compile-or-smoke'
+    if ($mayDeleteOutput -and $null -ne $fullOutputPath) {
+        try {
+            if ([System.IO.File]::Exists($fullOutputPath)) {
+                [System.IO.File]::Delete($fullOutputPath)
+            }
+        }
+        catch {
+            $buildStage = "$buildStage-cleanup"
+        }
+    }
+    Write-BuildFailure -Stage $buildStage
 }
