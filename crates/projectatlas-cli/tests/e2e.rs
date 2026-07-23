@@ -12973,10 +12973,6 @@ fn purpose_review_adapters_enforce_shared_input_budgets() -> Result<(), Box<dyn 
         .failure()
         .stderr(predicate::str::contains("aggregate string bytes"));
 
-    let repeated_item = serde_json::json!({
-        "path": "src/main.rs",
-        "purpose": "Bounded MCP review."
-    });
     let messages = vec![
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
@@ -13011,18 +13007,6 @@ fn purpose_review_adapters_enforce_shared_input_budgets() -> Result<(), Box<dyn 
             }
         })
         .to_string(),
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 4,
-            "method": "tools/call",
-            "params": {
-                "name": "atlas_purpose_review",
-                "arguments": {
-                    "items": vec![repeated_item; 201]
-                }
-            }
-        })
-        .to_string(),
     ];
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let stdout = run_mcp_stdio(
@@ -13037,14 +13021,44 @@ fn purpose_review_adapters_enforce_shared_input_budgets() -> Result<(), Box<dyn 
     )?;
     let success = mcp_tool_text(&stdout, 2)?;
     let oversized = mcp_tool_text(&stdout, 3)?;
-    let too_many = mcp_tool_text(&stdout, 4)?;
+    let repeated_item = serde_json::json!({
+        "path": "src/main.rs",
+        "purpose": "Bounded MCP review."
+    });
+    let too_many_messages = vec![
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "atlas_purpose_review",
+                "arguments": {
+                    "items": vec![repeated_item; 201]
+                }
+            }
+        })
+        .to_string(),
+    ];
+    let too_many_stdout = run_mcp_stdio(
+        &executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &too_many_messages,
+    )?;
+    let too_many = mcp_tool_text(&too_many_stdout, 2)?;
     if !success.contains("purpose_review:")
         || !success.contains("Reviewed café λ entry point.")
         || !oversized.contains("field purpose")
         || !too_many.contains("maximum is 200")
     {
         return Err(io::Error::other(format!(
-            "MCP purpose-review admission responses were incomplete: {stdout}"
+            "MCP purpose-review admission responses were incomplete: {stdout}; {too_many_stdout}"
         ))
         .into());
     }
