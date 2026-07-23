@@ -1569,6 +1569,7 @@ public static class ProjectAtlasConstructionProcess
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
     private const uint JobObjectLimitBreakawayOk = 0x00000800;
     private const uint JobObjectLimitSilentBreakawayOk = 0x00001000;
+    private const int JobObjectBasicUiRestrictions = 4;
     private const int JobObjectExtendedLimitInformation = 9;
     private const int JobObjectBasicAccountingInformation = 1;
     private const uint WaitObject0 = 0;
@@ -1577,6 +1578,7 @@ public static class ProjectAtlasConstructionProcess
     private const uint AdmissionCleanupWaitMilliseconds = 5000;
     private const uint FailureExitCode = 125;
     private const uint SemaphoreSynchronizeAndModify = 0x00100002;
+    private const uint DuplicateSameAccess = 0x00000002;
     private const int ErrorAlreadyExists = 183;
     private const uint WindowStationAllAccess = 0x000F037F;
     private const uint DesktopAllAccess = 0x000F01FF;
@@ -1584,17 +1586,27 @@ public static class ProjectAtlasConstructionProcess
     private const uint TokenQuery = 0x0008;
     private const int TokenUserInformation = 1;
     private const int TokenGroupsInformation = 2;
+    private const int TokenRestrictedSidsInformation = 11;
+    private const int TokenHasRestrictionsInformation = 21;
     private const int TokenIntegrityLevelInformation = 25;
+    private const int TokenIsAppContainerInformation = 29;
+    private const int TokenPrivateNameSpaceInformation = 42;
+    private const int TokenBnoIsolationInformationClass = 44;
+    private const int TokenIsSandboxedInformation = 47;
+    private const int TokenIsAppSiloInformation = 48;
     private const uint SeGroupEnabled = 0x00000004;
     private const uint SeGroupUseForDenyOnly = 0x00000010;
     private const uint SeGroupLogonId = 0xC0000000;
     private const int ErrorInsufficientBuffer = 122;
     private const int MaximumTokenInformationBytes = 64 * 1024;
     private const int MaximumTokenGroupCount = 1024;
+    private const int MaximumBnoIsolationPrefixCharacters = 256;
     private const int MaximumLogonCommandLineCharacters = 1023;
     private const string RequiredIntegritySid = "S-1-16-8192";
     private const string BrokerJobPrefix = "Global\\ProjectAtlasParserPackBroker-";
     private const string DiagnosticSemaphorePrefix = "Global\\ProjectAtlasParserPack-";
+    private const string SeededSemaphorePlaceholder =
+        "__PROJECTATLAS_SEEDED_SEMAPHORE__";
 
     private static readonly object BrokerJobSync = new object();
     private static string configuredBrokerJobName;
@@ -1625,11 +1637,13 @@ public static class ProjectAtlasConstructionProcess
         internal bool LogonTokenHandleClosed { get; set; }
         internal bool ConstructionTokenHandleOwned { get; set; }
         internal bool ConstructionTokenHandleClosed { get; set; }
-        internal bool NamedObjectProbeRan { get; set; }
-        internal string PreJobNativeSemaphoreName { get; set; }
-        internal int PreJobNativeCreateWin32 { get; set; }
-        internal bool PreJobNativeCreatedNew { get; set; }
-        internal int PreJobNativeCloseWin32 { get; set; }
+        internal string SeededSemaphoreName { get; set; }
+        internal bool SeededSemaphoreCreatedNew { get; set; }
+        internal bool SeededSemaphoreDuplicated { get; set; }
+        internal bool SeededSemaphoreParentHandleClosed { get; set; }
+        internal TokenNamespaceSnapshot LogonTokenNamespace { get; set; }
+        internal TokenNamespaceSnapshot ChildTokenNamespaceBeforeJob { get; set; }
+        internal TokenNamespaceSnapshot ChildTokenNamespaceAfterJob { get; set; }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1697,6 +1711,28 @@ public static class ProjectAtlasConstructionProcess
     private struct TokenMandatoryLabel
     {
         public SidAndAttributes Label;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenBnoIsolationInformation
+    {
+        public IntPtr IsolationPrefix;
+
+        [MarshalAs(UnmanagedType.U1)]
+        public bool IsolationEnabled;
+    }
+
+    private sealed class TokenNamespaceSnapshot
+    {
+        internal bool HasRestrictions { get; set; }
+        internal uint RestrictedSidCount { get; set; }
+        internal bool IsAppContainer { get; set; }
+        internal bool IsSandboxed { get; set; }
+        internal bool IsAppSilo { get; set; }
+        internal bool BnoIsolationEnabled { get; set; }
+        internal string BnoIsolationPrefix { get; set; }
+        internal int PrivateNamespaceQueryWin32 { get; set; }
+        internal int PrivateNamespaceInformationLength { get; set; }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1860,6 +1896,19 @@ public static class ProjectAtlasConstructionProcess
         uint flags,
         uint desiredAccess);
 
+    [DllImport(
+        "kernel32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true,
+        EntryPoint = "CreateSemaphoreExW")]
+    private static extern IntPtr CreateProtectedSemaphore(
+        ref SecurityAttributes securityAttributes,
+        int initialCount,
+        int maximumCount,
+        string name,
+        uint flags,
+        uint desiredAccess);
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr OpenJobObject(
         uint desiredAccess,
@@ -1895,6 +1944,18 @@ public static class ProjectAtlasConstructionProcess
         uint informationLength,
         IntPtr returnLength);
 
+    [DllImport(
+        "kernel32.dll",
+        EntryPoint = "QueryInformationJobObject",
+        SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryBasicUiRestrictions(
+        IntPtr job,
+        int informationClass,
+        out uint restrictions,
+        uint informationLength,
+        IntPtr returnLength);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
@@ -1902,6 +1963,17 @@ public static class ProjectAtlasConstructionProcess
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DuplicateHandle(
+        IntPtr sourceProcess,
+        IntPtr sourceHandle,
+        IntPtr targetProcess,
+        out IntPtr targetHandle,
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        uint options);
 
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetCurrentProcess();
@@ -2115,35 +2187,289 @@ public static class ProjectAtlasConstructionProcess
         return new SecurityIdentifier(sid);
     }
 
-    private static void CapturePreJobNativeSemaphoreProbe(AdmissionReceipt receipt)
+    private static TokenNamespaceSnapshot CaptureTokenNamespaceSnapshot(
+        SafeAccessTokenHandle token)
     {
-        receipt.NamedObjectProbeRan = true;
-        if (string.IsNullOrEmpty(receipt.PreJobNativeSemaphoreName))
+        TokenNamespaceSnapshot snapshot = new TokenNamespaceSnapshot();
+        snapshot.HasRestrictions = ReadExactTokenDword(
+            token,
+            TokenHasRestrictionsInformation,
+            "read-construction-token-restriction-state") != 0;
+        snapshot.RestrictedSidCount = ReadBoundedRestrictedSidCount(token);
+        snapshot.IsAppContainer = ReadExactTokenDword(
+            token,
+            TokenIsAppContainerInformation,
+            "read-construction-token-app-container") != 0;
+        snapshot.IsSandboxed = ReadExactTokenDword(
+            token,
+            TokenIsSandboxedInformation,
+            "read-construction-token-sandbox-state") != 0;
+        snapshot.IsAppSilo = ReadExactTokenDword(
+            token,
+            TokenIsAppSiloInformation,
+            "read-construction-token-app-silo") != 0;
+        using (TokenInformationBuffer bnoInformation = GetBoundedTokenInformation(
+            token,
+            TokenBnoIsolationInformationClass))
         {
-            receipt.PreJobNativeSemaphoreName =
-                DiagnosticSemaphorePrefix + Guid.NewGuid().ToString("N");
+            RequireStructureBytes<TokenBnoIsolationInformation>(
+                bnoInformation,
+                "read-construction-token-bno-isolation");
+            TokenBnoIsolationInformation bno =
+                Marshal.PtrToStructure<TokenBnoIsolationInformation>(
+                    bnoInformation.Pointer);
+            snapshot.BnoIsolationEnabled = bno.IsolationEnabled;
+            snapshot.BnoIsolationPrefix = bno.IsolationEnabled
+                ? ReadBoundedUnicodeString(
+                    bnoInformation,
+                    bno.IsolationPrefix,
+                    "read-construction-token-bno-prefix")
+                : string.Empty;
         }
-        receipt.PreJobNativeCloseWin32 = -1;
-        IntPtr handle = CreateSemaphoreEx(
-            IntPtr.Zero,
-            1,
-            1,
-            receipt.PreJobNativeSemaphoreName,
-            0,
-            SemaphoreSynchronizeAndModify);
-        int createError = Marshal.GetLastWin32Error();
-        if (handle == IntPtr.Zero)
+        CapturePrivateNamespaceStatus(token, snapshot);
+        return snapshot;
+    }
+
+    private static uint ReadExactTokenDword(
+        SafeAccessTokenHandle token,
+        int informationClass,
+        string operation)
+    {
+        using (TokenInformationBuffer information = GetBoundedTokenInformation(
+            token,
+            informationClass))
         {
-            receipt.PreJobNativeCreateWin32 = createError;
+            if (information.Length != sizeof(uint))
+            {
+                throw new InvalidOperationException(operation);
+            }
+            return unchecked((uint)Marshal.ReadInt32(information.Pointer));
+        }
+    }
+
+    private static uint ReadBoundedRestrictedSidCount(SafeAccessTokenHandle token)
+    {
+        using (TokenInformationBuffer information = GetBoundedTokenInformation(
+            token,
+            TokenRestrictedSidsInformation))
+        {
+            if (information.Length < sizeof(uint))
+            {
+                throw new InvalidOperationException(
+                    "read-construction-token-restricted-sids");
+            }
+            uint count = unchecked((uint)Marshal.ReadInt32(information.Pointer));
+            if (count > MaximumTokenGroupCount)
+            {
+                throw new InvalidOperationException(
+                    "read-construction-token-restricted-sids");
+            }
+            if (count == 0)
+            {
+                return 0;
+            }
+            int groupOffset = Marshal.OffsetOf<TokenGroups>(nameof(TokenGroups.Groups)).ToInt32();
+            int groupSize = Marshal.SizeOf<SidAndAttributes>();
+            long requiredBytes = checked(
+                (long)groupOffset + checked((long)count * groupSize));
+            if (groupOffset < sizeof(uint) || requiredBytes > information.Length)
+            {
+                throw new InvalidOperationException(
+                    "read-construction-token-restricted-sids");
+            }
+            for (uint index = 0; index < count; index++)
+            {
+                IntPtr groupPointer = IntPtr.Add(
+                    information.Pointer,
+                    checked(groupOffset + checked((int)index * groupSize)));
+                SidAndAttributes group = Marshal.PtrToStructure<SidAndAttributes>(
+                    groupPointer);
+                ReadBoundedSid(
+                    information,
+                    group.Sid,
+                    "read-construction-token-restricted-sid");
+            }
+            return count;
+        }
+    }
+
+    private static string ReadBoundedUnicodeString(
+        TokenInformationBuffer information,
+        IntPtr value,
+        string operation)
+    {
+        if (information == null || information.Pointer == IntPtr.Zero ||
+            value == IntPtr.Zero)
+        {
+            throw new InvalidOperationException(operation);
+        }
+        long offset = checked(value.ToInt64() - information.Pointer.ToInt64());
+        if (offset < 0 || offset > information.Length - sizeof(char) ||
+            (offset % sizeof(char)) != 0)
+        {
+            throw new InvalidOperationException(operation);
+        }
+        int availableCharacters = checked((information.Length - (int)offset) / sizeof(char));
+        int boundedCharacters = Math.Min(
+            availableCharacters,
+            MaximumBnoIsolationPrefixCharacters + 1);
+        StringBuilder result = new StringBuilder();
+        for (int index = 0; index < boundedCharacters; index++)
+        {
+            char character = checked((char)(ushort)Marshal.ReadInt16(
+                value,
+                checked(index * sizeof(char))));
+            if (character == '\0')
+            {
+                return result.ToString();
+            }
+            if (char.IsControl(character) ||
+                result.Length == MaximumBnoIsolationPrefixCharacters)
+            {
+                throw new InvalidOperationException(operation);
+            }
+            result.Append(character);
+        }
+        throw new InvalidOperationException(operation);
+    }
+
+    private static void CapturePrivateNamespaceStatus(
+        SafeAccessTokenHandle token,
+        TokenNamespaceSnapshot snapshot)
+    {
+        int requiredBytes;
+        bool measured = GetTokenInformation(
+            token,
+            TokenPrivateNameSpaceInformation,
+            IntPtr.Zero,
+            0,
+            out requiredBytes);
+        int measurementError = Marshal.GetLastWin32Error();
+        if (measured)
+        {
+            if (requiredBytes < 0 || requiredBytes > MaximumTokenInformationBytes)
+            {
+                throw new InvalidOperationException(
+                    "bound-construction-token-private-namespace");
+            }
+            snapshot.PrivateNamespaceQueryWin32 = 0;
+            snapshot.PrivateNamespaceInformationLength = requiredBytes;
             return;
         }
-        receipt.PreJobNativeCreatedNew = createError != ErrorAlreadyExists;
-        receipt.PreJobNativeCreateWin32 = receipt.PreJobNativeCreatedNew
-            ? 0
-            : createError;
-        receipt.PreJobNativeCloseWin32 = CloseHandle(handle)
-            ? 0
-            : Marshal.GetLastWin32Error();
+        if (measurementError != ErrorInsufficientBuffer)
+        {
+            snapshot.PrivateNamespaceQueryWin32 = measurementError;
+            snapshot.PrivateNamespaceInformationLength = 0;
+            return;
+        }
+        if (requiredBytes <= 0 || requiredBytes > MaximumTokenInformationBytes)
+        {
+            throw new InvalidOperationException(
+                "bound-construction-token-private-namespace");
+        }
+        using (TokenInformationBuffer information = GetBoundedTokenInformation(
+            token,
+            TokenPrivateNameSpaceInformation))
+        {
+            snapshot.PrivateNamespaceQueryWin32 = 0;
+            snapshot.PrivateNamespaceInformationLength = information.Length;
+        }
+    }
+
+    private static void ValidateConstructionNamespace(
+        TokenNamespaceSnapshot snapshot,
+        string operation)
+    {
+        if (snapshot == null || snapshot.HasRestrictions ||
+            snapshot.RestrictedSidCount != 0 || snapshot.IsAppContainer ||
+            snapshot.IsSandboxed || snapshot.IsAppSilo ||
+            snapshot.BnoIsolationEnabled ||
+            !string.IsNullOrEmpty(snapshot.BnoIsolationPrefix))
+        {
+            throw new InvalidOperationException(operation);
+        }
+    }
+
+    private static bool TokenNamespaceSnapshotsEqual(
+        TokenNamespaceSnapshot left,
+        TokenNamespaceSnapshot right)
+    {
+        return left != null && right != null &&
+            left.HasRestrictions == right.HasRestrictions &&
+            left.RestrictedSidCount == right.RestrictedSidCount &&
+            left.IsAppContainer == right.IsAppContainer &&
+            left.IsSandboxed == right.IsSandboxed &&
+            left.IsAppSilo == right.IsAppSilo &&
+            left.BnoIsolationEnabled == right.BnoIsolationEnabled &&
+            string.Equals(
+                left.BnoIsolationPrefix,
+                right.BnoIsolationPrefix,
+                StringComparison.Ordinal) &&
+            left.PrivateNamespaceQueryWin32 == right.PrivateNamespaceQueryWin32 &&
+            left.PrivateNamespaceInformationLength ==
+                right.PrivateNamespaceInformationLength;
+    }
+
+    private static void RequireEquivalentTokenNamespaces(
+        TokenNamespaceSnapshot before,
+        TokenNamespaceSnapshot after)
+    {
+        if (!TokenNamespaceSnapshotsEqual(before, after))
+        {
+            throw new InvalidOperationException(
+                "construction-token-namespace-changed-after-job-assignment");
+        }
+    }
+
+    private static void ValidateOwnedConstructionJobPolicy(IntPtr job)
+    {
+        ExtendedLimitInformation limits;
+        if (!QueryExtendedLimitInformation(
+            job,
+            JobObjectExtendedLimitInformation,
+            out limits,
+            (uint)Marshal.SizeOf<ExtendedLimitInformation>(),
+            IntPtr.Zero))
+        {
+            throw Failure("query-construction-job-policy");
+        }
+        uint uiRestrictions = ReadJobUiRestrictions(
+            job,
+            "query-construction-job-ui-policy");
+        ValidateJobPolicyValues(
+            limits.BasicLimitInformation.LimitFlags,
+            uiRestrictions,
+            JobObjectLimitKillOnJobClose,
+            "construction-job-policy");
+    }
+
+    private static uint ReadJobUiRestrictions(
+        IntPtr job,
+        string queryOperation)
+    {
+        uint uiRestrictions;
+        if (!QueryBasicUiRestrictions(
+            job,
+            JobObjectBasicUiRestrictions,
+            out uiRestrictions,
+            sizeof(uint),
+            IntPtr.Zero))
+        {
+            throw Failure(queryOperation);
+        }
+        return uiRestrictions;
+    }
+
+    private static void ValidateJobPolicyValues(
+        uint actualFlags,
+        uint uiRestrictions,
+        uint expectedFlags,
+        string operation)
+    {
+        if (actualFlags != expectedFlags || uiRestrictions != 0)
+        {
+            throw new InvalidOperationException(operation);
+        }
     }
 
     public static void ConfigureBrokerJob(string brokerJobName)
@@ -2266,12 +2592,14 @@ public static class ProjectAtlasConstructionProcess
             }
             uint expectedFlags =
                 JobObjectLimitKillOnJobClose | JobObjectLimitBreakawayOk;
-            if (limits.BasicLimitInformation.LimitFlags != expectedFlags ||
-                (limits.BasicLimitInformation.LimitFlags &
-                    JobObjectLimitSilentBreakawayOk) != 0)
-            {
-                throw new InvalidOperationException("construction-broker-job-policy");
-            }
+            uint uiRestrictions = ReadJobUiRestrictions(
+                brokerJob,
+                "query-construction-broker-job-ui-policy");
+            ValidateJobPolicyValues(
+                limits.BasicLimitInformation.LimitFlags,
+                uiRestrictions,
+                expectedFlags,
+                "construction-broker-job-policy");
             bool processInBrokerJob;
             if (!IsProcessInJob(
                 process,
@@ -2291,6 +2619,148 @@ public static class ProjectAtlasConstructionProcess
             {
                 throw Failure("close-construction-broker-job");
             }
+        }
+    }
+
+    private static string ResolveSeededSemaphoreName(AdmissionReceipt receipt)
+    {
+        string name = receipt == null ? null : receipt.SeededSemaphoreName;
+        if (string.IsNullOrEmpty(name))
+        {
+            name = DiagnosticSemaphorePrefix + Guid.NewGuid().ToString("N");
+        }
+        if (name.Length != DiagnosticSemaphorePrefix.Length + 32 ||
+            !name.StartsWith(DiagnosticSemaphorePrefix, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("seeded-construction-semaphore-name");
+        }
+        for (int index = DiagnosticSemaphorePrefix.Length; index < name.Length; index++)
+        {
+            char character = name[index];
+            if (!((character >= '0' && character <= '9') ||
+                (character >= 'a' && character <= 'f')))
+            {
+                throw new InvalidOperationException("seeded-construction-semaphore-name");
+            }
+        }
+        if (receipt != null)
+        {
+            receipt.SeededSemaphoreName = name;
+        }
+        return name;
+    }
+
+    private static string[] BindSeededSemaphoreName(
+        string[] arguments,
+        string seededSemaphoreName)
+    {
+        if (arguments == null)
+        {
+            throw new ArgumentNullException(nameof(arguments));
+        }
+        string[] bound = (string[])arguments.Clone();
+        int replacements = 0;
+        for (int index = 0; index < bound.Length; index++)
+        {
+            if (string.Equals(
+                bound[index],
+                SeededSemaphorePlaceholder,
+                StringComparison.Ordinal))
+            {
+                bound[index] = seededSemaphoreName;
+                replacements++;
+            }
+        }
+        if (replacements > 1)
+        {
+            throw new InvalidOperationException(
+                "seeded-construction-semaphore-placeholder");
+        }
+        return bound;
+    }
+
+    private static IntPtr CreateSeededSemaphore(
+        string name,
+        string principalSid,
+        out IntPtr securityDescriptor)
+    {
+        string sddl = "D:P(A;;0x00100002;;;" + principalSid + ")";
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
+            sddl,
+            SddlRevision1,
+            out securityDescriptor,
+            IntPtr.Zero))
+        {
+            throw Failure("create-seeded-construction-semaphore-security");
+        }
+        SecurityAttributes attributes = new SecurityAttributes();
+        attributes.Length = Marshal.SizeOf<SecurityAttributes>();
+        attributes.SecurityDescriptor = securityDescriptor;
+        attributes.InheritHandle = false;
+        IntPtr semaphore = CreateProtectedSemaphore(
+            ref attributes,
+            1,
+            1,
+            name,
+            0,
+            SemaphoreSynchronizeAndModify);
+        int createError = Marshal.GetLastWin32Error();
+        if (semaphore == IntPtr.Zero)
+        {
+            throw new Win32Exception(
+                createError,
+                "create-seeded-construction-semaphore");
+        }
+        if (createError == ErrorAlreadyExists)
+        {
+            Exception closeFailure = CloseHandleFailure(
+                semaphore,
+                "close-colliding-seeded-construction-semaphore");
+            InvalidOperationException collision = new InvalidOperationException(
+                "seeded-construction-semaphore-name-collision");
+            if (closeFailure != null)
+            {
+                throw new AggregateException(collision, closeFailure);
+            }
+            throw collision;
+        }
+        return semaphore;
+    }
+
+    private static void TransferSeededSemaphore(
+        ref IntPtr semaphore,
+        IntPtr process,
+        AdmissionReceipt receipt)
+    {
+        IntPtr targetHandle;
+        if (!DuplicateHandle(
+            GetCurrentProcess(),
+            semaphore,
+            process,
+            out targetHandle,
+            0,
+            false,
+            DuplicateSameAccess))
+        {
+            throw Failure("duplicate-seeded-construction-semaphore");
+        }
+        if (targetHandle == IntPtr.Zero)
+        {
+            throw new InvalidOperationException(
+                "duplicate-seeded-construction-semaphore-handle");
+        }
+        if (receipt != null)
+        {
+            receipt.SeededSemaphoreDuplicated = true;
+        }
+        if (!CloseHandle(semaphore))
+        {
+            throw Failure("close-parent-seeded-construction-semaphore");
+        }
+        semaphore = IntPtr.Zero;
+        if (receipt != null)
+        {
+            receipt.SeededSemaphoreParentHandleClosed = true;
         }
     }
 
@@ -2342,10 +2812,14 @@ public static class ProjectAtlasConstructionProcess
                 throw new InvalidOperationException("ambient-construction-jobserver");
             }
         }
+        string seededSemaphoreName = ResolveSeededSemaphoreName(admissionReceipt);
+        arguments = BindSeededSemaphoreName(arguments, seededSemaphoreName);
         LastTotalProcesses = 0;
         IntPtr job = IntPtr.Zero;
+        IntPtr seededSemaphore = IntPtr.Zero;
         IntPtr environment = IntPtr.Zero;
         IntPtr securityDescriptor = IntPtr.Zero;
+        IntPtr semaphoreSecurityDescriptor = IntPtr.Zero;
         IntPtr windowStation = IntPtr.Zero;
         IntPtr desktop = IntPtr.Zero;
         IntPtr originalWindowStation = IntPtr.Zero;
@@ -2375,6 +2849,7 @@ public static class ProjectAtlasConstructionProcess
             {
                 throw Failure("configure-job");
             }
+            ValidateOwnedConstructionJobPolicy(job);
 
             string objectSddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;" + principalSid + ")";
             if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
@@ -2469,15 +2944,22 @@ public static class ProjectAtlasConstructionProcess
                 admittedLogonSid = ValidateConstructionToken(
                     logonToken,
                     principalSid);
-                if (admissionScenario == AdmissionScenario.Normal &&
-                    admissionReceipt != null)
+                TokenNamespaceSnapshot logonNamespace =
+                    CaptureTokenNamespaceSnapshot(logonToken);
+                ValidateConstructionNamespace(
+                    logonNamespace,
+                    "construction-logon-token-namespace");
+                if (admissionReceipt != null)
                 {
-                    WindowsIdentity.RunImpersonated(
-                        logonToken,
-                        delegate
-                        {
-                            CapturePreJobNativeSemaphoreProbe(admissionReceipt);
-                        });
+                    admissionReceipt.LogonTokenNamespace = logonNamespace;
+                }
+                seededSemaphore = CreateSeededSemaphore(
+                    seededSemaphoreName,
+                    principalSid,
+                    out semaphoreSecurityDescriptor);
+                if (admissionReceipt != null)
+                {
+                    admissionReceipt.SeededSemaphoreCreatedNew = true;
                 }
                 environment = Marshal.StringToHGlobalUni(environmentBlock);
                 created = CreateProcessWithToken(
@@ -2522,6 +3004,10 @@ public static class ProjectAtlasConstructionProcess
             {
                 admissionReceipt.ProcessId = checked((int)process.ProcessId);
             }
+            TransferSeededSemaphore(
+                ref seededSemaphore,
+                process.Process,
+                admissionReceipt);
             if (!OpenProcessToken(process.Process, TokenQuery, out constructionToken))
             {
                 int tokenError = Marshal.GetLastWin32Error();
@@ -2544,6 +3030,16 @@ public static class ProjectAtlasConstructionProcess
             string processLogonSid = ValidateConstructionToken(
                 constructionToken,
                 principalSid);
+            TokenNamespaceSnapshot childNamespaceBeforeJob =
+                CaptureTokenNamespaceSnapshot(constructionToken);
+            ValidateConstructionNamespace(
+                childNamespaceBeforeJob,
+                "construction-child-token-namespace-before-job");
+            if (admissionReceipt != null)
+            {
+                admissionReceipt.ChildTokenNamespaceBeforeJob =
+                    childNamespaceBeforeJob;
+            }
             if (!string.Equals(
                 processLogonSid,
                 admittedLogonSid,
@@ -2608,6 +3104,19 @@ public static class ProjectAtlasConstructionProcess
             if (!inJob)
             {
                 throw new InvalidOperationException("verify-job-membership");
+            }
+            TokenNamespaceSnapshot childNamespaceAfterJob =
+                CaptureTokenNamespaceSnapshot(constructionToken);
+            ValidateConstructionNamespace(
+                childNamespaceAfterJob,
+                "construction-child-token-namespace-after-job");
+            RequireEquivalentTokenNamespaces(
+                childNamespaceBeforeJob,
+                childNamespaceAfterJob);
+            if (admissionReceipt != null)
+            {
+                admissionReceipt.ChildTokenNamespaceAfterJob =
+                    childNamespaceAfterJob;
             }
             if (ResumeThread(process.Thread) == UInt32.MaxValue)
             {
@@ -2721,6 +3230,12 @@ public static class ProjectAtlasConstructionProcess
             {
                 Marshal.FreeHGlobal(environment);
             }
+            cleanupFailure = AppendCleanupFailure(
+                cleanupFailure,
+                CloseHandleFailure(
+                    seededSemaphore,
+                    "close-parent-seeded-construction-semaphore"));
+            seededSemaphore = IntPtr.Zero;
             if (desktop != IntPtr.Zero)
             {
                 CloseDesktop(desktop);
@@ -2732,6 +3247,10 @@ public static class ProjectAtlasConstructionProcess
             if (securityDescriptor != IntPtr.Zero)
             {
                 LocalFree(securityDescriptor);
+            }
+            if (semaphoreSecurityDescriptor != IntPtr.Zero)
+            {
+                LocalFree(semaphoreSecurityDescriptor);
             }
             if (admissionScenario == AdmissionScenario.FailBeforeJobAssignmentAndCleanupFailure &&
                 cleanupFailure == null)
@@ -3527,7 +4046,8 @@ exit 0
         "-RustcRelease", $RustcRelease,
         "-RustcCommitHash", $RustcCommitHash,
         "-NetworkIsolation", $expectedIsolation,
-        "-ResolverAddress", $ResolverAddress
+        "-ResolverAddress", $ResolverAddress,
+        "-SeededSemaphoreName", "__PROJECTATLAS_SEEDED_SEMAPHORE__"
     )
     $state.object_directory = Get-ConstructionObjectDirectoryPath
     Write-ProtectedState -State $state

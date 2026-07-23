@@ -328,6 +328,9 @@ try {
                 $brokerText.Contains('JobObjectLimitKillOnJobClose | JobObjectLimitBreakawayOk') -and
                 $brokerText.Contains('limits.BasicLimitInformation.LimitFlags != expected') -and
                 $brokerText.Contains('JobObjectLimitSilentBreakawayOk') -and
+                $brokerText.Contains('JobObjectBasicUiRestrictions = 4') -and
+                $brokerText.Contains('if (uiRestrictions != 0)') -and
+                $brokerText.Contains('ValidatePolicy(handle);') -and
                 $brokerText.Contains('GetNamedPipeClientProcessId') -and
                 $brokerText.Contains('GetNamedPipeServerProcessId') -and
                 $brokerText.Contains('$maximumDiagnosticCharacters = 12 * 1024') -and
@@ -418,6 +421,30 @@ try {
             $canarySource,
             [System.Text.UTF8Encoding]::new($false)
         )
+        $diagnosticSeedName =
+            "Global\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+        $diagnosticSeedRights =
+            [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
+            [System.Security.AccessControl.SemaphoreRights]::Modify
+        $diagnosticSeedSecurity =
+            [System.Security.AccessControl.SemaphoreSecurity]::new()
+        $diagnosticSeedSecurity.SetAccessRuleProtection($true, $false)
+        $diagnosticSeedSecurity.AddAccessRule(
+            [System.Security.AccessControl.SemaphoreAccessRule]::new(
+                [System.Security.Principal.WindowsIdentity]::GetCurrent().User,
+                $diagnosticSeedRights,
+                [System.Security.AccessControl.AccessControlType]::Allow
+            )
+        )
+        $diagnosticSeedCreatedNew = $false
+        $diagnosticSeed = [System.Threading.SemaphoreAcl]::Create(
+            1,
+            1,
+            $diagnosticSeedName,
+            [ref]$diagnosticSeedCreatedNew,
+            $diagnosticSeedSecurity
+        )
+        Require $diagnosticSeedCreatedNew "Named-object diagnostic seed collided."
         $probeStart = [System.Diagnostics.ProcessStartInfo]::new()
         $probeStart.FileName = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
         $probeStart.UseShellExecute = $false
@@ -433,7 +460,8 @@ try {
             '-ExpectedOwnerSid',
             [System.Security.Principal.WindowsIdentity]::GetCurrent().Owner.Value,
             '-ResultPath', $probeResult,
-            '-CanaryPath', $probeCanary
+            '-CanaryPath', $probeCanary,
+            '-SeededSemaphoreName', $diagnosticSeedName
         )) {
             $probeStart.ArgumentList.Add($argument)
         }
@@ -459,7 +487,7 @@ try {
             "Named-object diagnostic fault did not atomically publish one bounded record."
         $probeRecord = Read-NamedObjectProbeRecord -Path $probeResultItem.FullName
         Require `
-            ($probeRecord.schema_version -eq 3L -and
+            ($probeRecord.schema_version -eq 4L -and
                 $probeRecord.status -ceq 'failure' -and
                 $probeRecord.stage -ceq 'ambient-environment' -and
                 $probeRecord.exit_code -eq 122L -and
@@ -480,7 +508,7 @@ try {
         )
         $stringSchemaPayload = [System.IO.File]::ReadAllText($probeResult) |
             ConvertFrom-Json -Depth 8
-        $stringSchemaPayload.schema_version = '3'
+        $stringSchemaPayload.schema_version = '4'
         [System.IO.File]::WriteAllText(
             $stringSchemaRecord,
             ($stringSchemaPayload | ConvertTo-Json -Depth 8 -Compress)
@@ -502,7 +530,7 @@ try {
             "projectatlas-object-namespace-probe-$([Guid]::NewGuid().ToString('N')).json"
         )
         $stringBooleanPayload = [ordered]@{
-            schema_version = 3
+            schema_version = 4
             status = 'success'
             stage = 'complete'
             exit_code = 0
@@ -520,7 +548,13 @@ try {
             post_job_native_create_win32 = 0
             post_job_native_created_new = $true
             post_job_native_close_win32 = 0
-            semaphore_name = "Global\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+            seeded_semaphore_name = $diagnosticSeedName
+            seeded_open_win32 = 0
+            seeded_open_close_win32 = 0
+            seeded_create_win32 = 183
+            seeded_create_created_new = $false
+            seeded_create_close_win32 = 0
+            semaphore_name = $diagnosticSeedName
             created_new = 'false'
             descendant_exit_code = 0
         }
@@ -597,6 +631,7 @@ try {
                 [System.Security.Principal.WindowsIdentity]::GetCurrent().Owner.Value,
                 '-ResultPath', $faultResult,
                 '-CanaryPath', $probeCanary,
+                '-SeededSemaphoreName', $diagnosticSeedName,
                 '-DiagnosticFault', $faultRow.Fault
             )) {
                 $faultStart.ArgumentList.Add($argument)
@@ -645,6 +680,8 @@ try {
                     "Descendant OpenSemaphore failure lost its native error code."
             }
         }
+
+        $diagnosticSeed.Dispose()
 
         $temporarySurvivor = "$probeResult.tmp-$([Guid]::NewGuid().ToString('N'))"
         $temporaryDecoy = "$probeResult.tmp-not-owned"
@@ -716,24 +753,34 @@ try {
                 'CARGO_BUILD_JOBS = "1"'
             ).Count -eq 1 -and
                 $productionText.Contains('[string]$env:CARGO_BUILD_JOBS -cne "1"') -and
-                $productionText.Contains('New-ContainedCargoJobserver') -and
+                $productionText.Contains('Open-ContainedCargoJobserver') -and
                 $productionText.Contains('Invoke-ContainedCargoJobserverCanary') -and
                 $productionText.Contains('EntryPoint = "OpenSemaphoreW"') -and
                 $productionText.Contains('SynchronizeAndModify = 0x00100002') -and
+                $productionText.Contains('OpenExisting(string name)') -and
+                $productionText.Contains('RequireExistingObject(string name)') -and
+                $productionText.Contains('contained-cargo-jobserver-seed-missing') -and
+                $productionText.Contains('$script:constructionJobserverName = $SeededSemaphoreName') -and
                 $productionText.Contains('$env:CARGO_MAKEFLAGS =') -and
                 $productionText.Contains('Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS') -and
-                -not $wrapperText.Contains('CreateConstructionJobserver(') -and
-                -not $wrapperText.Contains('AddConstructionJobserverEnvironment(') -and
-                $wrapperText.Contains('CapturePreJobNativeSemaphoreProbe') -and
-                $wrapperText.Contains('PreJobNativeSemaphoreName') -and
+                $wrapperText.Contains('CreateSeededSemaphore(') -and
+                $wrapperText.Contains('TransferSeededSemaphore(') -and
+                $wrapperText.Contains('SeededSemaphorePlaceholder') -and
                 $wrapperText.Contains('Add-ConstructionObjectDirectoryPrincipalAccess') -and
                 $wrapperText.Contains('Assert-ConstructionObjectDirectoryPrincipalAbsent')) `
-            "Windows construction did not use its child-owned one-worker jobserver and exact namespace grant."
+            "Windows construction did not use its transferred protected one-worker jobserver and exact namespace grant."
         Require `
             ($wrapperText.Contains('ValidateConstructionToken(') -and
                 $wrapperText.Contains('RequiredIntegritySid = "S-1-16-8192";') -and
                 $wrapperText.Contains('SeGroupLogonId = 0xC0000000;') -and
                 $wrapperText.Contains('private sealed class TokenInformationBuffer : IDisposable') -and
+                $wrapperText.Contains('private sealed class TokenNamespaceSnapshot') -and
+                $wrapperText.Contains('TokenBnoIsolationInformation') -and
+                $wrapperText.Contains('[MarshalAs(UnmanagedType.U1)]') -and
+                $wrapperText.Contains('MaximumTokenInformationBytes = 64 * 1024;') -and
+                $wrapperText.Contains('MaximumBnoIsolationPrefixCharacters = 256;') -and
+                $wrapperText.Contains('ReadBoundedUnicodeString(') -and
+                $wrapperText.Contains('availableCharacters') -and
                 $wrapperText.Contains('requiredGroupBytes > groupsInformation.Length') -and
                 $wrapperText.Contains('!IsValidSid(sid)') -and
                 $wrapperText.Contains('checked(offset + sidBytes) > information.Length')) `
@@ -780,10 +827,19 @@ try {
                 $nativeSource.Contains('SemaphoreSynchronizeAndModify = 0x00100002;') -and
                 -not $nativeSource.Contains('SemaphoreAllAccess') -and
                 -not $nativeSource.Contains('0x001F0003') -and
-                -not $nativeSource.Contains('CreateConstructionJobserver(') -and
-                $nativeSource.Contains(
-                    'CapturePreJobNativeSemaphoreProbe(admissionReceipt);'
-                )) `
+                $nativeSource.Contains('EntryPoint = "CreateSemaphoreExW"') -and
+                $nativeSource.Contains('string sddl = "D:P(A;;0x00100002;;;"') -and
+                $nativeSource.Contains('EntryPoint = "QueryInformationJobObject"') -and
+                $nativeSource.Contains('DuplicateHandle(') -and
+                $nativeSource.Contains('false,') -and
+                $nativeSource.Contains('DuplicateSameAccess') -and
+                $nativeSource.Contains('CaptureTokenNamespaceSnapshot(') -and
+                $nativeSource.Contains('RequireEquivalentTokenNamespaces(') -and
+                -not $nativeSource.Contains('JobObjectCreateSilo') -and
+                -not $nativeSource.Contains('CreateRestrictedToken') -and
+                -not $nativeSource.Contains('SetTokenInformation') -and
+                -not $nativeSource.Contains('PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES') -and
+                -not $nativeSource.Contains('JOB_OBJECT_SECURITY_')) `
             "Windows construction adapter did not use the bounded alternate-logon process boundary."
         $principalLogonStart = $nativeSource.IndexOf(
             'if (!LogonUser(',
@@ -857,6 +913,81 @@ try {
             ($null -ne $privateRunCore -and
                 $privateRunCore.GetParameters().Count -eq 10) `
             "Construction adapter private recovery boundary changed."
+        $namespaceSnapshotType = $adapterType.GetNestedType(
+            'TokenNamespaceSnapshot',
+            [System.Reflection.BindingFlags]::NonPublic
+        )
+        $namespaceComparator = $adapterType.GetMethod(
+            'TokenNamespaceSnapshotsEqual',
+            $nestedTypeFlags
+        )
+        Require `
+            ($null -ne $namespaceSnapshotType -and $null -ne $namespaceComparator) `
+            "Construction token namespace comparator was missing."
+        $leftSnapshot = [Activator]::CreateInstance($namespaceSnapshotType, $true)
+        $rightSnapshot = [Activator]::CreateInstance($namespaceSnapshotType, $true)
+        foreach ($snapshot in @($leftSnapshot, $rightSnapshot)) {
+            $namespaceSnapshotType.GetProperty(
+                'BnoIsolationPrefix',
+                $instanceMemberFlags
+            ).SetValue($snapshot, '')
+        }
+        Require `
+            ([bool]$namespaceComparator.Invoke(
+                $null,
+                [object[]]@($leftSnapshot, $rightSnapshot)
+            )) `
+            "Equivalent construction token namespaces did not compare equal."
+        foreach ($mutation in @(
+            @{ Name = 'BnoIsolationEnabled'; Value = $true; Reset = $false },
+            @{ Name = 'BnoIsolationPrefix'; Value = 'isolated'; Reset = '' },
+            @{ Name = 'IsAppContainer'; Value = $true; Reset = $false },
+            @{ Name = 'IsSandboxed'; Value = $true; Reset = $false },
+            @{ Name = 'IsAppSilo'; Value = $true; Reset = $false },
+            @{ Name = 'HasRestrictions'; Value = $true; Reset = $false },
+            @{ Name = 'RestrictedSidCount'; Value = [uint32]1; Reset = [uint32]0 }
+        )) {
+            $property = $namespaceSnapshotType.GetProperty(
+                $mutation.Name,
+                $instanceMemberFlags
+            )
+            Require ($null -ne $property) "Construction namespace snapshot field was missing."
+            $property.SetValue($rightSnapshot, $mutation.Value)
+            Require `
+                (-not [bool]$namespaceComparator.Invoke(
+                    $null,
+                    [object[]]@($leftSnapshot, $rightSnapshot)
+                )) `
+                "Construction namespace comparator ignored $($mutation.Name)."
+            $property.SetValue($rightSnapshot, $mutation.Reset)
+        }
+        $jobPolicyValidator = $adapterType.GetMethod(
+            'ValidateJobPolicyValues',
+            $nestedTypeFlags
+        )
+        Require ($null -ne $jobPolicyValidator) "Construction Job policy validator was missing."
+        foreach ($expectedFlags in @([uint32]0x2000, [uint32]0x2800)) {
+            $jobPolicyValidator.Invoke(
+                $null,
+                [object[]]@($expectedFlags, [uint32]0, $expectedFlags, 'policy')
+            ) | Out-Null
+            foreach ($invalid in @(
+                [object[]]@([uint32]($expectedFlags -bor 1), [uint32]0),
+                [object[]]@($expectedFlags, [uint32]1)
+            )) {
+                $policyRejected = $false
+                try {
+                    $jobPolicyValidator.Invoke(
+                        $null,
+                        [object[]]@($invalid[0], $invalid[1], $expectedFlags, 'policy')
+                    ) | Out-Null
+                }
+                catch {
+                    $policyRejected = $true
+                }
+                Require $policyRejected "Construction Job policy accepted one extra bit."
+            }
+        }
         $processCreationIndex = $nativeSource.IndexOf(
             'created = CreateProcessWithToken(',
             [System.StringComparison]::Ordinal
@@ -877,6 +1008,33 @@ try {
             'string processLogonSid = ValidateConstructionToken(',
             [System.StringComparison]::Ordinal
         )
+        $logonNamespaceIndex = $nativeSource.IndexOf(
+            'CaptureTokenNamespaceSnapshot(logonToken)',
+            [System.StringComparison]::Ordinal
+        )
+        $seedCreateIndex = $nativeSource.IndexOf(
+            'seededSemaphore = CreateSeededSemaphore(',
+            [System.StringComparison]::Ordinal
+        )
+        $seedTransferIndex = $nativeSource.IndexOf(
+            'TransferSeededSemaphore(',
+            $processCreatedIndex,
+            [System.StringComparison]::Ordinal
+        )
+        $duplicateSeedIndex = $nativeSource.IndexOf(
+            'if (!DuplicateHandle(',
+            [System.StringComparison]::Ordinal
+        )
+        $closeParentSeedIndex = $nativeSource.IndexOf(
+            'if (!CloseHandle(semaphore))',
+            $duplicateSeedIndex,
+            [System.StringComparison]::Ordinal
+        )
+        $childBeforeNamespaceIndex = $nativeSource.IndexOf(
+            'CaptureTokenNamespaceSnapshot(constructionToken)',
+            $tokenValidationIndex,
+            [System.StringComparison]::Ordinal
+        )
         $retainedJobInjectionIndex = $nativeSource.IndexOf(
             'if (admissionScenario == AdmissionScenario.RetainedJobBeforeAdmission)',
             [System.StringComparison]::Ordinal
@@ -894,6 +1052,15 @@ try {
             $admissionFailureIndex,
             [System.StringComparison]::Ordinal
         )
+        $childAfterNamespaceIndex = $nativeSource.IndexOf(
+            'CaptureTokenNamespaceSnapshot(constructionToken)',
+            $jobAssignmentIndex,
+            [System.StringComparison]::Ordinal
+        )
+        $resumeIndex = $nativeSource.IndexOf(
+            'if (ResumeThread(process.Thread) == UInt32.MaxValue)',
+            [System.StringComparison]::Ordinal
+        )
         $admissionCleanupIndex = $nativeSource.IndexOf(
             'if (processCreated && !assignedToJob)',
             [System.StringComparison]::Ordinal
@@ -906,18 +1073,28 @@ try {
             ($creationFlagsIndex -ge 0 -and
                 $processCreationIndex -gt $creationFlagsIndex -and
                 $processCreatedIndex -gt $processCreationIndex -and
+                $logonNamespaceIndex -gt $creationFlagsIndex -and
+                $logonNamespaceIndex -lt $processCreationIndex -and
+                $seedCreateIndex -gt $logonNamespaceIndex -and
+                $seedCreateIndex -lt $processCreationIndex -and
+                $seedTransferIndex -gt $processCreatedIndex -and
+                $duplicateSeedIndex -ge 0 -and
+                $closeParentSeedIndex -gt $duplicateSeedIndex -and
                 $processTokenOpenIndex -gt $processCreatedIndex -and
                 $tokenValidationIndex -gt $processTokenOpenIndex -and
+                $childBeforeNamespaceIndex -gt $tokenValidationIndex -and
                 $retainedJobInjectionIndex -gt $tokenValidationIndex -and
                 $inheritedJobCheckIndex -gt $retainedJobInjectionIndex -and
                 $admissionFailureIndex -gt $inheritedJobCheckIndex -and
                 $jobAssignmentIndex -gt $admissionFailureIndex -and
+                $childAfterNamespaceIndex -gt $jobAssignmentIndex -and
+                $resumeIndex -gt $childAfterNamespaceIndex -and
                 $admissionCleanupIndex -gt $jobAssignmentIndex -and
                 $tokenCloseIndex -gt $admissionCleanupIndex -and
                 $nativeSource.Contains('return CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;') -and
                 $nativeSource.Contains('ValidateCurrentBrokerJob(brokerJobName);') -and
                 $nativeSource.Contains('process.Process,') -and
-                $nativeSource.Contains('limits.BasicLimitInformation.LimitFlags != expectedFlags') -and
+                $nativeSource.Contains('ValidateJobPolicyValues(') -and
                 $nativeSource.Contains('JobObjectLimitKillOnJobClose | JobObjectLimitBreakawayOk') -and
                 $nativeSource.Contains('MaximumLogonCommandLineCharacters = 1023;') -and
                 $nativeSource.Contains('construction-command-line-too-long') -and
@@ -925,6 +1102,14 @@ try {
                 $nativeSource.Contains('LogonTokenHandleClosed') -and
                 $nativeSource.Contains('ConstructionTokenHandleOwned') -and
                 $nativeSource.Contains('ConstructionTokenHandleClosed') -and
+                $nativeSource.Contains('SeededSemaphoreCreatedNew') -and
+                $nativeSource.Contains('SeededSemaphoreDuplicated') -and
+                $nativeSource.Contains('SeededSemaphoreParentHandleClosed') -and
+                $nativeSource.Contains('ValidateOwnedConstructionJobPolicy(job);') -and
+                $nativeSource.Contains('JobObjectBasicUiRestrictions') -and
+                $nativeSource.Contains('uiRestrictions != 0') -and
+                $nativeSource.Contains('inheritHandle,') -and
+                $nativeSource.Contains('false,') -and
                 $nativeSource.Contains('AdmissionCleanupWaitMilliseconds = 5000;') -and
                 $nativeSource.Contains(
                     'int waitError = wait == WaitFailed ? Marshal.GetLastWin32Error() : 0;'
@@ -2119,13 +2304,13 @@ public static class ProjectAtlasConstructionAdmissionFixture
             {
                 param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-                    $node.Name -eq "New-ContainedCargoJobserver"
+                    $node.Name -eq "Open-ContainedCargoJobserver"
             },
             $true
         ))
         Require `
             ($jobserverDefinitions.Count -eq 1) `
-            "Contained construction lost child-owned jobserver creation."
+            "Contained construction lost protected seeded jobserver opening."
         $jobserverCanaryDefinitions = @($ast.FindAll(
             {
                 param($node)
@@ -2141,21 +2326,16 @@ public static class ProjectAtlasConstructionAdmissionFixture
             "Contained Cargo jobserver lost its exact-rights descendant canary."
         $jobserverDefinitionText = $jobserverDefinitions[0].Extent.Text
         Require `
-            ($jobserverDefinitionText.Contains('$security.SetAccessRuleProtection($true, $false)') -and
-                $jobserverDefinitionText.Contains('$identity.Owner.Value') -and
+            ($jobserverDefinitionText.Contains('$identity.Owner.Value') -and
                 $jobserverDefinitionText.Contains('requires the construction SID as the token default owner') -and
-                $jobserverDefinitionText.Contains('[System.Security.AccessControl.SemaphoreRights]::Synchronize -bor') -and
-                $jobserverDefinitionText.Contains('[System.Security.AccessControl.SemaphoreRights]::Modify') -and
-                $jobserverDefinitionText.Contains('[System.Security.AccessControl.AccessControlType]::Allow') -and
                 $jobserverDefinitionText.Contains('public static class ProjectAtlasCargoJobserverNative') -and
                 $jobserverDefinitionText.Contains('SynchronizeAndModify = 0x00100002') -and
-                $jobserverDefinitionText.Contains('$security.GetSecurityDescriptorBinaryForm()') -and
-                -not $jobserverDefinitionText.Contains('$security.SetOwner(') -and
-                -not $jobserverDefinitionText.Contains('if (createError != 0)') -and
-                $jobserverDefinitionText.Contains('if (createError == ErrorAlreadyExists)') -and
-                -not $jobserverDefinitionText.Contains('[System.Threading.SemaphoreAcl]::Create(') -and
-                ([regex]::Matches($jobserverDefinitionText, '\.AddAccessRule\(').Count -eq 1)) `
-            "Contained Cargo jobserver did not retain one protected exact-rights DACL."
+                $jobserverDefinitionText.Contains('OpenExisting(string name)') -and
+                $jobserverDefinitionText.Contains('RequireExistingObject(string name)') -and
+                $jobserverDefinitionText.Contains('EntryPoint = "OpenSemaphoreW"') -and
+                $jobserverDefinitionText.Contains('if (createError != ErrorAlreadyExists)') -and
+                -not $jobserverDefinitionText.Contains('InheritHandle = true')) `
+            "Contained Cargo jobserver did not retain exact-rights named-open validation."
         Invoke-Expression $jobserverDefinitionText
         Invoke-Expression $jobserverCanaryDefinitions[0].Extent.Text
         $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -2171,7 +2351,7 @@ public static class ProjectAtlasConstructionAdmissionFixture
             )) {
             $ownerMismatchRejected = $false
             try {
-                $unexpectedOwnerJobserver = New-ContainedCargoJobserver `
+                $unexpectedOwnerJobserver = Open-ContainedCargoJobserver `
                     -Sid $currentSid `
                     -Name "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
                 $unexpectedOwnerJobserver.Dispose()
@@ -2187,7 +2367,25 @@ public static class ProjectAtlasConstructionAdmissionFixture
         $jobserverRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
             [System.Security.AccessControl.SemaphoreRights]::Modify
         $jobserverName = "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
-        $jobserver = New-ContainedCargoJobserver `
+        $jobserverSecurity = [System.Security.AccessControl.SemaphoreSecurity]::new()
+        $jobserverSecurity.SetAccessRuleProtection($true, $false)
+        $jobserverSecurity.AddAccessRule(
+            [System.Security.AccessControl.SemaphoreAccessRule]::new(
+                $jobserverSecuritySid,
+                $jobserverRights,
+                [System.Security.AccessControl.AccessControlType]::Allow
+            )
+        )
+        $jobserverCreatedNew = $false
+        $jobserverSeed = [System.Threading.SemaphoreAcl]::Create(
+            1,
+            1,
+            $jobserverName,
+            [ref]$jobserverCreatedNew,
+            $jobserverSecurity
+        )
+        Require $jobserverCreatedNew "Diagnostic Cargo jobserver seed collided."
+        $jobserver = Open-ContainedCargoJobserver `
             -Sid $jobserverSecuritySid `
             -Name $jobserverName
         $openedJobserver = $null
@@ -2220,20 +2418,20 @@ public static class ProjectAtlasConstructionAdmissionFixture
             Require `
                 ($openedJobserver.WaitOne(0) -and $openedJobserver.Release() -eq 0) `
                 "Contained Cargo jobserver did not restore its token."
-            $collisionRejected = $false
+            $absentSeedRejected = $false
             try {
-                $unexpectedJobserver = New-ContainedCargoJobserver `
+                $unexpectedJobserver = Open-ContainedCargoJobserver `
                     -Sid $jobserverSecuritySid `
-                    -Name $jobserverName
+                    -Name "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
                 $unexpectedJobserver.Dispose()
             }
             catch {
-                $collisionRejected = $true
+                $absentSeedRejected = $true
             }
-            Require $collisionRejected "Contained Cargo jobserver accepted a live-name collision."
+            Require $absentSeedRejected "Contained Cargo jobserver fabricated an absent seed."
             $localNameRejected = $false
             try {
-                $unexpectedLocalJobserver = New-ContainedCargoJobserver `
+                $unexpectedLocalJobserver = Open-ContainedCargoJobserver `
                     -Sid $jobserverSecuritySid `
                     -Name "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
                 $unexpectedLocalJobserver.Dispose()
@@ -2248,6 +2446,7 @@ public static class ProjectAtlasConstructionAdmissionFixture
                 $openedJobserver.Dispose()
             }
             $jobserver.Dispose()
+            $jobserverSeed.Dispose()
         }
         $postCleanupJobserver = $null
         $jobserverNameRemoved = -not [System.Threading.SemaphoreAcl]::TryOpenExisting(

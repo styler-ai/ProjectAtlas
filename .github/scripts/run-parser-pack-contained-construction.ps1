@@ -42,7 +42,10 @@ param(
     [string]$NetworkIsolation,
 
     [Parameter(Mandatory = $true)]
-    [string]$ResolverAddress
+    [string]$ResolverAddress,
+
+    [ValidatePattern('\A(?:|Global\\ProjectAtlasParserPack-[0-9a-f]{32})\z')]
+    [string]$SeededSemaphoreName = ''
 )
 
 Set-StrictMode -Version Latest
@@ -337,7 +340,7 @@ function Write-ConstructionStatus {
     }
 }
 
-function New-ContainedCargoJobserver {
+function Open-ContainedCargoJobserver {
     param(
         [Parameter(Mandatory = $true)]
         [System.Security.Principal.SecurityIdentifier]$Sid,
@@ -369,79 +372,75 @@ public static class ProjectAtlasCargoJobserverNative
     private const uint SynchronizeAndModify = 0x00100002;
     private const int ErrorAlreadyExists = 183;
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct SecurityAttributes
-    {
-        internal int Length;
-        internal IntPtr SecurityDescriptor;
-
-        [MarshalAs(UnmanagedType.Bool)]
-        internal bool InheritHandle;
-    }
+    [DllImport(
+        "kernel32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true,
+        EntryPoint = "OpenSemaphoreW")]
+    private static extern IntPtr OpenSemaphore(
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        string name);
 
     [DllImport(
         "kernel32.dll",
         CharSet = CharSet.Unicode,
         SetLastError = true,
         EntryPoint = "CreateSemaphoreExW")]
-    private static extern IntPtr CreateSemaphoreEx(
-        ref SecurityAttributes securityAttributes,
+    private static extern IntPtr ProbeExistingSemaphore(
+        IntPtr securityAttributes,
         int initialCount,
         int maximumCount,
         string name,
         uint flags,
         uint desiredAccess);
 
-    public static SafeWaitHandle Create(string name, byte[] securityDescriptor)
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public static SafeWaitHandle OpenExisting(string name)
     {
-        if (string.IsNullOrEmpty(name) ||
-            securityDescriptor == null ||
-            securityDescriptor.Length == 0)
+        if (string.IsNullOrEmpty(name))
         {
             throw new ArgumentException("contained-cargo-jobserver-input");
         }
-
-        GCHandle pinnedDescriptor = default(GCHandle);
-        try
+        IntPtr rawHandle = OpenSemaphore(SynchronizeAndModify, false, name);
+        if (rawHandle == IntPtr.Zero)
         {
-            pinnedDescriptor = GCHandle.Alloc(
-                securityDescriptor,
-                GCHandleType.Pinned);
-            SecurityAttributes attributes = new SecurityAttributes();
-            attributes.Length = Marshal.SizeOf(typeof(SecurityAttributes));
-            attributes.SecurityDescriptor = pinnedDescriptor.AddrOfPinnedObject();
-            attributes.InheritHandle = false;
-
-            IntPtr rawHandle = CreateSemaphoreEx(
-                ref attributes,
-                1,
-                1,
-                name,
-                0,
-                SynchronizeAndModify);
-            int createError = Marshal.GetLastWin32Error();
-            if (rawHandle == IntPtr.Zero)
-            {
-                throw new Win32Exception(
-                    createError,
-                    "create-contained-cargo-jobserver");
-            }
-
-            SafeWaitHandle handle = new SafeWaitHandle(rawHandle, true);
-            if (createError == ErrorAlreadyExists)
-            {
-                handle.Dispose();
-                throw new InvalidOperationException(
-                    "contained-cargo-jobserver-name-collision");
-            }
-            return handle;
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "open-contained-cargo-jobserver");
         }
-        finally
+        return new SafeWaitHandle(rawHandle, true);
+    }
+
+    public static void RequireExistingObject(string name)
+    {
+        IntPtr handle = ProbeExistingSemaphore(
+            IntPtr.Zero,
+            1,
+            1,
+            name,
+            0,
+            SynchronizeAndModify);
+        int createError = Marshal.GetLastWin32Error();
+        if (handle == IntPtr.Zero)
         {
-            if (pinnedDescriptor.IsAllocated)
-            {
-                pinnedDescriptor.Free();
-            }
+            throw new Win32Exception(
+                createError,
+                "probe-contained-cargo-jobserver");
+        }
+        if (!CloseHandle(handle))
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "close-contained-cargo-jobserver-probe");
+        }
+        if (createError != ErrorAlreadyExists)
+        {
+            throw new InvalidOperationException(
+                "contained-cargo-jobserver-seed-missing");
         }
     }
 }
@@ -449,26 +448,12 @@ public static class ProjectAtlasCargoJobserverNative
         Add-Type -TypeDefinition $nativeSource -Language CSharp -ErrorAction Stop
     }
 
-    $security = [System.Security.AccessControl.SemaphoreSecurity]::new()
-    $security.SetAccessRuleProtection($true, $false)
-    $rights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
-        [System.Security.AccessControl.SemaphoreRights]::Modify
-    $security.AddAccessRule(
-        [System.Security.AccessControl.SemaphoreAccessRule]::new(
-            $Sid,
-            $rights,
-            [System.Security.AccessControl.AccessControlType]::Allow
-        )
-    )
-
     try {
-        $semaphore = [ProjectAtlasCargoJobserverNative]::Create(
-            $Name,
-            $security.GetSecurityDescriptorBinaryForm()
-        )
+        $semaphore = [ProjectAtlasCargoJobserverNative]::OpenExisting($Name)
+        [ProjectAtlasCargoJobserverNative]::RequireExistingObject($Name)
     }
     catch {
-        throw "Contained Cargo jobserver could not be created."
+        throw "Contained Cargo jobserver seed could not be opened."
     }
     return $semaphore
 }
@@ -616,6 +601,10 @@ foreach ($forbiddenVariable in @("TSLP_LANGUAGES", "TSLP_ALLOW_FAILED_GRAMMARS")
     }
 }
 Assert-CargoConstructionEnvironment -Target $Target
+if ($Target -eq "x86_64-pc-windows-msvc" -and
+    $SeededSemaphoreName -notmatch '\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z') {
+    throw "Windows construction requires one protected seeded Cargo jobserver."
+}
 
 $source = Get-CanonicalDirectory -Path $SourceRoot -Role "SourceRoot"
 $inputs = Get-CanonicalDirectory -Path $InputDirectory -Role "InputDirectory"
@@ -704,9 +693,8 @@ if ($Target -eq "x86_64-pc-windows-msvc") {
     $script:constructionStage = "cargo-jobserver-bootstrap"
     Write-ConstructionStatus -Stage $script:constructionStage -State "running"
     $constructionSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-    $script:constructionJobserverName =
-        "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
-    $script:constructionJobserver = New-ContainedCargoJobserver `
+    $script:constructionJobserverName = $SeededSemaphoreName
+    $script:constructionJobserver = Open-ContainedCargoJobserver `
         -Sid $constructionSid `
         -Name $script:constructionJobserverName
     $env:CARGO_MAKEFLAGS =

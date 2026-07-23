@@ -77,6 +77,7 @@ public sealed class ProjectAtlasWindowsRunnerJob : IDisposable
     private const uint JobObjectLimitSilentBreakawayOk = 0x00001000;
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
     private const int JobObjectBasicAccountingInformation = 1;
+    private const int JobObjectBasicUiRestrictions = 4;
     private const int JobObjectExtendedLimitInformation = 9;
     private const uint SddlRevision1 = 1;
     private const uint TokenQuery = 0x0008;
@@ -191,6 +192,18 @@ public sealed class ProjectAtlasWindowsRunnerJob : IDisposable
         EntryPoint = "QueryInformationJobObject",
         SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryBasicUiRestrictions(
+        IntPtr job,
+        int informationClass,
+        out uint restrictions,
+        uint informationLength,
+        IntPtr returnLength);
+
+    [DllImport(
+        "kernel32.dll",
+        EntryPoint = "QueryInformationJobObject",
+        SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool QueryBasicAccountingInformation(
         IntPtr job,
         int informationClass,
@@ -290,6 +303,7 @@ public sealed class ProjectAtlasWindowsRunnerJob : IDisposable
                 {
                     throw Failure("configure-broker-job");
                 }
+                ValidatePolicy(handle);
                 return new ProjectAtlasWindowsRunnerJob(handle);
             }
             catch
@@ -550,6 +564,20 @@ public sealed class ProjectAtlasWindowsRunnerJob : IDisposable
                 JobObjectLimitSilentBreakawayOk) != 0)
         {
             throw new InvalidOperationException("broker-job-policy");
+        }
+        uint uiRestrictions;
+        if (!QueryBasicUiRestrictions(
+            targetJob,
+            JobObjectBasicUiRestrictions,
+            out uiRestrictions,
+            sizeof(uint),
+            IntPtr.Zero))
+        {
+            throw Failure("query-broker-job-ui-policy");
+        }
+        if (uiRestrictions != 0)
+        {
+            throw new InvalidOperationException("broker-job-ui-policy");
         }
     }
 

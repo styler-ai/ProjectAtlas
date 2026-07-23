@@ -180,9 +180,12 @@ function Assert-ProductionRecoveryContracts {
         'created = CreateProcessWithToken(',
         [System.StringComparison]::Ordinal
     )
-    $preJobNamedObjectProbeIndex = $nativeText.IndexOf(
-        'WindowsIdentity.RunImpersonated(',
-        $principalTokenValidationIndex,
+    $logonNamespaceIndex = $nativeText.IndexOf(
+        'CaptureTokenNamespaceSnapshot(logonToken)',
+        [System.StringComparison]::Ordinal
+    )
+    $seedCreateIndex = $nativeText.IndexOf(
+        'seededSemaphore = CreateSeededSemaphore(',
         [System.StringComparison]::Ordinal
     )
     $creationFlagsIndex = $nativeText.IndexOf(
@@ -195,6 +198,11 @@ function Assert-ProductionRecoveryContracts {
     )
     $processTokenOpenIndex = $nativeText.IndexOf(
         'OpenProcessToken(process.Process, TokenQuery, out constructionToken)',
+        [System.StringComparison]::Ordinal
+    )
+    $seedTransferIndex = $nativeText.IndexOf(
+        'TransferSeededSemaphore(',
+        $processCreatedIndex,
         [System.StringComparison]::Ordinal
     )
     $tokenValidationIndex = $nativeText.IndexOf(
@@ -214,40 +222,70 @@ function Assert-ProductionRecoveryContracts {
         $inheritedJobCheckIndex,
         [System.StringComparison]::Ordinal
     )
+    $childBeforeNamespaceIndex = $nativeText.IndexOf(
+        'CaptureTokenNamespaceSnapshot(constructionToken)',
+        $tokenValidationIndex,
+        [System.StringComparison]::Ordinal
+    )
+    $childAfterNamespaceIndex = $nativeText.IndexOf(
+        'CaptureTokenNamespaceSnapshot(constructionToken)',
+        $ownJobAssignmentIndex,
+        [System.StringComparison]::Ordinal
+    )
+    $resumeIndex = $nativeText.IndexOf(
+        'if (ResumeThread(process.Thread) == UInt32.MaxValue)',
+        [System.StringComparison]::Ordinal
+    )
     Require `
         ($creationFlagsIndex -ge 0 -and
             $principalLogonIndex -gt $creationFlagsIndex -and
             $principalTokenValidationIndex -gt $principalLogonIndex -and
-            $preJobNamedObjectProbeIndex -gt $principalTokenValidationIndex -and
-            $processCreationIndex -gt $preJobNamedObjectProbeIndex -and
+            $logonNamespaceIndex -gt $principalTokenValidationIndex -and
+            $seedCreateIndex -gt $logonNamespaceIndex -and
+            $processCreationIndex -gt $seedCreateIndex -and
             $processCreatedIndex -gt $processCreationIndex -and
+            $seedTransferIndex -gt $processCreatedIndex -and
             $processTokenOpenIndex -gt $processCreatedIndex -and
             $tokenValidationIndex -gt $processTokenOpenIndex -and
+            $childBeforeNamespaceIndex -gt $tokenValidationIndex -and
             $retainedJobInjectionIndex -gt $tokenValidationIndex -and
             $inheritedJobCheckIndex -gt $retainedJobInjectionIndex -and
             $ownJobAssignmentIndex -gt $inheritedJobCheckIndex -and
+            $childAfterNamespaceIndex -gt $ownJobAssignmentIndex -and
+            $resumeIndex -gt $childAfterNamespaceIndex -and
             $nativeText.Contains('return CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;') -and
             $nativeText.Contains('EntryPoint = "LogonUserW"') -and
             $nativeText.Contains('EntryPoint = "CreateProcessWithTokenW"') -and
             -not $nativeText.Contains('EntryPoint = "CreateProcessWithLogonW"') -and
             -not $nativeText.Contains('CreateBreakawayFromJob = 0x01000000;') -and
             $nativeText.Contains('ValidateCurrentBrokerJob(brokerJobName);') -and
-            $nativeText.Contains('limits.BasicLimitInformation.LimitFlags != expectedFlags') -and
+            $nativeText.Contains('ValidateJobPolicyValues(') -and
             $nativeText.Contains('JobObjectLimitKillOnJobClose | JobObjectLimitBreakawayOk') -and
+            $nativeText.Contains('JobObjectBasicUiRestrictions') -and
+            $nativeText.Contains('uiRestrictions != 0') -and
             $nativeText.Contains('construction-broker-job-required') -and
             $nativeText.Contains('construction-broker-job-membership') -and
             $nativeText.Contains('construction-broker-job-policy') -and
             $nativeText.Contains('Marshal.ZeroFreeGlobalAllocUnicode(passwordPointer);') -and
             $nativeText.Contains('LogonTokenHandleOwned') -and
             $nativeText.Contains('LogonTokenHandleClosed') -and
-            $nativeText.Contains('NamedObjectProbeRan') -and
-            $nativeText.Contains('PreJobNativeCreateWin32') -and
-            $nativeText.Contains('PreJobNativeCloseWin32') -and
-            $nativeText.Contains('admissionScenario == AdmissionScenario.Normal &&') -and
+            $nativeText.Contains('SeededSemaphoreCreatedNew') -and
+            $nativeText.Contains('SeededSemaphoreDuplicated') -and
+            $nativeText.Contains('SeededSemaphoreParentHandleClosed') -and
+            $nativeText.Contains('TokenNamespaceSnapshot') -and
+            $nativeText.Contains('TokenBnoIsolationInformation') -and
+            $nativeText.Contains('[MarshalAs(UnmanagedType.U1)]') -and
+            $nativeText.Contains('MaximumTokenInformationBytes = 64 * 1024;') -and
             $nativeText.Contains('ambient-construction-jobserver') -and
-            -not $nativeText.Contains('CreateConstructionJobserver(') -and
             $nativeText.Contains('EntryPoint = "CreateSemaphoreExW"') -and
-            $nativeText.Contains('CapturePreJobNativeSemaphoreProbe(admissionReceipt);') -and
+            $nativeText.Contains('DuplicateHandle(') -and
+            $nativeText.Contains('DuplicateSameAccess') -and
+            $nativeText.Contains('RequireEquivalentTokenNamespaces(') -and
+            -not $nativeText.Contains('JobObjectCreateSilo') -and
+            -not $nativeText.Contains('CreateRestrictedToken') -and
+            -not $nativeText.Contains('SetTokenInformation') -and
+            -not $nativeText.Contains('PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES') -and
+            -not $nativeText.Contains('JOB_OBJECT_SECURITY_') -and
             $nativeText.Contains('MaximumLogonCommandLineCharacters = 1023;') -and
             $nativeText.Contains('construction-process-retained-inherited-job')) `
         "Construction admission no longer validates the suspended alternate-logon child before assigning its owned Job."
@@ -485,16 +523,19 @@ function Assert-NamedObjectProbeDiagnosticContract {
         'SemaphoreSynchronizeAndModify = 0x00100002',
         'NtOpenDirectoryObject(',
         'CreateAndCloseSemaphore(',
-        'CreateOwnedSemaphore(',
+        'OpenAndCloseSemaphore(',
+        'OpenOwnedSemaphore(',
         'directory_traverse_ntstatus = $directoryTraverseNtStatus',
         'directory_create_object_ntstatus = $directoryCreateObjectNtStatus',
         'directory_traverse_create_ntstatus = $directoryTraverseCreateNtStatus',
         'construction-token-owner-sid-mismatch',
-        '$security.SetAccessRuleProtection($true, $false)',
         'post_job_native_create_win32 = $postJobNativeCreateWin32',
         'post_job_native_created_new = $postJobNativeCreatedNew',
         'post_job_native_close_win32 = $postJobNativeCloseWin32',
-        'schema_version = 3',
+        'seeded_semaphore_name = $SeededSemaphoreName',
+        'seeded_open_win32 = $seededOpenWin32',
+        'seeded_create_win32 = $seededCreateWin32',
+        'schema_version = 4',
         '$probeStage = ''cleanup''',
         '$probeStage = ''result-write''',
         '[Console]::Error.WriteLine($fallbackJson)',
@@ -608,7 +649,7 @@ function Assert-NamedObjectProbeDiagnosticContract {
             $selfText.Contains('function Format-NamedObjectAccessComparison') -and
             $selfText.Contains('function Assert-NamedObjectProbeRecordFixtures') -and
             $selfText.Contains('post_job_native_create_win32') -and
-            $selfText.Contains('same_native_name=') -and
+            $selfText.Contains('seeded_name_matches=') -and
             $selfText.Contains('operation_error_type=$operationType') -and
             $selfText.Contains('cleanup_error_type=$cleanupType') -and
             $selfText.Contains('function Remove-NamedObjectProbeTemporaryRecords') -and
@@ -1138,7 +1179,9 @@ function Read-NamedObjectProbeRecord {
         'directory_traverse_ntstatus', 'error', 'exit_code', 'native_semaphore_name',
         'operation_error', 'operation_stage', 'post_job_native_close_win32',
         'post_job_native_create_win32', 'post_job_native_created_new', 'schema_version',
-        'semaphore_name', 'session_id', 'stage', 'status'
+        'seeded_create_close_win32', 'seeded_create_created_new',
+        'seeded_create_win32', 'seeded_open_close_win32', 'seeded_open_win32',
+        'seeded_semaphore_name', 'semaphore_name', 'session_id', 'stage', 'status'
     ) | Sort-Object
     $actualKeys = @($record.PSObject.Properties.Name | Sort-Object)
     Require `
@@ -1157,7 +1200,7 @@ function Read-NamedObjectProbeRecord {
     }
     Require `
         ((Test-ExactJsonInteger $record.schema_version) -and
-            $record.schema_version -eq 3L -and
+            $record.schema_version -eq 4L -and
             (Test-ExactJsonString $record.status) -and
             (Test-ExactJsonString $record.stage) -and
             (Test-ExactJsonInteger $record.exit_code) -and
@@ -1170,6 +1213,12 @@ function Read-NamedObjectProbeRecord {
             (Test-ExactJsonInteger $record.post_job_native_create_win32) -and
             (Test-ExactJsonBoolean $record.post_job_native_created_new) -and
             (Test-ExactJsonInteger $record.post_job_native_close_win32) -and
+            (Test-ExactJsonString $record.seeded_semaphore_name) -and
+            (Test-ExactJsonInteger $record.seeded_open_win32) -and
+            (Test-ExactJsonInteger $record.seeded_open_close_win32) -and
+            (Test-ExactJsonInteger $record.seeded_create_win32) -and
+            (Test-ExactJsonBoolean $record.seeded_create_created_new) -and
+            (Test-ExactJsonInteger $record.seeded_create_close_win32) -and
             (Test-ExactJsonString $record.semaphore_name) -and
             (Test-ExactJsonBoolean $record.created_new) -and
             (Test-ExactJsonInteger $record.descendant_exit_code) -and
@@ -1189,6 +1238,14 @@ function Read-NamedObjectProbeRecord {
             $record.post_job_native_create_win32 -le [int32]::MaxValue -and
             $record.post_job_native_close_win32 -ge -1L -and
             $record.post_job_native_close_win32 -le [int32]::MaxValue -and
+            $record.seeded_open_win32 -ge -1L -and
+            $record.seeded_open_win32 -le [int32]::MaxValue -and
+            $record.seeded_open_close_win32 -ge -1L -and
+            $record.seeded_open_close_win32 -le [int32]::MaxValue -and
+            $record.seeded_create_win32 -ge -1L -and
+            $record.seeded_create_win32 -le [int32]::MaxValue -and
+            $record.seeded_create_close_win32 -ge -1L -and
+            $record.seeded_create_close_win32 -le [int32]::MaxValue -and
             ([string]::IsNullOrEmpty($record.directory_path) -or
                 $record.directory_path -ceq '\BaseNamedObjects') -and
             ([string]::IsNullOrEmpty($record.semaphore_name) -or
@@ -1196,6 +1253,9 @@ function Read-NamedObjectProbeRecord {
                     '\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z') -and
             ([string]::IsNullOrEmpty($record.native_semaphore_name) -or
                 $record.native_semaphore_name -match
+                    '\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z') -and
+            ([string]::IsNullOrEmpty($record.seeded_semaphore_name) -or
+                $record.seeded_semaphore_name -match
                     '\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')) `
         "Named-object probe diagnostic field types or values were invalid."
 
@@ -1213,8 +1273,13 @@ function Read-NamedObjectProbeRecord {
             -CreateWin32 $record.post_job_native_create_win32 `
             -CreatedNew $record.post_job_native_created_new `
             -CloseWin32 $record.post_job_native_close_win32) -and
+        $record.seeded_open_win32 -eq 0L -and
+        $record.seeded_open_close_win32 -eq 0L -and
+        $record.seeded_create_win32 -eq 183L -and
+        $record.seeded_create_created_new -eq $false -and
+        $record.seeded_create_close_win32 -eq 0L -and
         -not [string]::IsNullOrEmpty($record.semaphore_name) -and
-        $record.created_new -eq $true -and
+        $record.created_new -eq $false -and
         $record.descendant_exit_code -eq 0L
 
     $isOperationFailure = $record.status -ceq 'failure' -and
@@ -1285,7 +1350,7 @@ function Assert-NamedObjectProbeRecordFixtures {
         $nativeName = 'Global\ProjectAtlasParserPack-00000000000000000000000000000001'
         $managedName = 'Global\ProjectAtlasParserPack-00000000000000000000000000000002'
         $success = [ordered]@{
-            schema_version = 3
+            schema_version = 4
             status = 'success'
             stage = 'complete'
             exit_code = 0
@@ -1302,8 +1367,14 @@ function Assert-NamedObjectProbeRecordFixtures {
             post_job_native_create_win32 = 0
             post_job_native_created_new = $true
             post_job_native_close_win32 = 0
+            seeded_semaphore_name = $managedName
+            seeded_open_win32 = 0
+            seeded_open_close_win32 = 0
+            seeded_create_win32 = 183
+            seeded_create_created_new = $false
+            seeded_create_close_win32 = 0
             semaphore_name = $managedName
-            created_new = $true
+            created_new = $false
             descendant_exit_code = 0
         }
         $records = [System.Collections.Generic.List[System.Collections.IDictionary]]::new()
@@ -2316,6 +2387,36 @@ function Get-ReflectedReceiptValue {
     return $property.GetValue($Receipt)
 }
 
+function Assert-TokenNamespaceSnapshot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Snapshot
+    )
+
+    $flags = [System.Reflection.BindingFlags]'NonPublic,Instance'
+    $values = @{}
+    foreach ($name in @(
+        'HasRestrictions', 'RestrictedSidCount', 'IsAppContainer', 'IsSandboxed',
+        'IsAppSilo', 'BnoIsolationEnabled', 'BnoIsolationPrefix',
+        'PrivateNamespaceQueryWin32', 'PrivateNamespaceInformationLength'
+    )) {
+        $property = $Snapshot.GetType().GetProperty($name, $flags)
+        Require ($null -ne $property) "Token namespace snapshot lost $name."
+        $values[$name] = $property.GetValue($Snapshot)
+    }
+    Require `
+        (-not [bool]$values.HasRestrictions -and
+            [uint32]$values.RestrictedSidCount -eq 0 -and
+            -not [bool]$values.IsAppContainer -and
+            -not [bool]$values.IsSandboxed -and
+            -not [bool]$values.IsAppSilo -and
+            -not [bool]$values.BnoIsolationEnabled -and
+            [string]$values.BnoIsolationPrefix -ceq '' -and
+            [int]$values.PrivateNamespaceInformationLength -ge 0) `
+        "Construction token entered an isolated or restricted namespace."
+    return $values
+}
+
 function Format-NamedObjectAccessComparison {
     param(
         [Parameter(Mandatory = $true)]
@@ -2328,26 +2429,22 @@ function Format-NamedObjectAccessComparison {
         [pscustomobject]$Record
     )
 
-    $preRan = [bool](Get-ReflectedReceiptValue `
+    $seedName = [string](Get-ReflectedReceiptValue `
         -ReceiptType $ReceiptType `
         -Receipt $Receipt `
-        -Name NamedObjectProbeRan)
-    $preName = [string](Get-ReflectedReceiptValue `
+        -Name SeededSemaphoreName)
+    $seedCreated = [bool](Get-ReflectedReceiptValue `
         -ReceiptType $ReceiptType `
         -Receipt $Receipt `
-        -Name PreJobNativeSemaphoreName)
-    $preCreated = [bool](Get-ReflectedReceiptValue `
+        -Name SeededSemaphoreCreatedNew)
+    $seedDuplicated = [bool](Get-ReflectedReceiptValue `
         -ReceiptType $ReceiptType `
         -Receipt $Receipt `
-        -Name PreJobNativeCreatedNew)
-    $preCreate = [int](Get-ReflectedReceiptValue `
+        -Name SeededSemaphoreDuplicated)
+    $parentClosed = [bool](Get-ReflectedReceiptValue `
         -ReceiptType $ReceiptType `
         -Receipt $Receipt `
-        -Name PreJobNativeCreateWin32)
-    $preClose = [int](Get-ReflectedReceiptValue `
-        -ReceiptType $ReceiptType `
-        -Receipt $Receipt `
-        -Name PreJobNativeCloseWin32)
+        -Name SeededSemaphoreParentHandleClosed)
     $postCreate = if ($null -eq $Record) { '' } else { [string]$Record.post_job_native_create_win32 }
     $postCreated = if ($null -eq $Record) { '' } else { [string]$Record.post_job_native_created_new }
     $postClose = if ($null -eq $Record) { '' } else { [string]$Record.post_job_native_close_win32 }
@@ -2359,12 +2456,12 @@ function Format-NamedObjectAccessComparison {
     }
     else {
         [string][string]::Equals(
-            $preName,
-            [string]$Record.native_semaphore_name,
+            $seedName,
+            [string]$Record.seeded_semaphore_name,
             [System.StringComparison]::Ordinal
         )
     }
-    return "pre_job_ran=$preRan pre_job_create_win32=$preCreate pre_job_created_new=$preCreated pre_job_close_win32=$preClose post_job_create_win32=$postCreate post_job_created_new=$postCreated post_job_close_win32=$postClose same_native_name=$sameName directory_traverse_ntstatus=$directoryTraverse directory_create_object_ntstatus=$directoryCreate directory_traverse_create_ntstatus=$directoryCombined"
+    return "seed_created=$seedCreated seed_duplicated=$seedDuplicated parent_seed_closed=$parentClosed seeded_name_matches=$sameName post_job_create_win32=$postCreate post_job_created_new=$postCreated post_job_close_win32=$postClose directory_traverse_ntstatus=$directoryTraverse directory_create_object_ntstatus=$directoryCreate directory_traverse_create_ntstatus=$directoryCombined"
 }
 
 function Get-ReflectedOperationFailure {
@@ -2545,6 +2642,10 @@ param(
     [ValidatePattern('\A(?:|Global\\ProjectAtlasParserPack-[0-9a-f]{32})\z')]
     [string]$ComparisonSemaphoreName = '',
 
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
+    [string]$SeededSemaphoreName,
+
     [ValidateSet('none', 'operation-and-cleanup', 'descendant-open-not-found')]
     [string]$DiagnosticFault = 'none'
 )
@@ -2673,16 +2774,6 @@ public static class ProjectAtlasNamedObjectAccessProbe
     private const int ErrorAlreadyExists = 183;
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct SecurityAttributes
-    {
-        internal int Length;
-        internal IntPtr SecurityDescriptor;
-
-        [MarshalAs(UnmanagedType.Bool)]
-        internal bool InheritHandle;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
     private struct UnicodeString
     {
         internal ushort Length;
@@ -2723,22 +2814,19 @@ public static class ProjectAtlasNamedObjectAccessProbe
         uint flags,
         uint desiredAccess);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
     [DllImport(
         "kernel32.dll",
         CharSet = CharSet.Unicode,
         SetLastError = true,
-        EntryPoint = "CreateSemaphoreExW")]
-    private static extern IntPtr CreateSemaphoreExWithSecurity(
-        ref SecurityAttributes securityAttributes,
-        int initialCount,
-        int maximumCount,
-        string name,
-        uint flags,
-        uint desiredAccess);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CloseHandle(IntPtr handle);
+        EntryPoint = "OpenSemaphoreW")]
+    private static extern IntPtr OpenSemaphore(
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        string name);
 
     public static int OpenDirectory(string path, uint desiredAccess)
     {
@@ -2818,60 +2906,39 @@ public static class ProjectAtlasNamedObjectAccessProbe
         return createdNew ? 0 : createError;
     }
 
-    public static SafeWaitHandle CreateOwnedSemaphore(
+    public static int OpenAndCloseSemaphore(
         string name,
-        byte[] securityDescriptor)
+        out int closeError)
     {
-        if (string.IsNullOrEmpty(name) ||
-            securityDescriptor == null ||
-            securityDescriptor.Length == 0)
+        closeError = -1;
+        IntPtr handle = OpenSemaphore(
+            SemaphoreSynchronizeAndModify,
+            false,
+            name);
+        int openError = Marshal.GetLastWin32Error();
+        if (handle == IntPtr.Zero)
         {
-            throw new ArgumentException("contained-cargo-jobserver-input");
+            return openError;
         }
-
-        GCHandle pinnedDescriptor = default(GCHandle);
-        try
-        {
-            pinnedDescriptor = GCHandle.Alloc(
-                securityDescriptor,
-                GCHandleType.Pinned);
-            SecurityAttributes attributes = new SecurityAttributes();
-            attributes.Length = Marshal.SizeOf(typeof(SecurityAttributes));
-            attributes.SecurityDescriptor = pinnedDescriptor.AddrOfPinnedObject();
-            attributes.InheritHandle = false;
-
-            IntPtr rawHandle = CreateSemaphoreExWithSecurity(
-                ref attributes,
-                1,
-                1,
-                name,
-                0,
-                SemaphoreSynchronizeAndModify);
-            int createError = Marshal.GetLastWin32Error();
-            if (rawHandle == IntPtr.Zero)
-            {
-                throw new System.ComponentModel.Win32Exception(
-                    createError,
-                    "create-contained-cargo-jobserver");
-            }
-
-            SafeWaitHandle handle = new SafeWaitHandle(rawHandle, true);
-            if (createError == ErrorAlreadyExists)
-            {
-                handle.Dispose();
-                throw new InvalidOperationException(
-                    "contained-cargo-jobserver-name-collision");
-            }
-            return handle;
-        }
-        finally
-        {
-            if (pinnedDescriptor.IsAllocated)
-            {
-                pinnedDescriptor.Free();
-            }
-        }
+        closeError = CloseHandle(handle) ? 0 : Marshal.GetLastWin32Error();
+        return 0;
     }
+
+    public static SafeWaitHandle OpenOwnedSemaphore(string name)
+    {
+        IntPtr handle = OpenSemaphore(
+            SemaphoreSynchronizeAndModify,
+            false,
+            name);
+        if (handle == IntPtr.Zero)
+        {
+            throw new System.ComponentModel.Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "open-seeded-cargo-jobserver");
+        }
+        return new SafeWaitHandle(handle, true);
+    }
+
 }
 "@
 
@@ -2885,6 +2952,11 @@ $nativeSemaphoreName = ''
 $postJobNativeCreateWin32 = -1
 $postJobNativeCreatedNew = $false
 $postJobNativeCloseWin32 = -1
+$seededOpenWin32 = -1
+$seededOpenCloseWin32 = -1
+$seededCreateWin32 = -1
+$seededCreateCreatedNew = $false
+$seededCreateCloseWin32 = -1
 $name = ''
 $createdNew = $false
 $childExitCode = -1
@@ -2946,29 +3018,42 @@ try {
             [ref]$postJobNativeCloseWin32
         )
 
+    $probeStage = 'native-semaphore-create'
+    $seededOpenWin32 =
+        [ProjectAtlasNamedObjectAccessProbe]::OpenAndCloseSemaphore(
+            $SeededSemaphoreName,
+            [ref]$seededOpenCloseWin32
+        )
+    if ($seededOpenWin32 -ne 0 -or $seededOpenCloseWin32 -ne 0) {
+        throw [System.ComponentModel.Win32Exception]::new(
+            $seededOpenWin32,
+            'open-seeded-cargo-jobserver'
+        )
+    }
+    $seededCreateWin32 =
+        [ProjectAtlasNamedObjectAccessProbe]::CreateAndCloseSemaphore(
+            $SeededSemaphoreName,
+            [ref]$seededCreateCreatedNew,
+            [ref]$seededCreateCloseWin32
+        )
+    if ($seededCreateWin32 -ne 183 -or
+        $seededCreateCreatedNew -or
+        $seededCreateCloseWin32 -ne 0) {
+        throw [System.InvalidOperationException]::new(
+            'seeded-cargo-jobserver-existing-object-probe'
+        )
+    }
+
     $probeStage = 'semaphore-acl'
     if ($DiagnosticFault -ceq 'operation-and-cleanup') {
         throw [System.InvalidOperationException]::new(
             'diagnostic-operation-fault ordinary/token C:/private/forward.txt //server/share/unquoted.txt'
         )
     }
-    $security = [System.Security.AccessControl.SemaphoreSecurity]::new()
-    $security.SetAccessRuleProtection($true, $false)
-    $rights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
-        [System.Security.AccessControl.SemaphoreRights]::Modify
-    $security.AddAccessRule([System.Security.AccessControl.SemaphoreAccessRule]::new(
-        [System.Security.Principal.SecurityIdentifier]::new($ExpectedPrincipalSid),
-        $rights,
-        [System.Security.AccessControl.AccessControlType]::Allow
-    ))
-
     $probeStage = 'semaphore-create'
-    $name = "Global\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
-    $semaphore = [ProjectAtlasNamedObjectAccessProbe]::CreateOwnedSemaphore(
-        $name,
-        $security.GetSecurityDescriptorBinaryForm()
-    )
-    $createdNew = $true
+    $name = $SeededSemaphoreName
+    $semaphore = [ProjectAtlasNamedObjectAccessProbe]::OpenOwnedSemaphore($name)
+    $createdNew = $false
 
     $probeStage = 'cargo-makeflags'
     $env:CARGO_MAKEFLAGS = "-j --jobserver-fds=$name --jobserver-auth=$name"
@@ -3119,7 +3204,7 @@ else {
     $finalError = $null
 }
 $record = [ordered]@{
-    schema_version = 3
+    schema_version = 4
     status = $status
     stage = $finalStage
     exit_code = $exitCode
@@ -3136,6 +3221,12 @@ $record = [ordered]@{
     post_job_native_create_win32 = $postJobNativeCreateWin32
     post_job_native_created_new = $postJobNativeCreatedNew
     post_job_native_close_win32 = $postJobNativeCloseWin32
+    seeded_semaphore_name = $SeededSemaphoreName
+    seeded_open_win32 = $seededOpenWin32
+    seeded_open_close_win32 = $seededOpenCloseWin32
+    seeded_create_win32 = $seededCreateWin32
+    seeded_create_created_new = $seededCreateCreatedNew
+    seeded_create_close_win32 = $seededCreateCloseWin32
     semaphore_name = $name
     created_new = $createdNew
     descendant_exit_code = $childExitCode
@@ -3147,7 +3238,7 @@ try {
 catch {
     $writeError = ConvertTo-BoundedProbeError -Exception $_.Exception
     $fallback = [ordered]@{
-        schema_version = 3
+        schema_version = 4
         status = 'failure'
         stage = 'result-write'
         exit_code = [int]$probeExitCodes['result-write']
@@ -3155,7 +3246,7 @@ catch {
     }
     $fallbackJson = $fallback | ConvertTo-Json -Compress -Depth 4
     if ($fallbackJson.Length -gt 1024) {
-        $fallbackJson = '{"schema_version":3,"status":"failure","stage":"result-write","exit_code":128,"error":{"type":"Exception","native_code":null,"message":"probe-result-write-failed"}}'
+        $fallbackJson = '{"schema_version":4,"status":"failure","stage":"result-write","exit_code":128,"error":{"type":"Exception","native_code":null,"message":"probe-result-write-failed"}}'
     }
     [Console]::Error.WriteLine($fallbackJson)
     exit [int]$probeExitCodes['result-write']
@@ -3253,7 +3344,8 @@ exit 0
         '-ExpectedOwnerSid', $identity.Sid,
         '-ResultPath', $probeResultPath,
         '-CanaryPath', $probeCanaryPath,
-        '-ComparisonSemaphoreName', $comparisonSemaphoreName
+        '-ComparisonSemaphoreName', $comparisonSemaphoreName,
+        '-SeededSemaphoreName', '__PROJECTATLAS_SEEDED_SEMAPHORE__'
     )
     # RunCore validates its command line before authentication. Keep this probe
     # short so invalid credentials reach the intended LogonUser boundary.
@@ -3318,14 +3410,17 @@ exit 0
         $admissionScenario = [enum]::Parse($scenarioType, $scenarioName)
         $receipt = [Activator]::CreateInstance($receiptType, $true)
         if ($scenarioName -eq 'Normal') {
-            $preJobNameProperty = $receiptType.GetProperty(
-                'PreJobNativeSemaphoreName',
+            $seededNameProperty = $receiptType.GetProperty(
+                'SeededSemaphoreName',
                 [System.Reflection.BindingFlags]'NonPublic,Instance'
             )
             Require `
-                ($null -ne $preJobNameProperty) `
-                "Construction receipt lost its pre-Job native semaphore name."
-            $preJobNameProperty.SetValue($receipt, $comparisonSemaphoreName)
+                ($null -ne $seededNameProperty) `
+                "Construction receipt lost its seeded semaphore name."
+            $seededNameProperty.SetValue(
+                $receipt,
+                "Global\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+            )
         }
         $invokeArguments = [object[]]::new(10)
         $invokeArguments[0] = $identity.Username
@@ -3421,39 +3516,59 @@ exit 0
                 -ReceiptType $receiptType `
                 -Receipt $receipt `
                 -ExpectTermination $false
-            $preJobSemaphoreName = [string](Get-ReflectedReceiptValue `
+            $seededSemaphoreName = [string](Get-ReflectedReceiptValue `
                 -ReceiptType $receiptType `
                 -Receipt $receipt `
-                -Name PreJobNativeSemaphoreName)
+                -Name SeededSemaphoreName)
             Require `
                 ((Get-ReflectedReceiptValue `
                         -ReceiptType $receiptType `
                         -Receipt $receipt `
-                        -Name NamedObjectProbeRan) -eq $true -and
+                        -Name SeededSemaphoreCreatedNew) -eq $true -and
                     (Get-ReflectedReceiptValue `
                         -ReceiptType $receiptType `
                         -Receipt $receipt `
-                        -Name PreJobNativeCreateWin32) -eq 0 -and
+                        -Name SeededSemaphoreDuplicated) -eq $true -and
                     (Get-ReflectedReceiptValue `
                         -ReceiptType $receiptType `
                         -Receipt $receipt `
-                        -Name PreJobNativeCreatedNew) -eq $true -and
-                    (Get-ReflectedReceiptValue `
-                        -ReceiptType $receiptType `
-                        -Receipt $receipt `
-                        -Name PreJobNativeCloseWin32) -eq 0 -and
-                    $preJobSemaphoreName -match
+                        -Name SeededSemaphoreParentHandleClosed) -eq $true -and
+                    $seededSemaphoreName -match
                         '\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z' -and
                     [string]::Equals(
-                        $preJobSemaphoreName,
-                        [string]$probeResult.native_semaphore_name,
+                        $seededSemaphoreName,
+                        [string]$probeResult.seeded_semaphore_name,
                         [System.StringComparison]::Ordinal
                     )) `
-                "Construction pre-Job native semaphore probe failed. comparison=$comparison"
+                "Construction seeded semaphore transfer failed. comparison=$comparison"
+            $logonNamespace = Assert-TokenNamespaceSnapshot -Snapshot (
+                Get-ReflectedReceiptValue `
+                    -ReceiptType $receiptType `
+                    -Receipt $receipt `
+                    -Name LogonTokenNamespace
+            )
+            $childNamespaceBefore = Assert-TokenNamespaceSnapshot -Snapshot (
+                Get-ReflectedReceiptValue `
+                    -ReceiptType $receiptType `
+                    -Receipt $receipt `
+                    -Name ChildTokenNamespaceBeforeJob
+            )
+            $childNamespaceAfter = Assert-TokenNamespaceSnapshot -Snapshot (
+                Get-ReflectedReceiptValue `
+                    -ReceiptType $receiptType `
+                    -Receipt $receipt `
+                    -Name ChildTokenNamespaceAfterJob
+            )
+            foreach ($namespaceField in $childNamespaceBefore.Keys) {
+                Require `
+                    ($childNamespaceBefore[$namespaceField] -ceq
+                        $childNamespaceAfter[$namespaceField]) `
+                    "Construction Job changed token namespace field $namespaceField."
+            }
             Invoke-ExactSidProcessAudit -Sid $identity.Sid -Expectation absent
             $expectedDirectoryPath = '\BaseNamedObjects'
             Require `
-                ($probeResult.schema_version -eq 3L -and
+                ($probeResult.schema_version -eq 4L -and
                     $probeResult.status -ceq 'success' -and
                     $probeResult.stage -ceq 'complete' -and
                     $probeResult.exit_code -eq 0L -and
@@ -3474,7 +3589,12 @@ exit 0
                         -CreateWin32 $probeResult.post_job_native_create_win32 `
                         -CreatedNew $probeResult.post_job_native_created_new `
                         -CloseWin32 $probeResult.post_job_native_close_win32) -and
-                    $probeResult.created_new -eq $true -and
+                    $probeResult.seeded_open_win32 -eq 0L -and
+                    $probeResult.seeded_open_close_win32 -eq 0L -and
+                    $probeResult.seeded_create_win32 -eq 183L -and
+                    $probeResult.seeded_create_created_new -eq $false -and
+                    $probeResult.seeded_create_close_win32 -eq 0L -and
+                    $probeResult.created_new -eq $false -and
                     $probeResult.descendant_exit_code -eq 0L -and
                     $probeResult.semaphore_name -match
                         '\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z') `
@@ -3518,6 +3638,19 @@ exit 0
                 "Construction adapter did not preserve operation and cleanup failures."
         }
         Assert-AdmissionReceipt -ReceiptType $receiptType -Receipt $receipt
+        $failedSeedName = [string](Get-ReflectedReceiptValue `
+            -ReceiptType $receiptType `
+            -Receipt $receipt `
+            -Name SeededSemaphoreName)
+        $failedSeed = $null
+        $failedSeedAbsent = -not [System.Threading.SemaphoreAcl]::TryOpenExisting(
+            $failedSeedName,
+            [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
+                [System.Security.AccessControl.SemaphoreRights]::Modify,
+            [ref]$failedSeed
+        )
+        if ($null -ne $failedSeed) { $failedSeed.Dispose() }
+        Require $failedSeedAbsent "Construction admission failure left its seeded semaphore."
         Invoke-ExactSidProcessAudit -Sid $identity.Sid -Expectation absent
     }
     $launcherExit = Invoke-BoundedProcess `
