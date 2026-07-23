@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "source_manifest_sha256": "6e530ca5fb0bc5cfb2e73dbade346d6591adbb8a9b6a1722f2ae19080723c8b4",
+  "source_manifest_sha256": "5e99567bfac525f155a5af9e9f0b246c9f0abb3daf07024e4997d0915fd78ac8",
   "rows": [
     {
       "language_id": "abl",
@@ -216,8 +216,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/push_pop_tag.txt",
           "case_name": "pop tag incomplete",
-          "source": "poptag #samp\n",
-          "source_sha256": "56fc1bbd698550cc89649f372b171068303b601d70a8ef84b151d5f0828a568f",
+          "source": "poptag #sampleTag",
+          "source_sha256": "6cc8e403fccfa90656759799c977ef9ee067353fdb79bdca5068e7e0b5c8f040",
           "expected_error": true
         }
       }
@@ -392,8 +392,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "cedarschema/test/corpus/cli/schema_a_7.txt",
           "case_name": "schema_a_7 incomplete",
-          "source": "// https://github.com/cedar-policy/cedar/blob/v4.11.2/cedar-policy-cli/sample-data/sandbox_a/s\n",
-          "source_sha256": "bd67e2c2d6c62575ce2e88c2ccfca75054b6d31e8e695c7f72e96e33f7e0b79a",
+          "source": "// https://github.com/cedar-policy/cedar/blob/v4.11.2/cedar-policy-cli/sample-data/sandbox_a/schema.cedarschema#L7\n\nentity ",
+          "source_sha256": "e82c95bbc6ce065c572235624c102066d650a4ed63f8f6919c996e591583c45c",
           "expected_error": true
         }
       }
@@ -524,8 +524,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/types.txt",
           "case_name": "Comments (This is not a type though) incomplete",
-          "source": ";; Tests start\n",
-          "source_sha256": "2235f678ad92c743b02d1447d39356d050a50f88b162843b44e1bcd00d9f39aa",
+          "source": ";",
+          "source_sha256": "41b805ea7ac014e23556e98bb374702a08344268f92489a02f0880849394a1e4",
           "expected_error": true
         }
       }
@@ -568,8 +568,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/comment.txt",
           "case_name": "comment incomplete",
-          "source": "aaaaaa identification division.\naaaaaa program-id. a.  ,,, ;;;\n",
-          "source_sha256": "c9fbc8f0f35d400bb4f205ffbf698239bb02de2655e9ca8b8bf47b4389d5ef9b",
+          "source": "aaaaaa identification division.\naaaaaa program-id. a",
+          "source_sha256": "190f9ce3e3813645ed293a1a97a4d8008b8742bb7997f17096dc6d9ce14d9a0f",
           "expected_error": true
         }
       }
@@ -631,11 +631,11 @@
           "expected_tree_sha256": "8c3efdb2713e627b656fbecac8ff22d6448b776dab56eb864dc8837f54dc2c6a"
         },
         "negative": {
-          "origin": "upstream-corpus-error-case",
+          "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/cst.txt",
-          "case_name": "CST with error node",
-          "source": "0:0  - 1:0    •translation_unit\n0:0  - 0:18     •ERROR\n0:0  - 0:3         type: primitive_type `int`\n0:4  - 0:8         identifier `main`\n0:8  - 0:9         \"(\"\n0:9  - 0:17        parameter_declaration\n0:9  - 0:12          type: primitive_type `int`\n0:13 - 0:17          declarator: identifier `argc`\n0:17 - 0:18       \",\"\n",
-          "source_sha256": "42cf5bf83caa395eeb2b95ff1976bc65c419a0eded9079bac00e72a03efa06be",
+          "case_name": "CST without errors incomplete",
+          "source": "0:0  - 4:0    translation_unit",
+          "source_sha256": "2567c9704fa61f31950b93f7c952da8bd4d43ab9fb1995880ac34b81b2ca5b45",
           "expected_error": true
         }
       }
@@ -656,8 +656,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/test.txt",
           "case_name": "Single letter incomplete",
-          "source": "a\n(\n",
-          "source_sha256": "dc15f55179e950fafd294c8d9baffa20ec26c740682cc170393699f418729e98",
+          "source": "a\n,",
+          "source_sha256": "b7c763d40c96fc7a0731751a25215519a2579416e917eed4894a9ed9334d6f25",
           "expected_error": true
         }
       }
@@ -744,8 +744,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/main.txt",
           "case_name": "Comments incomplete",
-          "source": "# Hello\n\n#\n",
-          "source_sha256": "0b4e486caa2436c70e25f695280f5538bcf4fb3e14ba9caf6900b7940142aec8",
+          "source": "# Hello\n\n# world",
+          "source_sha256": "acc962ae3792dbf71cf9acd417c404c64936b928f71311a97e040df8810c6e68",
           "expected_error": true
         }
       }
@@ -920,8 +920,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/literals.txt",
           "case_name": "Rationals incomplete",
-          "source": "nop 1/2 0x1\n",
-          "source_sha256": "c75eb8cfcc40c7b9e187244cccbc74b8e7582ab55895ae9e7c4d6f9d023a9fa0",
+          "source": "nop 1/2 0x10/100\n{\n",
+          "source_sha256": "0377591c7c0c1345e288e05fcbf27ec3df62bd6da901fb7618e05305eba143fd",
           "expected_error": true
         }
       }
@@ -1030,8 +1030,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/home_dir_expansion.txt",
           "case_name": "Home Dir Expansion incomplete",
-          "source": "echo ~\nls ~\n$cm\n",
-          "source_sha256": "c9aa74b7d3d9ef060ab8cf83d126475b85ca63cbe5f125ccd13924212500b7c1",
+          "source": "echo ~\nls ~\n$cmd ~/app",
+          "source_sha256": "ab6e7ee074879aaeec24a71de7aed0e1ed6b414e5a715b001d49c9547a9fac38",
           "expected_error": true
         }
       }
@@ -1052,8 +1052,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/word.txt",
           "case_name": "Check word symbols incomplete",
-          "source": "x,y\ntest:parse\nmaybe?\nvar@\n",
-          "source_sha256": "a77415e886faab47049df7840ea6a797bf092a179a821eca4863dd1d13ec7096",
+          "source": "x,y\ntest:parse\nmaybe?\nvar@\nsave!\n#num\n:",
+          "source_sha256": "6e25e715b8a6acb02ab707827d0312dece490146a27505e9eb41214b3bad2f80",
           "expected_error": true
         }
       }
@@ -1096,8 +1096,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/module_abbrev.txt",
           "case_name": "basic module abbreviation incomplete",
-          "source": "module local = Mo\n",
-          "source_sha256": "f7ba23a74caeb7db79213bb0e5f92eefa462bf86efeb476c6e17c6499ec18e96",
+          "source": "module local = Mod.",
+          "source_sha256": "3f36d34e6a7666d55d4d31a48951c6201253029328914cc105856a247b989eb7",
           "expected_error": true
         }
       }
@@ -1228,8 +1228,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/comments.txt",
           "case_name": "Comments incomplete",
-          "source": "////// regular comment\n\n///// regular comment\n\n//// module doc comment\n\n/// statemen\n",
-          "source_sha256": "329d05289428d65766c929944516625652b0dc42145e1eb9efabf8b5f65a0d24",
+          "source": "////// regular comment\n\n///// regular comment\n\n//// module doc comment\n\n/// statement doc comment\n\n/",
+          "source_sha256": "6e2029f2c6071696eb8cb7f4c2c43b108e31b3f2ffea217ad0809c52504e3233",
           "expected_error": true
         }
       }
@@ -1272,8 +1272,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/comments.txt",
           "case_name": "Multi line comment incomplete",
-          "source": "# This is a comment \\ \nthis is th\n",
-          "source_sha256": "6910e583e4f2451bddb877c6f862838e11bae0068554082b45f5a18f00110258",
+          "source": "# This is a comment \\ \nthis is the same comment\n{\n",
+          "source_sha256": "7615194a86956556a8c576b811e0901515192f68296e6d7062448c7eb9655327",
           "expected_error": true
         }
       }
@@ -1426,8 +1426,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/text.txt",
           "case_name": "Plain Text incomplete",
-          "source": "Hello Wo\n",
-          "source_sha256": "c1db7069156fa43ac5eccf23deabdc346a7b617887c80b80e36c4cf3f50b037e",
+          "source": "Hello World!\n{\n",
+          "source_sha256": "8a53729508305748d0c93d00e7a607b8a229a87f4231ea3eadcdbee0c03e8d7b",
           "expected_error": true
         }
       }
@@ -1470,8 +1470,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/main.txt",
           "case_name": "Multiple values in path incomplete",
-          "source": "\"Fi\" \"nn\" the human: Ja\n",
-          "source_sha256": "a1d0979ba8cf64aef09240da6afad11a41580433657f7f79ce02b845a3ddd1ed",
+          "source": "\"Fi\" \"nn\" the human: ",
+          "source_sha256": "da339dcc9e520050fb6d1740f37aae57b0147f92e2bf6887fbc2670c8622f63a",
           "expected_error": true
         }
       }
@@ -1514,8 +1514,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/hard_test.txt",
           "case_name": "Raw body wrapped with annotation comments incomplete",
-          "source": "POST example.com\n\n# @_RES\nraw\n",
-          "source_sha256": "5b9045b8e5340e0eea5f3fab831d5616438abee2c910b2197e952bc23e7eaf79",
+          "source": "POST example.com\n\n# @_RES\nraw body\n# @",
+          "source_sha256": "7aba58dbac709997924f699732275c1b4fff9c90da44f03ac3ecc4bcc864a9d4",
           "expected_error": true
         }
       }
@@ -1646,8 +1646,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/literals.txt",
           "case_name": "boolean literals incomplete",
-          "source": "true\nfa\n",
-          "source_sha256": "48ed264a965689dd53649f5753a35a53123b0a7e22176f474b1deecdb83e462b",
+          "source": "true\nfalse\n{\n",
+          "source_sha256": "3b31375760fa17979c44bf99dfb7c67836d387f81bbb920984544360b5050d87",
           "expected_error": true
         }
       }
@@ -1778,8 +1778,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/dates.txt",
           "case_name": "single dates incomplete",
-          "source": "2021-09-01\n    Account\n\n21-09-01\n    Account\n\n09-01\n    Accou\n",
-          "source_sha256": "21213453c75ed0eef000859231696a3f51302f095431d07bb65cd7e0beb9ffb9",
+          "source": "2021-09-01\n    Account\n\n21-09-01\n    Account\n\n09-01\n    Account\n\n2023-4-2\n    Account",
+          "source_sha256": "85cd68ab2771fcacf7c23206860801eb587e3fe96e7d31be794af7e155a48d61",
           "expected_error": true
         }
       }
@@ -1888,8 +1888,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/lambda.txt",
           "case_name": "Lambda: Handle incomplete",
-          "source": "a = @sin\nb = @m\n",
-          "source_sha256": "17715fc94a9b7d23488d83f37c96e86aa715df84922866ffa1050236d5dfcc7a",
+          "source": "a = @sin\nb = @math.sin",
+          "source_sha256": "76ca54870e08e8642fd7bee21895752fec0810f06a517fbe2412c0e51ae24839",
           "expected_error": true
         }
       }
@@ -1910,8 +1910,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/pie.txt",
           "case_name": "Simple Pie chart incomplete",
-          "source": "pie\n    title Key elements in Product X\n    \"Calcium\" : 42.96\n    \"Potassium\" : 50.05\n",
-          "source_sha256": "156f9c88022a16f09b35c957490665ed759ee17afe795947f911ba1e7c3e1b4d",
+          "source": "pie\n    title Key elements in Product X\n    \"Calcium\" : 42.96\n    \"Potassium\" : 50.05\n    \"Magnesium\" : 10.01\n    \"Iron\" :  ",
+          "source_sha256": "3c58e6ca46189d48b93a8c1eae2ab00b4da42c497e12e6fa6e8c7933cee96ff0",
           "expected_error": true
         }
       }
@@ -1998,8 +1998,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/comments.txt",
           "case_name": "Single Line incomplete",
-          "source": "// This is a comment\n// This is a\n",
-          "source_sha256": "1588fc534d9f770b38786e16a56434da4a668d169235ef8e854d488c6a75bc1d",
+          "source": "// This is a comment\n/",
+          "source_sha256": "789fa826526a284f998c18e371247ee78d0e1df74e62af0b215c71ccfe7a32e4",
           "expected_error": true
         }
       }
@@ -2042,8 +2042,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/comments.txt",
           "case_name": "docComment incomplete",
-          "source": "## doc\ndiscard true ## do\n",
-          "source_sha256": "5b4c0f491ad9c1b82bf641792fba13b5adb440bc18c4e76c3910d723f98489b8",
+          "source": "## doc\ndiscard true ## doc\n  ## doc\n{\n",
+          "source_sha256": "003a625a1fc931eac2ce4305d113972aa556f8f51f52df89cde0f405da78c6b0",
           "expected_error": true
         }
       }
@@ -2064,8 +2064,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/escape.txt",
           "case_name": "Test escaping new lines incomplete",
-          "source": "one\\\nw\n",
-          "source_sha256": "a8c4cfa2bd3d2ad4ba52bc934dff29cc3b586e7051182edb202e82e0d078bbca",
+          "source": "one\\",
+          "source_sha256": "06fe7e5d22254f3b2ff4f635cdb05ea18da7f2ca6697d1ba1acb70a9e0564437",
           "expected_error": true
         }
       }
@@ -2098,18 +2098,18 @@
         "positive": {
           "origin": "upstream-tree-sitter-corpus",
           "source_path": "test/corpus/decl/script.nu",
-          "case_name": "script-001-empty",
-          "source": "-----\n\n(nu_script)\n\n=====\nscript-002-shebang\n=====\n\n#!/usr/bin/nu env\n",
-          "source_sha256": "6dfc6d4051f9014a26ab14af8bf5bdebf57c443e708220c3505ad42d7ab2f173",
+          "case_name": "script-002-shebang",
+          "source": "#!/usr/bin/nu env\n",
+          "source_sha256": "d46746c58abcf9d33f8cff078257409016223c89cbc5c8b5a617aae769074bea",
           "expected_tree": "(nu_script\n  (shebang))\n",
           "expected_tree_sha256": "549e43841d7c3e5e6f6a1562e9cdec4068cc28262a581dd2b2ec71abc8e52f00"
         },
         "negative": {
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/decl/script.nu",
-          "case_name": "script-001-empty incomplete",
-          "source": "-----\n\n(nu_script)\n\n=====\nscript-002-shebang\n====\n",
-          "source_sha256": "c54f5e0786978e4fb7bf9251b98d7391163d262ee9f89e960d24105924022d6c",
+          "case_name": "script-002-shebang incomplete",
+          "source": "#!/usr/bin/nu env\n(\n",
+          "source_sha256": "66f54219e0b4dd3ff9b8f01ef269d54d9b0eee6a48ba5a4f333f5416375b21fa",
           "expected_error": true
         }
       }
@@ -2152,8 +2152,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/declarations.txt",
           "case_name": "Build Tags incomplete",
-          "source": "#+build darwin,\n",
-          "source_sha256": "2108207bc6271468845b50c1e85b8caceb5401b8b2bfbcd4c66e66300406ae44",
+          "source": "#+",
+          "source_sha256": "c366b28ed174bb8606a2903337c66024bd02779ff3cc1aa135cdd82be61e7142",
           "expected_error": true
         }
       }
@@ -2284,8 +2284,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/generics.txt",
           "case_name": "Ambiguous Generic Expressions incomplete",
-          "source": "class X[T]\n\nactor Main\n  new create(env: Env) =>\n    X\n    [None]\n",
-          "source_sha256": "80a10a8dd62d7bc66b4b544286d355c7fd848767e2d67af1e98c4d7364a41b0a",
+          "source": "class X[T]\n\nactor Main\n  new create(env: Env) =>\n    X\n    [None]\n\n  fun other() =>\n    X [None",
+          "source_sha256": "237e22517c9ab35433b5bbbe41e54807910a7130641a265d0436ce500375748c",
           "expected_error": true
         }
       }
@@ -2328,8 +2328,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/range.txt",
           "case_name": "range vector - simple incomplete",
-          "source": "http_requests_to\n",
-          "source_sha256": "5b92e501d898bbac7d295d3ed525da813237352e78e9f14df79eeb26cd184c6d",
+          "source": "http_requests_total[1m",
+          "source_sha256": "73e19c153070e3e3a55dd95912fb6845b0040797576e93637166f5c9971c8c51",
           "expected_error": true
         }
       }
@@ -2372,8 +2372,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/test.txt",
           "case_name": "Single letter incomplete",
-          "source": "a\n(\n",
-          "source_sha256": "dc15f55179e950fafd294c8d9baffa20ec26c740682cc170393699f418729e98",
+          "source": "a\n|",
+          "source_sha256": "b303bee17e95794dcb0f5cdc37f53aafce084eafda7471fe0dcbb0e2dacba05b",
           "expected_error": true
         }
       }
@@ -2438,8 +2438,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/ctf.txt",
           "case_name": "dataflow example from ctf incomplete",
-          "source": "from Configuration cfg, DataFlow::PathNode source, DataFlow::PathNode sink\nwhere cfg.hasFlowPath(source, sink)\nselect sink.getNode(), s\n",
-          "source_sha256": "83efca0bcb416e0e1ebbce06dfce64b29fec5cad88ac7406d611e10ee906f5cf",
+          "source": "from Configuration cfg, DataFlow::PathNode source, DataFlow::PathNode sink\nwhere cfg.hasFlowPath(source, sink)\nselect sink.getNode(), source, sink, \"Potential XSS vulnerability in plugin.",
+          "source_sha256": "f50121afb3dcf0adc443895c603705362864395b48cfa9f56880e788fca13a2c",
           "expected_error": true
         }
       }
@@ -2482,8 +2482,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/box.rkt",
           "case_name": "box incomplete",
-          "source": "#&17\n#&\"str\"\n",
-          "source_sha256": "c351796c791e81be8e5a17d8c885331e8667f059231f7a52ae265c7bc173ad93",
+          "source": "#&17\n#&\"str\"\n#& (",
+          "source_sha256": "d6432dbb48bf639a00cb821827fdd77d3a0257ae2b9942c6f1ba6b8b6ffab7a8",
           "expected_error": true
         }
       }
@@ -2526,8 +2526,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/escapes.txt",
           "case_name": "Escape incomplete",
-          "source": "@@code\n(\n",
-          "source_sha256": "5d61602ef2d24f68cdfb7acf718be391134dbce5c1dce2e69c2e4b75550d3390",
+          "source": "@@",
+          "source_sha256": "3330e5ba53cb09ab97dd287ad8ba30380b88a5aca467b6c231b0a46f261c16e1",
           "expected_error": true
         }
       }
@@ -2548,8 +2548,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/directives.txt",
           "case_name": "wildcard use clause incomplete",
-          "source": "use Foo\n",
-          "source_sha256": "2853c1ebc7da5a5b14bede9550fdeb7be1b531fd0327840ecb14061bbcf5a442",
+          "source": "use Foo::",
+          "source_sha256": "32ff82c41548b274676ab8e548d3d7cbb4dbea966fc9f983bb078555cecd7985",
           "expected_error": true
         }
       }
@@ -2592,8 +2592,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/aliases.txt",
           "case_name": "Rego alias for package incomplete",
-          "source": "package myexample\nimport second.pack\n",
-          "source_sha256": "57408fd8430953846c6d730b99a94c12b80eb34461ead21c13af656aec154aef",
+          "source": "package myexample\nimport second.pack as ",
+          "source_sha256": "66f810679f9d355d5e05de64795c39ead6f9bbcec02b627ad120176ffb909b5e",
           "expected_error": true
         }
       }
@@ -2614,8 +2614,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/tasks-section.txt",
           "case_name": "Simple task incomplete",
-          "source": "*** Tasks ***\n\nDo Something Cool\n    As the Tasks section is just an alias for the Test Cases section\n\n    The p\n",
-          "source_sha256": "d429c13b2db430975bb78d5f8348443c28c3553f154ab65f8ef7bcb015f73d0d",
+          "source": "*** Tasks ***\n\nDo Something Cool\n    As the Tasks section is just an alias for the Test Cases section\n\n    The parsed tree should be identical to Test Cases",
+          "source_sha256": "260f7abaec799991044c36e40d5a2617b27dcac677c6a307e492de984fc11d25",
           "expected_error": true
         }
       }
@@ -2680,8 +2680,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/transitions.txt",
           "case_name": "Transitions incomplete",
-          "source": "****\n\n^^^^^\n\n||||||\n\n~~~~~~~~~\n\n~~~~~~~~~~\n",
-          "source_sha256": "1ba78735c13b4166fb75550d06a01cbc487802994b2002b5fdbbb4408352dd0f",
+          "source": "****\n\n^^^^^\n\n||||||\n\n~~~~~~~~~\n\n~~~~~~~~~~~~~\nI'm not valid\n\n:role:`unterminated",
+          "source_sha256": "62304e6e67c24fe977d5aa906fe3e7b54ccdb013df21ff1a85bf06e73366060b",
           "expected_error": true
         }
       }
@@ -2834,8 +2834,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/preprocessor_misc.txt",
           "case_name": "preprocessor error incomplete",
-          "source": "#error This is an erro\n",
-          "source_sha256": "ea99fc3e0a0f7019ca7cdd714fc416e8d83a6d31a3f4a6014bf68e86433cc0ff",
+          "source": "#erro",
+          "source_sha256": "7f38e2e1b1fc176b7be5806f55f1e7c3c9970ad6aeee98c6f8a8c2082eae3a34",
           "expected_error": true
         }
       }
@@ -2922,8 +2922,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/comments.txt",
           "case_name": "Comments incomplete",
-          "source": "# this is a c\n",
-          "source_sha256": "7e86e775b017ba2f49a70d00cee63fd99e70fcc74f39a26c0cc054e8174ba9c8",
+          "source": "# this is a comment",
+          "source_sha256": "27615da3d0494b3ab8e9972d6747c31bcd24384bed9d2f5503a9802ad6352048",
           "expected_error": true
         }
       }
@@ -3054,8 +3054,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/test.txt",
           "case_name": "Single letter incomplete",
-          "source": "a\n(\n",
-          "source_sha256": "dc15f55179e950fafd294c8d9baffa20ec26c740682cc170393699f418729e98",
+          "source": "a\n\t",
+          "source_sha256": "89e1f3b8b7a82b7da9e8b3963d917b42393860d2acfbef7418bc317ea7a75241",
           "expected_error": true
         }
       }
@@ -3186,8 +3186,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/comments.txt",
           "case_name": "single line incomplete",
-          "source": "// single line\n",
-          "source_sha256": "1d3e92c4779262d2e55c3739b50c753c932ab5ecaf05060703012be3932f52a0",
+          "source": "/",
+          "source_sha256": "8a5edab282632443219e051e4ade2d1d5bbc671c781051bf1437897cbdfea0f1",
           "expected_error": true
         }
       }
@@ -3230,8 +3230,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "source_path": "test/corpus/comments.txt",
           "case_name": "Comments incomplete",
-          "source": "# This is a comment in Cassette\n# This is\n",
-          "source_sha256": "041abec106a5d466d66c0a04dd7e6eee1309c7c3fb285ded94f014cf31bc4151",
+          "source": "# This is a comment in Cassette\n# This is another comment\n{\n",
+          "source_sha256": "3cfa7ba8a352e799b33a492de090af960daf90e65a9fee496b3a80619a555d61",
           "expected_error": true
         }
       }

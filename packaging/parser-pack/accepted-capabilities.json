@@ -1839,8 +1839,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/push_pop_tag.txt",
           "case_name": "pop tag incomplete",
-          "source": "poptag #samp\n",
-          "source_blake3": "4859322cb907488e0714c27d567203eb0742615f0f26b858f4c48ef6687c5315"
+          "source": "poptag #sampleTag",
+          "source_blake3": "e9dfb12e1c645be2eb633ab8e9f839d73670ba36bd9408863a59962cd6f36cfe"
         }
       },
       "required_platforms": [
@@ -1848,7 +1848,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "55d4a1e11eabfdbcc62805155b370ae4c7fcff524b1e734a12eb708257647cf2"
+      "capability_digest": "cfb31251c2c1415a22b86c796dfeb3153639cbba7489a01fc0b2441c303d8f43"
     },
     {
       "language_id": "bicep",
@@ -2169,8 +2169,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "cedarschema/test/corpus/cli/schema_a_7.txt",
           "case_name": "schema_a_7 incomplete",
-          "source": "// https://github.com/cedar-policy/cedar/blob/v4.11.2/cedar-policy-cli/sample-data/sandbox_a/s\n",
-          "source_blake3": "e3bd05b7e2cd32e0be95fb1e3903aaf70356b97c441c6e90cf72834a117f0e8c"
+          "source": "// https://github.com/cedar-policy/cedar/blob/v4.11.2/cedar-policy-cli/sample-data/sandbox_a/schema.cedarschema#L7\n\nentity ",
+          "source_blake3": "48ccf6aeecc1ab3066c531c34c9614f88eeaf9e3714d8fb87ce3650666403bd3"
         }
       },
       "required_platforms": [
@@ -2178,7 +2178,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "be728473b80a9ccb74f258555900c405fdd615f4cae71329653e9fdd8e0eac64"
+      "capability_digest": "94ea8f811bfeeeef184ebfd2c03c6e678ed133565da7a74859e061dc391a359e"
     },
     {
       "language_id": "cel",
@@ -2415,8 +2415,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/types.txt",
           "case_name": "Comments (This is not a type though) incomplete",
-          "source": ";; Tests start\n",
-          "source_blake3": "1cef60e1db3e8fac2e1731c94f1dad6e984c4f8f12ee653a16fef4cae9f18e47"
+          "source": ";",
+          "source_blake3": "e436acb4b40175eb9014c83cdc3e937a042345845191cd6e7e901be3affd0943"
         }
       },
       "required_platforms": [
@@ -2424,7 +2424,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "d777f65c8ab892538bb89c82a10cf8b20bb45aa91e4ea2ec62048b93e34cfb77"
+      "capability_digest": "ab0ba8589db5cb749d425d5a590d9960343f5528d741e8d8331886690a1e9df8"
     },
     {
       "language_id": "cmake",
@@ -2497,8 +2497,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/comment.txt",
           "case_name": "comment incomplete",
-          "source": "aaaaaa identification division.\naaaaaa program-id. a.  ,,, ;;;\n",
-          "source_blake3": "b3ba6ca43cb76eff775b7dbfe13bce935fbede43a9101b21b81e4aa0ae1de9ce"
+          "source": "aaaaaa identification division.\naaaaaa program-id. a",
+          "source_blake3": "039dcd4f7b58d718c489e93dc85234dabf3751a421e9118190cc88af4621a9da"
         }
       },
       "required_platforms": [
@@ -2506,7 +2506,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "53125ba66188bb54c420180228d5ba57f92743fbe1d96dea3c601542ea68a324"
+      "capability_digest": "e73de9715b13b57e6f98bee8eee0778b24b288706d2ee897941103d57586af4d"
     },
     {
       "language_id": "commonlisp",
@@ -2617,11 +2617,11 @@
           "source_blake3": "4bd5c405a8ce9dfe08e8ed7e03828d83ee9dd66d22273d8e4fe1bc8a192883d2"
         },
         "negative": {
-          "origin": "upstream-corpus-error-case",
+          "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/cst.txt",
-          "case_name": "CST with error node",
-          "source": "0:0  - 1:0    •translation_unit\n0:0  - 0:18     •ERROR\n0:0  - 0:3         type: primitive_type `int`\n0:4  - 0:8         identifier `main`\n0:8  - 0:9         \"(\"\n0:9  - 0:17        parameter_declaration\n0:9  - 0:12          type: primitive_type `int`\n0:13 - 0:17          declarator: identifier `argc`\n0:17 - 0:18       \",\"\n",
-          "source_blake3": "9159f767c2de0eb0af762d607378611ad524a8d8ec9a7291efff2d6c2f774e7c"
+          "case_name": "CST without errors incomplete",
+          "source": "0:0  - 4:0    translation_unit",
+          "source_blake3": "ac49f83116ccf3268a8270488cd18e27fd545a5b26ef5b4722e400fb8ea5acd7"
         }
       },
       "required_platforms": [
@@ -2629,7 +2629,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "f2dd3d0ac916432e79cbab43abcfb31f1283d6b6ff4814290af87315fc2da13b"
+      "capability_digest": "334de6c3c2639a88b8ee0a5da3132bbe8d184aff5cfad1a88eab41ec11f51a4c"
     },
     {
       "language_id": "csv",
@@ -2661,8 +2661,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/test.txt",
           "case_name": "Single letter incomplete",
-          "source": "a\n(\n",
-          "source_blake3": "62b3cf2357fef3c03b2d8815f2e965b778080bd381935244ee8bfd14dd2738e5"
+          "source": "a\n,",
+          "source_blake3": "fc62351764d704805e95dd0e87fefb6b1b4a8d0e778169d228dd0a53bb9170c4"
         }
       },
       "required_platforms": [
@@ -2670,7 +2670,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "e3e8790a9999149bd8b9d36d3ee0e6cc831e8b49e5fb1ecdda0fdfabcb63309a"
+      "capability_digest": "44b49b64404f2c503e4d09a334e22575dbe3b2eac4092b6336652dcfc173a44a"
     },
     {
       "language_id": "cuda",
@@ -2825,8 +2825,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/main.txt",
           "case_name": "Comments incomplete",
-          "source": "# Hello\n\n#\n",
-          "source_blake3": "c7f8431ff4e5820e839f7ebb5a4f78be2b8114986add07d865961504c1bc5da1"
+          "source": "# Hello\n\n# world",
+          "source_blake3": "7f608a84ed9585546df7076d3fed8b13ad115217696b995fb3f0639d0b109f95"
         }
       },
       "required_platforms": [
@@ -2834,7 +2834,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "cc9ebb32c270295cb3fe6042bd696a69d75bf14f7716b01e0b56a73fb21d9103"
+      "capability_digest": "b729e6206ebd3171a453a7fca776a1b17ba191e2b796e441b15ccc2602535044"
     },
     {
       "language_id": "devicetree",
@@ -3155,8 +3155,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/literals.txt",
           "case_name": "Rationals incomplete",
-          "source": "nop 1/2 0x1\n",
-          "source_blake3": "13c647c4b0b638624a37ae3816e4d332f6ee2797ba21f5141e9ca9f38951b317"
+          "source": "nop 1/2 0x10/100\n{\n",
+          "source_blake3": "ccdb39e5cf1338bf7681afaf180e12f514cc856b5f7590dd3c71dc677a7cb949"
         }
       },
       "required_platforms": [
@@ -3164,7 +3164,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "541c9de9102c1c60cd2437231e8b786de29eec95d954f2cc457fd653f9ad2ba6"
+      "capability_digest": "08761ecd126b4cc20d29cd9ec20482f06b3176a08b7b36b2dc12e725cd9a2f7b"
     },
     {
       "language_id": "enforce",
@@ -3360,8 +3360,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/home_dir_expansion.txt",
           "case_name": "Home Dir Expansion incomplete",
-          "source": "echo ~\nls ~\n$cm\n",
-          "source_blake3": "9b94cac15854c09f08bcf3113ea4dd3f9ed7fd696bbf4dd4ec0c696849f671c7"
+          "source": "echo ~\nls ~\n$cmd ~/app",
+          "source_blake3": "0c642a76a9b4b0cb7b327047c9a364e9c28cbc8e4411ec1d57b039a37569a921"
         }
       },
       "required_platforms": [
@@ -3369,7 +3369,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "9e5234c962fe2bb908ea2af5d7fe39c033081f0557395fe6c7c9334f20771911"
+      "capability_digest": "c45381667c7c97190761e11eb433af4b7ff0fc715307743e23cd192b9868d0e7"
     },
     {
       "language_id": "forth",
@@ -3401,8 +3401,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/word.txt",
           "case_name": "Check word symbols incomplete",
-          "source": "x,y\ntest:parse\nmaybe?\nvar@\n",
-          "source_blake3": "82f3ba26ab1ccdf95bce8e499d463c69e146d63b73702823d9d93fa5576cc9d6"
+          "source": "x,y\ntest:parse\nmaybe?\nvar@\nsave!\n#num\n:",
+          "source_blake3": "c40905b62152332f7da165ef58873f917f3d65ec7282a11e804bedd1b1e22975"
         }
       },
       "required_platforms": [
@@ -3410,7 +3410,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "dd152e4da732f807b7de4e8d87738e5d273c2f056b25ab709a01ca6deb44e1ba"
+      "capability_digest": "5d5fca79251fe52c4ba7c15ac6e79ea572a8537f5d4ae7f67a00bb67756dfca6"
     },
     {
       "language_id": "fortran",
@@ -3483,8 +3483,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/module_abbrev.txt",
           "case_name": "basic module abbreviation incomplete",
-          "source": "module local = Mo\n",
-          "source_blake3": "097d27d2d4698d150c10e86925877bd334fdaa34c51a78573eb08757835d751c"
+          "source": "module local = Mod.",
+          "source_blake3": "8a735518267576bcc6ab959553657e1736071681ab0be1288cffa81e6c57003c"
         }
       },
       "required_platforms": [
@@ -3492,7 +3492,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "9e9f0ac9262125801ec9f06c1b989a7ff5fc5025a7a6a03c005e81843dc6d406"
+      "capability_digest": "afdca9019c90ab3a83874ed2381a93bf9f0b64766e2a112c29040b2f26e97fa6"
     },
     {
       "language_id": "gap",
@@ -3729,8 +3729,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/comments.txt",
           "case_name": "Comments incomplete",
-          "source": "////// regular comment\n\n///// regular comment\n\n//// module doc comment\n\n/// statemen\n",
-          "source_blake3": "dae9a66813d82c55516f90d33855e093e3de03e6d7d4b42e235218b355222781"
+          "source": "////// regular comment\n\n///// regular comment\n\n//// module doc comment\n\n/// statement doc comment\n\n/",
+          "source_blake3": "7e103bc4f486d9dd8eb8d023a32322978c79d45643528451a5e290ed2079c837"
         }
       },
       "required_platforms": [
@@ -3738,7 +3738,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "6fa3483c1b2593fe90ff06c47a599ae76ef67f252ec9311f545042131f8af2a7"
+      "capability_digest": "d65bc7b8a36a73a516117288b16b940490a90e20e45eb5a27332b29b22e1b8eb"
     },
     {
       "language_id": "glsl",
@@ -3811,8 +3811,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/comments.txt",
           "case_name": "Multi line comment incomplete",
-          "source": "# This is a comment \\ \nthis is th\n",
-          "source_blake3": "e6dbe3510768e828c490e8fe29bbd3b9edf8ef309fc4d418c4709fab4ca41a5f"
+          "source": "# This is a comment \\ \nthis is the same comment\n{\n",
+          "source_blake3": "d6e5efd565948c47b8d348293380afbe734feaf84a57c0c8d308b8645ea70f67"
         }
       },
       "required_platforms": [
@@ -3820,7 +3820,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "9deb3b5a28745d5ba73a6e8848b113ef268bb25c84d85a7055aa2773bff47df8"
+      "capability_digest": "db6d845a6d53cf92b8dfbbf6ad2a4f31700234ad3feeb8cc730629f825e54c14"
     },
     {
       "language_id": "godot_resource",
@@ -4098,8 +4098,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/text.txt",
           "case_name": "Plain Text incomplete",
-          "source": "Hello Wo\n",
-          "source_blake3": "f6621449ec2c056c3a1461bcac74a7d0b5b063d34827fa26a52bc2d9ffb0d7b5"
+          "source": "Hello World!\n{\n",
+          "source_blake3": "6fef9377221636d69c46f5c96a4d6facc13086acfc0ad031480e3f502d9212dc"
         }
       },
       "required_platforms": [
@@ -4107,7 +4107,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "cb8f54e7c66148ce798d8e71381217dd68284c4a3bf16d445f4471b9c21146e1"
+      "capability_digest": "31ff07d8d239076811b03658dcc1340e639a643100162ef7a2562a921a17d282"
     },
     {
       "language_id": "hlsl",
@@ -4180,8 +4180,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/main.txt",
           "case_name": "Multiple values in path incomplete",
-          "source": "\"Fi\" \"nn\" the human: Ja\n",
-          "source_blake3": "5cef1bbbde9cfb93dee3ef16d8410ee0d2939dc3c3d8bea900863678da7e5237"
+          "source": "\"Fi\" \"nn\" the human: ",
+          "source_blake3": "9082bed69fb8805dc1bca9409abc46a3f719ed647bd9d42535c48bbaba5d3e55"
         }
       },
       "required_platforms": [
@@ -4189,7 +4189,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "9405980de12b7ed7dbf041e142982ddd9052bbccf657a73dcb9ba870d3ead7b0"
+      "capability_digest": "9ca1f073728fce705435d55b2c9c0444fc6052a48e1b84665c7de23c4ffcd305"
     },
     {
       "language_id": "hoon",
@@ -4262,8 +4262,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/hard_test.txt",
           "case_name": "Raw body wrapped with annotation comments incomplete",
-          "source": "POST example.com\n\n# @_RES\nraw\n",
-          "source_blake3": "c175c5a7fe752fad1c690228dcbb6626eb28a10e1d1439a50e41b2014e7e406c"
+          "source": "POST example.com\n\n# @_RES\nraw body\n# @",
+          "source_blake3": "843737590fd7d1d864210303c662f84910ab9ccfdb2450b51c617d4b81157539"
         }
       },
       "required_platforms": [
@@ -4271,7 +4271,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "fc38236dfdf697b11d3dd742422ae9377575d2403b10a5e1470a873ce06dedbd"
+      "capability_digest": "daf1a9be4e9331bdc846c78ece823b7f8a08e1b927272bc18526826107ad0e84"
     },
     {
       "language_id": "ispc",
@@ -4508,8 +4508,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/literals.txt",
           "case_name": "boolean literals incomplete",
-          "source": "true\nfa\n",
-          "source_blake3": "467db64a37f3c6d5e08cf3c7214b9851608f15d8d59e483daabb0a08c04b7eb8"
+          "source": "true\nfalse\n{\n",
+          "source_blake3": "062bf9893396713239ab1c806551b7564ce8d779b755bebb01f826aadaa241ec"
         }
       },
       "required_platforms": [
@@ -4517,7 +4517,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "9818e0da2c9c9b9705d11153f0cdeeb30d8848bb6edef568cccdca8df52be1bc"
+      "capability_digest": "edbe41b1c2c0b0cc6a906122ea0169edfae6fbf38667cd78ce6f1235968fabe9"
     },
     {
       "language_id": "just",
@@ -4754,8 +4754,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/dates.txt",
           "case_name": "single dates incomplete",
-          "source": "2021-09-01\n    Account\n\n21-09-01\n    Account\n\n09-01\n    Accou\n",
-          "source_blake3": "97e09e6a4bf0ba1018bd3357a5d39e7c2af6547f1ac3209048fec84638b4e39b"
+          "source": "2021-09-01\n    Account\n\n21-09-01\n    Account\n\n09-01\n    Account\n\n2023-4-2\n    Account",
+          "source_blake3": "78b5e7042568b8ed96a9146bc1e7d820fb32db691c83dd6b7b1af4236e288907"
         }
       },
       "required_platforms": [
@@ -4763,7 +4763,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "31db2899a8f6f94ce76b3c3a4c2640e53abc5a5a79d470eb6aefee78c01f75a3"
+      "capability_digest": "e3495ef52c5f4215d499aedd9f145679270bf10520d47d355e113ada74dfbc70"
     },
     {
       "language_id": "llvm",
@@ -4959,8 +4959,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/lambda.txt",
           "case_name": "Lambda: Handle incomplete",
-          "source": "a = @sin\nb = @m\n",
-          "source_blake3": "f21e230ff78688e32e645a2b54ae0f4bdba62fef9d856fe8c520955a4c8d581c"
+          "source": "a = @sin\nb = @math.sin",
+          "source_blake3": "e7536095fb6298770b332902a6f7b056c4457bc3b5d1b93563b71043934b584c"
         }
       },
       "required_platforms": [
@@ -4968,7 +4968,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "98c5b50f17cd5abc978e0f1757249d8b1a28cdd29a4fa47976ac91b6aa02130a"
+      "capability_digest": "3382d2ac7214a977c049365e1cfa8bc2ed3fbefb9a9d5c29d0a46289176f3314"
     },
     {
       "language_id": "mermaid",
@@ -5000,8 +5000,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/pie.txt",
           "case_name": "Simple Pie chart incomplete",
-          "source": "pie\n    title Key elements in Product X\n    \"Calcium\" : 42.96\n    \"Potassium\" : 50.05\n",
-          "source_blake3": "002a62809b1d388d31e79b4576213b4c70da07c7db6e2cf934e207333dc9417d"
+          "source": "pie\n    title Key elements in Product X\n    \"Calcium\" : 42.96\n    \"Potassium\" : 50.05\n    \"Magnesium\" : 10.01\n    \"Iron\" :  ",
+          "source_blake3": "c3bfd06fcb91e27f2605cd0830120e976180b4bbcc7fb4cf847deac7de2d05b3"
         }
       },
       "required_platforms": [
@@ -5009,7 +5009,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "d97219befc323c77067d185753212f2b0521a345e1ccda027f307839f0455a54"
+      "capability_digest": "0cc599ccee2cf6e4ff0e8b52b36d6183ce207fa2d1a03abf6a044931c52878dd"
     },
     {
       "language_id": "meson",
@@ -5164,8 +5164,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/comments.txt",
           "case_name": "Single Line incomplete",
-          "source": "// This is a comment\n// This is a\n",
-          "source_blake3": "f9d19125402cafcb685504f172097be1e0c8f9ef601b3b76b4e090b7e7930d55"
+          "source": "// This is a comment\n/",
+          "source_blake3": "a1142b48e1c8b19c7102c9528fd2b78b2120130ce7e95a8a0c2fa067bf10f8c9"
         }
       },
       "required_platforms": [
@@ -5173,7 +5173,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "0b03959aa43bb9a1c17cc1eeff76d66feb1bc1188e1dbe90ea79074e5d729ca5"
+      "capability_digest": "f0d4c77a96daa2263a23053d345103efe31d9184bf6fff58101a79a8805b5e3f"
     },
     {
       "language_id": "nginx",
@@ -5246,8 +5246,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/comments.txt",
           "case_name": "docComment incomplete",
-          "source": "## doc\ndiscard true ## do\n",
-          "source_blake3": "eb5faeb1c27d58e5cf9248a6adbda2e3fb4753160444c9c5df97e1e79509d31e"
+          "source": "## doc\ndiscard true ## doc\n  ## doc\n{\n",
+          "source_blake3": "54aedcf228fadebf948cf36ebe3c35f9b239b4d4f8f7c1936549e4880b395c81"
         }
       },
       "required_platforms": [
@@ -5255,7 +5255,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "da05fdc41ae618fc275113bf866b4ff8e9b7625fad9705af1ce7e5ee3aaef05f"
+      "capability_digest": "6da17ac885cc4258faaf815af66600df376d7c284497d311bb697d7d009dfe2d"
     },
     {
       "language_id": "norg",
@@ -5287,8 +5287,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/escape.txt",
           "case_name": "Test escaping new lines incomplete",
-          "source": "one\\\nw\n",
-          "source_blake3": "88d4ec295e94a2d23bb23fe9fd26982cf4dea2d78ea7485394815b0876ec7c8f"
+          "source": "one\\",
+          "source_blake3": "842615643f39c2d8dc1b507d573439735da91a9c6955ccd494bb41eee9f6152f"
         }
       },
       "required_platforms": [
@@ -5296,7 +5296,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "1ddcd6c684a928c9126abc73262abc2eae02945cb92e90a561c5df01bf6e5356"
+      "capability_digest": "c87774edb2029456131eb77d0bf1fe856a9315fcb00aed116c1f0cdf0313bd64"
     },
     {
       "language_id": "nqc",
@@ -5361,16 +5361,16 @@
         "positive": {
           "origin": "upstream-tree-sitter-corpus",
           "path": "test/corpus/decl/script.nu",
-          "case_name": "script-001-empty",
-          "source": "-----\n\n(nu_script)\n\n=====\nscript-002-shebang\n=====\n\n#!/usr/bin/nu env\n",
-          "source_blake3": "15a8b2cca162995e8a17bd971c3849b9da35ea880d440b98a4831a6581c0d8b0"
+          "case_name": "script-002-shebang",
+          "source": "#!/usr/bin/nu env\n",
+          "source_blake3": "1b260c80a529635c57b11562a0e7df78037911e903f5e7d33e0cdb321e0587c0"
         },
         "negative": {
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/decl/script.nu",
-          "case_name": "script-001-empty incomplete",
-          "source": "-----\n\n(nu_script)\n\n=====\nscript-002-shebang\n====\n",
-          "source_blake3": "b267735acca551fc040b4f824a09b93c93b94dabe8827cef82b2c90216c52c33"
+          "case_name": "script-002-shebang incomplete",
+          "source": "#!/usr/bin/nu env\n(\n",
+          "source_blake3": "e80b2cb0e5908afec5938ce1d111f8dcfd418e9487dd7b5087bfbdb5e604df0b"
         }
       },
       "required_platforms": [
@@ -5378,7 +5378,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "b2c80370cba605c00843d3367d1b8f6daf37a2f04a0bb69ca364cda3dabc27e4"
+      "capability_digest": "f6805241f89aad7055085ee666b27608f229ee64e4d3d6745194b89829b010b9"
     },
     {
       "language_id": "ocamllex",
@@ -5451,8 +5451,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/declarations.txt",
           "case_name": "Build Tags incomplete",
-          "source": "#+build darwin,\n",
-          "source_blake3": "664b5f6a4981b6a88578f27dfc2a75799edc6141b59009e0b8637dea0efc2c8a"
+          "source": "#+",
+          "source_blake3": "70d30aa02ab3023a89b87da78afa6f1a14b9f385a8d8e9e1b6c96f4c9cc27125"
         }
       },
       "required_platforms": [
@@ -5460,7 +5460,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "53aaa2ddc3774f81bcb03f1c49a2814287ea9c1469b190fd154128c4f7fede11"
+      "capability_digest": "ebacb6877bbb79609f6e701873d1507d2985f6fac6856b7721e6fde636b05e5f"
     },
     {
       "language_id": "openscad",
@@ -5698,8 +5698,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/generics.txt",
           "case_name": "Ambiguous Generic Expressions incomplete",
-          "source": "class X[T]\n\nactor Main\n  new create(env: Env) =>\n    X\n    [None]\n",
-          "source_blake3": "ec0634176b508146461ed8c75cdc5476c8bb6f3747bc040222c48d3a015788c2"
+          "source": "class X[T]\n\nactor Main\n  new create(env: Env) =>\n    X\n    [None]\n\n  fun other() =>\n    X [None",
+          "source_blake3": "e03c7a64fe07681c48736871a2a83a08f7f44b2123885e628499483ce034df09"
         }
       },
       "required_platforms": [
@@ -5707,7 +5707,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "2397e3b41418d1110a957deeb1e64ef9c32c0398312f14bc4d0014cedb823236"
+      "capability_digest": "29403ea97eb4c20bbae5ca510c21618ab773ea364b41f01e2d986f1921b75e6e"
     },
     {
       "language_id": "postscript",
@@ -5780,8 +5780,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/range.txt",
           "case_name": "range vector - simple incomplete",
-          "source": "http_requests_to\n",
-          "source_blake3": "d171e264f861c1d4825e06c5eab3a5446caad988be156332a39ad3c232551501"
+          "source": "http_requests_total[1m",
+          "source_blake3": "2a4cc8c6eb4aaed9bfa87a727550f6df03b8a615413342a1c8829ebbd067a95f"
         }
       },
       "required_platforms": [
@@ -5789,7 +5789,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "b8552514ab5c5a539609c83660dae3fb1fce803780955cc76792587fa1b9dd4d"
+      "capability_digest": "4df06a86a62ef2d395959408e55a4945b7db4f14b76fde4126ce6790c1e75184"
     },
     {
       "language_id": "prql",
@@ -5862,8 +5862,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/test.txt",
           "case_name": "Single letter incomplete",
-          "source": "a\n(\n",
-          "source_blake3": "62b3cf2357fef3c03b2d8815f2e965b778080bd381935244ee8bfd14dd2738e5"
+          "source": "a\n|",
+          "source_blake3": "6841a76fb542b7293f4ebea9ff8376a9f28978d9ba0bfb2cb6d48282f3829fa9"
         }
       },
       "required_platforms": [
@@ -5871,7 +5871,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "846c0b1db3b9e5e2d5afcfe99bfcf0e8645c93056e8154cbe41694c34d3976a6"
+      "capability_digest": "fe18bdfb28a38933cc3604b7113c546290fdbbd5da423b1120c7734f799c75af"
     },
     {
       "language_id": "puppet",
@@ -5985,8 +5985,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/ctf.txt",
           "case_name": "dataflow example from ctf incomplete",
-          "source": "from Configuration cfg, DataFlow::PathNode source, DataFlow::PathNode sink\nwhere cfg.hasFlowPath(source, sink)\nselect sink.getNode(), s\n",
-          "source_blake3": "fbca3386d5ddc5f8d311b2a928310e7f21dd475d88d276070abd29df2583c926"
+          "source": "from Configuration cfg, DataFlow::PathNode source, DataFlow::PathNode sink\nwhere cfg.hasFlowPath(source, sink)\nselect sink.getNode(), source, sink, \"Potential XSS vulnerability in plugin.",
+          "source_blake3": "61750e436d3e8879f747e3f94936a660a415ea342b44ce1076d3ddfe8178360a"
         }
       },
       "required_platforms": [
@@ -5994,7 +5994,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "8d9d4a246c9acb6b912d75df7f0102456347f96c93db5632268cc48b1231debd"
+      "capability_digest": "764e24eba66e5a1a3188fa7e9b156acb0a4110ea88d935c740b212a03b2f84b0"
     },
     {
       "language_id": "qmljs",
@@ -6067,8 +6067,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/box.rkt",
           "case_name": "box incomplete",
-          "source": "#&17\n#&\"str\"\n",
-          "source_blake3": "d6168ad552d4bac474533e8c0d840b74ee1f04e04ccd3129096eb1cad76d6202"
+          "source": "#&17\n#&\"str\"\n#& (",
+          "source_blake3": "00c1893cd087d5fa51a284cac0baa0eed198f73f7614d8549d76ea5faaa22dd3"
         }
       },
       "required_platforms": [
@@ -6076,7 +6076,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "ab64ff71beb432555cd3b1fcb13e3998ed3ab07c1952c95d39319d3d1cd5efa8"
+      "capability_digest": "81c41a12f426c2a20900441c06e2beea08c35f2a734dc182f8e25612e92c45ba"
     },
     {
       "language_id": "rasi",
@@ -6149,8 +6149,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/escapes.txt",
           "case_name": "Escape incomplete",
-          "source": "@@code\n(\n",
-          "source_blake3": "fee16310de94d36abb9f9d255d590cfef7b97d2e6da84351e287f493f7c98526"
+          "source": "@@",
+          "source_blake3": "bb4b1e4c22fc8b912cce84f1dc18ec5262e7169e904c88c2a96f74f9fbdf9363"
         }
       },
       "required_platforms": [
@@ -6158,7 +6158,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "5aa5003738b492c3e85466a640b6e5f4d129beca74095ae9f0d6768f02254872"
+      "capability_digest": "6e4a0d24cd7ceecf165c97ecddcd2ee65b9754d62662dc9032cb20b0ed4a348f"
     },
     {
       "language_id": "rbs",
@@ -6190,8 +6190,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/directives.txt",
           "case_name": "wildcard use clause incomplete",
-          "source": "use Foo\n",
-          "source_blake3": "50fab06e151c8cf3d40d6b54a05b77c748bf54be6b00916ace409404ddf5ef7a"
+          "source": "use Foo::",
+          "source_blake3": "68d71803a08218aa3ada475d4f965aad4d4e0e1c30b06dd1c7c82d6b372562f3"
         }
       },
       "required_platforms": [
@@ -6199,7 +6199,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "742af9d41f90a1b0245cc930e691d17e1b86221d58c0474781ec34dff2afcbcc"
+      "capability_digest": "e6ea29635c49585461a1e422c12dbf2b7ca1e48ef97acc3be178819f31c0dbd1"
     },
     {
       "language_id": "re2c",
@@ -6272,8 +6272,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/aliases.txt",
           "case_name": "Rego alias for package incomplete",
-          "source": "package myexample\nimport second.pack\n",
-          "source_blake3": "35cec10c21547a9d2dbf02afa0e53d0b5d33acedf3bcf9674fcb6a20b0b85485"
+          "source": "package myexample\nimport second.pack as ",
+          "source_blake3": "e423b76ed3c8d701e6ace1d5617922587f6f94999682fb7d632c94c47bbd5645"
         }
       },
       "required_platforms": [
@@ -6281,7 +6281,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "450ae76eedb1fcd0499639724c7db38fcc5a487332e644e7312a4e6fb3683cf3"
+      "capability_digest": "4696843e3eaeba61207016f9d83961aa83ce80094568ee3cf53a5541e645662e"
     },
     {
       "language_id": "robot",
@@ -6313,8 +6313,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/tasks-section.txt",
           "case_name": "Simple task incomplete",
-          "source": "*** Tasks ***\n\nDo Something Cool\n    As the Tasks section is just an alias for the Test Cases section\n\n    The p\n",
-          "source_blake3": "c7e7b8d0c531581f208b57a8c0da2707214adb8c455020866ce48e0d2d77194d"
+          "source": "*** Tasks ***\n\nDo Something Cool\n    As the Tasks section is just an alias for the Test Cases section\n\n    The parsed tree should be identical to Test Cases",
+          "source_blake3": "08c7130cdaaa07f21f4ef37d2d4146272cca973f459f4c639ed7b01baa02113c"
         }
       },
       "required_platforms": [
@@ -6322,7 +6322,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "b8795f6f5690a07a057fbf7651a5f40856e2cc70e3ac7d2f5f20bd991917412e"
+      "capability_digest": "014ac176542d56eb72a59a4e4c1fa443233c952e3d0c148488a5fae18b63868d"
     },
     {
       "language_id": "roc",
@@ -6437,8 +6437,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/transitions.txt",
           "case_name": "Transitions incomplete",
-          "source": "****\n\n^^^^^\n\n||||||\n\n~~~~~~~~~\n\n~~~~~~~~~~\n",
-          "source_blake3": "a4937a8e861a7bf7c3a7cf27d1fe0550fed75d542880702d7161867bf3357ab5"
+          "source": "****\n\n^^^^^\n\n||||||\n\n~~~~~~~~~\n\n~~~~~~~~~~~~~\nI'm not valid\n\n:role:`unterminated",
+          "source_blake3": "945df02af59cd1d91c145617d31eed03933472183c90fa260a0e970d6f3f0b00"
         }
       },
       "required_platforms": [
@@ -6446,7 +6446,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "ff91b1db0495a32a520f12d75c20b0ab0d502770d4254495c05feea6fd00aedb"
+      "capability_digest": "a3a2ff5f32ea769ae7e9002503ee2138314f3a9af84bc6f3ebc247e9c0941df5"
     },
     {
       "language_id": "scheme",
@@ -6724,8 +6724,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/preprocessor_misc.txt",
           "case_name": "preprocessor error incomplete",
-          "source": "#error This is an erro\n",
-          "source_blake3": "6a2f57ecc729102c00f6768baff6dbbd7dcb7f5d00d631fa649ab2474f1edb6a"
+          "source": "#erro",
+          "source_blake3": "5c97d3a4f7febae4dc1a72ec44db0135ffe7c08d4dbe4f1af0d7937446fd1f68"
         }
       },
       "required_platforms": [
@@ -6733,7 +6733,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "7ed23ad92a21485a213f4609516477ab0ccd9d320a600236c4c6449972c3d7b8"
+      "capability_digest": "43afc4b8641c3378171ee718386f00fcf191963527678acf924a053f8a29eb75"
     },
     {
       "language_id": "superhtml",
@@ -6888,8 +6888,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/comments.txt",
           "case_name": "Comments incomplete",
-          "source": "# this is a c\n",
-          "source_blake3": "a6ef9c751f09cebdad7b743b537bfa2296422bfa537df86aa3b6c695af22c792"
+          "source": "# this is a comment",
+          "source_blake3": "24287d5a6565d3797c740fb3d4c8acb7be3f7ac10d05c8d4bd71e3dd59a8abed"
         }
       },
       "required_platforms": [
@@ -6897,7 +6897,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "6ea98033415bad123859f4d6e91b52b8618279eaab23887904fa55897ee51d85"
+      "capability_digest": "db4a2f37faed6233be540726705b4e872e88f1e8f5ca99cde27ddd1f55aa6a24"
     },
     {
       "language_id": "teal",
@@ -7134,8 +7134,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/test.txt",
           "case_name": "Single letter incomplete",
-          "source": "a\n(\n",
-          "source_blake3": "62b3cf2357fef3c03b2d8815f2e965b778080bd381935244ee8bfd14dd2738e5"
+          "source": "a\n\t",
+          "source_blake3": "4422a5038bdbecab5e7e08d2297d7c1c4ab25aca462574e36a023c66ec97cf0a"
         }
       },
       "required_platforms": [
@@ -7143,7 +7143,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "e4b61bcf5f659a11211b5baa6df1f09ee244bf28e22fe1d04105f3ecd0d626b2"
+      "capability_digest": "79b760b6d4fc31e70060877b44befbc5192937e676ed62f0e5aaac1aa5e52747"
     },
     {
       "language_id": "turtle",
@@ -7380,8 +7380,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/comments.txt",
           "case_name": "single line incomplete",
-          "source": "// single line\n",
-          "source_blake3": "3c5fddd57e7f03b7bbdc547a6f7aaec36cfd068401c5335a9d6c22fbd8036bef"
+          "source": "/",
+          "source_blake3": "329f85ac6e6310f8fc8148a48307002ad1ab5c493a815fd6116b2a52add807d9"
         }
       },
       "required_platforms": [
@@ -7389,7 +7389,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "2dd121663ab9b1fa06f0f8f816d1241379b9e9ea6b432e8da9de44efc423e829"
+      "capability_digest": "a3d81d7e1e652fbcebee328a43d8c9e513c85f6800eebdaf242838297339b1fb"
     },
     {
       "language_id": "vhdl",
@@ -7462,8 +7462,8 @@
           "origin": "projectatlas-incomplete-upstream-case",
           "path": "test/corpus/comments.txt",
           "case_name": "Comments incomplete",
-          "source": "# This is a comment in Cassette\n# This is\n",
-          "source_blake3": "977cc72d76fac527736d8e826ac74d37a2e6e991920576dba07b633062aa649e"
+          "source": "# This is a comment in Cassette\n# This is another comment\n{\n",
+          "source_blake3": "1f55aa340062abf20221d2ea79de427e954592ac55aae2548712c772b06a3522"
         }
       },
       "required_platforms": [
@@ -7471,7 +7471,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "built_in_precedence": "built-in-authoritative",
-      "capability_digest": "e1740aeb26745b70f0317408ec4ad2538071793e6650757d31aecfadd0041219"
+      "capability_digest": "3ebb14d76d22254fcd1c8bde09b8396cbf3d049123bf4be6383e0c4427c1534c"
     },
     {
       "language_id": "vrl",
@@ -7597,5 +7597,5 @@
       "capability_digest": "d11ac33f63f87c732d6bcac6b300eace2a4eba4775097f03c0f835f5fa2db4e9"
     }
   ],
-  "capability_set_digest": "d4681c228168e9c5e5a47a99133dc34daf2c2b664432884fabd65a365acae991"
+  "capability_set_digest": "e86fd4bbee90494e63586ad06c82bf65ff81c361bb59df2092b2a60b758b2162"
 }
