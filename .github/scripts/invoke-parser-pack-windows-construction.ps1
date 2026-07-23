@@ -2730,8 +2730,8 @@ public static class ProjectAtlasConstructionProcess
         attributes.InheritHandle = false;
         IntPtr semaphore = CreateProtectedSemaphore(
             ref attributes,
-            4,
-            4,
+            2,
+            2,
             name,
             0,
             SemaphoreSynchronizeAndModify);
@@ -3920,7 +3920,7 @@ try {
         RUSTC = Join-Path $toolchainBin "rustc.exe"
         CARGO_HOME = $cargo
         CARGO_NET_OFFLINE = "true"
-        CARGO_BUILD_JOBS = "4"
+        CARGO_BUILD_JOBS = "2"
         CARGO_INCREMENTAL = "0"
         CARGO_TERM_COLOR = "never"
         TSLP_OFFLINE = "1"
@@ -4033,7 +4033,7 @@ foreach ($entry in [Environment]::GetEnvironmentVariables().Keys) {
         exit 23
     }
 }
-if ([string]$env:CARGO_BUILD_JOBS -cne '4' -or
+if ([string]$env:CARGO_BUILD_JOBS -cne '2' -or
     (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS)) {
     exit 24
 }

@@ -713,7 +713,7 @@ function Assert-CargoConstructionEnvironment {
     )
 
     if ($Target -eq "x86_64-pc-windows-msvc") {
-        if ([string]$env:CARGO_BUILD_JOBS -cne "4" -or
+        if ([string]$env:CARGO_BUILD_JOBS -cne "2" -or
             (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS)) {
             throw "Windows construction must create its Cargo jobserver inside the contained child."
         }
