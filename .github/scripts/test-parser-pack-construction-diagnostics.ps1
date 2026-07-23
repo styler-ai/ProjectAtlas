@@ -178,6 +178,22 @@ try {
     $output = [System.IO.Directory]::CreateDirectory(
         [System.IO.Path]::Combine($testRoot, "output")
     ).FullName
+    $script:constructionStatusPath = [System.IO.Path]::Combine(
+        $output,
+        "reusable-cargo-target-validation-status.json"
+    )
+    Write-ConstructionStatus `
+        -Stage "reusable-cargo-target-validation" `
+        -State "running"
+    $cacheValidationStatus =
+        Get-Content -Raw -LiteralPath $script:constructionStatusPath |
+            ConvertFrom-Json -Depth 4
+    Require `
+        ($cacheValidationStatus.stage -eq "reusable-cargo-target-validation" -and
+            $cacheValidationStatus.state -eq "running") `
+        "Reusable Cargo target validation is not one writable bounded status stage."
+    [System.IO.File]::Delete($script:constructionStatusPath)
+
     $hadBuildJobs = Test-Path -LiteralPath Env:CARGO_BUILD_JOBS
     $previousBuildJobs = [string]$env:CARGO_BUILD_JOBS
     $hadMakeflags = Test-Path -LiteralPath Env:CARGO_MAKEFLAGS

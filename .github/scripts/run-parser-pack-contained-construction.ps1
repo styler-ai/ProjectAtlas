@@ -444,7 +444,8 @@ function Write-ConstructionStatus {
             "artifact-assembly-b",
             "archive-creation-b",
             "deterministic-archive-comparison",
-            "publication"
+            "publication",
+            "reusable-cargo-target-validation"
         )]
         [string]$Stage,
 
