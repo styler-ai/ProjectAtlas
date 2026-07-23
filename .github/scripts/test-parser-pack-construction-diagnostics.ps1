@@ -487,7 +487,7 @@ try {
             "Named-object diagnostic fault did not atomically publish one bounded record."
         $probeRecord = Read-NamedObjectProbeRecord -Path $probeResultItem.FullName
         Require `
-            ($probeRecord.schema_version -eq 4L -and
+            ($probeRecord.schema_version -eq 5L -and
                 $probeRecord.status -ceq 'failure' -and
                 $probeRecord.stage -ceq 'ambient-environment' -and
                 $probeRecord.exit_code -eq 122L -and
@@ -508,7 +508,7 @@ try {
         )
         $stringSchemaPayload = [System.IO.File]::ReadAllText($probeResult) |
             ConvertFrom-Json -Depth 8
-        $stringSchemaPayload.schema_version = '4'
+        $stringSchemaPayload.schema_version = '5'
         [System.IO.File]::WriteAllText(
             $stringSchemaRecord,
             ($stringSchemaPayload | ConvertTo-Json -Depth 8 -Compress)
@@ -530,7 +530,7 @@ try {
             "projectatlas-object-namespace-probe-$([Guid]::NewGuid().ToString('N')).json"
         )
         $stringBooleanPayload = [ordered]@{
-            schema_version = 4
+            schema_version = 5
             status = 'success'
             stage = 'complete'
             exit_code = 0
@@ -543,12 +543,15 @@ try {
             directory_traverse_ntstatus = 0
             directory_create_object_ntstatus = 0
             directory_traverse_create_ntstatus = 0
+            session_directory_traverse_ntstatus = 0
             native_semaphore_name =
                 "Global\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
             post_job_native_create_win32 = 0
             post_job_native_created_new = $true
             post_job_native_close_win32 = 0
             seeded_semaphore_name = $diagnosticSeedName
+            seeded_direct_open_ntstatus = 0
+            seeded_direct_open_close_ntstatus = 0
             seeded_open_win32 = 0
             seeded_open_close_win32 = 0
             seeded_create_win32 = 183

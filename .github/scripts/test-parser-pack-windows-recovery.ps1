@@ -535,12 +535,17 @@ function Assert-NamedObjectProbeDiagnosticContract {
         'public static class ProjectAtlasNamedObjectAccessProbe',
         'SemaphoreSynchronizeAndModify = 0x00100002',
         'NtOpenDirectoryObject(',
+        'NtOpenSemaphore(',
         'CreateAndCloseSemaphore(',
+        'OpenAndCloseSemaphoreByPath(',
         'OpenAndCloseSemaphore(',
         'OpenOwnedSemaphore(',
         'directory_traverse_ntstatus = $directoryTraverseNtStatus',
         'directory_create_object_ntstatus = $directoryCreateObjectNtStatus',
         'directory_traverse_create_ntstatus = $directoryTraverseCreateNtStatus',
+        'session_directory_traverse_ntstatus = $sessionDirectoryTraverseNtStatus',
+        'seeded_direct_open_ntstatus = $seededDirectOpenNtStatus',
+        'seeded_direct_open_close_ntstatus = $seededDirectOpenCloseNtStatus',
         'construction-token-owner-sid-mismatch',
         'post_job_native_create_win32 = $postJobNativeCreateWin32',
         'post_job_native_created_new = $postJobNativeCreatedNew',
@@ -548,7 +553,7 @@ function Assert-NamedObjectProbeDiagnosticContract {
         'seeded_semaphore_name = $SeededSemaphoreName',
         'seeded_open_win32 = $seededOpenWin32',
         'seeded_create_win32 = $seededCreateWin32',
-        'schema_version = 4',
+        'schema_version = 5',
         '$probeStage = ''cleanup''',
         '$probeStage = ''result-write''',
         '[Console]::Error.WriteLine($fallbackJson)',
@@ -1193,8 +1198,10 @@ function Read-NamedObjectProbeRecord {
         'operation_error', 'operation_stage', 'post_job_native_close_win32',
         'post_job_native_create_win32', 'post_job_native_created_new', 'schema_version',
         'seeded_create_close_win32', 'seeded_create_created_new',
+        'seeded_direct_open_close_ntstatus', 'seeded_direct_open_ntstatus',
         'seeded_create_win32', 'seeded_open_close_win32', 'seeded_open_win32',
-        'seeded_semaphore_name', 'semaphore_name', 'session_id', 'stage', 'status'
+        'seeded_semaphore_name', 'semaphore_name', 'session_directory_traverse_ntstatus',
+        'session_id', 'stage', 'status'
     ) | Sort-Object
     $actualKeys = @($record.PSObject.Properties.Name | Sort-Object)
     Require `
@@ -1213,7 +1220,7 @@ function Read-NamedObjectProbeRecord {
     }
     Require `
         ((Test-ExactJsonInteger $record.schema_version) -and
-            $record.schema_version -eq 4L -and
+            $record.schema_version -eq 5L -and
             (Test-ExactJsonString $record.status) -and
             (Test-ExactJsonString $record.stage) -and
             (Test-ExactJsonInteger $record.exit_code) -and
@@ -1222,11 +1229,14 @@ function Read-NamedObjectProbeRecord {
             (Test-ExactJsonInteger $record.directory_traverse_ntstatus) -and
             (Test-ExactJsonInteger $record.directory_create_object_ntstatus) -and
             (Test-ExactJsonInteger $record.directory_traverse_create_ntstatus) -and
+            (Test-ExactJsonInteger $record.session_directory_traverse_ntstatus) -and
             (Test-ExactJsonString $record.native_semaphore_name) -and
             (Test-ExactJsonInteger $record.post_job_native_create_win32) -and
             (Test-ExactJsonBoolean $record.post_job_native_created_new) -and
             (Test-ExactJsonInteger $record.post_job_native_close_win32) -and
             (Test-ExactJsonString $record.seeded_semaphore_name) -and
+            (Test-ExactJsonInteger $record.seeded_direct_open_ntstatus) -and
+            (Test-ExactJsonInteger $record.seeded_direct_open_close_ntstatus) -and
             (Test-ExactJsonInteger $record.seeded_open_win32) -and
             (Test-ExactJsonInteger $record.seeded_open_close_win32) -and
             (Test-ExactJsonInteger $record.seeded_create_win32) -and
@@ -1247,6 +1257,8 @@ function Read-NamedObjectProbeRecord {
             $record.directory_create_object_ntstatus -le [int32]::MaxValue -and
             $record.directory_traverse_create_ntstatus -ge [int32]::MinValue -and
             $record.directory_traverse_create_ntstatus -le [int32]::MaxValue -and
+            $record.session_directory_traverse_ntstatus -ge [int32]::MinValue -and
+            $record.session_directory_traverse_ntstatus -le [int32]::MaxValue -and
             $record.post_job_native_create_win32 -ge -1L -and
             $record.post_job_native_create_win32 -le [int32]::MaxValue -and
             $record.post_job_native_close_win32 -ge -1L -and
@@ -1255,6 +1267,10 @@ function Read-NamedObjectProbeRecord {
             $record.seeded_open_win32 -le [int32]::MaxValue -and
             $record.seeded_open_close_win32 -ge -1L -and
             $record.seeded_open_close_win32 -le [int32]::MaxValue -and
+            $record.seeded_direct_open_ntstatus -ge [int32]::MinValue -and
+            $record.seeded_direct_open_ntstatus -le [int32]::MaxValue -and
+            $record.seeded_direct_open_close_ntstatus -ge [int32]::MinValue -and
+            $record.seeded_direct_open_close_ntstatus -le [int32]::MaxValue -and
             $record.seeded_create_win32 -ge -1L -and
             $record.seeded_create_win32 -le [int32]::MaxValue -and
             $record.seeded_create_close_win32 -ge -1L -and
@@ -1282,6 +1298,9 @@ function Read-NamedObjectProbeRecord {
         $record.session_id -ge 0L -and
         -not [string]::IsNullOrEmpty($record.directory_path) -and
         -not [string]::IsNullOrEmpty($record.native_semaphore_name) -and
+        $record.session_directory_traverse_ntstatus -eq 0L -and
+        $record.seeded_direct_open_ntstatus -eq 0L -and
+        $record.seeded_direct_open_close_ntstatus -eq 0L -and
         (Test-DefaultSecuritySemaphoreProbe `
             -CreateWin32 $record.post_job_native_create_win32 `
             -CreatedNew $record.post_job_native_created_new `
@@ -1363,7 +1382,7 @@ function Assert-NamedObjectProbeRecordFixtures {
         $nativeName = 'Global\ProjectAtlasParserPack-00000000000000000000000000000001'
         $managedName = 'Global\ProjectAtlasParserPack-00000000000000000000000000000002'
         $success = [ordered]@{
-            schema_version = 4
+            schema_version = 5
             status = 'success'
             stage = 'complete'
             exit_code = 0
@@ -1376,11 +1395,14 @@ function Assert-NamedObjectProbeRecordFixtures {
             directory_traverse_ntstatus = 0
             directory_create_object_ntstatus = 0
             directory_traverse_create_ntstatus = 0
+            session_directory_traverse_ntstatus = 0
             native_semaphore_name = $nativeName
             post_job_native_create_win32 = 0
             post_job_native_created_new = $true
             post_job_native_close_win32 = 0
             seeded_semaphore_name = $managedName
+            seeded_direct_open_ntstatus = 0
+            seeded_direct_open_close_ntstatus = 0
             seeded_open_win32 = 0
             seeded_open_close_win32 = 0
             seeded_create_win32 = 183
@@ -2461,9 +2483,13 @@ function Format-NamedObjectAccessComparison {
     $postCreate = if ($null -eq $Record) { '' } else { [string]$Record.post_job_native_create_win32 }
     $postCreated = if ($null -eq $Record) { '' } else { [string]$Record.post_job_native_created_new }
     $postClose = if ($null -eq $Record) { '' } else { [string]$Record.post_job_native_close_win32 }
+    $sessionId = if ($null -eq $Record) { '' } else { [string]$Record.session_id }
     $directoryTraverse = if ($null -eq $Record) { '' } else { [string]$Record.directory_traverse_ntstatus }
     $directoryCreate = if ($null -eq $Record) { '' } else { [string]$Record.directory_create_object_ntstatus }
     $directoryCombined = if ($null -eq $Record) { '' } else { [string]$Record.directory_traverse_create_ntstatus }
+    $sessionDirectoryTraverse = if ($null -eq $Record) { '' } else { [string]$Record.session_directory_traverse_ntstatus }
+    $seededDirectOpen = if ($null -eq $Record) { '' } else { [string]$Record.seeded_direct_open_ntstatus }
+    $seededDirectClose = if ($null -eq $Record) { '' } else { [string]$Record.seeded_direct_open_close_ntstatus }
     $sameName = if ($null -eq $Record) {
         ''
     }
@@ -2474,7 +2500,7 @@ function Format-NamedObjectAccessComparison {
             [System.StringComparison]::Ordinal
         )
     }
-    return "seed_created=$seedCreated seed_duplicated=$seedDuplicated parent_seed_closed=$parentClosed seeded_name_matches=$sameName post_job_create_win32=$postCreate post_job_created_new=$postCreated post_job_close_win32=$postClose directory_traverse_ntstatus=$directoryTraverse directory_create_object_ntstatus=$directoryCreate directory_traverse_create_ntstatus=$directoryCombined"
+    return "seed_created=$seedCreated seed_duplicated=$seedDuplicated parent_seed_closed=$parentClosed seeded_name_matches=$sameName session_id=$sessionId post_job_create_win32=$postCreate post_job_created_new=$postCreated post_job_close_win32=$postClose directory_traverse_ntstatus=$directoryTraverse directory_create_object_ntstatus=$directoryCreate directory_traverse_create_ntstatus=$directoryCombined session_directory_traverse_ntstatus=$sessionDirectoryTraverse seeded_direct_open_ntstatus=$seededDirectOpen seeded_direct_open_close_ntstatus=$seededDirectClose"
 }
 
 function Get-ReflectedOperationFailure {
@@ -2812,6 +2838,12 @@ public static class ProjectAtlasNamedObjectAccessProbe
         ref ObjectAttributes objectAttributes);
 
     [DllImport("ntdll.dll")]
+    private static extern int NtOpenSemaphore(
+        out IntPtr semaphoreHandle,
+        uint desiredAccess,
+        ref ObjectAttributes objectAttributes);
+
+    [DllImport("ntdll.dll")]
     private static extern int NtClose(IntPtr handle);
 
     [DllImport(
@@ -2895,6 +2927,59 @@ public static class ProjectAtlasNamedObjectAccessProbe
         }
     }
 
+    public static int OpenAndCloseSemaphoreByPath(
+        string path,
+        out int closeStatus)
+    {
+        closeStatus = -1;
+        IntPtr pathBuffer = IntPtr.Zero;
+        IntPtr unicodePointer = IntPtr.Zero;
+        IntPtr semaphoreHandle = IntPtr.Zero;
+        try
+        {
+            pathBuffer = Marshal.StringToHGlobalUni(path);
+            UnicodeString unicode = new UnicodeString();
+            unicode.Length = checked((ushort)(path.Length * sizeof(char)));
+            unicode.MaximumLength = checked((ushort)((path.Length + 1) * sizeof(char)));
+            unicode.Buffer = pathBuffer;
+            unicodePointer = Marshal.AllocHGlobal(Marshal.SizeOf<UnicodeString>());
+            Marshal.StructureToPtr(unicode, unicodePointer, false);
+            ObjectAttributes attributes = new ObjectAttributes();
+            attributes.Length = Marshal.SizeOf<ObjectAttributes>();
+            attributes.RootDirectory = IntPtr.Zero;
+            attributes.ObjectName = unicodePointer;
+            attributes.Attributes = ObjCaseInsensitive;
+            attributes.SecurityDescriptor = IntPtr.Zero;
+            attributes.SecurityQualityOfService = IntPtr.Zero;
+            int status = NtOpenSemaphore(
+                out semaphoreHandle,
+                SemaphoreSynchronizeAndModify,
+                ref attributes);
+            if (status < 0)
+            {
+                return status;
+            }
+            closeStatus = NtClose(semaphoreHandle);
+            semaphoreHandle = IntPtr.Zero;
+            return status;
+        }
+        finally
+        {
+            if (semaphoreHandle != IntPtr.Zero)
+            {
+                NtClose(semaphoreHandle);
+            }
+            if (unicodePointer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(unicodePointer);
+            }
+            if (pathBuffer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(pathBuffer);
+            }
+        }
+    }
+
     public static int CreateAndCloseSemaphore(
         string name,
         out bool createdNew,
@@ -2961,12 +3046,15 @@ $directoryPath = ''
 $directoryTraverseNtStatus = -1
 $directoryCreateObjectNtStatus = -1
 $directoryTraverseCreateNtStatus = -1
+$sessionDirectoryTraverseNtStatus = -1
 $nativeSemaphoreName = ''
 $postJobNativeCreateWin32 = -1
 $postJobNativeCreatedNew = $false
 $postJobNativeCloseWin32 = -1
 $seededOpenWin32 = -1
 $seededOpenCloseWin32 = -1
+$seededDirectOpenNtStatus = -1
+$seededDirectOpenCloseNtStatus = -1
 $seededCreateWin32 = -1
 $seededCreateCreatedNew = $false
 $seededCreateCloseWin32 = -1
@@ -3016,6 +3104,18 @@ try {
         [ProjectAtlasNamedObjectAccessProbe]::OpenDirectory($directoryPath, 0x00000004)
     $directoryTraverseCreateNtStatus =
         [ProjectAtlasNamedObjectAccessProbe]::OpenDirectory($directoryPath, 0x00000006)
+    $sessionDirectoryPath = "\Sessions\$sessionId\BaseNamedObjects"
+    $sessionDirectoryTraverseNtStatus =
+        [ProjectAtlasNamedObjectAccessProbe]::OpenDirectory(
+            $sessionDirectoryPath,
+            0x00000002
+        )
+    $seededNativePath = "$directoryPath\$($SeededSemaphoreName.Substring(7))"
+    $seededDirectOpenNtStatus =
+        [ProjectAtlasNamedObjectAccessProbe]::OpenAndCloseSemaphoreByPath(
+            $seededNativePath,
+            [ref]$seededDirectOpenCloseNtStatus
+        )
 
     $probeStage = 'native-semaphore-create'
     $nativeSemaphoreName = if ([string]::IsNullOrEmpty($ComparisonSemaphoreName)) {
@@ -3217,7 +3317,7 @@ else {
     $finalError = $null
 }
 $record = [ordered]@{
-    schema_version = 4
+    schema_version = 5
     status = $status
     stage = $finalStage
     exit_code = $exitCode
@@ -3230,11 +3330,14 @@ $record = [ordered]@{
     directory_traverse_ntstatus = $directoryTraverseNtStatus
     directory_create_object_ntstatus = $directoryCreateObjectNtStatus
     directory_traverse_create_ntstatus = $directoryTraverseCreateNtStatus
+    session_directory_traverse_ntstatus = $sessionDirectoryTraverseNtStatus
     native_semaphore_name = $nativeSemaphoreName
     post_job_native_create_win32 = $postJobNativeCreateWin32
     post_job_native_created_new = $postJobNativeCreatedNew
     post_job_native_close_win32 = $postJobNativeCloseWin32
     seeded_semaphore_name = $SeededSemaphoreName
+    seeded_direct_open_ntstatus = $seededDirectOpenNtStatus
+    seeded_direct_open_close_ntstatus = $seededDirectOpenCloseNtStatus
     seeded_open_win32 = $seededOpenWin32
     seeded_open_close_win32 = $seededOpenCloseWin32
     seeded_create_win32 = $seededCreateWin32
@@ -3251,7 +3354,7 @@ try {
 catch {
     $writeError = ConvertTo-BoundedProbeError -Exception $_.Exception
     $fallback = [ordered]@{
-        schema_version = 4
+        schema_version = 5
         status = 'failure'
         stage = 'result-write'
         exit_code = [int]$probeExitCodes['result-write']
@@ -3259,7 +3362,7 @@ catch {
     }
     $fallbackJson = $fallback | ConvertTo-Json -Compress -Depth 4
     if ($fallbackJson.Length -gt 1024) {
-        $fallbackJson = '{"schema_version":4,"status":"failure","stage":"result-write","exit_code":128,"error":{"type":"Exception","native_code":null,"message":"probe-result-write-failed"}}'
+        $fallbackJson = '{"schema_version":5,"status":"failure","stage":"result-write","exit_code":128,"error":{"type":"Exception","native_code":null,"message":"probe-result-write-failed"}}'
     }
     [Console]::Error.WriteLine($fallbackJson)
     exit [int]$probeExitCodes['result-write']
@@ -3581,7 +3684,7 @@ exit 0
             Invoke-ExactSidProcessAudit -Sid $identity.Sid -Expectation absent
             $expectedDirectoryPath = '\BaseNamedObjects'
             Require `
-                ($probeResult.schema_version -eq 4L -and
+                ($probeResult.schema_version -eq 5L -and
                     $probeResult.status -ceq 'success' -and
                     $probeResult.stage -ceq 'complete' -and
                     $probeResult.exit_code -eq 0L -and
@@ -3598,6 +3701,9 @@ exit 0
                     ) -and
                     $probeResult.native_semaphore_name -match
                         '\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z' -and
+                    $probeResult.session_directory_traverse_ntstatus -eq 0L -and
+                    $probeResult.seeded_direct_open_ntstatus -eq 0L -and
+                    $probeResult.seeded_direct_open_close_ntstatus -eq 0L -and
                     (Test-DefaultSecuritySemaphoreProbe `
                         -CreateWin32 $probeResult.post_job_native_create_win32 `
                         -CreatedNew $probeResult.post_job_native_created_new `
