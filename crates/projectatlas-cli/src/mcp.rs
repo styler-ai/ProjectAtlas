@@ -354,6 +354,18 @@ const MCP_SYMBOL_RELATION_VIEW_LEGACY: &str = "legacy";
 const MCP_SYMBOL_RELATION_VIEW_DETAILED: &str = "detailed";
 /// Additive closed analysis view on the existing relation route.
 const MCP_SYMBOL_RELATION_VIEW_ANALYSIS: &str = "analysis";
+/// Default closed relation-analysis mode.
+const MCP_RELATION_ANALYSIS_MODE_ARCHITECTURE: &str = "architecture";
+/// VCS impact relation-analysis mode.
+const MCP_RELATION_ANALYSIS_MODE_IMPACT: &str = "impact";
+/// Static trace relation-analysis mode.
+const MCP_RELATION_ANALYSIS_MODE_TRACE: &str = "trace";
+/// Default working-tree VCS impact selection.
+const MCP_RELATION_ANALYSIS_VCS_WORKING_TREE: &str = "working_tree";
+/// Staged-index VCS impact selection.
+const MCP_RELATION_ANALYSIS_VCS_INDEX: &str = "index";
+/// Explicit revision-range VCS impact selection.
+const MCP_RELATION_ANALYSIS_VCS_REVISION_RANGE: &str = "revision_range";
 /// Default direction for detailed MCP symbol-relation requests.
 const MCP_SYMBOL_RELATION_DIRECTION_DEFAULT: &str = "outbound";
 /// Default minimum confidence for detailed MCP symbol-relation requests.
@@ -373,6 +385,28 @@ const MCP_ERROR_DETAILED_RELATION_SYMBOL: &str = "detailed relation symbol must 
 const MCP_ERROR_DETAILED_RELATION_DISAMBIGUATOR: &str = "symbol disambiguators require symbol";
 /// MCP validation error for a relation limit outside the service range.
 const MCP_ERROR_DETAILED_RELATION_LIMIT: &str = "detailed relation limit exceeds the u32 range";
+/// MCP validation error for analysis controls on another relation view.
+const MCP_ERROR_ANALYSIS_VIEW_REQUIRED: &str = "analysis controls require view=analysis";
+/// MCP validation error for a symbol trace without a symbol-kind selector.
+const MCP_ERROR_TRACE_TARGET_KIND_REQUIRED: &str = "symbol trace targets require trace_target_kind";
+/// MCP validation error for a symbol trace without a signature selector.
+const MCP_ERROR_TRACE_TARGET_SIGNATURE_REQUIRED: &str =
+    "symbol trace targets require trace_target_signature";
+/// MCP validation error for symbol disambiguators without a trace symbol.
+const MCP_ERROR_TRACE_TARGET_REQUIRED: &str =
+    "trace target symbol disambiguators require trace_target";
+/// MCP validation error for a trace target without its owning file.
+const MCP_ERROR_TRACE_TARGET_FILE_REQUIRED: &str = "trace_target requires trace_target_file";
+/// MCP validation error for revision fields outside revision-range selection.
+const MCP_ERROR_VCS_REVISION_FIELDS: &str = "vcs_base and vcs_head require vcs=revision_range";
+/// MCP validation error for a revision-range selection without its base.
+const MCP_ERROR_VCS_BASE_REQUIRED: &str = "vcs=revision_range requires vcs_base";
+/// MCP validation error for a revision-range selection without its head.
+const MCP_ERROR_VCS_HEAD_REQUIRED: &str = "vcs=revision_range requires vcs_head";
+/// MCP validation error for an unsupported VCS impact selector.
+const MCP_ERROR_UNSUPPORTED_ANALYSIS_VCS: &str = "unsupported analysis VCS selection";
+/// MCP validation error for an unsupported closed relation-analysis mode.
+const MCP_ERROR_UNSUPPORTED_ANALYSIS_MODE: &str = "unsupported relation analysis mode";
 /// MCP telemetry event for health calls.
 const MCP_EVENT_ATLAS_HEALTH: &str = "mcp.atlas_health";
 /// MCP telemetry event for purpose-queue calls.
@@ -951,12 +985,12 @@ fn relation_analysis_trace_target(
             let file = validated_indexed_file_key(store, Path::new(file))?;
             let kind = params.trace_target_kind.as_deref().ok_or_else(|| {
                 CliError::Service(ServiceError::InvalidInput(
-                    "symbol trace targets require trace_target_kind".to_string(),
+                    MCP_ERROR_TRACE_TARGET_KIND_REQUIRED.to_string(),
                 ))
             })?;
             let signature = params.trace_target_signature.clone().ok_or_else(|| {
                 CliError::Service(ServiceError::InvalidInput(
-                    "symbol trace targets require trace_target_signature".to_string(),
+                    MCP_ERROR_TRACE_TARGET_SIGNATURE_REQUIRED.to_string(),
                 ))
             })?;
             Ok(Some(RelationAnchor::Symbol {
@@ -975,7 +1009,7 @@ fn relation_analysis_trace_target(
                 || params.trace_target_signature.is_some()
             {
                 return Err(CliError::Service(ServiceError::InvalidInput(
-                    "trace target symbol disambiguators require trace_target".to_string(),
+                    MCP_ERROR_TRACE_TARGET_REQUIRED.to_string(),
                 )));
             }
             let file = validated_indexed_file_key(store, Path::new(file))?;
@@ -986,7 +1020,7 @@ fn relation_analysis_trace_target(
             }))
         }
         (Some(_), None) => Err(CliError::Service(ServiceError::InvalidInput(
-            "trace_target requires trace_target_file".to_string(),
+            MCP_ERROR_TRACE_TARGET_FILE_REQUIRED.to_string(),
         ))),
         (None, None) => Ok(None),
     }
@@ -996,38 +1030,42 @@ fn relation_analysis_trace_target(
 fn relation_analysis_vcs(
     params: &AtlasSymbolRelationsParams,
 ) -> Result<GitImpactSelection, CliError> {
-    match params.vcs.as_deref().unwrap_or("working_tree") {
-        "working_tree" => {
+    match params
+        .vcs
+        .as_deref()
+        .unwrap_or(MCP_RELATION_ANALYSIS_VCS_WORKING_TREE)
+    {
+        MCP_RELATION_ANALYSIS_VCS_WORKING_TREE => {
             if params.vcs_base.is_some() || params.vcs_head.is_some() {
                 return Err(CliError::Service(ServiceError::InvalidInput(
-                    "vcs_base and vcs_head require vcs=revision_range".to_string(),
+                    MCP_ERROR_VCS_REVISION_FIELDS.to_string(),
                 )));
             }
             Ok(GitImpactSelection::WorkingTree)
         }
-        "index" => {
+        MCP_RELATION_ANALYSIS_VCS_INDEX => {
             if params.vcs_base.is_some() || params.vcs_head.is_some() {
                 return Err(CliError::Service(ServiceError::InvalidInput(
-                    "vcs_base and vcs_head require vcs=revision_range".to_string(),
+                    MCP_ERROR_VCS_REVISION_FIELDS.to_string(),
                 )));
             }
             Ok(GitImpactSelection::Index)
         }
-        "revision_range" => Ok(GitImpactSelection::RevisionRange {
+        MCP_RELATION_ANALYSIS_VCS_REVISION_RANGE => Ok(GitImpactSelection::RevisionRange {
             base: params.vcs_base.clone().ok_or_else(|| {
                 CliError::Service(ServiceError::InvalidInput(
-                    "vcs=revision_range requires vcs_base".to_string(),
+                    MCP_ERROR_VCS_BASE_REQUIRED.to_string(),
                 ))
             })?,
             head: params.vcs_head.clone().ok_or_else(|| {
                 CliError::Service(ServiceError::InvalidInput(
-                    "vcs=revision_range requires vcs_head".to_string(),
+                    MCP_ERROR_VCS_HEAD_REQUIRED.to_string(),
                 ))
             })?,
         }),
-        value => Err(CliError::Service(ServiceError::InvalidInput(format!(
-            "unsupported analysis VCS selection {value:?}"
-        )))),
+        _unsupported => Err(CliError::Service(ServiceError::InvalidInput(
+            MCP_ERROR_UNSUPPORTED_ANALYSIS_VCS.to_string(),
+        ))),
     }
 }
 
@@ -2997,7 +3035,7 @@ impl ProjectAtlasMcpServer {
                         project_path.clone(),
                         &[
                             (MCP_BRIEF_ARG_FILE, &next_call.path),
-                            (MCP_BRIEF_ARG_VIEW, "detailed"),
+                            (MCP_BRIEF_ARG_VIEW, MCP_SYMBOL_RELATION_VIEW_DETAILED),
                         ],
                         None,
                     ),
@@ -5185,7 +5223,7 @@ impl ProjectAtlasMcpServer {
             };
             if !analysis && relation_analysis_controls_present(params) {
                 return Err(CliError::Service(ServiceError::InvalidInput(
-                    "analysis controls require view=analysis".to_string(),
+                    MCP_ERROR_ANALYSIS_VIEW_REQUIRED.to_string(),
                 )));
             }
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
@@ -5298,17 +5336,22 @@ impl ProjectAtlasMcpServer {
                             cursor: params.cursor.clone(),
                         };
                         if analysis {
-                            let mode =
-                                match params.analysis_mode.as_deref().unwrap_or("architecture") {
-                                    "architecture" => RelationAnalysisMode::Architecture,
-                                    "impact" => RelationAnalysisMode::Impact,
-                                    "trace" => RelationAnalysisMode::Trace,
-                                    value => {
-                                        return Err(CliError::Service(ServiceError::InvalidInput(
-                                            format!("unsupported relation analysis mode {value:?}"),
-                                        )));
-                                    }
-                                };
+                            let mode = match params
+                                .analysis_mode
+                                .as_deref()
+                                .unwrap_or(MCP_RELATION_ANALYSIS_MODE_ARCHITECTURE)
+                            {
+                                MCP_RELATION_ANALYSIS_MODE_ARCHITECTURE => {
+                                    RelationAnalysisMode::Architecture
+                                }
+                                MCP_RELATION_ANALYSIS_MODE_IMPACT => RelationAnalysisMode::Impact,
+                                MCP_RELATION_ANALYSIS_MODE_TRACE => RelationAnalysisMode::Trace,
+                                _unsupported => {
+                                    return Err(CliError::Service(ServiceError::InvalidInput(
+                                        MCP_ERROR_UNSUPPORTED_ANALYSIS_MODE.to_string(),
+                                    )));
+                                }
+                            };
                             let trace_target = relation_analysis_trace_target(store, params)?;
                             let vcs_explicit = params.vcs.is_some()
                                 || params.vcs_base.is_some()

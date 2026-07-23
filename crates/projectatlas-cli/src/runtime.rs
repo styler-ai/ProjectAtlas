@@ -131,6 +131,8 @@ const MAX_PURPOSE_INPUT_FILE_BYTES: u64 = 16 * 1_024 * 1_024;
 const MAX_PURPOSE_REVIEW_PATH_BYTES: usize = 4 * 1_024;
 /// Maximum bytes in one non-path purpose-review string field.
 const MAX_PURPOSE_REVIEW_FIELD_BYTES: usize = 64 * 1_024;
+/// Purpose-review report field name for an item error.
+const PURPOSE_REVIEW_REPORT_ERROR_FIELD: &str = "error";
 /// Maximum aggregate string bytes admitted to one purpose-review batch.
 const MAX_PURPOSE_REVIEW_INPUT_BYTES: usize = 512 * 1_024;
 /// Maximum retained item/output bytes for one purpose-review report.
@@ -2959,7 +2961,11 @@ fn purpose_review_item_bytes(item: &PurposeReviewItem) -> Result<usize, CliError
             item.purpose.as_str(),
             MAX_PURPOSE_REVIEW_FIELD_BYTES,
         ),
-        ("error", item.error.as_str(), MAX_PURPOSE_REVIEW_FIELD_BYTES),
+        (
+            PURPOSE_REVIEW_REPORT_ERROR_FIELD,
+            item.error.as_str(),
+            MAX_PURPOSE_REVIEW_FIELD_BYTES,
+        ),
     ] {
         if value.len() > maximum {
             return Err(CliError::InvalidInput(format!(
