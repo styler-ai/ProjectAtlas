@@ -4734,6 +4734,13 @@ fn stage_symbols_for_nodes_with_limits(
         path: root.to_path_buf(),
         source,
     })?;
+    let considered_paths = nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::File)
+        .filter(|node| target_paths.is_none_or(|paths| paths.contains(&node.path)))
+        .map(|node| node.path.clone())
+        .collect::<Vec<_>>();
+    let previously_parsed_paths = store.source_parse_metadata_paths_for_paths(&considered_paths)?;
     let mut candidate_paths = nodes
         .iter()
         .filter(|node| node.kind == NodeKind::File)
@@ -4771,6 +4778,29 @@ fn stage_symbols_for_nodes_with_limits(
     let mut jobs = Vec::new();
     let mut changes = Vec::new();
     let mut output_bytes = 0_u64;
+    for node in nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::File)
+        .filter(|node| target_paths.is_none_or(|paths| paths.contains(&node.path)))
+        .filter(|node| {
+            !is_symbol_candidate_for_admission(
+                &node.path,
+                node.language.as_deref(),
+                admit_optional_languages,
+            ) && previously_parsed_paths.contains(&node.path)
+        })
+    {
+        output_bytes = checked_symbol_publication_usage(
+            output_bytes,
+            node.path.len() as u64 + node.language.as_ref().map_or(0, String::len) as u64,
+            limits.output_bytes,
+            IndexWorkResource::OutputBytes,
+        )?;
+        changes.push(SymbolProjectionChange::Clear {
+            path: node.path.clone(),
+            language: node.language.clone(),
+        });
+    }
     for node in nodes
         .iter()
         .filter(|node| node.kind == NodeKind::File)
@@ -8641,6 +8671,40 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             &inactive_plan.publication_contract_fingerprint(),
             "disabled optional parser derivation contract",
         )?;
+
+        let stale_graph = SymbolGraph {
+            path: "main.awk".to_string(),
+            language: Some("awk".to_string()),
+            parser: ParserKind::Fallback,
+            symbols: Vec::new(),
+            relations: Vec::new(),
+        };
+        let stale_metadata = SourceParseMetadata {
+            path: stale_graph.path.clone(),
+            language: stale_graph.language.clone(),
+            parser: ParserKind::TreeSitter,
+            symbol_count: 0,
+            relation_count: 0,
+        };
+        store.replace_symbol_graph_with_metadata(&stale_graph, &stale_metadata)?;
+        let selected_publication = store.begin_index_publication_from(
+            &selected_plan.publication_contract_fingerprint(),
+            before.generation,
+        )?;
+        selected_publication.complete()?;
+
+        refresh_index(&mut store, &disabled_plan, &symbol_options)?;
+        require_eq(
+            &store.load_source_parse_metadata("main.awk")?,
+            &None,
+            "disabled optional parser metadata",
+        )?;
+        if !publication_contract_matches(&store, &disabled_plan)? {
+            return Err(io::Error::other(
+                "disabled optional parser refresh did not publish its derivation contract",
+            )
+            .into());
+        }
         Ok(())
     }
 

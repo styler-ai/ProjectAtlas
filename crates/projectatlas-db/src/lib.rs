@@ -3467,6 +3467,37 @@ impl AtlasStore {
         Ok(counts)
     }
 
+    /// Return exact paths with persisted parser metadata from one bounded path set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading or row decoding fails.
+    pub fn source_parse_metadata_paths_for_paths(
+        &self,
+        paths: &[String],
+    ) -> DbResult<HashSet<String>> {
+        let mut indexed = HashSet::new();
+        for chunk in paths.chunks(900) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let placeholders = numbered_placeholders(1, chunk.len());
+            let sql = format!(
+                "SELECT path FROM source_parse_metadata
+                 WHERE path IN ({placeholders})
+                 ORDER BY path"
+            );
+            let mut statement = self.connection.prepare(&sql)?;
+            let rows = statement.query_map(params_from_iter(chunk.iter()), |row| {
+                row.get::<_, String>(0)
+            })?;
+            for row in rows {
+                indexed.insert(row?);
+            }
+        }
+        Ok(indexed)
+    }
+
     /// Return distinct parser strategies that produced symbols for one path.
     ///
     /// # Errors
@@ -11748,12 +11779,23 @@ mod tests {
         let reopened_metadata = reader
             .load_source_parse_metadata(&graph.path)?
             .ok_or_else(|| io::Error::other("missing reopened source parse metadata"))?;
+        let metadata_paths = reader.source_parse_metadata_paths_for_paths(&[
+            "src/missing.optional".to_string(),
+            empty_graph.path.clone(),
+            graph.path.clone(),
+            graph.path.clone(),
+        ])?;
         let reopened_graphs =
             reader.load_symbol_graphs_for_paths(&[graph.path.clone(), empty_graph.path.clone()])?;
         require_eq(
             &reopened_metadata.parser,
             &ParserKind::TreeSitter,
             "reopened source parser provenance",
+        )?;
+        require_eq(
+            &metadata_paths,
+            &HashSet::from([graph.path.clone(), empty_graph.path.clone()]),
+            "batched source parse metadata paths",
         )?;
         require_eq(
             &reopened_graphs,

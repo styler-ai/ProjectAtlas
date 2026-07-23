@@ -76,10 +76,16 @@ const WINDOWS_PROFILE_CLEANUP_REAP_TIMEOUT: Duration = Duration::from_secs(5);
 const WINDOWS_PROFILE_CLEANUP_OUTPUT_BYTES: u64 = 64 * 1024;
 /// Prefix for a unique slot tombstone whose profile cleanup is still pending.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-const WINDOWS_REMOVING_TOMBSTONE_PREFIX: &str = ".projectatlas-parser-removing-";
+const WINDOWS_REMOVING_TOMBSTONE_PREFIX: &str = ".pa-r-";
 /// Prefix for a unique tombstone whose profile is cleaned and only deletion remains.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-const WINDOWS_CLEANED_TOMBSTONE_PREFIX: &str = ".projectatlas-parser-cleaned-";
+const WINDOWS_CLEANED_TOMBSTONE_PREFIX: &str = ".pa-c-";
+/// Hex characters retained as a fail-closed tombstone routing hint.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+const WINDOWS_TOMBSTONE_ARTIFACT_PREFIX_HEX_CHARS: usize = 32;
+/// Largest working-directory path `CreateProcessW` can accept after adding `\0`.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+const WINDOWS_PROCESS_CURRENT_DIRECTORY_MAX_UTF16_UNITS: usize = 258;
 
 /// Failure while inspecting or changing the local optional-parser lifecycle.
 #[derive(Debug, Error)]
@@ -1006,7 +1012,7 @@ impl OptionalParserPackLifecycle {
                 "cleanup tombstone identity differs from its artifact manifest",
             ));
         }
-        cleanup_platform_profile(pack_root, supervisor.artifact_identity())?;
+        cleanup_platform_profile(supervisor.pack_root(), supervisor.artifact_identity())?;
         let cleaned = transition_tombstone_to_profile_cleaned(&pending)?;
         remove_tree_if_present(&cleaned.entry_root)?;
         Ok(true)
@@ -2057,8 +2063,9 @@ fn installed_slot_paths(
                 .into_string()
                 .map_err(|_name| invalid_data("parser-pack artifact directory is not UTF-8"))?;
             #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-            if let Some((state, artifact)) = parse_windows_tombstone_name(&entry_name) {
+            if let Some((state, artifact_prefix)) = parse_windows_tombstone_name(&entry_name) {
                 let entry_root = slot.path();
+                let artifact = windows_tombstone_artifact(&entry_root, &artifact_prefix)?;
                 slots.push(InstalledSlotPath {
                     projectatlas_version: projectatlas_version_name.clone(),
                     artifact,
@@ -2098,19 +2105,44 @@ fn parse_windows_tombstone_name(name: &str) -> Option<(InstalledSlotCleanupState
         } else {
             return None;
         };
-    if remainder.len() < 65 {
+    if remainder.len() <= WINDOWS_TOMBSTONE_ARTIFACT_PREFIX_HEX_CHARS {
         return None;
     }
-    let (artifact, unique_suffix) = remainder.split_at(64);
-    if !unique_suffix.starts_with('-')
-        || unique_suffix.len() < 2
-        || !artifact
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    let (artifact_prefix, suffix) = remainder.split_at(WINDOWS_TOMBSTONE_ARTIFACT_PREFIX_HEX_CHARS);
+    if !artifact_prefix
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !suffix.starts_with('-')
+        || suffix.len() < 2
+        || suffix.len() > 33
+        || !suffix[1..].bytes().all(|byte| byte.is_ascii_alphanumeric())
     {
         return None;
     }
-    Some((state, artifact.to_owned()))
+    Some((state, artifact_prefix.to_owned()))
+}
+
+/// Recover and validate one tombstone's exact artifact identity.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn windows_tombstone_artifact(
+    root: &Path,
+    expected_prefix: &str,
+) -> Result<String, OptionalParserPackLifecycleError> {
+    let manifest_bytes = read_bounded_file(
+        &root.join(ARTIFACT_MANIFEST_FILE_NAME),
+        u64::try_from(OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES)
+            .map_err(|source| invalid_data(source.to_string()))?,
+    )?;
+    let artifact = ParserArtifactIdentity::for_bytes(&manifest_bytes)
+        .digest()
+        .as_str()
+        .to_owned();
+    if !artifact.starts_with(expected_prefix) {
+        return Err(invalid_data(
+            "parser-pack cleanup tombstone differs from its artifact manifest",
+        ));
+    }
+    Ok(artifact)
 }
 
 /// Return whether one artifact has any bounded profile-removal tombstone.
@@ -2148,8 +2180,9 @@ fn windows_slot_cleanup_in_progress(
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if parse_windows_tombstone_name(&name)
-            .is_some_and(|(_state, candidate)| candidate == artifact)
+        if let Some((_state, artifact_prefix)) = parse_windows_tombstone_name(&name)
+            && artifact.starts_with(&artifact_prefix)
+            && windows_tombstone_artifact(&entry.path(), &artifact_prefix)? == artifact
         {
             return Ok(true);
         }
@@ -2173,12 +2206,25 @@ fn transition_slot_to_removing_tombstone(
         .entry_root
         .parent()
         .ok_or_else(|| invalid_data("parser-pack slot has no version parent"))?;
-    let prefix = format!("{WINDOWS_REMOVING_TOMBSTONE_PREFIX}{}-", slot.artifact);
+    let tombstone_prefix = format!(
+        "{WINDOWS_REMOVING_TOMBSTONE_PREFIX}{}-",
+        &slot.artifact[..WINDOWS_TOMBSTONE_ARTIFACT_PREFIX_HEX_CHARS]
+    );
     let reservation = tempfile::Builder::new()
-        .prefix(&prefix)
+        .prefix(&tombstone_prefix)
         .tempfile_in(parent)
         .map_err(|source| io_error("reserve unique parser-pack tombstone", parent, source))?;
     let tombstone = reservation.path().to_path_buf();
+    if let Err(error) = require_windows_cleanup_paths(&slot.entry_root, &tombstone) {
+        reservation.close().map_err(|source| {
+            io_error(
+                "release unsupported parser-pack tombstone reservation",
+                &tombstone,
+                source,
+            )
+        })?;
+        return Err(error);
+    }
     reservation.close().map_err(|source| {
         io_error(
             "release parser-pack tombstone reservation",
@@ -2225,6 +2271,7 @@ fn transition_tombstone_to_profile_cleaned(
         .parent()
         .ok_or_else(|| invalid_data("parser-pack cleanup tombstone has no parent"))?;
     let cleaned_root = parent.join(format!("{WINDOWS_CLEANED_TOMBSTONE_PREFIX}{remainder}"));
+    require_windows_cleanup_paths(&slot.entry_root, &cleaned_root)?;
     if fs::symlink_metadata(&cleaned_root).is_ok() {
         return Err(invalid_data(
             "profile-cleaned parser-pack tombstone path is already occupied",
@@ -2244,6 +2291,96 @@ fn transition_tombstone_to_profile_cleaned(
         pack_root: None,
         state: InstalledSlotCleanupState::ProfileCleaned,
     })
+}
+
+/// Convert one canonical absolute Windows path to extended-length syntax.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn windows_verbatim_path(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+
+    const DIRECTORY_SEPARATOR: u16 = b'\\' as u16;
+    const VERBATIM_PREFIX: &[u16] = &[
+        DIRECTORY_SEPARATOR,
+        DIRECTORY_SEPARATOR,
+        b'?' as u16,
+        DIRECTORY_SEPARATOR,
+    ];
+    const VERBATIM_UNC_PREFIX: &[u16] = &[
+        DIRECTORY_SEPARATOR,
+        DIRECTORY_SEPARATOR,
+        b'?' as u16,
+        DIRECTORY_SEPARATOR,
+        b'U' as u16,
+        b'N' as u16,
+        b'C' as u16,
+        DIRECTORY_SEPARATOR,
+    ];
+
+    let path = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if path.starts_with(VERBATIM_PREFIX) {
+        return PathBuf::from(OsString::from_wide(&path));
+    }
+    let (prefix, suffix) = if path.starts_with(&[DIRECTORY_SEPARATOR, DIRECTORY_SEPARATOR]) {
+        (VERBATIM_UNC_PREFIX, &path[2..])
+    } else {
+        (VERBATIM_PREFIX, path.as_slice())
+    };
+    let mut extended = Vec::with_capacity(prefix.len().saturating_add(suffix.len()));
+    extended.extend_from_slice(prefix);
+    extended.extend_from_slice(suffix);
+    PathBuf::from(OsString::from_wide(&extended))
+}
+
+/// Require the non-verbatim path form accepted by the .NET Framework cleanup broker.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn require_windows_framework_path(path: &Path) -> Result<(), OptionalParserPackLifecycleError> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let path = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if path.starts_with(&[
+        u16::from(b'\\'),
+        u16::from(b'\\'),
+        u16::from(b'?'),
+        u16::from(b'\\'),
+    ]) || path.len() > WINDOWS_PROCESS_CURRENT_DIRECTORY_MAX_UTF16_UNITS
+    {
+        return Err(invalid_data(
+            "Windows parser-pack cleanup path exceeds the .NET Framework path contract",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate every retained path before the legacy broker traverses the pack.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn require_windows_cleanup_paths(
+    source_root: &Path,
+    cleanup_root: &Path,
+) -> Result<(), OptionalParserPackLifecycleError> {
+    let mut pending = vec![(source_root.to_path_buf(), cleanup_root.to_path_buf())];
+    let mut observed = 0_usize;
+    while let Some((source, cleanup)) = pending.pop() {
+        if observed == LIFECYCLE_METADATA_ENTRY_LIMIT {
+            return Err(invalid_data(
+                "parser-pack cleanup tree exceeds the lifecycle bound",
+            ));
+        }
+        observed = observed.saturating_add(1);
+        require_windows_framework_path(&cleanup)?;
+        let metadata = fs::symlink_metadata(&source)
+            .map_err(|error| io_error("inspect parser-pack cleanup path", &source, error))?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            for entry in fs::read_dir(&source)
+                .map_err(|error| io_error("list parser-pack cleanup path", &source, error))?
+            {
+                let entry = entry
+                    .map_err(|error| io_error("read parser-pack cleanup path", &source, error))?;
+                pending.push((entry.path(), cleanup.join(entry.file_name())));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Run the exact verified Windows broker cleanup command for its own artifact directory.
@@ -2269,7 +2406,8 @@ fn cleanup_platform_profile(
     }
     let sha256 = Sha256::digest(&manifest_bytes);
     let profile_name = format!("projectatlas.parser.{}", lowercase_hex(&sha256[..20]));
-    let broker = root.join(WINDOWS_CONTAINMENT_BROKER_FILE_NAME);
+    require_windows_cleanup_paths(root, root)?;
+    let broker = windows_verbatim_path(&root.join(WINDOWS_CONTAINMENT_BROKER_FILE_NAME));
     let windows_directory = validated_windows_directory()?;
     let mut command = Command::new(&broker);
     command
@@ -3743,6 +3881,45 @@ mod tests {
 
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     #[test]
+    fn windows_cleanup_paths_preserve_verbatim_forms_and_bound_current_directory() -> TestResult {
+        require(
+            windows_verbatim_path(Path::new(r"C:\pack\parser")) == Path::new(r"\\?\C:\pack\parser"),
+            "drive path did not gain its verbatim prefix",
+        )?;
+        require(
+            windows_verbatim_path(Path::new(r"\\server\share\pack"))
+                == Path::new(r"\\?\UNC\server\share\pack"),
+            "UNC path did not gain its verbatim prefix",
+        )?;
+        require(
+            windows_verbatim_path(Path::new(r"\\?\C:\pack\parser"))
+                == Path::new(r"\\?\C:\pack\parser"),
+            "existing verbatim path changed",
+        )?;
+        let maximum = PathBuf::from(format!(
+            r"C:\{}",
+            "a".repeat(WINDOWS_PROCESS_CURRENT_DIRECTORY_MAX_UTF16_UNITS - 3)
+        ));
+        require(
+            require_windows_framework_path(&maximum).is_ok(),
+            "maximum supported working directory was rejected",
+        )?;
+        let overlong = PathBuf::from(format!(
+            r"C:\{}",
+            "a".repeat(WINDOWS_PROCESS_CURRENT_DIRECTORY_MAX_UTF16_UNITS - 2)
+        ));
+        require(
+            require_windows_framework_path(&overlong).is_err(),
+            "overlong working directory was accepted",
+        )?;
+        require(
+            require_windows_framework_path(Path::new(r"\\?\C:\pack")).is_err(),
+            "verbatim working directory was accepted",
+        )
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[test]
     fn cleaned_tombstone_makes_partial_slot_removal_retryable() -> TestResult {
         let root = tempfile::tempdir()?;
         let lifecycle = OptionalParserPackLifecycle::for_test(
@@ -3750,16 +3927,27 @@ mod tests {
             root.path().join("storage"),
             Some(PackPlatform::WindowsX86_64),
         );
-        let identity = test_slot('c');
+        let artifact_manifest = b"cleaned-tombstone-artifact";
+        let identity = PackSlotIdentity {
+            projectatlas_version: OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION.to_owned(),
+            artifact: ParserArtifactIdentity::for_bytes(artifact_manifest)
+                .digest()
+                .as_str()
+                .to_owned(),
+        };
         let version_root = lifecycle
             .versions_root()?
             .join(&identity.projectatlas_version);
         fs::create_dir_all(&version_root)?;
         let tombstone = version_root.join(format!(
-            "{WINDOWS_CLEANED_TOMBSTONE_PREFIX}{}-retry",
-            identity.artifact
+            "{WINDOWS_CLEANED_TOMBSTONE_PREFIX}{}-retry1",
+            &identity.artifact[..WINDOWS_TOMBSTONE_ARTIFACT_PREFIX_HEX_CHARS]
         ));
         fs::create_dir(&tombstone)?;
+        fs::write(
+            tombstone.join(ARTIFACT_MANIFEST_FILE_NAME),
+            artifact_manifest,
+        )?;
         let partial_file = tombstone.join("partial.bin");
         fs::write(&partial_file, b"partial")?;
 
@@ -3783,9 +3971,20 @@ mod tests {
             root.path().join("storage"),
             Some(PackPlatform::WindowsX86_64),
         );
-        let identity = test_slot('e');
+        let artifact_manifest = b"atomic-tombstone-artifact";
+        let identity = PackSlotIdentity {
+            projectatlas_version: OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION.to_owned(),
+            artifact: ParserArtifactIdentity::for_bytes(artifact_manifest)
+                .digest()
+                .as_str()
+                .to_owned(),
+        };
         let slot_root = lifecycle.slot_path(&identity)?;
         fs::create_dir_all(&slot_root)?;
+        fs::write(
+            slot_root.join(ARTIFACT_MANIFEST_FILE_NAME),
+            artifact_manifest,
+        )?;
         fs::write(slot_root.join("must-move.bin"), b"slot")?;
         let installed = InstalledSlotPath {
             projectatlas_version: identity.projectatlas_version.clone(),
@@ -3813,7 +4012,7 @@ mod tests {
                     .ok_or_else(|| io::Error::other("pending tombstone name missing"))?,
             ) == Some((
                 InstalledSlotCleanupState::ProfilePending,
-                identity.artifact.clone(),
+                identity.artifact[..WINDOWS_TOMBSTONE_ARTIFACT_PREFIX_HEX_CHARS].to_owned(),
             )),
             "profile-pending tombstone name was not strict",
         )?;
@@ -3858,10 +4057,20 @@ mod tests {
             root.path().join("storage"),
             Some(PackPlatform::WindowsX86_64),
         );
-        let identity = test_slot('f');
+        let artifact_manifest = b"invalid";
+        let identity = PackSlotIdentity {
+            projectatlas_version: OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION.to_owned(),
+            artifact: ParserArtifactIdentity::for_bytes(artifact_manifest)
+                .digest()
+                .as_str()
+                .to_owned(),
+        };
         let slot_root = lifecycle.slot_path(&identity)?;
         fs::create_dir_all(&slot_root)?;
-        fs::write(slot_root.join(ARTIFACT_MANIFEST_FILE_NAME), b"invalid")?;
+        fs::write(
+            slot_root.join(ARTIFACT_MANIFEST_FILE_NAME),
+            artifact_manifest,
+        )?;
         let marker = slot_root
             .parent()
             .ok_or_else(|| io::Error::other("slot parent missing"))?

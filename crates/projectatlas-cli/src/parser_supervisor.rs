@@ -350,7 +350,7 @@ pub enum ParserSupervisorError {
         message: String,
     },
     /// An operation failed and its mandatory cleanup also failed.
-    #[error("optional parser operation failed and cleanup also failed")]
+    #[error("optional parser operation failed: {operation}; cleanup also failed: {cleanup}")]
     OperationAndCleanup {
         /// Original typed operation failure.
         operation: Box<Self>,
@@ -3736,6 +3736,10 @@ mod tests {
             }),
         };
         assert!(nested.has_mandatory_cleanup_failure());
+        assert_eq!(
+            nested.to_string(),
+            "optional parser operation failed: optional parser operation was cancelled during test; cleanup also failed: optional parser operation failed: optional parser absolute deadline elapsed during test; cleanup also failed: optional parser cleanup failed: reap failed"
+        );
         assert!(
             ParserSupervisorError::Cleanup {
                 message: "drain failed".to_owned()
