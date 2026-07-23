@@ -1604,7 +1604,7 @@ public static class ProjectAtlasConstructionProcess
     private const int MaximumLogonCommandLineCharacters = 1023;
     private const string RequiredIntegritySid = "S-1-16-8192";
     private const string BrokerJobPrefix = "Global\\ProjectAtlasParserPackBroker-";
-    private const string DiagnosticSemaphorePrefix = "Global\\ProjectAtlasParserPack-";
+    private const string DiagnosticSemaphorePrefix = "ProjectAtlasParserPack-";
     private const string SeededSemaphorePlaceholder =
         "__PROJECTATLAS_SEEDED_SEMAPHORE__";
 
