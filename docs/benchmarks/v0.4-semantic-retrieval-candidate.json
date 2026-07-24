@@ -74,6 +74,25 @@
       ]
     }
   ],
+  "package_pre_screens": [
+    {
+      "model": "jinaai/jina-embeddings-v2-base-code",
+      "selected_model_file_bytes": 641517466,
+      "accepted": false,
+      "failed_gates": [
+        "model_cache_bytes"
+      ]
+    },
+    {
+      "model": "google/embeddinggemma-300m",
+      "official_checkpoint_display_size": "1.21 GB",
+      "observed_quantized_gguf_display_size_range": "212-278 MB",
+      "accepted": false,
+      "failed_gates": [
+        "model_cache_bytes"
+      ]
+    }
+  ],
   "environment": {
     "source_commit": "f892e99b32bc90f95970be3f1c730b065d9f5198",
     "os": "Microsoft Windows 11 Pro 10.0.26200 x86_64",
