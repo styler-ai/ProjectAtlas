@@ -104,7 +104,7 @@ Existing relation requests SHALL retain legacy defaults, rows, ordering, and rel
 
 ProjectAtlas v0.4 SHALL preserve the complete pre-change MCP inventory, tool names, request schemas, defaults, and payload behavior. Graph construction, freshness, purpose-plus-connection enrichment, direct relation navigation, and next-call guidance SHALL improve automatically behind existing calls, and no new mandatory graph, jump, or orchestration tool SHALL be added.
 
-The packaged v0.4 inventory and discovery measurements SHALL become the baseline for separately owned post-v0.4 rationalization. Public tool classification, compact/default inventory selection, alias consolidation, breaking removal, installer/plugin inventory changes, and inventory-specific agent evaluation SHALL NOT be implemented by this change.
+The packaged v0.4 inventory and discovery measurements SHALL become the baseline for separately owned post-v0.4 rationalization. Public tool classification, compact/default inventory selection, alias consolidation, breaking removal, and broad installer/plugin inventory rationalization SHALL NOT be implemented by this change. After the complete v0.4 feature behavior is stable, a feature-workflow MCP composition evaluation SHALL compare the current compatible routes with additive schema/default/next-call changes and the smallest credible dedicated or additional calls. It MAY add the smallest compatible v0.4 call surface that materially improves correctness or the bounded minimal agent path, but SHALL NOT remove or break a pre-change route.
 
 `atlas_session_brief` SHALL perform startup overview and purpose/graph candidate ranking once, then recommend the best ready-to-use summary, search, relation, or slice call. It SHALL NOT recommend rerunning folder/file ranking already included in the brief.
 
@@ -115,6 +115,14 @@ The packaged v0.4 inventory and discovery measurements SHALL become the baseline
 #### Scenario: Existing client repeats a pre-change request
 - **WHEN** a pre-change MCP request is replayed through v0.4
 - **THEN** its old route, schema, defaults, and compatible payload remain available through the shared implementation
+
+#### Scenario: A dedicated call materially improves a completed feature workflow
+- **WHEN** controlled agent evaluation shows the best existing-call composition is materially worse than a compatible dedicated or additional call for correctness, required calls, discovery/schema context, total context, latency, backtracking, or trust/freshness evidence
+- **THEN** ProjectAtlas implements and retests the smallest additive call surface before freezing v0.4 while preserving every pre-change route, and leaves broader inventory removal or consolidation to issue #310
+
+#### Scenario: Existing calls are best or tied
+- **WHEN** the existing compatible composition answers the completed feature workflows as well as or better than credible additive alternatives
+- **THEN** ProjectAtlas keeps the current tool surface and does not add a speculative convenience call
 
 ### Requirement: Cursors Bind Result-Defining State
 

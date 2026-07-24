@@ -54,7 +54,7 @@ The old hard-coded three-hop query, graph-scale/evidence runners, task receipts,
 4. Stabilize language and relation contracts before richer analysis or optional packs.
 5. Complete issue #308 before bounded project memory in #314 consumes the database/session boundaries.
 6. Run combined compatibility, packaging, platform, benchmark, and release readiness in #311 after #308 and #314 stabilize.
-7. Preserve the complete pre-v0.4 MCP inventory through #308 and freeze it as the packaged v0.4 baseline. Issue #310 alone owns later tool classification, compact/default selection, consolidation, or breaking removal; it must not duplicate #308 graph, freshness, ranking, or session-brief behavior.
+7. Preserve the complete pre-v0.4 MCP inventory through #308 and freeze it as the packaged v0.4 baseline. After all v0.4 feature behavior is stable, task 7.3.1 compares the current compatible composition with additive schema/default/next-call changes and the smallest credible dedicated or additional calls for the canonical feature workflows; it keeps the current surface when best or tied and implements only a materially better compatible additive boundary. Issue #310 alone owns later public tool classification, compact/default selection, consolidation, or breaking removal; it must not duplicate #308 graph, freshness, ranking, or session-brief behavior.
 
 ### Section-closeout architecture and pre-mortem reflection
 
@@ -76,7 +76,7 @@ Successful low-scope curation is silent in the main conversation and normal sess
 
 `low` remains the default background scope: folders plus task-relevant/high-impact files. `medium` intentionally requires every source file to be reviewed. `strict` intentionally requires every indexed file and folder and is never started implicitly. A host without isolated subagent support keeps the task-scoped queue available and does not claim invisible background work; normal source answers remain available.
 
-Architecture, impact, and trace begin as closed typed views of the existing bounded relation/summary/health services. At most one optional `atlas_analyze`-style surface may be added if real agent tasks prove that extending the relation request makes tool selection or schema size worse. Analysis is never a prerequisite for normal navigation, and complexity/bottleneck candidates do not receive a separate tool.
+Architecture, impact, and trace begin as closed typed views of the existing bounded relation/summary/health services. The post-feature MCP composition evaluation compares that shared route with additive schema/default/next-call changes and the smallest credible dedicated or additional calls; no fixed call-count cap may force unrelated intents into one confusing schema, but no call is added without measured correctness or bounded agent-path value. Analysis is never a prerequisite for normal navigation, complexity/bottleneck candidates do not receive speculative convenience tools, and every pre-v0.4 route remains compatible.
 
 ### 2. Use typed graph contracts with one owner
 
@@ -205,6 +205,8 @@ The issue cannot close on feature count alone. Repeated representative tasks com
 - total tool calls, emitted bytes, and conservative context tokens;
 - usefulness and correctness of next-call guidance;
 - compatibility of the normal overview-to-slice workflow.
+
+After all feature behavior is stable, the same acceptance boundary explicitly evaluates six canonical MCP questions: implementation ownership, affected callers, file relevance, relation resolution state, dependent-graph invalidation after edits, and the smallest exact source evidence after following a relationship. It compares the best current compatible call chain against credible additive schemas/defaults/next calls and dedicated-call boundaries under identical agent conditions. A technically expressible route is insufficient when it causes avoidable discovery, schema context, calls, backtracking, latency, or incomplete trust/freshness reconstruction. The current surface remains when best or tied; otherwise the smallest materially better compatible additive surface is implemented before the final system matrix and three-arm benchmark.
 
 Each normal workflow must use the same or fewer mandatory calls and must not regress file reads or total context. Extra bounded context is acceptable only when it avoids at least as much later context and improves the task result. Comparative public claims remain deferred to validated release results in #311.
 

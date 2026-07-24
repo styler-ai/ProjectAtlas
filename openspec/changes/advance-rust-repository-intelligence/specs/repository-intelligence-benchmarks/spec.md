@@ -12,6 +12,8 @@ Representative comparisons SHALL pin repository bytes, configuration, capabiliti
 
 Representative paired tasks SHALL compare the current candidate with ProjectAtlas 0.3.26 using the same local source bytes, configuration, prompt, model, permissions, and budgets, including dirty-worktree and non-Git cases. Results SHALL include source-selection correctness, purpose-plus-connection usefulness before summary, calls/time to first useful context, wrong/redundant choices, backtracking, full-file reads, broad-read escapes, total tool calls, emitted bytes, conservative context tokens, next-call usefulness, and task completion. Every normal startup, locate, inspect/summary, relations, and exact-slice workflow SHALL keep the same or fewer mandatory calls and SHALL not regress reads or total context. The candidate SHALL also meet the stronger predefined navigation targets used to ensure it is not merely equal to the prior release.
 
+After the complete v0.4 feature behavior is stable, one preregistered MCP composition evaluation SHALL cover six canonical questions: where behavior is implemented; which callers a symbol change affects; why a file is relevant; which relations are resolved, ambiguous, external, or unresolved; whether an edit invalidated dependent graph state; and the smallest trustworthy source slice after following a relationship. The evaluation SHALL compare the current compatible routes, additive request/payload/default/next-call changes, and the smallest credible dedicated or additional tool designs under identical clean, dirty-worktree, and non-Git fixtures and agent conditions. It SHALL measure answer and reusable-selector correctness, freshness/trust evidence, required calls, tool-discovery/schema and total context bytes, latency, backtracking, and bounded failure behavior. The current composition SHALL remain when it is best or tied; otherwise the smallest compatible additive v0.4 change or call set that materially improves the agent path SHALL be implemented and retested before the final release benchmark. No pre-v0.4 route may be removed or broken, and broader inventory removal, renaming, consolidation, or compact/default selection remains owned by issue #310.
+
 #### Scenario: Extra summary context avoids no later work
 - **WHEN** an enriched response grows but does not improve correctness or reduce later calls/reads/context
 - **THEN** the enrichment is simplified, made opt-in, or removed
@@ -23,6 +25,14 @@ Representative paired tasks SHALL compare the current candidate with ProjectAtla
 #### Scenario: Graph feature weakens the existing sieve
 - **WHEN** graph enrichment displaces a stronger purpose match, requires an extra mandatory call, trusts stale committed state over current local bytes, or adds context that prevents no later work
 - **THEN** the enrichment fails acceptance and is simplified, moved behind an opt-in view, or removed
+
+#### Scenario: Current MCP composition is only expressible, not effective
+- **WHEN** the existing calls can technically answer a canonical question but require avoidable discovery, schemas, calls, context, backtracking, or incomplete trust/freshness reconstruction compared with a credible compatible additive design
+- **THEN** the existing composition does not pass merely because it is expressible, and the smallest materially better additive schema or call surface is implemented and retested
+
+#### Scenario: Proposed MCP call adds no measured agent value
+- **WHEN** a dedicated or additional call does not improve correctness or the bounded agent path over the best existing-call composition
+- **THEN** the call is not added and the existing compatible surface remains authoritative
 
 ### Requirement: Resource Dimensions Remain Separate
 
