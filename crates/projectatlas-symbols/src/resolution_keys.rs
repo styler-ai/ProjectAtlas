@@ -15,7 +15,7 @@ use std::fmt;
 /// Maximum canonical keys emitted for one source, symbol, or relation fact.
 pub const MAX_RESOLUTION_KEYS_PER_FACT: usize = 64;
 /// Version of the currently implemented semantic relation-resolution contract.
-pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 1;
+pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 2;
 
 /// Return a deterministic digest of the live semantic resolution-key contract.
 ///
@@ -748,8 +748,8 @@ pub(super) fn strip_known_source_extension(path: &str) -> String {
 mod tests {
     use super::{
         ImportReference, ImportSyntax, RelationKind, ResolutionProjectionError,
-        derive_resolution_keys, parse_import_references, resolve_relative_import_path,
-        semantic_resolution_contract_digest,
+        SEMANTIC_RESOLUTION_CONTRACT_VERSION, derive_resolution_keys, parse_import_references,
+        resolve_relative_import_path, semantic_resolution_contract_digest,
     };
     use crate::extract_symbol_graph;
     use projectatlas_core::graph::{CanonicalResolutionKey, ProjectInstanceId};
@@ -773,10 +773,14 @@ mod tests {
 
     #[test]
     fn semantic_resolution_contract_digest_is_bounded_and_deterministic() {
+        const PRE_MODULE_CALLBACK_DIGEST: &str =
+            "487625adf2f9ec76f98034d4ef5667e707960b6b8afd280b213021cb64a0f10f";
         let first = semantic_resolution_contract_digest();
+        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 2);
         assert_eq!(first.len(), 64);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(first, semantic_resolution_contract_digest());
+        assert_ne!(first, PRE_MODULE_CALLBACK_DIGEST);
     }
 
     #[test]
@@ -891,6 +895,51 @@ mod tests {
             &rust_caller,
             &["execute"],
         )?;
+        let rust_module_target = extract_symbol_graph(
+            "src/config.rs",
+            Some("rust"),
+            "pub fn load_timeout_millis() -> u64 { 250 }\n",
+        );
+        let rust_module_caller = extract_symbol_graph(
+            "src/handler.rs",
+            Some("rust"),
+            "use crate::config;\npub fn health_response() { config::load_timeout_millis(); }\n",
+        );
+        assert_alias_resolution(
+            project,
+            Some("atlas"),
+            &rust_module_target,
+            "load_timeout_millis",
+            &rust_module_caller,
+            &["config::load_timeout_millis"],
+        )?;
+        let rust_callback_caller = extract_symbol_graph(
+            "src/router.rs",
+            Some("rust"),
+            "use crate::handler;\nfn dispatch(path: &str) -> Option<()> { (path == \"/health\").then(handler::health_response) }\n",
+        );
+        assert_alias_resolution(
+            project,
+            Some("atlas"),
+            &rust_module_caller,
+            "health_response",
+            &rust_callback_caller,
+            &["handler::health_response"],
+        )?;
+        let user_defined_then = extract_symbol_graph(
+            "src/scheduler.rs",
+            Some("rust"),
+            "use crate::handler;\nstruct Scheduler;\nimpl Scheduler { fn then(self, callback: fn()) { let _ = callback; } }\nfn schedule(scheduler: Scheduler) { scheduler.then(handler::health_response); }\n",
+        );
+        if user_defined_then.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Calls
+                && relation.target_name == "handler::health_response"
+        }) {
+            return Err(io::Error::other(
+                "a user-defined then method fabricated a callback call edge",
+            )
+            .into());
+        }
 
         let typescript_target = extract_symbol_graph(
             "src/shared/reader.ts",

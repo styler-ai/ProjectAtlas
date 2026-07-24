@@ -1672,7 +1672,7 @@ pub fn append_support_catalog_markdown(output: &mut String) -> fmt::Result {
         identity.schema_version, identity.catalog_version, identity.digest
     )?;
     output.push_str(
-        "\n`Complete` means conformance to the fixed ProjectAtlas navigation contract, not compiler, build-system, runtime, or whole-language completeness. The initial accepted complete-support inventory is empty; candidates remain at their achieved detected/parsed/symbol/semantic/benchmarked tiers until the final MCP navigation surface and independent review pass in task 7.3.\n\n",
+        "\n`Complete` means conformance to the fixed ProjectAtlas navigation contract, not compiler, build-system, runtime, or whole-language completeness. Final v0.4 MCP navigation revalidation retained every runtime candidate at its achieved detected/parsed/symbol/semantic/benchmarked tier: none has the complete schema-bound capability and agent-navigation evidence required for promotion.\n\n",
     );
     writeln!(
         output,
@@ -1735,7 +1735,7 @@ pub fn render_language_support_html() -> Result<String, fmt::Error> {
         "<p class=\"meta\">Complete-support schema <code>{}</code>; ecosystem catalog <code>{}</code>; catalog digest <code>{}</code>.</p>",
         identity.schema_version, identity.catalog_version, identity.digest
     )?;
-    output.push_str("<p><strong>Complete</strong> means the fixed ProjectAtlas navigation contract, not compiler, runtime, or whole-language completeness. The accepted complete inventory is empty until final MCP navigation revalidation and independent review. Planned and unavailable rows are documentation only and add nothing to runtime capability totals.</p>");
+    output.push_str("<p><strong>Complete</strong> means the fixed ProjectAtlas navigation contract, not compiler, runtime, or whole-language completeness. Final v0.4 MCP navigation revalidation retained every runtime candidate at its achieved tier because none has complete schema-bound capability and agent-navigation evidence. Planned and unavailable rows are documentation only and add nothing to runtime capability totals.</p>");
     output.push_str("<p>Detection selects a registry row; contained parsing and concrete fact providers retain honest provenance; typed resolution and atomic SQLite publication preserve exact occurrences; freshness-aware MCP navigation returns bounded selectors and exact source evidence. Maintained compatible grammars and standard queries are reused first. ProjectAtlas does not execute repository code, and absent optional packs do not burden core.</p>");
     output.push_str("<p>The <code>legacy-modernization</code> tag is navigation context, not an automatic-conversion or target-language claim. See the <a href=\"https://github.com/styler-ai/ProjectAtlas/blob/dev/docs/language-support.md\">generated Markdown authority</a>.</p>");
     output.push_str("<h2>Architecture paths</h2><ul>");
@@ -1879,14 +1879,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_is_valid_and_complete_inventory_is_truthfully_empty() -> Result<(), Box<dyn Error>> {
+    fn incomplete_candidate_profiles_remain_lower_tier() -> Result<(), Box<dyn Error>> {
         validate_support_catalog()?;
+        let candidates = candidate_support_profiles();
+        for candidate in &candidates {
+            let achieved = candidate.achieved;
+            if [
+                achieved.detected,
+                achieved.parsed,
+                achieved.symbols,
+                achieved.semantic,
+                achieved.benchmarked,
+            ]
+            .into_iter()
+            .all(|level| level == crate::language::CapabilitySupportLevel::Supported)
+            {
+                return Err(Box::new(invalid(format!(
+                    "candidate {:?} reached every capability axis without complete evidence review",
+                    candidate.id.as_str()
+                ))));
+            }
+        }
         require_test(
             ACCEPTED_COMPLETE_SUPPORT_PROFILES.is_empty(),
-            "complete-support inventory was promoted before final navigation review",
+            "incomplete candidate was promoted after final navigation review",
         )?;
         require_test(
-            !candidate_support_profiles().is_empty(),
+            !candidates.is_empty(),
             "runtime candidate projection is unexpectedly empty",
         )?;
         Ok(())

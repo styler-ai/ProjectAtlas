@@ -2983,6 +2983,21 @@ mod tests {
                 "use std::{fs, io};\npub fn caller() { private_helper(); }\nfn private_helper() {}\n",
             ),
             extract_symbol_graph(
+                "src/config.rs",
+                Some("rust"),
+                "pub fn load_timeout_millis() -> u64 { 250 }\n",
+            ),
+            extract_symbol_graph(
+                "src/handler.rs",
+                Some("rust"),
+                "use crate::config;\npub fn health_response() { config::load_timeout_millis(); }\n",
+            ),
+            extract_symbol_graph(
+                "src/router.rs",
+                Some("rust"),
+                "use crate::handler;\npub fn dispatch(path: &str) -> Option<()> { (path == \"/health\").then(handler::health_response) }\n",
+            ),
+            extract_symbol_graph(
                 "src/app.js",
                 Some("javascript"),
                 "import path from \"node:path\";\nexport function run() { return path.join('a', 'b'); }\n",
@@ -3144,6 +3159,18 @@ mod tests {
         require(
             resolved_symbols.contains(&("src/lib.rs".to_string(), "private_helper".to_string())),
             "reopened private Rust helper resolution is missing",
+        )?;
+        require(
+            resolved_symbols.contains(&(
+                "src/config.rs".to_string(),
+                "load_timeout_millis".to_string(),
+            )),
+            "reopened Rust module-qualified call resolution is missing",
+        )?;
+        require(
+            resolved_symbols
+                .contains(&("src/handler.rs".to_string(), "health_response".to_string())),
+            "reopened Rust callback resolution is missing",
         )?;
         reader.finish_index_read_snapshot()?;
         Ok(())

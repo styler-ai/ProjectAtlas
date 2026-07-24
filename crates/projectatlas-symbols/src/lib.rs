@@ -1414,6 +1414,70 @@ fn push_call_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
         node.start_position().row + 1,
         &context,
     );
+    if graph.language.as_deref() == Some("rust")
+        && rust_target_invokes_function_item(target_node, content)
+        && let Some(arguments) = node.child_by_field_name("arguments")
+        && let Some(callback) = first_named_child(arguments)
+        && callback.kind() == "scoped_identifier"
+    {
+        let callback = compact_text(node_text(callback, content).as_deref().unwrap_or(""));
+        if !callback.is_empty() && callback.len() <= MAX_SNIPPET_CHARS {
+            push_relation(
+                graph,
+                &source,
+                &callback,
+                RelationKind::Calls,
+                node.start_position().row + 1,
+                &context,
+            );
+        }
+    }
+}
+
+/// Return whether one Rust method target proves that its function-item argument is invoked.
+fn rust_target_invokes_function_item(target: Node<'_>, content: &str) -> bool {
+    if target.kind() != "field_expression"
+        || target
+            .child_by_field_name("field")
+            .and_then(|field| node_text(field, content))
+            .as_deref()
+            != Some("then")
+    {
+        return false;
+    }
+    target
+        .child_by_field_name("value")
+        .is_some_and(|receiver| rust_expression_is_definitely_bool(receiver, content))
+}
+
+/// Recognize Rust expressions whose syntax itself guarantees a Boolean value.
+fn rust_expression_is_definitely_bool(mut expression: Node<'_>, content: &str) -> bool {
+    while expression.kind() == "parenthesized_expression" {
+        let Some(inner) = first_named_child(expression) else {
+            return false;
+        };
+        expression = inner;
+    }
+    match expression.kind() {
+        "boolean_literal" => true,
+        "binary_expression" => {
+            let (Some(left), Some(right)) = (
+                expression.child_by_field_name("left"),
+                expression.child_by_field_name("right"),
+            ) else {
+                return false;
+            };
+            content
+                .get(left.end_byte()..right.start_byte())
+                .is_some_and(|operator| {
+                    matches!(
+                        operator.trim(),
+                        "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||"
+                    )
+                })
+        }
+        _ => false,
+    }
 }
 
 /// Return the first named child of a node.

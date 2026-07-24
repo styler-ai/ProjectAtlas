@@ -48,9 +48,13 @@ pub(super) fn parse_import(import_text: &str) -> Vec<ImportReference> {
         return Vec::new();
     }
     if components.len() <= 2 {
-        return module_reference(ImportSyntax::Rust, path, alias.unwrap_or(path))
-            .into_iter()
-            .collect();
+        return module_reference(
+            ImportSyntax::Rust,
+            path,
+            alias.unwrap_or(components.last().copied().unwrap_or(path)),
+        )
+        .into_iter()
+        .collect();
     }
     let Some((module, imported)) = path.rsplit_once("::") else {
         return Vec::new();

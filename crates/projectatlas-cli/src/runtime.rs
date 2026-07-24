@@ -932,6 +932,23 @@ fn index_derivation_fingerprint(
     #[cfg(feature = "optional-parser-supervisor")]
     optional_parser_selection: &OptionalParserPackProjectSelection,
 ) -> String {
+    index_derivation_fingerprint_with_semantic_digest(
+        scan_options,
+        text_options,
+        #[cfg(feature = "optional-parser-supervisor")]
+        optional_parser_selection,
+        &semantic_resolution_contract_digest(),
+    )
+}
+
+/// Hash one exact parser, semantic, and source-selection contract.
+fn index_derivation_fingerprint_with_semantic_digest(
+    scan_options: &ScanOptions,
+    text_options: TextIndexOptions,
+    #[cfg(feature = "optional-parser-supervisor")]
+    optional_parser_selection: &OptionalParserPackProjectSelection,
+    semantic_resolution_digest: &str,
+) -> String {
     let mut hasher = Hasher::new();
     hash_index_contract_value(
         &mut hasher,
@@ -961,7 +978,7 @@ fn index_derivation_fingerprint(
     hash_index_contract_value(
         &mut hasher,
         "semantic_resolution_contract_digest",
-        &semantic_resolution_contract_digest(),
+        semantic_resolution_digest,
     );
     for value in &scan_options.exclude_dir_names {
         hash_index_contract_value(&mut hasher, "exclude_dir_name", value);
@@ -8708,6 +8725,95 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             &Some(root_before),
             "authored purpose after purpose-import rollback",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_contract_revision_forces_full_projection_refresh() -> Result<(), Box<dyn Error>> {
+        const PRE_MODULE_CALLBACK_DIGEST: &str =
+            "487625adf2f9ec76f98034d4ef5667e707960b6b8afd280b213021cb64a0f10f";
+        let temp = tempfile::tempdir()?;
+        let atlas_dir = temp.path().join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        fs::create_dir_all(temp.path().join("src"))?;
+        fs::write(
+            temp.path().join("src/config.rs"),
+            "pub fn load_timeout_millis() -> u64 { 250 }\n",
+        )?;
+        fs::write(
+            temp.path().join("src/handler.rs"),
+            "use crate::config;\npub fn health_response() { let _ = config::load_timeout_millis(); }\n",
+        )?;
+        fs::write(
+            temp.path().join("src/router.rs"),
+            "use crate::handler;\npub fn dispatch(path: &str) -> Option<()> { (path == \"/health\").then(handler::health_response) }\n",
+        )?;
+
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
+        let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let db_path = atlas_dir.join("projectatlas.db");
+        let mut store = open_atlas_store_for_project(&db_path, &plan.root)?;
+        run_scan_pipeline(&mut store, &plan, &symbol_options)?;
+        let current_fingerprint = plan.publication_contract_fingerprint();
+        let legacy_fingerprint = index_derivation_fingerprint_with_semantic_digest(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            PRE_MODULE_CALLBACK_DIGEST,
+        );
+        if legacy_fingerprint == current_fingerprint {
+            return Err(io::Error::other(
+                "semantic contract revision did not change the derivation fingerprint",
+            )
+            .into());
+        }
+
+        let current_generation = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("current publication missing"))?
+            .generation;
+        store
+            .begin_index_publication_from(&legacy_fingerprint, current_generation)?
+            .complete()?;
+        if publication_contract_matches(&store, &plan)? {
+            return Err(io::Error::other(
+                "prior semantic contract unexpectedly matched the current plan",
+            )
+            .into());
+        }
+
+        let stale_generation = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("stale publication missing"))?
+            .generation;
+        let control = standalone_index_work_control();
+        refresh_index_controlled(&mut store, &plan, &symbol_options, &control)?;
+        let refreshed = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("refreshed publication missing"))?;
+        if refreshed.generation <= stale_generation
+            || refreshed.contract_fingerprint.as_deref() != Some(current_fingerprint.as_str())
+        {
+            return Err(io::Error::other(
+                "semantic contract mismatch did not force a current full publication",
+            )
+            .into());
+        }
+        let graphs = store.load_symbol_graphs_for_paths(&["src/router.rs".to_string()])?;
+        if !graphs
+            .iter()
+            .flat_map(|graph| &graph.relations)
+            .any(|relation| {
+                relation.kind == projectatlas_core::symbols::RelationKind::Calls
+                    && relation.target_name == "handler::health_response"
+            })
+        {
+            return Err(io::Error::other(
+                "semantic refresh did not publish the comparison-then callback edge",
+            )
+            .into());
+        }
         Ok(())
     }
 

@@ -1137,13 +1137,13 @@ pub fn load_detailed_relation_page(
     }
 
     if inspected_edges >= budget.edges()
-        && traversal_has_work(&state)
+        && traversal_has_work(&state, budget.depth())
         && !terminal_limit
         && !exhausted
     {
         push_limit(&mut reached_limits, GraphLimitKind::Edges);
     }
-    if selected.len() >= budget.page_rows() as usize && traversal_has_work(&state) {
+    if selected.len() >= budget.page_rows() as usize && traversal_has_work(&state, budget.depth()) {
         push_limit(&mut reached_limits, GraphLimitKind::Rows);
     }
     let relation_digests = selected
@@ -1256,7 +1256,7 @@ pub fn load_detailed_relation_page(
 
     let old_emitted = state.emitted_rows;
     state.emitted_rows = state.emitted_rows.saturating_add(rows.len() as u64);
-    let traversal_remaining = traversal_has_work(&state);
+    let traversal_remaining = traversal_has_work(&state, budget.depth());
     let has_more = traversal_remaining && !terminal_limit;
     let continuation = has_more
         .then(|| encode_relation_cursor(&cursor_binding, &state, budget))
@@ -1592,10 +1592,10 @@ fn traversal_path(
 }
 
 /// Whether the bounded traversal state can make progress on a later page.
-fn traversal_has_work(state: &RelationTraversalState) -> bool {
+fn traversal_has_work(state: &RelationTraversalState, maximum_depth: u32) -> bool {
     (state.pending_index as usize) < state.pending.len()
         || (state.frontier_index as usize) < state.frontier.len()
-        || !state.next_frontier.is_empty()
+        || (!state.next_frontier.is_empty() && state.depth < maximum_depth)
 }
 
 /// Resolve one exact file or symbol anchor without falling back to discovery.
@@ -2388,6 +2388,34 @@ mod tests {
     use std::io;
     use std::path::Path;
     use std::thread;
+
+    #[test]
+    fn maximum_depth_does_not_advertise_an_unusable_continuation() {
+        let state = RelationTraversalState {
+            depth: 1,
+            nodes: vec![
+                TraversalNodeState {
+                    digest: [1; 32],
+                    parent: None,
+                },
+                TraversalNodeState {
+                    digest: [2; 32],
+                    parent: Some(0),
+                },
+            ],
+            frontier: vec![0],
+            frontier_index: 1,
+            next_frontier: vec![1],
+            adjacency: None,
+            pending: Vec::new(),
+            pending_index: 0,
+            emitted_rows: 1,
+            pruned_paths: 0,
+        };
+
+        assert!(!traversal_has_work(&state, 1));
+        assert!(traversal_has_work(&state, 2));
+    }
 
     #[test]
     fn detailed_relations_are_node_simple_ranked_and_purpose_aware() -> Result<(), Box<dyn Error>> {

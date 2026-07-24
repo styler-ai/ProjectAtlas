@@ -290,7 +290,7 @@ Broad candidate rows are admitted only when the pinned catalog supplies a stable
 
 Complete-support schema version: `1`. Ecosystem catalog version: `1`. Catalog digest: `db48ea50e2c770edeb94865bdd2f22887c110001558974b2aaf828214210b6ab`.
 
-`Complete` means conformance to the fixed ProjectAtlas navigation contract, not compiler, build-system, runtime, or whole-language completeness. The initial accepted complete-support inventory is empty; candidates remain at their achieved detected/parsed/symbol/semantic/benchmarked tiers until the final MCP navigation surface and independent review pass in task 7.3.
+`Complete` means conformance to the fixed ProjectAtlas navigation contract, not compiler, build-system, runtime, or whole-language completeness. Final v0.4 MCP navigation revalidation retained every runtime candidate at its achieved detected/parsed/symbol/semantic/benchmarked tier: none has the complete schema-bound capability and agent-navigation evidence required for promotion.
 
 Catalog profile counts stay separate: **29** languages, **22** dialects, **11** domain formats, and **21** framework projections. Current assessment: **23** lower-tier runtime candidates, **12** planned documentation rows, **48** unavailable documentation rows, and **0** accepted complete profiles.
 

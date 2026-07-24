@@ -3077,9 +3077,16 @@ fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<
     )?;
     for required in [
         "For task-directed work in an existing indexed repository",
-        "`atlas_session_brief` at task-oriented startup",
-        "`atlas_session_brief` at task-oriented startup with `query`, `project_path` when needed, and `compact: true`",
+        "`atlas_session_brief` once at task-oriented startup",
+        "`atlas_session_brief` once at task-oriented startup with `query`, `project_path` when needed, and `compact: true`",
+        "start with `file_limit: 3`, `folder_limit: 3`, `blocker_limit: 1`, and `purpose_limit: 1`",
+        "do not restart the brief",
         "returned `atlas_file_summary` recommendation with `compact: true`",
+        "compact summary's crisp connections for an ordinary direct caller",
+        "Do not add a relation call merely to reconfirm a trusted `called_by` or call row",
+        "Request occurrences only when the call-site span itself is needed",
+        "Public exposure is not an inbound-caller question",
+        "a reviewed purpose and nested `pub` declaration are selection evidence, not exposure proof",
         "Follow its typed next call directly",
         "`connections_truncated` describes the compact sample",
         "Do not guess a symbol line or other disambiguator",
@@ -8027,6 +8034,9 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":29,"method":"tools/call","params":{"name":"atlas_session_brief","arguments":{"query":"src/lib.rs","compact":true}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"atlas_session_brief","arguments":{"query":"src/lib.rs"}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":"src/lib.rs"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"detailed","compact":true,"file":"src/lib.rs","symbol":"indexed","symbol_parent":"","direction":"outbound","include_occurrences":true,"limit":10,"output_bytes":65536}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"detailed","compact":true,"file":"src/lib.rs","symbol":"indexed","direction":"outbound","include_occurrences":true,"limit":10,"output_bytes":2048}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"compact":true,"file":"src/lib.rs","symbol":"indexed","direction":"outbound","limit":10}}}"#.to_string(),
     ];
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let stdout = run_mcp_stdio(
@@ -8050,6 +8060,9 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
     let compact_session_brief_text = mcp_tool_text(&stdout, 29)?;
     let legacy_default_brief_text = mcp_tool_text(&stdout, 30)?;
     let legacy_default_summary_text = mcp_tool_text(&stdout, 31)?;
+    let compact_relations_text = mcp_tool_text(&stdout, 32)?;
+    let bounded_compact_relations_text = mcp_tool_text(&stdout, 33)?;
+    let rejected_legacy_compact_text = mcp_tool_text(&stdout, 34)?;
     let session_brief_has_ready_call = session_brief_text.contains("target: atlas_file_summary")
         && session_brief_text.contains("file: src/lib.rs");
     if !stdout.contains(r#""id":1"#)
@@ -8113,6 +8126,9 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || recommended_summary_text.contains("source_status:")
         || recommended_summary_text.contains("total_functions:")
         || recommended_summary_text.contains("coverage:")
+        || recommended_summary_text.contains("documentation: \"\"")
+        || recommended_summary_text.contains("parent: \"\"")
+        || recommended_summary_text.contains("called_by[0]")
         || !expanded_summary_text.contains("source_status: \"live-source\"")
         || !expanded_summary_text.contains("total_functions:")
         || !expanded_summary_text.contains("coverage:")
@@ -8124,6 +8140,16 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !trace_text.contains("status: confirmed")
         || !trace_text.contains("name: helper")
         || !trace_text.contains("capability: symbol_slice")
+        || !compact_relations_text.contains("symbol_relations:")
+        || !compact_relations_text.contains("returned: 1")
+        || !compact_relations_text.contains("status: resolved")
+        || !compact_relations_text.contains("confidence: exact")
+        || !compact_relations_text.contains("completeness: complete")
+        || !compact_relations_text.contains("next_call:")
+        || !bounded_compact_relations_text
+            .contains("graph output byte limit is too small for the empty response envelope")
+        || !rejected_legacy_compact_text
+            .contains("compact symbol relations require view=detailed")
     {
         return Err(io::Error::other(format!(
             "mcp stdout did not include expected payloads: {stdout}"
@@ -14874,7 +14900,11 @@ fn assert_legacy_mcp_surface_compatible(stdout: &str) -> Result<(), Box<dyn Erro
                 .ok_or_else(|| io::Error::other(format!("current schema missing for {name}")))?,
         )?;
     }
-    for name in ["atlas_session_brief", "atlas_file_summary"] {
+    for name in [
+        "atlas_session_brief",
+        "atlas_file_summary",
+        "atlas_symbol_relations",
+    ] {
         let properties = current_by_name[name]
             .get("inputSchema")
             .and_then(|schema| schema.get("properties"))

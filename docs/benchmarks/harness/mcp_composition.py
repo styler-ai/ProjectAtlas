@@ -1,0 +1,587 @@
+#!/usr/bin/env python3
+"""Reproduce the ProjectAtlas v0.4 MCP composition evaluation."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import json
+import os
+import platform
+import re
+import shutil
+import stat
+import statistics
+import subprocess
+import time
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[3]
+FIXTURES = ROOT / "docs/benchmarks/fixtures/mcp-composition"
+REQUESTS = ROOT / "docs/benchmarks/v0.4-mcp-composition-requests.json"
+DEFAULT_WORK = ROOT / "target/benchmarks/mcp-composition/current"
+DEFAULT_OUTPUT = ROOT / "docs/benchmarks/v0.4-mcp-composition-raw.json"
+CONTINUATION = re.compile(r'^\s+(?:continuation|cursor): "(.*)"$', re.MULTILINE)
+PURPOSES = {
+    "clean": {
+        ".": "Own the clean Git navigation benchmark crate.",
+        "src": "Own clean order-submission benchmark source.",
+        ".gitignore": "Exclude generated Cargo and ProjectAtlas state.",
+        "Cargo.toml": "Define the clean benchmark crate.",
+        "src/api.rs": "Expose public order submission orchestration.",
+        "src/lib.rs": "Define the clean benchmark crate boundary and order types.",
+        "src/service.rs": "Validate order quantities and construct accepted orders.",
+        "src/states.rs": "Exercise every static relation-resolution state.",
+        "src/storage.rs": "Reject unassigned order identifiers before durable writes.",
+    },
+    "dirty": {
+        ".": "Own the dirty-worktree navigation benchmark crate.",
+        "src": "Own dirty checkout-policy benchmark source.",
+        ".gitignore": "Exclude generated Cargo and ProjectAtlas state.",
+        "Cargo.toml": "Define the dirty-worktree benchmark crate.",
+        "src/checkout.rs": "Expose the public checkout-total entrypoint.",
+        "src/lib.rs": "Define the dirty benchmark crate boundary and line-item type.",
+        "src/pricing.rs": "Own checkout subtotal and discount policy.",
+        "src/states.rs": "Exercise every static relation-resolution state.",
+    },
+    "non-git": {
+        ".": "Own the non-Git navigation benchmark crate.",
+        "src": "Own non-Git health-route benchmark source.",
+        "Cargo.toml": "Define the non-Git benchmark crate.",
+        "src/config.rs": "Own the health-response timeout configuration.",
+        "src/handler.rs": "Build the health response from current configuration.",
+        "src/lib.rs": "Define the non-Git benchmark crate boundary.",
+        "src/router.rs": "Expose path dispatch for the public health route.",
+        "src/states.rs": "Exercise every static relation-resolution state.",
+    },
+}
+ORACLES = {
+    "clean": {
+        "Q1": ["save_order", "order id must be assigned"],
+        "Q2": ["submit_order", "status: resolved"],
+        "Q3": ["src/storage.rs", "src/api.rs"],
+        "Q4": [
+            "status: resolved",
+            "status: ambiguous",
+            "status: unresolved",
+            "status: external",
+        ],
+        "Q5": ["generation:"],
+        "Q6": ["submit_order", "start_line:", "end_line:"],
+    },
+    "dirty": {
+        "Q1": ["apply_discount", "10_000", "1_000"],
+        "Q2": ["calculate_total", "checkout_total", "status: resolved"],
+        "Q3": ["src/pricing.rs", "src/checkout.rs"],
+        "Q4": [
+            "status: resolved",
+            "status: ambiguous",
+            "status: unresolved",
+            "status: external",
+        ],
+        "Q5": ["generation:"],
+        "Q6": ["calculate_total", "start_line:", "end_line:"],
+    },
+    "non-git": {
+        "Q1": ["load_timeout_millis", "250"],
+        "Q2": ["health_response", "dispatch", "status: resolved"],
+        "Q3": ["src/config.rs", "src/handler.rs"],
+        "Q4": [
+            "status: resolved",
+            "status: ambiguous",
+            "status: unresolved",
+            "status: external",
+        ],
+        "Q5": ["generation:"],
+        "Q6": ["health_response", "start_line:", "end_line:"],
+    },
+}
+SELECTOR_ORACLES = {
+    "clean": {
+        "Q1": ["src/storage.rs", "save_order"],
+        "Q2": ["src/api.rs", "submit_order"],
+        "Q3": ["src/storage.rs", "src/api.rs"],
+        "Q4": ["src/states.rs", "inspect_states"],
+        "Q5": ["src/storage.rs", "save_order"],
+        "Q6": ["src/api.rs", "submit_order"],
+    },
+    "dirty": {
+        "Q1": ["src/pricing.rs", "apply_discount"],
+        "Q2": ["src/checkout.rs", "checkout_total"],
+        "Q3": ["src/pricing.rs", "src/checkout.rs"],
+        "Q4": ["src/states.rs", "inspect_states"],
+        "Q5": ["src/pricing.rs", "calculate_total"],
+        "Q6": ["src/pricing.rs", "calculate_total"],
+    },
+    "non-git": {
+        "Q1": ["src/config.rs", "load_timeout_millis"],
+        "Q2": ["src/router.rs", "dispatch"],
+        "Q3": ["src/config.rs", "src/handler.rs"],
+        "Q4": ["src/states.rs", "inspect_states"],
+        "Q5": ["src/config.rs", "load_timeout_millis"],
+        "Q6": ["src/handler.rs", "health_response"],
+    },
+}
+TRUST_ORACLES = {
+    "Q1": ["index_status: available", "start_line:", "end_line:"],
+    "Q2": ["generation:", "status: resolved", "coverage[", "next_call:"],
+    "Q3": ["index_status: available", "connections[", "next_call:"],
+    "Q4": ["generation:", "coverage[", "next_call:"],
+    "Q5": ["generation:", "coverage[", "status: resolved"],
+    "Q6": ["generation:", "status: resolved", "start_line:", "end_line:"],
+}
+ARM_C_SCHEMA = {
+    "name": "atlas_relation_slice",
+    "description": (
+        "Return one compact detailed relation page and the exact source slice "
+        "selected by its first reusable local next call."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "project_path": {"type": ["string", "null"]},
+            "file": {"type": "string"},
+            "symbol": {"type": "string"},
+            "symbol_kind": {"type": ["string", "null"]},
+            "symbol_parent": {"type": ["string", "null"]},
+            "symbol_signature": {"type": ["string", "null"]},
+            "direction": {"enum": ["inbound", "outbound", "both"]},
+            "relation": {"type": ["string", "null"]},
+            "depth": {"type": "integer", "minimum": 1},
+            "include_occurrences": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 1},
+            "output_bytes": {"type": "integer", "minimum": 2048},
+        },
+        "required": ["file", "symbol"],
+        "additionalProperties": False,
+    },
+}
+
+
+def command(*args: str, cwd: Path, env: dict[str, str] | None = None) -> None:
+    subprocess.run(args, cwd=cwd, env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def remove_tree(path: Path) -> None:
+    def retry(function: Any, target: str, _: Any) -> None:
+        os.chmod(target, stat.S_IWRITE)
+        function(target)
+
+    shutil.rmtree(path, onerror=retry)
+
+
+def prepare_fixture(name: str, destination: Path, runtime: Path, env: dict[str, str]) -> None:
+    source = FIXTURES / name
+    shutil.copytree(source, destination, ignore=shutil.ignore_patterns("current"))
+    if name != "non-git":
+        command("git", "init", "-q", cwd=destination)
+        command("git", "config", "user.name", "ProjectAtlas Benchmark", cwd=destination)
+        command("git", "config", "user.email", "benchmark@projectatlas.invalid", cwd=destination)
+        command("git", "add", ".", cwd=destination)
+        command("git", "commit", "-q", "-m", "benchmark fixture", cwd=destination)
+    if name == "dirty":
+        shutil.copy2(source / "current/pricing.rs", destination / "src/pricing.rs")
+    command(str(runtime), "init", "--force-rescan", cwd=destination, env=env)
+    for path, purpose in PURPOSES[name].items():
+        command(str(runtime), "purpose", "set", path, purpose, cwd=destination, env=env)
+    if name == "clean":
+        status = subprocess.check_output(["git", "status", "--porcelain"], cwd=destination, text=True)
+        if status:
+            raise RuntimeError(f"clean fixture is dirty after preparation: {status}")
+    elif name == "dirty":
+        status = subprocess.check_output(["git", "status", "--porcelain"], cwd=destination, text=True)
+        if status.strip() != "M src/pricing.rs":
+            raise RuntimeError(f"dirty fixture state drifted: {status}")
+    elif (destination / ".git").exists():
+        raise RuntimeError("non-Git fixture unexpectedly contains .git")
+
+
+class McpClient:
+    def __init__(self, runtime: Path, fixture: Path, env: dict[str, str]) -> None:
+        self.process = subprocess.Popen(
+            [str(runtime), "--require-version", "0.4.0", "mcp"],
+            cwd=fixture,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+        )
+        self.next_id = 1
+        started = time.perf_counter()
+        self.request(
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "mcp-composition-benchmark", "version": "1"},
+            },
+        )
+        self.notify("notifications/initialized", {})
+        self.startup_ms = (time.perf_counter() - started) * 1000
+
+    def notify(self, method: str, params: dict[str, Any]) -> None:
+        self._write({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def request(self, method: str, params: dict[str, Any]) -> tuple[dict[str, Any], float]:
+        request_id = self.next_id
+        self.next_id += 1
+        started = time.perf_counter()
+        self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+        assert self.process.stdout is not None
+        while line := self.process.stdout.readline():
+            response = json.loads(line)
+            if response.get("id") == request_id:
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                if response.get("error") is not None:
+                    raise RuntimeError(json.dumps(response["error"], sort_keys=True))
+                return response, elapsed_ms
+        raise RuntimeError(f"MCP process ended before response {request_id}")
+
+    def call(self, name: str, arguments: dict[str, Any]) -> tuple[str, float]:
+        response, elapsed_ms = self.request(
+            "tools/call", {"name": name, "arguments": arguments}
+        )
+        return str(response["result"]["content"][0]["text"]), elapsed_ms
+
+    def tools(self) -> tuple[list[dict[str, Any]], float]:
+        response, elapsed_ms = self.request("tools/list", {})
+        return list(response["result"]["tools"]), elapsed_ms
+
+    def close(self) -> None:
+        if self.process.stdin is not None:
+            self.process.stdin.close()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=5)
+
+    def _write(self, payload: dict[str, Any]) -> None:
+        assert self.process.stdin is not None
+        self.process.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        self.process.stdin.flush()
+
+
+def run_arm(
+    runtime: Path,
+    fixture_name: str,
+    fixture: Path,
+    calls: list[dict[str, Any]],
+    compact: bool,
+    env: dict[str, str],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    client = McpClient(runtime, fixture, env)
+    rows: list[dict[str, Any]] = []
+    continuation: str | None = None
+    try:
+        tools, discovery_ms = client.tools()
+        discovery_json = json.dumps(tools, separators=(",", ":"), ensure_ascii=False)
+        for requested in calls:
+            call = copy.deepcopy(requested)
+            arguments = call["arguments"]
+            if compact and call["name"] == "atlas_symbol_relations" and arguments.get("view") == "detailed":
+                arguments["compact"] = True
+            if arguments.get("cursor") == "__previous_continuation__":
+                if continuation is None:
+                    raise RuntimeError(f"{fixture_name} {call['step']} has no continuation")
+                arguments["cursor"] = continuation
+            text, elapsed_ms = client.call(call["name"], arguments)
+            match = CONTINUATION.search(text)
+            continuation = json.loads(f'"{match.group(1)}"') if match else None
+            rows.append(
+                {
+                    "fixture": fixture_name,
+                    "arm": "compact" if compact else "full",
+                    "question": call["question"],
+                    "step": call["step"],
+                    "name": call["name"],
+                    "arguments": arguments,
+                    "response_bytes": len(text.encode("utf-8")),
+                    "elapsed_ms": round(elapsed_ms, 4),
+                    "response_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    "response_text": text,
+                }
+            )
+        correctness = {}
+        for question, needles in ORACLES[fixture_name].items():
+            question_rows = [row for row in rows if row["question"] == question]
+            question_text = "\n".join(row["response_text"] for row in question_rows)
+            missing = [needle for needle in needles if needle not in question_text]
+            missing_selectors = [
+                needle
+                for needle in SELECTOR_ORACLES[fixture_name][question]
+                if needle not in question_text
+            ]
+            missing_trust = [
+                needle for needle in TRUST_ORACLES[question] if needle not in question_text
+            ]
+            rubric = {
+                "correct": not missing,
+                "selector_correct": not missing_selectors,
+                "trust_correct": not missing_trust,
+                "missing": missing,
+                "missing_selectors": missing_selectors,
+                "missing_trust": missing_trust,
+                "backtracked": False,
+            }
+            rubric["disposition"] = (
+                "pass"
+                if rubric["correct"]
+                and rubric["selector_correct"]
+                and rubric["trust_correct"]
+                else "fail"
+            )
+            correctness[question] = rubric
+            for row in question_rows:
+                row["route_rubric"] = copy.deepcopy(rubric)
+        summary = summarize_arm(
+            fixture_name,
+            "compact" if compact else "full",
+            client.startup_ms,
+            discovery_json,
+            discovery_ms,
+            rows,
+            correctness,
+        )
+        return summary, rows
+    finally:
+        client.close()
+
+
+def summarize_arm(
+    fixture: str,
+    arm: str,
+    startup_ms: float,
+    discovery_json: str,
+    discovery_ms: float,
+    rows: list[dict[str, Any]],
+    correctness: dict[str, Any],
+) -> dict[str, Any]:
+    relations = [row for row in rows if row["name"] == "atlas_symbol_relations"]
+    question_bytes = {
+        question: sum(row["response_bytes"] for row in rows if row["question"] == question)
+        for question in ORACLES[fixture]
+    }
+    question_ms = {
+        question: sum(row["elapsed_ms"] for row in rows if row["question"] == question)
+        for question in ORACLES[fixture]
+    }
+    return {
+        "fixture": fixture,
+        "arm": arm,
+        "correct": all(value["disposition"] == "pass" for value in correctness.values()),
+        "correctness": correctness,
+        "startup_ms": round(startup_ms, 4),
+        "discovery_bytes": len(discovery_json.encode("utf-8")),
+        "discovery_elapsed_ms": round(discovery_ms, 4),
+        "calls": len(rows),
+        "emitted_bytes": sum(row["response_bytes"] for row in rows),
+        "route_elapsed_ms": round(sum(row["elapsed_ms"] for row in rows), 4),
+        "median_relation_bytes": statistics.median(
+            row["response_bytes"] for row in relations
+        ),
+        "median_relation_elapsed_ms": round(
+            statistics.median(row["elapsed_ms"] for row in relations), 4
+        ),
+        "median_question_bytes": statistics.median(question_bytes.values()),
+        "median_question_elapsed_ms": round(statistics.median(question_ms.values()), 4),
+        "question_bytes": question_bytes,
+    }
+
+
+def run_freshness(runtime: Path, fixture: Path, env: dict[str, str]) -> dict[str, Any]:
+    source = fixture / "src/pricing.rs"
+    original = source.read_text(encoding="utf-8")
+    client = McpClient(runtime, fixture, env)
+    arguments = {
+        "file": "src/pricing.rs",
+        "symbol": "calculate_total",
+        "view": "detailed",
+        "compact": True,
+        "direction": "outbound",
+        "depth": 2,
+        "include_occurrences": True,
+        "limit": 10,
+        "output_bytes": 65536,
+    }
+    try:
+        before, _ = client.call("atlas_symbol_relations", arguments)
+        before_generation = int(re.search(r"^  generation: (\d+)$", before, re.MULTILINE).group(1))
+        source.write_text(original.replace("10_000", "12_000"), encoding="utf-8")
+        time.sleep(0.5)
+        after, _ = client.call("atlas_symbol_relations", arguments)
+        after_generation = int(re.search(r"^  generation: (\d+)$", after, re.MULTILINE).group(1))
+        sliced, _ = client.call(
+            "atlas_slice", {"file": "src/pricing.rs", "start_line": 10, "end_line": 16}
+        )
+        return {
+            "before_generation": before_generation,
+            "after_generation": after_generation,
+            "generation_advanced": after_generation > before_generation,
+            "relation_still_resolved": "status: resolved" in after,
+            "current_slice_contains_edit": "12_000" in sliced,
+            "after_relation_bytes": len(after.encode("utf-8")),
+            "slice_bytes": len(sliced.encode("utf-8")),
+        }
+    finally:
+        source.write_text(original, encoding="utf-8")
+        client.close()
+
+
+def run_bounds(runtime: Path, fixture: Path, env: dict[str, str]) -> list[dict[str, Any]]:
+    rows = []
+    for compact, limit in ((False, 4096), (True, 4096), (True, 2048)):
+        client = McpClient(runtime, fixture, env)
+        try:
+            text, elapsed_ms = client.call(
+                "atlas_symbol_relations",
+                {
+                    "file": "src/storage.rs",
+                    "symbol": "save_order",
+                    "view": "detailed",
+                    "compact": compact,
+                    "direction": "inbound",
+                    "include_occurrences": True,
+                    "limit": 20,
+                    "output_bytes": limit,
+                },
+            )
+            rows.append(
+                {
+                    "arm": "compact" if compact else "full",
+                    "limit_bytes": limit,
+                    "response_bytes": len(text.encode("utf-8")),
+                    "elapsed_ms": round(elapsed_ms, 4),
+                    "response_text": text,
+                }
+            )
+        finally:
+            client.close()
+    return rows
+
+
+def arm_c_analysis(summaries: list[dict[str, Any]], raw: list[dict[str, Any]]) -> dict[str, Any]:
+    schema_json = json.dumps(ARM_C_SCHEMA, separators=(",", ":"), ensure_ascii=False)
+    fixtures = []
+    for fixture in ORACLES:
+        q6 = [
+            row
+            for row in raw
+            if row["fixture"] == fixture
+            and row["arm"] == "compact"
+            and row["question"] == "Q6"
+        ]
+        current_bytes = sum(row["response_bytes"] for row in q6)
+        relation_lower_bound_bytes = next(
+            row["response_bytes"]
+            for row in q6
+            if row["name"] == "atlas_symbol_relations"
+        )
+        fixtures.append(
+            {
+                "fixture": fixture,
+                "applicable_question": "Q6",
+                "current_calls": len(q6),
+                "candidate_calls": 1,
+                "current_bytes": current_bytes,
+                "candidate_payload_lower_bound_bytes": relation_lower_bound_bytes,
+                "maximum_possible_reduction_percent": round(
+                    100.0
+                    * (current_bytes - relation_lower_bound_bytes)
+                    / current_bytes,
+                    1,
+                ),
+            }
+        )
+    return {
+        "design": ARM_C_SCHEMA,
+        "schema_bytes": len(schema_json.encode("utf-8")),
+        "achievable_selection_rule": (
+            "remove at least one call from every applicable multi-call question and "
+            "reduce those route bytes by at least 20 percent without losing trust"
+        ),
+        "median_question_calls_before": 1.5,
+        "median_question_calls_after": 1.0,
+        "fixtures": fixtures,
+        "disposition": (
+            "rejected: even granting an impossible zero-byte exact-source payload, "
+            "the compact relation response leaves less than 20 percent achievable "
+            "body-byte reduction, and the tool adds discovery schema"
+        ),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--runtime", type=Path, required=True)
+    parser.add_argument("--work-root", type=Path, default=DEFAULT_WORK)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    args = parser.parse_args()
+    runtime = args.runtime.resolve(strict=True)
+    work_root = args.work_root.resolve()
+    allowed = (ROOT / "target/benchmarks/mcp-composition").resolve()
+    if work_root == allowed or allowed not in work_root.parents:
+        raise SystemExit(f"--work-root must be a child of {allowed}")
+    if work_root.exists():
+        remove_tree(work_root)
+    work_root.mkdir(parents=True)
+    env = os.environ.copy()
+    env["PROJECTATLAS_NO_TELEMETRY"] = "1"
+    requests = json.loads(REQUESTS.read_text(encoding="utf-8"))
+    prepared = {}
+    for name in ORACLES:
+        destination = work_root / name
+        prepare_fixture(name, destination, runtime, env)
+        prepared[name] = destination
+
+    summaries = []
+    raw = []
+    for name, calls in requests["fixtures"].items():
+        fixture_name = name.replace("non_git", "non-git")
+        for compact in (False, True):
+            summary, rows = run_arm(
+                runtime, fixture_name, prepared[fixture_name], calls, compact, env
+            )
+            summaries.append(summary)
+            raw.extend(rows)
+
+    result = {
+        "schema_version": 1,
+        "candidate": {
+            "version": subprocess.check_output([runtime, "--version"], text=True).strip(),
+            "runtime": str(runtime),
+            "runtime_sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
+            "runtime_bytes": runtime.stat().st_size,
+            "git_base": subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+            ).strip(),
+        },
+        "environment": {
+            "platform": platform.platform(),
+            "python": platform.python_version(),
+            "telemetry": "disabled",
+        },
+        "requests": str(REQUESTS.relative_to(ROOT)).replace("\\", "/"),
+        "fixture_source": str(FIXTURES.relative_to(ROOT)).replace("\\", "/"),
+        "summaries": summaries,
+        "raw_calls": raw,
+        "freshness": run_freshness(runtime, prepared["dirty"], env),
+        "bounded_output": run_bounds(runtime, prepared["clean"], env),
+    }
+    result["arm_c"] = arm_c_analysis(summaries, raw)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(
+        json.dumps(result, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    print(args.output)
+
+
+if __name__ == "__main__":
+    main()

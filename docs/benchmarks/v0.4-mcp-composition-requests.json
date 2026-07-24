@@ -1,0 +1,372 @@
+{
+  "schema_version": 1,
+  "compact_arm_rule": "add compact=true to every detailed atlas_symbol_relations request",
+  "continuation_rule": "replace __previous_continuation__ with the preceding relation response continuation",
+  "fixtures": {
+    "clean": [
+      {
+        "question": "Q1",
+        "step": "rank",
+        "name": "atlas_session_brief",
+        "arguments": {
+          "query": "Where is rejection of an unassigned order ID implemented?",
+          "compact": true
+        }
+      },
+      {
+        "question": "Q1",
+        "step": "trust",
+        "name": "atlas_file_summary",
+        "arguments": {
+          "file": "src/storage.rs",
+          "compact": true
+        }
+      },
+      {
+        "question": "Q1",
+        "step": "source",
+        "name": "atlas_slice",
+        "arguments": {
+          "file": "src/storage.rs",
+          "symbol": "save_order",
+          "symbol_kind": "function",
+          "symbol_line": 5
+        }
+      },
+      {
+        "question": "Q2",
+        "step": "callers",
+        "name": "atlas_symbol_relations",
+        "arguments": {
+          "file": "src/storage.rs",
+          "symbol": "save_order",
+          "view": "detailed",
+          "direction": "inbound",
+          "depth": 2,
+          "limit": 10,
+          "output_bytes": 65536
+        }
+      },
+      {
+        "question": "Q2",
+        "step": "callers_continued",
+        "name": "atlas_symbol_relations",
+        "arguments": {
+          "file": "src/storage.rs",
+          "symbol": "save_order",
+          "view": "detailed",
+          "direction": "inbound",
+          "depth": 2,
+          "limit": 10,
+          "output_bytes": 65536,
+          "cursor": "__previous_continuation__"
+        }
+      },
+      {
+        "question": "Q3",
+        "step": "relevance",
+        "name": "atlas_session_brief",
+        "arguments": {
+          "query": "Why is the order storage file relevant to public order submission?",
+          "compact": true
+        }
+      },
+      {
+        "question": "Q4",
+        "step": "resolution",
+        "name": "atlas_symbol_relations",
+        "arguments": {
+          "file": "src/states.rs",
+          "symbol": "inspect_states",
+          "view": "detailed",
+          "direction": "outbound",
+          "resolution": "any",
+          "limit": 10,
+          "output_bytes": 65536
+        }
+      },
+      {
+        "question": "Q5",
+        "step": "generation",
+        "name": "atlas_symbol_relations",
+        "arguments": {
+          "file": "src/storage.rs",
+          "symbol": "save_order",
+          "view": "detailed",
+          "direction": "inbound",
+          "limit": 10,
+          "output_bytes": 65536
+        }
+      },
+      {
+        "question": "Q6",
+        "step": "follow",
+        "name": "atlas_symbol_relations",
+        "arguments": {
+          "file": "src/storage.rs",
+          "symbol": "save_order",
+          "view": "detailed",
+          "direction": "inbound",
+          "include_occurrences": true,
+          "limit": 10,
+          "output_bytes": 65536
+        }
+      },
+      {
+        "question": "Q6",
+        "step": "source",
+        "name": "atlas_slice",
+        "arguments": {
+          "file": "src/api.rs",
+          "symbol": "submit_order",
+          "symbol_kind": "function",
+          "symbol_line": 5
+        }
+      }
+    ],
+    "dirty": [
+      {
+        "question": "Q1",
+        "step": "rank",
+        "name": "atlas_session_brief",
+        "arguments": {
+          "query": "Where is the saved checkout discount threshold and amount implemented?",
+          "compact": true
+        }
+      },
+      {
+        "question": "Q1",
+        "step": "trust",
+        "name": "atlas_file_summary",
+        "arguments": {
+          "file": "src/pricing.rs",
+          "compact": true
+        }
+      },
+      {
+        "question": "Q1",
+        "step": "source",
+        "name": "atlas_slice",
+        "arguments": {
+          "file": "src/pricing.rs",
+          "symbol": "apply_discount",
+          "symbol_kind": "function",
+          "symbol_line": 13
+        }
+      },
+      {
+        "question": "Q2",
+        "step": "callers",
+        "name": "atlas_symbol_relations",
+        "arguments": {
+          "file": "src/pricing.rs",
+          "symbol": "apply_discount",
+          "view": "detailed",
+          "direction": "inbound",
+          "depth": 2,
+          "limit": 10,
+          "output_bytes": 65536
+        }
+      },
+      {
+        "question": "Q2",
+        "step": "callers_continued",
+        "name": "atlas_symbol_relations",
+        "arguments": {
+          "file": "src/pricing.rs",
+          "symbol": "apply_discount",
+          "view": "detailed",
+          "direction": "inbound",
+          "depth": 2,
+          "limit": 10,
+          "output_bytes": 65536,
+          "cursor": "__previous_continuation__"
+        }
+      },
+      {
+        "question": "Q3",
+        "step": "relevance",
+        "name": "atlas_session_brief",
+        "arguments": {
+          "query": "Why is the pricing policy relevant to the public checkout total?",
+          "compact": true
+        }
+      },
+      {
+        "question": "Q4",
+        "step": "resolution",
+        "name": "atlas_symbol_relations",
+        "arguments": {
+          "file": "src/states.rs",
+          "symbol": "inspect_states",
+          "view": "detailed",
+          "direction": "outbound",
+          "resolution": "any",
+          "limit": 10,
+          "output_bytes": 65536
+        }
+      },
+      {
+        "question": "Q5",
+        "step": "generation",
+        "name": "atlas_symbol_relations",
+        "arguments": {
+          "file": "src/pricing.rs",
+          "symbol": "apply_discount",
+          "view": "detailed",
+          "direction": "inbound",
+          "depth": 2,
+          "limit": 10,
+          "output_bytes": 65536
+        }
+      },
+      {
+        "question": "Q6",
+        "step": "follow",
+        "name": "atlas_symbol_relations",
+        "arguments": {
+          "file": "src/pricing.rs",
+          "symbol": "apply_discount",
+          "view": "detailed",
+          "direction": "inbound",
+          "include_occurrences": true,
+          "limit": 10,
+          "output_bytes": 65536
+        }
+      },
+      {
+        "question": "Q6",
+        "step": "source",
+        "name": "atlas_slice",
+        "arguments": {
+          "file": "src/pricing.rs",
+          "symbol": "calculate_total",
+          "symbol_kind": "function",
+          "symbol_line": 5
+        }
+      }
+    ],
+    "non_git": [
+      {
+        "question": "Q1",
+        "step": "rank",
+        "name": "atlas_session_brief",
+        "arguments": {
+          "query": "Where is the health-response timeout value implemented?",
+          "compact": true
+        }
+      },
+      {
+        "question": "Q1",
+        "step": "trust",
+        "name": "atlas_file_summary",
+        "arguments": {
+          "file": "src/config.rs",
+          "compact": true
+        }
+      },
+      {
+        "question": "Q1",
+        "step": "source",
+        "name": "atlas_slice",
+        "arguments": {
+          "file": "src/config.rs",
+          "symbol": "load_timeout_millis",
+          "symbol_kind": "function",
+          "symbol_line": 3
+        }
+      },
+      {
+        "question": "Q2",
+        "step": "callers",
+        "name": "atlas_symbol_relations",
+        "arguments": {
+          "file": "src/config.rs",
+          "symbol": "load_timeout_millis",
+          "view": "detailed",
+          "direction": "inbound",
+          "depth": 2,
+          "limit": 10,
+          "output_bytes": 65536
+        }
+      },
+      {
+        "question": "Q2",
+        "step": "callers_continued",
+        "name": "atlas_symbol_relations",
+        "arguments": {
+          "file": "src/config.rs",
+          "symbol": "load_timeout_millis",
+          "view": "detailed",
+          "direction": "inbound",
+          "depth": 2,
+          "limit": 10,
+          "output_bytes": 65536,
+          "cursor": "__previous_continuation__"
+        }
+      },
+      {
+        "question": "Q3",
+        "step": "relevance",
+        "name": "atlas_session_brief",
+        "arguments": {
+          "query": "Why is the configuration reader relevant to the health route?",
+          "compact": true
+        }
+      },
+      {
+        "question": "Q4",
+        "step": "resolution",
+        "name": "atlas_symbol_relations",
+        "arguments": {
+          "file": "src/states.rs",
+          "symbol": "inspect_states",
+          "view": "detailed",
+          "direction": "outbound",
+          "resolution": "any",
+          "limit": 10,
+          "output_bytes": 65536
+        }
+      },
+      {
+        "question": "Q5",
+        "step": "generation",
+        "name": "atlas_symbol_relations",
+        "arguments": {
+          "file": "src/config.rs",
+          "symbol": "load_timeout_millis",
+          "view": "detailed",
+          "direction": "inbound",
+          "depth": 2,
+          "limit": 10,
+          "output_bytes": 65536
+        }
+      },
+      {
+        "question": "Q6",
+        "step": "follow",
+        "name": "atlas_symbol_relations",
+        "arguments": {
+          "file": "src/config.rs",
+          "symbol": "load_timeout_millis",
+          "view": "detailed",
+          "direction": "inbound",
+          "include_occurrences": true,
+          "limit": 10,
+          "output_bytes": 65536
+        }
+      },
+      {
+        "question": "Q6",
+        "step": "source",
+        "name": "atlas_slice",
+        "arguments": {
+          "file": "src/handler.rs",
+          "symbol": "health_response",
+          "symbol_kind": "function",
+          "symbol_line": 5
+        }
+      }
+    ]
+  }
+}

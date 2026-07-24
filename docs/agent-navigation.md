@@ -2,7 +2,7 @@
 
 ## Status
 
-This document defines the required agent-navigation contract for ProjectAtlas 0.4.0. ProjectAtlas 0.3.26 provides the baseline workflow described below. Automatic read freshness, normalized graph publication, purpose-plus-connection enrichment, direct relationship navigation, and closed analysis views are current v0.4 implementation behavior. The representative clean, dirty-worktree, and non-Git task-5.8 checkpoint has passed for correctness, fewer calls, and lower cold-session context against 0.3.26; its [interim three-way evaluation](benchmarks/v0.4-agent-navigation-evaluation.md) also reports the larger compatible discovery/runtime payload and expected fixed-cost loss to plain source reads on tiny repositories. Combined release verification and the publication-quality task-7.6 rerun after the final task-7 surface remain target behavior until issue #308 is complete. Version 0.4 preserves the complete compatible MCP inventory. Any later compact/default inventory or breaking rationalization belongs to post-v0.4 issue #310.
+This document defines the required agent-navigation contract for ProjectAtlas 0.4.0. ProjectAtlas 0.3.26 provides the baseline workflow described below. Automatic read freshness, normalized graph publication, purpose-plus-connection enrichment, direct relationship navigation, and closed analysis views are current v0.4 implementation behavior. The representative clean, saved-dirty, and non-Git task-7.3 forward test passes correctness, calls, backtracking, broad-read, emitted-byte, and cold-context boundaries against 0.3.26; the [agent evaluation](benchmarks/v0.4-agent-navigation-evaluation.md) reports the larger compatible discovery/runtime payload separately. Combined release verification and the repeated publication-quality task-7.6 three-arm benchmark remain target behavior until issue #308 is complete. Version 0.4 preserves the complete compatible MCP inventory. Any later compact/default inventory or breaking rationalization belongs to post-v0.4 issue #310.
 
 ## Product Goal
 
@@ -324,15 +324,15 @@ ProjectAtlas 0.4 preserves the complete 0.3.26 MCP inventory, names, request sch
 
 Issue #308 does not classify, hide, consolidate, or remove public tools. It records the packaged v0.4 inventory and discovery measurements as the baseline for issue #310, which separately owns any post-v0.4 compact/default selection or breaking rationalization.
 
-The stabilized pre-composition v0.4 candidate advertises the same 40 tool names.
-Its compact serialized `tools/list` tool array is 37,155 bytes, or 9,289
+The frozen post-composition v0.4 candidate advertises the same 40 tool names.
+Its compact serialized `tools/list` tool array is 37,299 bytes, or 9,325
 heuristic four-byte tokens, compared with 28,933 bytes and 7,234 heuristic
-tokens for the frozen v0.3.26 array. That 28.4% discovery growth is retained as
+tokens for the frozen v0.3.26 array. That 28.9% discovery growth is retained as
 the honest post-v0.4 #310 baseline. The compatibility E2E compares every name
 and description plus the complete recursive legacy request-schema tree; v0.4
-fields remain additive. Task 7.3.1 may still select the smallest compatible
-additive improvement, after which this measurement must be refreshed before the
-surface is frozen.
+fields remain additive. The task-7.3.1 composition evaluation selected only an
+opt-in compact detailed-relation projection and rejected a new graph-question
+tool; broader compact/default or inventory decisions remain with #310.
 
 No graph orchestration call is added to compensate for richer internals. The existing routes remain typed responsibility-owned operations; ProjectAtlas does not need a dynamic tool plugin system or one ambiguous administration mega-tool.
 
@@ -344,16 +344,36 @@ atlas_session_brief(task)
 → atlas_slice(selected symbol/range)
 ```
 
+For a focused code question, the packaged skill starts the compact brief with
+file/folder limits of three and blocker/purpose limits of one, then widens only
+when no actionable candidate exists. It calls the brief once; later caller,
+source, and public-boundary checks continue from the selected files rather than
+restarting discovery.
+
 Optional branches are:
 
 - `atlas_search` when the identifier or text is uncertain;
-- `atlas_symbol_relations` when callers, impact, architecture, or a path is material;
+- compact summary connections for ordinary direct callers or dependencies already shown there, without re-confirming the same trusted call row through detailed relations;
+- `atlas_symbol_relations` with `view: "detailed"` and `compact: true` when resolution/completeness, an omitted connection, ambiguity, external/unresolved state, or a bounded multi-hop path is material; request occurrences only when their call-site spans are needed, consume a returned top-level continuation call unchanged, then copy a row next-call selector directly;
+- a trusted export or bounded module/re-export declaration for public exposure; an inbound relation on the entrypoint does not prove that boundary;
 - `atlas_folders` then `atlas_files` for explicit manual work-area discovery when the caller intentionally does not use the brief's already-ranked candidates;
 - purpose queue/set/review for missing/suggested intent or an explicit correction of accepted intent.
 
 `atlas_session_brief` must not recommend rerunning folder/file ranking it already performed. Its next call should be a ready-to-use summary, search, relation, or exact-slice request.
 
-No new mandatory MCP tool is justified. Architecture, impact, and trace use a closed view on the existing bounded relation service. A separate analysis tool remains unjustified unless later measured agent tasks prove that the relation route harms tool selection or schema cost.
+A reviewed purpose can select a likely public entrypoint, but it does not prove
+exposure. External reachability requires the trusted owning-file export or an
+exact module/re-export declaration.
+
+No new mandatory MCP tool is justified. The formal clean, dirty, and non-Git
+composition evaluation kept the same 10 calls while compact detailed relations
+reduced emitted route bytes by 55.9–57.5% and median detailed-relation bytes by
+50.0–63.4%. Architecture, impact, and trace use a closed view on the existing
+bounded relation service. A dedicated graph-question tool failed the
+preregistered applicable-multi-call and further-byte thresholds without
+becoming a catch-all. The [formal composition result](benchmarks/v0.4-mcp-composition-evaluation.md)
+keeps the exact requests, machine result, freshness proof, bounds, and excluded
+runs.
 
 ## Output Shapes
 
@@ -396,31 +416,30 @@ The preserved baseline is ProjectAtlas `v0.3.26` at commit `d3b3e157f954c7d360d8
 
 For every row, correctness is decided before performance. No row may increase mandatory calls, full-file reads, broad-read escapes, or total context. Aggregate discovery bytes, calls, wrong selections, backtracking, and context must improve.
 
-### Interim Task-5.8 Checkpoint
+### Task-7.3 Forward Test
 
-The 2026-07-23 controlled checkpoint used the same clean, saved-dirty, and
-non-Git source-navigation tasks for the v0.4 candidate, frozen v0.3.26, and a
-no-ProjectAtlas shell/source-reading control. Every arm reached the exact
-correctness oracle. Against v0.3.26, v0.4 reduced aggregate ProjectAtlas calls
-from 32 to 18, removed all three recorded backtracks, and reduced task-evidence
-bytes by 12.3%. Preserving all compatible tool descriptions and request schemas
-increased per-session discovery from 28,933 to 37,011 bytes, so runtime
-navigation bytes increased 20.4%. The packaged skill shrank from 33,977 to
-13,666 bytes; including the matching skill once per independent cold session
-reduced aggregate cold-session bytes by 18.8%.
+The final 2026-07-24 forward test uses the same clean, saved-dirty, and non-Git
+task intent, truthful reviewed-purpose fixtures, model, reasoning, permissions,
+and cache policy for the v0.4 candidate and frozen v0.3.26. Both versions reach
+every correctness oracle. Against v0.3.26, v0.4 reduces calls from 34 to 24,
+backtracks from two to zero, broad content calls from three to zero, and emitted
+MCP evidence from 19,094 to 15,295 bytes. Each fixture is non-regressing:
+clean falls 23.4%, dirty 27.9%, and non-Git 6.3%.
 
-The no-ProjectAtlas control needed 25 navigation/source-reading commands versus
-18 v0.4 calls, but only 6,935 emitted bytes on these tiny fixtures. It used broad
-listings/searches and displayed 11 effectively complete tiny source files. The
-[full interim report](benchmarks/v0.4-agent-navigation-evaluation.md) preserves
-the exact tasks, call traces, compatibility boundary, excluded runs, metrics,
-methodology, and limitations.
+The complete compatible discovery array remains larger: 37,299 bytes versus
+28,933. Discovery plus response therefore increases 20.1%. The matching v0.4
+skill is 15,860 bytes versus 33,977 for v0.3.26, so independent cold-session
+context falls 15.9% overall. The
+[agent report](benchmarks/v0.4-agent-navigation-evaluation.md) and
+[machine-readable trials](benchmarks/v0.4-mcp-agent-trials.json) preserve both
+boundaries, exact call sequences, candidate identities, raw usage metadata, and
+limitations.
 
-This checkpoint closes only the representative task-5.8 workflow requirement.
-It is not a release headline. Task 7.6 requires a fresh, repeated three-way
-benchmark after tasks 7.1 through 7.5 and the exact release candidate stabilize,
-including medium and pinned real-source large/huge work, system resource costs,
-break-even behavior, raw results, and a prominent reviewed GitHub summary.
+This forward test closes only tasks 7.3 and 7.3.1. It is not a release headline. Task 7.6
+requires a fresh repeated v0.4/v0.3.26/no-ProjectAtlas benchmark after tasks 7.4
+and 7.5 stabilize the exact release candidate, including medium and pinned
+real-source large/huge work, distributions, system resource costs, break-even
+behavior, raw results, and a prominent reviewed GitHub summary.
 
 ## Acceptance Contract
 

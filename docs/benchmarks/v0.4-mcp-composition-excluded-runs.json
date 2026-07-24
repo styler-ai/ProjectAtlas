@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "selected_formal_runtime_sha256": "8c9e554b571167f44dbac5675e66af37208d8356694cfe388b177b1165039f90",
+  "selected_agent_trace_roots": [
+    "target/benchmarks/mcp-composition/agent-traces/v04-reviewed-oracle-final",
+    "target/benchmarks/mcp-composition/agent-traces/v0326-reviewed"
+  ],
+  "rule": "No excluded, interrupted, setup-failed, unreviewed-purpose, pre-fix, or superseded-candidate run contributes to the selected formal or agent aggregates.",
+  "excluded": [
+    {
+      "kind": "interrupted_formal_trial",
+      "count": 2,
+      "reason": "the run ended before every fixture and arm completed",
+      "raw_available": false
+    },
+    {
+      "kind": "cancelled_clean_agent_trial",
+      "count": 2,
+      "reason": "all MCP work was cancelled before a complete answer",
+      "raw_available": false
+    },
+    {
+      "kind": "automation_runtime_probe",
+      "count": 1,
+      "reason": "setup-only process used to verify the launch path; no task result"
+    },
+    {
+      "kind": "relative_config_binding",
+      "count": 3,
+      "reason": "relative config paths returned verification_incomplete"
+    },
+    {
+      "kind": "nonexistent_database_binding",
+      "count": 1,
+      "reason": "the non-Git database path did not exist; the run stopped before a fixture result"
+    },
+    {
+      "kind": "harness_non_git_key_mismatch",
+      "count": 1,
+      "reason": "fixture lookup used the wrong non-Git key; harness setup defect"
+    },
+    {
+      "kind": "harness_windows_cleanup_failure",
+      "count": 1,
+      "reason": "WinError 5 prevented deterministic fixture cleanup; no result selected"
+    },
+    {
+      "kind": "pre_fix_agent_trials",
+      "reason": "trials exposed empty optional symbol disambiguators and an unusable raw relation cursor; both product defects were fixed before the selected run",
+      "raw_available": false
+    },
+    {
+      "kind": "superseded_formal_runtime",
+      "runtime_sha256": "6bb273e13054927cd5c44966cec2818e06b61ad455e2e4f1690710fc87920f92",
+      "reason": "candidate identity changed after a strict-Clippy source correction"
+    },
+    {
+      "kind": "superseded_formal_runtime",
+      "runtime_sha256": "fc4c9ab890e2de1871e4acd8af1a88bd161fcbdc368e9f6b847de2c10b9ba7f3",
+      "reason": "candidate identity and compact routing behavior changed"
+    },
+    {
+      "kind": "superseded_formal_runtime",
+      "runtime_sha256_prefix": "0fd390",
+      "reason": "candidate identity changed before the complete final rerun"
+    },
+    {
+      "kind": "superseded_formal_runtime",
+      "runtime_sha256": "4b43427abd94d9581251064bd5ec6d5b782cd7710cbd356a80fba591f69e4586",
+      "reason": "candidate identity changed after compact startup removed duplicated blocker detail"
+    },
+    {
+      "kind": "superseded_formal_runtime",
+      "runtime_sha256": "436e4eaffa2fe8aa5d6a9602f034b96dc208da3734a15ef1bce46783ede9703e",
+      "reason": "candidate identity changed after compact startup removed redundant ranking metadata"
+    },
+    {
+      "kind": "superseded_formal_and_agent_candidate",
+      "runtime_sha256": "cd1c6ebdd489ad710256ce0c32bd6a581af65e33bbfcccfd05edfc27d7bd59f9",
+      "trace_root": "target/benchmarks/mcp-composition/agent-traces/v04-reviewed-compact-final",
+      "reason": "a stale Q3 trust oracle still required compact connection_counts after that redundant field was intentionally removed; the formal and blind agent trials were rerun completely against the corrected oracle and exact selected runtime"
+    },
+    {
+      "kind": "superseded_agent_trace_set",
+      "trace_roots": [
+        "target/benchmarks/mcp-composition/agent-traces/v04-final",
+        "target/benchmarks/mcp-composition/agent-traces/v04-selected",
+        "target/benchmarks/mcp-composition/agent-traces/v04-exact",
+        "target/benchmarks/mcp-composition/agent-traces/v04-final-selected",
+        "target/benchmarks/mcp-composition/agent-traces/v04-final-exact",
+        "target/benchmarks/mcp-composition/agent-traces/v04-reviewed",
+        "target/benchmarks/mcp-composition/agent-traces/v04-reviewed-exact",
+        "target/benchmarks/mcp-composition/agent-traces/v04-reviewed-final",
+        "target/benchmarks/mcp-composition/agent-traces/v04-reviewed-blockers"
+      ],
+      "reason": "each complete set preceded the final runtime, skill, compact payload, or reviewed-purpose contract; none was cherry-picked into the selected aggregate"
+    },
+    {
+      "kind": "superseded_baseline_trace_set",
+      "trace_root": "target/benchmarks/mcp-composition/agent-traces/v0326-final",
+      "reason": "purposes were generated suggestions rather than identical reviewed authored responsibilities"
+    },
+    {
+      "kind": "exploratory_compatibility_or_output_probe",
+      "reason": "used only to validate fixture compatibility, schema feasibility, bounds, or harness behavior"
+    }
+  ]
+}

@@ -40,7 +40,11 @@ use crate::{
     render_file_summary, render_parity_report, render_root_report, render_runtime_info,
     render_search_report, render_watch_status,
 };
-use projectatlas_core::graph::{GraphLimits, ProjectInstanceId, RepositoryFilePath};
+use projectatlas_core::graph::{
+    Completeness, ConfidenceClass, CoverageRecord, EntitySelector, ExternalSelector,
+    GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind, ProjectInstanceId,
+    RelationOccurrence, RelationResolution, RepositoryFilePath, ReusableTargetSelector, SourceSpan,
+};
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::symbols::ParserKind;
@@ -62,11 +66,14 @@ use projectatlas_db::{
 };
 use projectatlas_service::{
     COVERAGE_PAGE_MAX_LIMIT, CodeSliceBudget, CoverageDigest, CoverageTrustState,
-    DetailedRelationBudget, DetailedRelationQuery, FederatedStore, FileCallSummary,
-    FileSummaryReport, FileSymbolSummary, GitImpactSelection, RelationAnalysisMode,
-    RelationAnalysisQuery, RelationAnchor, SearchQuery, ServiceError, SymbolSliceSelector,
-    TokenReport, TokenReportRequest, build_file_summary_from_source, load_coverage_discovery,
-    load_detailed_relation_page, load_federated_detailed_relations,
+    DetailedRelationBudget, DetailedRelationNode, DetailedRelationQuery, DetailedRelationReport,
+    DetailedRelationRow, DetailedRelationWork, FederatedDetailedRelationReport,
+    FederatedParticipant, FederatedRelationWork, FederatedRendezvous, FederatedStore,
+    FileCallSummary, FileSummaryReport, FileSymbolSummary, GitImpactSelection,
+    RelationAnalysisMode, RelationAnalysisQuery, RelationAnchor, RelationDirection,
+    RelationNextCall, RelationPurpose, RelationTotalState, SearchQuery, ServiceError,
+    SymbolSliceSelector, TokenReport, TokenReportRequest, build_file_summary_from_source,
+    load_coverage_discovery, load_detailed_relation_page, load_federated_detailed_relations,
     load_federated_relation_analysis, load_relation_analysis, load_token_report,
     parse_coverage_parser, parse_coverage_relation, parse_coverage_state,
     parse_relation_confidence, parse_relation_direction, parse_relation_resolution,
@@ -399,6 +406,9 @@ const MCP_ERROR_DETAILED_RELATION_SYMBOL: &str = "detailed relation symbol must 
 const MCP_ERROR_DETAILED_RELATION_DISAMBIGUATOR: &str = "symbol disambiguators require symbol";
 /// MCP validation error for a relation limit outside the service range.
 const MCP_ERROR_DETAILED_RELATION_LIMIT: &str = "detailed relation limit exceeds the u32 range";
+/// MCP validation error for compact projection on a non-detailed relation view.
+const MCP_ERROR_COMPACT_DETAILED_RELATION_VIEW: &str =
+    "compact symbol relations require view=detailed";
 /// MCP validation error for analysis controls on another relation view.
 const MCP_ERROR_ANALYSIS_VIEW_REQUIRED: &str = "analysis controls require view=analysis";
 /// MCP validation error for federation on the legacy relation view.
@@ -917,6 +927,8 @@ struct AtlasSymbolRelationsParams {
     query: Option<String>,
     /// Preserve `legacy`, opt in to `detailed`, or select closed `analysis`.
     view: Option<String>,
+    /// Return the opt-in compact detailed projection while preserving exact selectors and trust.
+    compact: Option<bool>,
     /// Resume one exact generation- and purpose-bound detailed page.
     cursor: Option<String>,
     /// Complete ordered project-root set for one read-only federated call.
@@ -1829,16 +1841,16 @@ struct McpFileSummary<'a> {
     truncated: bool,
     /// Indexed functions when present.
     #[serde(skip_serializing_if = "Option::is_none")]
-    functions: Option<&'a [FileSymbolSummary]>,
+    functions: Option<Vec<McpFileSymbolSummary<'a>>>,
     /// Indexed methods when present.
     #[serde(skip_serializing_if = "Option::is_none")]
-    methods: Option<&'a [FileSymbolSummary]>,
+    methods: Option<Vec<McpFileSymbolSummary<'a>>>,
     /// Indexed classes when present.
     #[serde(skip_serializing_if = "Option::is_none")]
-    classes: Option<&'a [FileSymbolSummary]>,
+    classes: Option<Vec<McpFileSymbolSummary<'a>>>,
     /// Indexed type declarations when present.
     #[serde(skip_serializing_if = "Option::is_none")]
-    types: Option<&'a [FileSymbolSummary]>,
+    types: Option<Vec<McpFileSymbolSummary<'a>>>,
     /// Imports when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     imports: Option<&'a [String]>,
@@ -1854,6 +1866,53 @@ struct McpFileSummary<'a> {
     /// Coverage details only when they require agent attention.
     #[serde(skip_serializing_if = "Option::is_none")]
     coverage: Option<McpCompactCoverageDigest<'a>>,
+}
+
+/// Compact symbol row that omits empty legacy fields.
+#[derive(Debug, Serialize)]
+struct McpFileSymbolSummary<'a> {
+    /// Symbol name.
+    name: &'a str,
+    /// Symbol kind.
+    kind: &'a str,
+    /// One-based start line.
+    line: usize,
+    /// One-based end line.
+    end_line: usize,
+    /// Declaration signature.
+    signature: &'a str,
+    /// Whether the declaration is externally visible.
+    exported: bool,
+    /// Extracted documentation when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    documentation: Option<&'a str>,
+    /// Parent declaration when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<&'a str>,
+    /// Indexed callers when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    called_by: Option<&'a [String]>,
+}
+
+impl<'a> From<&'a FileSymbolSummary> for McpFileSymbolSummary<'a> {
+    fn from(symbol: &'a FileSymbolSummary) -> Self {
+        Self {
+            name: &symbol.name,
+            kind: &symbol.kind,
+            line: symbol.line,
+            end_line: symbol.end_line,
+            signature: &symbol.signature,
+            exported: symbol.exported,
+            documentation: nonempty_str(&symbol.documentation),
+            parent: nonempty_str(&symbol.parent),
+            called_by: nonempty_slice(&symbol.called_by),
+        }
+    }
+}
+
+/// Project nonempty symbol rows into their compact MCP representation.
+fn compact_file_symbols(symbols: &[FileSymbolSummary]) -> Option<Vec<McpFileSymbolSummary<'_>>> {
+    (!symbols.is_empty()).then(|| symbols.iter().map(McpFileSymbolSummary::from).collect())
 }
 
 impl<'a> From<&'a FileSummaryReport> for McpFileSummary<'a> {
@@ -1880,10 +1939,10 @@ impl<'a> From<&'a FileSummaryReport> for McpFileSummary<'a> {
             package: nonempty_str(&report.package),
             docstring: nonempty_str(&report.docstring),
             truncated: report.truncated,
-            functions: nonempty_slice(&report.functions),
-            methods: nonempty_slice(&report.methods),
-            classes: nonempty_slice(&report.classes),
-            types: nonempty_slice(&report.types),
+            functions: compact_file_symbols(&report.functions),
+            methods: compact_file_symbols(&report.methods),
+            classes: compact_file_symbols(&report.classes),
+            types: compact_file_symbols(&report.types),
             imports: nonempty_slice(&report.imports),
             dependencies: nonempty_slice(&report.dependencies),
             exports: nonempty_slice(&report.exports),
@@ -1982,6 +2041,409 @@ impl<'a> From<&'a CoverageDigest> for McpCompactCoverageDigest<'a> {
     }
 }
 
+/// Adapter-local compact detailed-relation node without stable-key duplication.
+#[derive(Debug, Serialize)]
+struct McpCompactDetailedRelationNode<'a> {
+    /// Exact selector accepted by later relation, summary, and slice calls.
+    selector: &'a EntitySelector,
+    /// Accepted, unavailable, or non-local purpose state.
+    purpose: &'a RelationPurpose,
+    /// Authoritative coverage rows for the selected local owner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<&'a [CoverageRecord]>,
+}
+
+impl<'a> From<&'a DetailedRelationNode> for McpCompactDetailedRelationNode<'a> {
+    fn from(node: &'a DetailedRelationNode) -> Self {
+        Self {
+            selector: node.entity.selector(),
+            purpose: &node.purpose,
+            coverage: nonempty_slice(&node.coverage),
+        }
+    }
+}
+
+/// Resolution facts retained by the compact relation projection.
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum McpCompactRelationResolution<'a> {
+    /// Exactly one reusable local target was resolved.
+    Resolved {
+        /// Exact selector accepted by later calls.
+        selector: &'a ReusableTargetSelector,
+        /// Complete generation containing the target.
+        generation: IndexGeneration,
+    },
+    /// More than one valid target remains.
+    Ambiguous {
+        /// Original normalized reference.
+        reference: &'a GraphIdentityText,
+        /// Number of retained candidates before limits.
+        candidates: u32,
+    },
+    /// No supported static target was found.
+    Unresolved {
+        /// Original normalized reference.
+        reference: &'a GraphIdentityText,
+    },
+    /// The target is intentionally outside the selected project.
+    External {
+        /// Typed external identity.
+        external: &'a ExternalSelector,
+        /// Complete generation containing the external record.
+        generation: IndexGeneration,
+    },
+}
+
+impl<'a> From<&'a RelationResolution> for McpCompactRelationResolution<'a> {
+    fn from(resolution: &'a RelationResolution) -> Self {
+        match resolution {
+            RelationResolution::Resolved {
+                selector,
+                generation,
+                ..
+            } => Self::Resolved {
+                selector,
+                generation: *generation,
+            },
+            RelationResolution::Ambiguous {
+                reference,
+                candidates,
+            } => Self::Ambiguous {
+                reference,
+                candidates: candidates.get(),
+            },
+            RelationResolution::Unresolved { reference } => Self::Unresolved { reference },
+            RelationResolution::External {
+                external,
+                generation,
+                ..
+            } => Self::External {
+                external,
+                generation: *generation,
+            },
+        }
+    }
+}
+
+/// Compact relation facts required for trust and direct navigation.
+#[derive(Debug, Serialize)]
+struct McpCompactLogicalRelation<'a> {
+    /// Typed legacy or extended relation family.
+    kind: GraphRelationKind,
+    /// Resolution state and reusable target when local.
+    resolution: McpCompactRelationResolution<'a>,
+    /// Coarse trust class.
+    confidence: ConfidenceClass,
+    /// Producer completeness for this relation scope.
+    completeness: Completeness,
+    /// Complete generation containing the relation.
+    generation: IndexGeneration,
+}
+
+/// One compact detailed-relation row.
+#[derive(Debug, Serialize)]
+struct McpCompactDetailedRelationRow<'a> {
+    /// One-based traversal depth.
+    depth: u32,
+    /// Direction relative to the selected frontier.
+    direction: RelationDirection,
+    /// Typed relation facts without stable-key duplication.
+    relation: McpCompactLogicalRelation<'a>,
+    /// Exact source selector, purpose, and coverage.
+    source: McpCompactDetailedRelationNode<'a>,
+    /// Retained local or external target when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<McpCompactDetailedRelationNode<'a>>,
+    /// Purpose disposition when no target node exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_purpose: Option<&'a RelationPurpose>,
+    /// Exact selectors for a multi-hop path; direct source/target rows omit this duplicate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<Vec<&'a EntitySelector>>,
+    /// Exact supporting occurrences when requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    occurrences: Option<Vec<McpCompactRelationOccurrence<'a>>>,
+    /// Whether the per-relation occurrence ceiling omitted rows.
+    #[serde(skip_serializing_if = "is_false")]
+    occurrences_truncated: bool,
+    /// Existing exact call that consumes the selected local endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_call: Option<&'a RelationNextCall>,
+}
+
+/// Compact source occurrence without another copy of the owning relation key.
+#[derive(Debug, Serialize)]
+struct McpCompactRelationOccurrence<'a> {
+    /// Repository-local file containing the evidence.
+    file: &'a RepositoryFilePath,
+    /// Exact supporting source range.
+    span: SourceSpan,
+    /// Complete generation containing the occurrence.
+    generation: IndexGeneration,
+}
+
+impl<'a> From<&'a RelationOccurrence> for McpCompactRelationOccurrence<'a> {
+    fn from(occurrence: &'a RelationOccurrence) -> Self {
+        Self {
+            file: occurrence.file(),
+            span: occurrence.span(),
+            generation: occurrence.generation(),
+        }
+    }
+}
+
+impl<'a> From<&'a DetailedRelationRow> for McpCompactDetailedRelationRow<'a> {
+    fn from(row: &'a DetailedRelationRow) -> Self {
+        Self {
+            depth: row.depth,
+            direction: row.direction,
+            relation: McpCompactLogicalRelation {
+                kind: row.relation.kind(),
+                resolution: McpCompactRelationResolution::from(row.relation.resolution()),
+                confidence: row.relation.confidence(),
+                completeness: row.relation.completeness(),
+                generation: row.relation.generation(),
+            },
+            source: McpCompactDetailedRelationNode::from(&row.source),
+            target: row
+                .target
+                .as_ref()
+                .map(McpCompactDetailedRelationNode::from),
+            target_purpose: row.target.is_none().then_some(&row.target_purpose),
+            path: (row.path.len() > 2)
+                .then(|| row.path.iter().map(|node| node.entity.selector()).collect()),
+            occurrences: (!row.occurrences.is_empty()).then(|| {
+                row.occurrences
+                    .iter()
+                    .map(McpCompactRelationOccurrence::from)
+                    .collect()
+            }),
+            occurrences_truncated: row.occurrences_truncated,
+            next_call: row.next_call.as_ref(),
+        }
+    }
+}
+
+/// Opt-in compact projection of one detailed relation page.
+#[derive(Debug, Serialize)]
+struct McpCompactDetailedRelationReport<'a> {
+    /// Exact selected anchor.
+    anchor: McpCompactDetailedRelationNode<'a>,
+    /// Complete graph generation captured by the page.
+    generation: IndexGeneration,
+    /// Accepted authored-purpose revision captured by the page.
+    authored_purpose_revision: u64,
+    /// Direction followed from the anchor.
+    direction: RelationDirection,
+    /// Number of retained relation steps.
+    returned: u32,
+    /// Number of cyclic or duplicate-node paths pruned.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pruned_paths: u64,
+    /// Whether a declared boundary stopped traversal.
+    #[serde(skip_serializing_if = "is_false")]
+    truncated: bool,
+    /// Directly reusable continuation call with the exact original query and budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_call: Option<McpCompactRelationContinuationCall<'a>>,
+    /// Exact, lower-bound, or unknown cardinality.
+    total: &'a RelationTotalState,
+    /// Stable hard limits reached while constructing the response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reached_limits: Option<&'a [GraphLimitKind]>,
+    /// Aggregate page and retained-state work.
+    work: &'a DetailedRelationWork,
+    /// Ranked node-simple relation steps.
+    rows: Vec<McpCompactDetailedRelationRow<'a>>,
+}
+
+/// Existing MCP relation call that resumes one exact compact page.
+#[derive(Debug, Serialize)]
+struct McpCompactRelationContinuationCall<'a> {
+    /// Existing MCP tool that owns relation continuation.
+    tool: &'static str,
+    /// Exact original request plus its generation-bound cursor.
+    arguments: McpCompactRelationContinuationArguments<'a>,
+}
+
+/// Exact result-defining arguments required to resume a detailed relation page.
+#[derive(Debug, Serialize)]
+struct McpCompactRelationContinuationArguments<'a> {
+    /// Explicit project root when the original request supplied one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_path: Option<&'a str>,
+    /// Selected repository-relative anchor file.
+    file: &'a str,
+    /// Original nearest-project policy when explicitly supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nearest_project: Option<bool>,
+    /// Original ordered federated roots when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    roots: Option<&'a [String]>,
+    /// Detailed relation view.
+    view: &'static str,
+    /// Preserve the compact response projection.
+    compact: bool,
+    /// Generation-, purpose-, query-, order-, and budget-bound cursor.
+    cursor: &'a str,
+    /// Exact symbol name when the anchor is a declaration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol: Option<&'a str>,
+    /// Exact nonempty symbol parent when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_parent: Option<&'a str>,
+    /// Exact nonempty symbol kind when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_kind: Option<&'a str>,
+    /// Exact nonempty symbol signature when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_signature: Option<&'a str>,
+    /// Original traversal direction when explicitly supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    direction: Option<&'a str>,
+    /// Original relation filter when explicitly supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relation: Option<&'a str>,
+    /// Original confidence floor when explicitly supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    minimum_confidence: Option<&'a str>,
+    /// Original resolution filter when explicitly supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolution: Option<&'a str>,
+    /// Original traversal depth when explicitly supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    depth: Option<u32>,
+    /// Original occurrence-retention choice when explicitly supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    include_occurrences: Option<bool>,
+    /// Original returned-row limit when explicitly supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit: Option<usize>,
+    /// Original per-relation occurrence limit when explicitly supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    occurrence_limit: Option<u32>,
+    /// Original edge budget when explicitly supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edge_limit: Option<u32>,
+    /// Original node budget when explicitly supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_limit: Option<u32>,
+    /// Original visited-node budget when explicitly supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    visited_limit: Option<u32>,
+    /// Original aggregate occurrence budget when explicitly supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    occurrence_total_limit: Option<u32>,
+    /// Original intermediate-byte budget when explicitly supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    intermediate_bytes: Option<u64>,
+    /// Original service deadline when explicitly supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deadline_ms: Option<u64>,
+    /// Original rendered-output budget when explicitly supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_bytes: Option<u32>,
+}
+
+impl<'a> McpCompactDetailedRelationReport<'a> {
+    /// Project one detailed page and its directly reusable continuation.
+    fn new(
+        report: &'a DetailedRelationReport,
+        file: &'a str,
+        params: &'a AtlasSymbolRelationsParams,
+    ) -> Self {
+        Self {
+            anchor: McpCompactDetailedRelationNode::from(&report.anchor),
+            generation: report.generation,
+            authored_purpose_revision: report.authored_purpose_revision,
+            direction: report.direction,
+            returned: report.returned,
+            pruned_paths: report.pruned_paths,
+            truncated: report.truncated,
+            next_call: report.continuation.as_deref().map(|cursor| {
+                McpCompactRelationContinuationCall {
+                    tool: MCP_TOOL_ATLAS_SYMBOL_RELATIONS,
+                    arguments: McpCompactRelationContinuationArguments {
+                        project_path: params.project_path.as_deref(),
+                        file,
+                        nearest_project: params.nearest_project,
+                        roots: params.roots.as_deref(),
+                        view: MCP_SYMBOL_RELATION_VIEW_DETAILED,
+                        compact: true,
+                        cursor,
+                        symbol: params.symbol.as_deref(),
+                        symbol_parent: params.symbol_parent.as_deref().and_then(nonempty_str),
+                        symbol_kind: params.symbol_kind.as_deref().and_then(nonempty_str),
+                        symbol_signature: params.symbol_signature.as_deref().and_then(nonempty_str),
+                        direction: params.direction.as_deref(),
+                        relation: params.relation.as_deref(),
+                        minimum_confidence: params.minimum_confidence.as_deref(),
+                        resolution: params.resolution.as_deref(),
+                        depth: params.depth,
+                        include_occurrences: params.include_occurrences,
+                        limit: params.limit,
+                        occurrence_limit: params.occurrence_limit,
+                        edge_limit: params.edge_limit,
+                        node_limit: params.node_limit,
+                        visited_limit: params.visited_limit,
+                        occurrence_total_limit: params.occurrence_total_limit,
+                        intermediate_bytes: params.intermediate_bytes,
+                        deadline_ms: params.deadline_ms,
+                        output_bytes: params.output_bytes,
+                    },
+                }
+            }),
+            total: &report.total,
+            reached_limits: nonempty_slice(&report.reached_limits),
+            work: &report.work,
+            rows: report
+                .rows
+                .iter()
+                .map(McpCompactDetailedRelationRow::from)
+                .collect(),
+        }
+    }
+}
+
+/// Compact federated wrapper that preserves cross-root evidence and work.
+#[derive(Debug, Serialize)]
+struct McpCompactFederatedDetailedRelationReport<'a> {
+    /// Ordered validated participants.
+    participants: &'a [FederatedParticipant],
+    /// Compact first-root detailed relation page.
+    primary: McpCompactDetailedRelationReport<'a>,
+    /// Exact cross-root external rendezvous evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rendezvous: Option<&'a [FederatedRendezvous]>,
+    /// Whether primary or rendezvous work was truncated.
+    #[serde(skip_serializing_if = "is_false")]
+    truncated: bool,
+    /// Stable aggregate limits reached by either stage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reached_limits: Option<&'a [GraphLimitKind]>,
+    /// Exact aggregate work.
+    work: &'a FederatedRelationWork,
+}
+
+impl<'a> McpCompactFederatedDetailedRelationReport<'a> {
+    /// Project a federated page while preserving its exact continuation call.
+    fn new(
+        report: &'a FederatedDetailedRelationReport,
+        file: &'a str,
+        params: &'a AtlasSymbolRelationsParams,
+    ) -> Self {
+        Self {
+            participants: &report.participants,
+            primary: McpCompactDetailedRelationReport::new(&report.primary, file, params),
+            rendezvous: nonempty_slice(&report.rendezvous),
+            truncated: report.truncated,
+            reached_limits: nonempty_slice(&report.reached_limits),
+            work: &report.work,
+        }
+    }
+}
+
 /// Borrow non-empty text into one optional compact field.
 fn nonempty_str(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
@@ -2044,9 +2506,9 @@ struct McpCompactSessionBrief {
     /// Ready file candidates for the task.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     files: Vec<McpCompactBriefCandidate>,
-    /// Unsafe health blockers when any exist.
+    /// Unsafe health blocker count when any exist.
     #[serde(skip_serializing_if = "Option::is_none")]
-    blockers: Option<McpBriefBlockers>,
+    blockers: Option<McpCompactBriefBlockers>,
     /// Exact host-owned purpose-curator follow-up when work is actionable.
     #[serde(skip_serializing_if = "Option::is_none")]
     purpose_handoff: Option<McpCompactBriefPurposeHandoff>,
@@ -2140,12 +2602,6 @@ struct McpCompactBriefCandidate {
     /// Purpose one-liner when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     purpose: Option<String>,
-    /// Strongest bounded compact ranking reason codes.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    reason_codes: Vec<RankedReasonCode>,
-    /// Sparse stable-order connection counts.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    connection_counts: Vec<RankedConnectionCount>,
     /// One high-value current connection when available.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     connections: Vec<RankedConnection>,
@@ -2190,6 +2646,13 @@ struct McpBriefBlockers {
     truncated: bool,
     /// Blocker rows.
     items: Vec<McpBriefBlocker>,
+}
+
+/// Compact blocker count; the recommendation carries the exact bounded health call.
+#[derive(Debug, Serialize)]
+struct McpCompactBriefBlockers {
+    /// Findings after filters are applied.
+    total: usize,
 }
 
 /// Return whether a serialized optional fact is false and can be omitted.
@@ -3446,7 +3909,9 @@ impl ProjectAtlasMcpServer {
                 .iter()
                 .map(Self::compact_brief_candidate)
                 .collect(),
-            blockers: (brief.blockers.total > 0).then(|| brief.blockers.clone()),
+            blockers: (brief.blockers.total > 0).then_some(McpCompactBriefBlockers {
+                total: brief.blockers.total,
+            }),
             purpose_handoff: brief
                 .purpose_handoff
                 .as_ref()
@@ -3503,8 +3968,6 @@ impl ProjectAtlasMcpServer {
             purpose_source: (!row.purpose_agent_reviewed).then_some(row.purpose_source),
             purpose_agent_reviewed: row.purpose_agent_reviewed,
             purpose: row.purpose.clone(),
-            reason_codes: Self::compact_brief_reason_codes(&row.reason_codes),
-            connection_counts: row.connection_counts.clone(),
             connections_truncated: row.connections_truncated
                 || connections.len() < row.connections.len(),
             connections,
@@ -3519,33 +3982,6 @@ impl ProjectAtlasMcpServer {
                 &connection.target,
                 RankedConnectionTarget::Unresolved { .. }
             )
-    }
-
-    /// Retain only the strongest bounded ranking signals in the default startup response.
-    fn compact_brief_reason_codes(codes: &[RankedReasonCode]) -> Vec<RankedReasonCode> {
-        const PRIORITY: &[RankedReasonCode] = &[
-            RankedReasonCode::ExactPath,
-            RankedReasonCode::ExactName,
-            RankedReasonCode::Path,
-            RankedReasonCode::ReviewedPurpose,
-            RankedReasonCode::GraphRoute,
-            RankedReasonCode::GraphTest,
-            RankedReasonCode::GraphConfig,
-            RankedReasonCode::GraphCall,
-            RankedReasonCode::GraphReference,
-            RankedReasonCode::GraphPackage,
-            RankedReasonCode::Summary,
-            RankedReasonCode::PairedFile,
-            RankedReasonCode::GraphImport,
-            RankedReasonCode::Symbol,
-            RankedReasonCode::IndexedText,
-        ];
-        PRIORITY
-            .iter()
-            .filter_map(|candidate| codes.iter().find(|code| *code == candidate))
-            .take(4)
-            .copied()
-            .collect()
     }
 
     /// Project an actionable handoff into one exact follow-up call instead of duplicating rows.
@@ -5698,18 +6134,30 @@ impl ProjectAtlasMcpServer {
                         &file,
                         &SymbolSliceSelector {
                             name: symbol,
-                            parent: params.symbol_parent.as_deref(),
-                            kind: params.symbol_kind.as_deref(),
-                            signature: params.symbol_signature.as_deref(),
+                            parent: params.symbol_parent.as_deref().and_then(nonempty_str),
+                            kind: params.symbol_kind.as_deref().and_then(nonempty_str),
+                            signature: params.symbol_signature.as_deref().and_then(nonempty_str),
                             line: params.symbol_line,
                         },
                         &content,
                         output_budget,
                     )?
                 } else {
-                    if params.symbol_parent.is_some()
-                        || params.symbol_kind.is_some()
-                        || params.symbol_signature.is_some()
+                    if params
+                        .symbol_parent
+                        .as_deref()
+                        .and_then(nonempty_str)
+                        .is_some()
+                        || params
+                            .symbol_kind
+                            .as_deref()
+                            .and_then(nonempty_str)
+                            .is_some()
+                        || params
+                            .symbol_signature
+                            .as_deref()
+                            .and_then(nonempty_str)
+                            .is_some()
                         || params.symbol_line.is_some()
                     {
                         return Err(CliError::InvalidInput(
@@ -5897,15 +6345,36 @@ impl ProjectAtlasMcpServer {
                 symbol_kind: params
                     .symbol_kind
                     .as_deref()
+                    .and_then(nonempty_str)
                     .map(parse_symbol_kind)
                     .transpose()?,
-                parent: params.symbol_parent.clone(),
-                signature: params.symbol_signature.clone(),
+                parent: params
+                    .symbol_parent
+                    .as_deref()
+                    .and_then(nonempty_str)
+                    .map(ToString::to_string),
+                signature: params
+                    .symbol_signature
+                    .as_deref()
+                    .and_then(nonempty_str)
+                    .map(ToString::to_string),
             }
         } else {
-            if params.symbol_parent.is_some()
-                || params.symbol_kind.is_some()
-                || params.symbol_signature.is_some()
+            if params
+                .symbol_parent
+                .as_deref()
+                .and_then(nonempty_str)
+                .is_some()
+                || params
+                    .symbol_kind
+                    .as_deref()
+                    .and_then(nonempty_str)
+                    .is_some()
+                || params
+                    .symbol_signature
+                    .as_deref()
+                    .and_then(nonempty_str)
+                    .is_some()
             {
                 return Err(CliError::Service(ServiceError::InvalidInput(
                     MCP_ERROR_DETAILED_RELATION_DISAMBIGUATOR.to_string(),
@@ -6041,11 +6510,15 @@ impl ProjectAtlasMcpServer {
                 let draft = load_detailed_relation_page(store, &relations, Some(control))?;
                 draft
                     .fit_output(Some(control), |report| {
-                        Self::with_selected_project_audit(
-                            state,
-                            routed_project,
-                            Self::encode_named_payload(MCP_PAYLOAD_SYMBOL_RELATIONS, report)?,
-                        )
+                        let payload = if params.compact.unwrap_or(false) {
+                            Self::encode_named_payload(
+                                MCP_PAYLOAD_SYMBOL_RELATIONS,
+                                &McpCompactDetailedRelationReport::new(report, &file, params),
+                            )?
+                        } else {
+                            Self::encode_named_payload(MCP_PAYLOAD_SYMBOL_RELATIONS, report)?
+                        };
+                        Self::with_selected_project_audit(state, routed_project, payload)
                     })?
                     .1
             }
@@ -6053,11 +6526,17 @@ impl ProjectAtlasMcpServer {
                 let draft = load_federated_detailed_relations(stores, &relations, Some(control))?;
                 draft
                     .fit_output(Some(control), |report| {
-                        Self::with_selected_project_audit(
-                            state,
-                            routed_project,
-                            Self::encode_named_payload(MCP_PAYLOAD_SYMBOL_RELATIONS, report)?,
-                        )
+                        let payload = if params.compact.unwrap_or(false) {
+                            Self::encode_named_payload(
+                                MCP_PAYLOAD_SYMBOL_RELATIONS,
+                                &McpCompactFederatedDetailedRelationReport::new(
+                                    report, &file, params,
+                                ),
+                            )?
+                        } else {
+                            Self::encode_named_payload(MCP_PAYLOAD_SYMBOL_RELATIONS, report)?
+                        };
+                        Self::with_selected_project_audit(state, routed_project, payload)
                     })?
                     .1
             }
@@ -6086,6 +6565,11 @@ impl ProjectAtlasMcpServer {
                     )));
                 }
             };
+            if params.compact.unwrap_or(false) && (!detailed || analysis) {
+                return Err(CliError::Service(ServiceError::InvalidInput(
+                    MCP_ERROR_COMPACT_DETAILED_RELATION_VIEW.to_string(),
+                )));
+            }
             if !analysis && relation_analysis_controls_present(params) {
                 return Err(CliError::Service(ServiceError::InvalidInput(
                     MCP_ERROR_ANALYSIS_VIEW_REQUIRED.to_string(),
@@ -7518,6 +8002,21 @@ mod tests {
             relations == explicit_legacy,
             "explicit MCP legacy relation view changed default response bytes or ordering",
         )?;
+        let compact_legacy = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                project_path: Some(project_path.to_string()),
+                file: Some("src/lib.rs".to_string()),
+                nearest_project: Some(false),
+                compact: Some(true),
+                limit: Some(50),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            compact_legacy.contains(MCP_ERROR_COMPACT_DETAILED_RELATION_VIEW),
+            "compact relation projection did not reject the legacy view",
+        )?;
         let zero_limit_legacy = server.atlas_symbol_relations_response(
             &AtlasSymbolRelationsParams {
                 project_path: Some(project_path.to_string()),
@@ -7549,6 +8048,34 @@ mod tests {
             "detailed MCP relation route did not return the bounded graph envelope",
         )?;
         if expected_symbol == "third" {
+            let compact_detailed = server.atlas_symbol_relations_response(
+                &AtlasSymbolRelationsParams {
+                    project_path: Some(project_path.to_string()),
+                    file: Some("src/lib.rs".to_string()),
+                    nearest_project: Some(false),
+                    view: Some("detailed".to_string()),
+                    compact: Some(true),
+                    symbol: Some("first".to_string()),
+                    direction: Some("outbound".to_string()),
+                    include_occurrences: Some(true),
+                    limit: Some(1),
+                    output_bytes: Some(8 * 1_024),
+                    ..AtlasSymbolRelationsParams::default()
+                },
+                None,
+            );
+            require(
+                compact_detailed.len() <= 8 * 1_024
+                    && compact_detailed.contains("returned: 1")
+                    && compact_detailed.contains("status: resolved")
+                    && compact_detailed.contains("confidence: exact")
+                    && compact_detailed.contains("completeness: complete")
+                    && compact_detailed.contains("Own café λ relation navigation")
+                    && compact_detailed.contains("next_call:")
+                    && compact_detailed.contains("occurrences[1]:")
+                    && !compact_detailed.contains("occurrences[1]:\n        - relation:"),
+                "compact detailed relation omitted trust, purpose, occurrence, next-call, or bounded-output behavior",
+            )?;
             let first_detailed_page = server.atlas_symbol_relations_response(
                 &AtlasSymbolRelationsParams {
                     project_path: Some(project_path.to_string()),
@@ -7613,6 +8140,57 @@ mod tests {
                     && second_detailed_report.get("rows") != first_detailed_report.get("rows")
                     && second_detailed_page.contains("Own café λ relation navigation"),
                 "detailed MCP cursor did not resume a distinct Unicode-safe symbol row",
+            )?;
+            let compact_continuation_page = server.atlas_symbol_relations_response(
+                &AtlasSymbolRelationsParams {
+                    project_path: Some(project_path.to_string()),
+                    file: Some("src/lib.rs".to_string()),
+                    nearest_project: Some(false),
+                    view: Some("detailed".to_string()),
+                    compact: Some(true),
+                    symbol: Some("first".to_string()),
+                    symbol_parent: Some(String::new()),
+                    direction: Some("outbound".to_string()),
+                    depth: Some(2),
+                    limit: Some(1),
+                    output_bytes: Some(64 * 1024),
+                    ..AtlasSymbolRelationsParams::default()
+                },
+                None,
+            );
+            let compact_continuation_value: serde_json::Value =
+                toon_format::decode_default(&compact_continuation_page)?;
+            let compact_continuation_report = compact_continuation_value
+                .get("symbol_relations")
+                .ok_or_else(|| io::Error::other("compact relation page omitted its envelope"))?;
+            let compact_next_call = compact_continuation_report
+                .get("next_call")
+                .ok_or_else(|| io::Error::other("compact relation page omitted its next call"))?;
+            require(
+                compact_next_call
+                    .get("tool")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(MCP_TOOL_ATLAS_SYMBOL_RELATIONS),
+                "compact relation continuation did not name its owning MCP tool",
+            )?;
+            let compact_next_arguments = compact_next_call
+                .get("arguments")
+                .cloned()
+                .ok_or_else(|| io::Error::other("compact next call omitted its arguments"))?;
+            require(
+                compact_next_arguments.get("cursor").is_some()
+                    && compact_next_arguments.get("symbol_parent").is_none(),
+                "compact next call did not preserve its cursor or normalize an empty parent",
+            )?;
+            let compact_next_params: AtlasSymbolRelationsParams =
+                serde_json::from_value(compact_next_arguments)?;
+            let compact_resumed_page =
+                server.atlas_symbol_relations_response(&compact_next_params, None);
+            require(
+                compact_resumed_page.contains("symbol_relations:")
+                    && !compact_resumed_page.contains("cursor does not match query")
+                    && !compact_resumed_page.contains("graph symbol anchor is not available"),
+                "compact relation next call was not directly reusable",
             )?;
         }
         let bounded_output_bytes = 4 * 1024_u32;
@@ -8256,12 +8834,39 @@ mod tests {
             .find(|candidate| candidate.path == "src/navigation_owner.rs")
             .ok_or_else(|| io::Error::other("graph-enriched MCP owner file is missing"))?;
         require(
-            owner.connection_counts.len() == 6
+            owner.connection_counts.len() == 7
                 && owner.connections.len() == 3
                 && owner.connections_truncated
                 && owner.next_call.capability
                     == projectatlas_core::NavigationNextCapability::Relations,
             "MCP file or session brief lost graph truncation or relations navigation",
+        )?;
+        let compact_relations = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                project_path: None,
+                file: Some("src/navigation_owner.rs".to_string()),
+                nearest_project: Some(false),
+                view: Some("detailed".to_string()),
+                compact: Some(true),
+                direction: Some("outbound".to_string()),
+                include_occurrences: Some(true),
+                limit: Some(10),
+                output_bytes: Some(64 * 1_024),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            compact_relations.contains("status: resolved")
+                && compact_relations.contains("status: ambiguous")
+                && compact_relations.contains("status: external")
+                && compact_relations.contains("status: unresolved")
+                && compact_relations.contains("reference: \"navigation-ambiguous\"")
+                && compact_relations.contains("candidates: 2")
+                && compact_relations.contains("next_call:"),
+            &format!(
+                "compact detailed relations dropped a resolution state or reusable next call: {compact_relations}"
+            ),
         )?;
 
         let compact = server.build_compact_session_brief(
@@ -8292,7 +8897,7 @@ mod tests {
                         )
                 })
                 && compact_owner.next_call.capability == NavigationNextCapability::Summary
-                && compact_owner.reason_codes.len() <= 4,
+                && compact_owner.purpose_agent_reviewed,
             "compact session brief did not retain one crisp edge and summary-first routing",
         )?;
         let expanded_text =
@@ -8307,9 +8912,16 @@ mod tests {
         let compact_text =
             ProjectAtlasMcpServer::encode_named_payload(MCP_PAYLOAD_SESSION_BRIEF, &compact)?;
         require(
-            !compact_text.contains("\n    db:")
+            compact
+                .blockers
+                .as_ref()
+                .is_some_and(|blockers| blockers.total > 0)
+                && !compact_text.contains("\n    db:")
                 && !compact_text.contains("\n    config:")
                 && !compact_text.contains("\n  policy:")
+                && !compact_text.contains("\n    items:")
+                && !compact_text.contains("reason_codes")
+                && !compact_text.contains("connection_counts")
                 && !compact_text.contains("agent_harness_expected")
                 && !compact_text.contains("server_started_curator")
                 && !compact_text.contains("missing_purposes")
@@ -8490,6 +9102,18 @@ mod tests {
                 &owner,
                 GraphRelationKind::Extended(ExtendedRelationKind::RoutesTo),
                 &local,
+            )?,
+            LogicalRelation::new(
+                &owner,
+                GraphRelationKind::Extended(ExtendedRelationKind::References),
+                RelationResolution::Ambiguous {
+                    reference: GraphIdentityText::new("navigation-ambiguous")?,
+                    candidates: std::num::NonZeroU32::new(2)
+                        .ok_or_else(|| io::Error::other("ambiguous fixture count is zero"))?,
+                },
+                ConfidenceClass::High,
+                Completeness::Partial,
+                generation,
             )?,
             unresolved_relation(
                 &owner,

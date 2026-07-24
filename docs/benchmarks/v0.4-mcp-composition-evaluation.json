@@ -1,0 +1,173 @@
+{
+  "schema_version": 2,
+  "status": "complete",
+  "candidate": {
+    "version": "projectatlas 0.4.0",
+    "runtime": "target/debug/projectatlas.exe",
+    "runtime_sha256": "8c9e554b571167f44dbac5675e66af37208d8356694cfe388b177b1165039f90",
+    "runtime_bytes": 69499392,
+    "git_base_before_slice_commit": "fea33c6be246818238c03298bac1b788f3ae59d3",
+    "telemetry": "disabled"
+  },
+  "inputs": {
+    "fixtures": "docs/benchmarks/fixtures/mcp-composition",
+    "requests": "docs/benchmarks/v0.4-mcp-composition-requests.json",
+    "harness": "docs/benchmarks/harness/mcp_composition.py",
+    "raw": "docs/benchmarks/v0.4-mcp-composition-raw.json",
+    "raw_sha256": "c033b1bea2446836699eeebf1f5fcfd2c1a2895e81fb563f993b5ae5122e46f7",
+    "excluded_runs": "docs/benchmarks/v0.4-mcp-composition-excluded-runs.json",
+    "agent_trials": "docs/benchmarks/v0.4-mcp-agent-trials.json"
+  },
+  "discovery": {
+    "v0_4_tool_count": 40,
+    "v0_4_bytes": 37299,
+    "v0_3_26_tool_count": 40,
+    "v0_3_26_bytes": 28933,
+    "growth_bytes": 8366,
+    "growth_percent": 28.9,
+    "disposition": "retained as the compatible post-v0.4 baseline for issue 310"
+  },
+  "formal_results": [
+    {
+      "fixture": "clean",
+      "full_bytes": 61068,
+      "compact_bytes": 25959,
+      "emitted_reduction_percent": 57.5,
+      "median_relation_reduction_percent": 63.4,
+      "median_question_reduction_percent": 61.9,
+      "full_calls": 10,
+      "compact_calls": 10,
+      "full_route_ms": 657.059,
+      "compact_route_ms": 622.7247,
+      "route_time_reduction_percent": 5.2,
+      "all_six_questions_correct": true
+    },
+    {
+      "fixture": "dirty",
+      "full_bytes": 71274,
+      "compact_bytes": 31418,
+      "emitted_reduction_percent": 55.9,
+      "median_relation_reduction_percent": 50.6,
+      "median_question_reduction_percent": 55.8,
+      "full_calls": 10,
+      "compact_calls": 10,
+      "full_route_ms": 659.9095,
+      "compact_route_ms": 625.862,
+      "route_time_reduction_percent": 5.2,
+      "all_six_questions_correct": true
+    },
+    {
+      "fixture": "non_git",
+      "full_bytes": 70135,
+      "compact_bytes": 30895,
+      "emitted_reduction_percent": 55.9,
+      "median_relation_reduction_percent": 50.1,
+      "median_question_reduction_percent": 55.6,
+      "full_calls": 10,
+      "compact_calls": 10,
+      "full_route_ms": 662.4397,
+      "compact_route_ms": 619.7833,
+      "route_time_reduction_percent": 6.4,
+      "all_six_questions_correct": true
+    }
+  ],
+  "resolution_state_proof": {
+    "per_fixture_and_arm": {
+      "resolved": 1,
+      "ambiguous": 1,
+      "external": 1,
+      "unresolved": 2
+    },
+    "selectors_and_trust_preserved": true
+  },
+  "freshness": {
+    "before_generation": 1,
+    "after_generation": 2,
+    "generation_advanced": true,
+    "relation_still_resolved": true,
+    "current_slice_contains_edit": true,
+    "after_relation_bytes": 8835,
+    "slice_bytes": 295
+  },
+  "bounded_output": [
+    {
+      "arm": "full",
+      "limit_bytes": 4096,
+      "response_bytes": 3231,
+      "returned_rows": 0,
+      "truncated": true,
+      "continuation": true
+    },
+    {
+      "arm": "compact",
+      "limit_bytes": 4096,
+      "response_bytes": 3806,
+      "returned_rows": 1,
+      "truncated": false,
+      "continuation": false
+    },
+    {
+      "arm": "compact",
+      "limit_bytes": 2048,
+      "response_bytes": 118,
+      "error": "graph output byte limit is too small for the empty response envelope"
+    }
+  ],
+  "arm_c": {
+    "design": "atlas_relation_slice",
+    "schema_bytes": 750,
+    "median_question_calls_before": 1.5,
+    "median_question_calls_after": 1.0,
+    "maximum_possible_body_byte_reduction_percent": {
+      "clean": 7.1,
+      "dirty": 8.1,
+      "non_git": 6.1
+    },
+    "selected": false,
+    "reason": "it removes one Q6 call, but even an impossible zero-byte exact-source payload can save only 6.1 to 8.1 percent because the compact relation response is already the lower bound; it also adds discovery schema"
+  },
+  "complete_support_revalidation": {
+    "candidate_profiles": 23,
+    "promoted": 0,
+    "reason": "no candidate has every required capability axis plus complete schema-bound representative-repository and bounded agent-navigation evidence"
+  },
+  "agent_forward_test": {
+    "v0_4_correct": 3,
+    "v0_3_26_correct": 3,
+    "v0_4_calls": 24,
+    "v0_3_26_calls": 34,
+    "calls_reduced_percent": 29.4,
+    "v0_4_backtracks": 0,
+    "v0_3_26_backtracks": 2,
+    "v0_4_emitted_mcp_bytes": 15295,
+    "v0_3_26_emitted_mcp_bytes": 19094,
+    "emitted_mcp_bytes_reduced_percent": 19.9,
+    "v0_4_runtime_navigation_bytes": 127192,
+    "v0_3_26_runtime_navigation_bytes": 105893,
+    "runtime_navigation_bytes_increased_percent": 20.1,
+    "v0_4_cold_navigation_bytes": 174772,
+    "v0_3_26_cold_navigation_bytes": 207824,
+    "cold_navigation_bytes_reduced_percent": 15.9,
+    "per_fixture_emitted_bytes_non_regression": true
+  },
+  "selection": {
+    "selected_arm": "B",
+    "changes": [
+      "compact=true on detailed atlas_symbol_relations",
+      "typed top-level next_call when a truncated relation page can continue",
+      "empty optional symbol disambiguators normalize to absent",
+      "compact file summaries omit empty legacy symbol fields",
+      "compact session briefs retain reviewed purpose, one crisp connection, truncation, and exact next call without duplicate ranking or blocker detail"
+    ],
+    "new_tool": false,
+    "tool_removed_or_renamed": false,
+    "legacy_defaults_changed": false,
+    "issue_310": "defer public tool classification, compact/default inventory selection, alias consolidation, and breaking removal"
+  },
+  "limitations": [
+    "formal route timing is one deterministic sanity replay per fixture and arm, not a latency distribution",
+    "task 7.3 uses one stochastic agent trial per arm and fixture",
+    "provider token counters are raw metadata, not a causal navigation-context claim",
+    "task 7.6 must repeat the final three-arm benchmark on small, medium, and pinned real-source large/huge work"
+  ]
+}
