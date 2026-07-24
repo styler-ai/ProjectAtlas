@@ -1,6 +1,7 @@
 # Local agent/workspace state
 .codex/
 .playwright-cli/
+/.worktrees/
 
 # ProjectAtlas runtime state
 .projectatlas/*.db
