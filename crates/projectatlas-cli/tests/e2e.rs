@@ -8391,6 +8391,208 @@ fn cli_navigation_rows_propagate_nonempty_typed_graph_evidence() -> Result<(), B
     Ok(())
 }
 
+#[test]
+fn cli_federation_is_explicit_read_only_and_fails_closed_on_a_stale_late_root()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let mut projects = Vec::new();
+    for index in 0..3 {
+        let root = temp.path().join(format!("federated-{index}"));
+        let database = create_federation_navigation_project(&root)?;
+        projects.push((root, database));
+    }
+
+    let before = projects
+        .iter()
+        .map(|(_, database)| fs::read(database))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut command = Command::cargo_bin("projectatlas")?;
+    command
+        .current_dir(&projects[0].0)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&projects[0].1)
+        .args([
+            "symbols",
+            "relations",
+            "--view",
+            "detailed",
+            "--file",
+            "src/navigation_owner.rs",
+            "--relation",
+            "imports",
+            "--resolution",
+            "external",
+            "--limit",
+            "10",
+        ]);
+    for (root, _) in &projects {
+        command.arg("--root").arg(root);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "federated CLI relation query failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    require_json_array_len(&report, &["symbol_relations", "participants"], 3)?;
+    require_json_array_len(&report, &["symbol_relations", "rendezvous"], 1)?;
+    require_json_array_len(
+        &report,
+        &["symbol_relations", "rendezvous", "0", "evidence"],
+        3,
+    )?;
+    let after = projects
+        .iter()
+        .map(|(_, database)| fs::read(database))
+        .collect::<Result<Vec<_>, _>>()?;
+    if before != after {
+        return Err(io::Error::other("federated CLI call changed a database").into());
+    }
+
+    fs::write(
+        projects[2].0.join("src/navigation_owner.rs"),
+        "pub fn navigation_fixture_changed() {}\n",
+    )?;
+    let mut stale = Command::cargo_bin("projectatlas")?;
+    stale
+        .current_dir(&projects[0].0)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&projects[0].1)
+        .args([
+            "symbols",
+            "relations",
+            "--view",
+            "detailed",
+            "--file",
+            "src/navigation_owner.rs",
+            "--limit",
+            "10",
+        ]);
+    for (root, _) in &projects {
+        stale.arg("--root").arg(root);
+    }
+    let stale = stale.output()?;
+    if stale.status.success()
+        || !String::from_utf8_lossy(&stale.stderr).contains("refresh_required")
+    {
+        return Err(io::Error::other(format!(
+            "stale late root did not fail closed: {}",
+            String::from_utf8_lossy(&stale.stderr)
+        ))
+        .into());
+    }
+    let after_stale = projects
+        .iter()
+        .map(|(_, database)| fs::read(database))
+        .collect::<Result<Vec<_>, _>>()?;
+    if after != after_stale {
+        return Err(io::Error::other("stale federation repaired or changed a database").into());
+    }
+    for (index, (_, database)) in projects.iter().enumerate() {
+        let moved = database.with_extension(format!("closed-{index}"));
+        fs::rename(database, &moved)?;
+        fs::rename(moved, database)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn mcp_federation_uses_the_existing_relation_tool_without_telemetry_writes()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let first = temp.path().join("mcp-federated-0");
+    let second = temp.path().join("mcp-federated-1");
+    let first_db = create_federation_navigation_project(&first)?;
+    let second_db = create_federation_navigation_project(&second)?;
+    let before = [fs::read(&first_db)?, fs::read(&second_db)?];
+    let roots = [first.display().to_string(), second.display().to_string()];
+    let messages = vec![
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-federation-e2e","version":"0.1.0"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "atlas_symbol_relations",
+                "arguments": {
+                    "view": "detailed",
+                    "file": "src/navigation_owner.rs",
+                    "relation": "imports",
+                    "resolution": "external",
+                    "limit": 10,
+                    "roots": roots
+                }
+            }
+        })
+        .to_string(),
+    ];
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let stdout = run_mcp_stdio(
+        &executable,
+        &first,
+        &[
+            "--db".to_string(),
+            first_db.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &messages,
+    )?;
+    let text = mcp_tool_text(&stdout, 2)?;
+    for expected in [
+        "symbol_relations:",
+        "participants[2]",
+        "rendezvous[1]",
+        "evidence[2]",
+    ] {
+        if !text.contains(expected) {
+            return Err(io::Error::other(format!(
+                "federated MCP response omitted {expected:?}: {text}"
+            ))
+            .into());
+        }
+    }
+    if before != [fs::read(&first_db)?, fs::read(&second_db)?] {
+        return Err(
+            io::Error::other("federated MCP call wrote telemetry or database state").into(),
+        );
+    }
+    Ok(())
+}
+
+/// Scan and publish one conventional root used by federation adapter tests.
+fn create_federation_navigation_project(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    fs::create_dir_all(root.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(root.join(TESTS_DIR_NAME))?;
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"adapter-navigation\"\nversion = \"0.1.0\"\n",
+    )?;
+    for path in [
+        "src/navigation_owner.rs",
+        "src/navigation_local.rs",
+        "src/navigation_unresolved.rs",
+        "tests/navigation_owner.rs",
+    ] {
+        fs::write(root.join(path), "pub fn navigation_fixture() {}\n")?;
+    }
+    Command::cargo_bin("projectatlas")?
+        .current_dir(root)
+        .args(["scan", "."])
+        .assert()
+        .success();
+    let database = root.join(".projectatlas").join("projectatlas.db");
+    publish_cli_navigation_graph(&database)?;
+    Ok(database)
+}
+
 fn publish_cli_navigation_graph(db: &Path) -> Result<(), Box<dyn Error>> {
     let mut store = AtlasStore::open(db)?;
     let project = store

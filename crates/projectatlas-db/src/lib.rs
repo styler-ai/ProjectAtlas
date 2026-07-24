@@ -1409,6 +1409,18 @@ impl AtlasStore {
         Self::open_read_only_with_project_root(path, Some(&expected_root))
     }
 
+    /// Return whether this store is restricted to non-mutating queries.
+    #[must_use]
+    pub const fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// Return whether this store currently owns an open read snapshot.
+    #[must_use]
+    pub fn has_active_read_snapshot(&self) -> bool {
+        self.read_snapshot_active.get()
+    }
+
     /// Open a current read snapshot with optional project identity validation.
     fn open_read_only_with_project_root(
         path: &Path,

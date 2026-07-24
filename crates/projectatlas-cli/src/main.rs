@@ -37,11 +37,12 @@ use projectatlas_db::{
 };
 use projectatlas_service::{
     COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CodeSliceBudget, CodeSliceDraft, CoverageDiscoveryReport,
-    DetailedRelationBudget, DetailedRelationQuery, FileSummaryReport, GitImpactSelection,
-    RelationAnalysisMode, RelationAnalysisQuery, RelationAnchor, RelationDirection,
-    RelationResolutionFilter, SearchQuery, SearchReport, SearchRetrievalMode, ServiceError,
-    SymbolSliceSelector, TokenReport, TokenReportRequest, build_file_summary_from_source,
-    load_coverage_discovery, load_detailed_relation_page, load_relation_analysis,
+    DetailedRelationBudget, DetailedRelationQuery, FederatedStore, FileSummaryReport,
+    GitImpactSelection, RelationAnalysisMode, RelationAnalysisQuery, RelationAnchor,
+    RelationDirection, RelationResolutionFilter, SearchQuery, SearchReport, SearchRetrievalMode,
+    ServiceError, SymbolSliceSelector, TokenReport, TokenReportRequest,
+    build_file_summary_from_source, load_coverage_discovery, load_detailed_relation_page,
+    load_federated_detailed_relations, load_federated_relation_analysis, load_relation_analysis,
     load_token_report, parse_coverage_parser, parse_coverage_relation, parse_coverage_state,
     parse_symbol_kind, read_indexed_code_slice_from_source_bounded,
     read_symbol_slice_from_source_bounded, search_indexed_files_with_control,
@@ -58,14 +59,15 @@ use runtime::{
     index_work_control, init_config_path, init_path_status, lint_database_if_present,
     next_step_report, next_step_report_payload, normalized_folder_filter,
     open_atlas_store_for_project, open_atlas_store_read_only_for_project,
-    open_fresh_atlas_store_for_project, purpose_curation_page, ranked_file_nodes_with_reasons,
-    ranked_folder_nodes_with_reasons, read_indexed_file_content,
-    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
-    render_coverage_report, render_health_page, render_purpose_curation_page,
+    open_federated_atlas_stores_for_project, open_fresh_atlas_store_for_project,
+    purpose_curation_page, ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons,
+    read_indexed_file_content, record_directory_walk_usage_estimate, record_usage_estimate,
+    record_usage_text, render_coverage_report, render_health_page, render_purpose_curation_page,
     render_purpose_review_report, reset_index_files, resolved_mcp_config_path, review_purposes,
     run_init_bootstrap, run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
-    run_symbol_build_pipeline_controlled, run_watch_loop, strip_legacy_purpose,
-    validate_purpose_review_admission, validated_indexed_file_key, watcher_status_report,
+    run_symbol_build_pipeline_controlled, run_watch_loop, standalone_index_work_control,
+    strip_legacy_purpose, validate_purpose_review_admission, validated_indexed_file_key,
+    watcher_status_report,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -73,6 +75,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
 #[cfg(test)]
 use token_tui::render_token_dashboard;
@@ -428,6 +431,9 @@ struct DetailedRelationArgs {
     /// Resume one exact generation- and purpose-bound detailed page.
     #[arg(long)]
     cursor: Option<String>,
+    /// Complete ordered project-root set for one read-only federated call.
+    #[arg(long = "root", value_name = "PATH")]
+    roots: Vec<PathBuf>,
     /// Exact local anchor controls.
     #[command(flatten)]
     anchor: DetailedRelationAnchorArgs,
@@ -1751,6 +1757,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             } => {
                 let DetailedRelationArgs {
                     cursor,
+                    roots,
                     anchor:
                         DetailedRelationAnchorArgs {
                             symbol,
@@ -1782,7 +1789,6 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     include_cycles,
                     include_dead_code,
                 } = analysis.as_ref();
-                let store = open_index_for_read(cli)?;
                 let analysis_controls_explicit = analysis_mode.is_some()
                     || trace_target.is_some()
                     || vcs.is_some()
@@ -1794,13 +1800,48 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         "analysis controls require --view analysis".to_string(),
                     )));
                 }
+                if *view == RelationViewArg::Legacy && !roots.is_empty() {
+                    return Err(CliError::Service(ServiceError::InvalidInput(
+                        "--root requires --view detailed or --view analysis".to_string(),
+                    )));
+                }
+                let federation_control = (!roots.is_empty()).then(|| {
+                    standalone_index_work_control()
+                        .with_timeout_ceiling(Duration::from_millis(10_000))
+                });
+                let mut federated_stores = if let Some(control) = federation_control.as_ref() {
+                    let selected_root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+                    Some(open_federated_atlas_stores_for_project(
+                        &cli.db,
+                        &selected_root,
+                        cli.config.as_deref(),
+                        roots,
+                        control,
+                    )?)
+                } else {
+                    None
+                };
+                let single_store = if federated_stores.is_none() {
+                    Some(open_index_for_read(cli)?)
+                } else {
+                    None
+                };
+                let store = match (&federated_stores, &single_store) {
+                    (Some(stores), _) => stores.first().map(FederatedStore::store),
+                    (None, store) => store.as_ref(),
+                }
+                .ok_or_else(|| {
+                    CliError::Service(ServiceError::InvalidInput(
+                        "relation request opened no project store".to_string(),
+                    ))
+                })?;
                 if *view == RelationViewArg::Legacy {
                     let relations =
                         store.load_symbol_relations(file.as_deref(), query.as_deref(), *limit)?;
                     let toon = render_symbol_relations(&relations);
                     print_tracked_output_estimate(
                         cli.format,
-                        &store,
+                        store,
                         usage_instance,
                         &cli.session,
                         "symbol-relations",
@@ -1808,7 +1849,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         query.clone(),
                         || {
                             estimated_source_tokens_for_paths(
-                                &store,
+                                store,
                                 relations.iter().map(|relation| relation.path.as_str()),
                             )
                         },
@@ -1827,7 +1868,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                             "detailed symbol relations require --file".to_string(),
                         ))
                     })?;
-                    let file = validated_indexed_file_key(&store, Path::new(file))?;
+                    let file = validated_indexed_file_key(store, Path::new(file))?;
                     let file = RepositoryFilePath::new(Path::new(&file)).map_err(|error| {
                         CliError::Service(ServiceError::InvalidInput(error.to_string()))
                     })?;
@@ -1881,13 +1922,40 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         cursor: cursor.clone(),
                     };
                     let output = if *view == RelationViewArg::Detailed {
-                        let draft = load_detailed_relation_page(&store, &relations, None)?;
-                        let (_report, output) = draft.fit_output(None, |report| {
-                            let payload = json!({ "symbol_relations": report });
-                            let toon = encode_agent_payload(&payload);
-                            serialized_output(cli.format, &toon, &payload)
-                        })?;
-                        output
+                        if let Some(stores) = federated_stores.take() {
+                            let control = federation_control.as_ref().ok_or_else(|| {
+                                CliError::Service(ServiceError::InvalidInput(
+                                    "federated relation control is unavailable".to_string(),
+                                ))
+                            })?;
+                            let draft = load_federated_detailed_relations(
+                                stores,
+                                &relations,
+                                Some(control),
+                            )?;
+                            let (_report, output) = draft.fit_output(Some(control), |report| {
+                                let payload = json!({ "symbol_relations": report });
+                                let toon = encode_agent_payload(&payload);
+                                serialized_output(cli.format, &toon, &payload)
+                            })?;
+                            output
+                        } else {
+                            let draft = load_detailed_relation_page(
+                                single_store.as_ref().ok_or_else(|| {
+                                    CliError::Service(ServiceError::InvalidInput(
+                                        "single-project relation store is unavailable".to_string(),
+                                    ))
+                                })?,
+                                &relations,
+                                None,
+                            )?;
+                            let (_report, output) = draft.fit_output(None, |report| {
+                                let payload = json!({ "symbol_relations": report });
+                                let toon = encode_agent_payload(&payload);
+                                serialized_output(cli.format, &toon, &payload)
+                            })?;
+                            output
+                        }
                     } else {
                         let vcs_explicit = vcs.is_some();
                         let vcs = match vcs.as_deref().unwrap_or("working-tree") {
@@ -1918,26 +1986,47 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                                     "--trace-target must be an exact RelationAnchor JSON object: {error}"
                                 )))
                             })?;
-                        let draft = load_relation_analysis(
-                            &store,
-                            &RelationAnalysisQuery {
-                                relations,
-                                mode,
-                                trace_target,
-                                vcs: (mode == RelationAnalysisMode::Impact || vcs_explicit)
-                                    .then_some(vcs),
-                                include_communities: *include_communities,
-                                include_cycles: *include_cycles,
-                                include_dead_code: *include_dead_code,
-                            },
-                            None,
-                        )?;
-                        let (_report, output) = draft.fit_output(|report| {
-                            let payload = json!({ "symbol_relations": report });
-                            let toon = encode_agent_payload(&payload);
-                            serialized_output(cli.format, &toon, &payload)
-                        })?;
-                        output
+                        let query = RelationAnalysisQuery {
+                            relations,
+                            mode,
+                            trace_target,
+                            vcs: (mode == RelationAnalysisMode::Impact || vcs_explicit)
+                                .then_some(vcs),
+                            include_communities: *include_communities,
+                            include_cycles: *include_cycles,
+                            include_dead_code: *include_dead_code,
+                        };
+                        if let Some(stores) = federated_stores.take() {
+                            let control = federation_control.as_ref().ok_or_else(|| {
+                                CliError::Service(ServiceError::InvalidInput(
+                                    "federated analysis control is unavailable".to_string(),
+                                ))
+                            })?;
+                            let draft =
+                                load_federated_relation_analysis(stores, &query, Some(control))?;
+                            let (_report, output) = draft.fit_output(|report| {
+                                let payload = json!({ "symbol_relations": report });
+                                let toon = encode_agent_payload(&payload);
+                                serialized_output(cli.format, &toon, &payload)
+                            })?;
+                            output
+                        } else {
+                            let draft = load_relation_analysis(
+                                single_store.as_ref().ok_or_else(|| {
+                                    CliError::Service(ServiceError::InvalidInput(
+                                        "single-project analysis store is unavailable".to_string(),
+                                    ))
+                                })?,
+                                &query,
+                                None,
+                            )?;
+                            let (_report, output) = draft.fit_output(|report| {
+                                let payload = json!({ "symbol_relations": report });
+                                let toon = encode_agent_payload(&payload);
+                                serialized_output(cli.format, &toon, &payload)
+                            })?;
+                            output
+                        }
                     };
                     write_stdout(&output)?;
                 }

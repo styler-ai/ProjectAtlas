@@ -18,8 +18,9 @@ use crate::runtime::{
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     index_work_control, init_config_path, lint_database_if_present, next_step_report,
     next_step_report_payload, normalized_folder_filter, open_atlas_store_for_project,
-    open_atlas_store_read_only_for_project, purpose_curation_page, purpose_curator_handoff,
-    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
+    open_atlas_store_read_only_for_project, open_federated_atlas_stores_for_project,
+    purpose_curation_page, purpose_curator_handoff, ranked_file_nodes_with_reasons,
+    ranked_folder_nodes_with_reasons, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
     render_health_page, render_purpose_curation_page, render_purpose_review_report,
     reset_index_files, review_purposes, run_init_bootstrap, run_scan_pipeline_controlled,
@@ -61,15 +62,16 @@ use projectatlas_db::{
 };
 use projectatlas_service::{
     COVERAGE_PAGE_MAX_LIMIT, CodeSliceBudget, CoverageDigest, CoverageTrustState,
-    DetailedRelationBudget, DetailedRelationQuery, FileCallSummary, FileSummaryReport,
-    FileSymbolSummary, GitImpactSelection, RelationAnalysisMode, RelationAnalysisQuery,
-    RelationAnchor, SearchQuery, ServiceError, SymbolSliceSelector, TokenReport,
-    TokenReportRequest, build_file_summary_from_source, load_coverage_discovery,
-    load_detailed_relation_page, load_relation_analysis, load_token_report, parse_coverage_parser,
-    parse_coverage_relation, parse_coverage_state, parse_relation_confidence,
-    parse_relation_direction, parse_relation_resolution, parse_symbol_kind,
-    read_indexed_code_slice_from_source_bounded, read_symbol_slice_from_source_bounded,
-    search_indexed_files_with_control,
+    DetailedRelationBudget, DetailedRelationQuery, FederatedStore, FileCallSummary,
+    FileSummaryReport, FileSymbolSummary, GitImpactSelection, RelationAnalysisMode,
+    RelationAnalysisQuery, RelationAnchor, SearchQuery, ServiceError, SymbolSliceSelector,
+    TokenReport, TokenReportRequest, build_file_summary_from_source, load_coverage_discovery,
+    load_detailed_relation_page, load_federated_detailed_relations,
+    load_federated_relation_analysis, load_relation_analysis, load_token_report,
+    parse_coverage_parser, parse_coverage_relation, parse_coverage_state,
+    parse_relation_confidence, parse_relation_direction, parse_relation_resolution,
+    parse_symbol_kind, read_indexed_code_slice_from_source_bounded,
+    read_symbol_slice_from_source_bounded, search_indexed_files_with_control,
 };
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
@@ -85,7 +87,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// MCP tools required for the agent-first repository-intelligence surface.
 pub(crate) const REQUIRED_MCP_TOOL_NAMES: &[&str] = &[
@@ -914,6 +916,8 @@ struct AtlasSymbolRelationsParams {
     view: Option<String>,
     /// Resume one exact generation- and purpose-bound detailed page.
     cursor: Option<String>,
+    /// Complete ordered project-root set for one read-only federated call.
+    roots: Option<Vec<String>>,
     /// Exact symbol name used as the detailed anchor; omit for a file anchor.
     symbol: Option<String>,
     /// Optional exact parent used to disambiguate the detailed symbol anchor.
@@ -1254,6 +1258,24 @@ struct McpProjectState {
     db_path: PathBuf,
     /// Selected scan/import configuration path.
     config_path: Option<PathBuf>,
+}
+
+/// Store ownership selected by the existing relation tool request shape.
+enum SymbolRelationStores<'a> {
+    /// Compatibility-preserving selected-project query.
+    Single(&'a AtlasStore),
+    /// Explicit call-owned ordered read snapshots.
+    Federated(Vec<FederatedStore>),
+}
+
+impl SymbolRelationStores<'_> {
+    /// Borrow the selected first project while validating local selectors.
+    fn primary(&self) -> &AtlasStore {
+        match self {
+            Self::Single(store) => store,
+            Self::Federated(stores) => stores[0].store(),
+        }
+    }
 }
 
 /// Exact root/database/project identity where this MCP process recorded telemetry.
@@ -5841,6 +5863,205 @@ impl ProjectAtlasMcpServer {
         self.atlas_symbols_response(&params, Some(context))
     }
 
+    /// Render the shared detailed/analysis contract through one selected store set.
+    fn detailed_symbol_relations_response(
+        state: &McpProjectState,
+        routed_project: bool,
+        file: &str,
+        params: &AtlasSymbolRelationsParams,
+        analysis: bool,
+        stores: SymbolRelationStores<'_>,
+        control: &IndexWorkControl,
+    ) -> Result<(String, Option<McpUsageIntent>), CliError> {
+        if params.query.is_some() {
+            return Err(CliError::Service(ServiceError::InvalidInput(
+                MCP_ERROR_DETAILED_RELATION_QUERY.to_string(),
+            )));
+        }
+        let primary = stores.primary();
+        let file = validated_indexed_file_key(primary, Path::new(file))?;
+        let graph_file = RepositoryFilePath::new(Path::new(&file))
+            .map_err(|error| CliError::Service(ServiceError::InvalidInput(error.to_string())))?;
+        let anchor = if let Some(symbol) = params.symbol.as_ref() {
+            if symbol.is_empty() {
+                return Err(CliError::Service(ServiceError::InvalidInput(
+                    MCP_ERROR_DETAILED_RELATION_SYMBOL.to_string(),
+                )));
+            }
+            RelationAnchor::Symbol {
+                file: graph_file,
+                name: symbol.clone(),
+                symbol_kind: params
+                    .symbol_kind
+                    .as_deref()
+                    .map(parse_symbol_kind)
+                    .transpose()?,
+                parent: params.symbol_parent.clone(),
+                signature: params.symbol_signature.clone(),
+            }
+        } else {
+            if params.symbol_parent.is_some()
+                || params.symbol_kind.is_some()
+                || params.symbol_signature.is_some()
+            {
+                return Err(CliError::Service(ServiceError::InvalidInput(
+                    MCP_ERROR_DETAILED_RELATION_DISAMBIGUATOR.to_string(),
+                )));
+            }
+            RelationAnchor::File { file: graph_file }
+        };
+        let rows = u32::try_from(params.limit.unwrap_or(50)).map_err(|_overflow| {
+            CliError::Service(ServiceError::InvalidInput(
+                MCP_ERROR_DETAILED_RELATION_LIMIT.to_string(),
+            ))
+        })?;
+        let limits = GraphLimits::new(
+            rows,
+            params.occurrence_limit.unwrap_or(25),
+            params.depth.unwrap_or(1),
+            params.output_bytes.unwrap_or(256 * 1024),
+        )
+        .map_err(|error| CliError::Service(ServiceError::InvalidInput(error.to_string())))?;
+        let relations = DetailedRelationQuery {
+            anchor,
+            direction: parse_relation_direction(
+                params
+                    .direction
+                    .as_deref()
+                    .unwrap_or(MCP_SYMBOL_RELATION_DIRECTION_DEFAULT),
+            )?,
+            relation: params
+                .relation
+                .as_deref()
+                .map(parse_coverage_relation)
+                .transpose()?,
+            minimum_confidence: parse_relation_confidence(
+                params
+                    .minimum_confidence
+                    .as_deref()
+                    .unwrap_or(MCP_SYMBOL_RELATION_CONFIDENCE_DEFAULT),
+            )?,
+            resolution: parse_relation_resolution(
+                params
+                    .resolution
+                    .as_deref()
+                    .unwrap_or(MCP_SYMBOL_RELATION_RESOLUTION_DEFAULT),
+            )?,
+            include_occurrences: params.include_occurrences.unwrap_or(false),
+            budget: DetailedRelationBudget::from_graph_limits(limits).with_aggregate_limits(
+                params.edge_limit,
+                params.node_limit,
+                params.visited_limit,
+                params.occurrence_total_limit,
+                params.intermediate_bytes,
+                params.deadline_ms,
+            )?,
+            cursor: params.cursor.clone(),
+        };
+        let usage = matches!(&stores, SymbolRelationStores::Single(_))
+            .then(|| {
+                Self::telemetry_enabled()
+                    .then(|| {
+                        estimated_source_tokens_for_paths(primary, std::iter::once(file.as_str()))
+                    })
+                    .and_then(Result::ok)
+                    .map(|baseline_tokens| {
+                        McpUsageIntent::estimate(
+                            MCP_EVENT_ATLAS_SYMBOL_RELATIONS,
+                            Some(file.clone()),
+                            params.symbol.clone(),
+                            baseline_tokens,
+                        )
+                    })
+            })
+            .flatten();
+
+        if analysis {
+            let mode = match params
+                .analysis_mode
+                .as_deref()
+                .unwrap_or(MCP_RELATION_ANALYSIS_MODE_ARCHITECTURE)
+            {
+                MCP_RELATION_ANALYSIS_MODE_ARCHITECTURE => RelationAnalysisMode::Architecture,
+                MCP_RELATION_ANALYSIS_MODE_IMPACT => RelationAnalysisMode::Impact,
+                MCP_RELATION_ANALYSIS_MODE_TRACE => RelationAnalysisMode::Trace,
+                _unsupported => {
+                    return Err(CliError::Service(ServiceError::InvalidInput(
+                        MCP_ERROR_UNSUPPORTED_ANALYSIS_MODE.to_string(),
+                    )));
+                }
+            };
+            let trace_target = relation_analysis_trace_target(primary, params)?;
+            let vcs_explicit =
+                params.vcs.is_some() || params.vcs_base.is_some() || params.vcs_head.is_some();
+            let vcs = relation_analysis_vcs(params)?;
+            let query = RelationAnalysisQuery {
+                relations,
+                mode,
+                trace_target,
+                vcs: (mode == RelationAnalysisMode::Impact || vcs_explicit).then_some(vcs),
+                include_communities: params.include_communities.unwrap_or(false),
+                include_cycles: params.include_cycles.unwrap_or(false),
+                include_dead_code: params.include_dead_code.unwrap_or(false),
+            };
+            let toon = match stores {
+                SymbolRelationStores::Single(store) => {
+                    let draft = load_relation_analysis(store, &query, Some(control))?;
+                    draft
+                        .fit_output(|report| {
+                            Self::with_selected_project_audit(
+                                state,
+                                routed_project,
+                                Self::encode_named_payload(MCP_PAYLOAD_SYMBOL_RELATIONS, report)?,
+                            )
+                        })?
+                        .1
+                }
+                SymbolRelationStores::Federated(stores) => {
+                    let draft = load_federated_relation_analysis(stores, &query, Some(control))?;
+                    draft
+                        .fit_output(|report| {
+                            Self::with_selected_project_audit(
+                                state,
+                                routed_project,
+                                Self::encode_named_payload(MCP_PAYLOAD_SYMBOL_RELATIONS, report)?,
+                            )
+                        })?
+                        .1
+                }
+            };
+            return Ok((toon, usage));
+        }
+
+        let toon = match stores {
+            SymbolRelationStores::Single(store) => {
+                let draft = load_detailed_relation_page(store, &relations, Some(control))?;
+                draft
+                    .fit_output(Some(control), |report| {
+                        Self::with_selected_project_audit(
+                            state,
+                            routed_project,
+                            Self::encode_named_payload(MCP_PAYLOAD_SYMBOL_RELATIONS, report)?,
+                        )
+                    })?
+                    .1
+            }
+            SymbolRelationStores::Federated(stores) => {
+                let draft = load_federated_detailed_relations(stores, &relations, Some(control))?;
+                draft
+                    .fit_output(Some(control), |report| {
+                        Self::with_selected_project_audit(
+                            state,
+                            routed_project,
+                            Self::encode_named_payload(MCP_PAYLOAD_SYMBOL_RELATIONS, report)?,
+                        )
+                    })?
+                    .1
+            }
+        };
+        Ok((toon, usage))
+    }
+
     /// Render one verified legacy or detailed symbol-relation response.
     fn atlas_symbol_relations_response(
         &self,
@@ -5873,6 +6094,52 @@ impl ProjectAtlasMcpServer {
                 params.file.as_deref(),
                 nearest_project,
             )?;
+            if let Some(roots) = params.roots.as_ref() {
+                if !detailed {
+                    return Err(CliError::Service(ServiceError::InvalidInput(
+                        "roots require the detailed or analysis relation view".to_string(),
+                    )));
+                }
+                let file = file.as_deref().ok_or_else(|| {
+                    CliError::Service(ServiceError::InvalidInput(
+                        MCP_ERROR_DETAILED_RELATION_FILE.to_string(),
+                    ))
+                })?;
+                let control =
+                    index_work_control(&SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None))
+                        .with_timeout_ceiling(Duration::from_millis(
+                            params.deadline_ms.unwrap_or(10_000).clamp(1, 60_000),
+                        ));
+                let bridge = context
+                    .map(|context| McpRequestCancellationBridge::start(context, &control))
+                    .transpose()?;
+                let roots = roots.iter().map(PathBuf::from).collect::<Vec<_>>();
+                let stores = open_federated_atlas_stores_for_project(
+                    &state.db_path,
+                    &state.root,
+                    state.config_path.as_deref(),
+                    &roots,
+                    &control,
+                )?;
+                let result = Self::detailed_symbol_relations_response(
+                    &state,
+                    routed_project,
+                    file,
+                    params,
+                    analysis,
+                    SymbolRelationStores::Federated(stores),
+                    &control,
+                )
+                .map(|(toon, _usage)| toon);
+                if bridge
+                    .as_ref()
+                    .is_some_and(McpRequestCancellationBridge::is_cancelled)
+                {
+                    control.cancel();
+                }
+                drop(bridge);
+                return result;
+            }
             self.with_fresh_string_and_usage_controlled_for_request(
                 &state,
                 context,
@@ -5882,185 +6149,20 @@ impl ProjectAtlasMcpServer {
                         .map(|path| validated_indexed_file_key(store, Path::new(path)))
                         .transpose()?;
                     if detailed {
-                        if params.query.is_some() {
-                            return Err(CliError::Service(ServiceError::InvalidInput(
-                                MCP_ERROR_DETAILED_RELATION_QUERY.to_string(),
-                            )));
-                        }
                         let file = file.as_deref().ok_or_else(|| {
                             CliError::Service(ServiceError::InvalidInput(
                                 MCP_ERROR_DETAILED_RELATION_FILE.to_string(),
                             ))
                         })?;
-                        let graph_file =
-                            RepositoryFilePath::new(Path::new(file)).map_err(|error| {
-                                CliError::Service(ServiceError::InvalidInput(error.to_string()))
-                            })?;
-                        let anchor = if let Some(symbol) = params.symbol.as_ref() {
-                            if symbol.is_empty() {
-                                return Err(CliError::Service(ServiceError::InvalidInput(
-                                    MCP_ERROR_DETAILED_RELATION_SYMBOL.to_string(),
-                                )));
-                            }
-                            RelationAnchor::Symbol {
-                                file: graph_file,
-                                name: symbol.clone(),
-                                symbol_kind: params
-                                    .symbol_kind
-                                    .as_deref()
-                                    .map(parse_symbol_kind)
-                                    .transpose()?,
-                                parent: params.symbol_parent.clone(),
-                                signature: params.symbol_signature.clone(),
-                            }
-                        } else {
-                            if params.symbol_parent.is_some()
-                                || params.symbol_kind.is_some()
-                                || params.symbol_signature.is_some()
-                            {
-                                return Err(CliError::Service(ServiceError::InvalidInput(
-                                    MCP_ERROR_DETAILED_RELATION_DISAMBIGUATOR.to_string(),
-                                )));
-                            }
-                            RelationAnchor::File { file: graph_file }
-                        };
-                        let rows =
-                            u32::try_from(params.limit.unwrap_or(50)).map_err(|_overflow| {
-                                CliError::Service(ServiceError::InvalidInput(
-                                    MCP_ERROR_DETAILED_RELATION_LIMIT.to_string(),
-                                ))
-                            })?;
-                        let limits = GraphLimits::new(
-                            rows,
-                            params.occurrence_limit.unwrap_or(25),
-                            params.depth.unwrap_or(1),
-                            params.output_bytes.unwrap_or(256 * 1024),
-                        )
-                        .map_err(|error| {
-                            CliError::Service(ServiceError::InvalidInput(error.to_string()))
-                        })?;
-                        let relations = DetailedRelationQuery {
-                            anchor,
-                            direction: parse_relation_direction(
-                                params
-                                    .direction
-                                    .as_deref()
-                                    .unwrap_or(MCP_SYMBOL_RELATION_DIRECTION_DEFAULT),
-                            )?,
-                            relation: params
-                                .relation
-                                .as_deref()
-                                .map(parse_coverage_relation)
-                                .transpose()?,
-                            minimum_confidence: parse_relation_confidence(
-                                params
-                                    .minimum_confidence
-                                    .as_deref()
-                                    .unwrap_or(MCP_SYMBOL_RELATION_CONFIDENCE_DEFAULT),
-                            )?,
-                            resolution: parse_relation_resolution(
-                                params
-                                    .resolution
-                                    .as_deref()
-                                    .unwrap_or(MCP_SYMBOL_RELATION_RESOLUTION_DEFAULT),
-                            )?,
-                            include_occurrences: params.include_occurrences.unwrap_or(false),
-                            budget: DetailedRelationBudget::from_graph_limits(limits)
-                                .with_aggregate_limits(
-                                    params.edge_limit,
-                                    params.node_limit,
-                                    params.visited_limit,
-                                    params.occurrence_total_limit,
-                                    params.intermediate_bytes,
-                                    params.deadline_ms,
-                                )?,
-                            cursor: params.cursor.clone(),
-                        };
-                        if analysis {
-                            let mode = match params
-                                .analysis_mode
-                                .as_deref()
-                                .unwrap_or(MCP_RELATION_ANALYSIS_MODE_ARCHITECTURE)
-                            {
-                                MCP_RELATION_ANALYSIS_MODE_ARCHITECTURE => {
-                                    RelationAnalysisMode::Architecture
-                                }
-                                MCP_RELATION_ANALYSIS_MODE_IMPACT => RelationAnalysisMode::Impact,
-                                MCP_RELATION_ANALYSIS_MODE_TRACE => RelationAnalysisMode::Trace,
-                                _unsupported => {
-                                    return Err(CliError::Service(ServiceError::InvalidInput(
-                                        MCP_ERROR_UNSUPPORTED_ANALYSIS_MODE.to_string(),
-                                    )));
-                                }
-                            };
-                            let trace_target = relation_analysis_trace_target(store, params)?;
-                            let vcs_explicit = params.vcs.is_some()
-                                || params.vcs_base.is_some()
-                                || params.vcs_head.is_some();
-                            let vcs = relation_analysis_vcs(params)?;
-                            let draft = load_relation_analysis(
-                                store,
-                                &RelationAnalysisQuery {
-                                    relations,
-                                    mode,
-                                    trace_target,
-                                    vcs: (mode == RelationAnalysisMode::Impact || vcs_explicit)
-                                        .then_some(vcs),
-                                    include_communities: params
-                                        .include_communities
-                                        .unwrap_or(false),
-                                    include_cycles: params.include_cycles.unwrap_or(false),
-                                    include_dead_code: params.include_dead_code.unwrap_or(false),
-                                },
-                                Some(control),
-                            )?;
-                            let (_report, toon) = draft.fit_output(|report| {
-                                Self::with_selected_project_audit(
-                                    &state,
-                                    routed_project,
-                                    Self::encode_named_payload(
-                                        MCP_PAYLOAD_SYMBOL_RELATIONS,
-                                        report,
-                                    )?,
-                                )
-                            })?;
-                            let usage = Self::telemetry_enabled()
-                                .then(|| {
-                                    estimated_source_tokens_for_paths(store, std::iter::once(file))
-                                })
-                                .and_then(Result::ok)
-                                .map(|baseline_tokens| {
-                                    McpUsageIntent::estimate(
-                                        MCP_EVENT_ATLAS_SYMBOL_RELATIONS,
-                                        Some(file.to_string()),
-                                        params.symbol.clone(),
-                                        baseline_tokens,
-                                    )
-                                });
-                            return Ok((toon, usage));
-                        }
-                        let draft = load_detailed_relation_page(store, &relations, Some(control))?;
-                        let (_report, toon) = draft.fit_output(Some(control), |report| {
-                            Self::with_selected_project_audit(
-                                &state,
-                                routed_project,
-                                Self::encode_named_payload(MCP_PAYLOAD_SYMBOL_RELATIONS, report)?,
-                            )
-                        })?;
-                        let usage = Self::telemetry_enabled()
-                            .then(|| {
-                                estimated_source_tokens_for_paths(store, std::iter::once(file))
-                            })
-                            .and_then(Result::ok)
-                            .map(|baseline_tokens| {
-                                McpUsageIntent::estimate(
-                                    MCP_EVENT_ATLAS_SYMBOL_RELATIONS,
-                                    Some(file.to_string()),
-                                    params.symbol.clone(),
-                                    baseline_tokens,
-                                )
-                            });
-                        return Ok((toon, usage));
+                        return Self::detailed_symbol_relations_response(
+                            &state,
+                            routed_project,
+                            file,
+                            params,
+                            analysis,
+                            SymbolRelationStores::Single(store),
+                            control,
+                        );
                     }
 
                     let relations = store.load_symbol_relations(

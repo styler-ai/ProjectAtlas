@@ -828,7 +828,7 @@ SQLite execution, exact hydration, and in-memory line verification.
 | `folders`, `files`, `next`, `atlas_session_brief` | Batch graph roles and only the crisp relevant connections for returned candidates, while projecting current accepted purpose plus approval/provenance state from `purposes`; never rank graph popularity above exact path/name and strong purpose evidence. | Current through 3.5, 5.2, and 5.7; combined release verification remains in 7.1-7.4. |
 | `summary`, `outline`, `symbols` | Hydrate a bounded selected-file coverage digest and route deeper related-identity inspection through the detailed relation surface without per-symbol or whole-graph query loops. | Current through 5.2, 5.3, 5.5, and 5.7; combined release verification remains in 7.1-7.4. |
 | `symbol relations` extended with direction/depth and closed architecture/impact/trace modes | Resolve stable selectors, use separately indexed source/target adjacency and dependency keys, page retained occurrences, batch endpoint plus nearest owning-purpose and exact-path symbol projection, and return generation, trust, resolution, coverage, exact spans, candidate-labeled findings, reusable next calls, cursors, work, and explicit truncation. No generic graph query language or separate jump tool is introduced. | Current through 5.5-5.7; combined release verification remains in 7.1-7.4. |
-| Explicit federated relation/analysis request | Validate the complete ordered root list, open each root's independent existing project database read-only/query-only under aggregate root/connection/database/row/edge/intermediate/time/output/cancellation budgets, bind results to every captured generation, close every handle, and retain nothing. | 6.2. Federation is call-only composition, never product sharding or a shared database. |
+| Explicit federated relation/analysis request | Validate the complete ordered root list, open each root's independent existing project database read-only/query-only under aggregate root/connection/database/row/edge/intermediate/time/output/cancellation budgets, bind results to every captured generation, close every handle, and retain nothing. | Current through 6.2. Federation is call-only composition, never product sharding or a shared database. |
 
 Task 2.7 verifies the implemented portions of these mappings through production
 query, service, and adapter paths. In-memory SQLite is sufficient only for
@@ -838,6 +838,52 @@ project databases plus real CLI/MCP smoke. A mocked repository or hand-built
 row can test pure classification or formatting, but cannot close a
 database-backed persistence, query-plan, rollback, or agent-visible behavior
 claim.
+
+### Explicit Federation Communication Sequence
+
+Federation is an additive request shape on the existing detailed relation and
+analysis routes. The first supplied root is the selected anchor project; later
+roots contribute only exact typed external-identity rendezvous evidence.
+Similar unresolved text never joins projects.
+
+```mermaid
+sequenceDiagram
+    actor Agent
+    participant Adapter as Existing CLI or MCP relation adapter
+    participant Runtime as Runtime freshness boundary
+    participant FS as Exact source verifier
+    participant DB as Independent project SQLite databases
+    participant Service as Relation and analysis service
+
+    Agent->>Adapter: detailed or analysis request plus complete ordered roots
+    Adapter->>Runtime: selected root, roots, aggregate deadline, cancellation
+    loop Each explicit root, maximum eight
+        Runtime->>DB: open existing root-bound query-only snapshot
+        Runtime->>FS: verify current source and policy without repair
+        Runtime->>DB: verify project, publication, schema, and generation
+        break Any root is stale, corrupt, incompatible, duplicate, or canceled
+            Runtime->>DB: finish and drop every captured snapshot
+            Runtime-->>Adapter: typed failure and no rows
+            Adapter-->>Agent: no partial result
+        end
+    end
+    Runtime->>Service: owned verified snapshots plus existing typed query
+    Service->>DB: bounded first-root traversal or analysis
+    Service->>DB: bounded exact typed external rendezvous reads
+    Service->>DB: finish and drop every participant snapshot
+    Service->>DB: reopen sequentially to revalidate all generations
+    alt Any project, generation, or purpose revision changed
+        Service-->>Adapter: stale result and no rows
+    else All participants remain current
+        Service-->>Adapter: project-qualified bounded report
+        Adapter-->>Agent: one fitted JSON or TOON envelope
+    end
+```
+
+No participant list, relation, cache, telemetry, setting, active-project
+selection, or connection survives the call. A cursor binds the ordered project
+identities, root digests, complete graph generations, and authored-purpose
+revisions before wrapping the existing relation or analysis continuation.
 
 ### MCP Read Communication Sequence
 

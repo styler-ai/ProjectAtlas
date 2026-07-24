@@ -1,6 +1,7 @@
 //! Purpose: Provide shared `ProjectAtlas` query services for CLI and MCP adapters.
 
 mod analysis;
+mod federation;
 mod import_aliases;
 mod relations;
 
@@ -8,6 +9,13 @@ pub use analysis::{
     AnalysisFinding, AnalysisFindingKind, AnalysisNode, AnalysisStatus, GitImpactSelection,
     RelationAnalysisDraft, RelationAnalysisMode, RelationAnalysisQuery, RelationAnalysisReport,
     RelationAnalysisWork, VcsImpact, load_relation_analysis,
+};
+pub use federation::{
+    FederatedAnalysisDraft, FederatedAnalysisReport, FederatedDetailedRelationDraft,
+    FederatedDetailedRelationReport, FederatedInputWork, FederatedParticipant,
+    FederatedRelationEvidence, FederatedRelationWork, FederatedRendezvous, FederatedStore,
+    MAX_FEDERATED_DATABASE_BYTES, MAX_FEDERATED_INPUT_BYTES, load_federated_detailed_relations,
+    load_federated_relation_analysis, validate_federated_root_count,
 };
 pub use relations::{
     DetailedRelationBudget, DetailedRelationNode, DetailedRelationPageDraft, DetailedRelationQuery,

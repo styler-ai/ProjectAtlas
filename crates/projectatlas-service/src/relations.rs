@@ -1701,7 +1701,7 @@ fn resolve_anchor(
 }
 
 /// Test one normalized relation against the service-owned trust filters.
-fn relation_matches(relation: &LogicalRelation, query: &DetailedRelationQuery) -> bool {
+pub(super) fn relation_matches(relation: &LogicalRelation, query: &DetailedRelationQuery) -> bool {
     query.relation.is_none_or(|kind| relation.kind() == kind)
         && confidence_rank(relation.confidence()) >= confidence_rank(query.minimum_confidence)
         && match query.resolution {

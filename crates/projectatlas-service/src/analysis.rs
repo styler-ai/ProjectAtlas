@@ -282,6 +282,12 @@ pub struct RelationAnalysisDraft {
 }
 
 impl RelationAnalysisDraft {
+    /// Fully hydrated report before adapter-specific output fitting.
+    #[must_use]
+    pub const fn candidate_report(&self) -> &RelationAnalysisReport {
+        &self.report
+    }
+
     /// Fit one complete adapter envelope by retaining the largest finding prefix.
     ///
     /// # Errors

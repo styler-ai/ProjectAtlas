@@ -69,8 +69,10 @@ use projectatlas_fs::{
     scan_repo_controlled, scan_repo_controlled_with_work,
 };
 use projectatlas_service::{
-    CoverageDiscoveryReport, FilePathMatcher, NextStepReport, build_next_report,
+    CoverageDiscoveryReport, FederatedInputWork, FederatedStore, FilePathMatcher,
+    MAX_FEDERATED_DATABASE_BYTES, MAX_FEDERATED_INPUT_BYTES, NextStepReport, build_next_report,
     load_ranked_file_nodes_with_reasons, load_ranked_folder_nodes_with_reasons,
+    validate_federated_root_count,
 };
 use projectatlas_symbols::{extract_symbol_graph_controlled, semantic_resolution_contract_digest};
 use rayon::ThreadPoolBuilder;
@@ -471,12 +473,31 @@ pub(crate) fn open_exact_fresh_atlas_store_for_project_controlled(
     config_path: Option<&Path>,
     control: &IndexWorkControl,
 ) -> Result<ExactFreshIndexRead, CliError> {
+    open_exact_fresh_atlas_store_for_project_with_repair(
+        db_path,
+        root,
+        config_path,
+        control,
+        true,
+        ScanLimits::default(),
+    )
+}
+
+/// Open a current read snapshot without repairing stale source or durable state.
+fn open_exact_fresh_atlas_store_for_project_with_repair(
+    db_path: &Path,
+    root: &Path,
+    config_path: Option<&Path>,
+    control: &IndexWorkControl,
+    repair_safe_delta: bool,
+    scan_limits: ScanLimits,
+) -> Result<ExactFreshIndexRead, CliError> {
     let bounded_control = bounded_index_work_control(control);
     let control = &bounded_control;
     let store = open_atlas_store_read_only_for_project(db_path, root)?;
     let plan = ScanRuntimePlan::for_path_controlled(config_path, root, None, control)
         .map_err(|source| publication_input_error(root, source))?;
-    let assessment = match detect_index_freshness_controlled(&store, &plan, control) {
+    let assessment = match detect_index_freshness_controlled(&store, &plan, scan_limits, control) {
         Ok(assessment) => assessment,
         Err(CliError::VerificationIncomplete(report))
             if report.reason == IndexVerificationReason::PublicationContractMismatch =>
@@ -491,6 +512,9 @@ pub(crate) fn open_exact_fresh_atlas_store_for_project_controlled(
     let Some(delta) = assessment.delta else {
         return Ok(ExactFreshIndexRead { store, work });
     };
+    if !repair_safe_delta {
+        return Err(CliError::RefreshRequired(Box::new(delta.report)));
+    }
     if delta.report.scope != IndexRefreshScope::Incremental {
         return Err(CliError::RefreshRequired(Box::new(delta.report)));
     }
@@ -526,6 +550,127 @@ pub(crate) fn open_exact_fresh_atlas_store_for_project_controlled(
     Ok(ExactFreshIndexRead { store, work })
 }
 
+/// Open an explicit ordered set of current project indexes without mutating any root.
+pub(crate) fn open_federated_atlas_stores_for_project(
+    selected_db: &Path,
+    selected_root: &Path,
+    selected_config: Option<&Path>,
+    roots: &[PathBuf],
+    control: &IndexWorkControl,
+) -> Result<Vec<FederatedStore>, CliError> {
+    validate_federated_root_count(roots.len()).map_err(CliError::Service)?;
+    let selected_root = fs::canonicalize(selected_root).map_err(|source| CliError::Io {
+        path: selected_root.to_path_buf(),
+        source,
+    })?;
+    let mut canonical_roots = Vec::with_capacity(roots.len());
+    for root in roots {
+        let root = fs::canonicalize(root).map_err(|source| CliError::Io {
+            path: root.clone(),
+            source,
+        })?;
+        if canonical_roots.contains(&root) {
+            return Err(CliError::Service(
+                projectatlas_service::ServiceError::InvalidInput(
+                    "federated roots must be unique".to_string(),
+                ),
+            ));
+        }
+        canonical_roots.push(root);
+    }
+    if canonical_roots.first() != Some(&selected_root) {
+        return Err(CliError::Service(
+            projectatlas_service::ServiceError::InvalidInput(
+                "the first federated root must be the selected project root".to_string(),
+            ),
+        ));
+    }
+
+    let databases = canonical_roots
+        .iter()
+        .enumerate()
+        .map(|(order, root)| {
+            if order == 0 {
+                selected_db.to_path_buf()
+            } else {
+                root.join(".projectatlas").join("projectatlas.db")
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut database_bytes = 0_u64;
+    for database in &databases {
+        let metadata = fs::metadata(database).map_err(|source| CliError::Io {
+            path: database.clone(),
+            source,
+        })?;
+        if !metadata.is_file() {
+            return Err(CliError::Service(
+                projectatlas_service::ServiceError::InvalidInput(
+                    "federated database path is not a regular file".to_string(),
+                ),
+            ));
+        }
+        database_bytes = database_bytes.checked_add(metadata.len()).ok_or_else(|| {
+            CliError::Service(projectatlas_service::ServiceError::InvalidInput(
+                "participating database byte count overflowed".to_string(),
+            ))
+        })?;
+        if database_bytes > MAX_FEDERATED_DATABASE_BYTES {
+            return Err(CliError::Service(
+                projectatlas_service::ServiceError::InvalidInput(format!(
+                    "participating databases exceed {MAX_FEDERATED_DATABASE_BYTES} bytes"
+                )),
+            ));
+        }
+    }
+
+    let default_scan_limits = ScanLimits::default();
+    let mut remaining_input_bytes = MAX_FEDERATED_INPUT_BYTES;
+    let mut stores: Vec<FederatedStore> = Vec::with_capacity(canonical_roots.len());
+    for (order, (root, database)) in canonical_roots.into_iter().zip(databases).enumerate() {
+        let started = Instant::now();
+        let config = (order == 0).then_some(selected_config).flatten();
+        let exact = match open_exact_fresh_atlas_store_for_project_with_repair(
+            &database,
+            &root,
+            config,
+            control,
+            false,
+            ScanLimits::new(
+                default_scan_limits.max_entries(),
+                remaining_input_bytes,
+                default_scan_limits.max_workers(),
+            ),
+        ) {
+            Ok(exact) => exact,
+            Err(error) => {
+                for store in stores {
+                    drop(store.finish());
+                }
+                return Err(error);
+            }
+        };
+        remaining_input_bytes = remaining_input_bytes.saturating_sub(exact.work.filesystem_bytes);
+        let input_work = FederatedInputWork {
+            filesystem_entries: exact.work.filesystem_entries,
+            filesystem_bytes: exact.work.filesystem_bytes,
+            sqlite_read_statements: exact.work.sqlite_read_statements,
+            decoded_nodes: exact.work.decoded_nodes,
+            elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        };
+        match FederatedStore::new(exact.store, database, root, input_work) {
+            Ok(store) => stores.push(store),
+            Err(error) => {
+                for store in stores {
+                    drop(store.finish());
+                }
+                return Err(CliError::Service(error));
+            }
+        }
+    }
+    Ok(stores)
+}
+
 /// Distinguish optional repair contention from database-integrity failures.
 fn automatic_refresh_write_is_unavailable(error: &CliError) -> bool {
     matches!(error, CliError::Db(source) if source.is_write_unavailable())
@@ -553,13 +698,14 @@ fn detect_index_freshness(
     plan: &ScanRuntimePlan,
 ) -> Result<Option<IndexFreshnessDelta>, CliError> {
     let control = standalone_index_work_control();
-    Ok(detect_index_freshness_controlled(store, plan, &control)?.delta)
+    Ok(detect_index_freshness_controlled(store, plan, ScanLimits::default(), &control)?.delta)
 }
 
 /// Detect the complete local-source delta under one cooperative work boundary.
 fn detect_index_freshness_controlled(
     store: &AtlasStore,
     plan: &ScanRuntimePlan,
+    scan_limits: ScanLimits,
     control: &IndexWorkControl,
 ) -> Result<IndexFreshnessAssessment, CliError> {
     let mut work = SourceVerificationWork::default();
@@ -567,13 +713,8 @@ fn detect_index_freshness_controlled(
     work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
     verify_index_publication(store, plan)?;
     work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
-    let scan = scan_repo_controlled_with_work(
-        &plan.root,
-        &plan.scan_options,
-        ScanLimits::default(),
-        control,
-    )
-    .map_err(|source| source_inspection_error(&plan.root, source))?;
+    let scan = scan_repo_controlled_with_work(&plan.root, &plan.scan_options, scan_limits, control)
+        .map_err(|source| source_inspection_error(&plan.root, source))?;
     work.filesystem_entries = scan.work.entries;
     work.filesystem_bytes = scan.work.source_bytes;
     let current_nodes = scan.nodes;
@@ -4560,7 +4701,7 @@ pub(crate) fn index_work_control(options: &SymbolBuildOptions) -> IndexWorkContr
 }
 
 /// Create a bounded work boundary for runtime paths without symbol options.
-fn standalone_index_work_control() -> IndexWorkControl {
+pub(crate) fn standalone_index_work_control() -> IndexWorkControl {
     IndexWorkControl::new(IndexCancellation::new(), Some(DEFAULT_INDEX_WORK_TIMEOUT))
 }
 
