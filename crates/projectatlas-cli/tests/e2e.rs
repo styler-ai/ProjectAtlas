@@ -2076,7 +2076,7 @@ fn settings_reports_supported_predecessor_without_migration() -> Result<(), Box<
         || schema
             .get("migration_steps_remaining")
             .and_then(Value::as_u64)
-            != Some(7)
+            != Some(8)
         || !settings.get("index").is_some_and(Value::is_null)
         || !settings.get("telemetry").is_some_and(Value::is_null)
     {
