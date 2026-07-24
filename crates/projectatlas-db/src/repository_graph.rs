@@ -5403,6 +5403,7 @@ const fn relation_parts(relation: GraphRelationKind) -> (&'static str, &'static 
         GraphRelationKind::Extended(ExtendedRelationKind::Tests) => ("extended", "tests"),
         GraphRelationKind::Extended(ExtendedRelationKind::RoutesTo) => ("extended", "routes-to"),
         GraphRelationKind::Extended(ExtendedRelationKind::Configures) => ("extended", "configures"),
+        GraphRelationKind::Extended(ExtendedRelationKind::Deploys) => ("extended", "deploys"),
         GraphRelationKind::Extended(ExtendedRelationKind::Reads) => ("extended", "reads"),
         GraphRelationKind::Extended(ExtendedRelationKind::Writes) => ("extended", "writes"),
     }
@@ -5425,6 +5426,7 @@ fn parse_relation_kind(scope: &str, kind: &str) -> DbResult<GraphRelationKind> {
         ("extended", "configures") => Ok(GraphRelationKind::Extended(
             ExtendedRelationKind::Configures,
         )),
+        ("extended", "deploys") => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Deploys)),
         ("extended", "reads") => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Reads)),
         ("extended", "writes") => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Writes)),
         _ => Err(DbError::InvalidEnum {

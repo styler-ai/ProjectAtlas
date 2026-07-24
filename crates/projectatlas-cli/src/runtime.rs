@@ -38,6 +38,9 @@ use projectatlas_core::language::{
     language_capability, language_registry_digest, language_registry_report,
 };
 use projectatlas_core::outline::estimate_tokens;
+use projectatlas_core::relation_capabilities::{
+    RelationFamilyInventoryReport, relation_family_inventory_report,
+};
 use projectatlas_core::symbols::{
     ParserKind, RelationKind, SourceParseMetadata, SymbolGraph, SymbolKind,
 };
@@ -3901,6 +3904,8 @@ pub(crate) struct SettingsReport {
     pub(crate) language_registry: LanguageRegistryReport,
     /// Digest of the currently implemented provider-backed relation contract.
     pub(crate) semantic_relation_contract_digest: String,
+    /// Versioned accepted relation-family inventory and lifecycle state.
+    pub(crate) relation_family_inventory: RelationFamilyInventoryReport,
     /// Typed search-mode readiness without an implicit index build.
     pub(crate) search: SettingsSearchReport,
     /// Content-free optional parser-pack lifecycle state.
@@ -4156,6 +4161,7 @@ pub(crate) fn build_settings_report(
         database,
         language_registry: language_registry_report(),
         semantic_relation_contract_digest: semantic_resolution_contract_digest(),
+        relation_family_inventory: relation_family_inventory_report(),
         search,
         optional_parser_pack,
     })

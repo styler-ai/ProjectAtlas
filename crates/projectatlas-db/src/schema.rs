@@ -566,7 +566,7 @@ const GRAPH_SCHEMA_SQL: &str = "
             (relation_scope = 'legacy'
                 AND relation_kind IN ('contains', 'imports', 'calls', 'depends-on'))
             OR (relation_scope = 'extended'
-                AND relation_kind IN ('references', 'tests', 'routes-to', 'configures', 'reads', 'writes'))
+                AND relation_kind IN ('references', 'tests', 'routes-to', 'configures', 'deploys', 'reads', 'writes'))
         ),
         CHECK(
             (resolution_status IN ('resolved', 'external')
@@ -629,7 +629,7 @@ const GRAPH_SCHEMA_SQL: &str = "
             OR (relation_scope = 'legacy'
                 AND relation_kind IN ('contains', 'imports', 'calls', 'depends-on'))
             OR (relation_scope = 'extended'
-                AND relation_kind IN ('references', 'tests', 'routes-to', 'configures', 'reads', 'writes'))
+                AND relation_kind IN ('references', 'tests', 'routes-to', 'configures', 'deploys', 'reads', 'writes'))
         ),
         CHECK(total = covered + omitted),
         CHECK(

@@ -702,6 +702,26 @@ back to bounded path-ordered persisted text. Semantic embeddings, rank fusion,
 or ANN remain separately gated, and neither an unbounded embedding scan nor a
 trigger-maintained search copy may become hidden default-core cost.
 
+### Accepted Relation-Family Inventory
+
+The generated [relation-family support inventory](relation-support.md) is the
+versioned compatibility authority for direct structural/type,
+package/manifest, test, route/protocol, configuration/environment,
+deployment/infrastructure, and bounded static read/write relationships.
+`projectatlas-core` owns the closed inventory, the existing runtime projection
+maps conservative parser and path facts into typed rows and invalidates them
+through the existing generation transaction, `projectatlas-db` persists them,
+and the existing bounded relation/analysis service remains the query consumer.
+Optional similarity and co-change rows stay explicitly disabled until their
+independent quality and resource gates pass.
+
+This addition does not change the component, crate-direction, publication, or
+read-snapshot boundaries in the diagrams above. Static inference abstains when
+route, environment, or file-path identity is dynamic; file access literals are
+project-root-relative, parser-backed occurrences remain exact, file-owned path
+classifications point to the owning file, and literal argument values are
+excluded from persisted relation diagnostics.
+
 ### MCP Call To Database Access Contract
 
 For this section, “the database” always means the one authoritative database

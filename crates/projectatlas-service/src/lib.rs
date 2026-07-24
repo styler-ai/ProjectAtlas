@@ -430,6 +430,7 @@ pub fn parse_coverage_relation(value: &str) -> ServiceResult<GraphRelationKind> 
         "configures" => Ok(GraphRelationKind::Extended(
             ExtendedRelationKind::Configures,
         )),
+        "deploys" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Deploys)),
         "reads" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Reads)),
         "writes" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Writes)),
         _ => Err(ServiceError::InvalidInput(format!(

@@ -651,6 +651,8 @@ pub enum ExtendedRelationKind {
     RoutesTo,
     /// Configuration selects or controls a target.
     Configures,
+    /// Deployment or infrastructure configuration provisions a target.
+    Deploys,
     /// A source performs a bounded static read.
     Reads,
     /// A source performs a bounded static write.
@@ -668,6 +670,21 @@ pub enum GraphRelationKind {
 }
 
 impl GraphRelationKind {
+    /// Complete stable persisted relation-kind set.
+    pub const ALL: [Self; 11] = [
+        Self::Legacy(RelationKind::Contains),
+        Self::Legacy(RelationKind::Imports),
+        Self::Legacy(RelationKind::Calls),
+        Self::Legacy(RelationKind::DependsOn),
+        Self::Extended(ExtendedRelationKind::References),
+        Self::Extended(ExtendedRelationKind::Tests),
+        Self::Extended(ExtendedRelationKind::RoutesTo),
+        Self::Extended(ExtendedRelationKind::Configures),
+        Self::Extended(ExtendedRelationKind::Deploys),
+        Self::Extended(ExtendedRelationKind::Reads),
+        Self::Extended(ExtendedRelationKind::Writes),
+    ];
+
     /// Wrap one legacy relation without changing its enum.
     #[must_use]
     pub const fn from_legacy(kind: RelationKind) -> Self {
@@ -684,7 +701,8 @@ impl GraphRelationKind {
     }
 
     /// Return the stable canonical relation spelling.
-    const fn canonical_name(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Legacy(RelationKind::Contains) => "legacy:contains",
             Self::Legacy(RelationKind::Imports) => "legacy:imports",
@@ -694,6 +712,7 @@ impl GraphRelationKind {
             Self::Extended(ExtendedRelationKind::Tests) => "extended:tests",
             Self::Extended(ExtendedRelationKind::RoutesTo) => "extended:routes-to",
             Self::Extended(ExtendedRelationKind::Configures) => "extended:configures",
+            Self::Extended(ExtendedRelationKind::Deploys) => "extended:deploys",
             Self::Extended(ExtendedRelationKind::Reads) => "extended:reads",
             Self::Extended(ExtendedRelationKind::Writes) => "extended:writes",
         }
@@ -1179,7 +1198,7 @@ impl CanonicalResolutionKey {
         append_optional_canonical_field(&mut canonical_identity, scope);
         append_optional_raw_canonical_field(
             &mut canonical_identity,
-            relation.map(GraphRelationKind::canonical_name),
+            relation.map(GraphRelationKind::as_str),
         );
         append_canonical_field(&mut canonical_identity, identity.as_str());
         let digest = *blake3::hash(canonical_identity.as_bytes()).as_bytes();
@@ -1458,7 +1477,7 @@ impl LogicalRelation {
         }
         let mut canonical = relation_project_prefix(source.key.project());
         append_canonical_field(&mut canonical, source.key.canonical_identity());
-        append_canonical_field(&mut canonical, kind.canonical_name());
+        append_canonical_field(&mut canonical, kind.as_str());
         resolution.append_canonical(&mut canonical);
         let key = LogicalRelationKey {
             project: source.key.project(),

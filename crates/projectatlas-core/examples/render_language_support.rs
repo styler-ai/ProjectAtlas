@@ -10,6 +10,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             projectatlas_core::support_catalog::render_language_support_html()?,
             arguments.next(),
         )
+    } else if first.as_deref() == Some(std::ffi::OsStr::new("--relations")) {
+        (
+            projectatlas_core::relation_capabilities::render_relation_support_markdown()?,
+            arguments.next(),
+        )
     } else {
         (
             projectatlas_core::language::render_language_support_markdown()?,

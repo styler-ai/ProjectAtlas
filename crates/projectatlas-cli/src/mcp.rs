@@ -8551,6 +8551,8 @@ mod tests {
                 && disabled_text.contains("accepted_set_digest:")
                 && disabled_text.contains("semantic_provider_digest:")
                 && disabled_text.contains("semantic_relation_contract_digest:")
+                && disabled_text.contains("relation_family_inventory:")
+                && disabled_text.contains("optional_disabled_families:")
                 && disabled_text.contains("benchmarked:")
                 && !disabled_text.contains("accepted_minimum:")
                 && !disabled_text.contains("provenance_source:")

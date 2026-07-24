@@ -18,6 +18,7 @@ use projectatlas_core::optional_parser_pack::{
     OPTIONAL_PARSER_PACK_MAX_ARCHIVE_BYTES, OPTIONAL_PARSER_PACK_MAX_EXPANDED_BYTES,
     OPTIONAL_PARSER_PACK_MAX_FILE_BYTES, OPTIONAL_PARSER_PACK_MAX_FILE_ENTRIES, PackRelativePath,
 };
+use projectatlas_core::relation_capabilities::{RELATION_FAMILY_CAPABILITIES, RelationFamilyState};
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
 };
@@ -1356,6 +1357,40 @@ fn settings_reports_content_free_telemetry_without_recording() -> Result<(), Box
         )
         .into());
     }
+    let relation_inventory = settings
+        .get("relation_family_inventory")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("settings omitted accepted relation-family inventory"))?;
+    if relation_inventory.get("version").and_then(Value::as_u64) != Some(1)
+        || relation_inventory
+            .get("digest")
+            .and_then(Value::as_str)
+            .is_none_or(|digest| digest.len() != 64)
+    {
+        return Err(io::Error::other("settings omitted accepted relation-family identity").into());
+    }
+    let active_rows = RELATION_FAMILY_CAPABILITIES
+        .iter()
+        .filter(|row| row.state == RelationFamilyState::Active)
+        .count() as u64;
+    let disabled_rows = RELATION_FAMILY_CAPABILITIES
+        .iter()
+        .filter(|row| row.state == RelationFamilyState::OptionalDisabled)
+        .count() as u64;
+    if relation_inventory
+        .get("active_families")
+        .and_then(Value::as_u64)
+        != Some(active_rows)
+        || relation_inventory
+            .get("optional_disabled_families")
+            .and_then(Value::as_u64)
+            != Some(disabled_rows)
+    {
+        return Err(io::Error::other(
+            "settings relation-family counts did not derive from their rows",
+        )
+        .into());
+    }
     let search = settings
         .get("search")
         .and_then(Value::as_object)
@@ -1527,6 +1562,7 @@ fn settings_reports_content_free_telemetry_without_recording() -> Result<(), Box
         "database": database,
         "language_registry": language_registry,
         "semantic_relation_contract_digest": settings["semantic_relation_contract_digest"],
+        "relation_family_inventory": relation_inventory,
         "search": search,
         "optional_parser_pack": optional_parser_pack,
     }))?;
@@ -10571,19 +10607,6 @@ fn assert_clean_scan_convergence(
 fn derived_result_snapshot(db: &Path) -> Result<DerivedResultSnapshot, Box<dyn Error>> {
     const GRAPH_ROW_LIMIT: u32 = 10_000;
     const GRAPH_OCCURRENCE_LIMIT: u32 = 1_024;
-    const RELATION_FAMILIES: [GraphRelationKind; 10] = [
-        GraphRelationKind::Legacy(RelationKind::Contains),
-        GraphRelationKind::Legacy(RelationKind::Imports),
-        GraphRelationKind::Legacy(RelationKind::Calls),
-        GraphRelationKind::Legacy(RelationKind::DependsOn),
-        GraphRelationKind::Extended(ExtendedRelationKind::References),
-        GraphRelationKind::Extended(ExtendedRelationKind::Tests),
-        GraphRelationKind::Extended(ExtendedRelationKind::RoutesTo),
-        GraphRelationKind::Extended(ExtendedRelationKind::Configures),
-        GraphRelationKind::Extended(ExtendedRelationKind::Reads),
-        GraphRelationKind::Extended(ExtendedRelationKind::Writes),
-    ];
-
     let store = AtlasStore::open_read_only(db)?;
     let publication = store
         .index_publication()?
@@ -10650,7 +10673,7 @@ fn derived_result_snapshot(db: &Path) -> Result<DerivedResultSnapshot, Box<dyn E
 
     let mut graph_relations = BTreeSet::new();
     let mut graph_occurrences = BTreeSet::new();
-    for family in RELATION_FAMILIES {
+    for family in GraphRelationKind::ALL {
         let relations = store.repository_graph_relations(
             RepositoryGraphRelationQuery::Family { relation: family },
             GRAPH_ROW_LIMIT,

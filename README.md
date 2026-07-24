@@ -340,6 +340,7 @@ skills/                   standalone agent skill snippets
 - `docs/agent-integration.md`
 - `docs/configuration.md`
 - [`docs/language-support.md`](docs/language-support.md) — generated capability and ecosystem authority
+- [`docs/relation-support.md`](docs/relation-support.md) — generated accepted relation-family inventory
 - `docs/workflow.md`
 - `docs/structural-summaries.md`
 - `docs/benchmarks/large-application-token-savings.md`

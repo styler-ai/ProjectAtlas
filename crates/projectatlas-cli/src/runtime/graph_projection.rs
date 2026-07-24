@@ -9,13 +9,15 @@ use super::{
 use projectatlas_core::IndexGeneration;
 use projectatlas_core::graph::{
     CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
-    CoverageState, EntityResolutionKey, EntitySelector, ExternalSelector, GraphContractError,
-    GraphEntity, GraphIdentityText, GraphLimits, GraphRelationKind, LogicalRelation,
-    PackageSelector, ProjectInstanceId, RelationDependencyKey, RelationOccurrence,
+    CoverageState, EntityResolutionKey, EntitySelector, ExtendedRelationKind, ExternalSelector,
+    GraphContractError, GraphEntity, GraphIdentityText, GraphLimits, GraphRelationKind,
+    LogicalRelation, PackageSelector, ProjectInstanceId, RelationDependencyKey, RelationOccurrence,
     RelationResolution, RepositoryFilePath, RepositoryNodePath, SourceSpan, SymbolSelector,
 };
 use projectatlas_core::language::{SemanticProviderOwner, language_capability};
-use projectatlas_core::symbols::{ParserKind, RelationKind, SymbolGraph, SymbolKind};
+use projectatlas_core::symbols::{
+    ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
+};
 use projectatlas_db::{
     AtlasStore, IndexPublicationGuard, RepositoryAffectedSourceFootprint,
     RepositoryResolutionCandidate,
@@ -53,6 +55,12 @@ const RUST_TOOLCHAIN_SYSTEM: &str = "rust-toolchain";
 const NODE_SYSTEM: &str = "node";
 /// Honest coverage diagnostic for fallback or structural relation extraction.
 const PARTIAL_COVERAGE_REASON: &str = "parser does not prove complete relationship coverage";
+/// External namespace for content-free configuration identities.
+const CONFIGURATION_SYSTEM: &str = "configuration";
+/// External namespace for static environment-variable identities.
+const ENVIRONMENT_SYSTEM: &str = "environment-variable";
+/// External namespace for content-free deployment platform identities.
+const DEPLOYMENT_SYSTEM: &str = "deployment-platform";
 
 /// One graph mutation staged outside the database writer transaction.
 pub(super) enum RepositoryGraphMutation {
@@ -348,6 +356,32 @@ struct GraphOwners {
     file: GraphEntity,
     /// Optional stable entity corresponding to each parser symbol row.
     symbols: Vec<Option<GraphEntity>>,
+}
+
+/// One conservative additive relation derived from already bounded parser facts.
+struct DerivedRelationFact {
+    /// Additive graph relation kind.
+    kind: ExtendedRelationKind,
+    /// Parser-compatible source, target, span, context, and trust facts.
+    relation: SymbolRelation,
+    /// Resolution strategy for the derived target.
+    target: DerivedRelationTarget,
+}
+
+/// Closed target classes accepted by additive relation projection.
+enum DerivedRelationTarget {
+    /// Resolve through the same typed provider keys as one parser relation.
+    Parser {
+        /// Canonical provider-owned dependency keys.
+        keys: Vec<CanonicalResolutionKey>,
+    },
+    /// Resolve one statically visible repository-relative file path.
+    RepositoryPath,
+    /// Bind one content-free external namespace and identity.
+    External {
+        /// Closed external namespace.
+        system: &'static str,
+    },
 }
 
 /// Package names assigned by longest manifest-directory ownership.
@@ -715,6 +749,70 @@ fn finish_projection(
                 );
             }
         }
+        for fact in derived_relation_facts(graph, &keys_by_relation) {
+            control.check(IndexWorkStage::SymbolParsing)?;
+            let source = relation_source(owners, graph, &fact.relation);
+            let resolution = derived_relation_resolution(
+                project,
+                generation,
+                &fact,
+                owners,
+                graph,
+                candidates,
+                &entities.entity_by_digest,
+                &mut external_entities,
+                control,
+            )?;
+            let relation = LogicalRelation::new(
+                source,
+                GraphRelationKind::Extended(fact.kind),
+                resolution,
+                relation_confidence(fact.relation.parser),
+                relation_completeness(fact.relation.parser),
+                generation,
+            )
+            .map_err(invalid_graph_contract)?;
+            let relation_digest = relation.key().digest().to_string();
+            if let Some(existing) = relations_by_digest.get(&relation_digest) {
+                if existing != &relation {
+                    return Err(CliError::InvalidInput(
+                        "derived relation digest retained conflicting facts".to_string(),
+                    ));
+                }
+            } else {
+                relations_by_digest.insert(relation_digest, relation.clone());
+            }
+            let line = u32::try_from(fact.relation.line).map_err(|error| {
+                CliError::InvalidInput(format!(
+                    "derived relation source line exceeds graph range: {error}"
+                ))
+            })?;
+            let end_column =
+                u32::try_from(fact.relation.context.chars().count()).map_err(|error| {
+                    CliError::InvalidInput(format!(
+                        "derived relation source context exceeds graph range: {error}"
+                    ))
+                })?;
+            occurrences.push(
+                RelationOccurrence::new(
+                    &relation,
+                    RepositoryFilePath::new(Path::new(&graph.path))
+                        .map_err(invalid_graph_contract)?,
+                    SourceSpan::new(line.max(1), 0, line.max(1), end_column)
+                        .map_err(invalid_graph_contract)?,
+                    generation,
+                )
+                .map_err(invalid_graph_contract)?,
+            );
+            if let DerivedRelationTarget::Parser { keys } = fact.target {
+                for key in keys {
+                    relation_dependencies.push(
+                        RelationDependencyKey::new(relation.key().clone(), key)
+                            .map_err(invalid_graph_contract)?,
+                    );
+                }
+            }
+        }
         coverage.push(coverage_for_graph(graph, generation)?);
     }
     let mut relations = relations_by_digest.into_values().collect::<Vec<_>>();
@@ -955,6 +1053,427 @@ fn entity_owner_path(entity: &GraphEntity) -> Option<&str> {
     }
 }
 
+/// Derive additive families only from exact bounded parser facts and path policy.
+fn derived_relation_facts(
+    graph: &SymbolGraph,
+    keys_by_relation: &BTreeMap<usize, &[CanonicalResolutionKey]>,
+) -> Vec<DerivedRelationFact> {
+    let mut facts = Vec::new();
+    let test_path = is_test_path(&graph.path);
+    for (index, relation) in graph.relations.iter().enumerate() {
+        if test_path && matches!(relation.kind, RelationKind::Imports | RelationKind::Calls) {
+            let keys = keys_by_relation
+                .get(&index)
+                .copied()
+                .unwrap_or_default()
+                .to_vec();
+            push_derived_relation(
+                &mut facts,
+                ExtendedRelationKind::Tests,
+                relation.clone(),
+                DerivedRelationTarget::Parser { keys },
+            );
+        }
+        if relation.kind == RelationKind::Calls {
+            if let Some(handler) = static_route_handler(relation) {
+                push_derived_relation(
+                    &mut facts,
+                    ExtendedRelationKind::RoutesTo,
+                    derived_parser_relation(relation, handler),
+                    DerivedRelationTarget::Parser { keys: Vec::new() },
+                );
+            }
+            if let Some(key) = static_environment_key(relation) {
+                push_derived_relation(
+                    &mut facts,
+                    ExtendedRelationKind::Configures,
+                    derived_parser_relation(relation, key),
+                    DerivedRelationTarget::External {
+                        system: ENVIRONMENT_SYSTEM,
+                    },
+                );
+            }
+            if let Some(kind) = static_data_access_kind(&relation.target_name)
+                && let Some(path) = static_string_argument(&relation.context)
+                    .and_then(normalize_static_repository_path)
+            {
+                push_derived_relation(
+                    &mut facts,
+                    kind,
+                    derived_parser_relation(relation, path),
+                    DerivedRelationTarget::RepositoryPath,
+                );
+            }
+        }
+    }
+    if let Some(identity) = configuration_file_identity(&graph.path) {
+        push_derived_relation(
+            &mut facts,
+            ExtendedRelationKind::Configures,
+            file_owned_relation(graph, identity),
+            DerivedRelationTarget::External {
+                system: CONFIGURATION_SYSTEM,
+            },
+        );
+    }
+    if let Some(identity) = deployment_platform_identity(&graph.path) {
+        push_derived_relation(
+            &mut facts,
+            ExtendedRelationKind::Deploys,
+            file_owned_relation(graph, identity),
+            DerivedRelationTarget::External {
+                system: DEPLOYMENT_SYSTEM,
+            },
+        );
+    }
+    facts
+}
+
+/// Retain one additive fact from the already bounded parser graph.
+fn push_derived_relation(
+    facts: &mut Vec<DerivedRelationFact>,
+    kind: ExtendedRelationKind,
+    relation: SymbolRelation,
+    target: DerivedRelationTarget,
+) {
+    facts.push(DerivedRelationFact {
+        kind,
+        relation,
+        target,
+    });
+}
+
+/// Copy source context while replacing only the statically selected target.
+fn derived_parser_relation(relation: &SymbolRelation, target_name: String) -> SymbolRelation {
+    SymbolRelation {
+        path: relation.path.clone(),
+        source_name: relation.source_name.clone(),
+        target_name,
+        kind: RelationKind::Calls,
+        line: relation.line,
+        context: relation.context.clone(),
+        parser: relation.parser,
+    }
+}
+
+/// Create one file-owned content-free configuration or deployment fact.
+fn file_owned_relation(graph: &SymbolGraph, target_name: String) -> SymbolRelation {
+    SymbolRelation {
+        path: graph.path.clone(),
+        source_name: "<module>".to_string(),
+        target_name,
+        kind: RelationKind::Calls,
+        line: 1,
+        context: graph.path.clone(),
+        parser: graph.parser,
+    }
+}
+
+/// Resolve one additive relation through its closed target class.
+fn derived_relation_resolution<'a>(
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    fact: &DerivedRelationFact,
+    owners: &'a GraphOwners,
+    graph: &SymbolGraph,
+    candidates: &'a ProjectResolutionRegistry,
+    entities: &'a BTreeMap<String, GraphEntity>,
+    external_entities: &mut BTreeMap<String, GraphEntity>,
+    control: &IndexWorkControl,
+) -> Result<RelationResolution, CliError> {
+    match &fact.target {
+        DerivedRelationTarget::Parser { keys } => relation_resolution(
+            project,
+            generation,
+            &fact.relation,
+            owners,
+            graph,
+            keys,
+            candidates,
+            external_entities,
+            control,
+        ),
+        DerivedRelationTarget::RepositoryPath => {
+            let candidate = GraphEntity::new(
+                project,
+                EntitySelector::File {
+                    path: RepositoryFilePath::new(Path::new(&fact.relation.target_name))
+                        .map_err(invalid_graph_contract)?,
+                },
+                generation,
+            )
+            .map_err(invalid_graph_contract)?;
+            match entities.get(candidate.key().digest()) {
+                Some(entity) if entity == &candidate => {
+                    RelationResolution::resolved(entity).map_err(invalid_graph_contract)
+                }
+                Some(_conflict) => Err(CliError::InvalidInput(
+                    "static repository-path target collided with another graph entity".to_string(),
+                )),
+                None => Ok(RelationResolution::Unresolved {
+                    reference: GraphIdentityText::new(fact.relation.target_name.clone())
+                        .map_err(invalid_graph_contract)?,
+                }),
+            }
+        }
+        DerivedRelationTarget::External { system } => {
+            let entity = GraphEntity::new(
+                project,
+                EntitySelector::External {
+                    external: ExternalSelector {
+                        system: GraphIdentityText::new(*system).map_err(invalid_graph_contract)?,
+                        identity: GraphIdentityText::new(fact.relation.target_name.clone())
+                            .map_err(invalid_graph_contract)?,
+                    },
+                },
+                generation,
+            )
+            .map_err(invalid_graph_contract)?;
+            let resolution =
+                RelationResolution::external(&entity).map_err(invalid_graph_contract)?;
+            insert_entity(external_entities, entity)?;
+            Ok(resolution)
+        }
+    }
+}
+
+/// Return whether a repository path is an accepted test-source location.
+fn is_test_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let file = normalized.rsplit('/').next().unwrap_or(&normalized);
+    normalized
+        .split('/')
+        .any(|segment| matches!(segment, "test" | "tests" | "__tests__"))
+        || file.contains(".test.")
+        || file.contains(".spec.")
+        || file
+            .split_once('.')
+            .is_some_and(|(stem, _extension)| stem.ends_with("_test") || stem.starts_with("test_"))
+}
+
+/// Extract one exact handler identifier from a static route registration.
+fn static_route_handler(relation: &SymbolRelation) -> Option<String> {
+    let leaf = call_leaf(&relation.target_name);
+    if !matches!(
+        leaf,
+        "route" | "add_route" | "map_get" | "map_post" | "map_put" | "map_patch" | "map_delete"
+    ) {
+        return None;
+    }
+    let route = static_string_argument(&relation.context)?;
+    if !route.starts_with('/')
+        || route.chars().any(char::is_control)
+        || relation.context.matches(',').count() != 1
+    {
+        return None;
+    }
+    let handler = relation
+        .context
+        .rsplit_once(',')?
+        .1
+        .trim()
+        .trim_end_matches([')', ';'])
+        .trim();
+    let valid_handler = !handler.is_empty()
+        && handler != relation.source_name
+        && handler
+            .chars()
+            .next()
+            .is_some_and(|character| !character.is_ascii_digit())
+        && handler.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | ':' | '.' | '$')
+        });
+    valid_handler.then(|| handler.trim_matches('$').to_string())
+}
+
+/// Extract one static environment key without retaining its value.
+fn static_environment_key(relation: &SymbolRelation) -> Option<String> {
+    let normalized = relation
+        .target_name
+        .trim()
+        .trim_end_matches('!')
+        .to_ascii_lowercase();
+    if !(normalized.ends_with("env::var")
+        || normalized.ends_with("env::var_os")
+        || normalized.ends_with("os.getenv")
+        || normalized.ends_with("getenvironmentvariable")
+        || matches!(normalized.as_str(), "getenv" | "getenv_os"))
+    {
+        return None;
+    }
+    let key = static_string_argument(&relation.context)?;
+    (!key.is_empty()
+        && key.len() <= 128
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'))
+    .then(|| key.to_string())
+}
+
+/// Classify a call as one accepted bounded static read or write API.
+fn static_data_access_kind(target: &str) -> Option<ExtendedRelationKind> {
+    let normalized = target.trim().trim_end_matches('!').to_ascii_lowercase();
+    let leaf = call_leaf(&normalized);
+    if matches!(
+        leaf,
+        "read" | "read_to_string" | "readfile" | "readfilesync"
+    ) || normalized.ends_with("file::open")
+    {
+        Some(ExtendedRelationKind::Reads)
+    } else if matches!(leaf, "write" | "writefile" | "writefilesync" | "create")
+        || normalized.ends_with("file::create")
+    {
+        Some(ExtendedRelationKind::Writes)
+    } else {
+        None
+    }
+}
+
+/// Return the normalized leaf of one qualified call target.
+fn call_leaf(target: &str) -> &str {
+    target
+        .trim()
+        .trim_end_matches('!')
+        .rsplit([':', '.', '/'])
+        .find(|part| !part.is_empty())
+        .unwrap_or_default()
+}
+
+/// Return the first argument only when it is one complete static string literal.
+fn static_string_argument(context: &str) -> Option<&str> {
+    let open = context.find('(')?;
+    let argument = context[open + 1..].trim_start();
+    let quote = argument.chars().next()?;
+    if !matches!(quote, '\'' | '"') {
+        return None;
+    }
+    let value = &argument[quote.len_utf8()..];
+    let end = value.find(quote)?;
+    let value = &value[..end];
+    (!value.contains('\\')
+        && !value.contains("${")
+        && !value.contains("#{")
+        && !value.chars().any(char::is_control))
+    .then_some(value)
+}
+
+/// Normalize one static relative source literal into a repository path.
+fn normalize_static_repository_path(value: &str) -> Option<String> {
+    let value = value.replace('\\', "/");
+    if value.is_empty()
+        || value.starts_with('/')
+        || value.starts_with('~')
+        || value.contains("://")
+        || value.contains('$')
+        || value.contains('{')
+        || value.contains('}')
+        || value
+            .split('/')
+            .next()
+            .is_some_and(|part| part.contains(':'))
+    {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in value.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part if part == "."
+                || part == ".."
+                || part.chars().any(char::is_control)
+                || part.trim() != part =>
+            {
+                return None;
+            }
+            part => parts.push(part.to_string()),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// Classify one exact repository configuration filename without reading values.
+fn configuration_file_identity(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let file = normalized.rsplit('/').next().unwrap_or(&normalized);
+    let identity = if file == ".env" || file.starts_with(".env.") {
+        "dotenv"
+    } else if matches!(
+        file,
+        "config.json"
+            | "config.yaml"
+            | "config.yml"
+            | "config.toml"
+            | "settings.json"
+            | "settings.yaml"
+            | "settings.yml"
+            | "settings.toml"
+            | "appsettings.json"
+    ) {
+        "application-config"
+    } else {
+        return None;
+    };
+    Some(identity.to_string())
+}
+
+/// Classify one accepted infrastructure path into a content-free platform.
+fn deployment_platform_identity(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let file = normalized.rsplit('/').next().unwrap_or(&normalized);
+    let identity = if file_has_extension(file, "tf")
+        || file
+            .strip_suffix(".json")
+            .is_some_and(|stem| file_has_extension(stem, "tf"))
+    {
+        "terraform"
+    } else if file == "dockerfile"
+        || file.starts_with("dockerfile.")
+        || matches!(
+            file,
+            "compose.yaml" | "compose.yml" | "docker-compose.yaml" | "docker-compose.yml"
+        )
+    {
+        "containers"
+    } else if matches!(
+        file,
+        "chart.yaml" | "kustomization.yaml" | "kustomization.yml"
+    ) || (normalized
+        .split('/')
+        .any(|segment| matches!(segment, "k8s" | "kubernetes" | "helm" | "kustomize"))
+        && matches!(
+            Path::new(file).extension().and_then(|value| value.to_str()),
+            Some("yaml" | "yml" | "json")
+        ))
+    {
+        "kubernetes"
+    } else if file_has_extension(file, "bicep") {
+        "azure-bicep"
+    } else if file == "sam-template.yaml"
+        || (file.contains("cloudformation")
+            && matches!(
+                Path::new(file).extension().and_then(|value| value.to_str()),
+                Some("yaml" | "yml" | "json")
+            ))
+    {
+        "cloudformation"
+    } else if file == "playbook.yaml" || file == "playbook.yml" {
+        "ansible"
+    } else {
+        return None;
+    };
+    Some(identity.to_string())
+}
+
+/// Match one exact extension without platform case assumptions.
+fn file_has_extension(file: &str, expected: &str) -> bool {
+    Path::new(file)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
+}
+
 /// Resolve one parser relation's unique local source entity when possible.
 fn relation_source<'a>(
     owners: &'a GraphOwners,
@@ -1024,7 +1543,7 @@ fn relation_resolution<'a>(
                 return Ok(resolution);
             }
             Ok(RelationResolution::Unresolved {
-                reference: GraphIdentityText::new(nonempty_reference(&relation.target_name))
+                reference: GraphIdentityText::new(relation_reference(relation))
                     .map_err(invalid_graph_contract)?,
             })
         }
@@ -1035,7 +1554,7 @@ fn relation_resolution<'a>(
         )
         .map_err(invalid_graph_contract),
         count => Ok(RelationResolution::Ambiguous {
-            reference: GraphIdentityText::new(nonempty_reference(&relation.target_name))
+            reference: GraphIdentityText::new(relation_reference(relation))
                 .map_err(invalid_graph_contract)?,
             candidates: NonZeroU32::new(count).ok_or_else(|| {
                 CliError::InvalidInput("ambiguous target count was zero".to_string())
@@ -1244,8 +1763,9 @@ fn rust_toolchain_identity(
             common_rust_path(&common, &identity)
         });
     }
-    let target = relation.target_name.trim();
-    rust_toolchain_root(target).map(|_root| target.to_string())
+    let target = relation_reference(relation);
+    rust_toolchain_root(&target)?;
+    Some(target)
 }
 
 /// Return one explicitly toolchain-owned Rust import identity.
@@ -1316,6 +1836,22 @@ fn nonempty_reference(value: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+/// Keep call arguments and literal values out of persisted relation diagnostics.
+fn relation_reference(relation: &SymbolRelation) -> String {
+    let mut value = if relation.kind == RelationKind::Calls {
+        relation
+            .target_name
+            .split_once('(')
+            .map_or(relation.target_name.as_str(), |(target, _arguments)| target)
+    } else {
+        &relation.target_name
+    };
+    if relation.kind == RelationKind::Calls && value.contains(['\'', '"']) {
+        value = call_leaf(value);
+    }
+    nonempty_reference(value)
 }
 
 /// Project parser trust into one path-scoped coverage record.
@@ -1700,6 +2236,9 @@ mod tests {
         RelationResolution, RepositoryFilePath, ResolutionKeyDomain, ReusableTargetSelector,
         SymbolSelector,
     };
+    use projectatlas_core::relation_capabilities::{
+        RELATION_FAMILY_CAPABILITIES, RelationFamilyState,
+    };
     use projectatlas_core::symbols::{
         CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolGraph, SymbolKind,
         SymbolRelation,
@@ -1892,29 +2431,172 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_projection_publication_does_not_fabricate_extended_relation_families()
-    -> Result<(), Box<dyn Error>> {
+    fn accepted_relation_families_publish_and_reopen() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
-        let root = temp.path().join("ordinary-projection");
-        fs::create_dir_all(root.join("src"))?;
+        let root = temp.path().join("accepted-relation-families");
+        for directory in ["src", "tests", "config", "infra", "data"] {
+            fs::create_dir_all(root.join(directory))?;
+        }
         let database = root.join("projectatlas.db");
         let mut store = AtlasStore::open_for_project(&database, &root)?;
         let project = store
             .project_instance_id()?
-            .ok_or_else(|| io::Error::other("ordinary projection identity is missing"))?;
+            .ok_or_else(|| io::Error::other("relation inventory identity is missing"))?;
         let generation = IndexGeneration::new(1);
         let control = IndexWorkControl::new(IndexCancellation::new(), None);
         let graphs = vec![
             extract_symbol_graph(
                 "Cargo.toml",
                 Some("cargo-manifest"),
-                "[package]\nname = \"ordinary-projection\"\nversion = \"0.1.0\"\n",
+                concat!(
+                    "[package]\nname = \"relation-fixture\"\nversion = \"0.1.0\"\n",
+                    "\n[dependencies]\nserde = \"1\"\n",
+                ),
             ),
             extract_symbol_graph(
                 "src/lib.rs",
                 Some("rust"),
-                "use std::path::Path;\npub fn route_test_config_reference() { helper(); }\nfn helper() {}\n",
+                concat!(
+                    "use std::fs;\n",
+                    "pub struct Router { pub enabled: bool }\n",
+                    "impl Router { pub fn install(&self) {} }\n",
+                    "pub fn handler() {}\n",
+                    "pub fn register() {\n",
+                    "    route(\"/health\", handler);\n",
+                    "    let _ = std::env::var(\"ATLAS_MODE\").unwrap_or_else(|_| \"super-secret\".into());\n",
+                    "    let _ = fs::read_to_string(\"data/input.txt\");\n",
+                    "    let _ = fs::write(\"data/output.txt\", \"ok\");\n",
+                    "}\n",
+                    "fn route(_path: &str, _handler: fn()) {}\n",
+                ),
             ),
+            extract_symbol_graph(
+                "tests/feature_test.rs",
+                Some("rust"),
+                "fn subject() {}\nfn verifies_subject() { subject(); }\n",
+            ),
+            extract_symbol_graph(
+                "config/appsettings.json",
+                Some("json"),
+                "{\"token\":\"super-secret\"}\n",
+            ),
+            extract_symbol_graph(
+                "infra/main.tf",
+                Some("terraform"),
+                "resource \"null_resource\" \"fixture\" {}\n",
+            ),
+            extract_symbol_graph("data/input.txt", None, "input\n"),
+            extract_symbol_graph("data/output.txt", None, ""),
+        ];
+        let nodes = graphs
+            .iter()
+            .map(|graph| {
+                test_file_node(&graph.path, graph.language.as_deref().unwrap_or("unknown"))
+            })
+            .collect::<Vec<_>>();
+        let packages = PackageIndex::from_graphs(&graphs)?;
+        let projection = build_entity_projection(
+            project, generation, &nodes, &graphs, &packages, true, &control,
+        )?;
+        let candidates = resolution_registry_from_exports(&projection, &control)?;
+        let staged = finish_projection(
+            project,
+            generation,
+            RepositoryGraphMutation::Full,
+            projection,
+            &candidates,
+            &control,
+        )?;
+        {
+            let mut publication = store.begin_index_publication("accepted-relation-families")?;
+            publication.begin_scan_replacement()?;
+            publication.upsert_scan_node_batch(&nodes)?;
+            publication.finish_scan_replacement()?;
+            staged.apply(&mut publication, &control)?;
+            publication.complete()?;
+        }
+        drop(store);
+
+        let reader = AtlasStore::open_read_only_for_project(&database, &root)?;
+        for capability in RELATION_FAMILY_CAPABILITIES
+            .iter()
+            .filter(|capability| capability.state == RelationFamilyState::Active)
+        {
+            for &family in capability.graph_relations {
+                let page = reader.repository_graph_relations(
+                    RepositoryGraphRelationQuery::Family { relation: family },
+                    128,
+                )?;
+                require(!page.truncated, &format!("{family:?} page was truncated"))?;
+                require(
+                    !page.rows.is_empty(),
+                    &format!("{family:?} had no reopened persisted relation"),
+                )?;
+                for relation in page.rows {
+                    let occurrences = reader.repository_graph_occurrences(&relation, 32)?;
+                    require(
+                        !occurrences.rows.is_empty() && !occurrences.truncated,
+                        &format!("{family:?} lost exact source occurrences"),
+                    )?;
+                    require(
+                        !format!("{relation:?}").contains("super-secret"),
+                        &format!("secret value escaped into persisted {family:?} relation"),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn accepted_relation_families_abstain_without_static_evidence() -> Result<(), Box<dyn Error>> {
+        let project = ProjectInstanceId::from_bytes([13; 16])?;
+        let generation = IndexGeneration::new(1);
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let graphs = vec![
+            extract_symbol_graph(
+                "src/dynamic.rs",
+                Some("rust"),
+                concat!(
+                    "use std::fs;\n",
+                    "struct Client;\n",
+                    "impl Client { fn get(&self, _path: &str, _handler: fn()) {} }\n",
+                    "fn handler() {}\n",
+                    "fn dynamic(client: &Client, route_path: &str, key: &str, file: &str) {\n",
+                    "    client.get(\"/health\", handler);\n",
+                    "    route(route_path, handler);\n",
+                    "    let _ = std::env::var(key);\n",
+                    "    let _ = fs::read_to_string(file);\n",
+                    "    let _ = fs::write(file, \"super-secret\");\n",
+                    "}\n",
+                    "fn route(_path: &str, _handler: fn()) {}\n",
+                ),
+            ),
+            extract_symbol_graph(
+                "src/escaping.rs",
+                Some("rust"),
+                concat!(
+                    "use std::fs;\n",
+                    "fn unsafe_paths() {\n",
+                    "    let _ = fs::read_to_string(\"../secret.txt\");\n",
+                    "    let _ = fs::write(\"C:/secret.txt\", \"super-secret\");\n",
+                    "}\n",
+                ),
+            ),
+            extract_symbol_graph(
+                "src/dynamic.js",
+                Some("javascript"),
+                concat!(
+                    "function handler() {}\n",
+                    "function middleware() {}\n",
+                    "function route(...args) {}\n",
+                    "route(\"/health\", handler, middleware);\n",
+                ),
+            ),
+            extract_symbol_graph("docs/main.tf.example", None, "not infrastructure\n"),
+            extract_symbol_graph("docs/k8s/README.md", None, "not infrastructure\n"),
+            extract_symbol_graph("docs/cloudformation-notes.md", None, "not infrastructure\n"),
+            extract_symbol_graph("config/settings.json.bak", None, "super-secret\n"),
         ];
         let packages = PackageIndex::from_graphs(&graphs)?;
         let projection =
@@ -1928,41 +2610,29 @@ mod tests {
             &candidates,
             &control,
         )?;
-        require(
-            staged
-                .relations
-                .iter()
-                .any(|relation| matches!(relation.kind(), GraphRelationKind::Legacy(_))),
-            "ordinary projection fixture emitted no legacy relation",
-        )?;
-        {
-            let mut publication = store.begin_index_publication("ordinary-projection")?;
-            publication.begin_scan_replacement()?;
-            publication.upsert_scan_node_batch(&[
-                test_file_node("Cargo.toml", "cargo-manifest"),
-                test_file_node("src/lib.rs", "rust"),
-            ])?;
-            publication.finish_scan_replacement()?;
-            staged.apply(&mut publication, &control)?;
-            publication.complete()?;
-        }
         for family in [
-            ExtendedRelationKind::References,
             ExtendedRelationKind::Tests,
             ExtendedRelationKind::RoutesTo,
             ExtendedRelationKind::Configures,
+            ExtendedRelationKind::Deploys,
+            ExtendedRelationKind::Reads,
+            ExtendedRelationKind::Writes,
         ] {
-            let page = store.repository_graph_relations(
-                RepositoryGraphRelationQuery::Family {
-                    relation: GraphRelationKind::Extended(family),
-                },
-                10,
-            )?;
             require(
-                page.rows.is_empty() && !page.truncated,
-                &format!("ordinary projection fabricated {family:?}"),
+                staged
+                    .relations
+                    .iter()
+                    .all(|relation| relation.kind() != GraphRelationKind::Extended(family)),
+                &format!("dynamic or lookalike input fabricated {family:?}"),
             )?;
         }
+        require(
+            staged
+                .entities
+                .iter()
+                .all(|entity| !entity.key().canonical_identity().contains("super-secret")),
+            "negative fixture leaked a secret into graph identity",
+        )?;
         Ok(())
     }
 
@@ -2960,6 +3630,13 @@ mod tests {
             &staged.relations[0].completeness(),
             &Completeness::Partial,
             "fallback relation completeness after reopen",
+        )?;
+        require(
+            staged
+                .relations
+                .iter()
+                .any(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)),
+            "reopened graph lost its legacy call relation",
         )?;
         require_eq(&staged.coverage.len(), &1, "normalized coverage count")?;
         require_eq(
