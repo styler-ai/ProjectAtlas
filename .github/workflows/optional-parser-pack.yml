@@ -8,6 +8,15 @@ on:
         required: true
         default: false
         type: boolean
+      target:
+        description: Run all release targets or one bounded diagnostic target
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - x86_64-unknown-linux-gnu
+          - x86_64-pc-windows-msvc
   pull_request:
     branches: [dev]
     types: [labeled]
@@ -42,6 +51,9 @@ jobs:
             target: x86_64-pc-windows-msvc
             isolation: windows-principal-firewall
             reuse_cargo_layer: false
+        exclude:
+          - target: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'x86_64-unknown-linux-gnu' && 'x86_64-pc-windows-msvc' || '__none__' }}
+          - target: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'x86_64-pc-windows-msvc' && 'x86_64-unknown-linux-gnu' || '__none__' }}
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -648,6 +660,9 @@ jobs:
           - os: windows-2025
             target: x86_64-pc-windows-msvc
             isolation: windows-app-container
+        exclude:
+          - target: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'x86_64-unknown-linux-gnu' && 'x86_64-pc-windows-msvc' || '__none__' }}
+          - target: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'x86_64-pc-windows-msvc' && 'x86_64-unknown-linux-gnu' || '__none__' }}
     steps:
       - name: Download platform construction output
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -904,6 +919,9 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: windows-2025
             target: x86_64-pc-windows-msvc
+        exclude:
+          - target: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'x86_64-unknown-linux-gnu' && 'x86_64-pc-windows-msvc' || '__none__' }}
+          - target: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'x86_64-pc-windows-msvc' && 'x86_64-unknown-linux-gnu' || '__none__' }}
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1101,6 +1119,7 @@ jobs:
   aggregate:
     name: aggregate exact supported-platform proof
     needs: [verify, runtime-e2e]
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

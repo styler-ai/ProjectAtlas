@@ -1891,6 +1891,11 @@ percent, clearing both materiality bounds. The Windows cache saves only 7.6 perc
 of a proof stage dominated by mandatory audit and deterministic assembly, so it is
 disabled without weakening those gates.
 
+Manual diagnostics may select exactly one accepted target. The unselected
+construction, fresh-verifier, and runtime matrix rows are omitted, and the aggregate
+release proof is skipped. Pull-request proof and final clean acceptance still require
+both Linux and Windows; a partial diagnostic cannot become release evidence.
+
 ```mermaid
 sequenceDiagram
     participant R as Hosted runner

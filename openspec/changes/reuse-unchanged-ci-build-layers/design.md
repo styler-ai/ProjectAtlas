@@ -99,7 +99,7 @@ An invalid tree is atomically renamed to a quarantine sibling and replaced with 
 
 ### Separate iterative reuse from clean release acceptance
 
-`workflow_dispatch` gains a boolean clean-construction input. Clean mode skips restore and save on both targets. Pull-request runs may restore exact trusted state but never save. Only non-clean `workflow_dispatch` construction jobs that reach the save step after contained construction, platform verification, candidate revalidation, artifact upload, and cache sanitation are save-eligible. Downstream fresh-runner jobs remain release gates, but cannot govern a runner-local cache write after the construction runner has ended.
+`workflow_dispatch` gains a boolean clean-construction input and an explicit target selector. Clean mode skips restore and save on both targets. The selector defaults to both release targets but may run exactly one target for a bounded platform diagnostic; the unselected construction, fresh-verifier, and runtime jobs do not exist in that matrix, and the aggregate release proof is skipped. Pull-request runs always retain both targets and may restore exact trusted state but never save. Only non-clean `workflow_dispatch` construction jobs that reach the save step after contained construction, platform verification, candidate revalidation, artifact upload, and cache sanitation are save-eligible. Downstream fresh-runner jobs remain release gates, but cannot govern a runner-local cache write after the construction runner has ended. A single-target diagnostic never satisfies final clean release acceptance.
 
 Each construction-matrix target declares whether Cargo-layer reuse is enabled.
 Disabled targets still perform the same empty-target construction and all proof

@@ -408,6 +408,24 @@ try {
             -not $workflowText.Contains("restore-keys:")) `
         "Reusable Cargo layer must use pinned official actions with exact keys and clean bypass."
     Require `
+        ($workflowText.Contains(
+                "description: Run all release targets or one bounded diagnostic target"
+            ) -and
+            $workflowText.Contains(
+                "inputs.target == 'x86_64-unknown-linux-gnu' && 'x86_64-pc-windows-msvc'"
+            ) -and
+            $workflowText.Contains(
+                "inputs.target == 'x86_64-pc-windows-msvc' && 'x86_64-unknown-linux-gnu'"
+            ) -and
+            [System.Text.RegularExpressions.Regex]::Matches(
+                $workflowText,
+                "(?m)^\s{8}exclude:$"
+            ).Count -eq 3 -and
+            $workflowText.Contains(
+                "if: github.event_name != 'workflow_dispatch' || inputs.target == 'all'"
+            )) `
+        "Single-target diagnostics must skip the unaffected matrix target and aggregate proof."
+    Require `
         ([System.Text.RegularExpressions.Regex]::Matches(
                 $ast.Extent.Text,
                 '"--no-default-features"'

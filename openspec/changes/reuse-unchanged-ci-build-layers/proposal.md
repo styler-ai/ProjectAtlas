@@ -8,6 +8,7 @@ The optional parser-pack workflow discards reusable Cargo build state on every r
 - Rebuild every ProjectAtlas-owned crate from the exact checked-out candidate before constructing parser-pack outputs.
 - Treat restored cache bytes as untrusted, validate their bounded filesystem shape, and never cache release archives, receipts, secrets, ProjectAtlas databases, or authored workspace state.
 - Add an explicit clean-construction mode that bypasses cache restore/save for final release acceptance.
+- Allow a bounded single-target diagnostic dispatch that skips the unaffected platform without producing an aggregate release proof.
 - Record cold and repeated-run timings, cache disposition, and deterministic invalidation inputs for Linux and Windows.
 
 ## Capabilities

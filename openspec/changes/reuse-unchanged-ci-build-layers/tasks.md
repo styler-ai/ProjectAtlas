@@ -12,7 +12,7 @@
 ## 3. Workflow Integration
 
 - [x] 3.1 Pin official GitHub cache restore/save actions and derive exact target keys from Rust, native toolchain/SDK, lockfile, manifests/features, and cache-policy inputs.
-- [x] 3.2 Add cache-free dispatch mode, restore-only pull-request behavior, trusted successful save, and bounded per-target disposition receipts.
+- [x] 3.2 Add cache-free and bounded single-target diagnostic dispatch modes, restore-only pull-request behavior, trusted successful save, aggregate-proof exclusion for partial target sets, and bounded per-target disposition receipts.
 - [x] 3.3 Preserve exact-candidate, offline construction, deterministic assembly, digest, native-import, license, containment, lifecycle, package, and fresh-runner verification.
 
 ## 4. Documentation and Proof

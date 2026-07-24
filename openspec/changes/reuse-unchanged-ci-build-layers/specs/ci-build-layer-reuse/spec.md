@@ -55,6 +55,17 @@ The workflow SHALL expose an explicit clean-construction dispatch mode that bypa
 - **WHEN** a trusted operator dispatches the workflow with clean construction enabled
 - **THEN** both targets start with empty Cargo target directories and no cache state is restored or saved
 
+### Requirement: Platform diagnostics skip unaffected targets
+The workflow SHALL allow an explicit dispatch to select exactly one accepted target for bounded platform diagnosis. A single-target dispatch SHALL omit the unselected construction, fresh-verifier, and runtime matrix rows and SHALL skip the aggregate release proof. Pull-request proof and final clean release acceptance SHALL retain both accepted targets.
+
+#### Scenario: One platform-specific failure is rerun
+- **WHEN** a trusted operator selects one accepted target for a diagnostic dispatch
+- **THEN** only that target constructs and runs its fresh-verifier and runtime checks, while no aggregate proof is published
+
+#### Scenario: Release acceptance is requested
+- **WHEN** both accepted targets are selected explicitly or by the default release-proof route
+- **THEN** Linux and Windows run and the aggregate job requires the complete matching platform proof set
+
 ### Requirement: Reuse benefit and disposition are measurable
 The workflow SHALL record target-specific cold and repeated-run wall times, cache disposition, and a non-secret digest of the selected cache key. Reuse SHALL remain enabled only when an unchanged-input repeated construction reduces contained construction wall time by at least 30 percent and 30 seconds for that target; otherwise reuse SHALL remain disabled with the measured reason recorded.
 
