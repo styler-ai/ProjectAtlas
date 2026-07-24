@@ -412,19 +412,21 @@ try {
             ) -and
             -not $workflowText.Contains("restore-keys:")) `
         "Reusable Cargo layer must use pinned official actions with exact keys and clean bypass."
+    $singleTargetMatrix =
+        'target: ${{ fromJSON(github.event_name == ''workflow_dispatch'' && inputs.target != ''all'' && format(''["{0}"]'', inputs.target) || ''["x86_64-unknown-linux-gnu","x86_64-pc-windows-msvc"]'') }}'
+    $targetRunner =
+        'runs-on: ${{ matrix.target == ''x86_64-unknown-linux-gnu'' && ''ubuntu-24.04'' || ''windows-2025'' }}'
     Require `
         ($workflowText.Contains(
                 "description: Run all release targets or one bounded diagnostic target"
             ) -and
-            $workflowText.Contains(
-                "inputs.target == 'x86_64-unknown-linux-gnu' && 'x86_64-pc-windows-msvc'"
-            ) -and
-            $workflowText.Contains(
-                "inputs.target == 'x86_64-pc-windows-msvc' && 'x86_64-unknown-linux-gnu'"
-            ) -and
             [System.Text.RegularExpressions.Regex]::Matches(
                 $workflowText,
-                "(?m)^\s{8}exclude:$"
+                [System.Text.RegularExpressions.Regex]::Escape($singleTargetMatrix)
+            ).Count -eq 3 -and
+            [System.Text.RegularExpressions.Regex]::Matches(
+                $workflowText,
+                [System.Text.RegularExpressions.Regex]::Escape($targetRunner)
             ).Count -eq 3 -and
             $workflowText.Contains(
                 "if: github.event_name != 'workflow_dispatch' || inputs.target == 'all'"
@@ -515,17 +517,15 @@ try {
         (-not $workflowText.Contains(
                 "hashFiles('.github/workflows/optional-parser-pack.yml', '.github/scripts/run-parser-pack-contained-construction.ps1')"
             ) -and
-            [System.Text.RegularExpressions.Regex]::IsMatch(
+            [System.Text.RegularExpressions.Regex]::Matches(
                 $workflowText,
-                'target:\s+x86_64-unknown-linux-gnu[\r\n]+\s+isolation:\s+linux-network-namespace[\r\n]+\s+reuse_cargo_layer:\s+true'
-            ) -and
-            [System.Text.RegularExpressions.Regex]::IsMatch(
-                $workflowText,
-                'target:\s+x86_64-pc-windows-msvc[\r\n]+\s+isolation:\s+windows-principal-firewall[\r\n]+\s+reuse_cargo_layer:\s+false'
-            ) -and
+                "(?m)^\s+matrix\.target == 'x86_64-unknown-linux-gnu' &&$"
+            ).Count -eq 3 -and
             $workflowText.Contains("github.event_name != 'workflow_dispatch' || !inputs.clean_construction") -and
             $workflowText.Contains("github.event_name == 'workflow_dispatch' &&") -and
-            $workflowText.Contains("matrix.reuse_cargo_layer &&") -and
+            $workflowText.Contains(
+                '$reuseEnabled = "${{ matrix.target == ''x86_64-unknown-linux-gnu'' }}" -eq "true"'
+            ) -and
             $workflowText.Contains("steps.cargo-cache-restore.outputs.cache-hit != 'true'") -and
             $workflowText.Contains("steps.cargo-cache-key.outputs.compatible_v2_key") -and
             $workflowText.Contains("steps.cargo-cache-compatible-restore.outputs.cache-hit") -and

@@ -37,23 +37,12 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.event.label.name == 'optional-parser-pack-proof'
     name: construct ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu-24.04' || 'windows-2025' }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            isolation: linux-network-namespace
-            reuse_cargo_layer: true
-          - os: windows-2025
-            target: x86_64-pc-windows-msvc
-            isolation: windows-principal-firewall
-            reuse_cargo_layer: false
-        exclude:
-          - target: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'x86_64-unknown-linux-gnu' && 'x86_64-pc-windows-msvc' || '__none__' }}
-          - target: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'x86_64-pc-windows-msvc' && 'x86_64-unknown-linux-gnu' || '__none__' }}
+        target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.target != 'all' && format('["{0}"]', inputs.target) || '["x86_64-unknown-linux-gnu","x86_64-pc-windows-msvc"]') }}
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -244,7 +233,7 @@ jobs:
       - name: Restore exact reusable Cargo layer
         id: cargo-cache-restore
         if: >-
-          matrix.reuse_cargo_layer &&
+          matrix.target == 'x86_64-unknown-linux-gnu' &&
           (github.event_name != 'workflow_dispatch' || !inputs.clean_construction)
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -254,7 +243,7 @@ jobs:
       - name: Restore exact compatible v2 Cargo layer
         id: cargo-cache-compatible-restore
         if: >-
-          matrix.reuse_cargo_layer &&
+          matrix.target == 'x86_64-unknown-linux-gnu' &&
           (github.event_name != 'workflow_dispatch' || !inputs.clean_construction) &&
           steps.cargo-cache-restore.outputs.cache-hit != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -351,7 +340,7 @@ jobs:
               -CargoLockSha256 '${{ steps.identity.outputs.cargo_lock_sha256 }}' \
               -RustcRelease '${{ steps.identity.outputs.rustc_release }}' \
               -RustcCommitHash '${{ steps.identity.outputs.rustc_commit_hash }}' \
-              -NetworkIsolation '${{ matrix.isolation }}' \
+              -NetworkIsolation '${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'linux-network-namespace' || 'windows-principal-firewall' }}' \
               -ResolverAddress '${{ steps.network.outputs.resolver_address }}'
           construction_exit=$?
           set -e
@@ -561,7 +550,7 @@ jobs:
             throw "Contained construction returned an invalid cache disposition."
           }
           $clean = "${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction }}" -eq "true"
-          $reuseEnabled = "${{ matrix.reuse_cargo_layer }}" -eq "true"
+          $reuseEnabled = "${{ matrix.target == 'x86_64-unknown-linux-gnu' }}" -eq "true"
           $restoreAttempted = $reuseEnabled -and -not $clean
           $exactHit = "${{ steps.cargo-cache-restore.outputs.cache-hit }}" -eq "true"
           $compatibleHit = "${{ steps.cargo-cache-compatible-restore.outputs.cache-hit }}" -eq "true"
@@ -635,7 +624,7 @@ jobs:
 
       - name: Save exact reusable Cargo layer
         if: >-
-          matrix.reuse_cargo_layer &&
+          matrix.target == 'x86_64-unknown-linux-gnu' &&
           github.event_name == 'workflow_dispatch' &&
           !inputs.clean_construction &&
           steps.cargo-cache-restore.outputs.cache-hit != 'true' &&
@@ -648,21 +637,12 @@ jobs:
   verify:
     name: verify ${{ matrix.target }}
     needs: construct
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu-24.04' || 'windows-2025' }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            isolation: linux-network-namespace
-          - os: windows-2025
-            target: x86_64-pc-windows-msvc
-            isolation: windows-app-container
-        exclude:
-          - target: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'x86_64-unknown-linux-gnu' && 'x86_64-pc-windows-msvc' || '__none__' }}
-          - target: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'x86_64-pc-windows-msvc' && 'x86_64-unknown-linux-gnu' || '__none__' }}
+        target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.target != 'all' && format('["{0}"]', inputs.target) || '["x86_64-unknown-linux-gnu","x86_64-pc-windows-msvc"]') }}
     steps:
       - name: Download platform construction output
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -807,7 +787,7 @@ jobs:
             working_directory_outside_pack = "verified"
             ambient_library_paths_cleared = "verified"
             network_denial = [ordered]@{
-              mechanism = "${{ matrix.isolation }}"
+              mechanism = "${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'linux-network-namespace' || 'windows-app-container' }}"
               dns_denied = $true
               direct_tcp_denied = $true
               https_denied = $true
@@ -909,19 +889,12 @@ jobs:
   runtime-e2e:
     name: normal runtime lifecycle ${{ matrix.target }}
     needs: [construct, verify]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu-24.04' || 'windows-2025' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - os: windows-2025
-            target: x86_64-pc-windows-msvc
-        exclude:
-          - target: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'x86_64-unknown-linux-gnu' && 'x86_64-pc-windows-msvc' || '__none__' }}
-          - target: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'x86_64-pc-windows-msvc' && 'x86_64-unknown-linux-gnu' || '__none__' }}
+        target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.target != 'all' && format('["{0}"]', inputs.target) || '["x86_64-unknown-linux-gnu","x86_64-pc-windows-msvc"]') }}
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
