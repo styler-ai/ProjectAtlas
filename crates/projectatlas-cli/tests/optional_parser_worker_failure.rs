@@ -839,6 +839,14 @@ fn stalled_worker_cancellation_preserves_mcp_reads_and_active_generation()
             OsStr::new(&artifact),
         ],
     )?;
+    fs::create_dir(&pending_dir)?;
+    let pending_source = pending_optional_source()?;
+    for index in 0..PENDING_OPTIONAL_FILE_COUNT {
+        fs::write(
+            pending_dir.join(format!("work-{index:04}.awk")),
+            pending_source.as_bytes(),
+        )?;
+    }
     run_json(&repo, &host, &[OsStr::new("scan")])?;
 
     let baseline_store = AtlasStore::open_read_only(&database)?;
@@ -854,16 +862,13 @@ fn stalled_worker_cancellation_preserves_mcp_reads_and_active_generation()
     if baseline_parse.parser != ParserKind::TreeSitter {
         return Err(io::Error::other("baseline optional source was not grammar parsed").into());
     }
+    let baseline_pending_node = baseline_store
+        .load_node_by_path("pending/work-0000.awk")?
+        .ok_or_else(|| io::Error::other("baseline pending node is missing"))?;
+    let baseline_pending_parse = baseline_store
+        .load_source_parse_metadata("pending/work-0000.awk")?
+        .ok_or_else(|| io::Error::other("baseline pending parse metadata is missing"))?;
     drop(baseline_store);
-
-    fs::create_dir(&pending_dir)?;
-    let pending_source = pending_optional_source()?;
-    for index in 0..PENDING_OPTIONAL_FILE_COUNT {
-        fs::write(
-            pending_dir.join(format!("work-{index:04}.awk")),
-            pending_source.as_bytes(),
-        )?;
-    }
 
     let mut mcp = McpProcess::spawn(&repo, &database, &host)?;
     let task_start = mcp.call_tool(
@@ -920,24 +925,20 @@ fn stalled_worker_cancellation_preserves_mcp_reads_and_active_generation()
     let retained_parse = retained_store
         .load_source_parse_metadata("src/baseline.awk")?
         .ok_or_else(|| io::Error::other("retained baseline parse metadata is missing"))?;
+    let retained_pending_node = retained_store
+        .load_node_by_path("pending/work-0000.awk")?
+        .ok_or_else(|| io::Error::other("retained pending node is missing"))?;
+    let retained_pending_parse = retained_store
+        .load_source_parse_metadata("pending/work-0000.awk")?
+        .ok_or_else(|| io::Error::other("retained pending parse metadata is missing"))?;
     if retained_publication != baseline_publication
         || retained_node != baseline_node
         || retained_parse != baseline_parse
+        || retained_pending_node != baseline_pending_node
+        || retained_pending_parse != baseline_pending_parse
     {
         return Err(io::Error::other(
-            "stalled-worker cancellation changed the active generation or baseline facts",
-        )
-        .into());
-    }
-    if retained_store
-        .load_node_by_path("pending/work-0000.awk")?
-        .is_some()
-        || retained_store
-            .load_source_parse_metadata("pending/work-0000.awk")?
-            .is_some()
-    {
-        return Err(io::Error::other(
-            "stalled-worker cancellation exposed uncommitted pending source",
+            "stalled-worker cancellation changed the active generation or indexed facts",
         )
         .into());
     }
