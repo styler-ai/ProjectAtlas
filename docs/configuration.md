@@ -74,7 +74,10 @@ diagnostics also compare rebuildable FTS document identities with authoritative
 `file_texts`. A mismatch disables acceleration without disabling lexical fallback.
 Search patterns are capped at 64 KiB and path globs at 4 KiB before matcher
 construction. Semantic and hybrid modes remain explicitly unavailable until a
-compatible semantic generation is installed, built, and ready.
+compatible semantic generation is installed, built, and ready. The v0.4
+candidate evaluation selected no semantic pack, so v0.4 has no semantic
+install/build commands, model download, vector index, or ANN runtime; explicit
+semantic and hybrid requests return the typed `not-installed` state.
 
 ### Optional broad parser pack
 

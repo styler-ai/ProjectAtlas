@@ -2,7 +2,7 @@
 
 ### Requirement: Optional Semantic Capability Has An Explicit Lifecycle
 
-Semantic retrieval SHALL remain optional and project-local. Its typed lifecycle SHALL cover absent, installed-disabled, building, ready, stale, updating, rollback-ready, incompatible, failed, removing, and removed behavior with explicit allowed operations and generation identity. Normal scan and lexical/graph queries SHALL not require or implicitly download a model/runtime.
+Semantic retrieval SHALL remain optional and project-local. ProjectAtlas SHALL select no semantic pack unless one model/index composition passes the labeled quality, determinism, update-cost, memory, package, license, and required-platform gates. When a composition is selected, its typed lifecycle SHALL cover absent, installed-disabled, building, ready, stale, updating, rollback-ready, incompatible, failed, removing, and removed behavior with explicit allowed operations and generation identity before the capability is advertised. When no composition passes, the release SHALL ship no semantic lifecycle commands or runtime and SHALL expose only the typed absent/not-installed capability state. Normal scan and lexical/graph queries SHALL not require or implicitly download a model/runtime.
 
 #### Scenario: Semantic mode is requested while unavailable
 - **WHEN** no compatible ready generation exists
@@ -11,6 +11,10 @@ Semantic retrieval SHALL remain optional and project-local. Its typed lifecycle 
 #### Scenario: Semantic update fails
 - **WHEN** model verification, vector build, cancellation, or activation fails
 - **THEN** structural/lexical data remains valid and any rollback generation remains explicit
+
+#### Scenario: No candidate passes the admission gate
+- **WHEN** every evaluated composition fails at least one required quality, resource, license, or platform check
+- **THEN** ProjectAtlas selects no model or ANN backend, exposes semantic and hybrid retrieval as typed not-installed capabilities, and adds no unused lifecycle command or runtime dependency
 
 ### Requirement: Default Core Is Independent From Optional Runtime Cost
 
