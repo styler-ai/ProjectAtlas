@@ -8588,7 +8588,7 @@ fn create_federation_navigation_project(root: &Path) -> Result<PathBuf, Box<dyn 
         .args(["scan", "."])
         .assert()
         .success();
-    let database = root.join(".projectatlas").join("projectatlas.db");
+    let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
     publish_cli_navigation_graph(&database)?;
     Ok(database)
 }

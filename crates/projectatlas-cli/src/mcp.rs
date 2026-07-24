@@ -401,6 +401,9 @@ const MCP_ERROR_DETAILED_RELATION_DISAMBIGUATOR: &str = "symbol disambiguators r
 const MCP_ERROR_DETAILED_RELATION_LIMIT: &str = "detailed relation limit exceeds the u32 range";
 /// MCP validation error for analysis controls on another relation view.
 const MCP_ERROR_ANALYSIS_VIEW_REQUIRED: &str = "analysis controls require view=analysis";
+/// MCP validation error for federation on the legacy relation view.
+const MCP_ERROR_FEDERATED_RELATION_VIEW: &str =
+    "roots require the detailed or analysis relation view";
 /// MCP validation error for a symbol trace without a symbol-kind selector.
 const MCP_ERROR_TRACE_TARGET_KIND_REQUIRED: &str = "symbol trace targets require trace_target_kind";
 /// MCP validation error for a symbol trace without a signature selector.
@@ -6097,7 +6100,7 @@ impl ProjectAtlasMcpServer {
             if let Some(roots) = params.roots.as_ref() {
                 if !detailed {
                     return Err(CliError::Service(ServiceError::InvalidInput(
-                        "roots require the detailed or analysis relation view".to_string(),
+                        MCP_ERROR_FEDERATED_RELATION_VIEW.to_string(),
                     )));
                 }
                 let file = file.as_deref().ok_or_else(|| {
