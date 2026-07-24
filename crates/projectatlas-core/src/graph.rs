@@ -16,6 +16,8 @@ const RELATION_KEY_DOMAIN: &str = "projectatlas.graph.relation.v1";
 const RESOLUTION_KEY_DOMAIN: &str = "projectatlas.graph.resolution.v1";
 /// Largest accepted identity component in bytes.
 const MAX_IDENTITY_BYTES: usize = 4_096;
+/// Maximum portable canonical resolver material retained in a derived snapshot.
+const MAX_PORTABLE_RESOLUTION_IDENTITY_BYTES: usize = 32 * 1_024;
 
 /// Failure while constructing or reconciling typed graph contracts.
 #[derive(Debug, Error)]
@@ -41,6 +43,9 @@ pub enum GraphContractError {
     /// A persisted canonical resolution-key domain was not supported.
     #[error("unsupported canonical resolution-key domain")]
     InvalidResolutionKeyDomain,
+    /// A portable canonical resolution identity was malformed or oversized.
+    #[error("invalid portable canonical resolution-key identity")]
+    InvalidResolutionKeyIdentity,
     /// Two distinct canonical identities claimed the same compact key.
     #[error("stable graph key collision for digest {digest}")]
     StableKeyCollision {
@@ -1261,6 +1266,20 @@ impl CanonicalResolutionKey {
         &self.canonical_identity
     }
 
+    /// Remove project qualification while retaining the exact canonical
+    /// resolver material needed to rebind a derived graph snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the private canonical-key invariant was violated.
+    pub fn portable(&self) -> Result<PortableResolutionKey, GraphContractError> {
+        let prefix = resolution_project_prefix(self.project, self.domain);
+        let Some(canonical_identity) = self.canonical_identity.strip_prefix(&prefix) else {
+            return Err(GraphContractError::ProjectQualificationMismatch);
+        };
+        PortableResolutionKey::new(self.domain, canonical_identity.to_string())
+    }
+
     /// Compare compact keys without silently accepting a digest collision.
     ///
     /// # Errors
@@ -1280,6 +1299,95 @@ impl CanonicalResolutionKey {
             });
         }
         Ok(true)
+    }
+}
+
+/// Project-independent canonical resolution identity carried by a derived
+/// graph snapshot.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(
+    try_from = "PortableResolutionKeyWire",
+    into = "PortableResolutionKeyWire"
+)]
+pub struct PortableResolutionKey {
+    /// Closed resolver family.
+    domain: ResolutionKeyDomain,
+    /// Exact length-prefixed canonical fields after project qualification.
+    canonical_identity: String,
+}
+
+impl PortableResolutionKey {
+    /// Validate one portable resolver identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for oversized, malformed, or incomplete canonical
+    /// field material.
+    pub fn new(
+        domain: ResolutionKeyDomain,
+        canonical_identity: String,
+    ) -> Result<Self, GraphContractError> {
+        if canonical_identity.len() > MAX_PORTABLE_RESOLUTION_IDENTITY_BYTES
+            || !valid_canonical_field_sequence(&canonical_identity)
+        {
+            return Err(GraphContractError::InvalidResolutionKeyIdentity);
+        }
+        Ok(Self {
+            domain,
+            canonical_identity,
+        })
+    }
+
+    /// Return the closed resolver family.
+    #[must_use]
+    pub const fn domain(&self) -> ResolutionKeyDomain {
+        self.domain
+    }
+
+    /// Borrow the project-independent canonical identity.
+    #[must_use]
+    pub fn canonical_identity(&self) -> &str {
+        &self.canonical_identity
+    }
+
+    /// Bind this portable identity to one destination project.
+    #[must_use]
+    pub fn bind(&self, project: ProjectInstanceId) -> CanonicalResolutionKey {
+        let mut canonical_identity = resolution_project_prefix(project, self.domain);
+        canonical_identity.push_str(&self.canonical_identity);
+        let digest = *blake3::hash(canonical_identity.as_bytes()).as_bytes();
+        CanonicalResolutionKey {
+            project,
+            domain: self.domain,
+            digest,
+            canonical_identity,
+        }
+    }
+}
+
+/// Validated serialized portable resolution-key representation.
+#[derive(Deserialize, Serialize)]
+struct PortableResolutionKeyWire {
+    /// Closed resolver family.
+    domain: ResolutionKeyDomain,
+    /// Exact project-independent canonical fields.
+    canonical_identity: String,
+}
+
+impl TryFrom<PortableResolutionKeyWire> for PortableResolutionKey {
+    type Error = GraphContractError;
+
+    fn try_from(value: PortableResolutionKeyWire) -> Result<Self, Self::Error> {
+        Self::new(value.domain, value.canonical_identity)
+    }
+}
+
+impl From<PortableResolutionKey> for PortableResolutionKeyWire {
+    fn from(value: PortableResolutionKey) -> Self {
+        Self {
+            domain: value.domain,
+            canonical_identity: value.canonical_identity,
+        }
     }
 }
 
@@ -2007,6 +2115,78 @@ fn append_canonical_field(canonical: &mut String, value: &str) {
     canonical.push_str(value);
 }
 
+/// Validate the exact project-independent field sequence produced by
+/// [`CanonicalResolutionKey::new`].
+fn valid_canonical_field_sequence(canonical: &str) -> bool {
+    let Some(fields) = decode_canonical_fields(canonical) else {
+        return false;
+    };
+    let mut index = 0;
+    for _required in 0..2 {
+        let Some(field) = fields.get(index) else {
+            return false;
+        };
+        if !valid_canonical_identity_field(field) {
+            return false;
+        }
+        index += 1;
+    }
+    for _optional in 0..3 {
+        let Some(marker) = fields.get(index) else {
+            return false;
+        };
+        index += 1;
+        match *marker {
+            "none" => {}
+            "some" => {
+                let Some(field) = fields.get(index) else {
+                    return false;
+                };
+                if !valid_canonical_identity_field(field) {
+                    return false;
+                }
+                index += 1;
+            }
+            _ => return false,
+        }
+    }
+    fields
+        .get(index)
+        .is_some_and(|field| valid_canonical_identity_field(field))
+        && index + 1 == fields.len()
+}
+
+/// Decode one complete sequence of byte-length-prefixed canonical fields.
+fn decode_canonical_fields(mut canonical: &str) -> Option<Vec<&str>> {
+    let mut fields = Vec::new();
+    while !canonical.is_empty() {
+        canonical = canonical.strip_prefix('|')?;
+        let separator = canonical.find(':')?;
+        let length_text = canonical.get(..separator)?;
+        let length = length_text.parse::<usize>().ok()?;
+        if length_text != length.to_string() {
+            return None;
+        }
+        canonical = canonical.get(separator + 1..)?;
+        if length == 0
+            || length > MAX_IDENTITY_BYTES
+            || length > canonical.len()
+            || !canonical.is_char_boundary(length)
+        {
+            return None;
+        }
+        let (field, remainder) = canonical.split_at(length);
+        fields.push(field);
+        canonical = remainder;
+    }
+    Some(fields)
+}
+
+/// Apply the original identity-field constraints to portable canonical data.
+fn valid_canonical_identity_field(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_IDENTITY_BYTES && !value.chars().any(char::is_control)
+}
+
 /// Append an optional identity field without conflating absent and empty values.
 fn append_optional_canonical_field(canonical: &mut String, value: Option<&GraphIdentityText>) {
     match value {
@@ -2056,10 +2236,10 @@ mod tests {
         CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
         CoverageState, EntityResolutionKey, EntitySelector, ExtendedRelationKind, ExternalSelector,
         GraphContractError, GraphEntity, GraphEntityKey, GraphIdentityText, GraphLimitKind,
-        GraphLimits, GraphRelationKind, LogicalRelation, PackageSelector, ProjectInstanceId,
-        RelationDependencyKey, RelationOccurrence, RelationResolution, RepositoryFilePath,
-        RepositoryNodePath, ResolutionKeyDomain, ReusableTargetSelector, SourceSpan, StableKey,
-        SymbolSelector,
+        GraphLimits, GraphRelationKind, LogicalRelation, PackageSelector, PortableResolutionKey,
+        ProjectInstanceId, RelationDependencyKey, RelationOccurrence, RelationResolution,
+        RepositoryFilePath, RepositoryNodePath, ResolutionKeyDomain, ReusableTargetSelector,
+        SourceSpan, StableKey, SymbolSelector,
     };
     use crate::IndexGeneration;
     use crate::symbols::{RelationKind, SymbolKind};
@@ -2349,6 +2529,57 @@ mod tests {
         require(
             serde_json::from_value::<CanonicalResolutionKey>(serialized).is_err(),
             "tampered persisted resolver key was accepted",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn portable_resolution_keys_rebind_without_project_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = GraphIdentityText::new("tree-sitter")?;
+        let language = GraphIdentityText::new("rust")?;
+        let package = GraphIdentityText::new("auth")?;
+        let scope = GraphIdentityText::new("crate")?;
+        let identity = GraphIdentityText::new("répond")?;
+        let source = CanonicalResolutionKey::new(
+            project()?,
+            ResolutionKeyDomain::Declaration,
+            &provider,
+            &language,
+            Some(&package),
+            Some(&scope),
+            Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+            &identity,
+        );
+        let portable = source.portable()?;
+        let encoded = serde_json::to_string(&portable)?;
+        require(
+            !encoded.contains(&project()?.as_hex()),
+            "portable resolver key leaked its source project identity",
+        )?;
+        let decoded = serde_json::from_str::<PortableResolutionKey>(&encoded)?;
+        let destination = ProjectInstanceId::try_from("10112233445566778899aabbccddeeff")?;
+        let rebound = decoded.bind(destination);
+        let expected = CanonicalResolutionKey::new(
+            destination,
+            ResolutionKeyDomain::Declaration,
+            &provider,
+            &language,
+            Some(&package),
+            Some(&scope),
+            Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+            &identity,
+        );
+        require(
+            rebound.reconcile(&expected)?,
+            "portable resolver key did not rebind to the destination project",
+        )?;
+
+        let mut invalid = serde_json::to_value(&portable)?;
+        invalid["canonical_identity"] = serde_json::json!("|04:rust");
+        require(
+            serde_json::from_value::<PortableResolutionKey>(invalid).is_err(),
+            "non-canonical portable resolver material was accepted",
         )?;
         Ok(())
     }

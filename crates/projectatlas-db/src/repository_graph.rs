@@ -4,6 +4,7 @@ use super::{
     AtlasStore, DbError, DbResult, IndexPublicationGuard, IndexPublicationState, count_to_usize,
     with_sqlite_read_progress,
 };
+use crate::derived_snapshot::{CapturedGraph, SnapshotBudget};
 use crate::project_identity::{
     load_graph_generation, load_project_identity, require_bound_project_identity,
     set_graph_generation, verify_project_identity,
@@ -2737,6 +2738,181 @@ impl AtlasStore {
         let mut statement = self.connection.prepare_cached(sql)?;
         collect_relation_rows(statement.query(params![&key[..], limit_plus_one])?)
     }
+}
+
+/// Decode the complete normalized graph from one private `SQLite` backup.
+pub(crate) fn capture_derived_graph(
+    connection: &Connection,
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    budget: &mut SnapshotBudget,
+) -> DbResult<CapturedGraph> {
+    let mut entities = Vec::new();
+    let mut entities_by_key = HashMap::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT entity_key, project_instance_id, canonical_identity, entity_kind,
+                    repository_path, package_manager, package_name, manifest_path,
+                    symbol_name, symbol_kind, symbol_parent, symbol_signature,
+                    external_system, external_identity
+               FROM graph_entities
+              WHERE project_instance_id = ?1
+              ORDER BY canonical_identity, entity_key",
+        )?;
+        let mut rows = statement.query(params![&project.as_bytes()[..]])?;
+        while let Some(row) = rows.next()? {
+            let raw = entity_row(row)?;
+            budget.admit(entity_row_decoded_bytes(&raw)?)?;
+            let entity = entity_from_row(raw, project, generation)?;
+            let key = entity.key().digest_bytes()?;
+            if entities_by_key.insert(key, entity.clone()).is_some() {
+                return Err(DbError::DerivedSnapshotInvalid {
+                    reason: "private capture contains a duplicate entity",
+                });
+            }
+            entities.push(entity);
+        }
+    }
+
+    let mut relations = Vec::new();
+    let mut relations_by_key = HashMap::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT relation_key, project_instance_id, canonical_identity,
+                    source_entity_key, relation_scope, relation_kind,
+                    resolution_status, target_entity_key, reference_text,
+                    candidate_count, confidence, completeness
+               FROM graph_relations
+              WHERE project_instance_id = ?1
+              ORDER BY canonical_identity, relation_key",
+        )?;
+        let mut rows = statement.query(params![&project.as_bytes()[..]])?;
+        while let Some(row) = rows.next()? {
+            let raw = relation_row(row)?;
+            budget.admit(relation_row_decoded_bytes(&raw)?)?;
+            let relation = relation_from_row(&entities_by_key, raw, project, generation)?;
+            let key = relation.key().digest_bytes()?;
+            if relations_by_key.insert(key, relation.clone()).is_some() {
+                return Err(DbError::DerivedSnapshotInvalid {
+                    reason: "private capture contains a duplicate relation",
+                });
+            }
+            relations.push(relation);
+        }
+    }
+
+    let mut occurrences = Vec::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT relation_key, file_path, start_line, start_column, end_line, end_column
+               FROM graph_relation_occurrences
+              ORDER BY relation_key, file_path, start_line, start_column, end_line, end_column",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let raw = occurrence_row(row)?;
+            budget.admit(occurrence_row_decoded_bytes(&raw)?)?;
+            let key = fixed_bytes::<32>(
+                "graph_relation_occurrences.relation_key",
+                raw.relation.clone(),
+            )?;
+            let relation = relations_by_key
+                .get(&key)
+                .ok_or(DbError::DerivedSnapshotInvalid {
+                    reason: "private capture occurrence owner is absent",
+                })?;
+            occurrences.push(occurrence_from_row(raw, relation, generation)?);
+        }
+    }
+
+    let mut coverage = Vec::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT project_instance_id, scope_kind, scope_path, relation_scope,
+                    relation_kind, state, total, covered, omitted, reason,
+                    reached_limit, NULL, NULL
+               FROM graph_coverage
+              WHERE project_instance_id = ?1
+              ORDER BY scope_kind, scope_path, relation_scope, relation_kind, state, id",
+        )?;
+        let mut rows = statement.query(params![&project.as_bytes()[..]])?;
+        while let Some(row) = rows.next()? {
+            let raw = coverage_row(row)?;
+            budget.admit(coverage_row_decoded_bytes(&raw)?)?;
+            coverage.push(coverage_from_row(raw, project, generation)?);
+        }
+    }
+
+    let mut entity_exports = Vec::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT key.project_instance_id, key.resolution_domain, key.key_digest,
+                    key.canonical_identity, export.entity_key
+               FROM graph_entity_exports AS export
+               JOIN graph_resolution_keys AS key
+                 ON key.project_instance_id = export.project_instance_id
+                AND key.resolution_domain = export.resolution_domain
+                AND key.key_digest = export.key_digest
+              WHERE export.project_instance_id = ?1
+              ORDER BY export.entity_key, key.resolution_domain, key.canonical_identity",
+        )?;
+        let mut rows = statement.query(params![&project.as_bytes()[..]])?;
+        while let Some(row) = rows.next()? {
+            let key = resolution_key_from_row(row, project)?;
+            let owner =
+                fixed_bytes::<32>("graph_entity_exports.entity_key", row.get::<_, Vec<u8>>(4)?)?;
+            budget.admit(decoded_payload_bytes(
+                [
+                    key.canonical_identity().len(),
+                    key.digest_bytes().len(),
+                    owner.len(),
+                ],
+                16,
+            )?)?;
+            entity_exports.push((owner, key));
+        }
+    }
+
+    let mut relation_dependencies = Vec::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT key.project_instance_id, key.resolution_domain, key.key_digest,
+                    key.canonical_identity, dependency.relation_key
+               FROM graph_relation_dependencies AS dependency
+               JOIN graph_resolution_keys AS key
+                 ON key.project_instance_id = dependency.project_instance_id
+                AND key.resolution_domain = dependency.resolution_domain
+                AND key.key_digest = dependency.key_digest
+              WHERE dependency.project_instance_id = ?1
+              ORDER BY dependency.relation_key, key.resolution_domain, key.canonical_identity",
+        )?;
+        let mut rows = statement.query(params![&project.as_bytes()[..]])?;
+        while let Some(row) = rows.next()? {
+            let key = resolution_key_from_row(row, project)?;
+            let owner = fixed_bytes::<32>(
+                "graph_relation_dependencies.relation_key",
+                row.get::<_, Vec<u8>>(4)?,
+            )?;
+            budget.admit(decoded_payload_bytes(
+                [
+                    key.canonical_identity().len(),
+                    key.digest_bytes().len(),
+                    owner.len(),
+                ],
+                16,
+            )?)?;
+            relation_dependencies.push((owner, key));
+        }
+    }
+
+    Ok(CapturedGraph {
+        entities,
+        relations,
+        occurrences,
+        coverage,
+        entity_exports,
+        relation_dependencies,
+    })
 }
 
 impl IndexPublicationGuard<'_> {

@@ -152,6 +152,148 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
     Ok(())
 }
 
+#[cfg(feature = "derived-snapshot")]
+#[test]
+fn derived_snapshot_cli_round_trips_without_replacing_authored_state() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let source = temp.path().join("snapshot-source");
+    let destination = temp.path().join("snapshot-destination");
+    for root in [&source, &destination] {
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(root.join("src/lib.rs"), "pub fn answer() -> u32 { 42 }\n")?;
+    }
+    let source_db = source.join(".projectatlas/projectatlas.db");
+    let destination_db = destination.join(".projectatlas/projectatlas.db");
+    for (root, db) in [(&source, &source_db), (&destination, &destination_db)] {
+        let output = Command::cargo_bin("projectatlas")?
+            .current_dir(root)
+            .args(["--format", "json", "--db"])
+            .arg(db)
+            .arg("scan")
+            .arg(root)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "snapshot fixture scan failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+    }
+
+    let source_secret = "TOP_SECRET_CLI_SNAPSHOT_SOURCE";
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&source)
+        .arg("--db")
+        .arg(&source_db)
+        .args(["purpose", "set", "src/lib.rs", source_secret])
+        .assert()
+        .success();
+    let destination_purpose = "Destination-authored purpose survives import";
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&destination)
+        .arg("--db")
+        .arg(&destination_db)
+        .args(["purpose", "set", "src/lib.rs", destination_purpose])
+        .assert()
+        .success();
+
+    let destination_identity_before =
+        Connection::open_with_flags(&destination_db, OpenFlags::SQLITE_OPEN_READ_ONLY)?.query_row(
+            "SELECT project_instance_id FROM project_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
+    let archive = temp.path().join("derived-graph.tar.zst");
+    let export = Command::cargo_bin("projectatlas")?
+        .current_dir(&source)
+        .args(["--format", "json", "--db"])
+        .arg(&source_db)
+        .args(["snapshot", "export"])
+        .arg(&archive)
+        .output()?;
+    if !export.status.success() {
+        return Err(io::Error::other(format!(
+            "snapshot export failed: {}",
+            String::from_utf8_lossy(&export.stderr)
+        ))
+        .into());
+    }
+    let export_json: Value = serde_json::from_slice(&export.stdout)?;
+    let digest = export_json["snapshot_digest"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("snapshot export digest is missing"))?;
+
+    let archive_file = fs::File::open(&archive)?;
+    let decoder = zstd::stream::read::Decoder::new(archive_file)?;
+    let mut tar = tar::Archive::new(decoder);
+    let mut payload = None;
+    for entry in tar.entries()? {
+        let mut entry = entry?;
+        if entry.path()?.as_ref() == Path::new("projectatlas-derived-snapshot/graph.json") {
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            payload = Some(bytes);
+        }
+    }
+    let payload = String::from_utf8(
+        payload.ok_or_else(|| io::Error::other("snapshot archive payload is missing"))?,
+    )?;
+    if payload.contains(source_secret) {
+        return Err(io::Error::other("snapshot payload leaked an authored purpose").into());
+    }
+
+    let import = Command::cargo_bin("projectatlas")?
+        .current_dir(&destination)
+        .args(["--format", "json", "--db"])
+        .arg(&destination_db)
+        .args(["snapshot", "import"])
+        .arg(&archive)
+        .args(["--require-digest", digest])
+        .output()?;
+    if !import.status.success() {
+        return Err(io::Error::other(format!(
+            "snapshot import failed: {}",
+            String::from_utf8_lossy(&import.stderr)
+        ))
+        .into());
+    }
+    let connection =
+        Connection::open_with_flags(&destination_db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let destination_identity_after = connection.query_row(
+        "SELECT project_instance_id FROM project_identity WHERE singleton = 1",
+        [],
+        |row| row.get::<_, Vec<u8>>(0),
+    )?;
+    if destination_identity_before != destination_identity_after {
+        return Err(io::Error::other("snapshot import replaced destination identity").into());
+    }
+    let retained_purpose = connection.query_row(
+        "SELECT purpose.purpose
+           FROM purposes AS purpose
+           JOIN nodes AS node ON node.id = purpose.node_id
+          WHERE node.path = 'src/lib.rs'",
+        [],
+        |row| row.get::<_, String>(0),
+    )?;
+    if retained_purpose != destination_purpose {
+        return Err(io::Error::other("snapshot import replaced destination purpose").into());
+    }
+    let generation = connection.query_row(
+        "SELECT value FROM metadata WHERE key = 'index_publication_generation'",
+        [],
+        |row| row.get::<_, String>(0),
+    )?;
+    if generation != "2" {
+        return Err(io::Error::other(format!(
+            "snapshot import published generation {generation}, expected 2"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 #[test]
 fn detailed_relation_cli_bounds_the_exact_json_envelope() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;

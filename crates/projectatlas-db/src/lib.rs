@@ -1,5 +1,6 @@
 //! Purpose: Persist `ProjectAtlas` 3 indexes in `SQLite`.
 
+mod derived_snapshot;
 mod diagnostics;
 mod project_identity;
 mod repository_graph;
@@ -7,6 +8,10 @@ mod schema;
 mod sqlite_profile;
 mod telemetry;
 
+pub use derived_snapshot::{
+    DerivedGraphSnapshot, DerivedGraphSnapshotImport, DerivedGraphSnapshotMetadata,
+    DerivedSnapshotContent, MAX_DERIVED_SNAPSHOT_JSON_BYTES,
+};
 pub use diagnostics::{
     DatabaseCoverageSample, DatabaseCoverageSummary, DatabaseCoverageTotalState,
     DatabaseFilesystemSupport, DatabaseOperatingProfileReport, DatabasePublicationContractState,
@@ -206,6 +211,36 @@ pub enum DbError {
         /// Stable shape diagnostic.
         reason: &'static str,
     },
+    /// A derived graph snapshot violates its bounded portable contract.
+    #[error("invalid derived graph snapshot: {reason}")]
+    DerivedSnapshotInvalid {
+        /// Stable validation failure.
+        reason: &'static str,
+    },
+    /// A derived graph snapshot exceeded one declared resource ceiling.
+    #[error(
+        "derived graph snapshot {resource} exceeds the limit: found {found}, maximum {maximum}"
+    )]
+    DerivedSnapshotLimit {
+        /// Bounded resource that was exceeded.
+        resource: &'static str,
+        /// Observed amount.
+        found: u64,
+        /// Maximum admitted amount.
+        maximum: u64,
+    },
+    /// A private snapshot capture could not be created or cleaned up.
+    #[error("derived graph snapshot I/O failed for {path:?}: {source}")]
+    DerivedSnapshotIo {
+        /// Private temporary path involved in the operation.
+        path: PathBuf,
+        /// Underlying filesystem failure.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A portable snapshot payload was not valid JSON.
+    #[error("derived graph snapshot JSON is invalid: {0}")]
+    DerivedSnapshotJson(#[from] serde_json::Error),
     /// Persisted per-file symbol rows do not match their owning parser metadata.
     #[error("invalid persisted symbol graph for {path:?}: {reason}")]
     SymbolGraphRowShape {

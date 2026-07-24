@@ -1297,6 +1297,46 @@ No production spill owner currently exists, so restart maintenance reports
 never deletes project identity, reviewed purposes, health resolutions, or
 future separately capped Memory Atlas records.
 
+#### Derived Graph Snapshot Export And Import
+
+```mermaid
+flowchart LR
+    Export[CLI snapshot export] --> Source[(Source projectatlas.db)]
+    Source --> Capture[(Private SQLite backup)]
+    Capture --> Validate[quick_check and bounded<br/>typed derived-row decode]
+    Validate --> Payload[Fresh derived-only payload<br/>allowlist, inventory, and digests]
+    Payload --> Archive[Bounded tar.zst archive]
+    Sign[Optional Ed25519 signing] -.-> Archive
+    Validate --> Cleanup[Close and delete capture]
+    Payload -. excludes .-> Private[Identity, purposes, health, telemetry,<br/>settings, memory, machine paths, and free pages]
+```
+
+```mermaid
+flowchart TB
+    Archive[Bounded tar.zst archive] --> Container[Validate paths, entry types/counts,<br/>size/window limits, digest pin, and signature trust]
+    Container --> Contract[Validate runtime, schema, root, inventory,<br/>graph shape, and content digests]
+    Contract --> State[Verify destination source-state<br/>and capability fingerprints]
+    State --> Bind[Bind destination identity<br/>and next generation]
+    Bind --> Publish[Existing atomic derived<br/>projection publication]
+    Publish --> Active[New complete generation active]
+    Container -->|failure| Prior[Prior complete generation remains active]
+    Contract -->|failure| Prior
+    State -->|failure| Prior
+    Bind -->|failure| Prior
+    Publish -->|failure and rollback| Prior
+    Authored[(Destination identity and authored state)] -. preserved .-> Active
+```
+
+The backup is a private consistency mechanism, not the distributable format.
+Only typed derived graph rows and repository-relative source evidence enter the
+fresh payload. The archive has a closed path and entry inventory, bounded
+compressed and expanded sizes, and no extraction step. Import requires the
+destination to have the same current source state and capability contract,
+then rebinds portable indexes and resolution keys to the destination identity.
+Local use remains unsigned by default; a digest pin or the optional Ed25519
+feature supplies explicit trust for shared artifacts. No snapshot route is
+added to MCP because snapshots are explicit CLI artifact lifecycle operations.
+
 ### Index Publication Cancellation, Failure, And Watch Retry
 
 ```mermaid
@@ -1421,7 +1461,7 @@ The validated SQLite operating profile is explicit:
 | Writable connections | `foreign_keys=ON`, WAL, `synchronous=FULL`, five-second ordinary busy timeout with bounded WAL-establishment retry for concurrent validated openers; publication acquisition remains fail-fast and ancillary telemetry remains 25 ms. | The accepted mixed authored/derived durability profile is enforced and verified on production writable paths, including concurrent MCP requests with short authored and telemetry writes. |
 | Read connections | Read-only open, verified `query_only=ON`, verified five-second ordinary busy timeout, validated WAL, deferred read snapshot. | Complete-generation snapshots and bounded busy/corruption propagation are enforced through production read paths. |
 | Checkpoints/statistics | SQLite auto-checkpoint for structural work plus a bounded post-commit `PASSIVE` checkpoint attempt after the configured telemetry-write interval; content-free state reports the live auto-checkpoint threshold, outcome, pending work, page/freelist counts, and that no explicit planner-statistics maintenance policy is currently configured. | Task 7.4 measures representative WAL growth, long readers, plans, page reuse/reclaim, and whether an explicit bounded statistics lifecycle is justified; normal reads never run blocking reclaim or optimization. |
-| Backup/recovery | Preflight and transaction rollback exist; live-file copying is not accepted as backup. | Task 6.4 uses the SQLite backup API plus bounded isolated import validation without replacing destination identity. |
+| Backup/recovery | Preflight and transaction rollback exist; live-file copying is not accepted as backup. | Snapshot export now uses the SQLite backup API only for a private consistent capture, rebuilds a bounded allowlisted artifact, and imports through full validation plus the normal atomic derived-generation publication without replacing destination identity or authored state. |
 
 Before any parent directory or database file is created, ProjectAtlas inspects
 the exact existing database or nearest existing parent, resolves its canonical

@@ -29,6 +29,14 @@ Legacy `.purpose` files, source `Purpose:` headers, and `.projectatlas/projectat
 
 The compatibility map at `.projectatlas/projectatlas.toon` is an optional exported snapshot for older workflows; it should not be committed as the agent source of truth. The SQLite database is the durable source of truth.
 
+## Derived graph snapshots
+
+`projectatlas snapshot export <archive.tar.zst>` creates a portable graph accelerator for the current exact source state. The exported archive is rebuilt from an explicit derived-only allowlist; it does not copy the live SQLite pages or carry project identity, purposes, health resolutions, telemetry, settings, future Memory Atlas rows, machine-local roots, or deleted/free-page remnants.
+
+`projectatlas snapshot import <archive.tar.zst>` validates the archive root, entry types and paths, compression and expansion limits, inventory, schema/runtime, content digests, source-state identity, and capability fingerprint before replacing graph rows through the normal atomic projection publication. The destination must already be a current index of the same source state. Its project identity and authored state remain authoritative.
+
+Local export/import is unsigned by default. `--require-digest <blake3>` provides an explicit content trust pin. Builds that opt into the `derived-snapshot-signatures` feature also support `--signing-key <secret-key-file>` on export and `--trusted-public-key <public-key-file>` on import; trusted imports reject missing, invalid, or differently signed archives before publication.
+
 ## Health signals
 
 ProjectAtlas surfaces:

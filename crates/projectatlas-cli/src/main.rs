@@ -1,6 +1,8 @@
 //! Purpose: Provide the `ProjectAtlas` 3 command-line adapter.
 
 mod atlas_map;
+#[cfg(feature = "derived-snapshot")]
+mod derived_snapshot_archive;
 mod mcp;
 mod runtime;
 mod structural;
@@ -118,6 +120,8 @@ const REQUIRED_CLI_COMMANDS: &[RequiredCliCommand] = &[
     RequiredCliCommand::Slice,
     RequiredCliCommand::Symbols,
     RequiredCliCommand::Settings,
+    #[cfg(feature = "derived-snapshot")]
+    RequiredCliCommand::Snapshot,
     #[cfg(feature = "optional-parser-supervisor")]
     RequiredCliCommand::ParserPack,
     RequiredCliCommand::Root,
@@ -925,6 +929,26 @@ enum Command {
     },
     /// Print local `ProjectAtlas` settings and cache/index locations.
     Settings,
+    /// Export or import a portable derived-only graph snapshot.
+    #[cfg(feature = "derived-snapshot")]
+    Snapshot {
+        /// Snapshot operation.
+        #[arg(value_enum)]
+        action: SnapshotAction,
+        /// Destination archive for export or source archive for import.
+        path: PathBuf,
+        /// Require this exact lowercase BLAKE3 digest during import.
+        #[arg(long)]
+        require_digest: Option<String>,
+        /// Optional raw 32-byte Ed25519 secret key encoded as 64 hexadecimal characters.
+        #[cfg(feature = "derived-snapshot-signatures")]
+        #[arg(long)]
+        signing_key: Option<PathBuf>,
+        /// Require an import signature from this raw 32-byte Ed25519 public key.
+        #[cfg(feature = "derived-snapshot-signatures")]
+        #[arg(long)]
+        trusted_public_key: Option<PathBuf>,
+    },
     /// Manage the separately shipped optional parser pack.
     #[cfg(feature = "optional-parser-supervisor")]
     ParserPack {
@@ -1122,6 +1146,17 @@ enum Command {
         #[command(subcommand)]
         command: PurposeCommand,
     },
+}
+
+/// Portable derived graph snapshot operation.
+#[cfg(feature = "derived-snapshot")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+enum SnapshotAction {
+    /// Export a fresh bounded tar.zst artifact without overwriting an existing file.
+    Export,
+    /// Validate and atomically import one portable derived graph archive.
+    Import,
 }
 
 /// Explicit optional parser-pack lifecycle commands.
@@ -2077,6 +2112,67 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             let toon = render_settings_report(&report);
             print_output(cli.format, &toon, &report)?;
         }
+        #[cfg(feature = "derived-snapshot")]
+        Command::Snapshot {
+            action,
+            path,
+            require_digest,
+            #[cfg(feature = "derived-snapshot-signatures")]
+            signing_key,
+            #[cfg(feature = "derived-snapshot-signatures")]
+            trusted_public_key,
+        } => match action {
+            SnapshotAction::Export => {
+                if require_digest.is_some() {
+                    return Err(CliError::InvalidInput(
+                        "--require-digest applies only to snapshot import".to_string(),
+                    ));
+                }
+                #[cfg(feature = "derived-snapshot-signatures")]
+                if trusted_public_key.is_some() {
+                    return Err(CliError::InvalidInput(
+                        "--trusted-public-key applies only to snapshot import".to_string(),
+                    ));
+                }
+                let store = open_index_for_read(cli)?;
+                let report = derived_snapshot_archive::export_snapshot_archive(
+                    &store,
+                    path,
+                    #[cfg(feature = "derived-snapshot-signatures")]
+                    signing_key.as_deref(),
+                )?;
+                store.finish_index_read_snapshot()?;
+                print_output(
+                    cli.format,
+                    &encode_agent_payload(&json!({ "snapshot_export": report })),
+                    &report,
+                )?;
+            }
+            SnapshotAction::Import => {
+                #[cfg(feature = "derived-snapshot-signatures")]
+                if signing_key.is_some() {
+                    return Err(CliError::InvalidInput(
+                        "--signing-key applies only to snapshot export".to_string(),
+                    ));
+                }
+                let fresh = open_index_for_read(cli)?;
+                fresh.finish_index_read_snapshot()?;
+                drop(fresh);
+                let mut store = open_index_for_mutation(cli)?;
+                let report = derived_snapshot_archive::import_snapshot_archive(
+                    &mut store,
+                    path,
+                    require_digest.as_deref(),
+                    #[cfg(feature = "derived-snapshot-signatures")]
+                    trusted_public_key.as_deref(),
+                )?;
+                print_output(
+                    cli.format,
+                    &encode_agent_payload(&json!({ "snapshot_import": report })),
+                    &report,
+                )?;
+            }
+        },
         #[cfg(feature = "optional-parser-supervisor")]
         Command::ParserPack {
             storage_root,
@@ -3531,6 +3627,9 @@ enum RequiredCliCommand {
     Symbols,
     /// `projectatlas settings`.
     Settings,
+    /// `projectatlas snapshot`.
+    #[cfg(feature = "derived-snapshot")]
+    Snapshot,
     /// `projectatlas parser-pack`.
     #[cfg(feature = "optional-parser-supervisor")]
     ParserPack,
@@ -3585,6 +3684,8 @@ impl RequiredCliCommand {
             Self::Slice => "slice",
             Self::Symbols => "symbols",
             Self::Settings => "settings",
+            #[cfg(feature = "derived-snapshot")]
+            Self::Snapshot => "snapshot",
             #[cfg(feature = "optional-parser-supervisor")]
             Self::ParserPack => "parser-pack",
             Self::Root => "root",
@@ -3678,6 +3779,16 @@ impl RequiredCliCommand {
                 }),
             },
             Self::Settings => Command::Settings,
+            #[cfg(feature = "derived-snapshot")]
+            Self::Snapshot => Command::Snapshot {
+                action: SnapshotAction::Export,
+                path: PathBuf::from("snapshot.tar.zst"),
+                require_digest: None,
+                #[cfg(feature = "derived-snapshot-signatures")]
+                signing_key: None,
+                #[cfg(feature = "derived-snapshot-signatures")]
+                trusted_public_key: None,
+            },
             #[cfg(feature = "optional-parser-supervisor")]
             Self::ParserPack => Command::ParserPack {
                 storage_root: None,
@@ -4122,6 +4233,8 @@ fn cli_command_name(command: &Command) -> &'static str {
         Command::Slice { .. } => "slice",
         Command::Symbols { .. } => "symbols",
         Command::Settings => "settings",
+        #[cfg(feature = "derived-snapshot")]
+        Command::Snapshot { .. } => "snapshot",
         #[cfg(feature = "optional-parser-supervisor")]
         Command::ParserPack { .. } => "parser-pack",
         Command::Root { .. } => "root",
