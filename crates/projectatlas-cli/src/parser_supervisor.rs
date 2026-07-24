@@ -1263,8 +1263,6 @@ enum LinuxMemoryMonitorEvent {
         accounting: ParserMemoryAccountingKind,
         /// Bounded observation failure.
         message: String,
-        /// Process-group termination failure, when the first kill attempt failed.
-        termination_error: Option<String>,
     },
 }
 
@@ -1344,7 +1342,6 @@ fn linux_memory_monitor_loop(
             Err((accounting, source)) => Some(LinuxMemoryMonitorEvent::ObservationFailed {
                 accounting,
                 message: bounded_message(source.to_string()),
-                termination_error: linux_monitor_termination_error(process_id),
             }),
         };
         if let Some(event) = event {
@@ -2260,36 +2257,55 @@ impl ResidentParserSession {
         phase: &'static str,
         event: LinuxMemoryMonitorEvent,
     ) -> ParserSupervisorError {
-        self.termination_requested = true;
         let (operation, termination_error) = match event {
             LinuxMemoryMonitorEvent::Limit {
                 breach,
                 termination_error,
-            } => (
-                ParserSupervisorError::ResidentMemoryLimitExceeded {
-                    phase,
-                    accounting: breach.accounting,
-                    observed_bytes: breach.observed_bytes,
-                    maximum_bytes: self.memory_limits.process_bytes,
-                    observation_interval_millis: u64::try_from(
-                        PARSER_LINUX_RSS_OBSERVATION_INTERVAL.as_millis(),
-                    )
-                    .unwrap_or(u64::MAX),
-                },
-                termination_error,
-            ),
+            } => {
+                self.termination_requested = true;
+                (
+                    ParserSupervisorError::ResidentMemoryLimitExceeded {
+                        phase,
+                        accounting: breach.accounting,
+                        observed_bytes: breach.observed_bytes,
+                        maximum_bytes: self.memory_limits.process_bytes,
+                        observation_interval_millis: u64::try_from(
+                            PARSER_LINUX_RSS_OBSERVATION_INTERVAL.as_millis(),
+                        )
+                        .unwrap_or(u64::MAX),
+                    },
+                    termination_error,
+                )
+            }
             LinuxMemoryMonitorEvent::ObservationFailed {
                 accounting,
                 message,
-                termination_error,
-            } => (
-                ParserSupervisorError::ResidentMemoryObservationFailed {
-                    phase,
-                    accounting,
-                    message,
-                },
-                termination_error,
-            ),
+            } => {
+                let transition = resolve_linux_memory_exit_transition(
+                    io::Error::other(message.clone()),
+                    SUPERVISOR_POLL_INTERVAL,
+                    || Err(io::Error::other(message.clone())),
+                    || {
+                        self.child.try_wait().map(|status| {
+                            status.map(|status| LinuxChildExit {
+                                code: status.code(),
+                            })
+                        })
+                    },
+                );
+                if let Ok(LinuxMemoryObservation::ChildExited { code }) = transition {
+                    return ParserSupervisorError::ChildExited { phase, code };
+                }
+                self.termination_requested = true;
+                return attach_cleanup(
+                    ParserSupervisorError::ResidentMemoryObservationFailed {
+                        phase,
+                        accounting,
+                        message,
+                    },
+                    kill_direct_child(&mut self.child),
+                );
+            }
         };
         let Some(termination_error) = termination_error else {
             return operation;
