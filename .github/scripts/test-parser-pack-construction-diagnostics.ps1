@@ -416,6 +416,13 @@ try {
                 $ast.Extent.Text,
                 '"--bin",\s*"optional_parser_pack_release"'
             ).Count -eq 2 -and
+            [System.Text.RegularExpressions.Regex]::Matches(
+                $ast.Extent.Text,
+                '"projectatlas-cli/optional-parser-worker"'
+            ).Count -eq 2 -and
+            -not $ast.Extent.Text.Contains(
+                '"projectatlas-cli/optional-parser-supervisor"'
+            ) -and
             $cliManifestText.Contains('required-features = ["cli"]') -and
             $cliManifestText.Contains('default = ["cli"]') -and
             $cliManifestText.Contains(

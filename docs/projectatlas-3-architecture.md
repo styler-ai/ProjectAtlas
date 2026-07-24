@@ -1822,7 +1822,8 @@ Parser-pack construction disables the full default CLI feature and compiles only
 worker, supervisor, assembler, and verifier dependency closure. The verifier is a
 normal release binary, so construction does not activate example-only development
 dependencies; the normal `projectatlas` executable retains its complete default CLI
-behavior.
+behavior. Linux reuses the worker-feature CLI library for its separate release-tool
+build instead of compiling a second supervisor-only library variant.
 After a v2 miss, one exact compatible v1 key derived from the same target, Rust,
 native-toolchain, lockfile, and manifest inputs may migrate an already sanitized
 layer into v2. There are no prefix fallbacks, and the restored tree still crosses

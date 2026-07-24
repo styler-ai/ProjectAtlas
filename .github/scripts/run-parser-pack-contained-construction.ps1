@@ -956,7 +956,7 @@ $workerBuildArguments = @(
                 "--package",
                 "projectatlas-cli",
                 "--features",
-                "projectatlas-cli/optional-parser-supervisor",
+                "projectatlas-cli/optional-parser-worker",
                 "--example",
                 "assemble_optional_parser_artifact",
                 "--bin",

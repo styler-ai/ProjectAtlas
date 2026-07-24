@@ -69,7 +69,9 @@ features and activates only the worker/supervisor closure. The release verifier 
 normal binary target, not an example target that pulls test-only dependencies into
 construction. Windows builds the worker, assembler, and verifier in one Cargo
 invocation. Linux keeps the worker's required linker-specific `cargo rustc`
-invocation separate, then builds both release tools in one Cargo invocation.
+invocation separate, then builds both release tools with that same worker feature
+closure so Cargo reuses the already-built CLI library instead of compiling a second
+supervisor-only variant.
 
 Windows Cargo runs through the existing SID-restricted protected jobserver with a
 fixed two-worker budget. A four-worker hosted trial increased elapsed construction
