@@ -277,6 +277,7 @@ function Build-RuntimeProfile {
         [string]$TargetTriple,
 
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$ExecutableSuffix
     )
 

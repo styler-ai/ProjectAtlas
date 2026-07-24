@@ -462,7 +462,8 @@ try {
         ($runtimeBoundaryMeasurementText.Contains('-CargoFeatures "cli-core"') -and
             $runtimeBoundaryMeasurementText.Contains(
                 '-FeatureArguments @("--no-default-features", "--features", "cli-core")'
-            )) `
+            ) -and
+            $runtimeBoundaryMeasurementText.Contains('[AllowEmptyString()]')) `
         "Absent-pack control must build the runnable CLI core without the optional supervisor."
     foreach ($dependency in @(
         "blake3",
