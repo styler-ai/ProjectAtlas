@@ -54,9 +54,15 @@ const SRC_DIR_NAME: &str = "src";
 const TESTS_DIR_NAME: &str = "tests";
 const ALPHA_RS_FILE_NAME: &str = "alpha.rs";
 const CREATED_RS_FILE_NAME: &str = "created.rs";
+const DUPLICATE_RS_FILE_NAME: &str = "duplicate.rs";
 const HIDDEN_RS_FILE_NAME: &str = "hidden.rs";
 const IGNORED_DIR_NAME: &str = "ignored";
 const INSTALLER_RS_FILE_NAME: &str = "installer.rs";
+const LIB_RS_FILE_NAME: &str = "lib.rs";
+const SCANNED_RS_FILE_NAME: &str = "scanned.rs";
+const GIT_DIR_NAME: &str = ".git";
+const OUTSIDE_CANARY_FILE_NAME: &str = "outside-canary.txt";
+const PARENT_CANARY_FILE_NAME: &str = "parent-canary.txt";
 const ATLAS_DIR_NAME: &str = ".projectatlas";
 const GITHOOKS_DIR_NAME: &str = ".githooks";
 const ISSUE_TEMPLATE_DIR_NAME: &str = "ISSUE_TEMPLATE";
@@ -8284,15 +8290,15 @@ fn packaged_cli_commands_own_their_real_sqlite_effects() -> Result<(), Box<dyn E
         "pub fn indexed() {\n    helper();\n}\n\nfn helper() {}\n",
     )?;
     fs::write(
-        repo.join(SRC_DIR_NAME).join("duplicate.rs"),
+        repo.join(SRC_DIR_NAME).join(DUPLICATE_RS_FILE_NAME),
         "pub fn duplicate_contract() {}\n",
     )?;
-    fs::write(repo.join("outside-canary.txt"), "preserve me\n")?;
+    fs::write(repo.join(OUTSIDE_CANARY_FILE_NAME), "preserve me\n")?;
     fs::write(
         repo.join(".gitignore"),
         ".projectatlas/\nprojectatlas.toon\n",
     )?;
-    let parent_canary = temp.path().join("parent-canary.txt");
+    let parent_canary = temp.path().join(PARENT_CANARY_FILE_NAME);
     fs::write(&parent_canary, "preserve parent\n")?;
     for arguments in [
         vec!["init", "--quiet"],
@@ -8415,7 +8421,7 @@ fn packaged_cli_commands_own_their_real_sqlite_effects() -> Result<(), Box<dyn E
                 "files".to_string(),
                 "contract".to_string(),
                 "--folder".to_string(),
-                "src".to_string(),
+                SRC_DIR_NAME.to_string(),
                 "--limit".to_string(),
                 "2".to_string(),
             ],
@@ -8683,11 +8689,11 @@ fn packaged_cli_commands_own_their_real_sqlite_effects() -> Result<(), Box<dyn E
     for case in &cases {
         match case.name {
             "scan" => fs::write(
-                repo.join("src/scanned.rs"),
+                repo.join(SRC_DIR_NAME).join(SCANNED_RS_FILE_NAME),
                 "pub fn scanned_contract() {}\n",
             )?,
             "summary" => fs::write(
-                repo.join("src/lib.rs"),
+                repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
                 "pub fn indexed() {\n    helper();\n}\n\nfn helper() {}\n\npub fn dirty_contract() {}\n",
             )?,
             "watch" => fs::write(
@@ -8733,7 +8739,7 @@ fn packaged_cli_commands_own_their_real_sqlite_effects() -> Result<(), Box<dyn E
             )?;
         }
         if fs::read_to_string(&parent_canary)? != "preserve parent\n"
-            || fs::read_to_string(repo.join("outside-canary.txt"))? != "preserve me\n"
+            || fs::read_to_string(repo.join(OUTSIDE_CANARY_FILE_NAME))? != "preserve me\n"
         {
             return Err(io::Error::other(format!(
                 "{} escaped the CLI contract repository boundary",
@@ -8802,12 +8808,12 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
         repo.join(SRC_DIR_NAME).join("lib.rs"),
         "pub fn indexed() {\n    helper();\n}\n\nfn helper() {}\n",
     )?;
-    fs::write(repo.join("outside-canary.txt"), "preserve me\n")?;
+    fs::write(repo.join(OUTSIDE_CANARY_FILE_NAME), "preserve me\n")?;
     fs::write(
         repo.join(".gitignore"),
         ".projectatlas/\nprojectatlas.toon\n",
     )?;
-    let parent_canary = temp.path().join("parent-canary.txt");
+    let parent_canary = temp.path().join(PARENT_CANARY_FILE_NAME);
     fs::write(&parent_canary, "preserve parent\n")?;
     for arguments in [
         vec!["init", "--quiet"],
@@ -8979,7 +8985,7 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
         },
         McpToolContractCase {
             name: "atlas_folders",
-            arguments: serde_json::json!({"project_path": repo_argument, "query": "src", "limit": 2}),
+            arguments: serde_json::json!({"project_path": repo_argument, "query": SRC_DIR_NAME, "limit": 2}),
             expected_marker: "folders",
             payload_key: Some("folders"),
             effect: McpSqliteEffect::None,
@@ -8987,7 +8993,7 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
         },
         McpToolContractCase {
             name: "atlas_files",
-            arguments: serde_json::json!({"project_path": repo_argument, "query": "indexed", "folder": "src", "limit": 2}),
+            arguments: serde_json::json!({"project_path": repo_argument, "query": "indexed", "folder": SRC_DIR_NAME, "limit": 2}),
             expected_marker: "files",
             payload_key: Some("files"),
             effect: McpSqliteEffect::None,
@@ -9267,15 +9273,15 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
     for case in &cases {
         match case.name {
             "atlas_init" => fs::write(
-                repo.join("src/scanned.rs"),
+                repo.join(SRC_DIR_NAME).join(SCANNED_RS_FILE_NAME),
                 "pub fn scanned_contract() {}\n",
             )?,
             "atlas_file_summary" => fs::write(
-                repo.join("src/lib.rs"),
+                repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
                 "pub fn indexed() {\n    helper();\n}\n\nfn helper() {}\n\npub fn dirty_contract() {}\n",
             )?,
             "atlas_watch_once" => fs::write(
-                repo.join("src/lib.rs"),
+                repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
                 "pub fn indexed() {\n    helper();\n}\n\nfn helper() {}\n\npub fn dirty_contract() {}\n\npub fn watched_contract() {}\n",
             )?,
             _ => {}
@@ -9361,7 +9367,7 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
                 .into());
             }
         }
-        if fs::read_to_string(repo.join("outside-canary.txt"))? != "preserve me\n"
+        if fs::read_to_string(repo.join(OUTSIDE_CANARY_FILE_NAME))? != "preserve me\n"
             || fs::read_to_string(&parent_canary)? != "preserve parent\n"
         {
             return Err(io::Error::other(format!(
@@ -12052,7 +12058,7 @@ fn dependency_aware_refresh_re_resolves_unchanged_inbound_callers() -> Result<()
         "pub fn caller() { target(); }\n",
     )?;
     let target = repo.join(SRC_DIR_NAME).join("target.rs");
-    let duplicate = repo.join(SRC_DIR_NAME).join("duplicate.rs");
+    let duplicate = repo.join(SRC_DIR_NAME).join(DUPLICATE_RS_FILE_NAME);
     fs::write(&target, "pub fn target() {}\n")?;
 
     Command::cargo_bin("projectatlas")?
@@ -16536,7 +16542,7 @@ fn assert_cli_contract_payload(name: &str, payload: &Value) -> Result<(), Box<dy
             require_json_usize_at_least(payload, &["symbols", "parsed"], 1)?;
         }
         "overview" => require_json_usize_at_least(payload, &["files"], 1)?,
-        "folders" => require_json_string(payload, &["0", "path"], "src")?,
+        "folders" => require_json_string(payload, &["0", "path"], SRC_DIR_NAME)?,
         "files" => require_json_string(payload, &["0", "path"], "src/duplicate.rs")?,
         "next" => {
             require_json_string(payload, &["query"], "contract")?;
@@ -17314,9 +17320,12 @@ fn graph_stage_directories(repo: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> 
 fn assert_cli_non_git_freshness(executable: &Path) -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("cli-non-git-contract");
-    fs::create_dir_all(repo.join("src"))?;
-    fs::write(repo.join("src/lib.rs"), "pub fn baseline() {}\n")?;
-    if repo.join(".git").exists() {
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn baseline() {}\n",
+    )?;
+    if repo.join(GIT_DIR_NAME).exists() {
         return Err(io::Error::other("non-Git CLI fixture unexpectedly contained .git").into());
     }
     let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
@@ -17341,7 +17350,7 @@ fn assert_cli_non_git_freshness(executable: &Path) -> Result<(), Box<dyn Error>>
         (MCP_CONTRACT_METADATA_CANARY, "preserve"),
     )?;
     fs::write(
-        repo.join("src/lib.rs"),
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
         "pub fn baseline() {}\n\npub fn non_git_cli_contract() {}\n",
     )?;
     let case = CliContractCase {
@@ -17587,9 +17596,12 @@ fn assert_mcp_contract_failure_no_mutation(
 fn assert_mcp_non_git_freshness(executable: &Path) -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("non-git-contract");
-    fs::create_dir_all(repo.join("src"))?;
-    fs::write(repo.join("src/lib.rs"), "pub fn baseline() {}\n")?;
-    if repo.join(".git").exists() {
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn baseline() {}\n",
+    )?;
+    if repo.join(GIT_DIR_NAME).exists() {
         return Err(io::Error::other("non-Git MCP fixture unexpectedly contained .git").into());
     }
     let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
@@ -17616,7 +17628,7 @@ fn assert_mcp_non_git_freshness(executable: &Path) -> Result<(), Box<dyn Error>>
 
     let before = mcp_database_snapshot(&database)?;
     fs::write(
-        repo.join("src/lib.rs"),
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
         "pub fn baseline() {}\n\npub fn non_git_contract() {}\n",
     )?;
     let case = McpToolContractCase {
@@ -17991,7 +18003,7 @@ fn assert_mcp_active_cancellation_preserves_generation(
 ) -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("cancellation-contract");
-    fs::create_dir_all(repo.join("src"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
     fs::write(repo.join("src/baseline.rs"), "pub fn baseline() {}\n")?;
     let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
     run_mcp_contract_json(
