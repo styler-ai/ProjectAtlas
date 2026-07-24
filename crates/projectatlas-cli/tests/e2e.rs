@@ -29,7 +29,8 @@ use projectatlas_db::{
     AtlasStore, HealthResolution, IndexedFileText, PlannerStatisticsPolicy, PlannerStatisticsState,
     RepositoryGraphRelationQuery, TelemetryCheckpointState,
 };
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::types::ValueRef;
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,9 +41,10 @@ use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{self, Read as IoRead, Write as IoWrite};
+use std::io::{self, BufRead, BufReader, Read as IoRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
-use std::process::{Command as StdCommand, Stdio};
+use std::process::{Child, ChildStdin, Command as StdCommand, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 use yaml_rust2::{Yaml, YamlLoader};
@@ -85,6 +87,11 @@ const OPTIONAL_PARSER_PACKS_DIR_NAME: &str = "parser-packs";
 const PROJECTATLAS_SKILL_DIR: &str = "skills";
 const PROJECTATLAS_SKILL_NAME: &str = "projectatlas";
 const SKILL_FILE_NAME: &str = "SKILL.md";
+const MCP_CONTRACT_EXECUTABLE_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE";
+const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
+const MCP_CONTRACT_METADATA_CANARY: &str = "mcp_contract_metadata_canary";
+const MCP_V040_TOOLS_SHA256: &str =
+    "68e8af9502420a3a51d8094096c3ed0d9f0badea9d0b4762ece56635b652ea09";
 const SUBDIR_CONFIG_DIR: &str = "config";
 const SESSION_TEST_FILE_NAME: &str = "session.rs";
 #[cfg(any(
@@ -100,6 +107,57 @@ fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut sidecar = path.as_os_str().to_os_string();
     sidecar.push(suffix);
     PathBuf::from(sidecar)
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum McpSqliteEffect {
+    None,
+    Telemetry,
+    DerivedSourceAdvance,
+    DerivedGraphAdvance,
+    PurposeAdvance(&'static str),
+    HealthResolution,
+}
+
+struct McpToolContractCase {
+    name: &'static str,
+    arguments: Value,
+    expected_marker: &'static str,
+    payload_key: Option<&'static str>,
+    effect: McpSqliteEffect,
+    telemetry_enabled: bool,
+}
+
+#[derive(Clone, Copy)]
+enum CliContractOutput {
+    JsonObject,
+    JsonArray,
+    Empty,
+    Mcp,
+}
+
+struct CliContractCase {
+    name: &'static str,
+    arguments: Vec<String>,
+    output: CliContractOutput,
+    effect: McpSqliteEffect,
+    expected_exit_code: i32,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct McpDatabaseSnapshot {
+    authoritative: BTreeMap<String, String>,
+    usage: BTreeMap<String, String>,
+    authored_purposes: BTreeMap<String, String>,
+    metadata_canary: Option<String>,
+    project_instance_id: Option<String>,
+    usage_calls: usize,
+    usage_events: Vec<String>,
+    active_usage_instances: usize,
+    sealed_mcp_instances: usize,
+    generation: u64,
+    purpose_revision: u64,
+    publication_state: String,
 }
 
 #[test]
@@ -3857,6 +3915,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "cargo check --workspace --all-targets --all-features --locked",
         "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
         "cargo test --workspace --all-features --locked",
+        "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled",
         "cargo test --doc --workspace --all-features --locked",
         "cargo deny --locked --all-features check -D warnings",
         "--issue-map openspec/issue-map.json",
@@ -3881,9 +3940,68 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     if !release.contains("--milestone \"${RELEASE_VERSION}-00\"")
         || !release.contains("cargo fmt --all --check")
+        || !release.contains(
+            "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled",
+        )
     {
         return Err(io::Error::other(
             "release must retain milestone completion and ordinary quality gates",
+        )
+        .into());
+    }
+    for required in [
+        "packaged-contract-runner-${{ matrix.suffix }}",
+        "packaged-contract-runner-x86_64-pc-windows-msvc",
+        "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE",
+        "needs: [prepublish-installer-smoke-unix, prepublish-installer-smoke-windows]",
+        "pattern: projectatlas-*",
+    ] {
+        if !release.contains(required) {
+            return Err(io::Error::other(format!(
+                "release omitted packaged CLI contract wiring {required:?}"
+            ))
+            .into());
+        }
+    }
+    let unix_prepublish = release
+        .split("  prepublish-installer-smoke-unix:")
+        .nth(1)
+        .and_then(|tail| tail.split("  prepublish-installer-smoke-windows:").next())
+        .ok_or_else(|| io::Error::other("release omitted the Unix prepublish job"))?;
+    let windows_prepublish = release
+        .split("  prepublish-installer-smoke-windows:")
+        .nth(1)
+        .and_then(|tail| tail.split("  publish:").next())
+        .ok_or_else(|| io::Error::other("release omitted the Windows prepublish job"))?;
+    for (job, body) in [("Unix", unix_prepublish), ("Windows", windows_prepublish)] {
+        for contract in [
+            "mcp_advertised_tools_own_their_real_sqlite_effects",
+            "packaged_cli_surface_preserves_v0326_routes_and_defaults",
+            "packaged_cli_commands_own_their_real_sqlite_effects",
+        ] {
+            if !body.contains(contract) {
+                return Err(io::Error::other(format!(
+                    "{job} prepublish omitted packaged contract {contract:?}"
+                ))
+                .into());
+            }
+        }
+    }
+    for suffix in [
+        "x86_64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+    ] {
+        if unix_prepublish.matches(suffix).count() != 1 {
+            return Err(io::Error::other(format!(
+                "Unix prepublish must own exactly one {suffix:?} target"
+            ))
+            .into());
+        }
+    }
+    if !windows_prepublish.contains("x86_64-pc-windows-msvc") {
+        return Err(io::Error::other(
+            "Windows prepublish omitted the x86_64-pc-windows-msvc target",
         )
         .into());
     }
@@ -7970,6 +8088,1302 @@ fn real_scan_resolves_import_alias_called_by_across_core_languages() -> Result<(
 }
 
 #[test]
+fn packaged_cli_surface_preserves_v0326_routes_and_defaults() -> Result<(), Box<dyn Error>> {
+    let executable = mcp_contract_executable();
+    assert_mcp_contract_runtime_and_skill(&executable)?;
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/cli-surfaces.json"))?;
+    let current_key = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let current = fixture
+        .get(&current_key)
+        .ok_or_else(|| io::Error::other(format!("CLI fixture omitted {current_key}")))?;
+    let legacy = json_at(&fixture, &["v0.3.26"])?;
+    let current_commands = cli_surface_strings(current, &["commands"])?;
+    let root_help = cli_help_surface(&executable, "")?;
+    if !root_help.help_present {
+        return Err(io::Error::other("packaged CLI root omitted Clap's help command").into());
+    }
+    let advertised_commands = root_help.subcommands;
+    if advertised_commands != current_commands {
+        return Err(io::Error::other(format!(
+            "packaged CLI command inventory drifted: advertised={advertised_commands:?} expected={current_commands:?}"
+        ))
+        .into());
+    }
+
+    let current_subcommands = json_at(current, &["subcommands"])?
+        .as_object()
+        .ok_or_else(|| io::Error::other("current CLI subcommands fixture was not an object"))?;
+    for (parent, expected) in current_subcommands {
+        let expected = cli_value_strings(expected, parent)?;
+        let help = cli_help_surface(&executable, parent)?;
+        if !help.help_present {
+            return Err(io::Error::other(format!(
+                "packaged CLI group {parent} omitted Clap's help command"
+            ))
+            .into());
+        }
+        let advertised = help.subcommands;
+        if advertised != expected {
+            return Err(io::Error::other(format!(
+                "packaged CLI subcommand inventory drifted for {parent}: advertised={advertised:?} expected={expected:?}"
+            ))
+            .into());
+        }
+    }
+    let current_actions = json_at(current, &["actions"])?
+        .as_object()
+        .ok_or_else(|| io::Error::other("current CLI actions fixture was not an object"))?;
+    for (route, expected) in current_actions {
+        let expected = cli_value_strings(expected, route)?;
+        let advertised = cli_help_surface(&executable, route)?.possible_values;
+        if advertised != expected {
+            return Err(io::Error::other(format!(
+                "packaged CLI positional action inventory drifted for {route}: advertised={advertised:?} expected={expected:?}"
+            ))
+            .into());
+        }
+    }
+
+    let current_defaults = json_at(current, &["defaults"])?
+        .as_object()
+        .ok_or_else(|| io::Error::other("current CLI defaults fixture was not an object"))?;
+    let mut current_routes = vec![String::new()];
+    for command in &current_commands {
+        current_routes.push(command.clone());
+        if let Some(subcommands) = current_subcommands.get(command) {
+            for subcommand in cli_value_strings(subcommands, command)? {
+                current_routes.push(format!("{command} {subcommand}"));
+            }
+        }
+    }
+    for route in &current_routes {
+        let expected = current_defaults
+            .get(route)
+            .map(|value| cli_value_strings(value, route))
+            .transpose()?
+            .unwrap_or_default();
+        let advertised = cli_help_surface(&executable, route)?.defaults;
+        if advertised != expected {
+            return Err(io::Error::other(format!(
+                "packaged CLI defaults drifted for {route:?}: advertised={advertised:?} expected={expected:?}"
+            ))
+            .into());
+        }
+    }
+
+    let legacy_commands = cli_surface_strings(legacy, &["commands"])?;
+    if !legacy_commands
+        .iter()
+        .all(|command| current_commands.contains(command))
+    {
+        return Err(io::Error::other(format!(
+            "packaged CLI removed a v0.3.26 command: current={current_commands:?} legacy={legacy_commands:?}"
+        ))
+        .into());
+    }
+    let legacy_subcommands = json_at(legacy, &["subcommands"])?
+        .as_object()
+        .ok_or_else(|| io::Error::other("legacy CLI subcommands fixture was not an object"))?;
+    for (parent, expected) in legacy_subcommands {
+        let expected = cli_value_strings(expected, parent)?;
+        let advertised = cli_help_surface(&executable, parent)?.subcommands;
+        if !expected
+            .iter()
+            .all(|subcommand| advertised.contains(subcommand))
+        {
+            return Err(io::Error::other(format!(
+                "packaged CLI removed a v0.3.26 {parent} route: advertised={advertised:?} legacy={expected:?}"
+            ))
+            .into());
+        }
+    }
+    let legacy_defaults = json_at(legacy, &["defaults"])?
+        .as_object()
+        .ok_or_else(|| io::Error::other("legacy CLI defaults fixture was not an object"))?;
+    for (route, expected) in legacy_defaults {
+        let expected = cli_value_strings(expected, route)?;
+        let advertised = cli_help_surface(&executable, route)?.defaults;
+        if !ordered_subsequence(&expected, &advertised) {
+            return Err(io::Error::other(format!(
+                "packaged CLI removed or reordered a v0.3.26 default for {route:?}: advertised={advertised:?} legacy={expected:?}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn packaged_cli_commands_own_their_real_sqlite_effects() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("cli-contract");
+    fs::create_dir(&repo)?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn indexed() {\n    helper();\n}\n\nfn helper() {}\n",
+    )?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("duplicate.rs"),
+        "pub fn duplicate_contract() {}\n",
+    )?;
+    fs::write(repo.join("outside-canary.txt"), "preserve me\n")?;
+    fs::write(
+        repo.join(".gitignore"),
+        ".projectatlas/\nprojectatlas.toon\n",
+    )?;
+    let parent_canary = temp.path().join("parent-canary.txt");
+    fs::write(&parent_canary, "preserve parent\n")?;
+    for arguments in [
+        vec!["init", "--quiet"],
+        vec!["config", "user.name", "ProjectAtlas CLI Contract"],
+        vec!["config", "user.email", "cli-contract@projectatlas.invalid"],
+        vec!["add", "."],
+        vec!["commit", "--quiet", "-m", "baseline"],
+    ] {
+        let output = StdCommand::new("git")
+            .current_dir(&repo)
+            .args(arguments)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "CLI contract Git setup failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+    }
+
+    let executable = mcp_contract_executable();
+    assert_mcp_contract_runtime_and_skill(&executable)?;
+    assert_packaged_cli_first_init_filesystem(&executable, temp.path())?;
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    for arguments in [
+        vec![
+            "--db".to_string(),
+            database.display().to_string(),
+            "init".to_string(),
+            "--no-scan".to_string(),
+        ],
+        vec![
+            "--db".to_string(),
+            database.display().to_string(),
+            "scan".to_string(),
+            ".".to_string(),
+        ],
+    ] {
+        run_mcp_contract_json(&executable, &repo, &arguments)?;
+    }
+    {
+        let store = AtlasStore::open(&database)?;
+        for (path, purpose) in [
+            (".", "CLI contract fixture repository."),
+            (SRC_DIR_NAME, "CLI contract fixture Rust sources."),
+            ("src/lib.rs", "CLI contract fixture Rust library."),
+            ("src/duplicate.rs", "CLI contract fixture Rust library."),
+        ] {
+            store.set_purpose(path, purpose, PurposeSource::Agent)?;
+        }
+    }
+    Connection::open(&database)?.execute(
+        "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
+        (MCP_CONTRACT_METADATA_CANARY, "preserve"),
+    )?;
+    let clean_status = StdCommand::new("git")
+        .current_dir(&repo)
+        .args(["status", "--porcelain"])
+        .output()?;
+    if !clean_status.status.success() || !clean_status.stdout.is_empty() {
+        return Err(io::Error::other(format!(
+            "CLI contract clean Git fixture was dirty: {}",
+            String::from_utf8_lossy(&clean_status.stdout)
+        ))
+        .into());
+    }
+
+    let snapshot_archive = temp.path().join("cli-contract-snapshot.tar.zst");
+    let parser_storage = temp.path().join("cli-contract-parser-pack");
+    let health_finding_id = projectatlas_core::health::finding_id(
+        "duplicate-purpose",
+        "src/lib.rs",
+        Some("src/duplicate.rs"),
+    );
+    let cases = vec![
+        CliContractCase {
+            name: "init",
+            arguments: vec!["init".to_string(), "--no-scan".to_string()],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "map",
+            arguments: vec!["map".to_string(), "--force".to_string()],
+            output: CliContractOutput::Empty,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "scan",
+            arguments: vec!["scan".to_string(), ".".to_string()],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::DerivedSourceAdvance,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "overview",
+            arguments: vec!["overview".to_string()],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "folders",
+            arguments: vec![
+                "folders".to_string(),
+                "source".to_string(),
+                "--limit".to_string(),
+                "2".to_string(),
+            ],
+            output: CliContractOutput::JsonArray,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "files",
+            arguments: vec![
+                "files".to_string(),
+                "contract".to_string(),
+                "--folder".to_string(),
+                "src".to_string(),
+                "--limit".to_string(),
+                "2".to_string(),
+            ],
+            output: CliContractOutput::JsonArray,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "next",
+            arguments: vec![
+                "next".to_string(),
+                "contract".to_string(),
+                "--limit".to_string(),
+                "2".to_string(),
+            ],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "outline",
+            arguments: vec![
+                "outline".to_string(),
+                "src/lib.rs".to_string(),
+                "--lines".to_string(),
+                "3".to_string(),
+            ],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "summary",
+            arguments: vec![
+                "summary".to_string(),
+                "src/lib.rs".to_string(),
+                "--limit".to_string(),
+                "5".to_string(),
+            ],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::DerivedSourceAdvance,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "search",
+            arguments: vec![
+                "search".to_string(),
+                "contract".to_string(),
+                "--file-pattern".to_string(),
+                "src/*.rs".to_string(),
+                "--limit".to_string(),
+                "1".to_string(),
+            ],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "slice",
+            arguments: vec![
+                "slice".to_string(),
+                "src/lib.rs".to_string(),
+                "--start-line".to_string(),
+                "1".to_string(),
+                "--end-line".to_string(),
+                "2".to_string(),
+            ],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "symbols",
+            arguments: vec!["symbols".to_string(), "build".to_string(), ".".to_string()],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::DerivedGraphAdvance,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "settings",
+            arguments: vec!["settings".to_string()],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "snapshot",
+            arguments: vec![
+                "snapshot".to_string(),
+                "export".to_string(),
+                snapshot_archive.display().to_string(),
+            ],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "parser-pack",
+            arguments: vec![
+                "parser-pack".to_string(),
+                "--storage-root".to_string(),
+                parser_storage.display().to_string(),
+                "status".to_string(),
+            ],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "root",
+            arguments: vec!["root".to_string(), "show".to_string()],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "config",
+            arguments: vec!["config".to_string(), "--print".to_string()],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "ignore",
+            arguments: vec!["ignore".to_string(), "list".to_string()],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "watch-status",
+            arguments: vec!["watch-status".to_string()],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "watch",
+            arguments: vec!["watch".to_string(), ".".to_string(), "--once".to_string()],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::DerivedSourceAdvance,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "health-check",
+            arguments: vec![
+                "health-check".to_string(),
+                "--source-only".to_string(),
+                "--limit".to_string(),
+                "5".to_string(),
+            ],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "health",
+            arguments: vec![
+                "health".to_string(),
+                "resolve".to_string(),
+                health_finding_id,
+                "duplicate-purpose".to_string(),
+                "src/lib.rs".to_string(),
+                "--related-path".to_string(),
+                "src/duplicate.rs".to_string(),
+                "--rationale".to_string(),
+                "CLI contract resolution.".to_string(),
+            ],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::HealthResolution,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "lint",
+            arguments: vec![
+                "lint".to_string(),
+                "--purpose-level".to_string(),
+                "low".to_string(),
+            ],
+            output: CliContractOutput::Empty,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "token",
+            arguments: vec!["token".to_string()],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "parity",
+            arguments: vec!["parity".to_string()],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "strip-legacy-purpose",
+            arguments: vec![
+                "strip-legacy-purpose".to_string(),
+                ".".to_string(),
+                "--dry-run".to_string(),
+            ],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "reset-index",
+            arguments: vec!["reset-index".to_string(), "--dry-run".to_string()],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "mcp",
+            arguments: vec!["mcp".to_string()],
+            output: CliContractOutput::Mcp,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "mcp-config",
+            arguments: vec!["mcp-config".to_string()],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "runtime-info",
+            arguments: vec!["runtime-info".to_string()],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
+            name: "purpose",
+            arguments: vec![
+                "purpose".to_string(),
+                "set".to_string(),
+                "src/watched.rs".to_string(),
+                "CLI contract watched source.".to_string(),
+            ],
+            output: CliContractOutput::JsonObject,
+            effect: McpSqliteEffect::PurposeAdvance("src/watched.rs"),
+            expected_exit_code: 0,
+        },
+    ];
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/cli-surfaces.json"))?;
+    let current_key = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let expected_commands =
+        cli_surface_strings(json_at(&fixture, &[&current_key])?, &["commands"])?;
+    let tested_commands = cases
+        .iter()
+        .map(|case| case.name.to_string())
+        .collect::<Vec<_>>();
+    if tested_commands != expected_commands {
+        return Err(io::Error::other(format!(
+            "packaged CLI behavior table drifted from the frozen inventory: tested={tested_commands:?} expected={expected_commands:?}"
+        ))
+        .into());
+    }
+
+    for case in &cases {
+        match case.name {
+            "scan" => fs::write(
+                repo.join("src/scanned.rs"),
+                "pub fn scanned_contract() {}\n",
+            )?,
+            "summary" => fs::write(
+                repo.join("src/lib.rs"),
+                "pub fn indexed() {\n    helper();\n}\n\nfn helper() {}\n\npub fn dirty_contract() {}\n",
+            )?,
+            "watch" => fs::write(
+                repo.join("src/watched.rs"),
+                "pub fn watched_contract() {}\n",
+            )?,
+            _ => {}
+        }
+        let before = mcp_database_snapshot(&database)?;
+        let filesystem_before = repository_filesystem_snapshot(&repo)?;
+        let outer_filesystem_before = repository_filesystem_snapshot(temp.path())?;
+        let output = run_packaged_cli_contract_case(&executable, &repo, &database, case)?;
+        assert_cli_contract_filesystem_effect(case.name, &repo)?;
+        let filesystem_after = repository_filesystem_snapshot(&repo)?;
+        assert_cli_contract_filesystem_delta(case.name, &filesystem_before, &filesystem_after)?;
+        let outer_filesystem_after = repository_filesystem_snapshot(temp.path())?;
+        assert_cli_contract_outer_filesystem_delta(
+            case.name,
+            &outer_filesystem_before,
+            &outer_filesystem_after,
+        )?;
+        if case.name == "search" {
+            require_json_bool(
+                output
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("CLI search omitted typed output"))?,
+                &["truncated"],
+                true,
+            )?;
+        }
+        let after = mcp_database_snapshot(&database)?;
+        assert_contract_sqlite_effect(case.name, case.effect, &before, &after)?;
+        if matches!(
+            case.effect,
+            McpSqliteEffect::DerivedSourceAdvance | McpSqliteEffect::DerivedGraphAdvance
+        ) {
+            assert_mcp_matches_clean_packaged_scan(
+                &executable,
+                &repo,
+                &database,
+                temp.path(),
+                &format!("cli-{}", case.name),
+            )?;
+        }
+        if fs::read_to_string(&parent_canary)? != "preserve parent\n"
+            || fs::read_to_string(repo.join("outside-canary.txt"))? != "preserve me\n"
+        {
+            return Err(io::Error::other(format!(
+                "{} escaped the CLI contract repository boundary",
+                case.name
+            ))
+            .into());
+        }
+    }
+    if !snapshot_archive.is_file() {
+        return Err(io::Error::other("packaged CLI snapshot export omitted its archive").into());
+    }
+    assert_cli_snapshot_archive(&snapshot_archive)?;
+
+    assert_packaged_cli_legacy_leaf_contracts(&executable, &repo, &database, temp.path())?;
+    assert_packaged_cli_edge_contracts(&executable, &repo, &database)?;
+    assert_cli_non_git_freshness(&executable)?;
+
+    let reopened = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            database.display().to_string(),
+            "summary".to_string(),
+            "src/watched.rs".to_string(),
+            "--limit".to_string(),
+            "5".to_string(),
+        ],
+    )?;
+    require_json_contains(&reopened, &["content_summary"], "watched_contract")?;
+    require_json_string(&reopened, &["file_purpose"], "CLI contract watched source.")?;
+    let reopen_case = McpToolContractCase {
+        name: "atlas_file_summary",
+        arguments: serde_json::json!({
+            "project_path": repo,
+            "file": "src/watched.rs",
+            "compact": true
+        }),
+        expected_marker: "file_summary:",
+        payload_key: Some("file_summary"),
+        effect: McpSqliteEffect::None,
+        telemetry_enabled: false,
+    };
+    let reopened_text = run_mcp_contract_call(&executable, &repo, &database, &reopen_case)?;
+    let reopened_mcp: Value = toon_format::decode_default(&reopened_text)?;
+    require_json_contains(
+        &reopened_mcp,
+        &["file_summary", "content_summary"],
+        "watched_contract",
+    )?;
+    require_json_string(
+        &reopened_mcp,
+        &["file_summary", "file_purpose"],
+        "CLI contract watched source.",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn indexed() {\n    helper();\n}\n\nfn helper() {}\n",
+    )?;
+    fs::write(repo.join("outside-canary.txt"), "preserve me\n")?;
+    fs::write(
+        repo.join(".gitignore"),
+        ".projectatlas/\nprojectatlas.toon\n",
+    )?;
+    let parent_canary = temp.path().join("parent-canary.txt");
+    fs::write(&parent_canary, "preserve parent\n")?;
+    for arguments in [
+        vec!["init", "--quiet"],
+        vec!["config", "user.name", "ProjectAtlas Contract"],
+        vec!["config", "user.email", "contract@projectatlas.invalid"],
+        vec!["add", "."],
+        vec!["commit", "--quiet", "-m", "baseline"],
+    ] {
+        let output = StdCommand::new("git")
+            .current_dir(&repo)
+            .args(arguments)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "MCP contract Git setup failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+    }
+    let db = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let executable = mcp_contract_executable();
+    assert_mcp_contract_runtime_and_skill(&executable)?;
+    run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "init".to_string(),
+            "--no-scan".to_string(),
+        ],
+    )?;
+    run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "scan".to_string(),
+            ".".to_string(),
+        ],
+    )?;
+    {
+        let store = AtlasStore::open(&db)?;
+        for (path, purpose) in [
+            (".", "Contract fixture repository."),
+            (SRC_DIR_NAME, "Contract fixture Rust sources."),
+            ("src/lib.rs", "Contract fixture Rust library."),
+        ] {
+            store.set_purpose(path, purpose, PurposeSource::Agent)?;
+        }
+    }
+    Connection::open(&db)?.execute(
+        "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
+        (MCP_CONTRACT_METADATA_CANARY, "preserve"),
+    )?;
+    let clean_status = StdCommand::new("git")
+        .current_dir(&repo)
+        .args(["status", "--porcelain"])
+        .output()?;
+    if !clean_status.status.success() || !clean_status.stdout.is_empty() {
+        return Err(io::Error::other(format!(
+            "MCP contract clean Git fixture was dirty: {}",
+            String::from_utf8_lossy(&clean_status.stdout)
+        ))
+        .into());
+    }
+
+    let repo_argument = repo.to_string_lossy().to_string();
+    let suggested_purpose_id =
+        projectatlas_core::health::finding_id("suggested-purpose-review", "src/scanned.rs", None);
+    let cases = vec![
+        McpToolContractCase {
+            name: "atlas_set_project_path",
+            arguments: serde_json::json!({"project_path": repo_argument}),
+            expected_marker: "project:",
+            payload_key: Some("project"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_init",
+            arguments: serde_json::json!({"project_path": repo_argument, "force_rescan": true}),
+            expected_marker: "init:",
+            payload_key: Some("init"),
+            effect: McpSqliteEffect::DerivedSourceAdvance,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_map",
+            arguments: serde_json::json!({"project_path": repo_argument, "force": true}),
+            expected_marker: "map:",
+            payload_key: Some("map"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_root",
+            arguments: serde_json::json!({"project_path": repo_argument, "verify": true}),
+            expected_marker: "root:",
+            payload_key: Some("root"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_root_set",
+            arguments: serde_json::json!({"root": repo_argument}),
+            expected_marker: "root:",
+            payload_key: Some("root"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_config",
+            arguments: serde_json::json!({"project_path": repo_argument}),
+            expected_marker: "config:",
+            payload_key: Some("config"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_ignore_list",
+            arguments: serde_json::json!({"project_path": repo_argument}),
+            expected_marker: "ignore:",
+            payload_key: Some("ignore"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_ignore_init_gitignore",
+            arguments: serde_json::json!({"project_path": repo_argument}),
+            expected_marker: "gitignore:",
+            payload_key: Some("gitignore"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_ignore_add",
+            arguments: serde_json::json!({"project_path": repo_argument, "kind": "path-prefix", "value": "generated"}),
+            expected_marker: "ignore:",
+            payload_key: Some("ignore"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_ignore_remove",
+            arguments: serde_json::json!({"project_path": repo_argument, "kind": "path-prefix", "value": "generated"}),
+            expected_marker: "ignore:",
+            payload_key: Some("ignore"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_scan",
+            arguments: serde_json::json!({"project_path": repo_argument, "path": repo_argument, "max_workers": 1}),
+            expected_marker: "scan:",
+            payload_key: Some("scan"),
+            effect: McpSqliteEffect::DerivedSourceAdvance,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_overview",
+            arguments: serde_json::json!({"project_path": repo_argument}),
+            expected_marker: "overview:",
+            payload_key: Some("overview"),
+            effect: McpSqliteEffect::Telemetry,
+            telemetry_enabled: true,
+        },
+        McpToolContractCase {
+            name: "atlas_folders",
+            arguments: serde_json::json!({"project_path": repo_argument, "query": "src", "limit": 2}),
+            expected_marker: "folders",
+            payload_key: Some("folders"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_files",
+            arguments: serde_json::json!({"project_path": repo_argument, "query": "indexed", "folder": "src", "limit": 2}),
+            expected_marker: "files",
+            payload_key: Some("files"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_next",
+            arguments: serde_json::json!({"project_path": repo_argument, "query": "indexed", "limit": 2}),
+            expected_marker: "next:",
+            payload_key: Some("next"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_outline",
+            arguments: serde_json::json!({"project_path": repo_argument, "file": "src/lib.rs", "lines": 4}),
+            expected_marker: "outline:",
+            payload_key: Some("outline"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_file_summary",
+            arguments: serde_json::json!({"project_path": repo_argument, "file": "src/lib.rs", "compact": true}),
+            expected_marker: "file_summary:",
+            payload_key: Some("file_summary"),
+            effect: McpSqliteEffect::DerivedSourceAdvance,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_search",
+            arguments: serde_json::json!({"project_path": repo_argument, "pattern": "helper", "file_pattern": "src/*.rs", "limit": 1}),
+            expected_marker: "search:",
+            payload_key: Some("search"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_slice",
+            arguments: serde_json::json!({"project_path": repo_argument, "file": "src/lib.rs", "start_line": 1, "end_line": 2, "output_bytes": 4096}),
+            expected_marker: "slice:",
+            payload_key: Some("slice"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_symbols_build",
+            arguments: serde_json::json!({"project_path": repo_argument, "path": repo_argument, "max_workers": 1}),
+            expected_marker: "symbols_build:",
+            payload_key: Some("symbols_build"),
+            effect: McpSqliteEffect::DerivedGraphAdvance,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_symbols",
+            arguments: serde_json::json!({"project_path": repo_argument, "file": "src/lib.rs", "query": "indexed", "limit": 2}),
+            expected_marker: "symbols",
+            payload_key: Some("symbols"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_symbol_relations",
+            arguments: serde_json::json!({"project_path": repo_argument, "view": "detailed", "compact": true, "file": "src/lib.rs", "symbol": "indexed", "direction": "outbound", "limit": 2, "output_bytes": 65536}),
+            expected_marker: "symbol_relations:",
+            payload_key: Some("symbol_relations"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_health",
+            arguments: serde_json::json!({"project_path": repo_argument, "limit": 2}),
+            expected_marker: "health:",
+            payload_key: Some("health"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_health_resolve",
+            arguments: serde_json::json!({"project_path": repo_argument, "finding_id": suggested_purpose_id, "category": "suggested-purpose-review", "path": "src/scanned.rs", "rationale": "Contract-owned resolution."}),
+            expected_marker: "health_resolution:",
+            payload_key: Some("health_resolution"),
+            effect: McpSqliteEffect::HealthResolution,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_lint",
+            arguments: serde_json::json!({"project_path": repo_argument, "purpose_level": "low"}),
+            expected_marker: "lint:",
+            payload_key: Some("lint"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_token_report",
+            arguments: serde_json::json!({"project_path": repo_argument}),
+            expected_marker: "token_savings:",
+            payload_key: Some("token_savings"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_parity_report",
+            arguments: serde_json::json!({"project_path": repo_argument, "profile": "repository-intelligence"}),
+            expected_marker: "parity:",
+            payload_key: Some("parity"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_settings",
+            arguments: serde_json::json!({"project_path": repo_argument}),
+            expected_marker: "settings:",
+            payload_key: Some("settings"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_watch_status",
+            arguments: serde_json::json!({"project_path": repo_argument}),
+            expected_marker: "watch_status:",
+            payload_key: Some("watch_status"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_watch_once",
+            arguments: serde_json::json!({"project_path": repo_argument, "path": repo_argument, "max_workers": 1}),
+            expected_marker: "watch:",
+            payload_key: Some("watch"),
+            effect: McpSqliteEffect::DerivedSourceAdvance,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_strip_legacy_purpose",
+            arguments: serde_json::json!({"project_path": repo_argument, "path": repo_argument, "dry_run": true}),
+            expected_marker: "legacy_purpose_migration:",
+            payload_key: Some("legacy_purpose_migration"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_reset_index",
+            arguments: serde_json::json!({"project_path": repo_argument, "dry_run": true}),
+            expected_marker: "reset_index:",
+            payload_key: Some("reset_index"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_mcp_config",
+            arguments: serde_json::json!({"project_path": repo_argument, "harness": "mcp-json"}),
+            expected_marker: "mcp_config:",
+            payload_key: Some("mcp_config"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_runtime_info",
+            arguments: serde_json::json!({"project_path": repo_argument}),
+            expected_marker: "runtime:",
+            payload_key: Some("runtime"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_session_brief",
+            arguments: serde_json::json!({"project_path": repo_argument, "query": "indexed", "compact": true, "folder_limit": 2, "file_limit": 2, "blocker_limit": 1, "purpose_limit": 1}),
+            expected_marker: "session_brief:",
+            payload_key: Some("session_brief"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_task_status",
+            arguments: serde_json::json!({"task_id": "task-progress-contract"}),
+            expected_marker: "task_status:",
+            payload_key: Some("task_status"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_task_cancel",
+            arguments: serde_json::json!({"task_id": "task-progress-contract"}),
+            expected_marker: "task_cancel:",
+            payload_key: Some("task_cancel"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_purpose_queue",
+            arguments: serde_json::json!({"project_path": repo_argument, "limit": 2, "task": "mcp-contract"}),
+            expected_marker: "purpose_curation:",
+            payload_key: Some("purpose_curation"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_purpose_set",
+            arguments: serde_json::json!({"project_path": repo_argument, "path": "src/lib.rs", "purpose": "MCP contract Rust library."}),
+            expected_marker: "purpose_set:",
+            payload_key: Some("purpose_set"),
+            effect: McpSqliteEffect::PurposeAdvance("src/lib.rs"),
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_purpose_review",
+            arguments: serde_json::json!({"project_path": repo_argument, "apply": true, "items": [{"path": "src/lib.rs", "purpose": "Reviewed MCP contract Rust library."}]}),
+            expected_marker: "purpose_review:",
+            payload_key: Some("purpose_review"),
+            effect: McpSqliteEffect::PurposeAdvance("src/lib.rs"),
+            telemetry_enabled: false,
+        },
+    ];
+
+    let inventory = run_mcp_contract_inventory(&executable, &repo, &db)?;
+    assert_legacy_mcp_surface_compatible(&inventory)?;
+    let tools_response = mcp_response(&inventory, 2)?;
+    let tools = tools_response
+        .get("result")
+        .and_then(|result| result.get("tools"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("MCP contract tools/list omitted tools"))?;
+    let tools_by_name = mcp_tools_by_name(tools)?;
+    let advertised_names = tools_by_name.keys().copied().collect::<BTreeSet<_>>();
+    let case_names = cases.iter().map(|case| case.name).collect::<BTreeSet<_>>();
+    if advertised_names != case_names || cases.len() != case_names.len() {
+        return Err(io::Error::other(format!(
+            "MCP contract table did not exactly own the advertised inventory: advertised={advertised_names:?} cases={case_names:?}"
+        ))
+        .into());
+    }
+    let tools_digest = sha256_hex(&serde_json::to_vec(tools)?);
+    if tools_digest != MCP_V040_TOOLS_SHA256 {
+        return Err(io::Error::other(format!(
+            "frozen v0.4.0 MCP inventory/schema digest drifted: expected {MCP_V040_TOOLS_SHA256}, found {tools_digest}"
+        ))
+        .into());
+    }
+    for case in &cases {
+        let schema = tools_by_name[case.name]
+            .get("inputSchema")
+            .ok_or_else(|| io::Error::other(format!("{} omitted inputSchema", case.name)))?;
+        let properties = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .ok_or_else(|| io::Error::other(format!("{} schema omitted properties", case.name)))?;
+        let arguments = case.arguments.as_object().ok_or_else(|| {
+            io::Error::other(format!("{} arguments were not an object", case.name))
+        })?;
+        for key in arguments.keys() {
+            if !properties.contains_key(key) {
+                return Err(io::Error::other(format!(
+                    "{} contract argument {key:?} is absent from the advertised schema",
+                    case.name
+                ))
+                .into());
+            }
+        }
+        for required in schema
+            .get("required")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if !arguments.contains_key(required) {
+                return Err(io::Error::other(format!(
+                    "{} contract row omitted required schema member {required:?}",
+                    case.name
+                ))
+                .into());
+            }
+        }
+    }
+
+    for case in &cases {
+        match case.name {
+            "atlas_init" => fs::write(
+                repo.join("src/scanned.rs"),
+                "pub fn scanned_contract() {}\n",
+            )?,
+            "atlas_file_summary" => fs::write(
+                repo.join("src/lib.rs"),
+                "pub fn indexed() {\n    helper();\n}\n\nfn helper() {}\n\npub fn dirty_contract() {}\n",
+            )?,
+            "atlas_watch_once" => fs::write(
+                repo.join("src/lib.rs"),
+                "pub fn indexed() {\n    helper();\n}\n\nfn helper() {}\n\npub fn dirty_contract() {}\n\npub fn watched_contract() {}\n",
+            )?,
+            _ => {}
+        }
+        let before = mcp_database_snapshot(&db)?;
+        let text = run_mcp_contract_call(&executable, &repo, &db, case)?;
+        if !text.contains(case.expected_marker) {
+            return Err(io::Error::other(format!(
+                "{} response omitted marker {:?}: {text}",
+                case.name, case.expected_marker
+            ))
+            .into());
+        }
+        let decoded: Value = toon_format::decode_default(&text).map_err(|error| {
+            io::Error::other(format!(
+                "{} returned invalid typed TOON: {error}",
+                case.name
+            ))
+        })?;
+        let object = decoded.as_object().ok_or_else(|| {
+            io::Error::other(format!("{} TOON did not decode to an object", case.name))
+        })?;
+        if let Some(payload_key) = case.payload_key
+            && !object.contains_key(payload_key)
+        {
+            return Err(io::Error::other(format!(
+                "{} typed TOON omitted top-level {payload_key:?}: {decoded}",
+                case.name
+            ))
+            .into());
+        }
+        let after = mcp_database_snapshot(&db)?;
+        assert_contract_sqlite_effect(case.name, case.effect, &before, &after)?;
+        assert_mcp_typed_payload(case, &decoded, &text, &after)?;
+        if matches!(
+            case.effect,
+            McpSqliteEffect::DerivedSourceAdvance | McpSqliteEffect::DerivedGraphAdvance
+        ) {
+            assert_mcp_matches_clean_packaged_scan(
+                &executable,
+                &repo,
+                &db,
+                temp.path(),
+                case.name,
+            )?;
+        }
+        if matches!(case.name, "atlas_init" | "atlas_watch_once") {
+            let file = if case.name == "atlas_init" {
+                "src/scanned.rs"
+            } else {
+                "src/lib.rs"
+            };
+            let expected = if case.name == "atlas_init" {
+                "scanned_contract"
+            } else {
+                "watched_contract"
+            };
+            let reopened = run_mcp_contract_json(
+                &executable,
+                &repo,
+                &[
+                    "--db".to_string(),
+                    db.display().to_string(),
+                    "summary".to_string(),
+                    file.to_string(),
+                    "--limit".to_string(),
+                    "25".to_string(),
+                ],
+            )?;
+            require_json_contains(&reopened, &["content_summary"], expected)?;
+        }
+        if case.name == "atlas_file_summary" {
+            let status = StdCommand::new("git")
+                .current_dir(&repo)
+                .args(["status", "--porcelain", "--", "src/lib.rs"])
+                .output()?;
+            if !status.status.success()
+                || !String::from_utf8_lossy(&status.stdout).contains("src/lib.rs")
+            {
+                return Err(io::Error::other(
+                    "saved-dirty MCP freshness fixture did not remain visibly Git-dirty",
+                )
+                .into());
+            }
+        }
+        if fs::read_to_string(repo.join("outside-canary.txt"))? != "preserve me\n"
+            || fs::read_to_string(&parent_canary)? != "preserve parent\n"
+        {
+            return Err(io::Error::other(format!(
+                "{} changed an unrelated filesystem canary",
+                case.name
+            ))
+            .into());
+        }
+    }
+
+    for (name, arguments, expected_error) in [
+        (
+            "atlas_slice",
+            serde_json::json!({"project_path": repo_argument}),
+            "file",
+        ),
+        (
+            "atlas_slice",
+            serde_json::json!({"project_path": repo_argument, "file": "src/lib.rs", "start_line": 1, "end_line": 2, "output_bytes": 1}),
+            "output",
+        ),
+        (
+            "atlas_purpose_set",
+            serde_json::json!({"project_path": repo_argument, "path": "../parent-canary.txt", "purpose": "Must not escape."}),
+            "project",
+        ),
+    ] {
+        assert_mcp_contract_failure_no_mutation(
+            &executable,
+            &repo,
+            &db,
+            name,
+            &arguments,
+            expected_error,
+        )?;
+    }
+    assert_mcp_non_git_freshness(&executable)?;
+    assert_mcp_active_cancellation_preserves_generation(&executable)?;
+
+    let reopened = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "summary".to_string(),
+            "src/lib.rs".to_string(),
+            "--limit".to_string(),
+            "2".to_string(),
+        ],
+    )?;
+    require_json_string(
+        &reopened,
+        &["file_purpose"],
+        "Reviewed MCP contract Rust library.",
+    )?;
+    require_json_contains(&reopened, &["content_summary"], "watched_contract")?;
+    let reopened_mcp = run_mcp_contract_call(
+        &executable,
+        &repo,
+        &db,
+        &McpToolContractCase {
+            name: "atlas_file_summary",
+            arguments: serde_json::json!({"project_path": repo_argument, "file": "src/lib.rs", "compact": true}),
+            expected_marker: "file_summary:",
+            payload_key: Some("file_summary"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+    )?;
+    if !reopened_mcp.contains("Reviewed MCP contract Rust library.")
+        || !reopened_mcp.contains("watched_contract")
+    {
+        return Err(io::Error::other(
+            "reopened MCP did not preserve authored purpose and watched source facts",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
@@ -10900,6 +12314,7 @@ fn incremental_refreshes_converge_with_clean_scan_results() -> Result<(), Box<dy
 #[derive(Debug, Eq, PartialEq)]
 struct DerivedResultSnapshot {
     nodes: Vec<String>,
+    unreviewed_purposes: BTreeMap<String, String>,
     texts: Vec<IndexedFileText>,
     parsers: Vec<String>,
     symbols: Vec<CodeSymbol>,
@@ -10970,7 +12385,10 @@ fn assert_clean_scan_convergence(
     let clean_db = scratch.join(format!("clean-{checkpoint}.db"));
     run_scan(repo, &clean_db)?;
     let incremental = derived_result_snapshot(incremental_db)?;
-    let clean = derived_result_snapshot(&clean_db)?;
+    let mut clean = derived_result_snapshot(&clean_db)?;
+    for path in authored_purpose_paths(incremental_db)? {
+        clean.unreviewed_purposes.remove(&path);
+    }
     if incremental != clean {
         return Err(io::Error::other(format!(
             "incremental results diverged from clean scan at {checkpoint}:\nincremental={incremental:#?}\nclean={clean:#?}"
@@ -10992,6 +12410,7 @@ fn derived_result_snapshot(db: &Path) -> Result<DerivedResultSnapshot, Box<dyn E
         .ok_or_else(|| io::Error::other("convergence project identity missing"))?;
     let indexed_nodes = store.load_nodes()?;
     let mut nodes = Vec::with_capacity(indexed_nodes.len());
+    let mut unreviewed_purposes = BTreeMap::new();
     let mut parsers = Vec::new();
     let mut graph_entities = BTreeSet::new();
     let mut graph_coverage = BTreeSet::new();
@@ -11017,6 +12436,19 @@ fn derived_result_snapshot(db: &Path) -> Result<DerivedResultSnapshot, Box<dyn E
             "content_hash": indexed.node.content_hash,
             "summary": indexed.summary,
         }))?);
+        if matches!(
+            indexed.purpose.source,
+            PurposeSource::Missing | PurposeSource::Generated
+        ) {
+            unreviewed_purposes.insert(
+                indexed.purpose.path.clone(),
+                serde_json::to_string(&serde_json::json!({
+                "purpose": indexed.purpose.purpose,
+                "source": indexed.purpose.source,
+                "status": indexed.purpose.status,
+                }))?,
+            );
+        }
         if let Some(metadata) = store.load_source_parse_metadata(&indexed.node.path)? {
             parsers.push(serde_json::to_string(&metadata)?);
         }
@@ -11105,6 +12537,7 @@ fn derived_result_snapshot(db: &Path) -> Result<DerivedResultSnapshot, Box<dyn E
     let internal = internal_derived_snapshot(db, &project_hex)?;
     Ok(DerivedResultSnapshot {
         nodes,
+        unreviewed_purposes,
         texts: store.load_file_texts_for_search(None, true)?,
         parsers,
         symbols,
@@ -11118,6 +12551,20 @@ fn derived_result_snapshot(db: &Path) -> Result<DerivedResultSnapshot, Box<dyn E
         entity_exports: internal.entity_exports,
         relation_dependencies: internal.relation_dependencies,
     })
+}
+
+fn authored_purpose_paths(db: &Path) -> Result<BTreeSet<String>, Box<dyn Error>> {
+    Ok(AtlasStore::open_read_only(db)?
+        .load_nodes()?
+        .into_iter()
+        .filter(|indexed| {
+            matches!(
+                indexed.purpose.source,
+                PurposeSource::Imported | PurposeSource::Agent
+            )
+        })
+        .map(|indexed| indexed.node.path)
+        .collect())
 }
 
 fn internal_derived_snapshot(
@@ -14737,12 +16184,1870 @@ fn copy_directory_tree(source: &Path, destination: &Path) -> Result<(), Box<dyn 
     Ok(())
 }
 
+struct CliHelpSurface {
+    subcommands: Vec<String>,
+    defaults: Vec<String>,
+    possible_values: Vec<String>,
+    help_present: bool,
+}
+
+/// Read one packaged help route and retain its command/default contract.
+fn cli_help_surface(executable: &Path, route: &str) -> Result<CliHelpSurface, Box<dyn Error>> {
+    let output = StdCommand::new(executable)
+        .args(route.split_whitespace())
+        .arg("--help")
+        .output()?;
+    if !output.status.success() || !output.stderr.is_empty() {
+        return Err(io::Error::other(format!(
+            "packaged CLI help failed for {route:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let help = String::from_utf8(output.stdout)?.replace("\r\n", "\n");
+    let mut subcommands = Vec::new();
+    let mut help_present = false;
+    let mut in_commands = false;
+    for line in help.lines() {
+        if line == "Commands:" {
+            in_commands = true;
+            continue;
+        }
+        if in_commands && line.trim().is_empty() {
+            break;
+        }
+        if in_commands {
+            let name = line.split_whitespace().next().unwrap_or("");
+            if name == "help" {
+                help_present = true;
+            } else if !name.is_empty() {
+                subcommands.push(name.to_string());
+            }
+        }
+    }
+    let possible_values = help
+        .lines()
+        .skip_while(|line| line.trim() != "Possible values:")
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
+        .filter_map(|line| {
+            line.trim_start()
+                .strip_prefix("- ")
+                .and_then(|value| value.split(':').next())
+                .map(str::to_string)
+        })
+        .collect();
+    let mut defaults = Vec::new();
+    let mut default_owner = None;
+    for line in help.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("--")
+            || trimmed.starts_with('<')
+            || (trimmed.starts_with('[') && !trimmed.starts_with("[default:"))
+        {
+            default_owner = trimmed.split_whitespace().next().map(str::to_string);
+        }
+        if let Some((_, tail)) = trimmed.split_once("[default: ") {
+            let (value, _) = tail.split_once(']').ok_or_else(|| {
+                io::Error::other(format!("unterminated default in {route:?} help"))
+            })?;
+            let owner = default_owner.as_deref().ok_or_else(|| {
+                io::Error::other(format!("unowned default {value:?} in {route:?} help"))
+            })?;
+            defaults.push(format!("{owner}={value}"));
+        }
+    }
+    Ok(CliHelpSurface {
+        subcommands,
+        defaults,
+        possible_values,
+        help_present,
+    })
+}
+
+/// Decode one ordered string array from the frozen CLI surface fixture.
+fn cli_value_strings(value: &Value, label: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    value
+        .as_array()
+        .ok_or_else(|| io::Error::other(format!("{label:?} CLI fixture value was not an array")))?
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                io::Error::other(format!("{label:?} CLI fixture contained a non-string")).into()
+            })
+        })
+        .collect()
+}
+
+/// Decode one ordered string array at a frozen CLI fixture path.
+fn cli_surface_strings(value: &Value, path: &[&str]) -> Result<Vec<String>, Box<dyn Error>> {
+    cli_value_strings(json_at(value, path)?, &path.join("."))
+}
+
+/// Return whether every older value survives in order among additive defaults.
+fn ordered_subsequence(expected: &[String], actual: &[String]) -> bool {
+    let mut actual = actual.iter();
+    expected
+        .iter()
+        .all(|expected| actual.by_ref().any(|actual| actual == expected))
+}
+
+/// Return the explicitly selected packaged runtime or the local test binary.
+fn mcp_contract_executable() -> PathBuf {
+    std::env::var_os(MCP_CONTRACT_EXECUTABLE_ENV).map_or_else(
+        || assert_cmd::cargo::cargo_bin("projectatlas"),
+        PathBuf::from,
+    )
+}
+
+/// Require the selected runtime and plugin skill to be the exact workspace release candidate.
+fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dyn Error>> {
+    let runtime = run_mcp_contract_json(
+        executable,
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            "--require-version".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+            "runtime-info".to_string(),
+        ],
+    )?;
+    require_json_string(&runtime, &["version"], env!("CARGO_PKG_VERSION"))?;
+    let plugin_root = if let Some(plugin_root) = std::env::var_os(MCP_CONTRACT_PLUGIN_ROOT_ENV) {
+        PathBuf::from(plugin_root)
+    } else {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .ok_or_else(|| io::Error::other("MCP contract workspace root was not found"))?
+            .join("plugins")
+            .join("projectatlas")
+    };
+    let manifest: Value = serde_json::from_slice(&fs::read(
+        plugin_root.join(".codex-plugin").join("plugin.json"),
+    )?)?;
+    require_json_string(&manifest, &["version"], env!("CARGO_PKG_VERSION"))?;
+    let skill = fs::read_to_string(
+        plugin_root
+            .join(PROJECTATLAS_SKILL_DIR)
+            .join(PROJECTATLAS_SKILL_NAME)
+            .join(SKILL_FILE_NAME),
+    )?;
+    for route in [
+        "atlas_session_brief",
+        "atlas_file_summary",
+        "atlas_symbol_relations",
+        "atlas_slice",
+    ] {
+        if !skill.contains(route) {
+            return Err(io::Error::other(format!(
+                "release-candidate ProjectAtlas skill omitted {route}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Run one release-candidate CLI command and decode its typed JSON output.
+fn run_mcp_contract_json(
+    executable: &Path,
+    cwd: &Path,
+    arguments: &[String],
+) -> Result<Value, Box<dyn Error>> {
+    let output = StdCommand::new(executable)
+        .current_dir(cwd)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--format")
+        .arg("json")
+        .args(arguments)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "MCP contract CLI failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+/// Run one packaged CLI command and enforce its stream and typed-output contract.
+fn run_packaged_cli_contract_case(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    case: &CliContractCase,
+) -> Result<Option<Value>, Box<dyn Error>> {
+    if matches!(case.output, CliContractOutput::Mcp) {
+        let stdout = run_mcp_contract_inventory(executable, cwd, database)?;
+        let response = mcp_response(&stdout, 2)?;
+        let tools = json_at(&response, &["result", "tools"])?
+            .as_array()
+            .ok_or_else(|| io::Error::other("packaged CLI mcp omitted its tool inventory"))?;
+        if tools.is_empty() {
+            return Err(io::Error::other("packaged CLI mcp advertised no tools").into());
+        }
+        assert_cli_contract_payload(case.name, &response)?;
+        return Ok(Some(response));
+    }
+
+    let output = StdCommand::new(executable)
+        .current_dir(cwd)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "--require-version",
+            env!("CARGO_PKG_VERSION"),
+            "--format",
+            "json",
+            "--db",
+        ])
+        .arg(database)
+        .args(&case.arguments)
+        .output()?;
+    let exit_code = output.status.code().unwrap_or(-1);
+    if exit_code != case.expected_exit_code {
+        return Err(io::Error::other(format!(
+            "{} exited {exit_code} instead of {}: stdout={} stderr={}",
+            case.name,
+            case.expected_exit_code,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    match case.output {
+        CliContractOutput::JsonObject | CliContractOutput::JsonArray => {
+            if !output.stderr.is_empty() {
+                return Err(io::Error::other(format!(
+                    "{} wrote typed success output to stderr: {}",
+                    case.name,
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into());
+            }
+            let decoded: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+                io::Error::other(format!(
+                    "{} emitted invalid JSON: {error}; stdout={}",
+                    case.name,
+                    String::from_utf8_lossy(&output.stdout)
+                ))
+            })?;
+            let expected_shape = match case.output {
+                CliContractOutput::JsonObject => decoded.is_object(),
+                CliContractOutput::JsonArray => decoded.is_array(),
+                CliContractOutput::Empty | CliContractOutput::Mcp => false,
+            };
+            if !expected_shape {
+                return Err(io::Error::other(format!(
+                    "{} emitted the wrong JSON shape: {decoded}",
+                    case.name
+                ))
+                .into());
+            }
+            assert_cli_contract_payload(case.name, &decoded)?;
+            Ok(Some(decoded))
+        }
+        CliContractOutput::Empty => {
+            if !output.stdout.is_empty() || !output.stderr.is_empty() {
+                return Err(io::Error::other(format!(
+                    "{} unexpectedly wrote output: stdout={} stderr={}",
+                    case.name,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into());
+            }
+            Ok(None)
+        }
+        CliContractOutput::Mcp => unreachable!("MCP output returned above"),
+    }
+}
+
+/// Require one behavior-owned discriminator from every packaged CLI success payload.
+fn assert_cli_contract_payload(name: &str, payload: &Value) -> Result<(), Box<dyn Error>> {
+    match name {
+        "init" => {
+            require_json_bool(payload, &["ok"], true)?;
+            require_json_array_len(payload, &["host_configs"], 3)?;
+        }
+        "map" | "lint" => {}
+        "scan" => {
+            require_json_usize_at_least(payload, &["overview", "files"], 1)?;
+            require_json_usize_at_least(payload, &["symbols", "parsed"], 1)?;
+        }
+        "overview" => require_json_usize_at_least(payload, &["files"], 1)?,
+        "folders" => require_json_string(payload, &["0", "path"], "src")?,
+        "files" => require_json_string(payload, &["0", "path"], "src/duplicate.rs")?,
+        "next" => {
+            require_json_string(payload, &["query"], "contract")?;
+            require_json_string(
+                payload,
+                &["files", "0", "next_call", "capability"],
+                "summary",
+            )?;
+        }
+        "outline" => require_json_string(payload, &["path"], "src/lib.rs")?,
+        "summary" => {
+            require_json_string(payload, &["file_path"], "src/lib.rs")?;
+            require_json_string(payload, &["source_status"], "live-source")?;
+            require_json_string(payload, &["coverage", "trust"], "trusted")?;
+        }
+        "search" => {
+            require_json_string(payload, &["query"], "contract")?;
+            require_json_bool(payload, &["truncated"], true)?;
+            require_json_string(payload, &["truncation_reason"], "result-limit")?;
+        }
+        "slice" => {
+            require_json_string(payload, &["path"], "src/lib.rs")?;
+            require_json_contains(payload, &["content"], "indexed")?;
+        }
+        "symbols" => {
+            require_json_usize_at_least(payload, &["parsed"], 1)?;
+            require_json_usize_at_least(payload, &["symbols"], 1)?;
+        }
+        "settings" => {
+            require_json_bool(payload, &["root_verified"], true)?;
+            require_json_string(payload, &["database", "schema", "compatibility"], "current")?;
+            require_json_string(payload, &["database", "publication", "state"], "complete")?;
+            require_json_usize_at_least(payload, &["database", "publication", "generation"], 1)?;
+        }
+        "snapshot" => {
+            let digest = json_at(payload, &["snapshot_digest"])?
+                .as_str()
+                .ok_or_else(|| io::Error::other("snapshot digest was not a string"))?;
+            if digest.len() != 64
+                || !digest
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
+            {
+                return Err(io::Error::other(format!(
+                    "snapshot digest was not a SHA-256 hex digest: {digest:?}"
+                ))
+                .into());
+            }
+            require_json_string(payload, &["signature"], "unsigned_local")?;
+        }
+        "parser-pack" => {
+            require_json_string(payload, &["operation"], "status")?;
+            require_json_string(payload, &["pack_id"], "broad-parser")?;
+        }
+        "root" => {
+            require_json_bool(payload, &["verified"], true)?;
+            require_json_string(payload, &["runtime_version"], env!("CARGO_PKG_VERSION"))?;
+        }
+        "config" => {
+            let extensions = json_at(payload, &["source_extensions"])?
+                .as_array()
+                .ok_or_else(|| io::Error::other("config source_extensions was not an array"))?;
+            if extensions.is_empty() {
+                return Err(io::Error::other("config advertised no source extensions").into());
+            }
+        }
+        "ignore" => {
+            require_json_bool(payload, &["gitignore_present"], true)?;
+            require_json_string(payload, &["manual_layer_order"], "after-gitignore")?;
+        }
+        "watch-status" => require_json_contains(payload, &["recommendation"], "watch")?,
+        "watch" => {
+            require_json_string(payload, &["mode"], "single-refresh")?;
+            require_json_usize(payload, &["cycles"], 1)?;
+        }
+        "health-check" => require_json_usize_at_least(payload, &["total"], 1)?,
+        "health" => {
+            require_json_string(payload, &["category"], "duplicate-purpose")?;
+            require_json_string(payload, &["path"], "src/lib.rs")?;
+        }
+        "token" => require_json_string(payload, &["detail_availability"], "retained")?,
+        "parity" => {
+            require_json_string(payload, &["profile"], "repository-intelligence")?;
+            require_json_bool(payload, &["ok"], true)?;
+        }
+        "strip-legacy-purpose" => require_json_bool(payload, &["applied"], false)?,
+        "reset-index" => require_json_bool(payload, &["dry_run"], true)?,
+        "mcp" => require_json_array_len(payload, &["result", "tools"], 40)?,
+        "mcp-config" => {
+            let arguments = json_at(payload, &["mcpServers", "projectatlas", "args"])?
+                .as_array()
+                .ok_or_else(|| io::Error::other("mcp-config args was not an array"))?;
+            if !arguments.iter().any(|argument| argument == "mcp")
+                || !arguments
+                    .iter()
+                    .any(|argument| argument == env!("CARGO_PKG_VERSION"))
+            {
+                return Err(io::Error::other(
+                    "mcp-config omitted the command or exact runtime-version guard",
+                )
+                .into());
+            }
+        }
+        "runtime-info" => {
+            require_json_string(payload, &["version"], env!("CARGO_PKG_VERSION"))?;
+            require_json_array_len(payload, &["mcp_tools"], 40)?;
+        }
+        "purpose" => {
+            require_json_string(payload, &["purpose_set", "path"], "src/watched.rs")?;
+            require_json_bool(payload, &["purpose_set", "agent_reviewed"], true)?;
+        }
+        unknown => {
+            return Err(io::Error::other(format!(
+                "packaged CLI contract has no payload discriminator for {unknown}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Verify the small filesystem surface owned by packaged commands in the main table.
+fn assert_cli_contract_filesystem_effect(name: &str, repo: &Path) -> Result<(), Box<dyn Error>> {
+    let atlas = repo.join(ATLAS_DIR_NAME);
+    match name {
+        "init" => {
+            for relative in [
+                "config.toml",
+                "projectatlas-nonsource-files.toon",
+                "projectatlas.db",
+                "projectatlas.mcp.json",
+                "projectatlas.claude.mcp.json",
+                "projectatlas.opencode.json",
+            ] {
+                let path = atlas.join(relative);
+                if !path.is_file() || fs::metadata(&path)?.len() == 0 {
+                    return Err(io::Error::other(format!(
+                        "packaged init omitted owned artifact {}",
+                        path.display()
+                    ))
+                    .into());
+                }
+            }
+        }
+        "map" => {
+            let path = atlas.join("projectatlas.toon");
+            let map = fs::read_to_string(&path).map_err(|error| {
+                io::Error::other(format!(
+                    "packaged map omitted readable artifact {}: {error}",
+                    path.display()
+                ))
+            })?;
+            if !map.contains("src/lib.rs") {
+                return Err(io::Error::other(
+                    "packaged map artifact omitted the indexed Rust source",
+                )
+                .into());
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Verify a packaged snapshot is a bounded readable archive with both owned entries.
+fn assert_cli_snapshot_archive(path: &Path) -> Result<(), Box<dyn Error>> {
+    let decoder = zstd::stream::read::Decoder::new(fs::File::open(path)?)?;
+    let mut archive = tar::Archive::new(decoder);
+    let mut entries = Vec::new();
+    for entry in archive.entries()? {
+        let entry = entry?;
+        if !entry.header().entry_type().is_file() {
+            return Err(io::Error::other("snapshot archive contained a non-file entry").into());
+        }
+        entries.push(entry.path()?.to_string_lossy().replace('\\', "/"));
+    }
+    entries.sort();
+    let expected = vec![
+        "projectatlas-derived-snapshot/graph.json".to_string(),
+        "projectatlas-derived-snapshot/manifest.json".to_string(),
+    ];
+    if entries != expected {
+        return Err(io::Error::other(format!(
+            "snapshot archive entries drifted: actual={entries:?} expected={expected:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Prove first-run init owns exactly its declared non-database repository files.
+fn assert_packaged_cli_first_init_filesystem(
+    executable: &Path,
+    temp: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let repo = temp.join("cli-first-init-contract");
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn init_contract() {}\n",
+    )?;
+    fs::write(repo.join(".gitignore"), ".projectatlas/\n")?;
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let before = repository_filesystem_snapshot(temp)?;
+    let report = run_mcp_contract_json(
+        executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            database.display().to_string(),
+            "init".to_string(),
+            "--no-scan".to_string(),
+        ],
+    )?;
+    require_json_bool(&report, &["ok"], true)?;
+    let after = repository_filesystem_snapshot(temp)?;
+    let expected_additions = BTreeSet::from([
+        "cli-first-init-contract/.projectatlas".to_string(),
+        "cli-first-init-contract/.projectatlas/config.toml".to_string(),
+        "cli-first-init-contract/.projectatlas/projectatlas-nonsource-files.toon".to_string(),
+        "cli-first-init-contract/.projectatlas/projectatlas.claude.mcp.json".to_string(),
+        "cli-first-init-contract/.projectatlas/projectatlas.mcp.json".to_string(),
+        "cli-first-init-contract/.projectatlas/projectatlas.opencode.json".to_string(),
+    ]);
+    let additions = after
+        .keys()
+        .filter(|path| !before.contains_key(*path))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let removals = before
+        .keys()
+        .filter(|path| !after.contains_key(*path))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let modifications = before
+        .iter()
+        .filter(|(path, value)| after.get(*path) != Some(*value))
+        .map(|(path, _)| path.clone())
+        .collect::<BTreeSet<_>>();
+    if additions != expected_additions || !removals.is_empty() || !modifications.is_empty() {
+        return Err(io::Error::other(format!(
+            "first-run init filesystem ownership drifted: additions={additions:?} removals={removals:?} modifications={modifications:?}"
+        ))
+        .into());
+    }
+    if !database.is_file() || fs::metadata(&database)?.len() == 0 {
+        return Err(io::Error::other("first-run init omitted its SQLite database").into());
+    }
+    Ok(())
+}
+
+/// Snapshot repository paths, types, and file bytes while `SQLite` owns its own checks.
+fn repository_filesystem_snapshot(repo: &Path) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
+    fn visit(
+        repo: &Path,
+        directory: &Path,
+        snapshot: &mut BTreeMap<String, String>,
+    ) -> Result<(), Box<dyn Error>> {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(repo)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if relative == ".git" || relative.ends_with("/.git") {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&path)?;
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                snapshot.insert(
+                    relative,
+                    format!("symlink:{}", fs::read_link(&path)?.to_string_lossy()),
+                );
+            } else if file_type.is_dir() {
+                snapshot.insert(relative, "directory".to_string());
+                visit(repo, &path, snapshot)?;
+            } else if file_type.is_file() {
+                if matches!(
+                    relative.as_str(),
+                    ".projectatlas/projectatlas.db"
+                        | ".projectatlas/projectatlas.db-wal"
+                        | ".projectatlas/projectatlas.db-shm"
+                ) || relative.ends_with("/.projectatlas/projectatlas.db")
+                    || relative.ends_with("/.projectatlas/projectatlas.db-wal")
+                    || relative.ends_with("/.projectatlas/projectatlas.db-shm")
+                {
+                    continue;
+                }
+                let bytes = fs::read(&path)?;
+                snapshot.insert(
+                    relative,
+                    format!("file:{}:{}", bytes.len(), sha256_hex(&bytes)),
+                );
+            } else {
+                snapshot.insert(relative, "other".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    let mut snapshot = BTreeMap::new();
+    visit(repo, repo, &mut snapshot)?;
+    Ok(snapshot)
+}
+
+/// Require exact effects across the enclosing contract fixture, including explicit output paths.
+fn assert_cli_contract_outer_filesystem_delta(
+    name: &str,
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> Result<(), Box<dyn Error>> {
+    let allowed_path = match name {
+        "map" => Some("cli-contract/.projectatlas/projectatlas.toon"),
+        "snapshot" => Some("cli-contract-snapshot.tar.zst"),
+        _ => None,
+    };
+    let mut expected = before.clone();
+    if let Some(path) = allowed_path {
+        let value = after.get(path).ok_or_else(|| {
+            io::Error::other(format!(
+                "{name} omitted its declared outer filesystem artifact"
+            ))
+        })?;
+        expected.insert(path.to_string(), value.clone());
+    }
+    if after != &expected {
+        return Err(io::Error::other(format!(
+            "{name} changed an undeclared path in the enclosing fixture: before={before:?} after={after:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Require one exact repository-filesystem delta for a packaged command family.
+fn assert_cli_contract_filesystem_delta(
+    name: &str,
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> Result<(), Box<dyn Error>> {
+    if name == "map" {
+        let path = ".projectatlas/projectatlas.toon";
+        let mut expected = before.clone();
+        let value = after
+            .get(path)
+            .ok_or_else(|| io::Error::other("packaged map omitted its repository artifact"))?;
+        expected.insert(path.to_string(), value.clone());
+        if after == &expected {
+            return Ok(());
+        }
+    } else if before == after {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "{name} changed an undeclared repository filesystem path: before={before:?} after={after:?}"
+    ))
+    .into())
+}
+
+/// Run every frozen v0.3.26 nested leaf through the real packaged executable.
+fn assert_packaged_cli_legacy_leaf_contracts(
+    executable: &Path,
+    repo: &Path,
+    database: &Path,
+    temp: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let before = mcp_database_snapshot(database)?;
+    let filesystem_before = repository_filesystem_snapshot(repo)?;
+
+    let symbols = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["symbols", "list", "--file", "src/lib.rs", "--limit", "2"],
+    )?;
+    require_json_string(&symbols, &["0", "path"], "src/lib.rs")?;
+    let relations = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &[
+            "symbols",
+            "relations",
+            "--file",
+            "src/lib.rs",
+            "--limit",
+            "2",
+        ],
+    )?;
+    require_json_string(&relations, &["0", "path"], "src/lib.rs")?;
+    let symbol_slice = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["symbols", "slice", "src/lib.rs", "indexed"],
+    )?;
+    require_json_string(&symbol_slice, &["path"], "src/lib.rs")?;
+    require_json_contains(&symbol_slice, &["content"], "indexed")?;
+
+    let root = repo
+        .canonicalize()?
+        .to_string_lossy()
+        .trim_start_matches("\\\\?\\")
+        .replace('\\', "/");
+    let root_set = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["root", "set", &root, "--transition", "bind"],
+    )?;
+    require_json_string(&root_set, &["transition"], "bind")?;
+    require_json_bool(&root_set, &["verified"], true)?;
+    for arguments in [&["root", "show"][..], &["root", "verify"][..]] {
+        let report = run_packaged_cli_json(executable, repo, database, arguments)?;
+        require_json_bool(&report, &["verified"], true)?;
+    }
+    if repository_filesystem_snapshot(repo)? != filesystem_before {
+        return Err(io::Error::other(
+            "root set/show/verify changed unrelated repository filesystem state",
+        )
+        .into());
+    }
+
+    let gitignore = repo.join(".gitignore");
+    let gitignore_before = fs::read(&gitignore)?;
+    let gitignore_report =
+        run_packaged_cli_json(executable, repo, database, &["ignore", "init-gitignore"])?;
+    require_json_bool(&gitignore_report, &["existed"], true)?;
+    require_json_bool(&gitignore_report, &["created"], false)?;
+    if fs::read(&gitignore)? != gitignore_before {
+        return Err(io::Error::other("ignore init-gitignore rewrote an existing file").into());
+    }
+
+    let added = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["ignore", "add", "--kind", "dir-name", "cli-contract-temp"],
+    )?;
+    require_json_string(&added, &["action"], "add")?;
+    require_json_bool(&added, &["changed"], true)?;
+    let listed = run_packaged_cli_json(executable, repo, database, &["ignore", "list"])?;
+    let names = json_at(&listed, &["exclude_dir_names"])?
+        .as_array()
+        .ok_or_else(|| io::Error::other("ignore list directory names was not an array"))?;
+    if !names.iter().any(|name| name == "cli-contract-temp") {
+        return Err(io::Error::other("ignore add was absent from the packaged list route").into());
+    }
+    let removed = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &[
+            "ignore",
+            "remove",
+            "--kind",
+            "dir-name",
+            "cli-contract-temp",
+        ],
+    )?;
+    require_json_string(&removed, &["action"], "remove")?;
+    require_json_bool(&removed, &["changed"], true)?;
+    let listed = run_packaged_cli_json(executable, repo, database, &["ignore", "list"])?;
+    let names = json_at(&listed, &["exclude_dir_names"])?
+        .as_array()
+        .ok_or_else(|| io::Error::other("ignore list directory names was not an array"))?;
+    if names.iter().any(|name| name == "cli-contract-temp") {
+        return Err(io::Error::other("ignore remove left its packaged list entry behind").into());
+    }
+    let filesystem_after_ignore = repository_filesystem_snapshot(repo)?;
+    if filesystem_after_ignore != filesystem_before {
+        return Err(io::Error::other(format!(
+            "ignore init/add/remove did not restore repository filesystem bytes exactly: before={filesystem_before:?} after={filesystem_after_ignore:?}"
+        ))
+        .into());
+    }
+
+    let review_file = temp.join("cli-contract-purpose-review.json");
+    fs::write(
+        &review_file,
+        serde_json::to_vec(&serde_json::json!({
+            "items": [{"path": "src/lib.rs", "confirm_existing": true}]
+        }))?,
+    )?;
+    let review_path = review_file.to_string_lossy().into_owned();
+    let review = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["purpose", "review", "--from-file", &review_path],
+    )?;
+    require_json_bool(&review, &["applied"], false)?;
+    require_json_usize(&review, &["failed"], 0)?;
+    let queue = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["purpose", "queue", "--task", "cli-contract", "--limit", "2"],
+    )?;
+    require_json_string(&queue, &["task"], "cli-contract")?;
+    require_json_usize(&queue, &["limit"], 2)?;
+
+    let parity = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["parity", "report", "--profile", "repository-intelligence"],
+    )?;
+    require_json_bool(&parity, &["ok"], true)?;
+
+    let after = mcp_database_snapshot(database)?;
+    if after != before {
+        return Err(
+            io::Error::other("a frozen v0.3.26 nested CLI leaf changed SQLite state").into(),
+        );
+    }
+    if repository_filesystem_snapshot(repo)? != filesystem_before {
+        return Err(io::Error::other(
+            "a frozen v0.3.26 nested CLI leaf changed repository filesystem state",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Run one normal packaged JSON command with telemetry disabled and an exact version guard.
+fn run_packaged_cli_json(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    arguments: &[&str],
+) -> Result<Value, Box<dyn Error>> {
+    let mut command = vec![
+        "--require-version".to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        "--db".to_string(),
+        database.display().to_string(),
+    ];
+    command.extend(arguments.iter().map(|argument| (*argument).to_string()));
+    run_mcp_contract_json(executable, cwd, &command)
+}
+
+/// Prove help, invalid input, bounded failure, cancellation, and TOON behavior.
+fn assert_packaged_cli_edge_contracts(
+    executable: &Path,
+    repo: &Path,
+    database: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let before_toon = mcp_database_snapshot(database)?;
+    let toon = StdCommand::new(executable)
+        .current_dir(repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--require-version", env!("CARGO_PKG_VERSION"), "--db"])
+        .arg(database)
+        .arg("overview")
+        .output()?;
+    if !toon.status.success() || !toon.stderr.is_empty() {
+        return Err(io::Error::other(format!(
+            "packaged CLI TOON overview failed: {}",
+            String::from_utf8_lossy(&toon.stderr)
+        ))
+        .into());
+    }
+    let toon_payload: Value = toon_format::decode_default(&String::from_utf8(toon.stdout)?)?;
+    if !toon_payload.is_object() || mcp_database_snapshot(database)? != before_toon {
+        return Err(
+            io::Error::other("packaged CLI TOON overview was untyped or changed SQLite").into(),
+        );
+    }
+
+    for arguments in [
+        vec!["unknown-contract-command"],
+        vec!["folders"],
+        vec!["help", "unknown-contract-command"],
+    ] {
+        let output = StdCommand::new(executable)
+            .current_dir(repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(&arguments)
+            .output()?;
+        if output.status.code() != Some(2) || !output.stdout.is_empty() || output.stderr.is_empty()
+        {
+            return Err(io::Error::other(format!(
+                "packaged CLI parse failure contract drifted for {arguments:?}: status={:?} stdout={} stderr={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+    }
+
+    let before_invalid = mcp_database_snapshot(database)?;
+    let invalid = StdCommand::new(executable)
+        .current_dir(repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "json", "--db"])
+        .arg(database)
+        .args([
+            "slice",
+            "src/lib.rs",
+            "--start-line",
+            "1",
+            "--output-bytes",
+            "0",
+        ])
+        .output()?;
+    let invalid_error = String::from_utf8(invalid.stderr)?;
+    if invalid.status.code() != Some(1)
+        || !invalid.stdout.is_empty()
+        || !invalid_error.contains("output byte")
+        || mcp_database_snapshot(database)? != before_invalid
+    {
+        return Err(io::Error::other(format!(
+            "packaged CLI invalid-input contract drifted: status={:?} stderr={invalid_error}",
+            invalid.status.code()
+        ))
+        .into());
+    }
+
+    let pending = repo.join("src/deadline.rs");
+    fs::write(&pending, "pub fn deadline_contract() {}\n")?;
+    let before_deadline = mcp_database_snapshot(database)?;
+    let deadline = StdCommand::new(executable)
+        .current_dir(repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "json", "--db"])
+        .arg(database)
+        .args(["watch", ".", "--once", "--timeout-seconds", "0"])
+        .output()?;
+    let deadline_message = String::from_utf8(deadline.stderr)?.to_ascii_lowercase();
+    if deadline.status.code() != Some(1)
+        || !deadline.stdout.is_empty()
+        || (!deadline_message.contains("deadline") && !deadline_message.contains("canceled"))
+        || mcp_database_snapshot(database)? != before_deadline
+    {
+        return Err(io::Error::other(format!(
+            "packaged CLI deadline preserved partial state: status={:?} stderr={deadline_message}",
+            deadline.status.code()
+        ))
+        .into());
+    }
+    fs::remove_file(pending)?;
+    assert_packaged_cli_active_interruption(executable, repo, database)?;
+    Ok(())
+}
+
+/// Interrupt packaged graph work only after its disposable stage is observable.
+fn assert_packaged_cli_active_interruption(
+    executable: &Path,
+    repo: &Path,
+    database: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let pending = repo.join("src/active-cancellation.rs");
+    fs::write(&pending, "pub fn active_cancellation() {}\n")?;
+    let project = AtlasStore::open(database)?
+        .project_instance_id()?
+        .ok_or_else(|| io::Error::other("CLI interruption fixture omitted project identity"))?;
+    let atlas = repo.join(ATLAS_DIR_NAME);
+    for index in 0..64 {
+        let stage = atlas.join(format!("graph-stage-interruption-{index:02}"));
+        fs::create_dir(&stage)?;
+        drop(AtlasStore::create_repository_graph_staging(
+            &stage.join("projectatlas.db"),
+            repo,
+            project,
+        )?);
+    }
+    let initial_stages = graph_stage_directories(repo)?.len();
+    let before = mcp_database_snapshot(database)?;
+    let mut child = StdCommand::new(executable)
+        .current_dir(repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "--require-version",
+            env!("CARGO_PKG_VERSION"),
+            "--format",
+            "json",
+            "--db",
+        ])
+        .arg(database)
+        .args(["watch", ".", "--once", "--max-workers", "1"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let observation_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if graph_stage_directories(repo)?.len() < initial_stages {
+            break;
+        }
+        if child.try_wait()?.is_some() {
+            let output = child.wait_with_output()?;
+            return Err(io::Error::other(format!(
+                "packaged CLI completed before active graph work could be interrupted: status={} stdout={} stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        if Instant::now() >= observation_deadline {
+            child.kill()?;
+            let _status = child.wait()?;
+            return Err(io::Error::other(
+                "packaged CLI exposed no graph-stage work within 30 seconds",
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let interrupted_at = Instant::now();
+    child.kill()?;
+    let output = child.wait_with_output()?;
+    if output.status.success()
+        || !output.stdout.is_empty()
+        || interrupted_at.elapsed() > Duration::from_secs(5)
+    {
+        return Err(io::Error::other(format!(
+            "active packaged CLI interruption was not prompt and stream-safe: elapsed={:?} status={} stdout={} stderr={}",
+            interrupted_at.elapsed(),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let after = mcp_database_snapshot(database)?;
+    if after != before {
+        return Err(io::Error::other(
+            "active packaged CLI interruption exposed a partial SQLite generation",
+        )
+        .into());
+    }
+
+    fs::remove_file(pending)?;
+    let recovered = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["watch", ".", "--once", "--max-workers", "1"],
+    )?;
+    require_json_string(&recovered, &["mode"], "single-refresh")?;
+    require_json_usize(&recovered, &["cycles"], 1)?;
+    if !graph_stage_directories(repo)?.is_empty() {
+        return Err(io::Error::other(
+            "packaged CLI restart left an abandoned graph staging directory",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// List only ProjectAtlas-owned disposable graph stages in a test repository.
+fn graph_stage_directories(repo: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    let atlas = repo.join(ATLAS_DIR_NAME);
+    let mut stages = Vec::new();
+    for entry in fs::read_dir(atlas)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir()
+            && entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("graph-stage-")
+        {
+            stages.push(entry.path());
+        }
+    }
+    Ok(stages)
+}
+
+/// Prove packaged CLI freshness and CLI/MCP reopen behavior without Git metadata.
+fn assert_cli_non_git_freshness(executable: &Path) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("cli-non-git-contract");
+    fs::create_dir_all(repo.join("src"))?;
+    fs::write(repo.join("src/lib.rs"), "pub fn baseline() {}\n")?;
+    if repo.join(".git").exists() {
+        return Err(io::Error::other("non-Git CLI fixture unexpectedly contained .git").into());
+    }
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    for arguments in [
+        vec![
+            "--db".to_string(),
+            database.display().to_string(),
+            "init".to_string(),
+            "--no-scan".to_string(),
+        ],
+        vec![
+            "--db".to_string(),
+            database.display().to_string(),
+            "scan".to_string(),
+            ".".to_string(),
+        ],
+    ] {
+        run_mcp_contract_json(executable, &repo, &arguments)?;
+    }
+    Connection::open(&database)?.execute(
+        "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
+        (MCP_CONTRACT_METADATA_CANARY, "preserve"),
+    )?;
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn baseline() {}\n\npub fn non_git_cli_contract() {}\n",
+    )?;
+    let case = CliContractCase {
+        name: "summary",
+        arguments: vec![
+            "summary".to_string(),
+            "src/lib.rs".to_string(),
+            "--limit".to_string(),
+            "5".to_string(),
+        ],
+        output: CliContractOutput::JsonObject,
+        effect: McpSqliteEffect::DerivedSourceAdvance,
+        expected_exit_code: 0,
+    };
+    let before = mcp_database_snapshot(&database)?;
+    let summary = run_packaged_cli_contract_case(executable, &repo, &database, &case)?
+        .ok_or_else(|| io::Error::other("non-Git CLI summary omitted output"))?;
+    require_json_contains(&summary, &["content_summary"], "non_git_cli_contract")?;
+    let after = mcp_database_snapshot(&database)?;
+    assert_contract_sqlite_effect(case.name, case.effect, &before, &after)?;
+    assert_mcp_matches_clean_packaged_scan(
+        executable,
+        &repo,
+        &database,
+        temp.path(),
+        "cli-non-git-freshness",
+    )?;
+
+    let stable_before = after;
+    let stable = run_packaged_cli_contract_case(
+        executable,
+        &repo,
+        &database,
+        &CliContractCase {
+            effect: McpSqliteEffect::None,
+            ..case
+        },
+    )?
+    .ok_or_else(|| io::Error::other("stable non-Git CLI summary omitted output"))?;
+    require_json_contains(&stable, &["content_summary"], "non_git_cli_contract")?;
+    if mcp_database_snapshot(&database)? != stable_before {
+        return Err(io::Error::other("unchanged non-Git CLI summary republished state").into());
+    }
+
+    let reopen_case = McpToolContractCase {
+        name: "atlas_file_summary",
+        arguments: serde_json::json!({
+            "project_path": repo,
+            "file": "src/lib.rs",
+            "compact": true
+        }),
+        expected_marker: "file_summary:",
+        payload_key: Some("file_summary"),
+        effect: McpSqliteEffect::None,
+        telemetry_enabled: false,
+    };
+    let reopened = run_mcp_contract_call(executable, &repo, &database, &reopen_case)?;
+    if !reopened.contains("non_git_cli_contract") {
+        return Err(io::Error::other("MCP reopen lost packaged CLI non-Git freshness").into());
+    }
+    Ok(())
+}
+
+/// Return the exact advertised inventory from a real release-candidate stdio process.
+fn run_mcp_contract_inventory(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+) -> Result<String, Box<dyn Error>> {
+    let messages = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-mcp-contract","version":"0.4.0"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+    ];
+    run_mcp_stdio_with_env(
+        executable,
+        cwd,
+        &[
+            "--db".to_string(),
+            database.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+    )
+}
+
+/// Execute one advertised tool through its own real stdio process.
+fn run_mcp_contract_call(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    case: &McpToolContractCase,
+) -> Result<String, Box<dyn Error>> {
+    let (response, stdout) = run_mcp_contract_raw_call(
+        executable,
+        cwd,
+        database,
+        case.name,
+        &case.arguments,
+        case.telemetry_enabled,
+    )?;
+    if response
+        .get("result")
+        .and_then(|result| result.get("isError"))
+        .and_then(Value::as_bool)
+        == Some(true)
+        || response.get("error").is_some()
+    {
+        return Err(io::Error::other(format!(
+            "MCP contract call {} failed: {response}",
+            case.name
+        ))
+        .into());
+    }
+    mcp_tool_text(&stdout, 2)
+}
+
+/// Execute one tool call and retain its complete success or error envelope.
+fn run_mcp_contract_raw_call(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    name: &str,
+    arguments: &Value,
+    telemetry_enabled: bool,
+) -> Result<(Value, String), Box<dyn Error>> {
+    let messages = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-mcp-contract","version":"0.4.0"}}}"#.to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "arguments": arguments,
+            }
+        })
+        .to_string(),
+    ];
+    let telemetry = if telemetry_enabled { None } else { Some("1") };
+    let stdout = run_mcp_stdio_with_env(
+        executable,
+        cwd,
+        &[
+            "--db".to_string(),
+            database.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", telemetry)],
+    )?;
+    let response = mcp_response(&stdout, 2)?;
+    Ok((response, stdout))
+}
+
+/// Require an invalid real MCP call to fail without changing logical `SQLite` state.
+fn assert_mcp_contract_failure_no_mutation(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    name: &str,
+    arguments: &Value,
+    expected_error: &str,
+) -> Result<(), Box<dyn Error>> {
+    let before = mcp_database_snapshot(database)?;
+    let (response, stdout) =
+        run_mcp_contract_raw_call(executable, cwd, database, name, arguments, false)?;
+    let error_text = if let Some(error) = response.get("error") {
+        error.get("code").and_then(Value::as_i64).ok_or_else(|| {
+            io::Error::other(format!("{name} protocol error omitted integer code"))
+        })?;
+        error
+            .get("message")
+            .and_then(Value::as_str)
+            .ok_or_else(|| io::Error::other(format!("{name} protocol error omitted message")))?;
+        error.to_string()
+    } else if response
+        .get("result")
+        .and_then(|result| result.get("isError"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        require_json_string(&response, &["result", "content", "0", "type"], "text")?;
+        let text = mcp_tool_text(&stdout, 2)?;
+        match toon_format::decode_default::<Value>(&text) {
+            Ok(error) if error.is_object() => error.to_string(),
+            Ok(error) => {
+                return Err(io::Error::other(format!(
+                    "{name} typed error payload was not an object: {error}"
+                ))
+                .into());
+            }
+            Err(_) if text.starts_with("failed to deserialize parameters:") => text,
+            Err(decode_error) => {
+                return Err(io::Error::other(format!(
+                    "{name} returned invalid typed error TOON: {decode_error}; payload={text:?}"
+                ))
+                .into());
+            }
+        }
+    } else {
+        let text = mcp_tool_text(&stdout, 2)?;
+        let error: Value = toon_format::decode_default(&text).map_err(|decode_error| {
+            io::Error::other(format!(
+                "{name} invalid contract call returned neither an MCP nor typed domain error: {decode_error}; response={response}"
+            ))
+        })?;
+        if error.get("error").is_none() {
+            return Err(io::Error::other(format!(
+                "{name} invalid contract call unexpectedly succeeded: {response}"
+            ))
+            .into());
+        }
+        error.to_string()
+    };
+    if !error_text
+        .to_ascii_lowercase()
+        .contains(&expected_error.to_ascii_lowercase())
+    {
+        return Err(io::Error::other(format!(
+            "{name} error omitted {expected_error:?}: {error_text}"
+        ))
+        .into());
+    }
+    let after = mcp_database_snapshot(database)?;
+    if before != after {
+        return Err(io::Error::other(format!(
+            "{name} invalid contract call changed SQLite state: before={before:?} after={after:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Prove saved-source freshness and stable reopen behavior without Git metadata.
+fn assert_mcp_non_git_freshness(executable: &Path) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("non-git-contract");
+    fs::create_dir_all(repo.join("src"))?;
+    fs::write(repo.join("src/lib.rs"), "pub fn baseline() {}\n")?;
+    if repo.join(".git").exists() {
+        return Err(io::Error::other("non-Git MCP fixture unexpectedly contained .git").into());
+    }
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    run_mcp_contract_json(
+        executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            database.display().to_string(),
+            "init".to_string(),
+            "--no-scan".to_string(),
+        ],
+    )?;
+    run_mcp_contract_json(
+        executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            database.display().to_string(),
+            "scan".to_string(),
+            ".".to_string(),
+        ],
+    )?;
+
+    let before = mcp_database_snapshot(&database)?;
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn baseline() {}\n\npub fn non_git_contract() {}\n",
+    )?;
+    let case = McpToolContractCase {
+        name: "atlas_file_summary",
+        arguments: serde_json::json!({"project_path": repo, "file": "src/lib.rs", "compact": true}),
+        expected_marker: "file_summary:",
+        payload_key: Some("file_summary"),
+        effect: McpSqliteEffect::DerivedSourceAdvance,
+        telemetry_enabled: false,
+    };
+    let text = run_mcp_contract_call(executable, &repo, &database, &case)?;
+    let decoded: Value = toon_format::decode_default(&text)?;
+    require_json_contains(
+        &decoded,
+        &["file_summary", "content_summary"],
+        "non_git_contract",
+    )?;
+    require_json_string(
+        &decoded,
+        &["file_summary", "parser_kind"],
+        "tree-sitter-symbol-graph",
+    )?;
+    require_json_string(&decoded, &["file_summary", "summary_status"], "ok")?;
+
+    let after = mcp_database_snapshot(&database)?;
+    let changed = changed_mcp_tables(&before.authoritative, &after.authoritative);
+    if changed.is_empty()
+        || changed
+            .iter()
+            .any(|table| !mcp_source_publication_table(table))
+        || before.usage != after.usage
+        || before.authored_purposes != after.authored_purposes
+        || before.purpose_revision != after.purpose_revision
+        || after.generation != before.generation.saturating_add(1)
+        || after.publication_state != "complete"
+    {
+        return Err(io::Error::other(format!(
+            "non-Git MCP freshness escaped atomic source ownership: changed={changed:?} before={before:?} after={after:?}"
+        ))
+        .into());
+    }
+    assert_mcp_matches_clean_packaged_scan(
+        executable,
+        &repo,
+        &database,
+        temp.path(),
+        "non-git-freshness",
+    )?;
+
+    let stable_before = after;
+    let stable_text = run_mcp_contract_call(executable, &repo, &database, &case)?;
+    if !stable_text.contains("non_git_contract")
+        || mcp_database_snapshot(&database)? != stable_before
+    {
+        return Err(io::Error::other(
+            "unchanged non-Git MCP reopen repeated publication or lost fresh source",
+        )
+        .into());
+    }
+    let reopened = run_mcp_contract_json(
+        executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            database.display().to_string(),
+            "summary".to_string(),
+            "src/lib.rs".to_string(),
+            "--limit".to_string(),
+            "5".to_string(),
+        ],
+    )?;
+    require_json_contains(&reopened, &["content_summary"], "non_git_contract")?;
+    Ok(())
+}
+
+/// Require one MCP publication to equal a clean packaged scan of the same source.
+fn assert_mcp_matches_clean_packaged_scan(
+    executable: &Path,
+    repo: &Path,
+    database: &Path,
+    scratch: &Path,
+    checkpoint: &str,
+) -> Result<(), Box<dyn Error>> {
+    let clean_database = scratch.join(format!("mcp-clean-{checkpoint}.db"));
+    run_mcp_contract_json(
+        executable,
+        repo,
+        &[
+            "--db".to_string(),
+            clean_database.display().to_string(),
+            "scan".to_string(),
+            ".".to_string(),
+        ],
+    )?;
+    let actual = derived_result_snapshot(database)?;
+    let mut clean = derived_result_snapshot(&clean_database)?;
+    for path in authored_purpose_paths(database)? {
+        clean.unreviewed_purposes.remove(&path);
+    }
+    if actual != clean {
+        return Err(io::Error::other(format!(
+            "{checkpoint} MCP publication diverged from an exact clean packaged scan:\nactual={actual:#?}\nclean={clean:#?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Return whether one table belongs to a derived source publication.
+fn mcp_source_publication_table(table: &str) -> bool {
+    matches!(
+        table,
+        "metadata"
+            | "nodes"
+            | "summaries"
+            | "symbols"
+            | "source_parse_metadata"
+            | "symbol_relations"
+            | "file_texts"
+            | "graph_entities"
+            | "graph_relations"
+            | "graph_relation_occurrences"
+            | "graph_coverage"
+            | "graph_resolution_keys"
+            | "graph_entity_exports"
+            | "graph_relation_dependencies"
+            | "project_identity"
+            | "purposes"
+    ) || table.starts_with("file_text_fts")
+}
+
+/// Persistent real MCP session used for ordered task cancellation.
+struct McpContractSession {
+    child: Option<Child>,
+    stdin: Option<ChildStdin>,
+    responses: Receiver<io::Result<String>>,
+    stdout_reader: Option<thread::JoinHandle<()>>,
+    stderr_reader: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+    next_request_id: u64,
+}
+
+impl McpContractSession {
+    /// Spawn and initialize one telemetry-disabled release-candidate MCP process.
+    fn spawn(executable: &Path, repo: &Path, database: &Path) -> Result<Self, Box<dyn Error>> {
+        let mut child = StdCommand::new(executable)
+            .current_dir(repo)
+            .arg("--db")
+            .arg(database)
+            .arg("mcp")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("MCP contract stdin was not piped"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("MCP contract stdout was not piped"))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| io::Error::other("MCP contract stderr was not piped"))?;
+        let (sender, responses) = mpsc::sync_channel(64);
+        let stdout_reader = thread::spawn(move || {
+            let mut stdout = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                let response = match stdout.read_line(&mut line) {
+                    Ok(0) => Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "MCP contract stdout closed",
+                    )),
+                    Ok(_) => Ok(line),
+                    Err(error) => Err(error),
+                };
+                let terminal = response.is_err();
+                if sender.send(response).is_err() || terminal {
+                    break;
+                }
+            }
+        });
+        let stderr_reader = thread::spawn(move || {
+            let mut output = Vec::new();
+            stderr.read_to_end(&mut output)?;
+            Ok(output)
+        });
+        let mut session = Self {
+            child: Some(child),
+            stdin: Some(stdin),
+            responses,
+            stdout_reader: Some(stdout_reader),
+            stderr_reader: Some(stderr_reader),
+            next_request_id: 1,
+        };
+        let initialized = session.request(
+            "initialize",
+            &serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "projectatlas-mcp-contract",
+                    "version": "0.4.0"
+                }
+            }),
+        )?;
+        if initialized.get("result").is_none() {
+            return Err(io::Error::other("MCP contract initialize omitted result").into());
+        }
+        session.notify("notifications/initialized", &serde_json::json!({}))?;
+        Ok(session)
+    }
+
+    /// Call one real MCP tool and return its text payload.
+    fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<String, Box<dyn Error>> {
+        let response = self.request(
+            "tools/call",
+            &serde_json::json!({"name": name, "arguments": arguments}),
+        )?;
+        if response.get("error").is_some()
+            || response
+                .get("result")
+                .and_then(|result| result.get("isError"))
+                .and_then(Value::as_bool)
+                == Some(true)
+        {
+            return Err(
+                io::Error::other(format!("MCP contract tool {name} failed: {response}")).into(),
+            );
+        }
+        response
+            .get("result")
+            .and_then(|result| result.get("content"))
+            .and_then(Value::as_array)
+            .and_then(|content| content.first())
+            .and_then(|content| content.get("text"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                io::Error::other(format!("MCP contract tool {name} returned no text")).into()
+            })
+    }
+
+    /// Send one request and wait for its matching response under a fixed deadline.
+    fn request(&mut self, method: &str, params: &Value) -> Result<Value, Box<dyn Error>> {
+        let request_id = self.next_request_id;
+        self.next_request_id = self
+            .next_request_id
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("MCP contract request id overflowed"))?;
+        self.write_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params
+        }))?;
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .ok_or_else(|| io::Error::other("MCP contract response deadline overflowed"))?;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("MCP contract request {request_id} for {method} timed out"),
+                )
+                .into());
+            }
+            let line = self
+                .responses
+                .recv_timeout(remaining)
+                .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))??;
+            let response: Value = serde_json::from_str(line.trim())?;
+            if response.get("id").and_then(Value::as_u64) == Some(request_id) {
+                return Ok(response);
+            }
+        }
+    }
+
+    /// Send one notification without waiting for a response.
+    fn notify(&mut self, method: &str, params: &Value) -> Result<(), Box<dyn Error>> {
+        self.write_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        }))
+    }
+
+    /// Write and flush one newline-delimited JSON-RPC message.
+    fn write_message(&mut self, message: &Value) -> Result<(), Box<dyn Error>> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::other("MCP contract stdin was closed"))?;
+        serde_json::to_writer(&mut *stdin, message)?;
+        stdin.write_all(b"\n")?;
+        stdin.flush()?;
+        Ok(())
+    }
+
+    /// Close stdin and require a clean bounded process exit.
+    fn shutdown(mut self) -> Result<(), Box<dyn Error>> {
+        self.stdin.take();
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .ok_or_else(|| io::Error::other("MCP contract shutdown deadline overflowed"))?;
+        let status = loop {
+            let child = self
+                .child
+                .as_mut()
+                .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill()?;
+                let _status = child.wait()?;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "MCP contract server did not exit after stdin closed",
+                )
+                .into());
+            }
+            thread::sleep(Duration::from_millis(25));
+        };
+        self.child.take();
+        if let Some(reader) = self.stdout_reader.take() {
+            reader
+                .join()
+                .map_err(|_panic| io::Error::other("MCP contract stdout reader panicked"))?;
+        }
+        let stderr = self
+            .stderr_reader
+            .take()
+            .ok_or_else(|| io::Error::other("MCP contract stderr reader was consumed"))?
+            .join()
+            .map_err(|_panic| io::Error::other("MCP contract stderr reader panicked"))??;
+        if !status.success() {
+            return Err(io::Error::other(format!(
+                "MCP contract server failed: {}",
+                String::from_utf8_lossy(&stderr)
+            ))
+            .into());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for McpContractSession {
+    fn drop(&mut self) {
+        self.stdin.take();
+        if let Some(child) = self.child.as_mut() {
+            drop(child.kill());
+            drop(child.wait());
+        }
+        self.child.take();
+        if let Some(reader) = self.stdout_reader.take() {
+            drop(reader.join());
+        }
+        if let Some(reader) = self.stderr_reader.take() {
+            drop(reader.join());
+        }
+    }
+}
+
+/// Prove a real active background task accepts cancellation without partial publication.
+fn assert_mcp_active_cancellation_preserves_generation(
+    executable: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("cancellation-contract");
+    fs::create_dir_all(repo.join("src"))?;
+    fs::write(repo.join("src/baseline.rs"), "pub fn baseline() {}\n")?;
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    run_mcp_contract_json(
+        executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            database.display().to_string(),
+            "init".to_string(),
+            "--no-scan".to_string(),
+        ],
+    )?;
+    run_mcp_contract_json(
+        executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            database.display().to_string(),
+            "scan".to_string(),
+            ".".to_string(),
+        ],
+    )?;
+    let before = mcp_database_snapshot(&database)?;
+
+    let pending = repo.join("pending");
+    fs::create_dir(&pending)?;
+    let source = "pub fn pending_contract() { let value = 1_u64; let _ = value; }\n".repeat(128);
+    for index in 0..512 {
+        fs::write(pending.join(format!("work-{index:04}.rs")), &source)?;
+    }
+    let mut session = McpContractSession::spawn(executable, &repo, &database)?;
+    let started: Value = toon_format::decode_default(&session.call_tool(
+        "atlas_scan",
+        &serde_json::json!({
+            "project_path": repo,
+            "path": repo,
+            "background": true,
+            "max_workers": 1
+        }),
+    )?)?;
+    let task_id = json_string_at(&started, &["task_start", "task_id"])?.to_owned();
+    require_json_string(&started, &["task_start", "operation"], "scan")?;
+    require_json_string(
+        &started,
+        &["task_start", "status_tool"],
+        "atlas_task_status",
+    )?;
+    require_json_string(
+        &started,
+        &["task_start", "cancel_tool"],
+        "atlas_task_cancel",
+    )?;
+    let status: Value = toon_format::decode_default(&session.call_tool(
+        "atlas_task_status",
+        &serde_json::json!({"task_id": task_id}),
+    )?)?;
+    require_json_string(&status, &["task_status", "lookup"], "found")?;
+    let canceled: Value = toon_format::decode_default(&session.call_tool(
+        "atlas_task_cancel",
+        &serde_json::json!({"task_id": task_id}),
+    )?)?;
+    require_json_string(
+        &canceled,
+        &["task_cancel", "result"],
+        "cancellation_requested",
+    )?;
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(5))
+        .ok_or_else(|| io::Error::other("MCP cancellation deadline overflowed"))?;
+    loop {
+        let status: Value = toon_format::decode_default(&session.call_tool(
+            "atlas_task_status",
+            &serde_json::json!({"task_id": task_id}),
+        )?)?;
+        match json_string_at(&status, &["task_status", "task", "state"])? {
+            "canceled" => break,
+            "pending" | "running" if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(25));
+            }
+            state => {
+                return Err(io::Error::other(format!(
+                    "MCP task did not quiesce as canceled: state={state} status={status}"
+                ))
+                .into());
+            }
+        }
+    }
+    session.shutdown()?;
+
+    let after = mcp_database_snapshot(&database)?;
+    if before != after {
+        return Err(io::Error::other(format!(
+            "active MCP cancellation exposed partial publication: before={before:?} after={after:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 /// Launch a real MCP stdio child and return stdout after stdin closes.
 fn run_mcp_stdio(
     executable: &std::path::Path,
     cwd: &std::path::Path,
     args: &[String],
     messages: &[impl AsRef<str>],
+) -> Result<String, Box<dyn Error>> {
+    run_mcp_stdio_with_env(executable, cwd, args, messages, &[])
+}
+
+/// Launch a real MCP stdio child with explicit per-process environment controls.
+fn run_mcp_stdio_with_env(
+    executable: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[String],
+    messages: &[impl AsRef<str>],
+    environment: &[(&str, Option<&str>)],
 ) -> Result<String, Box<dyn Error>> {
     let input = format!(
         "{}\n",
@@ -14752,13 +18057,21 @@ fn run_mcp_stdio(
             .collect::<Vec<_>>()
             .join("\n")
     );
-    let mut child = StdCommand::new(executable)
+    let mut command = StdCommand::new(executable);
+    command
         .current_dir(cwd)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    for (key, value) in environment {
+        if let Some(value) = value {
+            command.env(key, value);
+        } else {
+            command.env_remove(key);
+        }
+    }
+    let mut child = command.spawn()?;
 
     let mut stdin = child
         .stdin
@@ -14933,6 +18246,721 @@ fn mcp_tools_by_name(tools: &[Value]) -> Result<BTreeMap<&str, &Value>, Box<dyn 
         }
     }
     Ok(indexed)
+}
+
+/// Capture bounded logical rows so WAL/page-layout changes do not masquerade as product state.
+fn mcp_database_snapshot(database: &Path) -> Result<McpDatabaseSnapshot, Box<dyn Error>> {
+    const MAX_TABLE_ROWS: usize = 16_384;
+    const MAX_TABLE_BYTES: usize = 8 * 1024 * 1024;
+
+    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let table_names = {
+        let mut statement = connection.prepare(
+            "SELECT name
+             FROM sqlite_schema
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+        )?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut authoritative = BTreeMap::new();
+    let mut usage = BTreeMap::new();
+    for table_name in table_names {
+        let quoted_name = format!("\"{}\"", table_name.replace('"', "\"\""));
+        let column_count = {
+            let statement = connection.prepare(&format!("SELECT * FROM {quoted_name} LIMIT 0"))?;
+            statement.column_count()
+        };
+        if column_count == 0 {
+            return Err(io::Error::other(format!(
+                "MCP contract table {table_name} has no columns"
+            ))
+            .into());
+        }
+        let ordering = (1..=column_count)
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement =
+            connection.prepare(&format!("SELECT * FROM {quoted_name} ORDER BY {ordering}"))?;
+        let mut rows = statement.query([])?;
+        let mut encoded = Vec::new();
+        let mut row_count = 0usize;
+        while let Some(row) = rows.next()? {
+            row_count = row_count
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("MCP contract row count overflowed"))?;
+            if row_count > MAX_TABLE_ROWS {
+                return Err(io::Error::other(format!(
+                    "MCP contract table {table_name} exceeded {MAX_TABLE_ROWS} rows"
+                ))
+                .into());
+            }
+            for index in 0..column_count {
+                match row.get_ref(index)? {
+                    ValueRef::Null => encoded.push(0),
+                    ValueRef::Integer(value) => {
+                        encoded.push(1);
+                        encoded.extend_from_slice(&value.to_le_bytes());
+                    }
+                    ValueRef::Real(value) => {
+                        encoded.push(2);
+                        encoded.extend_from_slice(&value.to_bits().to_le_bytes());
+                    }
+                    ValueRef::Text(value) => {
+                        encoded.push(3);
+                        encoded.extend_from_slice(&u64::try_from(value.len())?.to_le_bytes());
+                        encoded.extend_from_slice(value);
+                    }
+                    ValueRef::Blob(value) => {
+                        encoded.push(4);
+                        encoded.extend_from_slice(&u64::try_from(value.len())?.to_le_bytes());
+                        encoded.extend_from_slice(value);
+                    }
+                }
+            }
+            encoded.push(0xff);
+            if encoded.len() > MAX_TABLE_BYTES {
+                return Err(io::Error::other(format!(
+                    "MCP contract table {table_name} exceeded {MAX_TABLE_BYTES} encoded bytes"
+                ))
+                .into());
+            }
+        }
+        let digest = format!("{row_count}:{}", sha256_hex(&encoded));
+        if table_name.starts_with("usage_") {
+            usage.insert(table_name, digest);
+        } else {
+            authoritative.insert(table_name, digest);
+        }
+    }
+    drop(connection);
+
+    let store = AtlasStore::open_read_only(database)?;
+    let publication = store
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("MCP contract database has no publication"))?;
+    let authored_purposes = {
+        let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut statement = connection.prepare(
+            "SELECT n.path, COALESCE(p.purpose, ''), p.source, p.status
+             FROM purposes AS p
+             JOIN nodes AS n ON n.id = p.node_id
+             WHERE p.source IN ('imported', 'agent')
+             ORDER BY n.path",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    format!(
+                        "{}\0{}\0{}",
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?
+                    ),
+                ))
+            })?
+            .collect::<Result<BTreeMap<_, _>, _>>()?
+    };
+    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let metadata_canary = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = ?1",
+            [MCP_CONTRACT_METADATA_CANARY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let sealed_mcp_instances = usize::try_from(connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM usage_instances WHERE owner = 'mcp_process' AND state = 'sealed'",
+        [],
+        |row| row.get(0),
+    )?)?;
+    let usage_events = store
+        .usage_events(None)?
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?;
+    let retention = store.telemetry_retention_state()?;
+    Ok(McpDatabaseSnapshot {
+        authoritative,
+        usage,
+        authored_purposes,
+        metadata_canary,
+        project_instance_id: store
+            .project_instance_id()?
+            .map(projectatlas_core::graph::ProjectInstanceId::as_hex),
+        usage_calls: store.token_overview(None)?.calls,
+        usage_events,
+        active_usage_instances: retention.active_instance_rows,
+        sealed_mcp_instances,
+        generation: publication.generation.get(),
+        purpose_revision: store.authored_purpose_revision()?,
+        publication_state: format!("{:?}", publication.state).to_ascii_lowercase(),
+    })
+}
+
+/// Return the logical table names whose rows changed between two snapshots.
+fn changed_mcp_tables(
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    before
+        .keys()
+        .chain(after.keys())
+        .filter(|table| before.get(*table) != after.get(*table))
+        .cloned()
+        .collect()
+}
+
+/// Require one packaged adapter call to stay inside its declared `SQLite` owner.
+fn assert_contract_sqlite_effect(
+    name: &str,
+    effect: McpSqliteEffect,
+    before: &McpDatabaseSnapshot,
+    after: &McpDatabaseSnapshot,
+) -> Result<(), Box<dyn Error>> {
+    if after.publication_state != "complete" {
+        return Err(io::Error::other(format!(
+            "{} left publication trust at {}",
+            name, after.publication_state
+        ))
+        .into());
+    }
+    let authoritative = changed_mcp_tables(&before.authoritative, &after.authoritative);
+    let usage = changed_mcp_tables(&before.usage, &after.usage);
+    if before.metadata_canary != after.metadata_canary
+        || before.project_instance_id != after.project_instance_id
+    {
+        return Err(io::Error::other(format!(
+            "{} changed unrelated metadata or project identity: canary={:?}->{:?} project={:?}->{:?}",
+            name,
+            before.metadata_canary,
+            after.metadata_canary,
+            before.project_instance_id,
+            after.project_instance_id
+        ))
+        .into());
+    }
+    match effect {
+        McpSqliteEffect::None => {
+            if !authoritative.is_empty()
+                || !usage.is_empty()
+                || before.authored_purposes != after.authored_purposes
+                || before.generation != after.generation
+                || before.purpose_revision != after.purpose_revision
+            {
+                return Err(io::Error::other(format!(
+                    "{} changed read-only SQLite state: authoritative={authoritative:?} usage={usage:?} generation={}->{} purpose_revision={}->{}",
+                    name,
+                    before.generation,
+                    after.generation,
+                    before.purpose_revision,
+                    after.purpose_revision
+                ))
+                .into());
+            }
+        }
+        McpSqliteEffect::Telemetry => {
+            let new_event = after
+                .usage_events
+                .last()
+                .map(|event| serde_json::from_str::<Value>(event))
+                .transpose()?
+                .ok_or_else(|| io::Error::other("telemetry call did not retain its usage event"))?;
+            if !authoritative.is_empty()
+                || usage.is_empty()
+                || usage.iter().any(|table| !table.starts_with("usage_"))
+                || before.authored_purposes != after.authored_purposes
+                || before.generation != after.generation
+                || before.purpose_revision != after.purpose_revision
+                || after.usage_calls != before.usage_calls.saturating_add(1)
+                || after.usage_events.len() != before.usage_events.len().saturating_add(1)
+                || !after.usage_events.starts_with(&before.usage_events)
+                || new_event.get("command").and_then(Value::as_str) != Some("mcp.atlas_overview")
+                || after.active_usage_instances != 0
+                || before.active_usage_instances != 0
+                || after.sealed_mcp_instances != before.sealed_mcp_instances.saturating_add(1)
+            {
+                return Err(io::Error::other(format!(
+                    "{} escaped one-call telemetry ownership: authoritative={authoritative:?} usage={usage:?} calls={}->{} events={}->{} active={}->{} sealed={}->{} new_event={new_event}",
+                    name,
+                    before.usage_calls,
+                    after.usage_calls,
+                    before.usage_events.len(),
+                    after.usage_events.len(),
+                    before.active_usage_instances,
+                    after.active_usage_instances,
+                    before.sealed_mcp_instances,
+                    after.sealed_mcp_instances
+                ))
+                .into());
+            }
+        }
+        McpSqliteEffect::DerivedSourceAdvance => {
+            let required = BTreeSet::from([
+                "file_texts".to_string(),
+                "metadata".to_string(),
+                "nodes".to_string(),
+                "source_parse_metadata".to_string(),
+                "summaries".to_string(),
+                "symbols".to_string(),
+            ]);
+            if !usage.is_empty()
+                || !required.is_subset(&authoritative)
+                || authoritative
+                    .iter()
+                    .any(|table| !mcp_source_publication_table(table))
+                || before.authored_purposes != after.authored_purposes
+                || before.purpose_revision != after.purpose_revision
+                || after.generation != before.generation.saturating_add(1)
+            {
+                return Err(io::Error::other(format!(
+                    "{} escaped complete source-publication ownership: authoritative={authoritative:?} required={required:?} usage={usage:?} generation={}->{}",
+                    name, before.generation, after.generation
+                ))
+                .into());
+            }
+        }
+        McpSqliteEffect::DerivedGraphAdvance => {
+            let required = BTreeSet::from([
+                "graph_coverage".to_string(),
+                "metadata".to_string(),
+                "source_parse_metadata".to_string(),
+                "summaries".to_string(),
+                "symbols".to_string(),
+            ]);
+            if !usage.is_empty()
+                || !required.is_subset(&authoritative)
+                || authoritative
+                    .iter()
+                    .any(|table| !mcp_source_publication_table(table))
+                || before.authored_purposes != after.authored_purposes
+                || before.purpose_revision != after.purpose_revision
+                || after.generation != before.generation.saturating_add(1)
+            {
+                return Err(io::Error::other(format!(
+                    "{} escaped complete graph-publication ownership: authoritative={authoritative:?} required={required:?} usage={usage:?} generation={}->{}",
+                    name, before.generation, after.generation
+                ))
+                .into());
+            }
+        }
+        McpSqliteEffect::PurposeAdvance(expected_path) => {
+            let allowed = BTreeSet::from(["metadata".to_string(), "purposes".to_string()]);
+            let changed_authored =
+                changed_mcp_tables(&before.authored_purposes, &after.authored_purposes);
+            if !usage.is_empty()
+                || authoritative.is_empty()
+                || !authoritative.is_subset(&allowed)
+                || changed_authored != BTreeSet::from([expected_path.to_string()])
+                || before.generation != after.generation
+                || after.purpose_revision != before.purpose_revision.saturating_add(1)
+            {
+                return Err(io::Error::other(format!(
+                    "{} escaped authored-purpose ownership: authoritative={authoritative:?} usage={usage:?} generation={}->{} purpose_revision={}->{}",
+                    name,
+                    before.generation,
+                    after.generation,
+                    before.purpose_revision,
+                    after.purpose_revision
+                ))
+                .into());
+            }
+        }
+        McpSqliteEffect::HealthResolution => {
+            if authoritative != BTreeSet::from(["health_resolutions".to_string()])
+                || !usage.is_empty()
+                || before.authored_purposes != after.authored_purposes
+                || before.generation != after.generation
+                || before.purpose_revision != after.purpose_revision
+            {
+                return Err(io::Error::other(format!(
+                    "{name} escaped health-resolution ownership: authoritative={authoritative:?} usage={usage:?}"
+                ))
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Require durable typed fields for every advertised MCP tool payload.
+fn assert_mcp_typed_payload(
+    case: &McpToolContractCase,
+    decoded: &Value,
+    text: &str,
+    after: &McpDatabaseSnapshot,
+) -> Result<(), Box<dyn Error>> {
+    let payload_key = case
+        .payload_key
+        .ok_or_else(|| io::Error::other(format!("{} omitted payload key", case.name)))?;
+    let payload = json_at(decoded, &[payload_key])?;
+    if matches!(case.name, "atlas_folders" | "atlas_files" | "atlas_symbols") {
+        if !payload.is_array() {
+            return Err(io::Error::other(format!(
+                "{} payload {payload_key:?} was not an array",
+                case.name
+            ))
+            .into());
+        }
+    } else if !payload.is_object() {
+        return Err(io::Error::other(format!(
+            "{} payload {payload_key:?} was not an object",
+            case.name
+        ))
+        .into());
+    }
+
+    match case.name {
+        "atlas_set_project_path" => {
+            require_json_string(decoded, &["project", "status"], "active")?;
+            json_string_at(decoded, &["project", "db"])?;
+        }
+        "atlas_init" => {
+            require_json_bool(decoded, &["init", "ok"], true)?;
+            require_json_string(decoded, &["init", "scan", "status"], "verified")?;
+            require_json_usize_at_least(
+                decoded,
+                &["init", "scan", "report", "overview", "files"],
+                4,
+            )?;
+            require_json_bool(
+                decoded,
+                &["init", "purpose_handoff", "server_started_curator"],
+                false,
+            )?;
+        }
+        "atlas_map" => {
+            require_json_bool(decoded, &["map", "written"], true)?;
+            json_string_at(decoded, &["map", "map_path"])?;
+        }
+        "atlas_root" | "atlas_root_set" => {
+            require_json_bool(decoded, &["root", "verified"], true)?;
+            require_json_string(
+                decoded,
+                &["root", "runtime_version"],
+                env!("CARGO_PKG_VERSION"),
+            )?;
+            json_string_at(decoded, &["root", "project_instance_id"])?;
+        }
+        "atlas_config" => {
+            json_at(decoded, &["config", "source_extensions"])?
+                .as_array()
+                .ok_or_else(|| {
+                    io::Error::other("atlas_config source_extensions was not an array")
+                })?;
+            require_json_usize(decoded, &["config", "text_index_max_bytes"], 2_000_000)?;
+        }
+        "atlas_ignore_list" => {
+            require_json_bool(decoded, &["ignore", "gitignore_present"], true)?;
+            require_json_string(
+                decoded,
+                &["ignore", "manual_layer_order"],
+                "after-gitignore",
+            )?;
+        }
+        "atlas_ignore_init_gitignore" => {
+            require_json_bool(decoded, &["gitignore", "existed"], true)?;
+            require_json_bool(decoded, &["gitignore", "created"], false)?;
+            require_json_bool(decoded, &["gitignore", "gitignore_inherited"], true)?;
+        }
+        "atlas_ignore_add" | "atlas_ignore_remove" => {
+            let action = case.name.strip_prefix("atlas_ignore_").ok_or_else(|| {
+                io::Error::other(format!("{} had no ignore action suffix", case.name))
+            })?;
+            require_json_string(decoded, &["ignore", "action"], action)?;
+            require_json_bool(decoded, &["ignore", "changed"], true)?;
+            require_json_string(decoded, &["ignore", "value"], "generated")?;
+        }
+        "atlas_scan" => {
+            require_json_usize_at_least(decoded, &["scan", "overview", "files"], 4)?;
+            require_json_usize(decoded, &["scan", "symbols", "parsed"], 2)?;
+            require_json_usize(decoded, &["scan", "symbols", "max_workers"], 1)?;
+        }
+        "atlas_overview" => {
+            require_json_usize_at_least(decoded, &["overview", "files"], 4)?;
+            require_json_usize_at_least(decoded, &["overview", "folders"], 2)?;
+        }
+        "atlas_folders" => {
+            require_json_array_len(decoded, &["folders"], 1)?;
+            require_json_bool(decoded, &["folders", "0", "purpose_agent_reviewed"], true)?;
+            require_json_string(
+                decoded,
+                &["folders", "0", "next_call", "capability"],
+                "files",
+            )?;
+        }
+        "atlas_files" => {
+            require_json_array_len(decoded, &["files"], 1)?;
+            require_json_string(decoded, &["files", "0", "path"], "src/lib.rs")?;
+            require_json_bool(decoded, &["files", "0", "purpose_agent_reviewed"], true)?;
+            require_json_string(
+                decoded,
+                &["files", "0", "next_call", "capability"],
+                "summary",
+            )?;
+        }
+        "atlas_next" => {
+            require_json_array_len(decoded, &["next", "files"], 1)?;
+            json_at(decoded, &["next", "suggestions"])?
+                .as_array()
+                .ok_or_else(|| io::Error::other("atlas_next suggestions was not an array"))?;
+        }
+        "atlas_outline" => {
+            require_json_string(decoded, &["outline", "path"], "src/lib.rs")?;
+            require_json_usize(decoded, &["outline", "line_count"], 5)?;
+            require_json_array_len(decoded, &["outline", "preview_lines"], 4)?;
+        }
+        "atlas_file_summary" => {
+            require_json_string(decoded, &["file_summary", "file_path"], "src/lib.rs")?;
+            require_json_string(
+                decoded,
+                &["file_summary", "parser_kind"],
+                "tree-sitter-symbol-graph",
+            )?;
+            require_json_string(decoded, &["file_summary", "summary_status"], "ok")?;
+            require_json_bool(
+                decoded,
+                &["file_summary", "file_purpose_agent_reviewed"],
+                true,
+            )?;
+            require_json_contains(
+                decoded,
+                &["file_summary", "content_summary"],
+                "dirty_contract",
+            )?;
+        }
+        "atlas_search" => {
+            require_json_string(decoded, &["search", "retrieval_mode"], "lexical")?;
+            require_json_bool(decoded, &["search", "truncated"], true)?;
+            require_json_string(decoded, &["search", "truncation_reason"], "result-limit")?;
+            require_json_usize(decoded, &["search", "returned"], 1)?;
+            require_json_usize_greater_than(decoded, &["search", "searched_bytes"], 0)?;
+            require_json_array_len(decoded, &["search", "results"], 1)?;
+        }
+        "atlas_slice" => {
+            require_json_string(decoded, &["slice", "path"], "src/lib.rs")?;
+            require_json_usize(decoded, &["slice", "start_line"], 1)?;
+            require_json_usize(decoded, &["slice", "end_line"], 2)?;
+            json_string_at(decoded, &["slice", "content"])?;
+            if text.len() > 4_096 {
+                return Err(io::Error::other(format!(
+                    "atlas_slice exceeded its 4096-byte response contract: {}",
+                    text.len()
+                ))
+                .into());
+            }
+        }
+        "atlas_symbols_build" => {
+            require_json_usize(decoded, &["symbols_build", "parsed"], 2)?;
+            require_json_usize(decoded, &["symbols_build", "symbols"], 4)?;
+            require_json_usize(decoded, &["symbols_build", "max_workers"], 1)?;
+        }
+        "atlas_symbols" => {
+            require_json_array_len(decoded, &["symbols"], 1)?;
+            require_json_string(decoded, &["symbols", "0", "path"], "src/lib.rs")?;
+            require_json_string(decoded, &["symbols", "0", "name"], "indexed")?;
+        }
+        "atlas_symbol_relations" => {
+            require_json_usize(
+                decoded,
+                &["symbol_relations", "generation"],
+                usize::try_from(after.generation)?,
+            )?;
+            require_json_usize(
+                decoded,
+                &["symbol_relations", "authored_purpose_revision"],
+                usize::try_from(after.purpose_revision)?,
+            )?;
+            require_json_string(decoded, &["symbol_relations", "direction"], "outbound")?;
+            require_json_string(
+                decoded,
+                &[
+                    "symbol_relations",
+                    "rows",
+                    "0",
+                    "relation",
+                    "resolution",
+                    "status",
+                ],
+                "resolved",
+            )?;
+            require_json_string(
+                decoded,
+                &[
+                    "symbol_relations",
+                    "rows",
+                    "0",
+                    "source",
+                    "coverage",
+                    "0",
+                    "state",
+                ],
+                "complete",
+            )?;
+            require_json_string(
+                decoded,
+                &["symbol_relations", "rows", "0", "next_call", "capability"],
+                "symbol_slice",
+            )?;
+            require_json_usize_greater_than(
+                decoded,
+                &["symbol_relations", "work", "database_decoded_bytes"],
+                0,
+            )?;
+        }
+        "atlas_health" => {
+            require_json_bool(decoded, &["health", "truncated"], true)?;
+            require_json_usize(decoded, &["health", "returned"], 2)?;
+            require_json_array_len(decoded, &["health_findings"], 2)?;
+        }
+        "atlas_health_resolve" => {
+            require_json_string(decoded, &["health_resolution", "path"], "src/scanned.rs")?;
+            require_json_string(
+                decoded,
+                &["health_resolution", "rationale"],
+                "Contract-owned resolution.",
+            )?;
+        }
+        "atlas_lint" => {
+            require_json_bool(decoded, &["lint", "ok"], true)?;
+            require_json_usize(decoded, &["lint", "exit_code"], 0)?;
+        }
+        "atlas_token_report" => {
+            require_json_string(decoded, &["token_savings", "estimate_kind"], "heuristic")?;
+            require_json_usize_at_least(decoded, &["token_savings", "calls"], 1)?;
+            json_at(decoded, &["token_savings", "tokens_avoided"])?
+                .as_i64()
+                .ok_or_else(|| {
+                    io::Error::other("token_savings.tokens_avoided was not an integer")
+                })?;
+        }
+        "atlas_parity_report" => {
+            require_json_string(decoded, &["parity", "profile"], "repository-intelligence")?;
+            require_json_bool(decoded, &["parity", "ok"], true)?;
+            json_at(decoded, &["parity", "checks"])?
+                .as_array()
+                .ok_or_else(|| io::Error::other("parity.checks was not an array"))?;
+        }
+        "atlas_settings" => {
+            require_json_bool(decoded, &["settings", "root_verified"], true)?;
+            require_json_string(
+                decoded,
+                &["settings", "database", "schema", "compatibility"],
+                "current",
+            )?;
+            require_json_string(
+                decoded,
+                &["settings", "database", "publication", "state"],
+                "complete",
+            )?;
+            require_json_usize(
+                decoded,
+                &["settings", "database", "publication", "generation"],
+                usize::try_from(after.generation)?,
+            )?;
+            require_json_string(decoded, &["mcp_session", "telemetry", "mode"], "disabled")?;
+        }
+        "atlas_watch_status" => {
+            require_json_bool(decoded, &["watch_status", "available"], true)?;
+            require_json_bool(decoded, &["watch_status", "active"], false)?;
+            require_json_string(decoded, &["watch_status", "mode"], "notify")?;
+        }
+        "atlas_watch_once" => {
+            require_json_bool(decoded, &["watch", "once"], true)?;
+            require_json_usize(decoded, &["watch", "cycles"], 1)?;
+            require_json_usize(decoded, &["watch", "last_symbols", "parsed"], 1)?;
+        }
+        "atlas_strip_legacy_purpose" => {
+            require_json_bool(decoded, &["legacy_purpose_migration", "applied"], false)?;
+            require_json_usize(
+                decoded,
+                &["legacy_purpose_migration", "purpose_files_found"],
+                0,
+            )?;
+        }
+        "atlas_reset_index" => {
+            require_json_bool(decoded, &["reset_index", "applied"], false)?;
+            require_json_bool(decoded, &["reset_index", "dry_run"], true)?;
+            require_json_usize(decoded, &["reset_index", "removed"], 0)?;
+        }
+        "atlas_mcp_config" => {
+            json_string_at(
+                decoded,
+                &["mcp_config", "mcpServers", "projectatlas", "command"],
+            )?;
+            json_at(
+                decoded,
+                &["mcp_config", "mcpServers", "projectatlas", "args"],
+            )?
+            .as_array()
+            .ok_or_else(|| io::Error::other("mcp_config args was not an array"))?;
+        }
+        "atlas_runtime_info" => {
+            require_json_string(decoded, &["runtime", "version"], env!("CARGO_PKG_VERSION"))?;
+            require_json_usize(decoded, &["runtime", "major_version"], 3)?;
+            require_json_array_len(decoded, &["runtime", "mcp_tools"], 40)?;
+        }
+        "atlas_session_brief" => {
+            require_json_string(
+                decoded,
+                &["session_brief", "project", "index_status"],
+                "available",
+            )?;
+            require_json_string(
+                decoded,
+                &["session_brief", "recommendations", "0", "target"],
+                "atlas_file_summary",
+            )?;
+            require_json_string(
+                decoded,
+                &["session_brief", "files", "0", "path"],
+                "src/lib.rs",
+            )?;
+        }
+        "atlas_task_status" => {
+            require_json_string(decoded, &["task_status", "lookup"], "found")?;
+            require_json_string(decoded, &["task_status", "task", "state"], "complete")?;
+            require_json_bool(decoded, &["task_status", "task", "cancelable"], false)?;
+        }
+        "atlas_task_cancel" => {
+            require_json_string(decoded, &["task_cancel", "result"], "already_finished")?;
+            require_json_string(decoded, &["task_cancel", "task", "state"], "complete")?;
+        }
+        "atlas_purpose_queue" => {
+            require_json_usize(
+                decoded,
+                &["purpose_curation", "active_generation"],
+                usize::try_from(after.generation)?,
+            )?;
+            require_json_bool(decoded, &["purpose_curation", "actionable"], false)?;
+            require_json_usize(decoded, &["purpose_curation", "returned"], 0)?;
+        }
+        "atlas_purpose_set" => {
+            require_json_string(decoded, &["purpose_set", "status"], "approved")?;
+            require_json_string(decoded, &["purpose_set", "source"], "agent")?;
+            require_json_bool(decoded, &["purpose_set", "agent_reviewed"], true)?;
+        }
+        "atlas_purpose_review" => {
+            require_json_bool(decoded, &["purpose_review", "applied"], true)?;
+            require_json_usize(decoded, &["purpose_review", "changed"], 1)?;
+            require_json_string(
+                decoded,
+                &["purpose_review_items", "0", "purpose"],
+                "Reviewed MCP contract Rust library.",
+            )?;
+        }
+        other => {
+            return Err(io::Error::other(format!(
+                "missing typed MCP payload contract for {other}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Require every frozen JSON contract member while permitting additive object properties.

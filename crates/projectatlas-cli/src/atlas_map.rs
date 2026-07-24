@@ -692,7 +692,7 @@ pub(crate) fn add_ignore_entry(
     let mut values = string_array_values(&path, &document, kind)?;
     let changed = values.insert(normalized.clone());
     if changed {
-        write_string_array(&mut document, kind.config_key(), &values)?;
+        write_string_array(&mut document, kind, &values)?;
         write_config_document(&path, &document)?;
     }
     let config = load_atlas_config(Some(&path))?;
@@ -721,7 +721,7 @@ pub(crate) fn remove_ignore_entry(
         let mut values = string_array_values(&path, &document, kind)?;
         if values.remove(&normalized) {
             changed = true;
-            write_string_array(&mut document, kind.config_key(), &values)?;
+            write_string_array(&mut document, kind, &values)?;
         }
         normalized
     } else {
@@ -730,21 +730,13 @@ pub(crate) fn remove_ignore_entry(
         let mut prefix_values = string_array_values(&path, &document, IgnoreEntryKind::PathPrefix)?;
         if prefix_values.remove(&normalized_prefix) {
             changed = true;
-            write_string_array(
-                &mut document,
-                IgnoreEntryKind::PathPrefix.config_key(),
-                &prefix_values,
-            )?;
+            write_string_array(&mut document, IgnoreEntryKind::PathPrefix, &prefix_values)?;
         }
         if let Some(normalized_dir) = normalized_dir.as_deref() {
             let mut dir_values = string_array_values(&path, &document, IgnoreEntryKind::DirName)?;
             if dir_values.remove(normalized_dir) {
                 changed = true;
-                write_string_array(
-                    &mut document,
-                    IgnoreEntryKind::DirName.config_key(),
-                    &dir_values,
-                )?;
+                write_string_array(&mut document, IgnoreEntryKind::DirName, &dir_values)?;
             }
         }
         normalized_prefix
@@ -1051,9 +1043,10 @@ fn string_array_values(
 /// Replace one `[scan]` string array while preserving unrelated config content.
 fn write_string_array(
     document: &mut DocumentMut,
-    key: &str,
+    kind: IgnoreEntryKind,
     values: &BTreeSet<String>,
 ) -> AtlasMapResult<()> {
+    let key = kind.config_key();
     if document.get("scan").is_none() {
         document["scan"] = Item::Table(Table::new());
     }
@@ -1063,11 +1056,40 @@ fn write_string_array(
             message: "[scan] must be a TOML table".to_string(),
         });
     };
-    let mut array = Array::new();
-    for value in values {
-        array.push(value.as_str());
+    if scan.get(key).is_none() {
+        scan[key] = value(Array::new());
     }
-    scan[key] = value(array);
+    let Some(array) = scan[key].as_array_mut() else {
+        return Err(AtlasMapError::TomlEdit {
+            path: PathBuf::from("<config>"),
+            message: format!("[scan].{key} must be an array of strings"),
+        });
+    };
+    let mut retained = BTreeSet::new();
+    let mut index = 0;
+    while index < array.len() {
+        let Some(text) = array.get(index).and_then(toml_edit::Value::as_str) else {
+            return Err(AtlasMapError::TomlEdit {
+                path: PathBuf::from("<config>"),
+                message: format!("[scan].{key} must contain only strings"),
+            });
+        };
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            index += 1;
+            continue;
+        }
+        let normalized = normalize_ignore_value(kind, trimmed)?;
+        if values.contains(&normalized) {
+            retained.insert(normalized);
+            index += 1;
+        } else {
+            array.remove(index);
+        }
+    }
+    for missing in values.difference(&retained) {
+        array.push(missing.as_str());
+    }
     Ok(())
 }
 
@@ -2805,14 +2827,16 @@ impl From<serde_json::Error> for AtlasMapError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AtlasMapConfig, AtlasMapError, DEFAULT_TEXT_INDEX_MAX_BYTES, MapRecord,
-        append_existing_map_purpose_records, append_record_rows, collect_repo_paths,
-        default_config_root_value, exclude_dir_name_set, extract_block_comment_purpose,
-        extract_line_comment_purpose, load_atlas_config_from_text, normalize_repo_string,
-        project_root_for_projectatlas_config, split_record_cells, stable_generated_at, toon_cell,
+        AtlasMapConfig, AtlasMapError, DEFAULT_TEXT_INDEX_MAX_BYTES, IgnoreEntryKind, MapRecord,
+        add_ignore_entry, append_existing_map_purpose_records, append_record_rows,
+        collect_repo_paths, default_config_root_value, exclude_dir_name_set,
+        extract_block_comment_purpose, extract_line_comment_purpose, load_atlas_config_from_text,
+        normalize_repo_string, project_root_for_projectatlas_config, remove_ignore_entry,
+        split_record_cells, stable_generated_at, toon_cell,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error;
+    use std::fs;
     use std::io;
     use std::path::Path;
 
@@ -2856,6 +2880,80 @@ mod tests {
         assert!(names.contains("target"));
         assert!(names.contains(".git"));
         assert!(names.contains(".projectatlas"));
+    }
+
+    #[test]
+    fn inverse_ignore_edits_restore_original_config_bytes() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let atlas = temp.path().join(".projectatlas");
+        fs::create_dir(&atlas)?;
+        let config_path = atlas.join("config.toml");
+        let original = r#"[project]
+root = "."
+
+[scan]
+# Preserve this formatting and comment.
+exclude_dir_names = [
+    "",
+    "   ",
+    ".git",
+    ".projectatlas",
+    "target",
+]
+exclude_path_prefixes = ["", "  "]
+"#;
+        fs::write(&config_path, original)?;
+
+        for (kind, value, remove_kind) in [
+            (
+                IgnoreEntryKind::DirName,
+                "temporary-cache",
+                Some(IgnoreEntryKind::DirName),
+            ),
+            (
+                IgnoreEntryKind::PathPrefix,
+                "generated/cache",
+                Some(IgnoreEntryKind::PathPrefix),
+            ),
+            (IgnoreEntryKind::DirName, "temporary-untyped", None),
+            (IgnoreEntryKind::PathPrefix, "generated/untyped", None),
+        ] {
+            let added = add_ignore_entry(Some(&config_path), temp.path(), kind, value)?;
+            if !added.changed {
+                return Err(io::Error::other("ignore add did not change the config").into());
+            }
+            let removed = remove_ignore_entry(Some(&config_path), temp.path(), remove_kind, value)?;
+            if !removed.changed || fs::read_to_string(&config_path)? != original {
+                return Err(io::Error::other(
+                    "inverse ignore edits did not restore the original config bytes",
+                )
+                .into());
+            }
+        }
+        for result in [
+            add_ignore_entry(
+                Some(&config_path),
+                temp.path(),
+                IgnoreEntryKind::DirName,
+                " ",
+            )
+            .map(|_| ()),
+            remove_ignore_entry(
+                Some(&config_path),
+                temp.path(),
+                Some(IgnoreEntryKind::PathPrefix),
+                "",
+            )
+            .map(|_| ()),
+            remove_ignore_entry(Some(&config_path), temp.path(), None, " ").map(|_| ()),
+        ] {
+            if result.is_ok() || fs::read_to_string(&config_path)? != original {
+                return Err(
+                    io::Error::other("invalid blank ignore mutation changed the config").into(),
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]

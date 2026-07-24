@@ -499,6 +499,7 @@ fn verify_archive_signature(
 
 #[cfg(not(feature = "derived-snapshot-signatures"))]
 /// Report signature presence honestly when verification support is absent.
+#[allow(clippy::unnecessary_wraps)]
 fn verify_archive_signature(
     signature: Option<&[u8]>,
     _manifest: &[u8],

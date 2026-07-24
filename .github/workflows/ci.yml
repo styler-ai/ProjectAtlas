@@ -103,6 +103,9 @@ jobs:
       - name: Tests
         run: cargo test --workspace --all-features --locked
 
+      - name: Filtered custom harness compatibility
+        run: cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled
+
       - name: Doc tests
         run: cargo test --doc --workspace --all-features --locked
 

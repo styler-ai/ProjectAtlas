@@ -4314,10 +4314,7 @@ impl ProjectAtlasMcpServer {
                     Some(result_ref.to_string()),
                 ),
                 Ok(Err(error)) => {
-                    let state = if matches!(
-                        &error,
-                        CliError::IndexWork(IndexWorkFailure::Cancelled { .. })
-                    ) {
+                    let state = if task_error_is_canceled(&error) {
                         McpTaskState::Canceled
                     } else {
                         McpTaskState::Failed
@@ -7229,6 +7226,20 @@ fn mcp_unix_time_ms() -> u128 {
         .map_or(0, |duration| duration.as_millis())
 }
 
+/// Recognize cooperative cancellation through each typed adapter error layer.
+fn task_error_is_canceled(error: &CliError) -> bool {
+    std::iter::successors(
+        Some(error as &(dyn std::error::Error + 'static)),
+        |source| source.source(),
+    )
+    .any(|source| {
+        matches!(
+            source.downcast_ref::<IndexWorkFailure>(),
+            Some(IndexWorkFailure::Cancelled { .. })
+        )
+    })
+}
+
 /// Retain one concise task failure without letting diagnostics grow unbounded.
 fn bounded_task_error(error: &CliError) -> String {
     error
@@ -7264,6 +7275,37 @@ mod tests {
         } else {
             Err(io::Error::other(message.to_string()).into())
         }
+    }
+
+    #[test]
+    fn task_errors_classify_only_typed_cancellation_as_canceled() {
+        let stage = IndexWorkStage::RepositoryTraversal;
+        assert!(task_error_is_canceled(&CliError::IndexWork(
+            IndexWorkFailure::Cancelled { stage },
+        )));
+        assert!(task_error_is_canceled(&CliError::Fs(
+            projectatlas_fs::FsError::IndexWork(IndexWorkFailure::Cancelled { stage }),
+        )));
+        assert!(task_error_is_canceled(&CliError::Db(DbError::IndexWork(
+            IndexWorkFailure::Cancelled { stage },
+        ))));
+        assert!(task_error_is_canceled(&CliError::Service(
+            ServiceError::Db(DbError::IndexWork(IndexWorkFailure::Cancelled { stage })),
+        )));
+        assert!(!task_error_is_canceled(&CliError::IndexWork(
+            IndexWorkFailure::DeadlineExceeded { stage },
+        )));
+        assert!(!task_error_is_canceled(&CliError::Db(DbError::IndexWork(
+            IndexWorkFailure::DeadlineExceeded { stage },
+        ))));
+        assert!(!task_error_is_canceled(&CliError::Fs(
+            projectatlas_fs::FsError::IndexWork(IndexWorkFailure::ResourceLimitExceeded {
+                stage,
+                resource: projectatlas_core::IndexWorkResource::Entries,
+                limit: 1,
+                observed: 2,
+            }),
+        )));
     }
 
     fn usage_test_project(
@@ -9466,7 +9508,11 @@ mod tests {
                 }
                 worker_cancel_started.wait();
                 loop {
-                    control.check(projectatlas_core::IndexWorkStage::RepositoryTraversal)?;
+                    control
+                        .check(projectatlas_core::IndexWorkStage::RepositoryTraversal)
+                        .map_err(|failure| {
+                            CliError::Fs(projectatlas_fs::FsError::IndexWork(failure))
+                        })?;
                     thread::yield_now();
                 }
             },

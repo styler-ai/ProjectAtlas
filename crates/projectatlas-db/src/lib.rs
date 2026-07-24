@@ -439,7 +439,7 @@ pub enum DbError {
         actual: usize,
     },
     /// A bounded database read observed cancellation or its deadline.
-    #[error(transparent)]
+    #[error("{0}")]
     IndexWork(#[from] IndexWorkFailure),
     /// Count value from `SQLite` could not fit its owning unsigned domain type.
     #[error("invalid count for {field}: {value}")]

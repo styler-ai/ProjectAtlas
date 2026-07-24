@@ -6544,6 +6544,7 @@ pub(crate) fn refresh_index_controlled(
             .delta
             .is_none()
     {
+        graph_projection::cleanup_abandoned_repository_graph_staging(store, &plan.root, control)?;
         return Ok(empty_index_refresh_report(plan.text_options));
     }
     let batch = stage_full_index_publication(
@@ -6739,6 +6740,7 @@ pub(crate) fn refresh_index_for_changes_controlled(
     }) {
         return refresh_index_controlled(store, plan, symbol_options, control);
     }
+    graph_projection::cleanup_abandoned_repository_graph_staging(store, root, control)?;
     let direct_graph_paths = nodes
         .iter()
         .filter(|node| node.kind == NodeKind::File)
@@ -9344,6 +9346,16 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         let before = store
             .index_publication()?
             .ok_or_else(|| io::Error::other("initial publication missing"))?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("project identity missing"))?;
+        let abandoned_full_stage = atlas_dir.join("graph-stage-full-noop");
+        fs::create_dir(&abandoned_full_stage)?;
+        drop(AtlasStore::create_repository_graph_staging(
+            &abandoned_full_stage.join("projectatlas.db"),
+            &plan.root,
+            project,
+        )?);
         let full_report = refresh_index(&mut store, &plan, &symbol_options)?;
         let after_full = store
             .index_publication()?
@@ -9368,6 +9380,18 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             &0,
             "full no-op symbol candidates",
         )?;
+        require_eq(
+            &abandoned_full_stage.exists(),
+            &false,
+            "full no-op abandoned graph stage",
+        )?;
+        let abandoned_incremental_stage = atlas_dir.join("graph-stage-incremental-noop");
+        fs::create_dir(&abandoned_incremental_stage)?;
+        drop(AtlasStore::create_repository_graph_staging(
+            &abandoned_incremental_stage.join("projectatlas.db"),
+            &plan.root,
+            project,
+        )?);
         let mut changes = WatchChangeSet::default();
         changes.paths.insert(source_path);
 
@@ -9388,6 +9412,11 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             "no-op summary candidates",
         )?;
         require_eq(&report.symbols.candidates, &0, "no-op symbol candidates")?;
+        require_eq(
+            &abandoned_incremental_stage.exists(),
+            &false,
+            "incremental no-op abandoned graph stage",
+        )?;
         Ok(())
     }
 

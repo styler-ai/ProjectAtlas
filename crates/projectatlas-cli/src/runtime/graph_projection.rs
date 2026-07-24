@@ -190,8 +190,8 @@ pub(super) fn stage_full_repository_graph(
     symbols: &SymbolBuildStage,
     control: &IndexWorkControl,
 ) -> Result<StagedRepositoryGraph, CliError> {
+    cleanup_abandoned_repository_graph_staging(store, root, control)?;
     let project = selected_project(store)?;
-    cleanup_abandoned_graph_staging(root, project)?;
     let generation = next_generation(base_generation)?;
     let paths = nodes
         .iter()
@@ -788,11 +788,22 @@ fn try_graph_stage_lease(staging_parent: &Path) -> Result<Option<File>, CliError
     }
 }
 
+/// Remove inactive disposable graph stages owned by the selected project.
+pub(super) fn cleanup_abandoned_repository_graph_staging(
+    store: &AtlasStore,
+    root: &Path,
+    control: &IndexWorkControl,
+) -> Result<(), CliError> {
+    cleanup_abandoned_graph_staging(root, selected_project(store)?, control)
+}
+
 /// Remove only validated, inactive disposable graph stages left by an earlier process.
 fn cleanup_abandoned_graph_staging(
     root: &Path,
     project: ProjectInstanceId,
+    control: &IndexWorkControl,
 ) -> Result<(), CliError> {
+    control.check(IndexWorkStage::Publication)?;
     let staging_parent = root.join(".projectatlas");
     if !staging_parent.is_dir() {
         return Ok(());
@@ -800,7 +811,7 @@ fn cleanup_abandoned_graph_staging(
     let Some(_lease) = try_graph_stage_lease(&staging_parent)? else {
         return Ok(());
     };
-    cleanup_abandoned_graph_staging_while_locked(&staging_parent, root, project)
+    cleanup_abandoned_graph_staging_while_locked(&staging_parent, root, project, control)
 }
 
 /// Remove direct child stages whose typed database binds the exact project.
@@ -808,12 +819,14 @@ fn cleanup_abandoned_graph_staging_while_locked(
     staging_parent: &Path,
     root: &Path,
     project: ProjectInstanceId,
+    control: &IndexWorkControl,
 ) -> Result<(), CliError> {
     let entries = fs::read_dir(staging_parent).map_err(|source| CliError::Io {
         path: staging_parent.to_path_buf(),
         source,
     })?;
     for entry in entries {
+        control.check(IndexWorkStage::Publication)?;
         let entry = entry.map_err(|source| CliError::Io {
             path: staging_parent.to_path_buf(),
             source,
@@ -846,6 +859,7 @@ fn cleanup_abandoned_graph_staging_while_locked(
         if !owned {
             continue;
         }
+        control.check(IndexWorkStage::Publication)?;
         fs::remove_dir_all(&path).map_err(|source| CliError::Io { path, source })?;
     }
     Ok(())
@@ -872,7 +886,7 @@ fn finish_projection_in_database(
             "another repository graph staging operation is active for this project".to_string(),
         )
     })?;
-    cleanup_abandoned_graph_staging_while_locked(&staging_parent, root, project)?;
+    cleanup_abandoned_graph_staging_while_locked(&staging_parent, root, project, control)?;
     let directory = TempDirBuilder::new()
         .prefix(GRAPH_STAGE_DIRECTORY_PREFIX)
         .tempdir_in(&staging_parent)
@@ -2774,7 +2788,10 @@ mod tests {
         CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolGraph, SymbolKind,
         SymbolRelation,
     };
-    use projectatlas_core::{IndexCancellation, IndexGeneration, IndexWorkControl, Node, NodeKind};
+    use projectatlas_core::{
+        IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
+        Node, NodeKind,
+    };
     use projectatlas_db::{
         AtlasStore, RepositoryAffectedSourceFootprint, RepositoryGraphRelationQuery,
     };
@@ -2786,6 +2803,45 @@ mod tests {
     use std::io;
     use std::num::NonZeroU32;
     use std::path::Path;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    fn create_directory_link(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_directory_link(target: &Path, link: &Path) -> io::Result<()> {
+        match std::os::windows::fs::symlink_dir(target, link) {
+            Ok(()) => Ok(()),
+            Err(source) if source.raw_os_error() == Some(1314) => {
+                let status = std::process::Command::new("cmd")
+                    .arg("/C")
+                    .arg("mklink")
+                    .arg("/J")
+                    .arg(link)
+                    .arg(target)
+                    .status()?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(source)
+                }
+            }
+            Err(source) => Err(source),
+        }
+    }
+
+    #[cfg(unix)]
+    fn create_file_link(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_file_link(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::windows::fs::symlink_file(target, link)
+    }
 
     #[test]
     fn cargo_package_ownership_uses_the_longest_repository_prefix() -> Result<(), Box<dyn Error>> {
@@ -2983,17 +3039,88 @@ mod tests {
             &lookalike.join(GRAPH_STAGE_DATABASE_FILE_NAME),
             &root,
         )?);
+        let foreign_root = temp.path().join("foreign-project");
+        fs::create_dir(&foreign_root)?;
+        let foreign_store =
+            AtlasStore::open_for_project(&foreign_root.join("projectatlas.db"), &foreign_root)?;
+        let foreign_project = foreign_store
+            .project_instance_id()?
+            .ok_or("foreign project identity is missing")?;
+        let foreign_project_stage =
+            atlas_dir.join(format!("{GRAPH_STAGE_DIRECTORY_PREFIX}foreign-project"));
+        fs::create_dir(&foreign_project_stage)?;
+        drop(AtlasStore::create_repository_graph_staging(
+            &foreign_project_stage.join(GRAPH_STAGE_DATABASE_FILE_NAME),
+            &root,
+            foreign_project,
+        )?);
+        let foreign_root_stage =
+            atlas_dir.join(format!("{GRAPH_STAGE_DIRECTORY_PREFIX}foreign-root"));
+        fs::create_dir(&foreign_root_stage)?;
+        drop(AtlasStore::create_repository_graph_staging(
+            &foreign_root_stage.join(GRAPH_STAGE_DATABASE_FILE_NAME),
+            &foreign_root,
+            project,
+        )?);
+        let linked_stage_target = temp.path().join("linked-stage-target");
+        fs::create_dir(&linked_stage_target)?;
+        fs::write(linked_stage_target.join("sentinel"), "preserve")?;
+        drop(AtlasStore::create_repository_graph_staging(
+            &linked_stage_target.join(GRAPH_STAGE_DATABASE_FILE_NAME),
+            &root,
+            project,
+        )?);
+        let linked_stage = atlas_dir.join(format!("{GRAPH_STAGE_DIRECTORY_PREFIX}linked"));
+        create_directory_link(&linked_stage_target, &linked_stage)?;
+
+        let linked_database_target = temp.path().join("linked-stage-database.db");
+        drop(AtlasStore::create_repository_graph_staging(
+            &linked_database_target,
+            &root,
+            project,
+        )?);
+        let linked_database_stage =
+            atlas_dir.join(format!("{GRAPH_STAGE_DIRECTORY_PREFIX}linked-database"));
+        fs::create_dir(&linked_database_stage)?;
+        let linked_database = linked_database_stage.join(GRAPH_STAGE_DATABASE_FILE_NAME);
+        let linked_database_created =
+            match create_file_link(&linked_database_target, &linked_database) {
+                Ok(()) => true,
+                #[cfg(windows)]
+                Err(source) if source.raw_os_error() == Some(1314) => false,
+                Err(source) => return Err(source.into()),
+            };
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
 
         let lease = try_graph_stage_lease(&atlas_dir)?
             .ok_or("test could not acquire graph staging lease")?;
-        cleanup_abandoned_graph_staging(&root, project)?;
+        cleanup_abandoned_graph_staging(&root, project, &control)?;
         require(
             owned.exists(),
             "restart cleanup removed an actively leased stage",
         )?;
         drop(lease);
 
-        cleanup_abandoned_graph_staging(&root, project)?;
+        let canceled_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        canceled_control.cancel();
+        let canceled = cleanup_abandoned_graph_staging(&root, project, &canceled_control)
+            .err()
+            .ok_or("canceled restart cleanup unexpectedly succeeded")?;
+        require(
+            matches!(
+                canceled,
+                CliError::IndexWork(IndexWorkFailure::Cancelled {
+                    stage: IndexWorkStage::Publication
+                })
+            ),
+            "restart cleanup did not preserve typed cancellation",
+        )?;
+        require(
+            owned.exists(),
+            "canceled restart cleanup removed an owned stage",
+        )?;
+
+        cleanup_abandoned_graph_staging(&root, project, &control)?;
         require(
             !owned.exists(),
             "restart cleanup retained an inactive owned stage",
@@ -3002,7 +3129,103 @@ mod tests {
             lookalike.exists(),
             "restart cleanup removed an unvalidated lookalike stage",
         )?;
+        require(
+            foreign_project_stage.exists(),
+            "restart cleanup removed a valid stage owned by another project",
+        )?;
+        require(
+            foreign_root_stage.exists(),
+            "restart cleanup removed a valid stage bound to another root",
+        )?;
+        require(
+            fs::symlink_metadata(&linked_stage).is_ok()
+                && linked_stage_target.join("sentinel").is_file(),
+            "restart cleanup followed a linked stage directory",
+        )?;
+        if linked_database_created {
+            require(
+                fs::symlink_metadata(&linked_database).is_ok() && linked_database_target.is_file(),
+                "restart cleanup followed a linked staging database",
+            )?;
+        }
         Ok(())
+    }
+
+    #[test]
+    fn restart_cleanup_observes_cancellation_between_owned_stages() -> Result<(), Box<dyn Error>> {
+        const STAGE_COUNT: usize = 64;
+        const FILES_PER_STAGE: usize = 64;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("restart-cleanup-cancellation");
+        let atlas_dir = root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let store =
+            AtlasStore::open_for_project(&atlas_dir.join(GRAPH_STAGE_DATABASE_FILE_NAME), &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("bound project identity is missing")?;
+        let mut stages = Vec::with_capacity(STAGE_COUNT);
+        for stage_index in 0..STAGE_COUNT {
+            let stage = atlas_dir.join(format!("{GRAPH_STAGE_DIRECTORY_PREFIX}{stage_index:03}"));
+            fs::create_dir(&stage)?;
+            drop(AtlasStore::create_repository_graph_staging(
+                &stage.join(GRAPH_STAGE_DATABASE_FILE_NAME),
+                &root,
+                project,
+            )?);
+            let payload = stage.join("payload");
+            fs::create_dir(&payload)?;
+            for file_index in 0..FILES_PER_STAGE {
+                fs::write(payload.join(format!("{file_index:03}")), b"x")?;
+            }
+            stages.push(stage);
+        }
+
+        let cancellation = IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        let worker_root = root;
+        let worker =
+            thread::spawn(move || cleanup_abandoned_graph_staging(&worker_root, project, &control));
+        let observation_deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let remaining = stages.iter().filter(|stage| stage.exists()).count();
+            if remaining < STAGE_COUNT {
+                cancellation.cancel();
+                break;
+            }
+            if worker.is_finished() {
+                return Err(io::Error::other(
+                    "restart cleanup completed before in-flight cancellation was observed",
+                )
+                .into());
+            }
+            if Instant::now() >= observation_deadline {
+                cancellation.cancel();
+                return Err(io::Error::other(
+                    "restart cleanup removed no stage within the test deadline",
+                )
+                .into());
+            }
+            thread::yield_now();
+        }
+        let result = worker
+            .join()
+            .map_err(|_panic| io::Error::other("restart cleanup worker panicked"))?;
+        require(
+            matches!(
+                result,
+                Err(CliError::IndexWork(IndexWorkFailure::Cancelled {
+                    stage: IndexWorkStage::Publication
+                }))
+            ),
+            "restart cleanup did not return typed in-flight cancellation",
+        )?;
+        let remaining = stages.iter().filter(|stage| stage.exists()).count();
+        require(
+            remaining > 0 && remaining < STAGE_COUNT,
+            "in-flight cancellation did not preserve a partial cleanup boundary",
+        )
     }
 
     #[test]

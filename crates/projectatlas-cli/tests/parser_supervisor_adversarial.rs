@@ -22,30 +22,56 @@ mod parser_supervisor;
 
 /// Exact synthetic artifact identity shared with the test-only launch authority.
 const TEST_ARTIFACT_BYTES: &[u8] = b"parser-supervisor-hostile-peer";
+/// Cargo-visible target name used for libtest-compatible substring filtering.
+const HARNESS_NAME: &str = "parser_supervisor_adversarial";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args();
     let _program = arguments.next();
-    match arguments.next().as_deref() {
-        Some("--peer") => hostile_peer(
-            arguments
-                .next()
-                .ok_or_else(|| io::Error::other("hostile scenario is missing"))?
-                .as_str(),
-        ),
-        Some(argument) => Err(io::Error::other(format!(
-            "unexpected adversarial harness argument {argument:?}"
-        ))
-        .into()),
-        None => {
-            #[cfg(any(
-                all(target_os = "linux", target_arch = "x86_64"),
-                all(target_os = "windows", target_arch = "x86_64")
-            ))]
-            parser_supervisor::run_adversarial_process_suite(&env::current_exe()?)?;
-            Ok(())
+    let first_argument = arguments.next();
+    if first_argument.as_deref() == Some("--peer") {
+        let scenario = arguments
+            .next()
+            .ok_or_else(|| io::Error::other("hostile scenario is missing"))?;
+        if let Some(argument) = arguments.next() {
+            return Err(io::Error::other(format!(
+                "unexpected adversarial harness argument {argument:?}"
+            ))
+            .into());
+        }
+        return hostile_peer(&scenario);
+    }
+
+    let mut filter = None;
+    let mut exact = false;
+    for argument in first_argument.into_iter().chain(arguments) {
+        match argument.as_str() {
+            "--nocapture" => {}
+            "--exact" => exact = true,
+            _ if argument.starts_with('-') || filter.is_some() => {
+                return Err(io::Error::other(format!(
+                    "unexpected adversarial harness argument {argument:?}"
+                ))
+                .into());
+            }
+            _ => filter = Some(argument),
         }
     }
+    let should_run = filter.is_none_or(|filter| {
+        if exact {
+            HARNESS_NAME == filter
+        } else {
+            HARNESS_NAME.contains(&filter)
+        }
+    });
+    if should_run {
+        #[cfg(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "windows", target_arch = "x86_64")
+        ))]
+        parser_supervisor::run_adversarial_process_suite(&env::current_exe()?)?;
+    }
+    Ok(())
 }
 
 /// Run one closed hostile protocol behavior over this process's standard streams.
