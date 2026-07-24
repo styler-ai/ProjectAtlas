@@ -107,6 +107,25 @@ gates, publish a `disabled` disposition, and cannot restore or save cache state.
 
 The workflow records a bounded JSON receipt per target with the cache disposition and SHA-256 of the key, not machine-local paths or cache contents. GitHub job/step timestamps remain the wall-time authority.
 
+## Measured Target Decision
+
+Hosted step timestamps and uploaded `parser-pack-<target>-cargo-layer-receipt`
+artifacts establish the same-key cold/hit comparison:
+
+| Target | Exact candidate and key SHA-256 | Cold contained construction | Exact hit | Improvement | Reuse decision |
+| --- | --- | ---: | ---: | ---: | --- |
+| `x86_64-unknown-linux-gnu` | `2b6df9d69c621200f0b8d991d185f978b3c1a654`, `68a445ba24eb3078bf918ae6d4a25c4c7902eae57ded07602d4d04800599ba93` | 134s in [run 30059696560](https://github.com/styler-ai/ProjectAtlas/actions/runs/30059696560), miss and save-eligible | 71s in [run 30059921214](https://github.com/styler-ai/ProjectAtlas/actions/runs/30059921214), exact hit, 2,033 entries and 481,216,004 restored bytes | 63s, 47.0% | enabled |
+| `x86_64-pc-windows-msvc` | `5d6299615982c0014e5638d6838f659076511167`, `bac2b06283ba4121a5b9126764135317c8d6a6376ec96c19cd7d594894c11ab0` | 1,152s in [run 30056598826](https://github.com/styler-ai/ProjectAtlas/actions/runs/30056598826), miss and save-eligible | 1,064s in [run 30057665887](https://github.com/styler-ai/ProjectAtlas/actions/runs/30057665887), exact hit, 1,737 entries and 468,278,562 restored bytes | 88s, 7.6% | disabled |
+
+The retained Linux v3 cache for the measured runner image is 129,196,905
+compressed bytes. The measured Windows cache was 98,991,674 compressed bytes.
+Windows saved more absolute seconds but only 7.6 percent of a long fixed proof
+stage, so its cache lifecycle and trust surface do not meet the materiality
+contract. The Linux proof runs were cancelled only after the Linux construction
+job and receipt completed successfully, avoiding a knowingly unnecessary parallel
+Windows build; the Windows comparison runs likewise retained successful construction
+jobs and receipts before downstream cancellation.
+
 ## Risks / Trade-offs
 
 - **A missing key input reuses incompatible native objects** → include toolchain, lock/manifest, target, runner/native identity, and an explicit reviewed cache-policy ABI; use no prefix fallback.

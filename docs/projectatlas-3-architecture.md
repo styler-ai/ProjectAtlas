@@ -1874,6 +1874,23 @@ flowchart TB
     Trust -->|yes| Save[Save exact dependency layer]
 ```
 
+The retained policy is measurement-owned, not platform folklore:
+
+| Target | Same-key cold | Exact hit | Improvement | Policy |
+| --- | ---: | ---: | ---: | --- |
+| `x86_64-unknown-linux-gnu` | 134s ([run 30059696560](https://github.com/styler-ai/ProjectAtlas/actions/runs/30059696560)) | 71s ([run 30059921214](https://github.com/styler-ai/ProjectAtlas/actions/runs/30059921214)) | 63s, 47.0% | reuse enabled |
+| `x86_64-pc-windows-msvc` | 1,152s ([run 30056598826](https://github.com/styler-ai/ProjectAtlas/actions/runs/30056598826)) | 1,064s ([run 30057665887](https://github.com/styler-ai/ProjectAtlas/actions/runs/30057665887)) | 88s, 7.6% | reuse disabled |
+
+The Linux receipts share key digest
+`68a445ba24eb3078bf918ae6d4a25c4c7902eae57ded07602d4d04800599ba93`;
+the Windows receipts share
+`bac2b06283ba4121a5b9126764135317c8d6a6376ec96c19cd7d594894c11ab0`.
+Both comparisons therefore hold target, candidate, toolchain, manifests, feature
+closure, and cache policy constant. The Linux cache saves 63 seconds and 47.0
+percent, clearing both materiality bounds. The Windows cache saves only 7.6 percent
+of a proof stage dominated by mandatory audit and deterministic assembly, so it is
+disabled without weakening those gates.
+
 ```mermaid
 sequenceDiagram
     participant R as Hosted runner
