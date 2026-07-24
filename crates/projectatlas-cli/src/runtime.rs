@@ -76,7 +76,6 @@ use projectatlas_service::{
 };
 use projectatlas_symbols::{extract_symbol_graph_controlled, semantic_resolution_contract_digest};
 use rayon::ThreadPoolBuilder;
-#[cfg(not(feature = "optional-parser-supervisor"))]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -106,7 +105,7 @@ const DEFAULT_INDEX_WORK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Maximum UTF-8 source bytes retained while one publication is staged.
 const MAX_STAGED_TEXT_BYTES: u64 = 512 * 1024 * 1024;
 /// Maximum aggregate retained string bytes across one in-memory publication batch.
-const MAX_PUBLICATION_STAGING_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_PUBLICATION_STAGING_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Maximum scan-node mutations applied between publication cancellation checks.
 const PUBLICATION_NODE_BATCH_SIZE: usize = 1_024;
 /// Maximum deleted repository paths applied between publication cancellation checks.
@@ -1044,6 +1043,7 @@ fn revalidate_index_publication_inputs_controlled_with_limits(
         plan,
         &staged_nodes,
         expected_purpose_import_fingerprint,
+        None,
         control,
         purpose_limits,
     )
@@ -1060,6 +1060,24 @@ fn revalidate_staged_publication_inputs_controlled(
         plan,
         staged_nodes,
         expected_purpose_import_fingerprint,
+        None,
+        control,
+        PurposeImportLimits::default(),
+    )
+}
+
+/// Recheck a full scan while reusing purpose rows from exact unchanged source nodes.
+fn revalidate_staged_publication_inputs_with_purpose_snapshot(
+    plan: &ScanRuntimePlan,
+    staged_nodes: &[Node],
+    purpose_import: Option<&PurposeImportSnapshot>,
+    control: &IndexWorkControl,
+) -> Result<(), CliError> {
+    revalidate_staged_publication_inputs_controlled_with_limits(
+        plan,
+        staged_nodes,
+        purpose_import.map(|snapshot| snapshot.fingerprint.as_str()),
+        purpose_import.map(|snapshot| snapshot.records.as_slice()),
         control,
         PurposeImportLimits::default(),
     )
@@ -1070,6 +1088,7 @@ fn revalidate_staged_publication_inputs_controlled_with_limits(
     plan: &ScanRuntimePlan,
     staged_nodes: &[Node],
     expected_purpose_import_fingerprint: Option<&str>,
+    reusable_purpose_records: Option<&[atlas_map::ImportedPurposeRecord]>,
     control: &IndexWorkControl,
     purpose_limits: PurposeImportLimits,
 ) -> Result<(), CliError> {
@@ -1097,11 +1116,27 @@ fn revalidate_staged_publication_inputs_controlled_with_limits(
         control,
     )
     .map_err(|source| source_inspection_error(&current_plan.root, source))?;
+    verify_source_nodes_match(&current_plan.root, &current_nodes, staged_nodes)?;
     if let Some(expected_fingerprint) = expected_purpose_import_fingerprint {
-        let current_snapshot = current_plan
-            .purpose_import_snapshot_controlled_with_limits(&current_nodes, control, purpose_limits)
-            .map_err(|source| publication_input_error(&plan.root, source))?;
-        if current_snapshot.fingerprint != expected_fingerprint {
+        let current_fingerprint = if let Some(records) = reusable_purpose_records {
+            current_plan
+                .purpose_import_fingerprint_for_records_controlled_with_limits(
+                    records,
+                    control,
+                    purpose_limits,
+                )
+                .map_err(|source| publication_input_error(&plan.root, source))?
+        } else {
+            current_plan
+                .purpose_import_snapshot_controlled_with_limits(
+                    &current_nodes,
+                    control,
+                    purpose_limits,
+                )
+                .map_err(|source| publication_input_error(&plan.root, source))?
+                .fingerprint
+        };
+        if current_fingerprint != expected_fingerprint {
             return Err(verification_incomplete(
                 &plan.root,
                 IndexVerificationReason::PublicationContractMismatch,
@@ -1112,7 +1147,6 @@ fn revalidate_staged_publication_inputs_controlled_with_limits(
             ));
         }
     }
-    verify_source_nodes_match(&current_plan.root, &current_nodes, staged_nodes)?;
     control.check(IndexWorkStage::Publication)?;
     Ok(())
 }
@@ -1531,38 +1565,90 @@ impl ScanRuntimePlan {
         let records = atlas_map::imported_purpose_records_from_nodes(config, nodes, &mut |path| {
             reader.read_text(path)
         })?;
-        let record_count = u64::try_from(records.len()).unwrap_or(u64::MAX);
-        if record_count > limits.records {
-            return Err(IndexWorkFailure::resource_limit(
-                IndexWorkStage::Publication,
-                IndexWorkResource::PurposeRecords,
-                limits.records,
-                record_count,
-            )
-            .into());
-        }
-        hash_publication_input_file_controlled(
+        let fingerprint = finish_purpose_import_fingerprint_controlled(
             &mut hasher,
-            "legacy_map",
-            &config.map_path,
+            config,
+            &records,
             &mut reader,
+            control,
+            limits,
         )?;
-        hash_publication_input_file_controlled(
-            &mut hasher,
-            "nonsource_purposes",
-            &config.nonsource_files_path,
-            &mut reader,
-        )?;
-        for record in &records {
-            control.check(IndexWorkStage::Publication)?;
-            hash_index_contract_value(&mut hasher, "purpose_path", &record.path);
-            hash_index_contract_value(&mut hasher, "purpose_summary", &record.summary);
-        }
         Ok(PurposeImportSnapshot {
             records,
-            fingerprint: hasher.finalize().to_hex().to_string(),
+            fingerprint,
         })
     }
+
+    /// Recheck external purpose inputs while reusing records from exact unchanged source nodes.
+    fn purpose_import_fingerprint_for_records_controlled_with_limits(
+        &self,
+        records: &[atlas_map::ImportedPurposeRecord],
+        control: &IndexWorkControl,
+        limits: PurposeImportLimits,
+    ) -> Result<String, CliError> {
+        control.check(IndexWorkStage::Publication)?;
+        let mut hasher = Hasher::new();
+        hash_index_contract_value(&mut hasher, "purpose_import_version", "2");
+        let Some(config) = self.config.as_ref() else {
+            hash_index_contract_value(&mut hasher, "selected_config", "absent");
+            return Ok(hasher.finalize().to_hex().to_string());
+        };
+        let selected_config_path = self.selected_config_path.as_deref().ok_or_else(|| {
+            CliError::InvalidInput(
+                "purpose import has normalized configuration without a selected config path"
+                    .to_string(),
+            )
+        })?;
+        let mut reader = PurposeInputReader::new(self, control, limits);
+        hash_publication_input_file_controlled(
+            &mut hasher,
+            "selected_config",
+            selected_config_path,
+            &mut reader,
+        )?;
+        finish_purpose_import_fingerprint_controlled(
+            &mut hasher,
+            config,
+            records,
+            &mut reader,
+            control,
+            limits,
+        )
+    }
+}
+
+/// Finish one purpose-import fingerprint from already normalized source records.
+fn finish_purpose_import_fingerprint_controlled(
+    hasher: &mut Hasher,
+    config: &atlas_map::AtlasMapConfig,
+    records: &[atlas_map::ImportedPurposeRecord],
+    reader: &mut PurposeInputReader<'_>,
+    control: &IndexWorkControl,
+    limits: PurposeImportLimits,
+) -> Result<String, CliError> {
+    let record_count = u64::try_from(records.len()).unwrap_or(u64::MAX);
+    if record_count > limits.records {
+        return Err(IndexWorkFailure::resource_limit(
+            IndexWorkStage::Publication,
+            IndexWorkResource::PurposeRecords,
+            limits.records,
+            record_count,
+        )
+        .into());
+    }
+    hash_publication_input_file_controlled(hasher, "legacy_map", &config.map_path, reader)?;
+    hash_publication_input_file_controlled(
+        hasher,
+        "nonsource_purposes",
+        &config.nonsource_files_path,
+        reader,
+    )?;
+    for record in records {
+        control.check(IndexWorkStage::Publication)?;
+        hash_index_contract_value(hasher, "purpose_path", &record.path);
+        hash_index_contract_value(hasher, "purpose_summary", &record.summary);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 /// Resolve the exact config file selected for a scan plan without loading it.
@@ -2159,6 +2245,7 @@ fn stage_full_index_publication(
     )?;
     let graph = graph_projection::stage_full_repository_graph(
         store,
+        &plan.root,
         base_generation,
         &nodes,
         &symbols,
@@ -2170,6 +2257,7 @@ fn stage_full_index_publication(
         &text.rows,
         Some(&symbols),
         &protected_purpose_paths,
+        symbol_options.effective_workers(),
         control,
     )?;
     enforce_publication_staging_budget(
@@ -2466,13 +2554,10 @@ pub(crate) fn run_scan_pipeline_controlled(
     let bounded_control = bounded_index_work_control(control);
     let control = &bounded_control;
     let batch = stage_full_index_publication(store, plan, symbol_options, false, true, control)?;
-    revalidate_staged_publication_inputs_controlled(
+    revalidate_staged_publication_inputs_with_purpose_snapshot(
         plan,
         batch.nodes.expected_nodes(),
-        batch
-            .purpose_import
-            .as_ref()
-            .map(|snapshot| snapshot.fingerprint.as_str()),
+        batch.purpose_import.as_ref(),
         control,
     )?;
     let outcome = publish_index_batch(store, batch, control)?;
@@ -2537,6 +2622,7 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
     )?;
     let graph = graph_projection::stage_full_repository_graph(
         store,
+        &plan.root,
         base_generation,
         &nodes,
         &staged,
@@ -3938,6 +4024,25 @@ struct StructuralSummaryStage {
     retained_bytes: u64,
 }
 
+/// One file's closed structural-summary derivation.
+#[derive(Default)]
+struct StructuralSummaryDerivation {
+    /// Optional persistence mutation for this file.
+    change: Option<StructuralSummaryChange>,
+    /// Observed summaries derived or reused.
+    summarized: usize,
+    /// Existing observed summaries cleared.
+    cleared: usize,
+    /// Files cleared because they exceeded the parser limit.
+    too_large: usize,
+    /// Files cleared because their content was not valid text.
+    binary_or_non_utf8: usize,
+    /// Unapproved purpose suggestions derived from observed summaries.
+    purpose_suggestions: usize,
+    /// String bytes retained until publication.
+    retained_bytes: u64,
+}
+
 /// One closed structural-summary projection mutation.
 enum StructuralSummaryChange {
     /// Replace one observed summary and optional unreviewed purpose suggestion.
@@ -4706,7 +4811,7 @@ impl SymbolPublicationLimits {
     const STANDARD: Self = Self {
         symbol_rows: 2_000_000,
         relation_rows: 8_000_000,
-        output_bytes: 512 * 1024 * 1024,
+        output_bytes: MAX_PUBLICATION_STAGING_BYTES,
     };
 }
 
@@ -4755,6 +4860,8 @@ pub(crate) struct SymbolParseSuccess {
     source_parser: ParserKind,
     /// Observed one-line source summary.
     summary: String,
+    /// Whether the existing parser worker derived the summary through the structural adapter.
+    summary_is_structural: bool,
     /// Optional generated purpose suggestion.
     purpose_suggestion: Option<String>,
 }
@@ -5328,7 +5435,14 @@ fn parse_admitted_symbol_job(
             Err(failure) => return SymbolParseOutcome::IndexWork(failure),
         };
     let source_parser = source_parser.unwrap_or(graph.parser);
-    let summary = summarize_symbol_graph(&graph, job.fallback_summary.as_deref());
+    let structural_summary = graph
+        .symbols
+        .is_empty()
+        .then(|| structural_summary_for_path(&job.path, job.language.as_deref(), content));
+    let structural_summary = structural_summary.flatten();
+    let summary_is_structural = structural_summary.is_some();
+    let summary = structural_summary
+        .unwrap_or_else(|| summarize_symbol_graph(&graph, job.fallback_summary.as_deref()));
     let purpose_suggestion = job
         .purpose_needs_suggestion
         .then(|| suggest_file_purpose(&job.path, &summary));
@@ -5337,6 +5451,7 @@ fn parse_admitted_symbol_job(
         graph,
         source_parser,
         summary,
+        summary_is_structural,
         purpose_suggestion,
     })
 }
@@ -6030,6 +6145,7 @@ where
 {
     match run_notify(store) {
         Ok(report) => Ok(report),
+        Err(error @ CliError::RefreshRequired(_)) => Err(error),
         Err(error) => run_polling_watch_loop(
             store,
             plan,
@@ -6423,6 +6539,13 @@ pub(crate) fn refresh_index_controlled(
     let bounded_control = bounded_index_work_control(control);
     let control = &bounded_control;
     let reuse_unchanged_symbols = publication_contract_matches(store, plan)?;
+    if reuse_unchanged_symbols
+        && detect_index_freshness_controlled(store, plan, ScanLimits::default(), control)?
+            .delta
+            .is_none()
+    {
+        return Ok(empty_index_refresh_report(plan.text_options));
+    }
     let batch = stage_full_index_publication(
         store,
         plan,
@@ -6687,6 +6810,7 @@ pub(crate) fn refresh_index_for_changes_controlled(
         &text.rows,
         Some(&symbols),
         &protected_purpose_paths,
+        symbol_options.effective_workers(),
         control,
     )?;
     enforce_publication_staging_budget(
@@ -6776,6 +6900,7 @@ fn refresh_structural_summaries_for_nodes_controlled(
         text_rows,
         None,
         &HashSet::new(),
+        2,
         control,
     )?;
     apply_structural_summary_stage(store, &staged, control)?;
@@ -6789,22 +6914,26 @@ fn stage_structural_summaries_for_nodes_controlled(
     text_rows: &[TextIndexRow],
     symbols: Option<&SymbolBuildStage>,
     protected_purpose_paths: &HashSet<String>,
+    max_workers: usize,
     control: &IndexWorkControl,
 ) -> Result<StructuralSummaryStage, CliError> {
     control.check(IndexWorkStage::TextIndex)?;
-    let paths = nodes
+    let candidates = nodes
         .iter()
         .filter(|node| node.kind == NodeKind::File)
         .filter(|node| is_structural_summary_candidate(&node.path, node.language.as_deref()))
-        .map(|node| node.path.clone())
         .collect::<Vec<_>>();
-    if paths.is_empty() {
+    if candidates.is_empty() {
         return Ok(StructuralSummaryStage {
             report: StructuralSummaryReport::default(),
             changes: Vec::new(),
             retained_bytes: 0,
         });
     }
+    let paths = candidates
+        .iter()
+        .map(|node| node.path.clone())
+        .collect::<Vec<_>>();
     let indexed_nodes = store
         .load_nodes_by_paths(&paths)?
         .into_iter()
@@ -6821,12 +6950,17 @@ fn stage_structural_summaries_for_nodes_controlled(
         .collect::<HashMap<_, _>>();
     let mut staged_symbol_counts = HashMap::new();
     let mut staged_symbol_summaries = HashMap::new();
+    let mut staged_structural_summaries = HashMap::new();
     if let Some(symbols) = symbols {
         for change in &symbols.changes {
             match change {
                 SymbolProjectionChange::Parsed(parsed) => {
                     staged_symbol_counts.insert(parsed.path.as_str(), parsed.graph.symbols.len());
                     staged_symbol_summaries.insert(parsed.path.as_str(), parsed.summary.as_str());
+                    if parsed.summary_is_structural {
+                        staged_structural_summaries
+                            .insert(parsed.path.as_str(), parsed.purpose_suggestion.is_some());
+                    }
                 }
                 SymbolProjectionChange::Clear { path, .. } => {
                     staged_symbol_counts.insert(path.as_str(), 0);
@@ -6838,92 +6972,129 @@ fn stage_structural_summaries_for_nodes_controlled(
         candidates: paths.len(),
         ..StructuralSummaryReport::default()
     };
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(max_workers.clamp(1, INDEX_WORKER_SAFE_CEILING))
+        .build()
+        .map_err(|source| {
+            CliError::InvalidInput(format!("structural summary worker pool failed: {source}"))
+        })?;
+    let derivations = pool.install(|| {
+        candidates
+            .par_iter()
+            .map(|node| -> Result<StructuralSummaryDerivation, CliError> {
+                control.check(IndexWorkStage::TextIndex)?;
+                let existing = indexed_nodes.get(&node.path);
+                if reason_by_path.get(node.path.as_str()) == Some(&TextIndexSkipReason::TooLarge)
+                    || node
+                        .size_bytes
+                        .is_some_and(|size_bytes| size_bytes > MAX_SYMBOL_FILE_BYTES)
+                {
+                    return Ok(StructuralSummaryDerivation {
+                        change: Some(StructuralSummaryChange::Clear {
+                            path: node.path.clone(),
+                        }),
+                        cleared: 1,
+                        too_large: 1,
+                        retained_bytes: node.path.len() as u64,
+                        ..StructuralSummaryDerivation::default()
+                    });
+                }
+                let Some(text) = text_by_path.get(node.path.as_str()) else {
+                    return Ok(StructuralSummaryDerivation {
+                        change: Some(StructuralSummaryChange::Clear {
+                            path: node.path.clone(),
+                        }),
+                        cleared: 1,
+                        binary_or_non_utf8: usize::from(
+                            reason_by_path.get(node.path.as_str())
+                                == Some(&TextIndexSkipReason::BinaryOrNonUtf8),
+                        ),
+                        retained_bytes: node.path.len() as u64,
+                        ..StructuralSummaryDerivation::default()
+                    });
+                };
+                if let Some(purpose_suggested) = staged_structural_summaries.get(node.path.as_str())
+                {
+                    return Ok(StructuralSummaryDerivation {
+                        summarized: 1,
+                        purpose_suggestions: usize::from(*purpose_suggested),
+                        ..StructuralSummaryDerivation::default()
+                    });
+                }
+                let symbol_count = staged_symbol_counts
+                    .get(node.path.as_str())
+                    .copied()
+                    .or_else(|| symbol_counts.get(node.path.as_str()).copied())
+                    .unwrap_or_default();
+                let effective_summary = staged_symbol_summaries
+                    .get(node.path.as_str())
+                    .copied()
+                    .or_else(|| existing.and_then(|indexed| indexed.summary.as_deref()));
+                if symbol_count > 0
+                    && effective_summary.is_some_and(|summary| {
+                        !summary.trim().is_empty() && !is_scanner_fallback_summary(summary)
+                    })
+                {
+                    return Ok(StructuralSummaryDerivation::default());
+                }
+                let Some(summary) = structural_summary_for_path(
+                    &node.path,
+                    node.language.as_deref(),
+                    &text.content,
+                ) else {
+                    return Ok(StructuralSummaryDerivation {
+                        change: Some(StructuralSummaryChange::Clear {
+                            path: node.path.clone(),
+                        }),
+                        cleared: 1,
+                        retained_bytes: node.path.len() as u64,
+                        ..StructuralSummaryDerivation::default()
+                    });
+                };
+                let purpose_needs_suggestion = !protected_purpose_paths.contains(&node.path)
+                    && existing.is_none_or(|indexed| {
+                        matches!(
+                            indexed.purpose.status,
+                            PurposeStatus::Missing | PurposeStatus::Suggested
+                        )
+                    });
+                let purpose_suggestion =
+                    purpose_needs_suggestion.then(|| suggest_file_purpose(&node.path, &summary));
+                let purpose_suggestions = usize::from(purpose_suggestion.is_some());
+                let retained_bytes = (node.path.len() as u64)
+                    .saturating_add(summary.len() as u64)
+                    .saturating_add(
+                        purpose_suggestion
+                            .as_ref()
+                            .map_or(0, |suggestion| suggestion.len() as u64),
+                    );
+                control.check(IndexWorkStage::TextIndex)?;
+                Ok(StructuralSummaryDerivation {
+                    change: Some(StructuralSummaryChange::Set {
+                        path: node.path.clone(),
+                        summary,
+                        purpose_suggestion,
+                    }),
+                    summarized: 1,
+                    purpose_suggestions,
+                    retained_bytes,
+                    ..StructuralSummaryDerivation::default()
+                })
+            })
+            .collect::<Result<Vec<_>, CliError>>()
+    })?;
     let mut changes = Vec::new();
     let mut retained_bytes = 0_u64;
-    for node in nodes
-        .iter()
-        .filter(|node| node.kind == NodeKind::File)
-        .filter(|node| is_structural_summary_candidate(&node.path, node.language.as_deref()))
-    {
-        control.check(IndexWorkStage::TextIndex)?;
-        let existing = indexed_nodes.get(&node.path);
-        if reason_by_path.get(node.path.as_str()) == Some(&TextIndexSkipReason::TooLarge)
-            || node
-                .size_bytes
-                .is_some_and(|size_bytes| size_bytes > MAX_SYMBOL_FILE_BYTES)
-        {
-            retained_bytes = retained_bytes.saturating_add(node.path.len() as u64);
-            changes.push(StructuralSummaryChange::Clear {
-                path: node.path.clone(),
-            });
-            report.cleared += 1;
-            report.too_large += 1;
-            continue;
+    for derivation in derivations {
+        report.summarized += derivation.summarized;
+        report.cleared += derivation.cleared;
+        report.too_large += derivation.too_large;
+        report.binary_or_non_utf8 += derivation.binary_or_non_utf8;
+        report.purpose_suggestions += derivation.purpose_suggestions;
+        retained_bytes = retained_bytes.saturating_add(derivation.retained_bytes);
+        if let Some(change) = derivation.change {
+            changes.push(change);
         }
-        let Some(text) = text_by_path.get(node.path.as_str()) else {
-            retained_bytes = retained_bytes.saturating_add(node.path.len() as u64);
-            changes.push(StructuralSummaryChange::Clear {
-                path: node.path.clone(),
-            });
-            report.cleared += 1;
-            if reason_by_path.get(node.path.as_str()) == Some(&TextIndexSkipReason::BinaryOrNonUtf8)
-            {
-                report.binary_or_non_utf8 += 1;
-            }
-            continue;
-        };
-        let symbol_count = staged_symbol_counts
-            .get(node.path.as_str())
-            .copied()
-            .or_else(|| symbol_counts.get(node.path.as_str()).copied())
-            .unwrap_or_default();
-        let effective_summary = staged_symbol_summaries
-            .get(node.path.as_str())
-            .copied()
-            .or_else(|| existing.and_then(|indexed| indexed.summary.as_deref()));
-        if symbol_count > 0
-            && effective_summary.is_some_and(|summary| {
-                !summary.trim().is_empty() && !is_scanner_fallback_summary(summary)
-            })
-        {
-            continue;
-        }
-        let Some(summary) =
-            structural_summary_for_path(&node.path, node.language.as_deref(), &text.content)
-        else {
-            retained_bytes = retained_bytes.saturating_add(node.path.len() as u64);
-            changes.push(StructuralSummaryChange::Clear {
-                path: node.path.clone(),
-            });
-            report.cleared += 1;
-            continue;
-        };
-        report.summarized += 1;
-        let purpose_needs_suggestion = !protected_purpose_paths.contains(&node.path)
-            && existing.is_none_or(|indexed| {
-                matches!(
-                    indexed.purpose.status,
-                    PurposeStatus::Missing | PurposeStatus::Suggested
-                )
-            });
-        let purpose_suggestion =
-            purpose_needs_suggestion.then(|| suggest_file_purpose(&node.path, &summary));
-        if purpose_suggestion.is_some() {
-            report.purpose_suggestions += 1;
-        }
-        retained_bytes = retained_bytes
-            .saturating_add(node.path.len() as u64)
-            .saturating_add(summary.len() as u64)
-            .saturating_add(
-                purpose_suggestion
-                    .as_ref()
-                    .map_or(0, |suggestion| suggestion.len() as u64),
-            );
-        changes.push(StructuralSummaryChange::Set {
-            path: node.path.clone(),
-            summary,
-            purpose_suggestion,
-        });
     }
     Ok(StructuralSummaryStage {
         report,
@@ -7846,6 +8017,125 @@ mod tests {
     }
 
     #[test]
+    fn parser_workers_reuse_structural_summaries_without_touching_approved_purpose()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("package.json");
+        let content =
+            r#"{"name":"demo","scripts":{"test":"vitest"},"dependencies":{"react":"1.0.0"}}"#;
+        fs::write(&path, content)?;
+        let node = Node {
+            path: "package.json".to_string(),
+            kind: NodeKind::File,
+            parent_path: None,
+            extension: Some(".json".to_string()),
+            language: Some("json".to_string()),
+            size_bytes: Some(content.len() as u64),
+            mtime_ns: Some(1),
+            content_hash: Some(blake3::hash(content.as_bytes()).to_hex().to_string()),
+        };
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(std::slice::from_ref(&node))?;
+        store.set_purpose(
+            "package.json",
+            "Own the JavaScript package manifest.",
+            PurposeSource::Agent,
+        )?;
+        let text = refresh_text_index_for_nodes_with_rows(
+            &mut store,
+            temp.path(),
+            std::slice::from_ref(&node),
+            TextIndexOptions::new(1_024),
+        )?;
+        let SymbolParseOutcome::Parsed(parsed) = parse_symbol_job(
+            &SymbolParseJob {
+                path: node.path.clone(),
+                native_path: path,
+                expected_content_hash: node
+                    .content_hash
+                    .clone()
+                    .ok_or_else(|| io::Error::other("fixture hash missing"))?,
+                language: node.language.clone(),
+                fallback_summary: None,
+                purpose_needs_suggestion: false,
+            },
+            &SymbolBuildOptions::new(1_024, Some(1), None),
+            Instant::now(),
+        ) else {
+            return Err(io::Error::other("package manifest did not parse").into());
+        };
+        require_eq(
+            &parsed.summary_is_structural,
+            &true,
+            "parser-owned structural summary",
+        )?;
+        require_eq(
+            &parsed.summary.as_str(),
+            &"package manifest for demo with scripts test and 1 dependencies.",
+            "structural content summary",
+        )?;
+        require_eq(
+            &parsed.purpose_suggestion.is_none(),
+            &true,
+            "approved-purpose suggestion suppression",
+        )?;
+        let retained_bytes = symbol_parse_output_bytes(&parsed);
+        let symbols = SymbolBuildStage {
+            report: empty_symbol_build_report(),
+            changes: vec![SymbolProjectionChange::Parsed(parsed)],
+            retained_bytes,
+        };
+        let protected_purpose_paths = HashSet::from(["package.json".to_string()]);
+        let control = standalone_index_work_control();
+        let structural = stage_structural_summaries_for_nodes_controlled(
+            &store,
+            std::slice::from_ref(&node),
+            &text.rows,
+            Some(&symbols),
+            &protected_purpose_paths,
+            1,
+            &control,
+        )?;
+        require_eq(
+            &structural.report.summarized,
+            &1,
+            "structural summary report",
+        )?;
+        require_eq(
+            &structural.report.purpose_suggestions,
+            &0,
+            "structural purpose-suggestion report",
+        )?;
+        require_eq(
+            &structural.changes.is_empty(),
+            &true,
+            "duplicate structural mutations",
+        )?;
+
+        apply_symbol_build_stage(&mut store, &symbols, &control)?;
+        apply_structural_summary_stage(&mut store, &structural, &control)?;
+        let indexed = store
+            .load_node_by_path("package.json")?
+            .ok_or_else(|| io::Error::other("indexed package manifest missing"))?;
+        require_eq(
+            &indexed.summary.as_deref(),
+            &Some("package manifest for demo with scripts test and 1 dependencies."),
+            "persisted structural content summary",
+        )?;
+        require_eq(
+            &indexed.purpose.purpose.as_deref(),
+            &Some("Own the JavaScript package manifest."),
+            "approved purpose text",
+        )?;
+        require_eq(
+            &indexed.purpose.status,
+            &PurposeStatus::Approved,
+            "approved purpose status",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn symbol_build_clamps_file_bytes_and_bounds_all_published_output() -> Result<(), Box<dyn Error>>
     {
         let temp = tempfile::tempdir()?;
@@ -8698,10 +8988,10 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             &import_map_path,
             "folders[1]:\n  .,Changed imported repository purpose\n",
         )?;
-        let import_result = revalidate_staged_publication_inputs_controlled(
+        let import_result = revalidate_staged_publication_inputs_with_purpose_snapshot(
             &import_plan,
             staged_import_batch.nodes.expected_nodes(),
-            Some(&staged_purpose_import.fingerprint),
+            Some(staged_purpose_import),
             &import_control,
         );
         let Err(CliError::VerificationIncomplete(details)) = import_result else {
@@ -9098,6 +9388,46 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             "no-op summary candidates",
         )?;
         require_eq(&report.symbols.candidates, &0, "no-op symbol candidates")?;
+        Ok(())
+    }
+
+    #[test]
+    fn watcher_preserves_explicit_full_refresh_guidance() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        fs::write(temp.path().join("source.rs"), "pub fn source() {}\n")?;
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1_024))?;
+        let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let database = temp.path().join(".projectatlas/projectatlas.db");
+        let mut store = open_atlas_store_for_project(&database, &plan.root)?;
+        refresh_index(&mut store, &plan, &symbol_options)?;
+        let before = store.index_publication()?;
+
+        let error =
+            run_watch_with_polling_fallback(&mut store, &plan, 0, 1, &symbol_options, |_| {
+                Err(CliError::RefreshRequired(Box::new(
+                    index_policy_refresh_required(&plan.root),
+                )))
+            })
+            .err()
+            .ok_or_else(|| {
+                io::Error::other("full-refresh guidance was hidden by polling fallback")
+            })?;
+        let CliError::RefreshRequired(report) = error else {
+            return Err(io::Error::other(format!(
+                "unexpected watcher error after full-refresh guidance: {error:?}"
+            ))
+            .into());
+        };
+        require_eq(
+            &report.scope,
+            &IndexRefreshScope::Full,
+            "watcher full-refresh scope",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &before,
+            "watcher generation after full-refresh guidance",
+        )?;
         Ok(())
     }
 

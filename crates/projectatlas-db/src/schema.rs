@@ -16,7 +16,7 @@ use projectatlas_core::normalize_native_path_display;
 use std::path::PathBuf;
 
 /// Current `SQLite` schema version supported by this crate.
-pub(crate) const SCHEMA_VERSION: i64 = 15;
+pub(crate) const SCHEMA_VERSION: i64 = 16;
 /// Released 0.3.26 schema accepted by the migration inventory.
 pub(crate) const PREVIOUS_SCHEMA_VERSION: i64 = 8;
 /// First internal schema with explicit publication invalidation.
@@ -30,7 +30,9 @@ const RESOLUTION_SCHEMA_VERSION: i64 = 12;
 /// First schema with separate source-parser and fact-provider provenance.
 const PARSER_PROVENANCE_SCHEMA_VERSION: i64 = 13;
 /// First schema with bounded coverage-discovery access paths.
-const COVERAGE_DISCOVERY_SCHEMA_VERSION: i64 = 14;
+pub(crate) const COVERAGE_DISCOVERY_SCHEMA_VERSION: i64 = 14;
+/// First schema with the rebuildable lexical candidate accelerator.
+const LEXICAL_SCHEMA_VERSION: i64 = 15;
 /// Metadata key for the durable schema version.
 pub(crate) const SCHEMA_VERSION_KEY: &str = "schema_version";
 /// Metadata key for the owning project root.
@@ -112,8 +114,13 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         from: COVERAGE_DISCOVERY_SCHEMA_VERSION,
-        to: SCHEMA_VERSION,
+        to: LEXICAL_SCHEMA_VERSION,
         apply: migrate_14_to_15,
+    },
+    Migration {
+        from: LEXICAL_SCHEMA_VERSION,
+        to: SCHEMA_VERSION,
+        apply: migrate_15_to_16,
     },
 ];
 
@@ -386,6 +393,12 @@ const FILE_TEXT_FTS_SCHEMA_SQL: &str = "
     );
 ";
 
+/// Covering access path for bounded import-alias discovery.
+const SYMBOL_RELATION_LOOKUP_SCHEMA_SQL: &str = "
+    CREATE INDEX IF NOT EXISTS idx_symbol_import_alias_lookup
+        ON symbol_relations(kind, path, line, source_name, target_name);
+";
+
 /// Separate file-level parse provenance from the parser provenance of derived facts.
 const SOURCE_PARSE_PROVENANCE_SCHEMA_SQL: &str = "
     ALTER TABLE source_parse_metadata RENAME TO source_parse_metadata_legacy;
@@ -474,7 +487,7 @@ const GRAPH_SCHEMA_SQL: &str = "
             CHECK(typeof(entity_key) = 'blob' AND length(entity_key) = 32),
         project_instance_id BLOB NOT NULL
             CHECK(typeof(project_instance_id) = 'blob' AND length(project_instance_id) = 16),
-        canonical_identity TEXT NOT NULL UNIQUE
+        canonical_identity TEXT NOT NULL
             CHECK(typeof(canonical_identity) = 'text' AND length(canonical_identity) > 0),
         entity_kind TEXT NOT NULL
             CHECK(entity_kind IN ('project', 'folder', 'file', 'package', 'symbol', 'external')),
@@ -540,7 +553,7 @@ const GRAPH_SCHEMA_SQL: &str = "
             CHECK(typeof(relation_key) = 'blob' AND length(relation_key) = 32),
         project_instance_id BLOB NOT NULL
             CHECK(typeof(project_instance_id) = 'blob' AND length(project_instance_id) = 16),
-        canonical_identity TEXT NOT NULL UNIQUE
+        canonical_identity TEXT NOT NULL
             CHECK(typeof(canonical_identity) = 'text' AND length(canonical_identity) > 0),
         source_entity_key BLOB NOT NULL
             CHECK(typeof(source_entity_key) = 'blob' AND length(source_entity_key) = 32),
@@ -641,7 +654,7 @@ const GRAPH_SCHEMA_SQL: &str = "
     );
 
     CREATE INDEX idx_graph_entities_path
-        ON graph_entities(repository_path, entity_kind, canonical_identity, entity_key);
+        ON graph_entities(repository_path, entity_kind, entity_key);
     CREATE INDEX idx_graph_entities_package
         ON graph_entities(package_manager, package_name, manifest_path, entity_key);
     CREATE INDEX idx_graph_entities_manifest_path
@@ -651,11 +664,11 @@ const GRAPH_SCHEMA_SQL: &str = "
     CREATE INDEX idx_graph_entities_external
         ON graph_entities(external_system, external_identity, entity_key);
     CREATE INDEX idx_graph_relations_source_kind
-        ON graph_relations(source_entity_key, relation_scope, relation_kind, canonical_identity, relation_key);
+        ON graph_relations(source_entity_key, relation_scope, relation_kind, relation_key);
     CREATE INDEX idx_graph_relations_target_kind
-        ON graph_relations(target_entity_key, relation_scope, relation_kind, canonical_identity, relation_key);
+        ON graph_relations(target_entity_key, relation_scope, relation_kind, relation_key);
     CREATE INDEX idx_graph_relations_kind_order
-        ON graph_relations(relation_scope, relation_kind, canonical_identity, relation_key);
+        ON graph_relations(relation_scope, relation_kind, relation_key);
     CREATE INDEX idx_graph_relations_kind_resolution
         ON graph_relations(relation_scope, relation_kind, resolution_status, relation_key);
     CREATE INDEX idx_graph_occurrences_file_span
@@ -678,12 +691,16 @@ const GRAPH_SCHEMA_SQL: &str = "
         ON graph_coverage(relation_scope, relation_kind, state, id);
 ";
 
-/// Lookup indexes owned by bounded project-wide coverage discovery.
-const COVERAGE_DISCOVERY_SCHEMA_SQL: &str = "
+/// Parser lookup indexes owned by bounded project-wide coverage discovery.
+const COVERAGE_DISCOVERY_SOURCE_SCHEMA_SQL: &str = "
     CREATE INDEX idx_source_parse_metadata_source_parser_path
         ON source_parse_metadata(source_parser, path);
     CREATE INDEX idx_source_parse_metadata_fact_parser_path
         ON source_parse_metadata(fact_parser, path);
+";
+
+/// Graph lookup indexes owned by bounded project-wide coverage discovery.
+const COVERAGE_DISCOVERY_GRAPH_SCHEMA_SQL: &str = "
     CREATE INDEX idx_graph_coverage_discovery_state
         ON graph_coverage(state, scope_path, id);
     CREATE INDEX idx_graph_coverage_discovery_reason
@@ -1397,7 +1414,8 @@ fn schema_state(connection: &Connection) -> DbResult<SchemaState> {
         | TELEMETRY_SCHEMA_VERSION
         | RESOLUTION_SCHEMA_VERSION
         | PARSER_PROVENANCE_SCHEMA_VERSION
-        | COVERAGE_DISCOVERY_SCHEMA_VERSION => Ok(SchemaState::UpgradeRequired),
+        | COVERAGE_DISCOVERY_SCHEMA_VERSION
+        | LEXICAL_SCHEMA_VERSION => Ok(SchemaState::UpgradeRequired),
         _ => Err(DbError::SchemaVersion {
             found,
             expected: SCHEMA_VERSION,
@@ -1410,11 +1428,12 @@ fn create_fresh(connection: &Connection, expected_root: Option<&str>) -> DbResul
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
     connection.execute_batch(GRAPH_SCHEMA_SQL)?;
-    connection.execute_batch(COVERAGE_DISCOVERY_SCHEMA_SQL)?;
+    create_coverage_discovery_schema(connection)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
     connection.execute_batch(FILE_TEXT_FTS_SCHEMA_SQL)?;
+    connection.execute_batch(SYMBOL_RELATION_LOOKUP_SCHEMA_SQL)?;
     set_metadata(connection, FILE_TEXT_FTS_SOURCE_REVISION_KEY, "0")?;
     set_metadata(connection, FILE_TEXT_FTS_PROJECTION_REVISION_KEY, "0")?;
     crate::telemetry::initialize_empty_storage(connection)?;
@@ -1485,10 +1504,16 @@ fn migrate_12_to_13(connection: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Create both bounded coverage-discovery lookup families.
+fn create_coverage_discovery_schema(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(COVERAGE_DISCOVERY_SOURCE_SCHEMA_SQL)?;
+    connection.execute_batch(COVERAGE_DISCOVERY_GRAPH_SCHEMA_SQL)?;
+    Ok(())
+}
+
 /// Add the indexed filter paths used by bounded coverage discovery.
 fn migrate_13_to_14(connection: &Connection) -> DbResult<()> {
-    connection.execute_batch(COVERAGE_DISCOVERY_SCHEMA_SQL)?;
-    Ok(())
+    create_coverage_discovery_schema(connection)
 }
 
 /// Add and backfill the rebuildable lexical candidate accelerator.
@@ -1501,6 +1526,41 @@ fn migrate_14_to_15(connection: &Connection) -> DbResult<()> {
     set_metadata(connection, FILE_TEXT_FTS_SOURCE_REVISION_KEY, "0")?;
     set_metadata(connection, FILE_TEXT_FTS_PROJECTION_REVISION_KEY, "0")?;
     Ok(())
+}
+
+/// Recreate disposable graph projections with compact stable-key ordering.
+fn migrate_15_to_16(connection: &Connection) -> DbResult<()> {
+    let project_identity = connection
+        .query_row(
+            "SELECT project_instance_id FROM project_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()?;
+    connection.execute_batch(
+        "
+        DROP TABLE graph_relation_dependencies;
+        DROP TABLE graph_entity_exports;
+        DROP TABLE graph_resolution_keys;
+        DROP TABLE graph_relation_occurrences;
+        DROP TABLE graph_coverage;
+        DROP TABLE graph_relations;
+        DROP TABLE graph_entities;
+        DROP TABLE project_identity;
+        ",
+    )?;
+    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    if let Some(project_identity) = project_identity {
+        connection.execute(
+            "INSERT INTO project_identity(singleton, project_instance_id, active_generation)
+             VALUES(1, ?1, 0)",
+            [project_identity],
+        )?;
+    }
+    connection.execute_batch(COVERAGE_DISCOVERY_GRAPH_SCHEMA_SQL)?;
+    connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
+    connection.execute_batch(SYMBOL_RELATION_LOOKUP_SCHEMA_SQL)?;
+    invalidate_derived_publication(connection)
 }
 
 /// Invalidate derived rows without deleting authored local state.
@@ -1536,6 +1596,11 @@ fn validate_integrity(connection: &Connection) -> DbResult<()> {
 
 /// Validate the exact tables, columns, constraints, and required indexes without repair DDL.
 fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResult<()> {
+    if state == SchemaState::UpgradeRequired
+        && stored_schema_version(connection)? == LEXICAL_SCHEMA_VERSION
+    {
+        return validate_disposable_graph_predecessor_shape(connection);
+    }
     let expected = match state {
         SchemaState::Current => schema_contract()?,
         SchemaState::UpgradeRequired => match stored_schema_version(connection)? {
@@ -1606,6 +1671,104 @@ fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResul
     Ok(())
 }
 
+/// Validate schema 15 exactly outside the disposable graph tables rebuilt by migration.
+fn validate_disposable_graph_predecessor_shape(connection: &Connection) -> DbResult<()> {
+    let expected = schema_contract()?;
+    let found = read_schema_contract(connection)?;
+    let expected_graph_tables = expected
+        .tables
+        .iter()
+        .filter(|table| table.name.starts_with("graph_"))
+        .map(|table| table.name.as_str())
+        .collect::<Vec<_>>();
+    let found_graph_tables = found
+        .tables
+        .iter()
+        .filter(|table| table.name.starts_with("graph_"))
+        .map(|table| table.name.as_str())
+        .collect::<Vec<_>>();
+    if expected_graph_tables != found_graph_tables {
+        return Err(schema_shape_error(
+            "disposable graph tables",
+            &expected_graph_tables,
+            &found_graph_tables,
+        ));
+    }
+    let expected_tables = expected
+        .tables
+        .iter()
+        .filter(|table| !table.name.starts_with("graph_"))
+        .collect::<Vec<_>>();
+    let found_tables = found
+        .tables
+        .iter()
+        .filter(|table| !table.name.starts_with("graph_"))
+        .collect::<Vec<_>>();
+    if expected_tables != found_tables {
+        return Err(schema_shape_error(
+            "non-graph tables",
+            &expected_tables,
+            &found_tables,
+        ));
+    }
+    let expected_foreign_keys = expected
+        .foreign_keys
+        .iter()
+        .filter(|foreign_key| !foreign_key.table.starts_with("graph_"))
+        .collect::<Vec<_>>();
+    let found_foreign_keys = found
+        .foreign_keys
+        .iter()
+        .filter(|foreign_key| !foreign_key.table.starts_with("graph_"))
+        .collect::<Vec<_>>();
+    if expected_foreign_keys != found_foreign_keys {
+        return Err(schema_shape_error(
+            "non-graph foreign_keys",
+            &expected_foreign_keys,
+            &found_foreign_keys,
+        ));
+    }
+    let expected_indexes = expected
+        .indexes
+        .iter()
+        .filter(|index| !index.table.starts_with("graph_"))
+        .collect::<Vec<_>>();
+    let found_indexes = found
+        .indexes
+        .iter()
+        .filter(|index| !index.table.starts_with("graph_"))
+        .collect::<Vec<_>>();
+    for required in &expected_indexes {
+        let Some(actual) = found_indexes
+            .iter()
+            .find(|index| index.name == required.name)
+        else {
+            return Err(DbError::SchemaShape {
+                object: required.name.clone(),
+                expected: format!("{required:?}"),
+                found: "missing".to_string(),
+            });
+        };
+        if actual != required {
+            return Err(schema_shape_error(&required.name, required, actual));
+        }
+    }
+    for extra in found_indexes.iter().filter(|index| {
+        !expected_indexes
+            .iter()
+            .any(|expected| expected.name == index.name)
+    }) {
+        if !is_compatible_extension_index(extra) {
+            return Err(DbError::SchemaShape {
+                object: extra.name.clone(),
+                expected: "optional non-unique full index over declared columns".to_string(),
+                found: format!("{extra:?}"),
+            });
+        }
+    }
+    validate_extension_objects(connection)
+}
+
 /// Return whether an extra index is a behavior-neutral lookup optimization.
 fn is_compatible_extension_index(index: &IndexContract) -> bool {
     index.origin == "c"
@@ -1628,11 +1791,12 @@ fn schema_contract() -> DbResult<&'static SchemaContract> {
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
     connection.execute_batch(GRAPH_SCHEMA_SQL)?;
-    connection.execute_batch(COVERAGE_DISCOVERY_SCHEMA_SQL)?;
+    create_coverage_discovery_schema(&connection)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
     connection.execute_batch(FILE_TEXT_FTS_SCHEMA_SQL)?;
+    connection.execute_batch(SYMBOL_RELATION_LOOKUP_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
     Ok(SCHEMA_CONTRACT.get_or_init(|| contract))
 }
@@ -1704,7 +1868,7 @@ fn coverage_discovery_predecessor_schema_contract() -> DbResult<&'static SchemaC
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
     connection.execute_batch(GRAPH_SCHEMA_SQL)?;
-    connection.execute_batch(COVERAGE_DISCOVERY_SCHEMA_SQL)?;
+    create_coverage_discovery_schema(&connection)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
@@ -2526,6 +2690,108 @@ mod tests {
     }
 
     #[test]
+    fn lexical_schema_upgrade_preserves_identity_and_authored_purpose_only()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        let project_identity = store.connection.query_row(
+            "SELECT project_instance_id FROM project_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
+        store.connection.execute_batch(
+            "
+            INSERT INTO nodes(id, path, kind) VALUES(1, 'src/lib.rs', 'file');
+            INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+                VALUES(1, 'Own the library.', 'agent', 'approved', 'agent');
+            INSERT INTO graph_entities(
+                entity_key, project_instance_id, canonical_identity, entity_kind, repository_path
+            ) SELECT zeroblob(32), project_instance_id, 'derived-file', 'file', 'src/lib.rs'
+                FROM project_identity WHERE singleton = 1;
+            UPDATE project_identity SET active_generation = 7 WHERE singleton = 1;
+            ",
+        )?;
+        set_metadata(
+            &store.connection,
+            SCHEMA_VERSION_KEY,
+            &LEXICAL_SCHEMA_VERSION.to_string(),
+        )?;
+        set_metadata(&store.connection, INDEX_PUBLICATION_STATE_KEY, "complete")?;
+        set_metadata(
+            &store.connection,
+            INDEX_PUBLICATION_FINGERPRINT_KEY,
+            "lexical-publication",
+        )?;
+        set_metadata(&store.connection, INDEX_PUBLICATION_GENERATION_KEY, "7")?;
+        drop(store);
+
+        let reopened = AtlasStore::open_for_project(&database, &root)?;
+        let migrated = reopened.connection.query_row(
+            "SELECT project_instance_id, active_generation FROM project_identity
+              WHERE singleton = 1",
+            [],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        if migrated != (project_identity, 0) {
+            return Err(io::Error::other(
+                "schema-15 migration changed project identity or retained graph generation",
+            )
+            .into());
+        }
+        let purpose = reopened.connection.query_row(
+            "SELECT purpose, source, status, updated_by FROM purposes WHERE node_id = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?;
+        if purpose
+            != (
+                "Own the library.".to_string(),
+                "agent".to_string(),
+                "approved".to_string(),
+                "agent".to_string(),
+            )
+        {
+            return Err(io::Error::other("schema-15 migration changed authored purpose").into());
+        }
+        let graph_rows =
+            reopened
+                .connection
+                .query_row("SELECT COUNT(*) FROM graph_entities", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        let publication_keys = reopened.connection.query_row(
+            "SELECT COUNT(*) FROM metadata WHERE key IN (?1, ?2, ?3)",
+            params![
+                INDEX_PUBLICATION_STATE_KEY,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                INDEX_PUBLICATION_GENERATION_KEY,
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if graph_rows != 0
+            || publication_keys != 0
+            || read_metadata(&reopened.connection, SCHEMA_VERSION_KEY)?
+                != Some(SCHEMA_VERSION.to_string())
+        {
+            return Err(io::Error::other(
+                "schema-15 migration retained disposable graph state or publication trust",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn resolution_schema_migrates_parser_provenance_without_weakening_existing_facts()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -2599,15 +2865,12 @@ mod tests {
             .into());
         }
         if read_metadata(&store.connection, SCHEMA_VERSION_KEY)? != Some(SCHEMA_VERSION.to_string())
-            || read_metadata(&store.connection, INDEX_PUBLICATION_STATE_KEY)?
-                != Some("complete".to_string())
-            || read_metadata(&store.connection, INDEX_PUBLICATION_FINGERPRINT_KEY)?
-                != Some("resolution-schema-publication".to_string())
-            || read_metadata(&store.connection, INDEX_PUBLICATION_GENERATION_KEY)?
-                != Some("4".to_string())
+            || read_metadata(&store.connection, INDEX_PUBLICATION_STATE_KEY)?.is_some()
+            || read_metadata(&store.connection, INDEX_PUBLICATION_FINGERPRINT_KEY)?.is_some()
+            || read_metadata(&store.connection, INDEX_PUBLICATION_GENERATION_KEY)?.is_some()
         {
             return Err(io::Error::other(
-                "parser-provenance migration changed valid publication metadata",
+                "parser-provenance migration did not invalidate rebuilt graph publication trust",
             )
             .into());
         }

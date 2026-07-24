@@ -7,8 +7,9 @@ use super::{
 use crate::derived_snapshot::{CapturedGraph, SnapshotBudget};
 use crate::project_identity::{
     load_graph_generation, load_project_identity, require_bound_project_identity,
-    set_graph_generation, verify_project_identity,
+    set_graph_generation, set_project_identity, verify_project_identity,
 };
+use crate::schema::PROJECT_ROOT_KEY;
 use projectatlas_core::graph::{
     CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
     CoverageState, EntityResolutionKey, EntitySelector, ExtendedRelationKind, ExternalSelector,
@@ -21,12 +22,30 @@ use projectatlas_core::symbols::{ParserKind, RelationKind, SymbolKind};
 use projectatlas_core::{
     IndexGeneration, IndexWorkControl, IndexWorkStage, NodeKind, RankedConnection,
     RankedConnectionCount, RankedConnectionDirection, RankedConnectionKind, RankedConnectionTarget,
+    normalize_native_path_display,
 };
 use rusqlite::types::Value;
-use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Row, Transaction, params, params_from_iter,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::Path;
+
+/// Disposable typed repository-graph writer used before main index publication.
+pub struct RepositoryGraphStagingGuard<'store> {
+    /// Transaction owning the staged graph rows.
+    transaction: Transaction<'store>,
+    /// Project identity accepted by every staged row.
+    project: ProjectInstanceId,
+    /// Generation that the main publication must consume.
+    generation: IndexGeneration,
+}
+
+/// Metadata key proving a database was created only as a disposable graph stage.
+const GRAPH_STAGING_MARKER_KEY: &str = "repository_graph_staging";
+/// Current disposable graph-staging marker value.
+const GRAPH_STAGING_MARKER_VALUE: &str = "v1";
 
 /// One bounded page of typed normalized graph rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -365,8 +384,6 @@ pub struct RepositoryGraphAdjacencyContinuation {
     relation_scope: String,
     /// Persisted relation family value of the last returned relation.
     relation_kind: String,
-    /// Canonical identity of the last returned relation.
-    canonical_identity: String,
     /// Stable compact key of the last returned relation.
     relation_key: [u8; 32],
 }
@@ -768,7 +785,7 @@ fn navigation_connection_branch(
                       LEFT JOIN graph_entities related
                         ON related.entity_key = r.target_entity_key
                      WHERE r.relation_scope = ? AND r.relation_kind = ?
-                     ORDER BY r.canonical_identity, r.relation_key
+                     ORDER BY r.relation_key
                      LIMIT ?
                 )"
         .to_string();
@@ -810,7 +827,7 @@ fn navigation_connection_branch(
               WHERE r.{relation_key} IN ({owned})
                 {exclude_internal}
                 AND r.relation_scope = ? AND r.relation_kind = ?
-              ORDER BY r.canonical_identity, r.relation_key
+              ORDER BY r.relation_key
               LIMIT ?
          )"
     )
@@ -1360,7 +1377,7 @@ impl AtlasStore {
                             external_system, external_identity
                        FROM graph_entities
                       WHERE project_instance_id = ?1 AND repository_path = ?2
-                      ORDER BY entity_kind, canonical_identity, entity_key
+                      ORDER BY entity_kind, entity_key
                       LIMIT ?3",
                 )?;
                 collect_entity_rows_metered(
@@ -1753,7 +1770,7 @@ impl AtlasStore {
                            FROM graph_relations
                           WHERE project_instance_id = ?1
                             AND relation_scope = ?2 AND relation_kind = ?3
-                          ORDER BY canonical_identity, relation_key
+                          ORDER BY relation_key
                           LIMIT ?4",
                         )?;
                         collect_relation_rows(statement.query(params![
@@ -2062,7 +2079,7 @@ impl AtlasStore {
 
         let bindings_per_frontier = if relation.is_some() { 4 } else { 2 };
         let mut bindings = Vec::with_capacity(
-            active_frontier * bindings_per_frontier + continuation.map_or(2, |_| 6),
+            active_frontier * bindings_per_frontier + continuation.map_or(2, |_| 5),
         );
         bindings.push(Value::Blob(project.as_bytes().to_vec()));
         for (index, digest) in frontier_digests.iter().enumerate().skip(continuation_index) {
@@ -2077,7 +2094,6 @@ impl AtlasStore {
             {
                 bindings.push(Value::Text(continuation.relation_scope.clone()));
                 bindings.push(Value::Text(continuation.relation_kind.clone()));
-                bindings.push(Value::Text(continuation.canonical_identity.clone()));
                 bindings.push(Value::Blob(continuation.relation_key.to_vec()));
             }
             bindings.push(Value::Integer(limit_plus_one));
@@ -2117,7 +2133,6 @@ impl AtlasStore {
                 frontier_index: last.frontier_index,
                 relation_scope: last.relation.relation_scope.clone(),
                 relation_kind: last.relation.relation_kind.clone(),
-                canonical_identity: last.relation.canonical.clone(),
                 relation_key: fixed_bytes::<32>(
                     "graph_relations.relation_key",
                     last.relation.key.clone(),
@@ -2715,7 +2730,7 @@ impl AtlasStore {
                         candidate_count, confidence, completeness
                    FROM graph_relations
                   WHERE source_entity_key = ?1
-                  ORDER BY relation_scope, relation_kind, canonical_identity, relation_key
+                  ORDER BY relation_scope, relation_kind, relation_key
                   LIMIT ?2"
             }
             "target_entity_key" => {
@@ -2725,7 +2740,7 @@ impl AtlasStore {
                         candidate_count, confidence, completeness
                    FROM graph_relations
                   WHERE target_entity_key = ?1
-                  ORDER BY relation_scope, relation_kind, canonical_identity, relation_key
+                  ORDER BY relation_scope, relation_kind, relation_key
                   LIMIT ?2"
             }
             _ => {
@@ -2757,7 +2772,7 @@ pub(crate) fn capture_derived_graph(
                     external_system, external_identity
                FROM graph_entities
               WHERE project_instance_id = ?1
-              ORDER BY canonical_identity, entity_key",
+              ORDER BY entity_key",
         )?;
         let mut rows = statement.query(params![&project.as_bytes()[..]])?;
         while let Some(row) = rows.next()? {
@@ -2784,7 +2799,7 @@ pub(crate) fn capture_derived_graph(
                     candidate_count, confidence, completeness
                FROM graph_relations
               WHERE project_instance_id = ?1
-              ORDER BY canonical_identity, relation_key",
+              ORDER BY relation_key",
         )?;
         let mut rows = statement.query(params![&project.as_bytes()[..]])?;
         while let Some(row) = rows.next()? {
@@ -2915,7 +2930,408 @@ pub(crate) fn capture_derived_graph(
     })
 }
 
+impl AtlasStore {
+    /// Return whether an existing file is an exact disposable stage for this project.
+    ///
+    /// This intentionally validates only staging ownership metadata because disposable
+    /// stores omit normal read indexes and are not ordinary `ProjectAtlas` databases.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be opened read-only or its ownership
+    /// metadata cannot be read.
+    pub fn repository_graph_staging_belongs_to(
+        path: &Path,
+        root: &Path,
+        project: ProjectInstanceId,
+    ) -> DbResult<bool> {
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let project_root = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [PROJECT_ROOT_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let marker = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [GRAPH_STAGING_MARKER_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(
+            project_root.as_deref() == Some(normalize_native_path_display(root).as_str())
+                && load_project_identity(&connection)? == Some(project)
+                && marker.as_deref() == Some(GRAPH_STAGING_MARKER_VALUE),
+        )
+    }
+
+    /// Create a new disposable graph staging store with the selected project identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path already exists, schema initialization or
+    /// root binding fails, or the selected identity cannot be stored.
+    pub fn create_repository_graph_staging(
+        path: &Path,
+        root: &Path,
+        project: ProjectInstanceId,
+    ) -> DbResult<Self> {
+        if path.exists() {
+            return Err(DbError::GraphRowShape {
+                table: "repository graph staging database",
+                reason: "staging path already exists",
+            });
+        }
+        let mut store = Self::open_for_project(path, root)?;
+        set_project_identity(&store.connection, project)?;
+        store.connection.execute(
+            "INSERT INTO metadata(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![GRAPH_STAGING_MARKER_KEY, GRAPH_STAGING_MARKER_VALUE],
+        )?;
+        drop_graph_rebuildable_indexes(&store.connection)?;
+        store.validated_project_instance_id = Some(project);
+        Ok(store)
+    }
+
+    /// Checkpoint and truncate a completed disposable graph staging WAL.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when another connection keeps the staging WAL busy or
+    /// `SQLite` cannot complete the checkpoint.
+    pub fn checkpoint_repository_graph_staging(&self) -> DbResult<()> {
+        let (busy, _log_frames, _checkpointed_frames) =
+            self.connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })?;
+        if busy != 0 {
+            return Err(DbError::GraphRowShape {
+                table: "repository graph staging database",
+                reason: "WAL checkpoint remained busy",
+            });
+        }
+        Ok(())
+    }
+
+    /// Begin one disposable typed repository-graph staging transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store belongs to another project, the generation
+    /// is zero, or `SQLite` cannot begin or clear the staging transaction.
+    pub fn begin_repository_graph_staging(
+        &mut self,
+        project: ProjectInstanceId,
+        generation: IndexGeneration,
+    ) -> DbResult<RepositoryGraphStagingGuard<'_>> {
+        if generation == IndexGeneration::ZERO {
+            return Err(GraphContractError::InvalidGeneration.into());
+        }
+        let transaction = self.connection.transaction()?;
+        require_bound_project_identity(&transaction, project)?;
+        transaction.execute("DELETE FROM graph_resolution_keys", [])?;
+        transaction.execute("DELETE FROM graph_coverage", [])?;
+        transaction.execute("DELETE FROM graph_relations", [])?;
+        transaction.execute("DELETE FROM graph_entities", [])?;
+        Ok(RepositoryGraphStagingGuard {
+            transaction,
+            project,
+            generation,
+        })
+    }
+}
+
+impl RepositoryGraphStagingGuard<'_> {
+    /// Append borrowed entity rows without cloning the staged domain objects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for foreign project or generation rows, stable-key
+    /// collisions, or `SQLite` failures.
+    pub fn append_entity_refs(&mut self, entities: &[&GraphEntity]) -> DbResult<()> {
+        if entities.iter().any(|entity| {
+            entity.key().project() != self.project || entity.generation() != self.generation
+        }) {
+            return Err(GraphContractError::GenerationMismatch {
+                context: "repository graph staging entities",
+            }
+            .into());
+        }
+        insert_entities(&self.transaction, self.project, entities.iter().copied())
+    }
+
+    /// Append one fully validated graph and resolution-key batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for foreign project or generation rows, invalid owner
+    /// bindings, stable-key collisions, or `SQLite` failures.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_batch(
+        &mut self,
+        entities: &[GraphEntity],
+        relations: &[LogicalRelation],
+        occurrences: &[RelationOccurrence],
+        coverage: &[CoverageRecord],
+        entity_exports: &[EntityResolutionKey],
+        relation_dependencies: &[RelationDependencyKey],
+    ) -> DbResult<()> {
+        validate_graph_batch(
+            self.project,
+            self.generation,
+            entities,
+            relations,
+            occurrences,
+            coverage,
+        )?;
+        validate_resolution_key_batch(self.project, entity_exports, relation_dependencies)?;
+        insert_graph_batch(
+            &self.transaction,
+            self.project,
+            entities,
+            relations,
+            occurrences,
+            coverage,
+        )?;
+        insert_resolution_key_batch(
+            &self.transaction,
+            self.project,
+            entity_exports,
+            relation_dependencies,
+        )
+    }
+
+    /// Commit the staged graph and bind it to the requested generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot persist the generation or commit.
+    pub fn complete(self) -> DbResult<()> {
+        set_graph_generation(&self.transaction, self.generation)?;
+        self.transaction.commit()?;
+        Ok(())
+    }
+}
+
+/// Normalized graph columns copied from one typed disposable staging database.
+const GRAPH_STAGE_COPY_TABLES: &[(&str, &str)] = &[
+    (
+        "graph_entities",
+        "entity_key, project_instance_id, canonical_identity, entity_kind, repository_path, \
+         package_manager, package_name, manifest_path, symbol_name, symbol_kind, symbol_parent, \
+         symbol_signature, external_system, external_identity",
+    ),
+    (
+        "graph_relations",
+        "relation_key, project_instance_id, canonical_identity, source_entity_key, \
+         relation_scope, relation_kind, resolution_status, target_entity_key, reference_text, \
+         candidate_count, confidence, completeness",
+    ),
+    (
+        "graph_relation_occurrences",
+        "relation_key, file_path, start_line, start_column, end_line, end_column",
+    ),
+    (
+        "graph_coverage",
+        "project_instance_id, scope_kind, scope_path, relation_scope, relation_kind, state, \
+         total, covered, omitted, reason, reached_limit",
+    ),
+    (
+        "graph_resolution_keys",
+        "project_instance_id, resolution_domain, key_digest, canonical_identity",
+    ),
+    (
+        "graph_entity_exports",
+        "project_instance_id, entity_key, owner_path, resolution_domain, key_digest",
+    ),
+    (
+        "graph_relation_dependencies",
+        "project_instance_id, relation_key, owner_path, resolution_domain, key_digest",
+    ),
+];
+
+/// Non-unique graph read indexes rebuilt once after a full bulk replacement.
+const GRAPH_REBUILDABLE_INDEX_NAMES: &[&str] = &[
+    "idx_graph_entities_path",
+    "idx_graph_entities_package",
+    "idx_graph_entities_manifest_path",
+    "idx_graph_entities_symbol",
+    "idx_graph_entities_external",
+    "idx_graph_relations_source_kind",
+    "idx_graph_relations_target_kind",
+    "idx_graph_relations_kind_order",
+    "idx_graph_relations_kind_resolution",
+    "idx_graph_occurrences_file_span",
+    "idx_graph_coverage_scope_state",
+    "idx_graph_coverage_scope_order",
+    "idx_graph_coverage_path",
+    "idx_graph_coverage_relation_state",
+    "idx_graph_coverage_discovery_state",
+    "idx_graph_coverage_discovery_reason",
+    "idx_graph_entity_exports_key",
+    "idx_graph_entity_exports_owner",
+    "idx_graph_relation_dependencies_key",
+    "idx_graph_relation_dependencies_owner",
+];
+
+/// Drop only the known derived read indexes around one bulk graph load.
+fn drop_graph_rebuildable_indexes(connection: &Connection) -> DbResult<()> {
+    for name in GRAPH_REBUILDABLE_INDEX_NAMES {
+        connection.execute(&format!("DROP INDEX IF EXISTS {name}"), [])?;
+    }
+    Ok(())
+}
+
+/// Capture exact live index definitions before a transactional bulk graph load.
+fn graph_rebuildable_index_sql(connection: &Connection) -> DbResult<Vec<String>> {
+    GRAPH_REBUILDABLE_INDEX_NAMES
+        .iter()
+        .map(|name| {
+            connection
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?1",
+                    [name],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or(DbError::GraphRowShape {
+                    table: "repository graph indexes",
+                    reason: "required rebuildable index is missing",
+                })
+        })
+        .collect()
+}
+/// Maximum rows copied through one bounded multi-row `SQLite` insert.
+const GRAPH_STAGE_COPY_ROWS: usize = 512;
+
+/// Insert one bounded group of decoded staging values.
+fn insert_graph_stage_values(
+    target: &Connection,
+    table: &'static str,
+    columns: &'static str,
+    column_count: usize,
+    values: &[Value],
+) -> DbResult<()> {
+    let rows = values.len() / column_count;
+    let row = format!(
+        "({})",
+        std::iter::repeat_n("?", column_count)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let placeholders = std::iter::repeat_n(row, rows).collect::<Vec<_>>().join(",");
+    let insert_sql = format!("INSERT INTO {table}({columns}) VALUES{placeholders}");
+    target.execute(&insert_sql, params_from_iter(values.iter()))?;
+    Ok(())
+}
+
+/// Copy one normalized table through bounded decoded multi-row inserts.
+fn copy_graph_stage_table(
+    source: &Connection,
+    target: &Connection,
+    table: &'static str,
+    columns: &'static str,
+    control: Option<&IndexWorkControl>,
+) -> DbResult<()> {
+    let column_count = columns.split(',').count();
+    let select_sql = format!("SELECT {columns} FROM {table}");
+    let mut select = source.prepare(&select_sql)?;
+    let mut rows = select.query([])?;
+    let mut copied = 0_usize;
+    let mut values = Vec::with_capacity(GRAPH_STAGE_COPY_ROWS.saturating_mul(column_count));
+    while let Some(row) = rows.next()? {
+        if copied.is_multiple_of(256)
+            && let Some(control) = control
+        {
+            control.check(IndexWorkStage::Publication)?;
+        }
+        for column in 0..column_count {
+            values.push(row.get::<_, Value>(column)?);
+        }
+        copied = copied.saturating_add(1);
+        if copied.is_multiple_of(GRAPH_STAGE_COPY_ROWS) {
+            insert_graph_stage_values(target, table, columns, column_count, &values)?;
+            values.clear();
+        }
+    }
+    if !values.is_empty() {
+        insert_graph_stage_values(target, table, columns, column_count, &values)?;
+    }
+    Ok(())
+}
+
 impl IndexPublicationGuard<'_> {
+    /// Replace the complete graph from one typed disposable staging database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when staging integrity, project identity, generation,
+    /// normalized constraints, cancellation, or `SQLite` copying fails.
+    pub fn replace_repository_graph_from_staging(
+        &mut self,
+        project: ProjectInstanceId,
+        staging: &AtlasStore,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<()> {
+        let generation = self.pending_graph_generation()?;
+        let staged_project = load_project_identity(&staging.connection)?;
+        if staged_project != Some(project) {
+            return Err(DbError::GraphProjectIdentityMismatch {
+                expected: project.to_string(),
+                found: staged_project
+                    .map_or_else(|| "missing".to_string(), |value| value.to_string()),
+            });
+        }
+        if load_graph_generation(&staging.connection)? != Some(generation) {
+            return Err(GraphContractError::GenerationMismatch {
+                context: "staged repository graph",
+            }
+            .into());
+        }
+        let quick_check = staging
+            .connection
+            .query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0))?;
+        if quick_check != "ok" {
+            return Err(DbError::GraphRowShape {
+                table: "repository graph staging database",
+                reason: "quick check failed",
+            });
+        }
+        let mut foreign_keys = staging.connection.prepare("PRAGMA foreign_key_check")?;
+        if foreign_keys.query([])?.next()?.is_some() {
+            return Err(DbError::GraphRowShape {
+                table: "repository graph staging database",
+                reason: "foreign key check failed",
+            });
+        }
+
+        let savepoint = self.store.connection.savepoint()?;
+        require_bound_project_identity(&savepoint, project)?;
+        let rebuildable_indexes = graph_rebuildable_index_sql(&savepoint)?;
+        drop_graph_rebuildable_indexes(&savepoint)?;
+        savepoint.execute("DELETE FROM graph_resolution_keys", [])?;
+        savepoint.execute("DELETE FROM graph_coverage", [])?;
+        savepoint.execute("DELETE FROM graph_relations", [])?;
+        savepoint.execute("DELETE FROM graph_entities", [])?;
+        for (table, columns) in GRAPH_STAGE_COPY_TABLES {
+            copy_graph_stage_table(&staging.connection, &savepoint, table, columns, control)?;
+        }
+        set_graph_generation(&savepoint, generation)?;
+        for index_sql in rebuildable_indexes {
+            savepoint.execute_batch(&index_sql)?;
+        }
+        savepoint.commit()?;
+        Ok(())
+    }
+
     /// Replace the complete normalized repository graph inside this publication.
     ///
     /// # Errors
@@ -4070,10 +4486,10 @@ fn insert_graph_batch(
 }
 
 /// Insert typed entities while refusing compact-key collisions.
-fn insert_entities(
+fn insert_entities<'entity>(
     connection: &Connection,
     project: ProjectInstanceId,
-    entities: &[GraphEntity],
+    entities: impl IntoIterator<Item = &'entity GraphEntity>,
 ) -> DbResult<()> {
     let mut insert = connection.prepare_cached(
         "INSERT INTO graph_entities(
@@ -4589,8 +5005,7 @@ fn adjacency_relation_sql(
         .map(|frontier_index| {
             let continuation = if continuation_index == Some(frontier_index) {
                 "AND (relation.relation_scope, relation.relation_kind,
-                      relation.canonical_identity, relation.relation_key) >
-                     (?, ?, ?, ?)"
+                      relation.relation_key) > (?, ?, ?)"
                     .to_string()
             } else {
                 String::new()
@@ -4611,7 +5026,7 @@ fn adjacency_relation_sql(
                         {relation_filter}
                         {continuation}
                       ORDER BY relation.relation_scope, relation.relation_kind,
-                               relation.canonical_identity, relation.relation_key
+                               relation.relation_key
                       LIMIT ?
                  )"
             )
@@ -4622,7 +5037,7 @@ fn adjacency_relation_sql(
         "WITH {request}
          {branches}
          ORDER BY frontier_index, relation_scope, relation_kind,
-                  canonical_identity, relation_key
+                  relation_key
          LIMIT ?"
     )
 }
@@ -6527,7 +6942,7 @@ mod tests {
                  SELECT entity_key FROM graph_entities
                   WHERE project_instance_id = zeroblob(16)
                     AND repository_path = 'src/Äuth.rs'
-                  ORDER BY entity_kind, canonical_identity, entity_key
+                  ORDER BY entity_kind, entity_key
                   LIMIT 11",
                 &["idx_graph_entities_path"],
             ),
@@ -6536,7 +6951,7 @@ mod tests {
                 "EXPLAIN QUERY PLAN
                  SELECT relation_key FROM graph_relations
                   WHERE source_entity_key = zeroblob(32)
-                  ORDER BY relation_scope, relation_kind, canonical_identity, relation_key
+                  ORDER BY relation_scope, relation_kind, relation_key
                   LIMIT 11",
                 &["idx_graph_relations_source_kind"],
             ),
@@ -6545,7 +6960,7 @@ mod tests {
                 "EXPLAIN QUERY PLAN
                  SELECT relation_key FROM graph_relations
                   WHERE target_entity_key = zeroblob(32)
-                  ORDER BY relation_scope, relation_kind, canonical_identity, relation_key
+                  ORDER BY relation_scope, relation_kind, relation_key
                   LIMIT 11",
                 &["idx_graph_relations_target_kind"],
             ),
@@ -6556,7 +6971,7 @@ mod tests {
                   WHERE project_instance_id = zeroblob(16)
                     AND relation_scope = 'legacy'
                     AND relation_kind = 'calls'
-                  ORDER BY canonical_identity, relation_key
+                  ORDER BY relation_key
                   LIMIT 11",
                 &["idx_graph_relations_kind_order"],
             ),
@@ -8556,7 +8971,6 @@ mod tests {
                     bindings.extend([
                         Value::Text(String::new()),
                         Value::Text(String::new()),
-                        Value::Text(String::new()),
                         Value::Blob(vec![0; 32]),
                     ]);
                 }
@@ -10094,7 +10508,6 @@ mod tests {
             frontier_index: 1,
             relation_scope: String::new(),
             relation_kind: String::new(),
-            canonical_identity: String::new(),
             relation_key: [0; 32],
         };
         let skipped_steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -10133,7 +10546,6 @@ mod tests {
             frontier_index: 0,
             relation_scope: "legacy".to_string(),
             relation_kind: "calls".to_string(),
-            canonical_identity: "perf-100000".to_string(),
             relation_key: last_key,
         };
         let deep_steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));

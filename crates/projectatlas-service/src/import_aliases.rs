@@ -1,7 +1,7 @@
 //! Import-alias caller resolution over persisted symbol relations.
 
-use projectatlas_core::symbols::{CodeSymbol, RelationKind, SymbolRelation};
-use projectatlas_db::AtlasStore;
+use projectatlas_core::symbols::CodeSymbol;
+use projectatlas_db::{AtlasStore, StoredImportRelation};
 use projectatlas_symbols::{ImportSyntax, parse_import_references, resolve_relative_import_path};
 use projectatlas_symbols::{module_aliases_for_path, source_stems_for_path};
 use std::collections::{HashMap, HashSet};
@@ -39,7 +39,7 @@ pub(crate) fn load_import_alias_map(
 fn load_import_relations_for_symbols(
     store: &AtlasStore,
     symbols: &[CodeSymbol],
-) -> ServiceResult<Vec<SymbolRelation>> {
+) -> ServiceResult<Vec<StoredImportRelation>> {
     let mut terms = symbols
         .iter()
         .flat_map(|symbol| module_aliases_for_path(&symbol.path))
@@ -56,10 +56,7 @@ fn load_import_relations_for_symbols(
     caller_paths.dedup();
     for caller_path in caller_paths {
         relations.extend(
-            store
-                .load_symbol_relations(Some(&caller_path), None, IMPORT_RELATION_LIMIT_PER_CALLER)?
-                .into_iter()
-                .filter(|relation| relation.kind == RelationKind::Imports),
+            store.load_import_relations_for_path(&caller_path, IMPORT_RELATION_LIMIT_PER_CALLER)?,
         );
     }
     relations.sort_by(|left, right| {
@@ -73,7 +70,6 @@ fn load_import_relations_for_symbols(
         left.path == right.path
             && left.source_name == right.source_name
             && left.target_name == right.target_name
-            && left.kind == right.kind
             && left.line == right.line
     });
     Ok(relations)
@@ -82,15 +78,12 @@ fn load_import_relations_for_symbols(
 /// Build deterministic import-alias call targets from already loaded imports.
 fn import_alias_map(
     symbols: &[CodeSymbol],
-    import_relations: &[SymbolRelation],
+    import_relations: &[StoredImportRelation],
     alias_counts: &HashMap<String, usize>,
 ) -> ImportAliasMap {
     let local_alias_counts = import_local_alias_counts(import_relations);
     let mut candidates: HashMap<(String, String), HashSet<String>> = HashMap::new();
-    for relation in import_relations
-        .iter()
-        .filter(|relation| relation.kind == RelationKind::Imports)
-    {
+    for relation in import_relations {
         for symbol in symbols {
             for target_name in import_call_targets_for_symbol(relation, symbol, alias_counts) {
                 if import_local_alias_is_ambiguous(&local_alias_counts, relation, &target_name) {
@@ -132,13 +125,10 @@ fn import_alias_map(
 
 /// Count local import aliases per caller file.
 fn import_local_alias_counts(
-    import_relations: &[SymbolRelation],
+    import_relations: &[StoredImportRelation],
 ) -> HashMap<(String, String), usize> {
     let mut counts = HashMap::new();
-    for relation in import_relations
-        .iter()
-        .filter(|relation| relation.kind == RelationKind::Imports)
-    {
+    for relation in import_relations {
         for alias in local_aliases_from_import(&relation.target_name) {
             *counts.entry((relation.path.clone(), alias)).or_insert(0) += 1;
         }
@@ -149,7 +139,7 @@ fn import_local_alias_counts(
 /// Return whether a resolved call target uses a duplicated local import alias.
 fn import_local_alias_is_ambiguous(
     counts: &HashMap<(String, String), usize>,
-    relation: &SymbolRelation,
+    relation: &StoredImportRelation,
     target_name: &str,
 ) -> bool {
     local_alias_candidates(target_name).iter().any(|alias| {
@@ -188,7 +178,7 @@ fn local_aliases_from_import(import_text: &str) -> Vec<String> {
 
 /// Return caller-local call targets that an import relation maps to a symbol.
 fn import_call_targets_for_symbol(
-    relation: &SymbolRelation,
+    relation: &StoredImportRelation,
     symbol: &CodeSymbol,
     alias_counts: &HashMap<String, usize>,
 ) -> Vec<String> {

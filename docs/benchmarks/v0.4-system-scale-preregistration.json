@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "benchmark": "projectatlas-v0.4-system-scale",
+  "status": "draft_until_harness-smoke-passes",
+  "candidate": {
+    "required_version": "0.4.0",
+    "functional_git_head": "21ec4c7e52fb068b1187b6f5b36ed39dd9a2e829",
+    "telemetry": "disabled",
+    "build_profile": "release-all-features"
+  },
+  "corpora": {
+    "small": {
+      "source": "docs/benchmarks/fixtures/mcp-composition",
+      "variants": [
+        "clean",
+        "dirty",
+        "non-git"
+      ],
+      "minimum_indexed_files": 5,
+      "maximum_indexed_files": 100
+    },
+    "medium": {
+      "source": "deterministic-rust-high-degree-v1",
+      "caller_files": 1024,
+      "minimum_indexed_files": 1000,
+      "narrow_edit": "append one comment to src/caller_0000.rs",
+      "expanded_edit": "rename the src/hub.rs shared export while retaining inbound references"
+    },
+    "huge": {
+      "repository": "https://github.com/microsoft/vscode.git",
+      "tag": "1.130.0",
+      "commit": "1b6a188127eeaf9194f945eb6eb89a657e93c54c",
+      "minimum_indexed_files": 5000,
+      "minimum_tracked_bytes": 20971520,
+      "target_file": "src/vs/platform/instantiation/common/instantiation.ts"
+    }
+  },
+  "measurements": [
+    "full scan wall time and process-tree CPU, peak RSS, workers, and I/O",
+    "included corpus files and bytes plus indexed text and parsed symbol work",
+    "unchanged, narrow, and expanded incremental refresh work",
+    "MCP startup, first exact verification, repeated healthy-epoch query latency, work, output, and retained RSS",
+    "indexed and correctness-fallback search bounds",
+    "SQLite version, compile options, schema, journal, synchronous, busy, checkpoint, statistics, database, WAL, and persistent bytes",
+    "concurrent isolated-project progress",
+    "forced parent termination to process-tree quiescence"
+  ],
+  "thresholds": {
+    "all": {
+      "command_timeout_seconds": 900,
+      "maximum_worker_processes": 20,
+      "maximum_bounded_output_bytes": 262144,
+      "maximum_bounded_query_process_read_bytes": 67108864,
+      "maximum_fallback_selected_text_bytes": 134217728,
+      "maximum_fallback_search_seconds": 10,
+      "maximum_relation_database_requested_rows": 128,
+      "maximum_relation_database_returned_rows": 256,
+      "maximum_relation_database_decoded_bytes": 262144,
+      "maximum_relation_hydrated_entities": 64,
+      "maximum_relation_hydrated_purpose_paths": 128,
+      "maximum_retained_rss_growth_bytes": 134217728,
+      "maximum_cancellation_quiescence_seconds": 5
+    },
+    "small": {
+      "maximum_full_scan_seconds": 30,
+      "maximum_unchanged_refresh_seconds": 10,
+      "maximum_query_p95_milliseconds": 3000,
+      "maximum_peak_rss_bytes": 1073741824,
+      "maximum_persistent_bytes": 67108864
+    },
+    "medium": {
+      "maximum_full_scan_seconds": 180,
+      "maximum_unchanged_refresh_seconds": 30,
+      "maximum_query_p95_milliseconds": 5000,
+      "maximum_peak_rss_bytes": 2147483648,
+      "maximum_persistent_bytes": 536870912
+    },
+    "huge": {
+      "maximum_full_scan_seconds": 900,
+      "maximum_unchanged_refresh_seconds": 120,
+      "maximum_query_p95_milliseconds": 10000,
+      "maximum_peak_rss_bytes": 4294967296,
+      "maximum_persistent_bytes": 4294967296
+    }
+  },
+  "failure_rules": [
+    "Any correctness, freshness, migration, corruption, timeout, or nonzero-exit failure rejects the candidate.",
+    "Any whole-tree or whole-node-table amplification on repeated healthy-epoch bounded reads rejects the candidate.",
+    "Any hot-query plan scan, unbounded retained materialization, worker oversubscription, unexplained busy/lock failure, or surviving canceled process rejects the candidate.",
+    "A threshold miss is reported and investigated; results are not silently excluded or thresholds changed after measurement."
+  ]
+}

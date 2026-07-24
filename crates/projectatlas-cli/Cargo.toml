@@ -51,6 +51,7 @@ cli-core = [
     "dep:regex",
     "dep:rmcp",
     "dep:scraper",
+    "dep:tempfile",
     "dep:tiktoken",
     "dep:tokio",
     "dep:toml",

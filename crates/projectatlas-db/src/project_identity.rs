@@ -385,7 +385,10 @@ fn generate_project_identity(
 }
 
 /// Insert or replace the singleton identity after dependent graph rows are removed.
-fn set_project_identity(connection: &Connection, identity: ProjectInstanceId) -> DbResult<()> {
+pub(crate) fn set_project_identity(
+    connection: &Connection,
+    identity: ProjectInstanceId,
+) -> DbResult<()> {
     connection.execute(
         "INSERT INTO project_identity(singleton, project_instance_id, active_generation)
          VALUES(1, ?1, 0)

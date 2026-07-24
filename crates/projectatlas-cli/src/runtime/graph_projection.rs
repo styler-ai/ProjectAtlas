@@ -26,10 +26,13 @@ use projectatlas_symbols::{
     MAX_RESOLUTION_KEYS_PER_FACT, ResolutionKeyProjection, ResolutionProjectionError,
     derive_resolution_keys, parse_import_references,
 };
+use std::borrow::{Borrow, Cow};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, btree_map::Entry};
+use std::fs::{self, File, OpenOptions};
 use std::num::NonZeroU32;
 use std::path::Path;
+use tempfile::{Builder as TempDirBuilder, TempDir};
 
 /// Maximum canonical keys or distinct source paths admitted by one incremental closure.
 const MAX_INCREMENTAL_RESOLUTION_ITEMS: u32 = GraphLimits::MAX_ROWS;
@@ -43,6 +46,18 @@ const MAX_GRAPH_KEY_BINDINGS: u64 = 8_000_000;
 const STAGED_GRAPH_ROW_BYTES: u64 = 128;
 /// Maximum graph-map rows processed between cooperative cancellation checks.
 const GRAPH_WORK_CHECK_INTERVAL: usize = 256;
+/// Maximum simultaneous parser/entity/key bytes before rows spill to typed `SQLite` staging.
+const MAX_IN_MEMORY_GRAPH_WORK_BYTES: u64 = 512 * 1_024 * 1_024;
+/// Borrowed entity references inserted per disposable staging call.
+const GRAPH_STAGE_ENTITY_BATCH_SIZE: usize = 1_024;
+/// Maximum normalized graph rows retained between disposable staging writes.
+const GRAPH_STAGE_ROW_BATCH_SIZE: usize = 8_192;
+/// Direct child prefix owned by disposable graph staging.
+const GRAPH_STAGE_DIRECTORY_PREFIX: &str = "graph-stage-";
+/// Stable cross-process lease protecting active staging and restart cleanup.
+const GRAPH_STAGE_LEASE_FILE_NAME: &str = "repository-graph-stage.lock";
+/// Typed disposable database inside every owned staging directory.
+const GRAPH_STAGE_DATABASE_FILE_NAME: &str = "projectatlas.db";
 /// Maximum persisted symbol-graph paths reconstructed between work checks.
 const PERSISTED_GRAPH_PATHS_PER_CHUNK: usize = 256;
 /// Stable fallback for a parser relation that omitted a usable display target.
@@ -88,8 +103,20 @@ pub(super) struct StagedRepositoryGraph {
     entity_exports: Vec<EntityResolutionKey>,
     /// Canonical dependency keys retained by staged relations.
     relation_dependencies: Vec<RelationDependencyKey>,
+    /// Optional disposable database replacing the in-memory row vectors.
+    database: Option<StagedGraphDatabase>,
     /// Conservative bytes retained until the parent publication completes.
     retained_bytes: u64,
+}
+
+/// File-backed graph rows staged outside the main database writer transaction.
+struct StagedGraphDatabase {
+    /// Open typed store copied into the main publication.
+    store: AtlasStore,
+    /// Owning directory removed after the store closes.
+    directory: TempDir,
+    /// Cross-process lease preventing restart cleanup while the stage is active.
+    _lease: File,
 }
 
 impl StagedRepositoryGraph {
@@ -105,6 +132,25 @@ impl StagedRepositoryGraph {
         control: &IndexWorkControl,
     ) -> Result<(), CliError> {
         control.check(IndexWorkStage::Publication)?;
+        if let Some(database) = &self.database {
+            if !database.directory.path().is_dir() {
+                return Err(CliError::InvalidInput(
+                    "repository graph staging directory is unavailable".to_string(),
+                ));
+            }
+            if !matches!(self.mutation, RepositoryGraphMutation::Full) {
+                return Err(CliError::InvalidInput(
+                    "database-backed graph staging only supports full replacement".to_string(),
+                ));
+            }
+            publication.replace_repository_graph_from_staging(
+                self.project,
+                &database.store,
+                Some(control),
+            )?;
+            control.check(IndexWorkStage::Publication)?;
+            return Ok(());
+        }
         match &self.mutation {
             RepositoryGraphMutation::Full => {
                 publication.replace_repository_graph_with_resolution_keys(
@@ -138,12 +184,14 @@ impl StagedRepositoryGraph {
 /// Stage a complete repository graph from current parser output plus safe reused graphs.
 pub(super) fn stage_full_repository_graph(
     store: &AtlasStore,
+    root: &Path,
     base_generation: IndexGeneration,
     nodes: &[Node],
     symbols: &SymbolBuildStage,
     control: &IndexWorkControl,
 ) -> Result<StagedRepositoryGraph, CliError> {
     let project = selected_project(store)?;
+    cleanup_abandoned_graph_staging(root, project)?;
     let generation = next_generation(base_generation)?;
     let paths = nodes
         .iter()
@@ -158,14 +206,32 @@ pub(super) fn stage_full_repository_graph(
     )?;
     let candidates = resolution_registry_from_exports(&entity_projection, control)?;
     enforce_resolution_staging_budget(&entity_projection, &candidates)?;
-    finish_projection(
-        project,
-        generation,
-        RepositoryGraphMutation::Full,
-        entity_projection,
-        &candidates,
-        control,
-    )
+    let graph_work_bytes = symbols
+        .retained_bytes
+        .saturating_add(entity_projection.retained_bytes)
+        .saturating_add(candidates.retained_bytes);
+    if graph_work_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
+        finish_projection_in_database(
+            root,
+            nodes,
+            project,
+            generation,
+            &graphs,
+            entity_projection,
+            &candidates,
+            control,
+        )
+    } else {
+        finish_projection(
+            project,
+            generation,
+            RepositoryGraphMutation::Full,
+            &graphs,
+            entity_projection,
+            &candidates,
+            control,
+        )
+    }
 }
 
 /// Stage one bounded dependency-aware graph closure for an incremental publication.
@@ -326,6 +392,7 @@ pub(super) fn stage_incremental_repository_graph(
         project,
         generation,
         RepositoryGraphMutation::AffectedPaths(affected_paths.iter().cloned().collect()),
+        &affected_graphs,
         entity_projection,
         &candidates,
         control,
@@ -344,18 +411,42 @@ struct EntityProjection {
     keys_by_graph: BTreeMap<String, ResolutionKeyProjection>,
     /// Canonical resolution keys exported by staged entities.
     entity_exports: Vec<EntityResolutionKey>,
-    /// Parser graphs retained for relationship and coverage projection.
-    graphs: Vec<SymbolGraph>,
-    /// Conservative bytes retained by entities, graphs, and export keys.
+    /// Conservative bytes retained by entities and export keys.
     retained_bytes: u64,
 }
 
 /// File and symbol entities associated with one parser graph.
 struct GraphOwners {
-    /// File entity owning the parser graph.
-    file: GraphEntity,
-    /// Optional stable entity corresponding to each parser symbol row.
-    symbols: Vec<Option<GraphEntity>>,
+    /// Digest of the file entity owning the parser graph.
+    file_digest: String,
+    /// Optional stable entity digest corresponding to each parser symbol row.
+    symbol_digests: Vec<Option<String>>,
+}
+
+/// Borrowed per-graph symbol lookup used by every relation in that file.
+struct GraphSymbolIndex<'graph> {
+    /// Parser symbol indices grouped by exact source name.
+    indices_by_name: BTreeMap<&'graph str, Vec<usize>>,
+}
+
+impl<'graph> GraphSymbolIndex<'graph> {
+    /// Build one bounded name index instead of rescanning all symbols per relation.
+    fn new(graph: &'graph SymbolGraph, control: &IndexWorkControl) -> Result<Self, CliError> {
+        let mut indices_by_name = BTreeMap::new();
+        for (index, symbol) in graph.symbols.iter().enumerate() {
+            check_graph_work(control, index)?;
+            indices_by_name
+                .entry(symbol.name.as_str())
+                .or_insert_with(Vec::new)
+                .push(index);
+        }
+        Ok(Self { indices_by_name })
+    }
+
+    /// Return exact parser symbol rows for one source name.
+    fn get(&self, name: &str) -> &[usize] {
+        self.indices_by_name.get(name).map_or(&[], Vec::as_slice)
+    }
 }
 
 /// One conservative additive relation derived from already bounded parser facts.
@@ -402,9 +493,10 @@ struct PackageOwner {
 
 impl PackageIndex {
     /// Build deterministic longest-prefix package ownership from manifest graphs.
-    fn from_graphs(graphs: &[SymbolGraph]) -> Result<Self, CliError> {
+    fn from_graphs(graphs: &[impl Borrow<SymbolGraph>]) -> Result<Self, CliError> {
         let mut packages = Vec::new();
         for graph in graphs {
+            let graph = graph.borrow();
             for symbol in &graph.symbols {
                 if symbol.kind != SymbolKind::Package {
                     continue;
@@ -503,7 +595,7 @@ fn build_entity_projection(
     project: ProjectInstanceId,
     generation: IndexGeneration,
     nodes: &[Node],
-    graphs: &[SymbolGraph],
+    graphs: &[impl Borrow<SymbolGraph>],
     packages: &PackageIndex,
     include_project: bool,
     control: &IndexWorkControl,
@@ -539,6 +631,7 @@ fn build_entity_projection(
     let mut entity_exports = Vec::new();
     let mut retained_bytes = 0_u64;
     for graph in graphs {
+        let graph = graph.borrow();
         control.check(IndexWorkStage::SymbolParsing)?;
         let file = GraphEntity::new(
             project,
@@ -549,8 +642,9 @@ fn build_entity_projection(
             generation,
         )
         .map_err(invalid_graph_contract)?;
-        insert_entity(&mut entity_by_digest, file.clone())?;
-        let mut symbols = Vec::with_capacity(graph.symbols.len());
+        let file_digest = file.key().digest().to_string();
+        insert_entity(&mut entity_by_digest, file)?;
+        let mut symbol_digests = Vec::with_capacity(graph.symbols.len());
         let qualified_parents = qualified_symbol_parents(graph);
         for (symbol, qualified_parent) in graph.symbols.iter().zip(qualified_parents) {
             control.check(IndexWorkStage::SymbolParsing)?;
@@ -602,12 +696,18 @@ fn build_entity_projection(
                     .map_err(invalid_graph_contract)?,
                 ),
             };
-            if let Some(entity) = entity.as_ref() {
-                insert_entity(&mut entity_by_digest, entity.clone())?;
+            let entity_digest = entity
+                .as_ref()
+                .map(|entity| entity.key().digest().to_string());
+            if let Some(entity) = entity {
+                insert_entity(&mut entity_by_digest, entity)?;
             }
-            symbols.push(entity);
+            symbol_digests.push(entity_digest);
         }
         let resolution = resolution_projection(project, packages.package_name(&graph.path), graph)?;
+        let file = entity_by_digest
+            .get(&file_digest)
+            .ok_or_else(|| CliError::InvalidInput("graph file owner was not staged".to_string()))?;
         for key in resolution.source_keys() {
             entity_exports.push(
                 EntityResolutionKey::new(file.key().clone(), key.clone())
@@ -615,9 +715,10 @@ fn build_entity_projection(
             );
         }
         for symbol_keys in resolution.symbol_keys() {
-            let Some(entity) = symbols
+            let Some(entity) = symbol_digests
                 .get(symbol_keys.symbol_index())
                 .and_then(Option::as_ref)
+                .and_then(|digest| entity_by_digest.get(digest))
             else {
                 continue;
             };
@@ -628,10 +729,14 @@ fn build_entity_projection(
                 );
             }
         }
-        retained_bytes = retained_bytes
-            .saturating_add(graph_retained_bytes(graph))
-            .saturating_add(resolution_retained_bytes(&resolution));
-        owners_by_graph.insert(graph.path.clone(), GraphOwners { file, symbols });
+        retained_bytes = retained_bytes.saturating_add(resolution_retained_bytes(&resolution));
+        owners_by_graph.insert(
+            graph.path.clone(),
+            GraphOwners {
+                file_digest,
+                symbol_digests,
+            },
+        );
         keys_by_graph.insert(graph.path.clone(), resolution);
     }
     sort_dedup_exports(&mut entity_exports);
@@ -651,7 +756,204 @@ fn build_entity_projection(
         owners_by_graph,
         keys_by_graph,
         entity_exports,
-        graphs: graphs.to_vec(),
+        retained_bytes,
+    })
+}
+
+/// Acquire the one project-local graph-staging lease without waiting.
+fn try_graph_stage_lease(staging_parent: &Path) -> Result<Option<File>, CliError> {
+    let path = staging_parent.join(GRAPH_STAGE_LEASE_FILE_NAME);
+    if let Ok(metadata) = fs::symlink_metadata(&path)
+        && (!metadata.file_type().is_file() || metadata.file_type().is_symlink())
+    {
+        return Err(CliError::InvalidInput(format!(
+            "repository graph staging lease is not a direct file: {}",
+            normalize_native_path_display(&path)
+        )));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|source| CliError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(source)) => Err(CliError::Io { path, source }),
+    }
+}
+
+/// Remove only validated, inactive disposable graph stages left by an earlier process.
+fn cleanup_abandoned_graph_staging(
+    root: &Path,
+    project: ProjectInstanceId,
+) -> Result<(), CliError> {
+    let staging_parent = root.join(".projectatlas");
+    if !staging_parent.is_dir() {
+        return Ok(());
+    }
+    let Some(_lease) = try_graph_stage_lease(&staging_parent)? else {
+        return Ok(());
+    };
+    cleanup_abandoned_graph_staging_while_locked(&staging_parent, root, project)
+}
+
+/// Remove direct child stages whose typed database binds the exact project.
+fn cleanup_abandoned_graph_staging_while_locked(
+    staging_parent: &Path,
+    root: &Path,
+    project: ProjectInstanceId,
+) -> Result<(), CliError> {
+    let entries = fs::read_dir(staging_parent).map_err(|source| CliError::Io {
+        path: staging_parent.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| CliError::Io {
+            path: staging_parent.to_path_buf(),
+            source,
+        })?;
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if !file_name.starts_with(GRAPH_STAGE_DIRECTORY_PREFIX)
+            || file_name.len() == GRAPH_STAGE_DIRECTORY_PREFIX.len()
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        let database_path = path.join(GRAPH_STAGE_DATABASE_FILE_NAME);
+        let Ok(database_metadata) = fs::symlink_metadata(&database_path) else {
+            continue;
+        };
+        if !database_metadata.file_type().is_file() || database_metadata.file_type().is_symlink() {
+            continue;
+        }
+        let owned = AtlasStore::repository_graph_staging_belongs_to(&database_path, root, project)
+            .unwrap_or(false);
+        if !owned {
+            continue;
+        }
+        fs::remove_dir_all(&path).map_err(|source| CliError::Io { path, source })?;
+    }
+    Ok(())
+}
+
+/// Spill a large full graph to typed disposable `SQLite` rows before main publication.
+fn finish_projection_in_database(
+    root: &Path,
+    nodes: &[Node],
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    graphs: &[impl Borrow<SymbolGraph>],
+    mut entities: EntityProjection,
+    candidates: &ProjectResolutionRegistry,
+    control: &IndexWorkControl,
+) -> Result<StagedRepositoryGraph, CliError> {
+    let staging_parent = root.join(".projectatlas");
+    fs::create_dir_all(&staging_parent).map_err(|source| CliError::Io {
+        path: staging_parent.clone(),
+        source,
+    })?;
+    let lease = try_graph_stage_lease(&staging_parent)?.ok_or_else(|| {
+        CliError::InvalidInput(
+            "another repository graph staging operation is active for this project".to_string(),
+        )
+    })?;
+    cleanup_abandoned_graph_staging_while_locked(&staging_parent, root, project)?;
+    let directory = TempDirBuilder::new()
+        .prefix(GRAPH_STAGE_DIRECTORY_PREFIX)
+        .tempdir_in(&staging_parent)
+        .map_err(|source| CliError::Io {
+            path: staging_parent,
+            source,
+        })?;
+    let database_path = directory.path().join(GRAPH_STAGE_DATABASE_FILE_NAME);
+    let mut store = AtlasStore::create_repository_graph_staging(&database_path, root, project)?;
+    store.replace_scan(nodes)?;
+    {
+        let mut staging = store.begin_repository_graph_staging(project, generation)?;
+        let mut entity_batch = Vec::with_capacity(GRAPH_STAGE_ENTITY_BATCH_SIZE);
+        for entity in entities.entity_by_digest.values() {
+            entity_batch.push(entity);
+            if entity_batch.len() == GRAPH_STAGE_ENTITY_BATCH_SIZE {
+                control.check(IndexWorkStage::Publication)?;
+                staging.append_entity_refs(&entity_batch)?;
+                entity_batch.clear();
+            }
+        }
+        if !entity_batch.is_empty() {
+            staging.append_entity_refs(&entity_batch)?;
+            entity_batch.clear();
+        }
+        staging.append_batch(&[], &[], &[], &[], &entities.entity_exports, &[])?;
+        let mut staged_rows = ProjectedGraphRows::default();
+        for graph in graphs {
+            let graph = graph.borrow();
+            let rows = project_graph_rows(
+                project,
+                generation,
+                graph,
+                &mut entities,
+                candidates,
+                control,
+            )?;
+            staged_rows.append(rows);
+            if staged_rows.row_count() < GRAPH_STAGE_ROW_BATCH_SIZE {
+                continue;
+            }
+            staging.append_batch(
+                &staged_rows.external_entities,
+                &staged_rows.relations,
+                &staged_rows.occurrences,
+                &staged_rows.coverage,
+                &[],
+                &staged_rows.relation_dependencies,
+            )?;
+            staged_rows.clear();
+        }
+        if !staged_rows.is_empty() {
+            staging.append_batch(
+                &staged_rows.external_entities,
+                &staged_rows.relations,
+                &staged_rows.occurrences,
+                &staged_rows.coverage,
+                &[],
+                &staged_rows.relation_dependencies,
+            )?;
+        }
+        staging.complete()?;
+    }
+    store.checkpoint_repository_graph_staging()?;
+    store.begin_index_read_snapshot()?;
+    let _staged_generation = store.repository_graph_generation()?;
+    let retained_bytes = normalize_native_path_display(&database_path).len() as u64;
+    Ok(StagedRepositoryGraph {
+        project,
+        mutation: RepositoryGraphMutation::Full,
+        entities: Vec::new(),
+        relations: Vec::new(),
+        occurrences: Vec::new(),
+        coverage: Vec::new(),
+        entity_exports: Vec::new(),
+        relation_dependencies: Vec::new(),
+        database: Some(StagedGraphDatabase {
+            store,
+            directory,
+            _lease: lease,
+        }),
         retained_bytes,
     })
 }
@@ -661,6 +963,7 @@ fn finish_projection(
     project: ProjectInstanceId,
     generation: IndexGeneration,
     mutation: RepositoryGraphMutation,
+    graphs: &[impl Borrow<SymbolGraph>],
     mut entities: EntityProjection,
     candidates: &ProjectResolutionRegistry,
     control: &IndexWorkControl,
@@ -669,151 +972,37 @@ fn finish_projection(
     let mut occurrences = Vec::new();
     let mut relation_dependencies = Vec::new();
     let mut coverage = Vec::new();
-    let mut external_entities = BTreeMap::new();
-    for graph in &entities.graphs {
-        control.check(IndexWorkStage::SymbolParsing)?;
-        let owners = entities
-            .owners_by_graph
-            .get(&graph.path)
-            .ok_or_else(|| CliError::InvalidInput("graph owners were not staged".to_string()))?;
-        let resolution_keys = entities
-            .keys_by_graph
-            .get(&graph.path)
-            .ok_or_else(|| CliError::InvalidInput("graph keys were not staged".to_string()))?;
-        let keys_by_relation = resolution_keys
-            .relation_keys()
+    for graph in graphs {
+        let graph = graph.borrow();
+        let rows = project_graph_rows(
+            project,
+            generation,
+            graph,
+            &mut entities,
+            candidates,
+            control,
+        )?;
+        for (relation_index, relation) in rows.relations.into_iter().enumerate() {
+            insert_relation(
+                &mut relations_by_digest,
+                relation,
+                &graph.path,
+                "projected",
+                relation_index,
+            )?;
+        }
+        occurrences.extend(rows.occurrences);
+        relation_dependencies.extend(rows.relation_dependencies);
+        coverage.extend(rows.coverage);
+        entities.retained_bytes = rows
+            .external_entities
             .iter()
-            .map(|entry| (entry.relation_index(), entry.keys()))
-            .collect::<BTreeMap<_, _>>();
-        for (relation_index, source_relation) in graph.relations.iter().enumerate() {
-            control.check(IndexWorkStage::SymbolParsing)?;
-            let source = relation_source(owners, graph, source_relation);
-            let dependency_keys = keys_by_relation
-                .get(&relation_index)
-                .copied()
-                .unwrap_or(&[]);
-            let resolution = relation_resolution(
-                project,
-                generation,
-                source_relation,
-                owners,
-                graph,
-                dependency_keys,
-                candidates,
-                &mut external_entities,
-                control,
-            )?;
-            let relation = LogicalRelation::new(
-                source,
-                GraphRelationKind::from_legacy(source_relation.kind),
-                resolution,
-                relation_confidence(source_relation.parser),
-                relation_completeness(source_relation.parser),
-                generation,
-            )
-            .map_err(invalid_graph_contract)?;
-            let relation_digest = relation.key().digest().to_string();
-            if let Some(existing) = relations_by_digest.get(&relation_digest) {
-                if existing != &relation {
-                    return Err(CliError::InvalidInput(
-                        "logical relation digest retained conflicting facts".to_string(),
-                    ));
-                }
-            } else {
-                relations_by_digest.insert(relation_digest, relation.clone());
-            }
-            let line = u32::try_from(source_relation.line).map_err(|error| {
-                CliError::InvalidInput(format!("relation source line exceeds graph range: {error}"))
-            })?;
-            let end_column =
-                u32::try_from(source_relation.context.chars().count()).map_err(|error| {
-                    CliError::InvalidInput(format!(
-                        "relation source context exceeds graph range: {error}"
-                    ))
-                })?;
-            occurrences.push(
-                RelationOccurrence::new(
-                    &relation,
-                    RepositoryFilePath::new(Path::new(&graph.path))
-                        .map_err(invalid_graph_contract)?,
-                    SourceSpan::new(line.max(1), 0, line.max(1), end_column)
-                        .map_err(invalid_graph_contract)?,
-                    generation,
-                )
-                .map_err(invalid_graph_contract)?,
-            );
-            for key in dependency_keys {
-                relation_dependencies.push(
-                    RelationDependencyKey::new(relation.key().clone(), key.clone())
-                        .map_err(invalid_graph_contract)?,
-                );
-            }
+            .fold(entities.retained_bytes, |bytes, entity| {
+                bytes.saturating_add(entity_retained_bytes(entity))
+            });
+        for entity in rows.external_entities {
+            insert_entity(&mut entities.entity_by_digest, entity)?;
         }
-        for fact in derived_relation_facts(graph, &keys_by_relation) {
-            control.check(IndexWorkStage::SymbolParsing)?;
-            let source = relation_source(owners, graph, &fact.relation);
-            let resolution = derived_relation_resolution(
-                project,
-                generation,
-                &fact,
-                owners,
-                graph,
-                candidates,
-                &entities.entity_by_digest,
-                &mut external_entities,
-                control,
-            )?;
-            let relation = LogicalRelation::new(
-                source,
-                GraphRelationKind::Extended(fact.kind),
-                resolution,
-                relation_confidence(fact.relation.parser),
-                relation_completeness(fact.relation.parser),
-                generation,
-            )
-            .map_err(invalid_graph_contract)?;
-            let relation_digest = relation.key().digest().to_string();
-            if let Some(existing) = relations_by_digest.get(&relation_digest) {
-                if existing != &relation {
-                    return Err(CliError::InvalidInput(
-                        "derived relation digest retained conflicting facts".to_string(),
-                    ));
-                }
-            } else {
-                relations_by_digest.insert(relation_digest, relation.clone());
-            }
-            let line = u32::try_from(fact.relation.line).map_err(|error| {
-                CliError::InvalidInput(format!(
-                    "derived relation source line exceeds graph range: {error}"
-                ))
-            })?;
-            let end_column =
-                u32::try_from(fact.relation.context.chars().count()).map_err(|error| {
-                    CliError::InvalidInput(format!(
-                        "derived relation source context exceeds graph range: {error}"
-                    ))
-                })?;
-            occurrences.push(
-                RelationOccurrence::new(
-                    &relation,
-                    RepositoryFilePath::new(Path::new(&graph.path))
-                        .map_err(invalid_graph_contract)?,
-                    SourceSpan::new(line.max(1), 0, line.max(1), end_column)
-                        .map_err(invalid_graph_contract)?,
-                    generation,
-                )
-                .map_err(invalid_graph_contract)?,
-            );
-            if let DerivedRelationTarget::Parser { keys } = fact.target {
-                for key in keys {
-                    relation_dependencies.push(
-                        RelationDependencyKey::new(relation.key().clone(), key)
-                            .map_err(invalid_graph_contract)?,
-                    );
-                }
-            }
-        }
-        coverage.push(coverage_for_graph(graph, generation)?);
     }
     let mut relations = relations_by_digest.into_values().collect::<Vec<_>>();
     relations.sort_by(|left, right| left.key().digest().cmp(right.key().digest()));
@@ -828,23 +1017,14 @@ fn finish_projection(
     occurrences.dedup();
     sort_dedup_dependencies(&mut relation_dependencies);
     enforce_key_binding_limit(relation_dependencies.len())?;
-    let external_retained_bytes = external_entities.values().fold(0_u64, |bytes, entity| {
-        bytes.saturating_add(entity_retained_bytes(entity))
-    });
-    for entity in external_entities.into_values() {
-        insert_entity(&mut entities.entity_by_digest, entity)?;
-    }
     let added_rows = relations
         .len()
         .saturating_add(occurrences.len())
         .saturating_add(coverage.len())
         .saturating_add(relation_dependencies.len());
-    entities.retained_bytes = entities
-        .retained_bytes
-        .saturating_add(
-            STAGED_GRAPH_ROW_BYTES.saturating_mul(u64::try_from(added_rows).unwrap_or(u64::MAX)),
-        )
-        .saturating_add(external_retained_bytes);
+    entities.retained_bytes = entities.retained_bytes.saturating_add(
+        STAGED_GRAPH_ROW_BYTES.saturating_mul(u64::try_from(added_rows).unwrap_or(u64::MAX)),
+    );
     Ok(StagedRepositoryGraph {
         project,
         mutation,
@@ -854,15 +1034,306 @@ fn finish_projection(
         coverage,
         entity_exports: entities.entity_exports,
         relation_dependencies,
+        database: None,
         retained_bytes: entities.retained_bytes,
     })
+}
+
+/// One graph's normalized rows, bounded by the parser graph already in memory.
+#[derive(Default)]
+struct ProjectedGraphRows {
+    /// Deduplicated logical relations owned by the graph.
+    relations: Vec<LogicalRelation>,
+    /// Exact supporting source occurrences.
+    occurrences: Vec<RelationOccurrence>,
+    /// Coverage rows for the graph.
+    coverage: Vec<CoverageRecord>,
+    /// Content-free external entities referenced by the graph.
+    external_entities: Vec<GraphEntity>,
+    /// Canonical dependency keys retained by the graph relations.
+    relation_dependencies: Vec<RelationDependencyKey>,
+}
+
+impl ProjectedGraphRows {
+    /// Append one graph while retaining a single bounded staging batch.
+    fn append(&mut self, rows: Self) {
+        self.relations.extend(rows.relations);
+        self.occurrences.extend(rows.occurrences);
+        self.coverage.extend(rows.coverage);
+        self.external_entities.extend(rows.external_entities);
+        self.relation_dependencies
+            .extend(rows.relation_dependencies);
+    }
+
+    /// Return aggregate normalized rows retained by this staging batch.
+    fn row_count(&self) -> usize {
+        self.relations
+            .len()
+            .saturating_add(self.occurrences.len())
+            .saturating_add(self.coverage.len())
+            .saturating_add(self.external_entities.len())
+            .saturating_add(self.relation_dependencies.len())
+    }
+
+    /// Return whether the staging batch is empty.
+    fn is_empty(&self) -> bool {
+        self.row_count() == 0
+    }
+
+    /// Release all successfully staged rows while preserving allocated capacity.
+    fn clear(&mut self) {
+        self.relations.clear();
+        self.occurrences.clear();
+        self.coverage.clear();
+        self.external_entities.clear();
+        self.relation_dependencies.clear();
+    }
+}
+
+/// Resolve one parser graph and release its temporary owner/key workspace.
+fn project_graph_rows(
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    graph: &SymbolGraph,
+    entities: &mut EntityProjection,
+    candidates: &ProjectResolutionRegistry,
+    control: &IndexWorkControl,
+) -> Result<ProjectedGraphRows, CliError> {
+    control.check(IndexWorkStage::SymbolParsing)?;
+    let owners = entities
+        .owners_by_graph
+        .remove(&graph.path)
+        .ok_or_else(|| CliError::InvalidInput("graph owners were not staged".to_string()))?;
+    let resolution_keys = entities
+        .keys_by_graph
+        .remove(&graph.path)
+        .ok_or_else(|| CliError::InvalidInput("graph keys were not staged".to_string()))?;
+    let symbol_index = GraphSymbolIndex::new(graph, control)?;
+    let keys_by_relation = resolution_keys
+        .relation_keys()
+        .iter()
+        .map(|entry| (entry.relation_index(), entry.keys()))
+        .collect::<BTreeMap<_, _>>();
+    let mut relations_by_digest = BTreeMap::new();
+    let mut occurrences = Vec::new();
+    let mut relation_dependencies = Vec::new();
+    let mut external_entities = BTreeMap::new();
+    for (relation_index, source_relation) in graph.relations.iter().enumerate() {
+        control.check(IndexWorkStage::SymbolParsing)?;
+        let source = relation_source(
+            &owners,
+            &entities.entity_by_digest,
+            &symbol_index,
+            source_relation,
+        )?;
+        let dependency_keys = keys_by_relation
+            .get(&relation_index)
+            .copied()
+            .unwrap_or(&[]);
+        let resolution = relation_resolution(
+            project,
+            generation,
+            source_relation,
+            &owners,
+            graph,
+            &symbol_index,
+            dependency_keys,
+            candidates,
+            &entities.entity_by_digest,
+            &mut external_entities,
+            control,
+        )?;
+        let relation = LogicalRelation::new(
+            source,
+            GraphRelationKind::from_legacy(source_relation.kind),
+            resolution,
+            relation_confidence(source_relation.parser),
+            relation_completeness(source_relation.parser),
+            generation,
+        )
+        .map_err(invalid_graph_contract)?;
+        insert_relation(
+            &mut relations_by_digest,
+            relation.clone(),
+            &graph.path,
+            "logical",
+            relation_index,
+        )?;
+        let line = u32::try_from(source_relation.line).map_err(|error| {
+            CliError::InvalidInput(format!("relation source line exceeds graph range: {error}"))
+        })?;
+        let end_column =
+            u32::try_from(source_relation.context.chars().count()).map_err(|error| {
+                CliError::InvalidInput(format!(
+                    "relation source context exceeds graph range: {error}"
+                ))
+            })?;
+        occurrences.push(
+            RelationOccurrence::new(
+                &relation,
+                RepositoryFilePath::new(Path::new(&graph.path)).map_err(invalid_graph_contract)?,
+                SourceSpan::new(line.max(1), 0, line.max(1), end_column)
+                    .map_err(invalid_graph_contract)?,
+                generation,
+            )
+            .map_err(invalid_graph_contract)?,
+        );
+        for key in dependency_keys {
+            relation_dependencies.push(
+                RelationDependencyKey::new(relation.key().clone(), key.clone())
+                    .map_err(invalid_graph_contract)?,
+            );
+        }
+    }
+    for (fact_index, fact) in derived_relation_facts(graph, &keys_by_relation)
+        .into_iter()
+        .enumerate()
+    {
+        control.check(IndexWorkStage::SymbolParsing)?;
+        let source = relation_source(
+            &owners,
+            &entities.entity_by_digest,
+            &symbol_index,
+            &fact.relation,
+        )?;
+        let resolution = derived_relation_resolution(
+            project,
+            generation,
+            &fact,
+            &owners,
+            graph,
+            &symbol_index,
+            candidates,
+            &entities.entity_by_digest,
+            &mut external_entities,
+            control,
+        )?;
+        let relation = LogicalRelation::new(
+            source,
+            GraphRelationKind::Extended(fact.kind),
+            resolution,
+            relation_confidence(fact.relation.parser),
+            relation_completeness(fact.relation.parser),
+            generation,
+        )
+        .map_err(invalid_graph_contract)?;
+        insert_relation(
+            &mut relations_by_digest,
+            relation.clone(),
+            &graph.path,
+            "derived",
+            fact_index,
+        )?;
+        let line = u32::try_from(fact.relation.line).map_err(|error| {
+            CliError::InvalidInput(format!(
+                "derived relation source line exceeds graph range: {error}"
+            ))
+        })?;
+        let end_column = u32::try_from(fact.relation.context.chars().count()).map_err(|error| {
+            CliError::InvalidInput(format!(
+                "derived relation source context exceeds graph range: {error}"
+            ))
+        })?;
+        occurrences.push(
+            RelationOccurrence::new(
+                &relation,
+                RepositoryFilePath::new(Path::new(&graph.path)).map_err(invalid_graph_contract)?,
+                SourceSpan::new(line.max(1), 0, line.max(1), end_column)
+                    .map_err(invalid_graph_contract)?,
+                generation,
+            )
+            .map_err(invalid_graph_contract)?,
+        );
+        if let DerivedRelationTarget::Parser { keys } = fact.target {
+            for key in keys {
+                relation_dependencies.push(
+                    RelationDependencyKey::new(relation.key().clone(), key)
+                        .map_err(invalid_graph_contract)?,
+                );
+            }
+        }
+    }
+    let mut relations = relations_by_digest.into_values().collect::<Vec<_>>();
+    relations.sort_by(|left, right| left.key().digest().cmp(right.key().digest()));
+    occurrences.sort_by(|left, right| {
+        left.relation()
+            .digest()
+            .cmp(right.relation().digest())
+            .then_with(|| left.file().as_str().cmp(right.file().as_str()))
+            .then_with(|| left.span().start_line().cmp(&right.span().start_line()))
+            .then_with(|| left.span().start_column().cmp(&right.span().start_column()))
+    });
+    occurrences.dedup();
+    sort_dedup_dependencies(&mut relation_dependencies);
+    enforce_key_binding_limit(relation_dependencies.len())?;
+    entities.retained_bytes = entities
+        .retained_bytes
+        .saturating_sub(resolution_retained_bytes(&resolution_keys));
+    Ok(ProjectedGraphRows {
+        relations,
+        occurrences,
+        coverage: vec![coverage_for_graph(graph, generation)?],
+        external_entities: external_entities.into_values().collect(),
+        relation_dependencies,
+    })
+}
+
+/// Deduplicate relation occurrences while conservatively retaining ambiguity.
+fn insert_relation(
+    relations: &mut BTreeMap<String, LogicalRelation>,
+    relation: LogicalRelation,
+    graph_path: &str,
+    relation_kind: &str,
+    relation_index: usize,
+) -> Result<(), CliError> {
+    let digest = relation.key().digest().to_string();
+    match relations.entry(digest) {
+        Entry::Vacant(entry) => {
+            entry.insert(relation);
+            Ok(())
+        }
+        Entry::Occupied(mut entry) => {
+            let existing = entry.get();
+            if existing == &relation {
+                return Ok(());
+            }
+            let mergeable = existing.key() == relation.key()
+                && existing.source() == relation.source()
+                && existing.kind() == relation.kind()
+                && existing.confidence() == relation.confidence()
+                && existing.completeness() == relation.completeness()
+                && existing.generation() == relation.generation();
+            if mergeable
+                && let (
+                    RelationResolution::Ambiguous {
+                        reference: existing_reference,
+                        candidates: existing_candidates,
+                    },
+                    RelationResolution::Ambiguous {
+                        reference: incoming_reference,
+                        candidates: incoming_candidates,
+                    },
+                ) = (existing.resolution(), relation.resolution())
+                && existing_reference == incoming_reference
+            {
+                if incoming_candidates > existing_candidates {
+                    entry.insert(relation);
+                }
+                return Ok(());
+            }
+            Err(CliError::InvalidInput(format!(
+                "{relation_kind} relation digest retained conflicting facts for {graph_path} \
+                 relation {relation_index}: existing={existing:?}, incoming={relation:?}"
+            )))
+        }
+    }
 }
 
 /// Project-wide stable entities and their canonical resolution-key bindings.
 #[derive(Default)]
 struct ProjectResolutionRegistry {
-    /// Each candidate entity owned once by its stable digest.
-    entities_by_digest: BTreeMap<String, GraphEntity>,
+    /// Persisted candidates not already owned by the staged entity projection.
+    supplemental_entities_by_digest: BTreeMap<String, GraphEntity>,
     /// Canonical keys mapped only to sorted, deduplicated entity digests.
     candidate_digests_by_key: BTreeMap<CanonicalResolutionKey, BTreeSet<String>>,
     /// Conservative peak bytes retained by this temporary resolution registry.
@@ -877,7 +1348,7 @@ impl ProjectResolutionRegistry {
         entity: &GraphEntity,
     ) -> Result<(), CliError> {
         let digest = entity.key().digest().to_string();
-        match self.entities_by_digest.entry(digest.clone()) {
+        match self.supplemental_entities_by_digest.entry(digest.clone()) {
             Entry::Occupied(entry) if entry.get() != entity => {
                 return Err(CliError::InvalidInput(
                     "graph entity digest retained conflicting selectors".to_string(),
@@ -892,6 +1363,24 @@ impl ProjectResolutionRegistry {
                 entry.insert(entity.clone());
             }
         }
+        self.insert_candidate_binding(key, digest)
+    }
+
+    /// Bind an entity already owned by the staged projection without cloning it.
+    fn insert_staged_candidate(
+        &mut self,
+        key: &CanonicalResolutionKey,
+        entity: &GraphEntity,
+    ) -> Result<(), CliError> {
+        self.insert_candidate_binding(key, entity.key().digest().to_string())
+    }
+
+    /// Insert one canonical-key binding for an entity owned by either registry.
+    fn insert_candidate_binding(
+        &mut self,
+        key: &CanonicalResolutionKey,
+        digest: String,
+    ) -> Result<(), CliError> {
         if let Some(existing) = self.candidate_digests_by_key.get_mut(key) {
             if existing.insert(digest.clone()) {
                 self.retained_bytes = self
@@ -982,7 +1471,7 @@ fn resolution_registry_from_exports(
         let entity = projection.entity_by_digest.get(&digest).ok_or_else(|| {
             CliError::InvalidInput("resolution export owner was not staged".to_string())
         })?;
-        candidates.insert_candidate(binding.key(), entity)?;
+        candidates.insert_staged_candidate(binding.key(), entity)?;
     }
     Ok(candidates)
 }
@@ -1015,18 +1504,34 @@ fn merge_resolution_registries(
     control: &IndexWorkControl,
 ) -> Result<(), CliError> {
     let ProjectResolutionRegistry {
-        entities_by_digest,
+        supplemental_entities_by_digest,
         candidate_digests_by_key,
         retained_bytes: _retained_bytes,
     } = source;
+    for entity in supplemental_entities_by_digest.into_values() {
+        check_graph_work(control, target.supplemental_entities_by_digest.len())?;
+        let digest = entity.key().digest().to_string();
+        match target.supplemental_entities_by_digest.entry(digest.clone()) {
+            Entry::Occupied(entry) if entry.get() != &entity => {
+                return Err(CliError::InvalidInput(
+                    "resolution candidate entity retained conflicting selectors".to_string(),
+                ));
+            }
+            Entry::Occupied(_entry) => {}
+            Entry::Vacant(entry) => {
+                target.retained_bytes = target
+                    .retained_bytes
+                    .saturating_add(entity_retained_bytes(&entity))
+                    .saturating_add(digest.len() as u64);
+                entry.insert(entity);
+            }
+        }
+    }
     let mut bindings = 0_usize;
     for (key, candidates) in candidate_digests_by_key {
         for digest in candidates {
             check_graph_work(control, bindings)?;
-            let entity = entities_by_digest.get(&digest).ok_or_else(|| {
-                CliError::InvalidInput("resolution candidate entity was not registered".to_string())
-            })?;
-            target.insert_candidate(&key, entity)?;
+            target.insert_candidate_binding(&key, digest)?;
             bindings = bindings.saturating_add(1);
         }
     }
@@ -1174,8 +1679,9 @@ fn derived_relation_resolution<'a>(
     project: ProjectInstanceId,
     generation: IndexGeneration,
     fact: &DerivedRelationFact,
-    owners: &'a GraphOwners,
+    owners: &GraphOwners,
     graph: &SymbolGraph,
+    symbol_index: &GraphSymbolIndex<'_>,
     candidates: &'a ProjectResolutionRegistry,
     entities: &'a BTreeMap<String, GraphEntity>,
     external_entities: &mut BTreeMap<String, GraphEntity>,
@@ -1188,8 +1694,10 @@ fn derived_relation_resolution<'a>(
             &fact.relation,
             owners,
             graph,
+            symbol_index,
             keys,
             candidates,
+            entities,
             external_entities,
             control,
         ),
@@ -1476,24 +1984,31 @@ fn file_has_extension(file: &str, expected: &str) -> bool {
 
 /// Resolve one parser relation's unique local source entity when possible.
 fn relation_source<'a>(
-    owners: &'a GraphOwners,
-    graph: &SymbolGraph,
+    owners: &GraphOwners,
+    entities: &'a BTreeMap<String, GraphEntity>,
+    symbol_index: &GraphSymbolIndex<'_>,
     relation: &projectatlas_core::symbols::SymbolRelation,
-) -> &'a GraphEntity {
-    let mut matches = graph
-        .symbols
-        .iter()
-        .zip(&owners.symbols)
-        .filter_map(|(symbol, entity)| {
-            (symbol.name == relation.source_name)
-                .then_some(entity.as_ref())
-                .flatten()
-        });
-    let first = matches.next();
-    if first.is_some() && matches.next().is_none() {
-        return first.unwrap_or(&owners.file);
+) -> Result<&'a GraphEntity, CliError> {
+    let file = entities.get(&owners.file_digest).ok_or_else(|| {
+        CliError::InvalidInput("graph file owner entity was not staged".to_string())
+    })?;
+    let mut matched = None;
+    for &index in symbol_index.get(&relation.source_name) {
+        let digest = owners.symbol_digests.get(index).ok_or_else(|| {
+            CliError::InvalidInput("graph symbol owner index was not staged".to_string())
+        })?;
+        let Some(digest) = digest else {
+            continue;
+        };
+        let entity = entities.get(digest).ok_or_else(|| {
+            CliError::InvalidInput("graph symbol owner entity was not staged".to_string())
+        })?;
+        if matched.is_some() {
+            return Ok(file);
+        }
+        matched = Some(entity);
     }
-    &owners.file
+    Ok(matched.unwrap_or(file))
 }
 
 /// Resolve one relation from canonical dependency keys and bounded candidates.
@@ -1510,25 +2025,41 @@ fn relation_resolution<'a>(
     project: ProjectInstanceId,
     generation: IndexGeneration,
     relation: &projectatlas_core::symbols::SymbolRelation,
-    owners: &'a GraphOwners,
+    owners: &GraphOwners,
     graph: &SymbolGraph,
+    symbol_index: &GraphSymbolIndex<'_>,
     dependency_keys: &[CanonicalResolutionKey],
     candidates: &'a ProjectResolutionRegistry,
+    staged_entities: &'a BTreeMap<String, GraphEntity>,
     external_entities: &mut BTreeMap<String, GraphEntity>,
     control: &IndexWorkControl,
 ) -> Result<RelationResolution, CliError> {
     let matches = match relation.kind {
-        RelationKind::Contains => local_relation_matches(relation, owners, graph, control)?,
+        RelationKind::Contains => local_relation_matches(
+            relation,
+            owners,
+            graph,
+            symbol_index,
+            staged_entities,
+            control,
+        )?,
         RelationKind::Calls => {
-            let local = local_relation_matches(relation, owners, graph, control)?;
+            let local = local_relation_matches(
+                relation,
+                owners,
+                graph,
+                symbol_index,
+                staged_entities,
+                control,
+            )?;
             if local.count == 0 {
-                registry_resolution_matches(dependency_keys, candidates, control)?
+                registry_resolution_matches(dependency_keys, candidates, staged_entities, control)?
             } else {
                 local
             }
         }
         RelationKind::Imports | RelationKind::DependsOn => {
-            registry_resolution_matches(dependency_keys, candidates, control)?
+            registry_resolution_matches(dependency_keys, candidates, staged_entities, control)?
         }
     };
     match matches.count {
@@ -1566,19 +2097,27 @@ fn relation_resolution<'a>(
 /// Resolve exact declarations owned by the relation's source file.
 fn local_relation_matches<'a>(
     relation: &projectatlas_core::symbols::SymbolRelation,
-    owners: &'a GraphOwners,
+    owners: &GraphOwners,
     graph: &SymbolGraph,
+    symbol_index: &GraphSymbolIndex<'_>,
+    staged_entities: &'a BTreeMap<String, GraphEntity>,
     control: &IndexWorkControl,
 ) -> Result<ResolutionMatches<'a>, CliError> {
     let mut targets = BTreeMap::<&str, &GraphEntity>::new();
     let target_name = relation.target_name.trim();
     let source_parent = if relation.kind == RelationKind::Calls {
-        unique_source_parent(graph, &relation.source_name, control)?
+        unique_source_parent(graph, symbol_index, &relation.source_name, control)?
     } else {
         None
     };
-    for (symbol_index, (symbol, entity)) in graph.symbols.iter().zip(&owners.symbols).enumerate() {
-        check_graph_work(control, symbol_index)?;
+    for (candidate_index, &row_index) in symbol_index.get(target_name).iter().enumerate() {
+        check_graph_work(control, candidate_index)?;
+        let symbol = graph.symbols.get(row_index).ok_or_else(|| {
+            CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+        })?;
+        let digest = owners.symbol_digests.get(row_index).ok_or_else(|| {
+            CliError::InvalidInput("graph symbol owner index was not staged".to_string())
+        })?;
         let exact_match = match relation.kind {
             RelationKind::Contains => {
                 symbol.name == target_name
@@ -1594,7 +2133,10 @@ fn local_relation_matches<'a>(
             }
             RelationKind::Imports | RelationKind::DependsOn => false,
         };
-        if exact_match && let Some(entity) = entity {
+        if exact_match && let Some(digest) = digest {
+            let entity = staged_entities.get(digest).ok_or_else(|| {
+                CliError::InvalidInput("graph symbol owner entity was not staged".to_string())
+            })?;
             if !targets.contains_key(entity.key().digest()) {
                 enforce_resolution_match_budget(targets.len().saturating_add(1))?;
             }
@@ -1611,16 +2153,17 @@ fn local_relation_matches<'a>(
 /// Return one unambiguous containing scope for the parser relation source.
 fn unique_source_parent<'a>(
     graph: &'a SymbolGraph,
+    symbol_index: &GraphSymbolIndex<'_>,
     source_name: &str,
     control: &IndexWorkControl,
 ) -> Result<Option<&'a str>, CliError> {
     let mut parent = None;
     let mut source_found = false;
-    for (symbol_index, symbol) in graph.symbols.iter().enumerate() {
-        check_graph_work(control, symbol_index)?;
-        if symbol.name != source_name {
-            continue;
-        }
+    for (candidate_index, &row_index) in symbol_index.get(source_name).iter().enumerate() {
+        check_graph_work(control, candidate_index)?;
+        let symbol = graph.symbols.get(row_index).ok_or_else(|| {
+            CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+        })?;
         let candidate = symbol.parent.as_deref();
         if !source_found {
             parent = candidate;
@@ -1636,6 +2179,7 @@ fn unique_source_parent<'a>(
 fn registry_resolution_matches<'a>(
     dependency_keys: &[CanonicalResolutionKey],
     candidates: &'a ProjectResolutionRegistry,
+    staged_entities: &'a BTreeMap<String, GraphEntity>,
     control: &IndexWorkControl,
 ) -> Result<ResolutionMatches<'a>, CliError> {
     enforce_resolution_match_budget(dependency_keys.len().saturating_mul(2))?;
@@ -1659,9 +2203,14 @@ fn registry_resolution_matches<'a>(
         check_graph_work(control, visited)?;
         visited = visited.saturating_add(1);
         if last_digest != Some(digest) {
-            let entity = candidates.entities_by_digest.get(digest).ok_or_else(|| {
-                CliError::InvalidInput("resolution candidate entity was not registered".to_string())
-            })?;
+            let entity = staged_entities
+                .get(digest)
+                .or_else(|| candidates.supplemental_entities_by_digest.get(digest))
+                .ok_or_else(|| {
+                    CliError::InvalidInput(
+                        "resolution candidate entity was not registered".to_string(),
+                    )
+                })?;
             first.get_or_insert(entity);
             count = count.checked_add(1).ok_or_else(|| {
                 IndexWorkFailure::resource_limit(
@@ -1918,25 +2467,25 @@ fn relation_completeness(parser: ParserKind) -> Completeness {
 }
 
 /// Overlay staged symbol changes on persisted graphs for exact selected paths.
-fn complete_symbol_graphs(
+fn complete_symbol_graphs<'a>(
     store: &AtlasStore,
     paths: &BTreeSet<String>,
-    symbols: &SymbolBuildStage,
+    symbols: &'a SymbolBuildStage,
     control: &IndexWorkControl,
-) -> Result<Vec<SymbolGraph>, CliError> {
+) -> Result<Vec<Cow<'a, SymbolGraph>>, CliError> {
     let paths = paths.iter().cloned().collect::<Vec<_>>();
     let mut graphs = BTreeMap::new();
     for chunk in paths.chunks(PERSISTED_GRAPH_PATHS_PER_CHUNK) {
         control.check(IndexWorkStage::SymbolParsing)?;
         for graph in store.load_symbol_graphs_for_paths(chunk)? {
-            graphs.insert(graph.path.clone(), graph);
+            graphs.insert(graph.path.clone(), Cow::Owned(graph));
         }
     }
     for (index, change) in symbols.changes.iter().enumerate() {
         check_graph_work(control, index)?;
         match change {
             SymbolProjectionChange::Parsed(parsed) if paths.binary_search(&parsed.path).is_ok() => {
-                graphs.insert(parsed.path.clone(), parsed.graph.clone());
+                graphs.insert(parsed.path.clone(), Cow::Borrowed(&parsed.graph));
             }
             SymbolProjectionChange::Clear { path, .. } if paths.binary_search(path).is_ok() => {
                 graphs.remove(path);
@@ -2171,26 +2720,6 @@ impl From<GraphContractError> for CliError {
     }
 }
 
-/// Count conservative retained parser-graph string bytes.
-fn graph_retained_bytes(graph: &SymbolGraph) -> u64 {
-    let mut bytes = graph.path.len() as u64 + graph.language.as_ref().map_or(0, String::len) as u64;
-    for symbol in &graph.symbols {
-        bytes = bytes
-            .saturating_add(symbol.path.len() as u64)
-            .saturating_add(symbol.name.len() as u64)
-            .saturating_add(symbol.signature.len() as u64)
-            .saturating_add(symbol.parent.as_ref().map_or(0, String::len) as u64);
-    }
-    for relation in &graph.relations {
-        bytes = bytes
-            .saturating_add(relation.path.len() as u64)
-            .saturating_add(relation.source_name.len() as u64)
-            .saturating_add(relation.target_name.len() as u64)
-            .saturating_add(relation.context.len() as u64);
-    }
-    bytes
-}
-
 /// Count conservative retained canonical resolution-key bytes.
 fn resolution_retained_bytes(projection: &ResolutionKeyProjection) -> u64 {
     projection
@@ -2218,23 +2747,25 @@ fn resolution_retained_bytes(projection: &ResolutionKeyProjection) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CliError, GraphOwners, MAX_INCREMENTAL_GRAPH_BYTES, MAX_INCREMENTAL_GRAPH_ROWS,
-        PackageIndex, ProjectResolutionRegistry, RepositoryGraphMutation, StagedRepositoryGraph,
-        build_entity_projection, enforce_incremental_projection_budget,
-        enforce_incremental_projection_limits, explicit_external_selector, finish_projection,
-        is_cargo_manifest_path, registry_resolution_matches, relation_resolution,
+        CliError, GRAPH_STAGE_DATABASE_FILE_NAME, GRAPH_STAGE_DIRECTORY_PREFIX, GraphOwners,
+        GraphSymbolIndex, MAX_INCREMENTAL_GRAPH_BYTES, MAX_INCREMENTAL_GRAPH_ROWS, PackageIndex,
+        ProjectResolutionRegistry, RepositoryGraphMutation, StagedRepositoryGraph,
+        build_entity_projection, cleanup_abandoned_graph_staging,
+        enforce_incremental_projection_budget, enforce_incremental_projection_limits,
+        explicit_external_selector, finish_projection, finish_projection_in_database,
+        insert_relation, is_cargo_manifest_path, registry_resolution_matches, relation_resolution,
         repository_path_belongs_to, resolution_registry_from_exports, rust_toolchain_identity,
-        stage_incremental_repository_graph,
+        stage_incremental_repository_graph, try_graph_stage_lease,
     };
     use crate::runtime::{
         IndexRefreshReason, IndexRefreshScope, SymbolBuildReport, SymbolBuildStage,
     };
     use projectatlas_core::graph::{
-        CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageState, EntityResolutionKey,
-        EntitySelector, ExtendedRelationKind, GraphEntity, GraphIdentityText, GraphRelationKind,
-        LogicalRelation, PackageSelector, ProjectInstanceId, RelationDependencyKey,
-        RelationResolution, RepositoryFilePath, ResolutionKeyDomain, ReusableTargetSelector,
-        SymbolSelector,
+        CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageScope, CoverageState,
+        EntityResolutionKey, EntitySelector, ExtendedRelationKind, GraphEntity, GraphIdentityText,
+        GraphRelationKind, LogicalRelation, PackageSelector, ProjectInstanceId,
+        RelationDependencyKey, RelationResolution, RepositoryFilePath, RepositoryNodePath,
+        ResolutionKeyDomain, ReusableTargetSelector, SymbolSelector,
     };
     use projectatlas_core::relation_capabilities::{
         RELATION_FAMILY_CAPABILITIES, RelationFamilyState,
@@ -2253,6 +2784,7 @@ mod tests {
     use std::fmt::Debug;
     use std::fs;
     use std::io;
+    use std::num::NonZeroU32;
     use std::path::Path;
 
     #[test]
@@ -2348,6 +2880,7 @@ mod tests {
             coverage: Vec::new(),
             entity_exports: Vec::new(),
             relation_dependencies: Vec::new(),
+            database: None,
             retained_bytes: 0,
         };
         let error =
@@ -2374,7 +2907,7 @@ mod tests {
     }
 
     #[test]
-    fn resolution_registry_owns_each_exported_entity_once() -> Result<(), Box<dyn Error>> {
+    fn resolution_registry_reuses_staged_export_entities() -> Result<(), Box<dyn Error>> {
         let project = ProjectInstanceId::from_bytes([2; 16])?;
         let generation = IndexGeneration::new(1);
         let control = IndexWorkControl::new(IndexCancellation::new(), None);
@@ -2389,11 +2922,6 @@ mod tests {
         let packages = PackageIndex::from_graphs(&graphs)?;
         let projection =
             build_entity_projection(project, generation, &[], &graphs, &packages, true, &control)?;
-        let exported_digests = projection
-            .entity_exports
-            .iter()
-            .map(|binding| binding.entity().digest().to_string())
-            .collect::<BTreeSet<_>>();
         let registry = resolution_registry_from_exports(&projection, &control)?;
         let registered_bindings = registry
             .candidate_digests_by_key
@@ -2402,9 +2930,9 @@ mod tests {
             .sum::<usize>();
 
         require_eq(
-            &registry.entities_by_digest.len(),
-            &exported_digests.len(),
-            "registry-owned entity count",
+            &registry.supplemental_entities_by_digest.len(),
+            &0,
+            "duplicate registry-owned entity count",
         )?;
         require_eq(
             &registered_bindings,
@@ -2416,8 +2944,8 @@ mod tests {
                 .candidate_digests_by_key
                 .values()
                 .flatten()
-                .all(|digest| registry.entities_by_digest.contains_key(digest)),
-            "resolution key referenced an unowned entity digest",
+                .all(|digest| projection.entity_by_digest.contains_key(digest)),
+            "resolution key referenced an unstaged entity digest",
         )?;
         let mut bindings_per_entity = BTreeMap::<&str, usize>::new();
         for digest in registry.candidate_digests_by_key.values().flatten() {
@@ -2426,6 +2954,132 @@ mod tests {
         require(
             bindings_per_entity.values().any(|count| *count > 1),
             "fixture did not exercise one entity exported under multiple canonical keys",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn restart_cleanup_removes_only_inactive_owned_graph_stages() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("restart-cleanup");
+        let atlas_dir = root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let database = atlas_dir.join(GRAPH_STAGE_DATABASE_FILE_NAME);
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("bound project identity is missing")?;
+
+        let owned = atlas_dir.join(format!("{GRAPH_STAGE_DIRECTORY_PREFIX}owned"));
+        fs::create_dir(&owned)?;
+        drop(AtlasStore::create_repository_graph_staging(
+            &owned.join(GRAPH_STAGE_DATABASE_FILE_NAME),
+            &root,
+            project,
+        )?);
+        let lookalike = atlas_dir.join(format!("{GRAPH_STAGE_DIRECTORY_PREFIX}lookalike"));
+        fs::create_dir(&lookalike)?;
+        drop(AtlasStore::open_for_project(
+            &lookalike.join(GRAPH_STAGE_DATABASE_FILE_NAME),
+            &root,
+        )?);
+
+        let lease = try_graph_stage_lease(&atlas_dir)?
+            .ok_or("test could not acquire graph staging lease")?;
+        cleanup_abandoned_graph_staging(&root, project)?;
+        require(
+            owned.exists(),
+            "restart cleanup removed an actively leased stage",
+        )?;
+        drop(lease);
+
+        cleanup_abandoned_graph_staging(&root, project)?;
+        require(
+            !owned.exists(),
+            "restart cleanup retained an inactive owned stage",
+        )?;
+        require(
+            lookalike.exists(),
+            "restart cleanup removed an unvalidated lookalike stage",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn database_staging_publishes_and_removes_its_disposable_store() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("database-staging");
+        let atlas_dir = root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let database = atlas_dir.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("bound project identity is missing")?;
+        let generation = IndexGeneration::new(1);
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let graphs = vec![extract_symbol_graph(
+            "src/lib.rs",
+            Some("rust"),
+            "pub fn caller() { helper(); }\nfn helper() {}\n",
+        )];
+        let nodes = vec![test_file_node("src/lib.rs", "rust")];
+        let packages = PackageIndex::from_graphs(&graphs)?;
+        let projection = build_entity_projection(
+            project, generation, &nodes, &graphs, &packages, true, &control,
+        )?;
+        let candidates = resolution_registry_from_exports(&projection, &control)?;
+        let staged = finish_projection_in_database(
+            &root,
+            &nodes,
+            project,
+            generation,
+            &graphs,
+            projection,
+            &candidates,
+            &control,
+        )?;
+        let staging_path = staged
+            .database
+            .as_ref()
+            .ok_or("database staging was not selected")?
+            .directory
+            .path()
+            .to_path_buf();
+        require(
+            staging_path.exists(),
+            "database staging directory is missing",
+        )?;
+        {
+            let mut publication = store.begin_index_publication("database-staging")?;
+            publication.begin_scan_replacement()?;
+            publication.upsert_scan_node_batch(&nodes)?;
+            publication.finish_scan_replacement()?;
+            staged.apply(&mut publication, &control)?;
+            publication.complete()?;
+        }
+        drop(staged);
+        require(
+            !staging_path.exists(),
+            "database staging directory survived publication",
+        )?;
+        drop(store);
+
+        let reader = AtlasStore::open_read_only_for_project(&database, &root)?;
+        let coverage = reader.repository_graph_coverage(
+            project,
+            &CoverageScope::Path {
+                path: RepositoryNodePath::new(Path::new("src/lib.rs"))?,
+            },
+            8,
+        )?;
+        require(
+            !coverage.truncated,
+            "database-staged coverage was truncated",
+        )?;
+        require(
+            !coverage.rows.is_empty(),
+            "database-staged graph rows were not published",
         )?;
         Ok(())
     }
@@ -2503,6 +3157,7 @@ mod tests {
             project,
             generation,
             RepositoryGraphMutation::Full,
+            &graphs,
             projection,
             &candidates,
             &control,
@@ -2606,6 +3261,7 @@ mod tests {
             project,
             generation,
             RepositoryGraphMutation::Full,
+            &graphs,
             projection,
             &candidates,
             &control,
@@ -2704,11 +3360,13 @@ mod tests {
                 .owners_by_graph
                 .get(path)
                 .ok_or("scoped graph owners are missing")?;
-            let first = owners.symbols[method_indices[0]]
+            let first = owners.symbol_digests[method_indices[0]]
                 .as_ref()
+                .and_then(|digest| projection.entity_by_digest.get(digest))
                 .ok_or("first scoped method entity is missing")?;
-            let second = owners.symbols[method_indices[1]]
+            let second = owners.symbol_digests[method_indices[1]]
                 .as_ref()
+                .and_then(|digest| projection.entity_by_digest.get(digest))
                 .ok_or("second scoped method entity is missing")?;
             let EntitySelector::Symbol {
                 symbol: first_selector,
@@ -2810,9 +3468,11 @@ mod tests {
         registry.insert_candidate(&second_key, &first)?;
         registry.insert_candidate(&second_key, &second)?;
         let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let staged_entities = BTreeMap::new();
         let matches = registry_resolution_matches(
             &[first_key.clone(), second_key.clone()],
             &registry,
+            &staged_entities,
             &control,
         )?;
         require_eq(&matches.count, &2, "distinct merged candidate count")?;
@@ -2830,9 +3490,100 @@ mod tests {
         let canceled_control = IndexWorkControl::new(cancellation.clone(), None);
         cancellation.cancel();
         require(
-            registry_resolution_matches(&[first_key, second_key], &registry, &canceled_control)
-                .is_err(),
+            registry_resolution_matches(
+                &[first_key, second_key],
+                &registry,
+                &staged_entities,
+                &canceled_control,
+            )
+            .is_err(),
             "candidate merge ignored cancellation",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_ambiguous_relations_keep_the_largest_candidate_count() -> Result<(), Box<dyn Error>>
+    {
+        let project = ProjectInstanceId::from_bytes([15; 16])?;
+        let generation = IndexGeneration::new(1);
+        let source = test_file_entity(project, generation, "src/duplicate.ts")?;
+        let relation = |candidates| -> Result<LogicalRelation, Box<dyn Error>> {
+            Ok(LogicalRelation::new(
+                &source,
+                GraphRelationKind::from_legacy(RelationKind::Contains),
+                RelationResolution::Ambiguous {
+                    reference: GraphIdentityText::new("declarations")?,
+                    candidates: NonZeroU32::new(candidates).ok_or("candidate count was zero")?,
+                },
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?)
+        };
+        let mut relations = BTreeMap::new();
+        insert_relation(
+            &mut relations,
+            relation(2)?,
+            "src/duplicate.ts",
+            "logical",
+            0,
+        )?;
+        insert_relation(
+            &mut relations,
+            relation(3)?,
+            "src/duplicate.ts",
+            "logical",
+            1,
+        )?;
+        insert_relation(
+            &mut relations,
+            relation(2)?,
+            "src/duplicate.ts",
+            "logical",
+            2,
+        )?;
+        let retained = relations
+            .into_values()
+            .next()
+            .ok_or("deduplicated relation was not retained")?;
+        require(
+            matches!(
+                retained.resolution(),
+                RelationResolution::Ambiguous { candidates, .. } if candidates.get() == 3
+            ),
+            "deduplicated ambiguity did not retain the largest candidate count",
+        )?;
+
+        let mut conflicting = BTreeMap::new();
+        insert_relation(
+            &mut conflicting,
+            relation(2)?,
+            "src/duplicate.ts",
+            "logical",
+            0,
+        )?;
+        let different_confidence = LogicalRelation::new(
+            &source,
+            GraphRelationKind::from_legacy(RelationKind::Contains),
+            RelationResolution::Ambiguous {
+                reference: GraphIdentityText::new("declarations")?,
+                candidates: NonZeroU32::new(2).ok_or("candidate count was zero")?,
+            },
+            ConfidenceClass::High,
+            Completeness::Complete,
+            generation,
+        )?;
+        require(
+            insert_relation(
+                &mut conflicting,
+                different_confidence,
+                "src/duplicate.ts",
+                "logical",
+                1,
+            )
+            .is_err(),
+            "a non-ambiguity conflict was merged",
         )?;
         Ok(())
     }
@@ -2870,6 +3621,7 @@ mod tests {
             project,
             generation,
             RepositoryGraphMutation::Full,
+            std::slice::from_ref(&private_graph),
             projection,
             &candidates,
             &control,
@@ -2944,6 +3696,7 @@ mod tests {
             project,
             generation,
             RepositoryGraphMutation::Full,
+            std::slice::from_ref(&duplicate_graph),
             projection,
             &candidates,
             &control,
@@ -3067,6 +3820,7 @@ mod tests {
             project,
             generation,
             RepositoryGraphMutation::Full,
+            &graphs,
             projection,
             &candidates,
             &control,
@@ -3212,10 +3966,12 @@ mod tests {
         registry.insert_candidate(&shared_key, &first_shared)?;
         registry.insert_candidate(&shared_key, &second_shared)?;
         registry.insert_candidate(&local_package_key, &local_package)?;
+        let source_digest = source.key().digest().to_string();
         let owners = GraphOwners {
-            file: source.clone(),
-            symbols: Vec::new(),
+            file_digest: source_digest.clone(),
+            symbol_digests: Vec::new(),
         };
+        let staged_entities = BTreeMap::from([(source_digest, source.clone())]);
         let mut external_entities = BTreeMap::new();
         let cases = [
             resolution_case("rust", RelationKind::Calls, "unique", &[&unique_key]),
@@ -3259,14 +4015,17 @@ mod tests {
         let mut relations = Vec::new();
         let mut dependencies = Vec::new();
         for case in &cases {
+            let symbol_index = GraphSymbolIndex::new(&case.graph, &control)?;
             let resolution = relation_resolution(
                 project,
                 generation,
                 &case.relation,
                 &owners,
                 &case.graph,
+                &symbol_index,
                 &case.keys,
                 &registry,
+                &staged_entities,
                 &mut external_entities,
                 &control,
             )?;
@@ -3315,6 +4074,7 @@ mod tests {
             coverage: Vec::new(),
             entity_exports: exports.into(),
             relation_dependencies: dependencies,
+            database: None,
             retained_bytes: 0,
         };
         {
@@ -3643,6 +4403,7 @@ mod tests {
             project,
             generation,
             RepositoryGraphMutation::Full,
+            &graphs,
             entities,
             &candidates,
             &control,
@@ -3710,6 +4471,7 @@ mod tests {
             project,
             IndexGeneration::new(1),
             RepositoryGraphMutation::Full,
+            &graphs,
             entity_projection,
             &candidates,
             &control,

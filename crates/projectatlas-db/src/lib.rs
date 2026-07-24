@@ -26,8 +26,8 @@ pub use repository_graph::{
     RepositoryGraphAdjacencyReadPage, RepositoryGraphAdjacencyRow, RepositoryGraphDirection,
     RepositoryGraphPage, RepositoryGraphReadBatch, RepositoryGraphReadBudget,
     RepositoryGraphReadPage, RepositoryGraphReadPages, RepositoryGraphReadWork,
-    RepositoryGraphRelationQuery, RepositoryGraphRelationRow, RepositoryNavigationConnections,
-    RepositoryNavigationNode, RepositoryResolutionCandidate,
+    RepositoryGraphRelationQuery, RepositoryGraphRelationRow, RepositoryGraphStagingGuard,
+    RepositoryNavigationConnections, RepositoryNavigationNode, RepositoryResolutionCandidate,
 };
 pub use sqlite_profile::validate_database_location;
 pub use telemetry::{
@@ -778,6 +778,19 @@ pub struct CapturedProjectBinding {
     pub project_instance_id: ProjectInstanceId,
     /// Normalized local source root captured with the project identity.
     pub project_root: String,
+}
+
+/// Lightweight persisted import fact used by alias resolution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredImportRelation {
+    /// Repository-relative source path that owns the import.
+    pub path: String,
+    /// Parser-selected source declaration or module.
+    pub source_name: String,
+    /// Original persisted import text.
+    pub target_name: String,
+    /// One-based source line.
+    pub line: usize,
 }
 
 /// One unapproved purpose row bound to deterministic curator work.
@@ -2760,7 +2773,7 @@ impl AtlasStore {
         let sql = format!(
             "
             SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
-            FROM symbols
+            FROM symbols INDEXED BY idx_symbols_path
             WHERE path = ?1 AND kind IN ({placeholders})
             ORDER BY path, line_start, name
             LIMIT {max_rows}
@@ -2782,8 +2795,10 @@ impl AtlasStore {
             return Ok(0);
         }
         let placeholders = numbered_placeholders(2, kinds.len());
-        let sql =
-            format!("SELECT COUNT(*) FROM symbols WHERE path = ?1 AND kind IN ({placeholders})");
+        let sql = format!(
+            "SELECT COUNT(*) FROM symbols INDEXED BY idx_symbols_path
+             WHERE path = ?1 AND kind IN ({placeholders})"
+        );
         let mut values = Vec::with_capacity(kinds.len() + 1);
         values.push(file.to_string());
         values.extend(kinds.iter().map(ToString::to_string));
@@ -3364,7 +3379,7 @@ impl AtlasStore {
                         PARTITION BY target_name
                         ORDER BY path, line, source_name, target_name
                     ) AS target_row
-                FROM symbol_relations
+                FROM symbol_relations INDEXED BY idx_symbol_relations_target
                 WHERE kind = 'calls' AND target_name IN ({placeholders})
             )
             WHERE target_row <= ?{limit_placeholder}
@@ -3403,26 +3418,31 @@ impl AtlasStore {
         &self,
         terms: &[String],
         limit_per_term: usize,
-    ) -> DbResult<Vec<SymbolRelation>> {
+    ) -> DbResult<Vec<StoredImportRelation>> {
         let mut unique_terms = terms.to_vec();
         unique_terms.sort();
         unique_terms.dedup();
         let mut relations = Vec::new();
         for term in unique_terms.iter().filter(|term| !term.trim().is_empty()) {
-            let mut term_relations = self.query_relations(
+            let mut statement = self.connection.prepare_cached(
                 "
-                SELECT path, source_name, target_name, kind, line, context, parser
-                FROM symbol_relations
+                SELECT path, source_name, target_name, line
+                FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup
                 WHERE kind = 'imports' AND target_name LIKE ?1 ESCAPE '\\'
                 ORDER BY path, line, source_name, target_name
                 LIMIT ?2
                 ",
+            )?;
+            let rows = statement.query_map(
                 params![
                     sqlite_like_pattern(term),
                     usize_to_i64(limit_per_term.max(1))
                 ],
+                stored_import_relation_from_row,
             )?;
-            relations.append(&mut term_relations);
+            for row in rows {
+                relations.push(row?);
+            }
         }
         relations.sort_by(|left, right| {
             left.path
@@ -3435,9 +3455,38 @@ impl AtlasStore {
             left.path == right.path
                 && left.source_name == right.source_name
                 && left.target_name == right.target_name
-                && left.kind == right.kind
                 && left.line == right.line
         });
+        Ok(relations)
+    }
+
+    /// Load bounded import facts for one exact caller path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the covering indexed read fails.
+    pub fn load_import_relations_for_path(
+        &self,
+        path: &str,
+        limit: usize,
+    ) -> DbResult<Vec<StoredImportRelation>> {
+        let mut statement = self.connection.prepare_cached(
+            "
+            SELECT path, source_name, target_name, line
+            FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup
+            WHERE kind = 'imports' AND path = ?1
+            ORDER BY path, line, source_name, target_name
+            LIMIT ?2
+            ",
+        )?;
+        let rows = statement.query_map(
+            params![path, usize_to_i64(limit.max(1))],
+            stored_import_relation_from_row,
+        )?;
+        let mut relations = Vec::new();
+        for row in rows {
+            relations.push(row?);
+        }
         Ok(relations)
     }
 
@@ -3779,6 +3828,26 @@ impl AtlasStore {
             relations.push(row?);
         }
         Ok(relations)
+    }
+
+    /// Return whether any accepted agent-authored purpose can affect navigation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bounded indexed lookup fails.
+    pub fn has_agent_approved_purpose(&self) -> DbResult<bool> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM purposes INDEXED BY idx_purposes_status
+                    WHERE status = 'approved' AND source = 'agent'
+                    LIMIT 1
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     /// Persist a purpose for a path.
@@ -6878,6 +6947,18 @@ fn code_symbol_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSymbol>
         detail: row.get(9)?,
         exported: row.get::<_, i64>(10)? != 0,
         documentation: row.get(11)?,
+    })
+}
+
+/// Decode the covering persisted import projection.
+fn stored_import_relation_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredImportRelation> {
+    Ok(StoredImportRelation {
+        path: row.get(0)?,
+        source_name: row.get(1)?,
+        target_name: row.get(2)?,
+        line: i64_to_usize(row.get::<_, i64>(3)?),
     })
 }
 
@@ -10718,7 +10799,7 @@ mod tests {
         set_metadata(
             &store.connection,
             SCHEMA_VERSION_KEY,
-            &(SCHEMA_VERSION - 1).to_string(),
+            &crate::schema::COVERAGE_DISCOVERY_SCHEMA_VERSION.to_string(),
         )?;
         drop(store);
 
@@ -11670,6 +11751,21 @@ mod tests {
             &PurposeStatus::Missing,
             "summary update does not approve purpose",
         )?;
+        require_eq(
+            &store.has_agent_approved_purpose()?,
+            &false,
+            "missing purpose does not activate graph hydration",
+        )?;
+        store.set_purpose(
+            "src/lib.rs",
+            "Owns the library entry points.",
+            PurposeSource::Agent,
+        )?;
+        require_eq(
+            &store.has_agent_approved_purpose()?,
+            &true,
+            "agent-approved purpose activates graph hydration",
+        )?;
         Ok(())
     }
 
@@ -11723,6 +11819,95 @@ mod tests {
             &Some("Run the application.".to_string()),
             "documentation metadata",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn import_alias_lookup_uses_kind_first_covering_index() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/main.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: Vec::new(),
+            relations: vec![
+                SymbolRelation {
+                    path: "src/main.rs".to_string(),
+                    source_name: "main".to_string(),
+                    target_name: "use crate::service::run".to_string(),
+                    kind: RelationKind::Imports,
+                    line: 1,
+                    context: "use crate::service::run;".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+                SymbolRelation {
+                    path: "src/main.rs".to_string(),
+                    source_name: "main".to_string(),
+                    target_name: "use crate::other::Thing".to_string(),
+                    kind: RelationKind::Imports,
+                    line: 2,
+                    context: "use crate::other::Thing;".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+            ],
+        })?;
+
+        let relations =
+            store.load_import_relations_matching_targets(&["service".to_string()], 10)?;
+        require_eq(&relations.len(), &1, "matched import relation count")?;
+        require_eq(
+            &store
+                .load_import_relations_for_path("src/main.rs", 10)?
+                .len(),
+            &2,
+            "exact-path import relation count",
+        )?;
+        let mut statement = store.connection.prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT path, source_name, target_name, line
+             FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup
+             WHERE kind = 'imports' AND target_name LIKE '%service%' ESCAPE '\\'
+             ORDER BY path, line, source_name, target_name
+             LIMIT 10",
+        )?;
+        let plan = statement
+            .query_map([], |row| row.get::<_, String>(3))?
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        require(
+            plan.contains(
+                "SEARCH symbol_relations USING COVERING INDEX idx_symbol_import_alias_lookup (kind=?)",
+            ),
+            &format!("import alias lookup missed kind-first covering index: {plan}"),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn file_scoped_symbol_kind_lookup_uses_path_index() -> Result<(), Box<dyn Error>> {
+        let store = AtlasStore::in_memory()?;
+        for sql in [
+            "EXPLAIN QUERY PLAN
+             SELECT path, language, name, kind, signature, line_start, line_end,
+                    parent, parser, detail, exported, documentation
+             FROM symbols INDEXED BY idx_symbols_path
+             WHERE path = 'src/lib.rs' AND kind IN ('function')
+             ORDER BY path, line_start, name
+             LIMIT 25",
+            "EXPLAIN QUERY PLAN
+             SELECT COUNT(*) FROM symbols INDEXED BY idx_symbols_path
+             WHERE path = 'src/lib.rs' AND kind IN ('function')",
+        ] {
+            let mut statement = store.connection.prepare(sql)?;
+            let plan = statement
+                .query_map([], |row| row.get::<_, String>(3))?
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n");
+            require(
+                plan.contains("SEARCH symbols USING INDEX idx_symbols_path (path=?)"),
+                &format!("file-scoped symbol lookup missed exact-path index: {plan}"),
+            )?;
+        }
         Ok(())
     }
 
@@ -12225,6 +12410,31 @@ mod tests {
             .count();
         require_eq(&alpha_count, &2, "alpha per-target limit")?;
         require_eq(&beta_count, &1, "beta preserved despite alpha skew")?;
+        let mut statement = store.connection.prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT path, source_name, target_name, kind, line, context, parser
+             FROM (
+                 SELECT path, source_name, target_name, kind, line, context, parser,
+                     ROW_NUMBER() OVER (
+                         PARTITION BY target_name
+                         ORDER BY path, line, source_name, target_name
+                     ) AS target_row
+                 FROM symbol_relations INDEXED BY idx_symbol_relations_target
+                 WHERE kind = 'calls' AND target_name IN ('alpha', 'beta')
+             )
+             WHERE target_row <= 2
+             ORDER BY path, line, source_name, target_name",
+        )?;
+        let plan = statement
+            .query_map([], |row| row.get::<_, String>(3))?
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        require(
+            plan.contains(
+                "SEARCH symbol_relations USING INDEX idx_symbol_relations_target (target_name=?)",
+            ),
+            &format!("call target lookup missed exact-target index: {plan}"),
+        )?;
         Ok(())
     }
 

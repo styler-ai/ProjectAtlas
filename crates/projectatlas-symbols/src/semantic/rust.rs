@@ -10,11 +10,8 @@ pub(super) fn parse_import(import_text: &str) -> Vec<ImportReference> {
     };
     let rest = rest.trim();
     let rest = rest.strip_suffix(';').unwrap_or(rest).trim();
-    if rest.is_empty() || rest.ends_with(" as") {
-        return Vec::new();
-    }
     if let Some(open) = rest.find('{') {
-        let Some(close) = rest.rfind('}').filter(|close| *close > open) else {
+        let Some(close) = rest[open + 1..].rfind('}').map(|close| open + 1 + close) else {
             return Vec::new();
         };
         if !rest[close + 1..].trim().is_empty() {
@@ -136,4 +133,33 @@ fn crate_source_root(components: &[String]) -> Vec<String> {
         .iter()
         .rposition(|component| component == "src")
         .map_or_else(Vec::new, |index| components[..=index].to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_export_candidate, resolve_anchored_module_path};
+    use crate::extract_symbol_graph;
+
+    #[test]
+    fn rust_visibility_and_anchored_module_paths_remain_conservative() {
+        let graph = extract_symbol_graph(
+            "crates/example/src/lib.rs",
+            Some("rust"),
+            "fn private_item() {}\npub fn public_item() {}\n",
+        );
+        assert_eq!(graph.symbols.len(), 2);
+        assert!(!is_export_candidate(&graph, 0));
+        assert!(is_export_candidate(&graph, 1));
+
+        assert_eq!(
+            resolve_anchored_module_path("crates/example/src/module.rs", "crate::worker"),
+            Some("crates/example/src/worker".to_string())
+        );
+        for invalid in ["crate::::worker", "crate::.::worker", "crate::..::worker"] {
+            assert_eq!(
+                resolve_anchored_module_path("crates/example/src/module.rs", invalid),
+                None
+            );
+        }
+    }
 }

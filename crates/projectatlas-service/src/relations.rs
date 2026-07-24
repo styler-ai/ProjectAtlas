@@ -1797,6 +1797,9 @@ fn load_purposes(
     retained_state_bytes: u64,
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<BTreeMap<String, Purpose>> {
+    if !store.has_agent_approved_purpose()? {
+        return Ok(BTreeMap::new());
+    }
     let mut paths = BTreeSet::new();
     paths.extend(purpose_candidates(anchor));
     for row in rows {
