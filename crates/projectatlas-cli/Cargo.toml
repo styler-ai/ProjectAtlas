@@ -9,7 +9,7 @@ homepage.workspace = true
 [[bin]]
 name = "projectatlas"
 path = "src/main.rs"
-required-features = ["cli"]
+required-features = ["cli-core"]
 
 [[bin]]
 name = "projectatlas-parser-worker"
@@ -30,10 +30,14 @@ required-features = ["optional-parser-supervisor"]
 [features]
 default = ["cli"]
 cli = [
+    "cli-core",
     "optional-parser-supervisor",
+]
+cli-core = [
     "dep:blake3",
     "dep:clap",
     "dep:cssparser",
+    "dep:getrandom",
     "dep:jsonc-parser",
     "dep:notify",
     "dep:pulldown-cmark",

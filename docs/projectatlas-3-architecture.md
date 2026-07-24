@@ -1934,9 +1934,10 @@ toolchain and runtime identity, sample count, and units to the default-core runt
 binary bytes, completed optional-pack archive bytes, median fresh-process `runtime-info`
 startup, fresh-process MCP launch through a valid `initialize` response, and idle
 initialized MCP process-tree resident memory. It compares the normal default feature
-surface with a separately built `--no-default-features` control from the same
-candidate, toolchain, target, and host; MCP-ready sample order alternates between the
-two profiles. The default-core measurement runs without an installed selection,
+surface with a separately built `--no-default-features --features cli-core` control
+that omits the optional-parser supervisor from the same candidate, toolchain, target,
+and host; MCP-ready sample order alternates between the two profiles. The default-core
+measurement runs without an installed selection,
 keeps MCP stdin open for the observation interval, and fails structurally if a parser
 worker or containment broker exists, optional-pack storage is touched, the default
 dependency/build surface includes the separately packaged grammar or worker-only

@@ -12,6 +12,8 @@ param(
         (Join-Path $PSScriptRoot "verify-parser-pack-runtime-containment.ps1"),
     [string]$OptionalParserPackWorkflow =
         (Join-Path (Split-Path -Parent $PSScriptRoot) "workflows/optional-parser-pack.yml"),
+    [string]$RuntimeBoundaryMeasurement =
+        (Join-Path $PSScriptRoot "measure-default-runtime-optional-pack-boundary.ps1"),
     [string]$CliManifest =
         (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) `
             "crates/projectatlas-cli/Cargo.toml")
@@ -132,6 +134,9 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile(
 Require ($parseErrors.Count -eq 0) "Production construction script did not parse."
 $workflowText = [System.IO.File]::ReadAllText(
     (Get-Item -LiteralPath $OptionalParserPackWorkflow -Force).FullName
+)
+$runtimeBoundaryMeasurementText = [System.IO.File]::ReadAllText(
+    (Get-Item -LiteralPath $RuntimeBoundaryMeasurement -Force).FullName
 )
 $cliManifestItem = Get-Item -LiteralPath $CliManifest -Force
 Require `
@@ -441,12 +446,22 @@ try {
             -not $ast.Extent.Text.Contains(
                 '"projectatlas-cli/optional-parser-supervisor"'
             ) -and
-            $cliManifestText.Contains('required-features = ["cli"]') -and
+            $cliManifestText.Contains('required-features = ["cli-core"]') -and
             $cliManifestText.Contains('default = ["cli"]') -and
+            [System.Text.RegularExpressions.Regex]::IsMatch(
+                $cliManifestText,
+                '(?ms)^cli = \[\s*"cli-core",\s*"optional-parser-supervisor",'
+            ) -and
             $cliManifestText.Contains(
                 'path = "src/bin/optional_parser_pack_release.rs"'
             )) `
         "Parser-pack targets regained the unrelated main-CLI owned dependency closure."
+    Require `
+        ($runtimeBoundaryMeasurementText.Contains('-CargoFeatures "cli-core"') -and
+            $runtimeBoundaryMeasurementText.Contains(
+                '-FeatureArguments @("--no-default-features", "--features", "cli-core")'
+            )) `
+        "Absent-pack control must build the runnable CLI core without the optional supervisor."
     foreach ($dependency in @(
         "blake3",
         "clap",

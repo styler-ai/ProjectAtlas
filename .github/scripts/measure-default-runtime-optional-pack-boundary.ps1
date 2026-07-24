@@ -799,8 +799,8 @@ $defaultProfile = [pscustomobject][ordered]@{
 }
 $controlProfile = Build-RuntimeProfile `
     -Name "no_default_features_control" `
-    -CargoFeatures "none" `
-    -FeatureArguments @("--no-default-features") `
+    -CargoFeatures "cli-core" `
+    -FeatureArguments @("--no-default-features", "--features", "cli-core") `
     -TargetDirectory $controlCargoTargetDirectory `
     -SourceDirectory $resolvedSourceRoot `
     -TargetTriple $Target `
