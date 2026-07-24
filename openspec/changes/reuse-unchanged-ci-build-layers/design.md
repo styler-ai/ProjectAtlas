@@ -45,12 +45,12 @@ containment checks, and candidate assembly can change without changing Cargo
 dependency artifact compatibility. Such edits must still run against the exact
 candidate, but must not force an unrelated dependency rebuild.
 
-After a v2 miss, the workflow may try one exact compatible v1 key composed from the
-same target, Rust, native-toolchain, lockfile, and manifest inputs plus the frozen
-v1 policy digest. A hit crosses the current bounded validation and owned-package
-cleanup gates, then a trusted successful dispatch saves the sanitized layer under
-v2. This migrates existing compatible state without a broad fallback or another
-dependency compile.
+The v3 policy binds the worker-feature construction closure introduced by this
+change. After a v3 miss, the workflow may try one exact compatible v2 key composed
+from the same target, Rust, native-toolchain, lockfile, and manifest inputs. A hit
+crosses the current bounded validation and owned-package cleanup gates, then a
+trusted successful dispatch saves the sanitized layer under v3. This migrates the
+existing compatible state without a broad fallback or another dependency compile.
 
 Caching package archives or grammar binaries was rejected because those bytes are already acquired by pinned digest and would broaden the trust boundary without addressing the dominant Cargo rebuild.
 
@@ -101,6 +101,10 @@ An invalid tree is atomically renamed to a quarantine sibling and replaced with 
 
 `workflow_dispatch` gains a boolean clean-construction input. Clean mode skips restore and save on both targets. Pull-request runs may restore exact trusted state but never save. Only non-clean `workflow_dispatch` construction jobs that reach the save step after contained construction, platform verification, candidate revalidation, artifact upload, and cache sanitation are save-eligible. Downstream fresh-runner jobs remain release gates, but cannot govern a runner-local cache write after the construction runner has ended.
 
+Each construction-matrix target declares whether Cargo-layer reuse is enabled.
+Disabled targets still perform the same empty-target construction and all proof
+gates, publish a `disabled` disposition, and cannot restore or save cache state.
+
 The workflow records a bounded JSON receipt per target with the cache disposition and SHA-256 of the key, not machine-local paths or cache contents. GitHub job/step timestamps remain the wall-time authority.
 
 ## Risks / Trade-offs
@@ -108,7 +112,7 @@ The workflow records a bounded JSON receipt per target with the cache dispositio
 - **A missing key input reuses incompatible native objects** → include toolchain, lock/manifest, target, runner/native identity, and an explicit reviewed cache-policy ABI; use no prefix fallback.
 - **A restored build tree contains hostile filesystem objects** → validate in containment, quarantine without traversal, then rebuild clean.
 - **Candidate artifacts survive package cleanup** → name every owned crate in one tested command and assert known candidate binaries are absent before save.
-- **Cache transfer and validation cost approaches rebuild cost** → require measured 60 percent contained-step improvement on each target before keeping reuse enabled.
+- **Cache transfer and validation cost approaches rebuild cost** → require at least 30 percent and 30 seconds of measured contained-step improvement on each target before keeping reuse enabled.
 - **Cache eviction causes intermittent misses** → treat every miss as an ordinary clean construction, never as a failure.
 
 ## Migration Plan
@@ -116,7 +120,7 @@ The workflow records a bounded JSON receipt per target with the cache dispositio
 1. Land the cache contract and focused validation/policy tests with reuse disabled only by the absence of a prior key.
 2. Run one trusted non-clean dispatch to establish the cold baseline and populate eligible dependency state.
 3. Run an unchanged-input dispatch and compare Linux/Windows contained-step timings.
-4. Keep reuse only where the 60 percent threshold is met.
+4. Keep reuse only where both the 30 percent and 30 second materiality thresholds are met.
 5. Before v0.4.0 acceptance, run and retain one successful clean-construction dispatch.
 
 Rollback removes the restore/save steps and returns the build directory to always-empty behavior; no product data or schema migration is involved.

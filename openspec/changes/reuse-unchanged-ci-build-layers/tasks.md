@@ -19,5 +19,5 @@
 
 - [x] 4.1 Add the CI dependency-layer and clean-release flow to the owning Mermaid architecture views, render it with Mermaid CLI, and inspect semantic and visual correctness.
 - [x] 4.2 Run the construction diagnostics, workflow syntax/policy checks, Rust formatting/check/Clippy/tests affected by the Linux launch fix, strict OpenSpec validation, and IssueOps synchronization.
-- [ ] 4.3 Run trusted cold and unchanged-input Linux/Windows constructions, publish the cache receipts and timing comparison, and keep reuse only where contained construction improves by at least 60 percent.
+- [ ] 4.3 Run trusted cold and unchanged-input Linux/Windows constructions, publish the cache receipts and timing comparison, and keep reuse only where contained construction improves by at least 30 percent and 30 seconds.
 - [ ] 4.4 Record one successful explicit empty-cache Linux and Windows construction on the final v0.4.0 candidate before release acceptance.

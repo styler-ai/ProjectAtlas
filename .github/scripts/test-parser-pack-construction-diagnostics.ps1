@@ -464,9 +464,8 @@ try {
         '${{ steps.identity.outputs.rustc_commit_hash }}',
         '${{ steps.native-toolchain.outputs.sha256 }}',
         "hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml')",
+        'parser-pack-cargo-v3',
         'parser-pack-cargo-v2',
-        'parser-pack-cargo-v1',
-        'ec8ceb19be347cb3a1bec0766a1d8dfc2a9f404c8838057af8aeab05f6ba6c43',
         'image_os=$env:ImageOS',
         'image_version=$env:ImageVersion',
         'visual_studio=$vsVersion',
@@ -483,12 +482,23 @@ try {
         (-not $workflowText.Contains(
                 "hashFiles('.github/workflows/optional-parser-pack.yml', '.github/scripts/run-parser-pack-contained-construction.ps1')"
             ) -and
+            [System.Text.RegularExpressions.Regex]::IsMatch(
+                $workflowText,
+                'target:\s+x86_64-unknown-linux-gnu[\r\n]+\s+isolation:\s+linux-network-namespace[\r\n]+\s+reuse_cargo_layer:\s+true'
+            ) -and
+            [System.Text.RegularExpressions.Regex]::IsMatch(
+                $workflowText,
+                'target:\s+x86_64-pc-windows-msvc[\r\n]+\s+isolation:\s+windows-principal-firewall[\r\n]+\s+reuse_cargo_layer:\s+false'
+            ) -and
             $workflowText.Contains("github.event_name != 'workflow_dispatch' || !inputs.clean_construction") -and
             $workflowText.Contains("github.event_name == 'workflow_dispatch' &&") -and
+            $workflowText.Contains("matrix.reuse_cargo_layer &&") -and
             $workflowText.Contains("steps.cargo-cache-restore.outputs.cache-hit != 'true'") -and
-            $workflowText.Contains("steps.cargo-cache-key.outputs.compatible_v1_key") -and
+            $workflowText.Contains("steps.cargo-cache-key.outputs.compatible_v2_key") -and
             $workflowText.Contains("steps.cargo-cache-compatible-restore.outputs.cache-hit") -and
             $workflowText.Contains("steps.cargo-cache-disposition.outputs.value != 'rejected'") -and
+            $workflowText.Contains('elseif (-not $reuseEnabled)') -and
+            $workflowText.Contains('"disabled"') -and
             $workflowText.Contains('construction_exit=$?') -and
             $workflowText.Contains('"--release",') -and
             $workflowText.Contains('path: ${{ runner.temp }}/parser-pack-output/build')) `
@@ -526,7 +536,7 @@ try {
         [System.StringComparison]::Ordinal
     )
     $compatibleRestoreIndex = $workflowText.IndexOf(
-        "- name: Restore exact compatible v1 Cargo layer",
+        "- name: Restore exact compatible v2 Cargo layer",
         [System.StringComparison]::Ordinal
     )
     $sanitizeIndex = $workflowText.IndexOf(

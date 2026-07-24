@@ -37,9 +37,11 @@ jobs:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             isolation: linux-network-namespace
+            reuse_cargo_layer: true
           - os: windows-2025
             target: x86_64-pc-windows-msvc
             isolation: windows-principal-firewall
+            reuse_cargo_layer: false
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -185,17 +187,16 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $manifestHash = "${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml') }}"
-          # Bump only when reusable Cargo artifact compatibility changes.
-          $cachePolicy = "parser-pack-cargo-v2"
-          $compatibleV1PolicyDigest = "ec8ceb19be347cb3a1bec0766a1d8dfc2a9f404c8838057af8aeab05f6ba6c43"
+          # Bump when reusable artifact compatibility or the declared feature closure changes.
+          $cachePolicy = "parser-pack-cargo-v3"
+          $compatibleV2Policy = "parser-pack-cargo-v2"
           $rustcCommit = "${{ steps.identity.outputs.rustc_commit_hash }}"
           if ($rustcCommit -cnotmatch '\A[0-9a-f]{40}\z') {
             throw "Reusable Cargo layer key contains an invalid rustc commit."
           }
           foreach ($digest in @(
             "${{ steps.native-toolchain.outputs.sha256 }}",
-            $manifestHash,
-            $compatibleV1PolicyDigest
+            $manifestHash
           )) {
             if ($digest -cnotmatch '\A[0-9a-f]{64}\z') {
               throw "Reusable Cargo layer key contains an invalid digest."
@@ -208,15 +209,14 @@ jobs:
             "${{ steps.native-toolchain.outputs.sha256 }}",
             $manifestHash
           ) -join "-"
-          $compatibleV1Key = @(
-            "parser-pack-cargo-v1",
+          $compatibleV2Key = @(
+            $compatibleV2Policy,
             "${{ matrix.target }}",
             $rustcCommit,
             "${{ steps.native-toolchain.outputs.sha256 }}",
-            $manifestHash,
-            $compatibleV1PolicyDigest
+            $manifestHash
           ) -join "-"
-          foreach ($candidateKey in @($key, $compatibleV1Key)) {
+          foreach ($candidateKey in @($key, $compatibleV2Key)) {
             if ($candidateKey.Length -gt 512) {
               throw "Reusable Cargo layer key exceeds the GitHub cache limit."
             }
@@ -227,25 +227,28 @@ jobs:
           ).ToLowerInvariant()
           "key=$key" >> $env:GITHUB_OUTPUT
           "sha256=$keyDigest" >> $env:GITHUB_OUTPUT
-          "compatible_v1_key=$compatibleV1Key" >> $env:GITHUB_OUTPUT
+          "compatible_v2_key=$compatibleV2Key" >> $env:GITHUB_OUTPUT
 
       - name: Restore exact reusable Cargo layer
         id: cargo-cache-restore
-        if: github.event_name != 'workflow_dispatch' || !inputs.clean_construction
+        if: >-
+          matrix.reuse_cargo_layer &&
+          (github.event_name != 'workflow_dispatch' || !inputs.clean_construction)
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/parser-pack-output/build
           key: ${{ steps.cargo-cache-key.outputs.key }}
 
-      - name: Restore exact compatible v1 Cargo layer
+      - name: Restore exact compatible v2 Cargo layer
         id: cargo-cache-compatible-restore
         if: >-
+          matrix.reuse_cargo_layer &&
           (github.event_name != 'workflow_dispatch' || !inputs.clean_construction) &&
           steps.cargo-cache-restore.outputs.cache-hit != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/parser-pack-output/build
-          key: ${{ steps.cargo-cache-key.outputs.compatible_v1_key }}
+          key: ${{ steps.cargo-cache-key.outputs.compatible_v2_key }}
 
       - name: Test bounded construction diagnostics
         shell: pwsh
@@ -546,16 +549,26 @@ jobs:
             throw "Contained construction returned an invalid cache disposition."
           }
           $clean = "${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction }}" -eq "true"
-          $restoreAttempted = -not $clean
+          $reuseEnabled = "${{ matrix.reuse_cargo_layer }}" -eq "true"
+          $restoreAttempted = $reuseEnabled -and -not $clean
           $exactHit = "${{ steps.cargo-cache-restore.outputs.cache-hit }}" -eq "true"
           $compatibleHit = "${{ steps.cargo-cache-compatible-restore.outputs.cache-hit }}" -eq "true"
           $saveEligible = (
+            $reuseEnabled -and
             "${{ github.event_name }}" -eq "workflow_dispatch" -and
             -not $clean -and
             -not $exactHit -and
             $state.disposition -ne "rejected"
           )
-          $effectiveDisposition = if ($clean) { "clean" } else { [string]$state.disposition }
+          $effectiveDisposition = if ($clean) {
+            "clean"
+          }
+          elseif (-not $reuseEnabled) {
+            "disabled"
+          }
+          else {
+            [string]$state.disposition
+          }
           $receiptDirectory = Join-Path $env:RUNNER_TEMP "parser-pack-cache-receipt"
           [System.IO.Directory]::CreateDirectory($receiptDirectory) | Out-Null
           $receipt = [ordered]@{
@@ -584,7 +597,7 @@ jobs:
             "",
             "- disposition: ``$effectiveDisposition``",
             "- key SHA-256: ``${{ steps.cargo-cache-key.outputs.sha256 }}``",
-            "- compatible v1 hit: ``$compatibleHit``",
+            "- compatible v2 hit: ``$compatibleHit``",
             "- restored entries: ``$([uint64]$state.entries)``",
             "- restored bytes: ``$([uint64]$state.bytes)``",
             "- save eligible: ``$saveEligible``"
@@ -610,6 +623,7 @@ jobs:
 
       - name: Save exact reusable Cargo layer
         if: >-
+          matrix.reuse_cargo_layer &&
           github.event_name == 'workflow_dispatch' &&
           !inputs.clean_construction &&
           steps.cargo-cache-restore.outputs.cache-hit != 'true' &&

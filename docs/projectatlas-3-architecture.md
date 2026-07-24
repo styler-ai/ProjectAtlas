@@ -1824,9 +1824,10 @@ normal release binary, so construction does not activate example-only developmen
 dependencies; the normal `projectatlas` executable retains its complete default CLI
 behavior. Linux reuses the worker-feature CLI library for its separate release-tool
 build instead of compiling a second supervisor-only library variant.
-After a v2 miss, one exact compatible v1 key derived from the same target, Rust,
-native-toolchain, lockfile, and manifest inputs may migrate an already sanitized
-layer into v2. There are no prefix fallbacks, and the restored tree still crosses
+The v3 cache policy binds that worker-feature construction closure. After a v3 miss,
+one exact compatible v2 key derived from the same target, Rust, native-toolchain,
+lockfile, and manifest inputs may migrate an already sanitized layer into v3. There
+are no prefix fallbacks, and the restored tree still crosses
 the same untrusted-input validation and owned-output cleanup boundaries.
 The pinned grammar bundles, constructed archives, candidate binaries, receipts,
 ProjectAtlas databases, and workspace state never enter this cache.
@@ -1840,6 +1841,8 @@ both actions and remains the final release-acceptance path. Candidate-owned buil
 targets share the smallest valid Cargo invocation for their platform, while the two
 required audit-and-archive constructions run concurrently in isolated lanes. Both
 lanes still start from the pinned inputs and must produce byte-identical archives.
+Each matrix target owns an explicit reuse decision: a disabled target starts empty,
+publishes a `disabled` disposition, and cannot restore or save cache state.
 
 ```mermaid
 flowchart TB
@@ -1847,9 +1850,11 @@ flowchart TB
     Dispatch{Explicit clean construction?}
     Key --> Dispatch
     Dispatch -->|yes| Empty[Empty Cargo target]
-    Dispatch -->|no| Lookup{Exact v2 cache hit?}
+    Dispatch -->|no| Reuse{Reuse enabled for target?}
+    Reuse -->|no: disabled| Empty
+    Reuse -->|yes| Lookup{Exact v3 cache hit?}
     Lookup -->|yes| Restore[Restore exact selected key]
-    Lookup -->|no| Compatible{Exact compatible v1 hit?}
+    Lookup -->|no| Compatible{Exact compatible v2 hit?}
     Compatible -->|yes| Restore
     Compatible -->|no| Empty
     Restore --> Validate{Bounded regular tree?}
@@ -1862,10 +1867,10 @@ flowchart TB
     Assemble --> Verify[Digest, license, native, containment, lifecycle, package, and fresh-runner proof]
     Verify --> Publish[Immutable construction artifact]
     Verify --> CleanAfter[Remove owned outputs and Windows broker]
-    Publish --> Receipt[Bounded target disposition receipt]
+    Publish --> Receipt[Bounded target disposition receipt<br/>including disabled]
     CleanAfter --> Receipt
-    Receipt --> Trust{Trusted successful non-clean dispatch?}
-    Trust -->|no: pull request or clean run| NoSave[Do not save cache state]
+    Receipt --> Trust{Cache-save eligible?<br/>trusted, non-clean, reuse-enabled}
+    Trust -->|no| NoSave[Do not save cache state]
     Trust -->|yes| Save[Save exact dependency layer]
 ```
 

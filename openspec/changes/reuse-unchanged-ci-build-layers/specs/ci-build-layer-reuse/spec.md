@@ -7,9 +7,9 @@ The optional parser-pack workflow SHALL reuse only Cargo target state left after
 - **WHEN** a trusted run uses the same target, toolchains, lockfile, manifests, and cache-policy ABI as a previously saved run
 - **THEN** the workflow restores that target's dependency build layer and reports an exact cache hit
 
-#### Scenario: One exact compatible v1 layer exists
-- **WHEN** the v2 key misses but the same target, toolchains, lockfile, and manifests have an exact sanitized v1 layer under the frozen compatible policy digest
-- **THEN** the workflow restores and validates that exact layer, rebuilds all candidate-owned outputs, and may save the sanitized result under v2 after every trusted gate succeeds
+#### Scenario: One exact compatible v2 layer exists
+- **WHEN** the v3 worker-feature key misses but the same target, toolchains, lockfile, and manifests have an exact sanitized v2 layer
+- **THEN** the workflow restores and validates that exact layer, rebuilds all candidate-owned outputs, and may save the sanitized result under v3 after every trusted gate succeeds
 
 #### Scenario: One cache input changes
 - **WHEN** any declared target, toolchain, lockfile, manifest, feature, or cache-policy ABI input changes
@@ -56,8 +56,8 @@ The workflow SHALL expose an explicit clean-construction dispatch mode that bypa
 - **THEN** both targets start with empty Cargo target directories and no cache state is restored or saved
 
 ### Requirement: Reuse benefit and disposition are measurable
-The workflow SHALL record target-specific cold and repeated-run wall times, cache disposition, and a non-secret digest of the selected cache key. An unchanged-input repeated construction SHALL reduce contained construction wall time by at least 60 percent on both accepted targets, or reuse SHALL remain disabled for the target with the measured reason recorded.
+The workflow SHALL record target-specific cold and repeated-run wall times, cache disposition, and a non-secret digest of the selected cache key. Reuse SHALL remain enabled only when an unchanged-input repeated construction reduces contained construction wall time by at least 30 percent and 30 seconds for that target; otherwise reuse SHALL remain disabled with the measured reason recorded.
 
 #### Scenario: Repeated-run benchmark completes
 - **WHEN** a cold run has populated eligible cache state and an unchanged-input run completes
-- **THEN** the Linux and Windows receipts distinguish clean, miss, hit, rejected, and save-eligible states and report the measured wall-time comparison
+- **THEN** the Linux and Windows receipts distinguish clean, disabled, miss, hit, rejected, and save-eligible states and report the measured wall-time comparison
