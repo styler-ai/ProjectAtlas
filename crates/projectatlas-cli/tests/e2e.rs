@@ -156,15 +156,21 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
 #[test]
 fn derived_snapshot_cli_round_trips_without_replacing_authored_state() -> Result<(), Box<dyn Error>>
 {
+    const FIXTURE_SOURCE_PATH: &str = "src/lib.rs";
+    const PROJECT_DB_PATH: &str = ".projectatlas/projectatlas.db";
+
     let temp = tempfile::tempdir()?;
     let source = temp.path().join("snapshot-source");
     let destination = temp.path().join("snapshot-destination");
     for root in [&source, &destination] {
-        fs::create_dir_all(root.join("src"))?;
-        fs::write(root.join("src/lib.rs"), "pub fn answer() -> u32 { 42 }\n")?;
+        fs::create_dir_all(root.join(SRC_DIR_NAME))?;
+        fs::write(
+            root.join(FIXTURE_SOURCE_PATH),
+            "pub fn answer() -> u32 { 42 }\n",
+        )?;
     }
-    let source_db = source.join(".projectatlas/projectatlas.db");
-    let destination_db = destination.join(".projectatlas/projectatlas.db");
+    let source_db = source.join(PROJECT_DB_PATH);
+    let destination_db = destination.join(PROJECT_DB_PATH);
     for (root, db) in [(&source, &source_db), (&destination, &destination_db)] {
         let output = Command::cargo_bin("projectatlas")?
             .current_dir(root)
@@ -187,7 +193,7 @@ fn derived_snapshot_cli_round_trips_without_replacing_authored_state() -> Result
         .current_dir(&source)
         .arg("--db")
         .arg(&source_db)
-        .args(["purpose", "set", "src/lib.rs", source_secret])
+        .args(["purpose", "set", FIXTURE_SOURCE_PATH, source_secret])
         .assert()
         .success();
     let destination_purpose = "Destination-authored purpose survives import";
@@ -195,7 +201,7 @@ fn derived_snapshot_cli_round_trips_without_replacing_authored_state() -> Result
         .current_dir(&destination)
         .arg("--db")
         .arg(&destination_db)
-        .args(["purpose", "set", "src/lib.rs", destination_purpose])
+        .args(["purpose", "set", FIXTURE_SOURCE_PATH, destination_purpose])
         .assert()
         .success();
 
