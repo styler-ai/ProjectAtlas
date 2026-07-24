@@ -13,6 +13,11 @@ on:
         description: "Release version (e.g. v0.3.0)"
         required: true
         type: string
+      prepublish_only:
+        description: "Build, install, and test release packages without publishing"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -97,6 +102,7 @@ jobs:
           fi
 
       - name: Release issue checklist gate
+        if: ${{ !inputs.prepublish_only }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -436,6 +442,7 @@ jobs:
 
   publish:
     name: publish
+    if: ${{ !inputs.prepublish_only }}
     needs: [prepublish-installer-smoke-unix, prepublish-installer-smoke-windows]
     runs-on: ubuntu-latest
     permissions:

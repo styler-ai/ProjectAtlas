@@ -3945,9 +3945,69 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         )
     {
         return Err(io::Error::other(
-            "release must retain milestone completion and ordinary quality gates",
+            "release must retain milestone completion, ordinary gates, and a non-publishing package-proof mode",
         )
         .into());
+    }
+    let prepublish_input = release
+        .split("      prepublish_only:")
+        .nth(1)
+        .and_then(|tail| tail.split("\n\npermissions:").next())
+        .ok_or_else(|| io::Error::other("release omitted the prepublish-only input"))?;
+    for required in ["required: false", "default: false", "type: boolean"] {
+        if !prepublish_input.contains(required) {
+            return Err(io::Error::other(format!(
+                "prepublish-only input omitted fail-closed field {required:?}"
+            ))
+            .into());
+        }
+    }
+    let prepublish_guard = "if: ${{ !inputs.prepublish_only }}";
+    let checklist_gate = release
+        .split("      - name: Release issue checklist gate")
+        .nth(1)
+        .and_then(|tail| tail.split("\n  package-unix:").next())
+        .ok_or_else(|| io::Error::other("release omitted the checklist gate step"))?;
+    if !checklist_gate.contains(prepublish_guard) {
+        return Err(io::Error::other(
+            "release checklist gate is not owned by the prepublish-only guard",
+        )
+        .into());
+    }
+    let publish_job = release
+        .split("\n  publish:\n")
+        .nth(1)
+        .ok_or_else(|| io::Error::other("release omitted the publish job"))?;
+    let publish_header = publish_job
+        .split("    steps:")
+        .next()
+        .ok_or_else(|| io::Error::other("release publish job omitted its header"))?;
+    if !publish_header.contains(prepublish_guard) || release.matches(prepublish_guard).count() != 2
+    {
+        return Err(io::Error::other(
+            "prepublish-only guard must own exactly the checklist step and publish job",
+        )
+        .into());
+    }
+    for job in [
+        "verify",
+        "package-unix",
+        "package-windows",
+        "prepublish-installer-smoke-unix",
+        "prepublish-installer-smoke-windows",
+    ] {
+        let marker = format!("\n  {job}:\n");
+        let header = release
+            .split(&marker)
+            .nth(1)
+            .and_then(|tail| tail.split("    steps:").next())
+            .ok_or_else(|| io::Error::other(format!("release omitted the {job} job header")))?;
+        if header.contains(prepublish_guard) {
+            return Err(io::Error::other(format!(
+                "prepublish-only mode incorrectly suppresses the {job} job"
+            ))
+            .into());
+        }
     }
     for required in [
         "packaged-contract-runner-${{ matrix.suffix }}",
