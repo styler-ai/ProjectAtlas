@@ -63,9 +63,13 @@ Keeping candidate artifacts and relying only on Cargo fingerprints was rejected 
 ### Schedule required candidate work without weakening proof
 
 Candidate-owned targets remain fresh, but they do not need separate serial Cargo
-graphs. Windows builds the worker, assembler, and verifier in one Cargo invocation.
-Linux keeps the worker's required linker-specific `cargo rustc` invocation separate,
-then builds both release tools in one Cargo invocation.
+graphs or the unrelated main-CLI dependency closure. The `projectatlas` executable
+keeps its full default `cli` feature, while parser-pack construction disables default
+features and activates only the worker/supervisor closure. The release verifier is a
+normal binary target, not an example target that pulls test-only dependencies into
+construction. Windows builds the worker, assembler, and verifier in one Cargo
+invocation. Linux keeps the worker's required linker-specific `cargo rustc`
+invocation separate, then builds both release tools in one Cargo invocation.
 
 Windows Cargo runs through the existing SID-restricted protected jobserver with a
 fixed two-worker budget. A four-worker hosted trial increased elapsed construction

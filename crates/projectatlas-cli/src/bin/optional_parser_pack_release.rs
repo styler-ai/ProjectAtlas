@@ -1977,43 +1977,71 @@ mod tests {
             exports_sha256: sha256_bytes(&[]),
         }));
         validate_containment_broker_audit(&presence, &artifact)?;
-        assert!(
+        require(
             validate_containment_broker_audit(&ContainmentBrokerAuditPresence(None), &artifact)
-                .is_err()
-        );
+                .is_err(),
+            "Windows artifact accepted missing broker audit",
+        )?;
 
-        let broker = presence.0.as_mut().expect("broker fixture");
+        let broker = presence
+            .0
+            .as_mut()
+            .ok_or_else(|| invalid("broker fixture is missing"))?;
         broker.clr_runtime_header_rva = 0;
-        assert!(validate_containment_broker_audit(&presence, &artifact).is_err());
-        let broker = presence.0.as_mut().expect("broker fixture");
+        require(
+            validate_containment_broker_audit(&presence, &artifact).is_err(),
+            "broker audit accepted a missing CLR header",
+        )?;
+        let broker = presence
+            .0
+            .as_mut()
+            .ok_or_else(|| invalid("broker fixture is missing"))?;
         broker.clr_runtime_header_rva = 0x2000;
         broker.entry_point = "0x0000000000000001".to_owned();
-        assert!(validate_containment_broker_audit(&presence, &artifact).is_err());
-        let broker = presence.0.as_mut().expect("broker fixture");
+        require(
+            validate_containment_broker_audit(&presence, &artifact).is_err(),
+            "broker audit accepted a changed entry point",
+        )?;
+        let broker = presence
+            .0
+            .as_mut()
+            .ok_or_else(|| invalid("broker fixture is missing"))?;
         broker.entry_point = OPTIONAL_PARSER_PACK_WINDOWS_BROKER_NATIVE_ENTRY_POINT.to_owned();
         broker.pe_loader_libraries.push("mscoree.dll".to_owned());
-        assert!(validate_containment_broker_audit(&presence, &artifact).is_err());
-        presence
+        require(
+            validate_containment_broker_audit(&presence, &artifact).is_err(),
+            "broker audit accepted a widened loader set",
+        )?;
+        let broker = presence
             .0
             .as_mut()
-            .expect("broker fixture")
-            .pe_loader_libraries
-            .clear();
-        presence.0.as_mut().expect("broker fixture").file.sha256 = "f".repeat(64);
-        assert!(validate_containment_broker_audit(&presence, &artifact).is_err());
-        let broker = presence.0.as_mut().expect("broker fixture");
+            .ok_or_else(|| invalid("broker fixture is missing"))?;
+        broker.pe_loader_libraries.clear();
+        broker.file.sha256 = "f".repeat(64);
+        require(
+            validate_containment_broker_audit(&presence, &artifact).is_err(),
+            "broker audit accepted a changed payload digest",
+        )?;
+        let broker = presence
+            .0
+            .as_mut()
+            .ok_or_else(|| invalid("broker fixture is missing"))?;
         broker.file.sha256 = broker_file.sha256.as_str().to_owned();
         broker.managed_modules.pop();
-        assert!(validate_containment_broker_audit(&presence, &artifact).is_err());
-        presence
+        require(
+            validate_containment_broker_audit(&presence, &artifact).is_err(),
+            "broker audit accepted an incomplete managed module set",
+        )?;
+        let broker = presence
             .0
             .as_mut()
-            .expect("broker fixture")
-            .managed_modules
-            .push("userenv.dll".to_owned());
+            .ok_or_else(|| invalid("broker fixture is missing"))?;
+        broker.managed_modules.push("userenv.dll".to_owned());
         artifact.platform = PackPlatform::LinuxX86_64;
-        assert!(validate_containment_broker_audit(&presence, &artifact).is_err());
-        Ok(())
+        require(
+            validate_containment_broker_audit(&presence, &artifact).is_err(),
+            "Linux artifact accepted a Windows containment broker",
+        )
     }
 
     /// Reject non-canonical worker entry points and platform-incompatible object kinds.

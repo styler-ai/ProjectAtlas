@@ -9,15 +9,16 @@ homepage.workspace = true
 [[bin]]
 name = "projectatlas"
 path = "src/main.rs"
+required-features = ["cli"]
 
 [[bin]]
 name = "projectatlas-parser-worker"
 path = "src/parser_worker.rs"
 required-features = ["optional-parser-worker"]
 
-[[example]]
+[[bin]]
 name = "optional_parser_pack_release"
-path = "examples/optional_parser_pack_release.rs"
+path = "src/bin/optional_parser_pack_release.rs"
 required-features = ["optional-parser-supervisor"]
 
 [[test]]
@@ -27,8 +28,38 @@ harness = false
 required-features = ["optional-parser-supervisor"]
 
 [features]
-default = ["optional-parser-supervisor"]
-optional-parser-supervisor = ["dep:nix", "dep:tar", "dep:tempfile", "dep:zstd"]
+default = ["cli"]
+cli = [
+    "optional-parser-supervisor",
+    "dep:blake3",
+    "dep:clap",
+    "dep:cssparser",
+    "dep:jsonc-parser",
+    "dep:notify",
+    "dep:pulldown-cmark",
+    "dep:projectatlas-db",
+    "dep:projectatlas-fs",
+    "dep:projectatlas-service",
+    "dep:projectatlas-symbols",
+    "dep:ratatui",
+    "dep:rayon",
+    "dep:regex",
+    "dep:rmcp",
+    "dep:scraper",
+    "dep:tiktoken",
+    "dep:tokio",
+    "dep:toml",
+    "dep:toml_edit",
+    "dep:toon-format",
+    "dep:yaml-rust2",
+]
+optional-parser-supervisor = [
+    "dep:getrandom",
+    "dep:nix",
+    "dep:tar",
+    "dep:tempfile",
+    "dep:zstd",
+]
 optional-parser-worker = [
     "optional-parser-supervisor",
     "dep:landlock",
@@ -38,37 +69,37 @@ optional-parser-worker = [
 ]
 
 [dependencies]
-getrandom.workspace = true
+getrandom = { workspace = true, optional = true }
 projectatlas-core.workspace = true
-projectatlas-db.workspace = true
-projectatlas-fs.workspace = true
-projectatlas-service.workspace = true
-projectatlas-symbols.workspace = true
-blake3.workspace = true
-clap.workspace = true
-cssparser.workspace = true
-jsonc-parser.workspace = true
-notify.workspace = true
-pulldown-cmark.workspace = true
-rayon.workspace = true
-ratatui.workspace = true
-regex.workspace = true
-rmcp.workspace = true
-scraper.workspace = true
+projectatlas-db = { workspace = true, optional = true }
+projectatlas-fs = { workspace = true, optional = true }
+projectatlas-service = { workspace = true, optional = true }
+projectatlas-symbols = { workspace = true, optional = true }
+blake3 = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+cssparser = { workspace = true, optional = true }
+jsonc-parser = { workspace = true, optional = true }
+notify = { workspace = true, optional = true }
+pulldown-cmark = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
+ratatui = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+rmcp = { workspace = true, optional = true }
+scraper = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tiktoken.workspace = true
-tokio.workspace = true
-toml.workspace = true
-toml_edit.workspace = true
-toon-format.workspace = true
+tiktoken = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+toml_edit = { workspace = true, optional = true }
+toon-format = { workspace = true, optional = true }
 tar = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 tree-sitter = { workspace = true, optional = true }
 tree-sitter-language-pack = { workspace = true, optional = true }
-yaml-rust2.workspace = true
+yaml-rust2 = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]

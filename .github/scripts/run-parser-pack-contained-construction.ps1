@@ -899,6 +899,7 @@ $workerBuildArguments = @(
         "build",
         "--frozen",
         "--offline",
+        "--no-default-features",
         "--release",
         "--package",
         "projectatlas-cli",
@@ -929,7 +930,7 @@ $workerBuildArguments = @(
             "projectatlas-core",
             "--example",
             "assemble_optional_parser_artifact",
-            "--example",
+            "--bin",
             "optional_parser_pack_release"
         )
     }
@@ -948,6 +949,7 @@ $workerBuildArguments = @(
                 "build",
                 "--frozen",
                 "--offline",
+                "--no-default-features",
                 "--release",
                 "--package",
                 "projectatlas-core",
@@ -957,7 +959,7 @@ $workerBuildArguments = @(
                 "projectatlas-cli/optional-parser-supervisor",
                 "--example",
                 "assemble_optional_parser_artifact",
-                "--example",
+                "--bin",
                 "optional_parser_pack_release"
             ) `
             -Role "parser-pack release tool builds"
@@ -1033,7 +1035,6 @@ $releaseTool = Get-RegularFile `
     -Path ([System.IO.Path]::Combine(
         $buildDirectory,
         "release",
-        "examples",
         "optional_parser_pack_release$executableSuffix"
     )) `
     -Role "built release verifier"

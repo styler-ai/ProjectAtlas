@@ -11,7 +11,10 @@ param(
     [string]$RuntimeContainmentVerifier =
         (Join-Path $PSScriptRoot "verify-parser-pack-runtime-containment.ps1"),
     [string]$OptionalParserPackWorkflow =
-        (Join-Path (Split-Path -Parent $PSScriptRoot) "workflows/optional-parser-pack.yml")
+        (Join-Path (Split-Path -Parent $PSScriptRoot) "workflows/optional-parser-pack.yml"),
+    [string]$CliManifest =
+        (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) `
+            "crates/projectatlas-cli/Cargo.toml")
 )
 
 Set-StrictMode -Version Latest
@@ -130,6 +133,12 @@ Require ($parseErrors.Count -eq 0) "Production construction script did not parse
 $workflowText = [System.IO.File]::ReadAllText(
     (Get-Item -LiteralPath $OptionalParserPackWorkflow -Force).FullName
 )
+$cliManifestItem = Get-Item -LiteralPath $CliManifest -Force
+Require `
+    (-not $cliManifestItem.PSIsContainer -and
+        (($cliManifestItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0)) `
+    "CLI manifest is not one regular file."
+$cliManifestText = [System.IO.File]::ReadAllText($cliManifestItem.FullName)
 foreach ($name in @(
     "Add-BoundedDiagnosticTail",
     "Write-BoundedConstructionDiagnostic",
@@ -398,6 +407,51 @@ try {
             ) -and
             -not $workflowText.Contains("restore-keys:")) `
         "Reusable Cargo layer must use pinned official actions with exact keys and clean bypass."
+    Require `
+        ([System.Text.RegularExpressions.Regex]::Matches(
+                $ast.Extent.Text,
+                '"--no-default-features"'
+            ).Count -eq 2 -and
+            [System.Text.RegularExpressions.Regex]::Matches(
+                $ast.Extent.Text,
+                '"--bin",\s*"optional_parser_pack_release"'
+            ).Count -eq 2 -and
+            $cliManifestText.Contains('required-features = ["cli"]') -and
+            $cliManifestText.Contains('default = ["cli"]') -and
+            $cliManifestText.Contains(
+                'path = "src/bin/optional_parser_pack_release.rs"'
+            )) `
+        "Parser-pack targets regained the unrelated main-CLI owned dependency closure."
+    foreach ($dependency in @(
+        "blake3",
+        "clap",
+        "cssparser",
+        "jsonc-parser",
+        "notify",
+        "pulldown-cmark",
+        "projectatlas-db",
+        "projectatlas-fs",
+        "projectatlas-service",
+        "projectatlas-symbols",
+        "ratatui",
+        "rayon",
+        "regex",
+        "rmcp",
+        "scraper",
+        "tiktoken",
+        "tokio",
+        "toml",
+        "toml_edit",
+        "toon-format",
+        "yaml-rust2"
+    )) {
+        Require `
+            ($cliManifestText.Contains("""dep:$dependency""") -and
+                $cliManifestText.Contains(
+                    "$dependency = { workspace = true, optional = true }"
+                )) `
+            "Main CLI dependency is not feature-owned: $dependency"
+    }
     foreach ($keyInput in @(
         '${{ matrix.target }}',
         '${{ steps.identity.outputs.rustc_commit_hash }}',
