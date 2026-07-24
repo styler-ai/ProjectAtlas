@@ -324,6 +324,16 @@ ProjectAtlas 0.4 preserves the complete 0.3.26 MCP inventory, names, request sch
 
 Issue #308 does not classify, hide, consolidate, or remove public tools. It records the packaged v0.4 inventory and discovery measurements as the baseline for issue #310, which separately owns any post-v0.4 compact/default selection or breaking rationalization.
 
+The stabilized pre-composition v0.4 candidate advertises the same 40 tool names.
+Its compact serialized `tools/list` tool array is 37,155 bytes, or 9,289
+heuristic four-byte tokens, compared with 28,933 bytes and 7,234 heuristic
+tokens for the frozen v0.3.26 array. That 28.4% discovery growth is retained as
+the honest post-v0.4 #310 baseline. The compatibility E2E compares every name
+and description plus the complete recursive legacy request-schema tree; v0.4
+fields remain additive. Task 7.3.1 may still select the smallest compatible
+additive improvement, after which this measurement must be refreshed before the
+surface is frozen.
+
 No graph orchestration call is added to compensate for richer internals. The existing routes remain typed responsibility-owned operations; ProjectAtlas does not need a dynamic tool plugin system or one ambiguous administration mega-tool.
 
 The normal already-indexed coding workflow should be three calls:
