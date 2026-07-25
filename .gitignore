@@ -6,6 +6,9 @@
 # ProjectAtlas runtime state
 .projectatlas/*.db
 .projectatlas/*.db-*
+.projectatlas/*.lock
+.projectatlas/graph-stage-*/
+.projectatlas/optional-parser-pack.json
 .projectatlas/projectatlas.toon
 .projectatlas/projectatlas-purpose-review.json
 .projectatlas/projectatlas.mcp.json

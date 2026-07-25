@@ -3366,6 +3366,18 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
         )
         .into());
     }
+    for required in [
+        ".projectatlas/*.lock",
+        ".projectatlas/graph-stage-*/",
+        ".projectatlas/optional-parser-pack.json",
+    ] {
+        if !gitignore.lines().any(|line| line == required) {
+            return Err(io::Error::other(format!(
+                "ProjectAtlas disposable graph state must stay ignored; missing {required:?}"
+            ))
+            .into());
+        }
+    }
     let tracked_review_batch = git_command_for_root(&workspace_root)
         .args([
             "ls-files",
@@ -10802,11 +10814,23 @@ fn ignore_commands_preserve_manual_layer_while_gitignore_updates_apply()
     require_json_bool(&init_gitignore_json, &["gitignore_inherited"], true)?;
     let gitignore_path = repo.join(".gitignore");
     let gitignore_text = fs::read_to_string(&gitignore_path)?;
-    if !gitignore_text.contains(".projectatlas/*.db") {
-        return Err(io::Error::other(format!(
-            "created .gitignore did not protect ProjectAtlas runtime DBs: {gitignore_text}"
-        ))
-        .into());
+    for required in [
+        ".projectatlas/*.db",
+        ".projectatlas/*.lock",
+        ".projectatlas/graph-stage-*/",
+        ".projectatlas/optional-parser-pack.json",
+        ".projectatlas/projectatlas.toon",
+        ".projectatlas/projectatlas-purpose-review.json",
+        ".projectatlas/projectatlas.mcp.json",
+        ".projectatlas/projectatlas.claude.mcp.json",
+        ".projectatlas/projectatlas.opencode.json",
+    ] {
+        if !gitignore_text.lines().any(|line| line == required) {
+            return Err(io::Error::other(format!(
+                "created .gitignore did not protect ProjectAtlas runtime state {required:?}: {gitignore_text}"
+            ))
+            .into());
+        }
     }
 
     let raw_existing_gitignore = Command::cargo_bin("projectatlas")?

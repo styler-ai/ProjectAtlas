@@ -2799,7 +2799,14 @@ fn default_gitignore_text() -> String {
         "# ProjectAtlas local runtime state",
         ".projectatlas/*.db",
         ".projectatlas/*.db-*",
+        ".projectatlas/*.lock",
+        ".projectatlas/graph-stage-*/",
+        ".projectatlas/optional-parser-pack.json",
+        ".projectatlas/projectatlas.toon",
+        ".projectatlas/projectatlas-purpose-review.json",
         ".projectatlas/projectatlas.mcp.json",
+        ".projectatlas/projectatlas.claude.mcp.json",
+        ".projectatlas/projectatlas.opencode.json",
         "",
     ]
     .join("\n")
