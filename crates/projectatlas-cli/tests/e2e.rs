@@ -17199,9 +17199,9 @@ fn assert_packaged_cli_legacy_leaf_contracts(
         return Err(io::Error::other("ignore remove left its packaged list entry behind").into());
     }
     let filesystem_after_ignore = repository_filesystem_snapshot(repo)?;
-    if filesystem_after_ignore != filesystem_before {
+    if filesystem_after_ignore != filesystem_after_root {
         return Err(io::Error::other(format!(
-            "ignore init/add/remove did not restore repository filesystem bytes exactly: before={filesystem_before:?} after={filesystem_after_ignore:?}"
+            "ignore init/add/remove did not preserve the post-root-binding repository filesystem bytes exactly: before={filesystem_after_root:?} after={filesystem_after_ignore:?}"
         ))
         .into());
     }
