@@ -7,11 +7,11 @@ ProjectAtlas is designed to run locally with a project-local SQLite atlas and op
 ## Recommended workflow
 
 1. `projectatlas init` (first-time setup, initial scan/index, generated MCP configs, and purpose handoff).
-2. Run `projectatlas scan` or `projectatlas watch --once` later when you need to refresh the SQLite index.
-3. Run `projectatlas config --print` when effective scan, purpose, or exclusion policy is unclear.
-4. Run `projectatlas overview`, `projectatlas folders <query>`, and `projectatlas files <query>` before broad source reads; use `projectatlas files --file-pattern <glob>` for direct glob discovery.
-5. Run `projectatlas summary <file> --limit 25` before opening full files.
-6. Run `projectatlas outline <file>` when line-level compressed context is still needed.
+2. Refresh with `atlas_watch_once`, `atlas_scan`, `projectatlas watch --once`, or `projectatlas scan` only when the SQLite index may be stale.
+3. For task-directed MCP work, call `atlas_session_brief` once with the task and `compact: true`, then follow its returned summary, search, relation, health, or slice request directly.
+4. Use `atlas_overview` → `atlas_folders` → `atlas_files`, or their CLI equivalents, only when session brief is unavailable, returns no actionable candidate, or broad repository structure is itself the task.
+5. Copy returned selectors into `atlas_slice`; use the manual CLI summary/outline/slice funnel only as a fallback.
+6. Run `projectatlas config --print` when effective scan, purpose, or exclusion policy is unclear.
 7. Run `projectatlas lint --report-untracked --purpose-level low`.
 8. Run `projectatlas map --force` only when a compatibility TOON snapshot is explicitly needed.
 9. Open a PR that references the GitHub issue (CI requires `#NNN` in title or body).
@@ -103,7 +103,7 @@ Ordinary pull requests require exact local/GitHub checklist synchronization but 
 
 ## Documentation site
 
-- `04-Docs` builds Rust API docs with `cargo doc` and deploys the generated `target/doc` artifact to GitHub Pages.
+- `04-Docs` builds Rust API docs plus the generated Language & Ecosystem Support page from the same catalog identity as `docs/language-support.md`, then deploys `target/doc` to GitHub Pages.
 - GitHub Pages should be configured for GitHub Actions deployment.
 
 ## Branching

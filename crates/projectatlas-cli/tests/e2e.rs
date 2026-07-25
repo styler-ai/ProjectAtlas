@@ -3194,6 +3194,37 @@ fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<
             .into());
         }
     }
+    for path in [
+        "README.md",
+        "templates/AGENTS.md",
+        "docs/agent-integration.md",
+        "docs/index.md",
+        "docs/workflow.md",
+    ] {
+        let guidance = fs::read_to_string(workspace_root()?.join(path))?;
+        for required in ["atlas_session_brief", "compact: true"] {
+            if !guidance.contains(required) {
+                return Err(io::Error::other(format!(
+                    "{path} must route task-directed agent startup through one compact session brief; missing {required:?}"
+                ))
+                .into());
+            }
+        }
+        for stale in [
+            "1. Build or refresh the local atlas.",
+            "This is the workflow the agent runs for you:",
+            "3. Run `projectatlas overview`",
+            "`atlas_scan` if stale, then `atlas_overview`",
+            "Run `projectatlas overview`, `projectatlas folders <query>`, and `projectatlas files <query>` before broad source reads",
+        ] {
+            if guidance.contains(stale) {
+                return Err(io::Error::other(format!(
+                    "{path} still contains mandatory pre-session-brief startup routing {stale:?}"
+                ))
+                .into());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -3312,8 +3343,6 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
         "AGENTS.md",
         "templates/AGENTS.md",
         "plugins/projectatlas/skills/projectatlas/SKILL.md",
-        "skills/codex/ProjectAtlas.md",
-        "skills/claude/ProjectAtlas.md",
         "docs/workflow.md",
         "docs/adoption.md",
         "docs/agent-integration.md",

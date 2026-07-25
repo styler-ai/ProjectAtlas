@@ -398,10 +398,14 @@ Configuration and ignore rules stay authoritative in their filesystem-owned
 formats. The database records only the fingerprints and derived consequences
 needed for freshness and publication; it does not become a second mutable
 configuration authority. There is one authoritative database for one resolved
-source-state binding. A large extraction may use a bounded disposable spool as an
-implementation detail, but even an SQLite-backed spool is not a ProjectAtlas
-database: it has no project identity, authored state, active generation, or
-query surface and is deleted after the owning operation.
+source-state binding. A large full projection may use one bounded private
+SQLite-backed staging directory. That stage uses the normal schema as an
+internal typed writer but is not a second authoritative database: it contains
+only rebuildable scan/graph rows plus exact-root, selected-project,
+staging-marker, and target-generation metadata for ownership and copy
+validation, no authored rows, and no supported CLI/MCP result surface. Its
+store closes before ownership-validated removal. Incomplete or uncertain
+creation is retained fail-closed instead of recursively deleted.
 
 A shared MCP process can route a call to another explicitly selected project;
 that opens the other project's own single database rather than adding a database
@@ -808,7 +812,7 @@ are added.
 
 | CLI route | MCP route | Physical database and source access | Freshness and generation contract | Transaction, bounds, telemetry, and target owner |
 | --- | --- | --- | --- | --- |
-| `init` | `atlas_init` | Create/validate project-local config and the one project database; unless `no_scan`, scan current local source, import controlled purpose inputs, and derive text, summaries, symbols, and graph projections. | The selected source tree and effective ignore/config policy are authoritative. Initialization binds project identity and publishes one active complete generation when scanning runs. | Discovery/extraction is admitted under existing entry, byte, parser-output, worker, deadline, and cancellation limits; prepared mutations publish in one short parent-owned transaction. It writes no separate product database. Introduced in schema 11 and preserved by schema 16, bounded telemetry, passive checkpoint state, reusable-page state, and the explicit no-spill lifecycle remain part of the current contract. |
+| `init` | `atlas_init` | Create/validate project-local config and the one project database; unless `no_scan`, scan current local source, import controlled purpose inputs, and derive text, summaries, symbols, and graph projections. | The selected source tree and effective ignore/config policy are authoritative. Initialization binds project identity and publishes one active complete generation when scanning runs. | Discovery/extraction is admitted under existing entry, byte, parser-output, worker, deadline, and cancellation limits; prepared mutations publish in one short parent-owned transaction. It writes no separate authoritative product database. Introduced in schema 11 and preserved by schema 16, bounded telemetry, passive checkpoint state, reusable-page state, and ownership-validated private graph staging remain part of the current contract. |
 | `scan` | `atlas_scan` | Read/hash/parse current included source off-writer, stage bounded typed batches, and replace the complete derived projection in the same database. | Revalidate source, configuration, purpose inputs, and base generation before publication. Readers keep the last complete generation until commit. | One short `BEGIN IMMEDIATE` publication owns all prepared mutations and one generation advance; failure/cancellation rolls back. Background MCP execution changes task delivery, not database ownership. No navigation telemetry is appended. |
 | `symbols build` | `atlas_symbols_build` | Read selected indexed source off-writer and rebuild compatible symbol plus normalized graph projections in the same database. | Revalidate the source and publication contract; preserve the last complete generation on failure. | Bounded parser workers, source bytes, retained parser output, deadline, and cancellation feed one publication transaction. No navigation telemetry is appended. |
 | `watch` and `watch --once` | `atlas_watch_once` | Observe or poll current local source, derive one changed-path batch off-writer, and publish affected text/symbol/graph rows in the same database; a correctness-required event may request a full scan. | Each successful batch revalidates source/policy/base generation and advances exactly once. Failed batches remain eligible for retry and expose no partial generation. | Each batch has bounded path/source/parser/worker/deadline/cancellation controls and one short publication transaction. The long-lived verified observation epoch is current. Database maintenance is bounded, content-free, and never introduces an abandoned spill authority. |
@@ -966,7 +970,7 @@ flowchart TB
     Inputs[Read and validate bounded configuration]
     Build[Discover current paths; read, hash, parse,<br/>compute dependency closure, resolve, and derive outside the main writer]
     subgraph Transient[Non-authoritative disposable staging]
-        Stage[Bounded typed Rust batches or optional measured<br/>memory/file/SQLite-backed spool<br/>no authored state; never queryable]
+        Stage[Private SQLite staging directory for a full projection<br/>derived rows plus ownership/copy metadata<br/>no authored rows or supported CLI/MCP surface]
     end
     Recheck[Recheck source/configuration fingerprints,<br/>limits, cancellation, and base generation]
     Begin[Acquire the SQLite writer<br/>and BEGIN IMMEDIATE]
@@ -979,10 +983,15 @@ flowchart TB
     PrewriteFailure[Pre-publication validation,<br/>limit, or cancellation failure]
     WriteFailure[Busy, generation-change,<br/>mutation, or commit failure]
     Restart[Ownership-validated restart]
-    Cleanup[Release memory and delete owned spool]
+    Cleanup[Release memory; checkpoint and close any staging store]
+    CleanupOwnership{Exact root, project identity,<br/>and staging marker validated?}
+    RemoveStage[Remove only the owned stage<br/>with its marker last]
+    RetainStage[Retain incomplete or uncertain<br/>state fail-closed]
     Lifecycle[Bounded staging lifecycle complete]
 
-    Request --> Admit --> Inputs --> Build --> Stage --> Recheck
+    Request --> Admit --> Inputs --> Build
+    Build -->|small or incremental| Recheck
+    Build -->|admitted full-projection spill| Stage --> Recheck
     Recheck -->|changed and valid| Begin --> Apply --> Commit --> Next
     Recheck -->|unchanged and current| NoChange --> Prior
     Inputs -.-> PrewriteFailure
@@ -998,7 +1007,10 @@ flowchart TB
     Next -.-> Cleanup
     NoChange -.-> Cleanup
     Fail -.-> Cleanup
-    Restart --> Cleanup --> Lifecycle
+    Restart --> Cleanup
+    Cleanup --> CleanupOwnership
+    CleanupOwnership -->|yes| RemoveStage --> Lifecycle
+    CleanupOwnership -->|no or incomplete| RetainStage --> Lifecycle
     style Transient stroke-dasharray: 5 5
 ```
 
@@ -1007,15 +1019,18 @@ before configuration content is read. Failed work never exposes partial rows
 or advances the active generation, and successful no-change work leaves the
 current generation unchanged. Expensive filesystem reads and parser work do not
 hold the main database writer. Small incremental closures may remain in admitted
-typed Rust batches. Large full/expanded closures spill only after measured
-cardinality, memory, recovery, and write-amplification behavior selects a
-bounded disposable spool, implemented as a plain temporary file or SQLite-backed
-working file. Even when SQLite-backed, it is not another ProjectAtlas database:
-it has no project identity, authored rows, active generation, or query surface.
-After one final source/configuration and base-generation recheck, only prepared
-mutation of the one project database occurs inside the short publication
-transaction. The spool is never a copied live atlas and is deleted after the
-owning operation publishes, fails, or is canceled.
+typed Rust batches. Large full closures spill only after measured cardinality,
+memory, recovery, and write-amplification behavior selects one bounded private
+SQLite staging directory. The stage is not another authoritative ProjectAtlas
+database: it contains rebuildable scan/graph rows and only the internal schema,
+exact-root, selected-project, staging-marker, and target-generation metadata
+needed for ownership and copy validation. It contains no authored rows, is not
+selected by normal project discovery, and exposes no supported CLI/MCP result
+surface. After one final source/configuration and base-generation recheck, only
+prepared mutation of the authoritative project database occurs inside the short
+publication transaction. The staging store is checkpointed and closed before
+ownership-validated removal. Incomplete or uncertain creation is retained
+fail-closed rather than recursively deleted.
 
 This flow is implemented for full scan, full watcher refresh,
 incremental watcher refresh, and symbol projection refresh capture their base
@@ -1136,8 +1151,8 @@ flowchart TB
             Tombstones[Label and instance tombstones<br/>prevent silent scope reopening]
         end
 
-        Project -->|project scope| Instances
-        Project -->|project scope| Labels
+        Project --> Instances
+        Project --> Labels
         Dimensions -->|dimension key| Exact
         Instances -->|instance key| Exact
         Instances --> Baselines
@@ -1295,10 +1310,16 @@ flowchart TB
     subgraph Database[Exactly one projectatlas.db]
         Publish[Successful structural publication] --> Obsolete[Delete ownership-proven<br/>obsolete derived rows]
         Obsolete --> Reuse[Pages become reusable inside the same database]
-        NoSpill[No production spill owner selected] --> State[spill_cleanup: not_applicable]
-        Settings[Read-only settings inspection] -. reads .-> State
     end
-    Lookalike[Arbitrary lookalike files] --> Untouched[Left untouched]
+    Full[Admitted full projection above the memory budget] --> Stage[Private SQLite staging directory]
+    Stage --> Derived[Rebuildable scan and graph rows]
+    Stage --> Metadata[Exact root, selected project,<br/>staging marker, target generation]
+    Stage -. excludes .-> Authored[Authored purposes, settings,<br/>health, telemetry, and memory]
+    Stage --> Close[Checkpoint and close store]
+    Close --> Owned{Ownership proven?}
+    Owned -->|yes| Remove[Remove stage marker last]
+    Owned -->|no or incomplete| Retain[Retain fail-closed]
+    Lookalike[Foreign, linked, or lookalike state] --> Retain
 ```
 
 The current schema 16 implements this bounded lifecycle in the one authoritative database.
@@ -1306,10 +1327,12 @@ The normal read path never performs an unbounded purge, blocking truncate
 checkpoint, blind `VACUUM`, or destructive rebuild. Telemetry compaction
 preserves supported all-time totals and declared trend windows; retained,
 partial, expired, and unavailable detail are reported rather than fabricated.
-No production spill owner currently exists, so restart maintenance reports
-`not_applicable` and never deletes arbitrary lookalike files. Derived cleanup
-never deletes project identity, reviewed purposes, health resolutions, or
-future separately capped Memory Atlas records.
+Production full graph projection uses the private SQLite-backed stage shown
+above. Restart cleanup removes only an ownership-validated direct stage after
+closing its validating connection, preserves arbitrary foreign, linked, and
+lookalike state, and retains incomplete or uncertain creation fail-closed.
+Derived cleanup never deletes project identity, reviewed purposes, health
+resolutions, or future separately capped Memory Atlas records.
 
 #### Derived Graph Snapshot Export And Import
 
@@ -1351,7 +1374,7 @@ Local use remains unsigned by default; a digest pin or the optional Ed25519
 feature supplies explicit trust for shared artifacts. No snapshot route is
 added to MCP because snapshots are explicit CLI artifact lifecycle operations.
 
-### Index Publication Cancellation, Failure, And Watch Retry
+### Cancellation, Failure, And Watch Retry
 
 ```mermaid
 stateDiagram-v2
