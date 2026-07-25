@@ -169,7 +169,7 @@ struct CliContractCase {
     expected_exit_code: i32,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct McpDatabaseSnapshot {
     authoritative: BTreeMap<String, String>,
     usage: BTreeMap<String, String>,
@@ -17150,12 +17150,7 @@ fn assert_packaged_cli_legacy_leaf_contracts(
         require_json_bool(&report, &["verified"], true)?;
     }
     let filesystem_after_root = repository_filesystem_snapshot(repo)?;
-    if filesystem_after_root != filesystem_before {
-        return Err(io::Error::other(format!(
-            "root set/show/verify changed unrelated repository filesystem state: before={filesystem_before:?} after={filesystem_after_root:?}"
-        ))
-        .into());
-    }
+    assert_root_bind_filesystem_delta(&filesystem_before, &filesystem_after_root)?;
 
     let gitignore = repo.join(".gitignore");
     let gitignore_before = fs::read(&gitignore)?;
@@ -17843,7 +17838,7 @@ fn assert_mcp_non_git_freshness(executable: &Path) -> Result<(), Box<dyn Error>>
     require_json_string(&decoded, &["file_summary", "summary_status"], "ok")?;
 
     let after = mcp_database_snapshot(&database)?;
-    let changed = changed_mcp_tables(&before.authoritative, &after.authoritative);
+    let changed = changed_snapshot_keys(&before.authoritative, &after.authoritative);
     if changed.is_empty()
         || changed
             .iter()
@@ -18663,8 +18658,8 @@ fn mcp_database_snapshot(database: &Path) -> Result<McpDatabaseSnapshot, Box<dyn
     })
 }
 
-/// Return the logical table names whose rows changed between two snapshots.
-fn changed_mcp_tables(
+/// Return the keys whose values changed between two bounded snapshots.
+fn changed_snapshot_keys(
     before: &BTreeMap<String, String>,
     after: &BTreeMap<String, String>,
 ) -> BTreeSet<String> {
@@ -18674,6 +18669,132 @@ fn changed_mcp_tables(
         .filter(|table| before.get(*table) != after.get(*table))
         .cloned()
         .collect()
+}
+
+/// Require root binding to update only its three generated host configurations.
+fn assert_root_bind_filesystem_delta(
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> Result<(), Box<dyn Error>> {
+    let allowed = BTreeSet::from([
+        ".projectatlas/projectatlas.claude.mcp.json".to_string(),
+        ".projectatlas/projectatlas.mcp.json".to_string(),
+        ".projectatlas/projectatlas.opencode.json".to_string(),
+    ]);
+    let missing = allowed
+        .iter()
+        .filter(|path| !after.contains_key(*path))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let changed = changed_snapshot_keys(before, after);
+    if !missing.is_empty() || !changed.is_subset(&allowed) {
+        return Err(io::Error::other(format!(
+            "root set/show/verify escaped generated host-config ownership: changed={changed:?} missing={missing:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn packaged_contract_accepts_only_owned_state_dependent_updates() -> Result<(), Box<dyn Error>> {
+    let filesystem_before = BTreeMap::from([
+        (
+            ".projectatlas/projectatlas.claude.mcp.json".to_string(),
+            "file:1:before".to_string(),
+        ),
+        (
+            ".projectatlas/projectatlas.mcp.json".to_string(),
+            "file:1:before".to_string(),
+        ),
+        (
+            ".projectatlas/projectatlas.opencode.json".to_string(),
+            "file:1:before".to_string(),
+        ),
+        ("src/lib.rs".to_string(), "file:1:source".to_string()),
+    ]);
+    let mut filesystem_after = filesystem_before.clone();
+    for path in [
+        ".projectatlas/projectatlas.claude.mcp.json",
+        ".projectatlas/projectatlas.mcp.json",
+        ".projectatlas/projectatlas.opencode.json",
+    ] {
+        filesystem_after.insert(path.to_string(), "file:1:after".to_string());
+    }
+    assert_root_bind_filesystem_delta(&filesystem_before, &filesystem_after)?;
+    filesystem_after.insert("src/lib.rs".to_string(), "file:1:changed".to_string());
+    if assert_root_bind_filesystem_delta(&filesystem_before, &filesystem_after).is_ok() {
+        return Err(io::Error::other("root binding accepted an unrelated source change").into());
+    }
+
+    let authoritative = BTreeMap::from([
+        ("graph_coverage".to_string(), "before".to_string()),
+        ("metadata".to_string(), "before".to_string()),
+        ("project_identity".to_string(), "before".to_string()),
+        ("source_parse_metadata".to_string(), "stable".to_string()),
+        ("summaries".to_string(), "stable".to_string()),
+        ("symbols".to_string(), "before".to_string()),
+    ]);
+    let before = McpDatabaseSnapshot {
+        authoritative,
+        usage: BTreeMap::new(),
+        authored_purposes: BTreeMap::new(),
+        metadata_canary: Some("canary".to_string()),
+        project_instance_id: Some("project".to_string()),
+        usage_calls: 0,
+        usage_events: Vec::new(),
+        active_usage_instances: 0,
+        sealed_mcp_instances: 0,
+        generation: 3,
+        purpose_revision: 0,
+        publication_state: "complete".to_string(),
+    };
+    let mut after = before.clone();
+    for table in ["graph_coverage", "metadata", "project_identity", "symbols"] {
+        after
+            .authoritative
+            .insert(table.to_string(), "after".to_string());
+    }
+    after.generation = 4;
+    assert_contract_sqlite_effect(
+        "symbols",
+        McpSqliteEffect::DerivedGraphAdvance,
+        &before,
+        &after,
+    )?;
+    let mut incomplete = after.clone();
+    incomplete
+        .authoritative
+        .insert("project_identity".to_string(), "before".to_string());
+    if assert_contract_sqlite_effect(
+        "symbols",
+        McpSqliteEffect::DerivedGraphAdvance,
+        &before,
+        &incomplete,
+    )
+    .is_ok()
+    {
+        return Err(io::Error::other(
+            "graph publication accepted stale project generation identity",
+        )
+        .into());
+    }
+    after
+        .authoritative
+        .insert("health_resolutions".to_string(), "unexpected".to_string());
+    if assert_contract_sqlite_effect(
+        "symbols",
+        McpSqliteEffect::DerivedGraphAdvance,
+        &before,
+        &after,
+    )
+    .is_ok()
+    {
+        return Err(
+            io::Error::other("graph publication accepted an unrelated table change").into(),
+        );
+    }
+    Ok(())
 }
 
 /// Require one packaged adapter call to stay inside its declared `SQLite` owner.
@@ -18690,8 +18811,8 @@ fn assert_contract_sqlite_effect(
         ))
         .into());
     }
-    let authoritative = changed_mcp_tables(&before.authoritative, &after.authoritative);
-    let usage = changed_mcp_tables(&before.usage, &after.usage);
+    let authoritative = changed_snapshot_keys(&before.authoritative, &after.authoritative);
+    let usage = changed_snapshot_keys(&before.usage, &after.usage);
     if before.metadata_canary != after.metadata_canary
         || before.project_instance_id != after.project_instance_id
     {
@@ -18789,8 +18910,7 @@ fn assert_contract_sqlite_effect(
             let required = BTreeSet::from([
                 "graph_coverage".to_string(),
                 "metadata".to_string(),
-                "source_parse_metadata".to_string(),
-                "summaries".to_string(),
+                "project_identity".to_string(),
                 "symbols".to_string(),
             ]);
             if !usage.is_empty()
@@ -18812,7 +18932,7 @@ fn assert_contract_sqlite_effect(
         McpSqliteEffect::PurposeAdvance(expected_path) => {
             let allowed = BTreeSet::from(["metadata".to_string(), "purposes".to_string()]);
             let changed_authored =
-                changed_mcp_tables(&before.authored_purposes, &after.authored_purposes);
+                changed_snapshot_keys(&before.authored_purposes, &after.authored_purposes);
             if !usage.is_empty()
                 || authoritative.is_empty()
                 || !authoritative.is_subset(&allowed)
