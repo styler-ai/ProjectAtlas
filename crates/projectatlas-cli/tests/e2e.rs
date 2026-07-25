@@ -17387,13 +17387,14 @@ fn assert_packaged_cli_active_interruption(
     let project = AtlasStore::open(database)?
         .project_instance_id()?
         .ok_or_else(|| io::Error::other("CLI interruption fixture omitted project identity"))?;
+    let canonical_repo = fs::canonicalize(repo)?;
     let atlas = repo.join(ATLAS_DIR_NAME);
     for index in 0..64 {
         let stage = atlas.join(format!("graph-stage-interruption-{index:02}"));
         fs::create_dir(&stage)?;
         drop(AtlasStore::create_repository_graph_staging(
             &stage.join("projectatlas.db"),
-            repo,
+            &canonical_repo,
             project,
         )?);
     }
