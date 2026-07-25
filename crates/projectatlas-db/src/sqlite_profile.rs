@@ -12,15 +12,15 @@ use std::time::{Duration, Instant};
 use std::path::{Component, Prefix};
 
 /// Required journal mode for live project databases.
-const REQUIRED_JOURNAL_MODE: &str = "wal";
+pub(crate) const REQUIRED_JOURNAL_MODE: &str = "wal";
 /// Required synchronous mode for authored and derived project state.
 const REQUIRED_SYNCHRONOUS_MODE: i64 = 2;
 /// Human-readable name for the required synchronous mode.
-const REQUIRED_SYNCHRONOUS_NAME: &str = "FULL";
+pub(crate) const REQUIRED_SYNCHRONOUS_NAME: &str = "FULL";
 /// Maximum pause between bounded retries while another opener establishes WAL.
 const JOURNAL_MODE_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 /// Maximum time ordinary read and write connections wait for database contention.
-pub(crate) const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(1);
+pub(crate) const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum diagnostic length retained from an operating-system error.
 const MAX_REASON_CHARS: usize = 512;
 

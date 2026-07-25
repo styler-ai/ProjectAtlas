@@ -2,7 +2,21 @@
 
 ## Status
 
-This document defines the required agent-navigation contract for ProjectAtlas 0.4.0. ProjectAtlas 0.3.26 provides the baseline workflow described below; graph enrichment, automatic read freshness, direct relationship jumps, and the compact MCP surface remain target behavior until issue #308 is complete.
+This document defines the implemented agent-navigation contract for
+ProjectAtlas 0.4.0. ProjectAtlas 0.3.26 provides the baseline workflow
+described below. Automatic read freshness, normalized graph publication,
+purpose-plus-connection enrichment, direct relationship navigation, and closed
+analysis views are current v0.4 behavior. The representative task-7.3 forward
+test passes its clean, saved-dirty, and non-Git compatibility boundaries. The
+final task-7.6 campaign retained all 45 preregistered v0.4, frozen-v0.3.26, and
+plain trials: v0.4 completed all 15, frozen v0.3.26 failed its three pinned
+VS Code setups, and final manual review passed 41 of 42 completed answers. The
+[agent evaluation](benchmarks/v0.4-agent-navigation-evaluation.md)
+reports the measured strengths, medium-context regression, huge indexing cost,
+plain-control advantage, and limitations without claiming universal savings.
+Version 0.4 preserves the complete compatible MCP inventory. Any later
+compact/default inventory or breaking rationalization belongs to post-v0.4
+issue #310.
 
 ## Product Goal
 
@@ -48,9 +62,9 @@ The stages answer different questions:
 | Trust | How much of this result is safe to rely on? | Parser kind, resolution state, coverage, limits, and truncation |
 | Slice | What exact implementation must I inspect? | Verbatim current source for one bounded line or symbol range |
 
-Folder purposes should be curated broadly because they drive the highest-value narrowing step. File purposes should remain selective and focus on public APIs, runtime behavior, build/configuration, tests, commands, adapters, migrations, and other high-impact files. Generated purpose suggestions are not reviewed truth. A meaningful responsibility change makes a reviewed purpose stale instead of silently overwriting it.
+Folder purposes should be curated broadly because they drive the highest-value narrowing step. File purposes should remain selective and focus on public APIs, runtime behavior, build/configuration, tests, commands, adapters, migrations, and other high-impact files. ProjectAtlas preserves the 0.3.26 distinction: deterministic or heuristic text is generated/suggested and is not reviewed truth; an agent-approved purpose is durable authored responsibility state. Source, summary, symbol, graph, scan, and watcher changes never invalidate it automatically. A main agent, reviewer, explicitly assigned curator, or user can still correct an accepted purpose through the purpose APIs when it is wrong or the path was genuinely repurposed.
 
-When purposes are missing or stale, ProjectAtlas reports that state and falls back deterministically to path, current content, symbols, and graph context. It must not pretend a suggestion is authoritative.
+When an accepted purpose is missing, ProjectAtlas reports generated/suggested or missing state and falls back deterministically to path, current content, symbols, and graph context. It must not pretend a suggestion is authoritative. Deleted or excluded paths are absent from navigation while their path-owned accepted purpose remains dormant; a rename does not transfer approval automatically.
 
 ### Initial Task Discovery
 
@@ -59,15 +73,18 @@ context as bounded supporting evidence:
 
 ```mermaid
 flowchart TD
-    Task[Agent task] --> Brief[Session brief or overview]
-    Brief --> Confident{Candidate ready?}
-    Confident -->|no| Folders[Rank folders by authoritative purpose plus state and graph role;<br/>use deterministic fallback when unavailable]
-    Folders --> Files[Rank files by authoritative purpose plus state and crisp connections;<br/>use deterministic fallback when unavailable]
+    Task[Agent task] --> Brief[Session brief ranks folders and files once<br/>with purpose plus graph evidence]
+    Brief --> Confident{Direct file candidate ready?}
     Confident -->|yes| Summary[Selected-file summary plus trust]
+    Confident -->|no; query available| Search[Indexed search with the task query]
+    Confident -->|no file candidate| Filesystem[Normal filesystem tools for exact context]
+    Search --> Summary
+    Task -. explicit manual discovery .-> Folders[Rank folders by authoritative purpose plus state and graph role]
+    Folders --> Files[Rank files by authoritative purpose plus state and crisp connections]
     Files --> Summary
     Summary --> CrossFile{Need cross-file context?}
     CrossFile -->|no| Slice[Exact source slice]
-    CrossFile -->|yes| Relations[Bounded relation or ranked path]
+    CrossFile -->|yes| Relations
     Relations --> Anchored[Continue with anchored target traversal]
 ```
 
@@ -84,7 +101,7 @@ anchor, with purpose projected onto every local target:
 flowchart TB
     Anchor[Current file or symbol anchor]
     Graph[(Freshness-checked current graph generation)]
-    Purposes[(Owning file or folder purpose metadata:<br/>approved, stale, missing, or unavailable)]
+    Purposes[(Owning file or folder purpose metadata:<br/>approved, suggested, missing, or unavailable)]
     Connections[Ranked inbound and outbound connections]
     Targets[Target rows:<br/>relation and reason<br/>selector and span<br/>owning file or folder purpose plus state<br/>coverage and trust]
     Summary[Target summary]
@@ -113,36 +130,68 @@ trust fields state how much to rely on it, and the slice provides exact source.
 An external or unresolved target reports purpose as not applicable or
 unavailable instead of inheriting or fabricating local responsibility.
 
+### Anchored Analysis Views
+
+Architecture, impact, and trace remain closed views of the existing relation
+service. They reuse one exact anchor and the same generation, purpose revision,
+cursor, work-control, and aggregate-budget contracts as detailed traversal:
+
+```mermaid
+flowchart LR
+    Request[Exact file or symbol anchor<br/>plus closed analysis mode and budgets]
+    Snapshot[(One freshness-checked SQLite read snapshot)]
+    Direct[Indexed entity resolution, one-hop adjacency,<br/>coverage, purpose, occurrence, and symbol batches]
+    Service[Rust service:<br/>bounded multi-hop topology, SCC/community,<br/>purpose alignment, structural candidates,<br/>impact/dead-code, or node-simple trace]
+    Git[Optional bounded shell-free Git context<br/>for impact only]
+    Control[Shared deadline, cancellation,<br/>rows, edges, memory, and output limits]
+    Result[Candidate-labeled findings with exact selectors,<br/>coverage/trust, exact-or-lower-bound total,<br/>continuation, work, and truncation]
+
+    Request --> Snapshot
+    Snapshot --> Direct
+    Direct --> Service
+    Git -. optional context; never local-source authority .-> Service
+    Control --> Direct
+    Control --> Service
+    Service --> Result
+    Result -. bound cursor replay .-> Request
+```
+
+SQLite owns indexed facts and bounded batches; the service owns traversal and
+composition. `candidate` is review evidence, `confirmed` is reserved for facts
+proved by the admitted complete scope, `absent` is a complete bounded negative,
+and `inconclusive` makes missing coverage or a reached limit explicit. Static
+trace never claims runtime execution evidence.
+
 ### Background Purpose Curator
 
-Purpose maintenance can run as a bounded low-reasoning “speedboat” beside the
+Purpose maintenance can run as a bounded low-scope “speedboat” beside the
 main task:
 
 ```mermaid
 sequenceDiagram
     participant Host as Agent host
     participant Main as Main agent
-    participant Curator as Low-reasoning curator
+    participant Curator as Low-reasoning purpose curator
     participant Atlas as ProjectAtlas purpose APIs
 
     Host->>Main: continue source task immediately
     Host->>Curator: spawn bounded low-scope lane
-    Curator->>Atlas: claim coalesced task/generation/path rows
-    Atlas-->>Curator: rows plus bounded current context
-    Curator->>Atlas: approved purpose set/review writes only
+    Curator->>Atlas: read coalesced task/generation/path rows
+    Atlas-->>Curator: rows plus work keys and current-row tokens
+    Curator->>Atlas: conditional purpose review through the public API
     Main->>Atlas: later normal navigation request
     Atlas-->>Main: response uses approved purposes
     Curator-->>Host: minimal machine-facing terminal state
     Note over Curator,Host: no ordinary conversation or per-path status
 ```
 
-At startup and relevant task/source transitions, a supported agent host launches the packaged purpose-curator lane without blocking the main task. The curator claims a coalesced task/generation/path-scoped queue directly; ordinary session/folder/file responses do not carry a purpose-maintenance handoff or status section. ProjectAtlas itself does not pretend an MCP server can spawn a host agent.
+At startup and relevant task/source transitions, a supported agent host launches the packaged purpose-curator lane without blocking the main task. Init, explicit session brief, and purpose queue expose one bounded task/generation/path-scoped handoff; ordinary folder/file/summary responses carry no maintenance status. Deterministic work keys coalesce duplicate host work, and current-row state tokens make stale review writes no-ops. ProjectAtlas itself does not pretend an MCP server can spawn a host agent. If the host cannot enforce isolated subagents or reasoning selection, the main agent may process the same `low`-scope batch; `medium` and `strict` remain explicit.
 
 Successful curation is silent in the main conversation: no per-file progress, approval, or completion messages. Later navigation simply benefits from the improved purposes. If a host requires a terminal result, it should be a minimal machine-facing state. Task-relevant conflicts that would make ranking unsafe and repeated degraded/failure state remain available through compact blockers or explicit health/settings diagnostics.
 
 The default background scope is `low`: all folders plus task-relevant/high-impact files. `medium` means every source file must be reviewed. `strict` means every indexed file and folder must be reviewed. Medium and strict are explicit expensive choices and are never started implicitly.
 
-The curator receives queue rows plus bounded file summary, graph role, outline, or exact source context. It never browses the whole repository without a bounded assignment, never edits source, and never edits SQLite directly. Purposes written through ProjectAtlas APIs are agent-approved and can be corrected later by any agent that finds them wrong, stale, vague, or generic.
+The curator receives queue rows plus bounded file summary, graph role, outline, or exact source context. It never browses the whole repository without a bounded assignment, never edits source, and never edits SQLite directly. Purposes written through ProjectAtlas APIs are agent-approved and can be corrected later by any agent that finds them wrong, vague, generic, inconsistent, or genuinely repurposed; source changes alone never trigger a correction.
 
 ## What Repository-Wide Graph Intelligence Adds
 
@@ -254,11 +303,11 @@ API route
 → integration test
 ```
 
-Every local step carries its relationship, exact file/symbol selector, authoritative owning-purpose projection and review/stale state, source span, resolution, confidence, coverage, and generation. Paths are node-simple, deterministic, and constrained by row, node, edge, depth, time, memory, output, and cancellation budgets.
+Every local step carries its relationship, exact file/symbol selector, authoritative accepted owning-purpose projection and approval/provenance state, source span, resolution, confidence, coverage, and generation. Paths are node-simple, deterministic, and constrained by row, node, edge, depth, time, memory, output, and cancellation budgets. A multi-page result whose membership, ranking, or hydration depends on purpose also binds the authored-purpose revision.
 
 ## Freshness Contract
 
-The watcher is a latency optimization, not the freshness authority. Every normal index-backed read performs a lightweight comparison between persisted fingerprints and the current local source/configuration state.
+The watcher is a latency optimization, not the freshness authority. A new long-lived MCP runtime activates bounded root and policy observation before its first exact post-start verification, reconciles any buffered events, and binds a process-local verified epoch to the selected project identity and complete SQLite generation. Later unchanged reads reuse that epoch after a constant freshness snapshot check without another whole-tree walk or full node-table decode. Relevant events, observer overflow/gap/disconnection, root or policy uncertainty, cancellation, and changes racing a query invalidate the epoch. A one-shot CLI process performs its own exact first verification because it cannot inherit process-local observation state.
 
 The response must do one of two things:
 
@@ -278,32 +327,27 @@ The contract covers:
 - non-Git directories;
 - transient path, permission, encoding, or root uncertainty;
 - re-resolution of inbound dependents after exported identities change;
-- no repeated publication for unchanged dirty state.
+- no repeated publication for unchanged dirty state;
+- no repository-sized freshness work on later unchanged healthy-epoch calls;
+- cancellation or observer uncertainty cannot leave an older epoch reusable.
 
-## Streamlined MCP Surface
+## Compatible MCP Surface With Streamlined Behavior
 
-ProjectAtlas 0.3.26 registers 40 MCP tools and its complete `tools/list` response is about 29 KB before any source answer. Version 0.4 keeps every old route available through an explicit full compatibility surface while installer-generated agent configurations advertise a compact surface.
+ProjectAtlas 0.4 preserves the complete 0.3.26 MCP inventory, names, request schemas, defaults, and compatible payload behavior. Repository graph construction, freshness, purpose-plus-connection enrichment, direct relation navigation, and next-call guidance improve automatically behind those calls.
 
-The initial compact agent surface is:
+Issue #308 does not classify, hide, consolidate, or remove public tools. It records the packaged v0.4 inventory and discovery measurements as the baseline for issue #310, which separately owns any post-v0.4 compact/default selection or breaking rationalization.
 
-```text
-atlas_init
-atlas_scan
-atlas_session_brief
-atlas_folders
-atlas_files
-atlas_search
-atlas_file_summary
-atlas_slice
-atlas_symbols
-atlas_symbol_relations
-atlas_health
-atlas_purpose_queue
-atlas_purpose_set
-atlas_purpose_review
-```
+The frozen post-composition v0.4 candidate advertises the same 40 tool names.
+Its compact serialized `tools/list` tool array is 37,299 bytes, or 9,325
+heuristic four-byte tokens, compared with 28,933 bytes and 7,234 heuristic
+tokens for the frozen v0.3.26 array. That 28.9% discovery growth is retained as
+the honest post-v0.4 #310 baseline. The compatibility E2E compares every name
+and description plus the complete recursive legacy request-schema tree; v0.4
+fields remain additive. The task-7.3.1 composition evaluation selected only an
+opt-in compact detailed-relation projection and rejected a new graph-question
+tool; broader compact/default or inventory decisions remain with #310.
 
-The full surface preserves all 0.3.26 names, request schemas, defaults, and payload compatibility. Deprecated routes delegate to the same service implementation. A closed `agent | full` MCP surface selection is sufficient; ProjectAtlas does not need a dynamic tool plugin system or one ambiguous administration mega-tool.
+No graph orchestration call is added to compensate for richer internals. The existing routes remain typed responsibility-owned operations; ProjectAtlas does not need a dynamic tool plugin system or one ambiguous administration mega-tool.
 
 The normal already-indexed coding workflow should be three calls:
 
@@ -313,16 +357,36 @@ atlas_session_brief(task)
 → atlas_slice(selected symbol/range)
 ```
 
+For a focused code question, the packaged skill starts the compact brief with
+file/folder limits of three and blocker/purpose limits of one, then widens only
+when no actionable candidate exists. It calls the brief once; later caller,
+source, and public-boundary checks continue from the selected files rather than
+restarting discovery.
+
 Optional branches are:
 
 - `atlas_search` when the identifier or text is uncertain;
-- `atlas_symbol_relations` when callers, impact, architecture, or a path is material;
-- `atlas_folders` then `atlas_files` only when the brief cannot confidently choose the work area;
-- purpose queue/set/review when navigation exposes missing or stale intent.
+- compact summary connections for ordinary direct callers or dependencies already shown there, without re-confirming the same trusted call row through detailed relations;
+- `atlas_symbol_relations` with `view: "detailed"` and `compact: true` when resolution/completeness, an omitted connection, ambiguity, external/unresolved state, or a bounded multi-hop path is material; request occurrences only when their call-site spans are needed, consume a returned top-level continuation call unchanged, then copy a row next-call selector directly;
+- a trusted export or bounded module/re-export declaration for public exposure; an inbound relation on the entrypoint does not prove that boundary;
+- `atlas_folders` then `atlas_files` for explicit manual work-area discovery when the caller intentionally does not use the brief's already-ranked candidates;
+- purpose queue/set/review for missing/suggested intent or an explicit correction of accepted intent.
 
 `atlas_session_brief` must not recommend rerunning folder/file ranking it already performed. Its next call should be a ready-to-use summary, search, relation, or exact-slice request.
 
-No new mandatory MCP tool is justified. Architecture, impact, and trace should first use a closed view on the existing bounded relation service. At most one optional analysis tool may be added later if real agent tasks prove that extending the relation request makes tool selection or schema size worse.
+A reviewed purpose can select a likely public entrypoint, but it does not prove
+exposure. External reachability requires the trusted owning-file export or an
+exact module/re-export declaration.
+
+No new mandatory MCP tool is justified. The formal clean, dirty, and non-Git
+composition evaluation kept the same 10 calls while compact detailed relations
+reduced emitted route bytes by 55.9–57.5% and median detailed-relation bytes by
+50.0–63.4%. Architecture, impact, and trace use a closed view on the existing
+bounded relation service. A dedicated graph-question tool failed the
+preregistered applicable-multi-call and further-byte thresholds without
+becoming a catch-all. The [formal composition result](benchmarks/v0.4-mcp-composition-evaluation.md)
+keeps the exact requests, machine result, freshness proof, bounds, and excluded
+runs.
 
 ## Output Shapes
 
@@ -364,6 +428,51 @@ The preserved baseline is ProjectAtlas `v0.3.26` at commit `d3b3e157f954c7d360d8
 | Non-Git freshness | Indexed directory without `.git`; saved edit/add/delete occurs | Explicit refresh is required | First normal indexed read reconciles safely or returns `refresh_required` | Filesystem fingerprints provide the same current-source guarantee as a Git worktree |
 
 For every row, correctness is decided before performance. No row may increase mandatory calls, full-file reads, broad-read escapes, or total context. Aggregate discovery bytes, calls, wrong selections, backtracking, and context must improve.
+
+### Task-7.3 Forward Test
+
+The final 2026-07-24 forward test uses the same clean, saved-dirty, and non-Git
+task intent, truthful reviewed-purpose fixtures, model, reasoning, permissions,
+and cache policy for the v0.4 candidate and frozen v0.3.26. Both versions reach
+every correctness oracle. Against v0.3.26, v0.4 reduces calls from 34 to 24,
+backtracks from two to zero, broad content calls from three to zero, and emitted
+MCP evidence from 19,094 to 15,295 bytes. Each fixture is non-regressing:
+clean falls 23.4%, dirty 27.9%, and non-Git 6.3%.
+
+The complete compatible discovery array remains larger: 37,299 bytes versus
+28,933. Discovery plus response therefore increases 20.1%. The matching v0.4
+skill is 15,860 bytes versus 33,977 for v0.3.26, so independent cold-session
+context falls 15.9% overall. The
+[agent report](benchmarks/v0.4-agent-navigation-evaluation.md) and
+[machine-readable trials](benchmarks/v0.4-mcp-agent-trials.json) preserve both
+boundaries, exact call sequences, candidate identities, raw usage metadata, and
+limitations.
+
+### Task-7.6 Final Benchmark
+
+After tasks 7.4 and 7.5 stabilized the candidate, the final campaign ran three
+repeats of five corpora across v0.4, frozen v0.3.26, and no ProjectAtlas. All
+45 rows remain in the
+[raw result](benchmarks/v0.4-agent-navigation-results.json); none was excluded.
+V0.4 and plain completed 15/15. Frozen v0.3.26 completed 12/15 and failed every
+pinned VS Code setup on a tracked non-UTF-8 source file.
+
+Manual review found all 42 produced answers substantively correct. One v0.4
+answer had invalid temporary-root citation targets, leaving a 41/42 final
+manual result. V0.4 reduced median net navigation context 28–30%
+against v0.3.26 on the small tasks and reduced several call/read counts, but
+regressed medium net context by 47% and could not be compared with v0.3.26 on
+huge source. Plain navigation used the least context on every corpus. V0.4's
+huge setup cost a median 618 seconds, 2.31 GiB peak RSS, and 3.72 GiB
+persistent storage before the agent task.
+
+The reviewed report publishes absolute values, median and observed-maximum
+percentage comparisons, all tool calls and visits, gross versus fully charged
+net context, provider counters as non-causal observations, task-7.4 resource
+reconciliation, exact identities and prompts, rerun commands, all failed and
+aborted attempts, and limitations. These results preserve the product's
+purpose-led indexed-navigation contract without relabeling it as a universal
+latency or token advantage.
 
 ## Acceptance Contract
 

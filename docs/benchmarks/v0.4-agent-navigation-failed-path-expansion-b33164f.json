@@ -1,0 +1,1820 @@
+{
+  "schema_version": 1,
+  "preregistration": "{REPO_ROOT}\\docs\\benchmarks\\v0.4-agent-navigation-preregistration.json",
+  "preregistration_sha256": "b428bd48b73ad8c1e1b65cfccdc092c0762c4740c022e403e31ef8326189d86a",
+  "effective_preregistration": {
+    "schema_version": 1,
+    "status": "locked_for_final_measurement",
+    "protocol": {
+      "date": "2026-07-25",
+      "repeats": 3,
+      "tail_statistic": "observed_maximum",
+      "execution": "45 sequential trials with arm order rotated once per repeat",
+      "inclusion": "Every scheduled trial is retained and included in correctness and failure counts.",
+      "exclusion": "No post-measurement exclusion path exists; preparation, timeout, malformed-output, mutation, and cleanup failures remain failed rows.",
+      "distribution_limit": "Three trials support an explicit value distribution, median, and observed maximum only; they do not support a stable percentile estimate.",
+      "provider_counter_limit": "Provider token counters are descriptive and non-causal because provider cache state is not independently controlled.",
+      "review": "Deterministic rubric results are followed by manual review of every retained final answer before publication."
+    },
+    "environment": {
+      "expected": {
+        "platform": "Windows-10-10.0.26200-SP0",
+        "python": "3.11.3",
+        "logical_cpus": 16,
+        "os_name": "nt",
+        "codex_version": "codex-cli 0.145.0",
+        "codex_sha256": "83751f15cb6a0a7b97df67752c001e3fe1c20e18ffbfec3ff63567296205eb6c"
+      }
+    },
+    "candidate": {
+      "functional_head": "f274acc1b973da16626e7cbeb7bb9acbaf10f86d",
+      "checklist_head": "7bcf12094c30fabd5d9b9cb165646744ce7c845f",
+      "setup_timeout_seconds": 1800,
+      "codex": {
+        "executable": "${APPDATA}/npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
+        "sha256": "83751f15cb6a0a7b97df67752c001e3fe1c20e18ffbfec3ff63567296205eb6c",
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "xhigh",
+        "sandbox": "read-only",
+        "approval_policy": "never",
+        "mcp_approval": {
+          "default_mode": "prompt",
+          "read_only_tools": [
+            "atlas_root",
+            "atlas_config",
+            "atlas_ignore_list",
+            "atlas_overview",
+            "atlas_folders",
+            "atlas_files",
+            "atlas_next",
+            "atlas_outline",
+            "atlas_file_summary",
+            "atlas_search",
+            "atlas_slice",
+            "atlas_symbols",
+            "atlas_symbol_relations",
+            "atlas_health",
+            "atlas_lint",
+            "atlas_token_report",
+            "atlas_parity_report",
+            "atlas_settings",
+            "atlas_watch_status",
+            "atlas_mcp_config",
+            "atlas_runtime_info",
+            "atlas_session_brief",
+            "atlas_task_status",
+            "atlas_purpose_queue"
+          ]
+        },
+        "timeout_seconds": 900,
+        "cache_policy": "One ephemeral Codex session and fresh isolated fixture/database per trial; arm order rotates, no trial result is reused, and provider cache counters remain descriptive.",
+        "environment": {
+          "NO_COLOR": "1"
+        },
+        "config": {}
+      },
+      "arms": {
+        "v0.4": {
+          "runtime": "target/release/projectatlas.exe",
+          "runtime_sha256": "6c819a272e7d4c258f2f97357b691706b5c2aafca1e5ea5cbbc598d4b7e4e3d3",
+          "version": "projectatlas 0.4.0",
+          "require_version": "0.4.0",
+          "skill_path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
+          "skill_sha256": "be0c2b0baa1aa9768d602ce33dcb3c81c8edf6e1a23f8cb1a4768dd922bb80f3",
+          "tool_discovery_bytes": 37299,
+          "mcp_args": [
+            "--require-version",
+            "0.4.0",
+            "--db",
+            "{db}",
+            "--config",
+            "{config}",
+            "mcp"
+          ],
+          "mcp_env": {
+            "PROJECTATLAS_NO_TELEMETRY": "1"
+          }
+        },
+        "v0.3.26": {
+          "runtime": "${LOCALAPPDATA}/ProjectAtlas/bin/projectatlas.exe",
+          "runtime_sha256": "1da83933a7e5358fc3cceb4ff0e3bd51e4a4cef6b49e1baba68cccf86924c900",
+          "version": "projectatlas 0.3.26",
+          "require_version": "0.3.26",
+          "skill_path": "${USERPROFILE}/.codex/plugins/cache/projectatlas/projectatlas/0.3.26/skills/projectatlas/SKILL.md",
+          "skill_sha256": "ac5a2561ab7fb791716d6160b060a0eacb2bf7b41d4385fa909d3e26465ff203",
+          "tool_discovery_bytes": 28933,
+          "mcp_args": [
+            "--require-version",
+            "0.3.26",
+            "--db",
+            "{db}",
+            "--config",
+            "{config}",
+            "mcp"
+          ],
+          "mcp_env": {
+            "PROJECTATLAS_NO_TELEMETRY": "1"
+          }
+        },
+        "plain": {}
+      }
+    },
+    "corpora": {
+      "small": {
+        "source": "docs/benchmarks/fixtures/mcp-composition",
+        "states": [
+          "clean",
+          "saved-dirty",
+          "non-git"
+        ],
+        "purpose_policy": "Both ProjectAtlas arms receive the same reviewed purposes through the public purpose set command; the plain control has no ProjectAtlas state."
+      },
+      "medium": {
+        "generator": "docs/benchmarks/harness/system_scale.py::prepare_medium",
+        "caller_files": 1024
+      },
+      "huge": {
+        "repository": "https://github.com/microsoft/vscode.git",
+        "release": "1.130.0",
+        "commit": "1b6a188127eeaf9194f945eb6eb89a657e93c54c",
+        "target_file": "src/vs/platform/instantiation/common/instantiation.ts"
+      }
+    },
+    "prompts": {
+      "cases": {
+        "small-clean": "Read-only source-navigation task: find where an unassigned order ID is rejected, identify the exact public caller affected if that behavior changes, explain why each selected file is relevant, and cite the smallest trustworthy source evidence. Do not modify files.",
+        "small-dirty": "Read-only source-navigation task: find the saved working-tree checkout discount threshold and amount, identify the exact public checkout path affected if that behavior changes, explain why each selected file is relevant, and cite the smallest trustworthy source evidence. Use current saved-dirty source, not only HEAD. Do not modify files.",
+        "small-non-git": "Read-only source-navigation task: find the configured timeout value and trace its behavior through the public health route, explain why each selected file is relevant, and cite the smallest trustworthy source evidence. This source tree is intentionally not a Git repository. Do not modify files.",
+        "medium": "Read-only source-navigation task: find the implementation of shared(value) in this generated Rust repository, determine how many public caller modules are affected by changing it, identify the common caller shape, and cite the smallest trustworthy implementation and caller evidence. Do not modify files.",
+        "huge-vscode": "Read-only source-navigation task in the pinned VS Code source: find the only valid way to create a ServiceIdentifier, explain how identifiers are cached and constructor dependencies are recorded, identify at least one directly affected caller or importer if that behavior changes, and cite the smallest trustworthy source evidence. Do not modify files."
+      },
+      "self_audit_marker": "BENCHMARK_SELF_AUDIT:",
+      "self_audit_instruction": "After the answer, append BENCHMARK_SELF_AUDIT: followed immediately by one JSON object and no later content. The object must be {\"productive\":{\"folders\":[string],\"files\":[string],\"relations\":[string]},\"wrong\":{\"folders\":[string],\"files\":[string],\"relations\":[string]},\"backtracks\":nonnegative integer,\"broad_reads\":nonnegative integer,\"full_reads\":nonnegative integer}. Report actual navigation only; a backtrack is a selection abandoned as irrelevant, a broad read spans many files or an unbounded search, and a full read consumes an entire source file."
+    },
+    "rubric": {
+      "method": "Case-insensitive deterministic required-term and any-of matching, followed by manual review of every answer.",
+      "cases": {
+        "small-clean": {
+          "required_terms": [
+            "save_order",
+            "order id must be assigned",
+            "submit_order"
+          ],
+          "any_of": [
+            [
+              "src/storage.rs",
+              "src\\storage.rs"
+            ],
+            [
+              "src/api.rs",
+              "src\\api.rs"
+            ]
+          ],
+          "forbidden_terms": []
+        },
+        "small-dirty": {
+          "required_terms": [
+            "apply_discount",
+            "checkout_total"
+          ],
+          "any_of": [
+            [
+              "10_000",
+              "10000",
+              "10,000"
+            ],
+            [
+              "1_000",
+              "1000",
+              "1,000"
+            ],
+            [
+              "src/pricing.rs",
+              "src\\pricing.rs"
+            ],
+            [
+              "src/checkout.rs",
+              "src\\checkout.rs"
+            ]
+          ],
+          "forbidden_terms": []
+        },
+        "small-non-git": {
+          "required_terms": [
+            "load_timeout_millis",
+            "health_response",
+            "/health",
+            "250"
+          ],
+          "any_of": [
+            [
+              "src/config.rs",
+              "src\\config.rs"
+            ],
+            [
+              "src/handler.rs",
+              "src\\handler.rs"
+            ],
+            [
+              "src/router.rs",
+              "src\\router.rs"
+            ]
+          ],
+          "forbidden_terms": []
+        },
+        "medium": {
+          "required_terms": [
+            "shared",
+            "value + 1"
+          ],
+          "any_of": [
+            [
+              "src/hub.rs",
+              "src\\hub.rs"
+            ],
+            [
+              "1024",
+              "1,024"
+            ],
+            [
+              "caller_0000",
+              "call_0000"
+            ]
+          ],
+          "forbidden_terms": []
+        },
+        "huge-vscode": {
+          "required_terms": [
+            "createDecorator",
+            "storeServiceDependency",
+            "_util.serviceIds",
+            "DI_DEPENDENCIES"
+          ],
+          "any_of": [
+            [
+              "src/vs/platform/instantiation/common/instantiation.ts",
+              "src\\vs\\platform\\instantiation\\common\\instantiation.ts"
+            ]
+          ],
+          "forbidden_terms": []
+        }
+      }
+    }
+  },
+  "repeat_count": 3,
+  "schedule": [
+    {
+      "run_id": "r01-small-clean-v0.4",
+      "repeat": 1,
+      "case": "small-clean",
+      "arm": "v0.4"
+    },
+    {
+      "run_id": "r01-small-clean-v0.3.26",
+      "repeat": 1,
+      "case": "small-clean",
+      "arm": "v0.3.26"
+    },
+    {
+      "run_id": "r01-small-clean-plain",
+      "repeat": 1,
+      "case": "small-clean",
+      "arm": "plain"
+    },
+    {
+      "run_id": "r01-small-dirty-v0.4",
+      "repeat": 1,
+      "case": "small-dirty",
+      "arm": "v0.4"
+    },
+    {
+      "run_id": "r01-small-dirty-v0.3.26",
+      "repeat": 1,
+      "case": "small-dirty",
+      "arm": "v0.3.26"
+    },
+    {
+      "run_id": "r01-small-dirty-plain",
+      "repeat": 1,
+      "case": "small-dirty",
+      "arm": "plain"
+    },
+    {
+      "run_id": "r01-small-non-git-v0.4",
+      "repeat": 1,
+      "case": "small-non-git",
+      "arm": "v0.4"
+    },
+    {
+      "run_id": "r01-small-non-git-v0.3.26",
+      "repeat": 1,
+      "case": "small-non-git",
+      "arm": "v0.3.26"
+    },
+    {
+      "run_id": "r01-small-non-git-plain",
+      "repeat": 1,
+      "case": "small-non-git",
+      "arm": "plain"
+    },
+    {
+      "run_id": "r01-medium-v0.4",
+      "repeat": 1,
+      "case": "medium",
+      "arm": "v0.4"
+    },
+    {
+      "run_id": "r01-medium-v0.3.26",
+      "repeat": 1,
+      "case": "medium",
+      "arm": "v0.3.26"
+    },
+    {
+      "run_id": "r01-medium-plain",
+      "repeat": 1,
+      "case": "medium",
+      "arm": "plain"
+    },
+    {
+      "run_id": "r01-huge-vscode-v0.4",
+      "repeat": 1,
+      "case": "huge-vscode",
+      "arm": "v0.4"
+    },
+    {
+      "run_id": "r01-huge-vscode-v0.3.26",
+      "repeat": 1,
+      "case": "huge-vscode",
+      "arm": "v0.3.26"
+    },
+    {
+      "run_id": "r01-huge-vscode-plain",
+      "repeat": 1,
+      "case": "huge-vscode",
+      "arm": "plain"
+    },
+    {
+      "run_id": "r02-small-clean-v0.3.26",
+      "repeat": 2,
+      "case": "small-clean",
+      "arm": "v0.3.26"
+    },
+    {
+      "run_id": "r02-small-clean-plain",
+      "repeat": 2,
+      "case": "small-clean",
+      "arm": "plain"
+    },
+    {
+      "run_id": "r02-small-clean-v0.4",
+      "repeat": 2,
+      "case": "small-clean",
+      "arm": "v0.4"
+    },
+    {
+      "run_id": "r02-small-dirty-v0.3.26",
+      "repeat": 2,
+      "case": "small-dirty",
+      "arm": "v0.3.26"
+    },
+    {
+      "run_id": "r02-small-dirty-plain",
+      "repeat": 2,
+      "case": "small-dirty",
+      "arm": "plain"
+    },
+    {
+      "run_id": "r02-small-dirty-v0.4",
+      "repeat": 2,
+      "case": "small-dirty",
+      "arm": "v0.4"
+    },
+    {
+      "run_id": "r02-small-non-git-v0.3.26",
+      "repeat": 2,
+      "case": "small-non-git",
+      "arm": "v0.3.26"
+    },
+    {
+      "run_id": "r02-small-non-git-plain",
+      "repeat": 2,
+      "case": "small-non-git",
+      "arm": "plain"
+    },
+    {
+      "run_id": "r02-small-non-git-v0.4",
+      "repeat": 2,
+      "case": "small-non-git",
+      "arm": "v0.4"
+    },
+    {
+      "run_id": "r02-medium-v0.3.26",
+      "repeat": 2,
+      "case": "medium",
+      "arm": "v0.3.26"
+    },
+    {
+      "run_id": "r02-medium-plain",
+      "repeat": 2,
+      "case": "medium",
+      "arm": "plain"
+    },
+    {
+      "run_id": "r02-medium-v0.4",
+      "repeat": 2,
+      "case": "medium",
+      "arm": "v0.4"
+    },
+    {
+      "run_id": "r02-huge-vscode-v0.3.26",
+      "repeat": 2,
+      "case": "huge-vscode",
+      "arm": "v0.3.26"
+    },
+    {
+      "run_id": "r02-huge-vscode-plain",
+      "repeat": 2,
+      "case": "huge-vscode",
+      "arm": "plain"
+    },
+    {
+      "run_id": "r02-huge-vscode-v0.4",
+      "repeat": 2,
+      "case": "huge-vscode",
+      "arm": "v0.4"
+    },
+    {
+      "run_id": "r03-small-clean-plain",
+      "repeat": 3,
+      "case": "small-clean",
+      "arm": "plain"
+    },
+    {
+      "run_id": "r03-small-clean-v0.4",
+      "repeat": 3,
+      "case": "small-clean",
+      "arm": "v0.4"
+    },
+    {
+      "run_id": "r03-small-clean-v0.3.26",
+      "repeat": 3,
+      "case": "small-clean",
+      "arm": "v0.3.26"
+    },
+    {
+      "run_id": "r03-small-dirty-plain",
+      "repeat": 3,
+      "case": "small-dirty",
+      "arm": "plain"
+    },
+    {
+      "run_id": "r03-small-dirty-v0.4",
+      "repeat": 3,
+      "case": "small-dirty",
+      "arm": "v0.4"
+    },
+    {
+      "run_id": "r03-small-dirty-v0.3.26",
+      "repeat": 3,
+      "case": "small-dirty",
+      "arm": "v0.3.26"
+    },
+    {
+      "run_id": "r03-small-non-git-plain",
+      "repeat": 3,
+      "case": "small-non-git",
+      "arm": "plain"
+    },
+    {
+      "run_id": "r03-small-non-git-v0.4",
+      "repeat": 3,
+      "case": "small-non-git",
+      "arm": "v0.4"
+    },
+    {
+      "run_id": "r03-small-non-git-v0.3.26",
+      "repeat": 3,
+      "case": "small-non-git",
+      "arm": "v0.3.26"
+    },
+    {
+      "run_id": "r03-medium-plain",
+      "repeat": 3,
+      "case": "medium",
+      "arm": "plain"
+    },
+    {
+      "run_id": "r03-medium-v0.4",
+      "repeat": 3,
+      "case": "medium",
+      "arm": "v0.4"
+    },
+    {
+      "run_id": "r03-medium-v0.3.26",
+      "repeat": 3,
+      "case": "medium",
+      "arm": "v0.3.26"
+    },
+    {
+      "run_id": "r03-huge-vscode-plain",
+      "repeat": 3,
+      "case": "huge-vscode",
+      "arm": "plain"
+    },
+    {
+      "run_id": "r03-huge-vscode-v0.4",
+      "repeat": 3,
+      "case": "huge-vscode",
+      "arm": "v0.4"
+    },
+    {
+      "run_id": "r03-huge-vscode-v0.3.26",
+      "repeat": 3,
+      "case": "huge-vscode",
+      "arm": "v0.3.26"
+    }
+  ],
+  "candidate_identities": {
+    "v0.4": {
+      "projectatlas": true,
+      "runtime": "{REPO_ROOT}\\target\\release\\projectatlas.exe",
+      "runtime_sha256": "6c819a272e7d4c258f2f97357b691706b5c2aafca1e5ea5cbbc598d4b7e4e3d3",
+      "version": "projectatlas 0.4.0",
+      "skill_path": "{REPO_ROOT}\\plugins\\projectatlas\\skills\\projectatlas\\SKILL.md",
+      "skill_sha256": "be0c2b0baa1aa9768d602ce33dcb3c81c8edf6e1a23f8cb1a4768dd922bb80f3",
+      "skill_bytes": 15860,
+      "tool_discovery_bytes": 37299
+    },
+    "v0.3.26": {
+      "projectatlas": true,
+      "runtime": "{USER_HOME}\\AppData\\Local\\ProjectAtlas\\bin\\projectatlas.exe",
+      "runtime_sha256": "1da83933a7e5358fc3cceb4ff0e3bd51e4a4cef6b49e1baba68cccf86924c900",
+      "version": "projectatlas 0.3.26",
+      "skill_path": "{USER_HOME}\\.codex\\plugins\\cache\\projectatlas\\projectatlas\\0.3.26\\skills\\projectatlas\\SKILL.md",
+      "skill_sha256": "ac5a2561ab7fb791716d6160b060a0eacb2bf7b41d4385fa909d3e26465ff203",
+      "skill_bytes": 33977,
+      "tool_discovery_bytes": 28933
+    },
+    "plain": {
+      "projectatlas": false
+    }
+  },
+  "environment": {
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.11.3",
+    "logical_cpus": 16,
+    "os_name": "nt",
+    "codex_version": "codex-cli 0.145.0",
+    "codex_sha256": "83751f15cb6a0a7b97df67752c001e3fe1c20e18ffbfec3ff63567296205eb6c"
+  },
+  "path_placeholders": {
+    "{REPO_ROOT}": "ProjectAtlas checkout root",
+    "{USER_HOME}": "current operating-system user home"
+  },
+  "rerun_command": [
+    "{USER_HOME}\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
+    "{REPO_ROOT}\\docs\\benchmarks\\harness\\agent_navigation.py",
+    "--preregistration",
+    "{REPO_ROOT}\\docs\\benchmarks\\v0.4-agent-navigation-preregistration.json",
+    "--output",
+    "{REPO_ROOT}\\docs\\benchmarks\\v0.4-agent-navigation-publication.json",
+    "--work-root",
+    "{REPO_ROOT}\\target\\benchmarks\\agent-navigation\\final-b33164f",
+    "--corpus-cache",
+    "{REPO_ROOT}\\target\\benchmarks\\system-scale\\corpus-cache",
+    "--repeats",
+    "3"
+  ],
+  "runs": [
+    {
+      "run_id": "r01-small-clean-v0.4",
+      "repeat": 1,
+      "case": "small-clean",
+      "arm": "v0.4",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r01-small-clean-v0.3.26",
+      "repeat": 1,
+      "case": "small-clean",
+      "arm": "v0.3.26",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r01-small-clean-plain",
+      "repeat": 1,
+      "case": "small-clean",
+      "arm": "plain",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r01-small-dirty-v0.4",
+      "repeat": 1,
+      "case": "small-dirty",
+      "arm": "v0.4",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r01-small-dirty-v0.3.26",
+      "repeat": 1,
+      "case": "small-dirty",
+      "arm": "v0.3.26",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r01-small-dirty-plain",
+      "repeat": 1,
+      "case": "small-dirty",
+      "arm": "plain",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r01-small-non-git-v0.4",
+      "repeat": 1,
+      "case": "small-non-git",
+      "arm": "v0.4",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r01-small-non-git-v0.3.26",
+      "repeat": 1,
+      "case": "small-non-git",
+      "arm": "v0.3.26",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r01-small-non-git-plain",
+      "repeat": 1,
+      "case": "small-non-git",
+      "arm": "plain",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r01-medium-v0.4",
+      "repeat": 1,
+      "case": "medium",
+      "arm": "v0.4",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r01-medium-v0.3.26",
+      "repeat": 1,
+      "case": "medium",
+      "arm": "v0.3.26",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r01-medium-plain",
+      "repeat": 1,
+      "case": "medium",
+      "arm": "plain",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r01-huge-vscode-v0.4",
+      "repeat": 1,
+      "case": "huge-vscode",
+      "arm": "v0.4",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "setup_failed",
+        "message": "ProjectAtlas setup failed"
+      },
+      "fixture": {
+        "path": "{REPO_ROOT}\\target\\benchmarks\\agent-navigation\\final-b33164f\\r01-huge-vscode-v0.4\\huge-vscode",
+        "setup_source_state": {
+          "passed": true,
+          "before": {
+            "kind": "git-worktree",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "status": ""
+          },
+          "after": {
+            "kind": "git-worktree",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "status": ""
+          }
+        }
+      },
+      "setup": {
+        "passed": false,
+        "commands": [
+          {
+            "sampler": "psutil-7.0.0",
+            "interval_seconds": 0.02,
+            "sampled_peak_metrics": [
+              "rss_bytes",
+              "processes",
+              "threads",
+              "storage"
+            ],
+            "peak_rss_bytes": 29110272,
+            "peak_processes": 1,
+            "peak_worker_processes": 0,
+            "peak_threads": 20,
+            "cpu_seconds": 7.359375,
+            "observed_pids": [
+              25548
+            ],
+            "peak_storage": {
+              "database_bytes": 458752,
+              "wal_bytes": 461472,
+              "shm_bytes": 32768,
+              "staging_bytes": 0,
+              "stage_directories": 0
+            },
+            "read_count": 80960,
+            "write_count": 347,
+            "exact_total_processes": 1,
+            "exact_terminal_active_processes": 0,
+            "worker_process_bound": 0,
+            "worker_process_bound_method": "cumulative-owned-processes-conservative-upper-bound",
+            "terminal_io_complete": true,
+            "terminal_io_method": "windows-job-basic-and-io-accounting",
+            "process_io_metric": {
+              "backend": "windows-job-basic-and-io-accounting-plus-psutil-peaks",
+              "kind": "exact-terminal-owned-process-tree-accounting",
+              "required_final_platform": "Windows",
+              "final_platform_eligible": true,
+              "ineligible_reason": null,
+              "terminal_counters_complete": true
+            },
+            "arguments": [
+              "--require-version",
+              "0.4.0",
+              "init",
+              "--force-rescan"
+            ],
+            "returncode": 1,
+            "timed_out": false,
+            "wall_seconds": 20.551742,
+            "one_core_cpu_percent": 35.809,
+            "host_cpu_percent": 2.238,
+            "stdout_bytes": 3764,
+            "stderr_bytes": 83,
+            "process_read_transfer_bytes": 320145082,
+            "process_write_transfer_bytes": 929010,
+            "stdout": "init:\n  ok: false\n  root: \"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r01-huge-vscode-v0.4/huge-vscode\"\n  project_dir:\n    status: created\n    path: \"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r01-huge-vscode-v0.4/huge-vscode/.projectatlas\"\n  config:\n    status: created\n    path: \"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r01-huge-vscode-v0.4/huge-vscode/.projectatlas/config.toml\"\n  nonsource_files:\n    status: created\n    path: \"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r01-huge-vscode-v0.4/huge-vscode/.projectatlas/projectatlas-nonsource-files.toon\"\n  db:\n    status: created\n    path: \"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r01-huge-vscode-v0.4/huge-vscode/.projectatlas/projectatlas.db\"\n  host_configs[3]{harness,status,path}:\n    mcp_json,created,\"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r01-huge-vscode-v0.4/huge-vscode/.projectatlas/projectatlas.mcp.json\"\n    claude_code,created,\"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r01-huge-vscode-v0.4/huge-vscode/.projectatlas/projectatlas.claude.mcp.json\"\n    opencode,created,\"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r01-huge-vscode-v0.4/huge-vscode/.projectatlas/projectatlas.opencode.json\"\n  scan:\n    status: failed\n    requested: true\n    force_rescan: true\n    report: null\n    error: \"invalid input: purpose input is not valid UTF-8 for {REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r01-huge-vscode-v0.4/huge-vscode/src/vs/platform/files/test/node/fixtures/service/binary.txt: invalid utf-8 sequence of 1 bytes from index 0\"\n  purpose_handoff:\n    agent_harness_expected: true\n    execution_owner: agent_host\n    recommended_subagent_reasoning: lowest_host_enforced\n    main_agent_fallback: true\n    server_started_curator: false\n    silent_on_success: true\n    queue:\n      project_instance_id: e434000841e44a195358388aeabc482f\n      active_generation: 0\n      task: \"project-init\"\n      work_key: efce3576c4b10a2ad3eaf398f76ca097f9183bcda0eb6835e67018b016aa4dc9\n      actionable: false\n      curation_scope: low\n      total: 0\n      unfiltered_total: 0\n      returned: 0\n      start_index: 0\n      limit: 50\n      max_limit: 200\n      next_start_index: null\n      truncated: false\n      source_only: true\n      folder_scope: all\n      file_scope: high_impact\n      category: \"\"\n      severity: \"\"\n      path_prefix: \"\"\n      summary_only: false\n      items[0]:\n    instructions[4]: \"If the host supports isolated subagents, delegate this actionable low-scope batch at the lowest reasoning tier the host can enforce; otherwise let the main agent process the same bounded rows without blocking navigation.\",\"Inspect only bounded current summary, graph, outline, or exact-slice context, then copy task, work_key, and state_token into atlas_purpose_review or projectatlas purpose review --apply; never edit SQLite directly.\",Skip accepted purposes unless an agent or user explicitly assigns a correction; use atlas_purpose_set or projectatlas purpose set for that deliberate correction path.,Keep successful curator maintenance out of normal conversation; ProjectAtlas reports a handoff and never claims that the Rust server spawned an agent.\n  next_steps[4]: Fix the scan/index error and rerun projectatlas init or projectatlas scan.,\"Purpose queue is empty for the default high-impact scope.\",Run projectatlas overview to confirm repository orientation.,Fix generated host MCP config errors and rerun projectatlas init.\n",
+            "stderr": "error: invalid input: projectatlas init completed with failed phase(s); see report\n",
+            "command": [
+              "{REPO_ROOT}\\target\\release\\projectatlas.exe",
+              "--require-version",
+              "0.4.0",
+              "init",
+              "--force-rescan"
+            ]
+          }
+        ],
+        "wall_seconds": 20.551742,
+        "cpu_seconds": 7.359375,
+        "peak_rss_bytes": 29110272,
+        "process_read_transfer_bytes": 320145082,
+        "process_write_transfer_bytes": 929010,
+        "peak_storage": {
+          "database_bytes": 458752,
+          "wal_bytes": 461472,
+          "shm_bytes": 32768,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        },
+        "persistent_storage": {
+          "database_bytes": 458752,
+          "wal_bytes": 0,
+          "shm_bytes": 0,
+          "staging_bytes": 0,
+          "stage_directories": 0,
+          "total_bytes": 458752
+        }
+      },
+      "cleanup_failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r01-huge-vscode-v0.4\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
+      }
+    },
+    {
+      "run_id": "r01-huge-vscode-v0.3.26",
+      "repeat": 1,
+      "case": "huge-vscode",
+      "arm": "v0.3.26",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      },
+      "cleanup_failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r01-huge-vscode-v0.3.26\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\completions-core\\\\vscode-node\\\\lib\\\\src\\\\prompt\\\\completionsPromptFactory\\\\componentsCompletionsPromptFactory.tsx'"
+      }
+    },
+    {
+      "run_id": "r01-huge-vscode-plain",
+      "repeat": 1,
+      "case": "huge-vscode",
+      "arm": "plain",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      },
+      "cleanup_failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r01-huge-vscode-plain\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
+      }
+    },
+    {
+      "run_id": "r02-small-clean-v0.3.26",
+      "repeat": 2,
+      "case": "small-clean",
+      "arm": "v0.3.26",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r02-small-clean-plain",
+      "repeat": 2,
+      "case": "small-clean",
+      "arm": "plain",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r02-small-clean-v0.4",
+      "repeat": 2,
+      "case": "small-clean",
+      "arm": "v0.4",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r02-small-dirty-v0.3.26",
+      "repeat": 2,
+      "case": "small-dirty",
+      "arm": "v0.3.26",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r02-small-dirty-plain",
+      "repeat": 2,
+      "case": "small-dirty",
+      "arm": "plain",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r02-small-dirty-v0.4",
+      "repeat": 2,
+      "case": "small-dirty",
+      "arm": "v0.4",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r02-small-non-git-v0.3.26",
+      "repeat": 2,
+      "case": "small-non-git",
+      "arm": "v0.3.26",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r02-small-non-git-plain",
+      "repeat": 2,
+      "case": "small-non-git",
+      "arm": "plain",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r02-small-non-git-v0.4",
+      "repeat": 2,
+      "case": "small-non-git",
+      "arm": "v0.4",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r02-medium-v0.3.26",
+      "repeat": 2,
+      "case": "medium",
+      "arm": "v0.3.26",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r02-medium-plain",
+      "repeat": 2,
+      "case": "medium",
+      "arm": "plain",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r02-medium-v0.4",
+      "repeat": 2,
+      "case": "medium",
+      "arm": "v0.4",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r02-huge-vscode-v0.3.26",
+      "repeat": 2,
+      "case": "huge-vscode",
+      "arm": "v0.3.26",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      },
+      "cleanup_failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r02-huge-vscode-v0.3.26\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\completions-core\\\\vscode-node\\\\lib\\\\src\\\\prompt\\\\completionsPromptFactory\\\\componentsCompletionsPromptFactory.tsx'"
+      }
+    },
+    {
+      "run_id": "r02-huge-vscode-plain",
+      "repeat": 2,
+      "case": "huge-vscode",
+      "arm": "plain",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      },
+      "cleanup_failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r02-huge-vscode-plain\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
+      }
+    },
+    {
+      "run_id": "r02-huge-vscode-v0.4",
+      "repeat": 2,
+      "case": "huge-vscode",
+      "arm": "v0.4",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "setup_failed",
+        "message": "ProjectAtlas setup failed"
+      },
+      "fixture": {
+        "path": "{REPO_ROOT}\\target\\benchmarks\\agent-navigation\\final-b33164f\\r02-huge-vscode-v0.4\\huge-vscode",
+        "setup_source_state": {
+          "passed": true,
+          "before": {
+            "kind": "git-worktree",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "status": ""
+          },
+          "after": {
+            "kind": "git-worktree",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "status": ""
+          }
+        }
+      },
+      "setup": {
+        "passed": false,
+        "commands": [
+          {
+            "sampler": "psutil-7.0.0",
+            "interval_seconds": 0.02,
+            "sampled_peak_metrics": [
+              "rss_bytes",
+              "processes",
+              "threads",
+              "storage"
+            ],
+            "peak_rss_bytes": 28590080,
+            "peak_processes": 1,
+            "peak_worker_processes": 0,
+            "peak_threads": 20,
+            "cpu_seconds": 6.828125,
+            "observed_pids": [
+              27028
+            ],
+            "peak_storage": {
+              "database_bytes": 458752,
+              "wal_bytes": 461472,
+              "shm_bytes": 32768,
+              "staging_bytes": 0,
+              "stage_directories": 0
+            },
+            "read_count": 80961,
+            "write_count": 347,
+            "exact_total_processes": 1,
+            "exact_terminal_active_processes": 0,
+            "worker_process_bound": 0,
+            "worker_process_bound_method": "cumulative-owned-processes-conservative-upper-bound",
+            "terminal_io_complete": true,
+            "terminal_io_method": "windows-job-basic-and-io-accounting",
+            "process_io_metric": {
+              "backend": "windows-job-basic-and-io-accounting-plus-psutil-peaks",
+              "kind": "exact-terminal-owned-process-tree-accounting",
+              "required_final_platform": "Windows",
+              "final_platform_eligible": true,
+              "ineligible_reason": null,
+              "terminal_counters_complete": true
+            },
+            "arguments": [
+              "--require-version",
+              "0.4.0",
+              "init",
+              "--force-rescan"
+            ],
+            "returncode": 1,
+            "timed_out": false,
+            "wall_seconds": 19.829189,
+            "one_core_cpu_percent": 34.435,
+            "host_cpu_percent": 2.152,
+            "stdout_bytes": 3768,
+            "stderr_bytes": 83,
+            "process_read_transfer_bytes": 320158462,
+            "process_write_transfer_bytes": 929010,
+            "stdout": "init:\n  ok: false\n  root: \"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r02-huge-vscode-v0.4/huge-vscode\"\n  project_dir:\n    status: created\n    path: \"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r02-huge-vscode-v0.4/huge-vscode/.projectatlas\"\n  config:\n    status: created\n    path: \"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r02-huge-vscode-v0.4/huge-vscode/.projectatlas/config.toml\"\n  nonsource_files:\n    status: created\n    path: \"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r02-huge-vscode-v0.4/huge-vscode/.projectatlas/projectatlas-nonsource-files.toon\"\n  db:\n    status: created\n    path: \"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r02-huge-vscode-v0.4/huge-vscode/.projectatlas/projectatlas.db\"\n  host_configs[3]{harness,status,path}:\n    mcp_json,created,\"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r02-huge-vscode-v0.4/huge-vscode/.projectatlas/projectatlas.mcp.json\"\n    claude_code,created,\"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r02-huge-vscode-v0.4/huge-vscode/.projectatlas/projectatlas.claude.mcp.json\"\n    opencode,created,\"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r02-huge-vscode-v0.4/huge-vscode/.projectatlas/projectatlas.opencode.json\"\n  scan:\n    status: failed\n    requested: true\n    force_rescan: true\n    report: null\n    error: \"invalid input: purpose input is not valid UTF-8 for {REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r02-huge-vscode-v0.4/huge-vscode/src/vs/platform/files/test/node/fixtures/service/binary.txt: invalid utf-8 sequence of 1 bytes from index 0\"\n  purpose_handoff:\n    agent_harness_expected: true\n    execution_owner: agent_host\n    recommended_subagent_reasoning: lowest_host_enforced\n    main_agent_fallback: true\n    server_started_curator: false\n    silent_on_success: true\n    queue:\n      project_instance_id: \"0037be89f26200d84eff0c16c00d3e35\"\n      active_generation: 0\n      task: \"project-init\"\n      work_key: \"016855abc8186d5b7c4faa095af90cc87897499c93bb84cc96ca510e81cba328\"\n      actionable: false\n      curation_scope: low\n      total: 0\n      unfiltered_total: 0\n      returned: 0\n      start_index: 0\n      limit: 50\n      max_limit: 200\n      next_start_index: null\n      truncated: false\n      source_only: true\n      folder_scope: all\n      file_scope: high_impact\n      category: \"\"\n      severity: \"\"\n      path_prefix: \"\"\n      summary_only: false\n      items[0]:\n    instructions[4]: \"If the host supports isolated subagents, delegate this actionable low-scope batch at the lowest reasoning tier the host can enforce; otherwise let the main agent process the same bounded rows without blocking navigation.\",\"Inspect only bounded current summary, graph, outline, or exact-slice context, then copy task, work_key, and state_token into atlas_purpose_review or projectatlas purpose review --apply; never edit SQLite directly.\",Skip accepted purposes unless an agent or user explicitly assigns a correction; use atlas_purpose_set or projectatlas purpose set for that deliberate correction path.,Keep successful curator maintenance out of normal conversation; ProjectAtlas reports a handoff and never claims that the Rust server spawned an agent.\n  next_steps[4]: Fix the scan/index error and rerun projectatlas init or projectatlas scan.,\"Purpose queue is empty for the default high-impact scope.\",Run projectatlas overview to confirm repository orientation.,Fix generated host MCP config errors and rerun projectatlas init.\n",
+            "stderr": "error: invalid input: projectatlas init completed with failed phase(s); see report\n",
+            "command": [
+              "{REPO_ROOT}\\target\\release\\projectatlas.exe",
+              "--require-version",
+              "0.4.0",
+              "init",
+              "--force-rescan"
+            ]
+          }
+        ],
+        "wall_seconds": 19.829189,
+        "cpu_seconds": 6.828125,
+        "peak_rss_bytes": 28590080,
+        "process_read_transfer_bytes": 320158462,
+        "process_write_transfer_bytes": 929010,
+        "peak_storage": {
+          "database_bytes": 458752,
+          "wal_bytes": 461472,
+          "shm_bytes": 32768,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        },
+        "persistent_storage": {
+          "database_bytes": 458752,
+          "wal_bytes": 0,
+          "shm_bytes": 0,
+          "staging_bytes": 0,
+          "stage_directories": 0,
+          "total_bytes": 458752
+        }
+      },
+      "cleanup_failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r02-huge-vscode-v0.4\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
+      }
+    },
+    {
+      "run_id": "r03-small-clean-plain",
+      "repeat": 3,
+      "case": "small-clean",
+      "arm": "plain",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r03-small-clean-v0.4",
+      "repeat": 3,
+      "case": "small-clean",
+      "arm": "v0.4",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r03-small-clean-v0.3.26",
+      "repeat": 3,
+      "case": "small-clean",
+      "arm": "v0.3.26",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r03-small-dirty-plain",
+      "repeat": 3,
+      "case": "small-dirty",
+      "arm": "plain",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r03-small-dirty-v0.4",
+      "repeat": 3,
+      "case": "small-dirty",
+      "arm": "v0.4",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r03-small-dirty-v0.3.26",
+      "repeat": 3,
+      "case": "small-dirty",
+      "arm": "v0.3.26",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r03-small-non-git-plain",
+      "repeat": 3,
+      "case": "small-non-git",
+      "arm": "plain",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r03-small-non-git-v0.4",
+      "repeat": 3,
+      "case": "small-non-git",
+      "arm": "v0.4",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r03-small-non-git-v0.3.26",
+      "repeat": 3,
+      "case": "small-non-git",
+      "arm": "v0.3.26",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r03-medium-plain",
+      "repeat": 3,
+      "case": "medium",
+      "arm": "plain",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r03-medium-v0.4",
+      "repeat": 3,
+      "case": "medium",
+      "arm": "v0.4",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r03-medium-v0.3.26",
+      "repeat": 3,
+      "case": "medium",
+      "arm": "v0.3.26",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      }
+    },
+    {
+      "run_id": "r03-huge-vscode-plain",
+      "repeat": 3,
+      "case": "huge-vscode",
+      "arm": "plain",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      },
+      "cleanup_failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r03-huge-vscode-plain\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
+      }
+    },
+    {
+      "run_id": "r03-huge-vscode-v0.4",
+      "repeat": 3,
+      "case": "huge-vscode",
+      "arm": "v0.4",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "setup_failed",
+        "message": "ProjectAtlas setup failed"
+      },
+      "fixture": {
+        "path": "{REPO_ROOT}\\target\\benchmarks\\agent-navigation\\final-b33164f\\r03-huge-vscode-v0.4\\huge-vscode",
+        "setup_source_state": {
+          "passed": true,
+          "before": {
+            "kind": "git-worktree",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "status": ""
+          },
+          "after": {
+            "kind": "git-worktree",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "status": ""
+          }
+        }
+      },
+      "setup": {
+        "passed": false,
+        "commands": [
+          {
+            "sampler": "psutil-7.0.0",
+            "interval_seconds": 0.02,
+            "sampled_peak_metrics": [
+              "rss_bytes",
+              "processes",
+              "threads",
+              "storage"
+            ],
+            "peak_rss_bytes": 28618752,
+            "peak_processes": 1,
+            "peak_worker_processes": 0,
+            "peak_threads": 20,
+            "cpu_seconds": 6.765625,
+            "observed_pids": [
+              26312
+            ],
+            "peak_storage": {
+              "database_bytes": 458752,
+              "wal_bytes": 461472,
+              "shm_bytes": 32768,
+              "staging_bytes": 0,
+              "stage_directories": 0
+            },
+            "read_count": 80961,
+            "write_count": 347,
+            "exact_total_processes": 1,
+            "exact_terminal_active_processes": 0,
+            "worker_process_bound": 0,
+            "worker_process_bound_method": "cumulative-owned-processes-conservative-upper-bound",
+            "terminal_io_complete": true,
+            "terminal_io_method": "windows-job-basic-and-io-accounting",
+            "process_io_metric": {
+              "backend": "windows-job-basic-and-io-accounting-plus-psutil-peaks",
+              "kind": "exact-terminal-owned-process-tree-accounting",
+              "required_final_platform": "Windows",
+              "final_platform_eligible": true,
+              "ineligible_reason": null,
+              "terminal_counters_complete": true
+            },
+            "arguments": [
+              "--require-version",
+              "0.4.0",
+              "init",
+              "--force-rescan"
+            ],
+            "returncode": 1,
+            "timed_out": false,
+            "wall_seconds": 19.820798,
+            "one_core_cpu_percent": 34.134,
+            "host_cpu_percent": 2.133,
+            "stdout_bytes": 3764,
+            "stderr_bytes": 83,
+            "process_read_transfer_bytes": 320158462,
+            "process_write_transfer_bytes": 929010,
+            "stdout": "init:\n  ok: false\n  root: \"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r03-huge-vscode-v0.4/huge-vscode\"\n  project_dir:\n    status: created\n    path: \"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r03-huge-vscode-v0.4/huge-vscode/.projectatlas\"\n  config:\n    status: created\n    path: \"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r03-huge-vscode-v0.4/huge-vscode/.projectatlas/config.toml\"\n  nonsource_files:\n    status: created\n    path: \"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r03-huge-vscode-v0.4/huge-vscode/.projectatlas/projectatlas-nonsource-files.toon\"\n  db:\n    status: created\n    path: \"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r03-huge-vscode-v0.4/huge-vscode/.projectatlas/projectatlas.db\"\n  host_configs[3]{harness,status,path}:\n    mcp_json,created,\"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r03-huge-vscode-v0.4/huge-vscode/.projectatlas/projectatlas.mcp.json\"\n    claude_code,created,\"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r03-huge-vscode-v0.4/huge-vscode/.projectatlas/projectatlas.claude.mcp.json\"\n    opencode,created,\"{REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r03-huge-vscode-v0.4/huge-vscode/.projectatlas/projectatlas.opencode.json\"\n  scan:\n    status: failed\n    requested: true\n    force_rescan: true\n    report: null\n    error: \"invalid input: purpose input is not valid UTF-8 for {REPO_ROOT}/target/benchmarks/agent-navigation/final-b33164f/r03-huge-vscode-v0.4/huge-vscode/src/vs/platform/files/test/node/fixtures/service/binary.txt: invalid utf-8 sequence of 1 bytes from index 0\"\n  purpose_handoff:\n    agent_harness_expected: true\n    execution_owner: agent_host\n    recommended_subagent_reasoning: lowest_host_enforced\n    main_agent_fallback: true\n    server_started_curator: false\n    silent_on_success: true\n    queue:\n      project_instance_id: 39ae25f0854adf9946f970732dc13aae\n      active_generation: 0\n      task: \"project-init\"\n      work_key: 212715c03eead491ca4c5627ec875fcfef726e91a9bfad94d75097a820da46a9\n      actionable: false\n      curation_scope: low\n      total: 0\n      unfiltered_total: 0\n      returned: 0\n      start_index: 0\n      limit: 50\n      max_limit: 200\n      next_start_index: null\n      truncated: false\n      source_only: true\n      folder_scope: all\n      file_scope: high_impact\n      category: \"\"\n      severity: \"\"\n      path_prefix: \"\"\n      summary_only: false\n      items[0]:\n    instructions[4]: \"If the host supports isolated subagents, delegate this actionable low-scope batch at the lowest reasoning tier the host can enforce; otherwise let the main agent process the same bounded rows without blocking navigation.\",\"Inspect only bounded current summary, graph, outline, or exact-slice context, then copy task, work_key, and state_token into atlas_purpose_review or projectatlas purpose review --apply; never edit SQLite directly.\",Skip accepted purposes unless an agent or user explicitly assigns a correction; use atlas_purpose_set or projectatlas purpose set for that deliberate correction path.,Keep successful curator maintenance out of normal conversation; ProjectAtlas reports a handoff and never claims that the Rust server spawned an agent.\n  next_steps[4]: Fix the scan/index error and rerun projectatlas init or projectatlas scan.,\"Purpose queue is empty for the default high-impact scope.\",Run projectatlas overview to confirm repository orientation.,Fix generated host MCP config errors and rerun projectatlas init.\n",
+            "stderr": "error: invalid input: projectatlas init completed with failed phase(s); see report\n",
+            "command": [
+              "{REPO_ROOT}\\target\\release\\projectatlas.exe",
+              "--require-version",
+              "0.4.0",
+              "init",
+              "--force-rescan"
+            ]
+          }
+        ],
+        "wall_seconds": 19.820798,
+        "cpu_seconds": 6.765625,
+        "peak_rss_bytes": 28618752,
+        "process_read_transfer_bytes": 320158462,
+        "process_write_transfer_bytes": 929010,
+        "peak_storage": {
+          "database_bytes": 458752,
+          "wal_bytes": 461472,
+          "shm_bytes": 32768,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        },
+        "persistent_storage": {
+          "database_bytes": 458752,
+          "wal_bytes": 0,
+          "shm_bytes": 0,
+          "staging_bytes": 0,
+          "stage_directories": 0,
+          "total_bytes": 458752
+        }
+      },
+      "cleanup_failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r03-huge-vscode-v0.4\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
+      }
+    },
+    {
+      "run_id": "r03-huge-vscode-v0.3.26",
+      "repeat": 3,
+      "case": "huge-vscode",
+      "arm": "v0.3.26",
+      "excluded": false,
+      "execution_status": "failed",
+      "failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 2] The system cannot find the file specified"
+      },
+      "cleanup_failure": {
+        "type": "FileNotFoundError",
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r03-huge-vscode-v0.3.26\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\completions-core\\\\vscode-node\\\\lib\\\\src\\\\prompt\\\\completionsPromptFactory\\\\componentsCompletionsPromptFactory.tsx'"
+      }
+    }
+  ],
+  "aggregate": {
+    "all_run_ids": [
+      "r01-small-clean-v0.4",
+      "r01-small-clean-v0.3.26",
+      "r01-small-clean-plain",
+      "r01-small-dirty-v0.4",
+      "r01-small-dirty-v0.3.26",
+      "r01-small-dirty-plain",
+      "r01-small-non-git-v0.4",
+      "r01-small-non-git-v0.3.26",
+      "r01-small-non-git-plain",
+      "r01-medium-v0.4",
+      "r01-medium-v0.3.26",
+      "r01-medium-plain",
+      "r01-huge-vscode-v0.4",
+      "r01-huge-vscode-v0.3.26",
+      "r01-huge-vscode-plain",
+      "r02-small-clean-v0.3.26",
+      "r02-small-clean-plain",
+      "r02-small-clean-v0.4",
+      "r02-small-dirty-v0.3.26",
+      "r02-small-dirty-plain",
+      "r02-small-dirty-v0.4",
+      "r02-small-non-git-v0.3.26",
+      "r02-small-non-git-plain",
+      "r02-small-non-git-v0.4",
+      "r02-medium-v0.3.26",
+      "r02-medium-plain",
+      "r02-medium-v0.4",
+      "r02-huge-vscode-v0.3.26",
+      "r02-huge-vscode-plain",
+      "r02-huge-vscode-v0.4",
+      "r03-small-clean-plain",
+      "r03-small-clean-v0.4",
+      "r03-small-clean-v0.3.26",
+      "r03-small-dirty-plain",
+      "r03-small-dirty-v0.4",
+      "r03-small-dirty-v0.3.26",
+      "r03-small-non-git-plain",
+      "r03-small-non-git-v0.4",
+      "r03-small-non-git-v0.3.26",
+      "r03-medium-plain",
+      "r03-medium-v0.4",
+      "r03-medium-v0.3.26",
+      "r03-huge-vscode-plain",
+      "r03-huge-vscode-v0.4",
+      "r03-huge-vscode-v0.3.26"
+    ],
+    "scheduled": 45,
+    "completed": 0,
+    "failed": 45,
+    "excluded": 0,
+    "groups": {
+      "huge-vscode/plain": {
+        "run_ids": [
+          "r01-huge-vscode-plain",
+          "r02-huge-vscode-plain",
+          "r03-huge-vscode-plain"
+        ],
+        "scheduled": 3,
+        "completed": 0,
+        "failed": 3,
+        "excluded": 0,
+        "correct": 0,
+        "distributions": {},
+        "provider_usage": {},
+        "tool_calls_by_type": {}
+      },
+      "huge-vscode/v0.3.26": {
+        "run_ids": [
+          "r01-huge-vscode-v0.3.26",
+          "r02-huge-vscode-v0.3.26",
+          "r03-huge-vscode-v0.3.26"
+        ],
+        "scheduled": 3,
+        "completed": 0,
+        "failed": 3,
+        "excluded": 0,
+        "correct": 0,
+        "distributions": {},
+        "provider_usage": {},
+        "tool_calls_by_type": {}
+      },
+      "huge-vscode/v0.4": {
+        "run_ids": [
+          "r01-huge-vscode-v0.4",
+          "r02-huge-vscode-v0.4",
+          "r03-huge-vscode-v0.4"
+        ],
+        "scheduled": 3,
+        "completed": 0,
+        "failed": 3,
+        "excluded": 0,
+        "correct": 0,
+        "distributions": {},
+        "provider_usage": {},
+        "tool_calls_by_type": {}
+      },
+      "medium/plain": {
+        "run_ids": [
+          "r01-medium-plain",
+          "r02-medium-plain",
+          "r03-medium-plain"
+        ],
+        "scheduled": 3,
+        "completed": 0,
+        "failed": 3,
+        "excluded": 0,
+        "correct": 0,
+        "distributions": {},
+        "provider_usage": {},
+        "tool_calls_by_type": {}
+      },
+      "medium/v0.3.26": {
+        "run_ids": [
+          "r01-medium-v0.3.26",
+          "r02-medium-v0.3.26",
+          "r03-medium-v0.3.26"
+        ],
+        "scheduled": 3,
+        "completed": 0,
+        "failed": 3,
+        "excluded": 0,
+        "correct": 0,
+        "distributions": {},
+        "provider_usage": {},
+        "tool_calls_by_type": {}
+      },
+      "medium/v0.4": {
+        "run_ids": [
+          "r01-medium-v0.4",
+          "r02-medium-v0.4",
+          "r03-medium-v0.4"
+        ],
+        "scheduled": 3,
+        "completed": 0,
+        "failed": 3,
+        "excluded": 0,
+        "correct": 0,
+        "distributions": {},
+        "provider_usage": {},
+        "tool_calls_by_type": {}
+      },
+      "small-clean/plain": {
+        "run_ids": [
+          "r01-small-clean-plain",
+          "r02-small-clean-plain",
+          "r03-small-clean-plain"
+        ],
+        "scheduled": 3,
+        "completed": 0,
+        "failed": 3,
+        "excluded": 0,
+        "correct": 0,
+        "distributions": {},
+        "provider_usage": {},
+        "tool_calls_by_type": {}
+      },
+      "small-clean/v0.3.26": {
+        "run_ids": [
+          "r01-small-clean-v0.3.26",
+          "r02-small-clean-v0.3.26",
+          "r03-small-clean-v0.3.26"
+        ],
+        "scheduled": 3,
+        "completed": 0,
+        "failed": 3,
+        "excluded": 0,
+        "correct": 0,
+        "distributions": {},
+        "provider_usage": {},
+        "tool_calls_by_type": {}
+      },
+      "small-clean/v0.4": {
+        "run_ids": [
+          "r01-small-clean-v0.4",
+          "r02-small-clean-v0.4",
+          "r03-small-clean-v0.4"
+        ],
+        "scheduled": 3,
+        "completed": 0,
+        "failed": 3,
+        "excluded": 0,
+        "correct": 0,
+        "distributions": {},
+        "provider_usage": {},
+        "tool_calls_by_type": {}
+      },
+      "small-dirty/plain": {
+        "run_ids": [
+          "r01-small-dirty-plain",
+          "r02-small-dirty-plain",
+          "r03-small-dirty-plain"
+        ],
+        "scheduled": 3,
+        "completed": 0,
+        "failed": 3,
+        "excluded": 0,
+        "correct": 0,
+        "distributions": {},
+        "provider_usage": {},
+        "tool_calls_by_type": {}
+      },
+      "small-dirty/v0.3.26": {
+        "run_ids": [
+          "r01-small-dirty-v0.3.26",
+          "r02-small-dirty-v0.3.26",
+          "r03-small-dirty-v0.3.26"
+        ],
+        "scheduled": 3,
+        "completed": 0,
+        "failed": 3,
+        "excluded": 0,
+        "correct": 0,
+        "distributions": {},
+        "provider_usage": {},
+        "tool_calls_by_type": {}
+      },
+      "small-dirty/v0.4": {
+        "run_ids": [
+          "r01-small-dirty-v0.4",
+          "r02-small-dirty-v0.4",
+          "r03-small-dirty-v0.4"
+        ],
+        "scheduled": 3,
+        "completed": 0,
+        "failed": 3,
+        "excluded": 0,
+        "correct": 0,
+        "distributions": {},
+        "provider_usage": {},
+        "tool_calls_by_type": {}
+      },
+      "small-non-git/plain": {
+        "run_ids": [
+          "r01-small-non-git-plain",
+          "r02-small-non-git-plain",
+          "r03-small-non-git-plain"
+        ],
+        "scheduled": 3,
+        "completed": 0,
+        "failed": 3,
+        "excluded": 0,
+        "correct": 0,
+        "distributions": {},
+        "provider_usage": {},
+        "tool_calls_by_type": {}
+      },
+      "small-non-git/v0.3.26": {
+        "run_ids": [
+          "r01-small-non-git-v0.3.26",
+          "r02-small-non-git-v0.3.26",
+          "r03-small-non-git-v0.3.26"
+        ],
+        "scheduled": 3,
+        "completed": 0,
+        "failed": 3,
+        "excluded": 0,
+        "correct": 0,
+        "distributions": {},
+        "provider_usage": {},
+        "tool_calls_by_type": {}
+      },
+      "small-non-git/v0.4": {
+        "run_ids": [
+          "r01-small-non-git-v0.4",
+          "r02-small-non-git-v0.4",
+          "r03-small-non-git-v0.4"
+        ],
+        "scheduled": 3,
+        "completed": 0,
+        "failed": 3,
+        "excluded": 0,
+        "correct": 0,
+        "distributions": {},
+        "provider_usage": {},
+        "tool_calls_by_type": {}
+      }
+    },
+    "comparisons": {
+      "small-clean/v0.4-vs-v0.3.26": {
+        "lower_is_better_percent_savings": {},
+        "provider_usage_descriptive_only": {},
+        "wall_time_break_even_tasks": null
+      },
+      "small-clean/v0.4-vs-plain": {
+        "lower_is_better_percent_savings": {},
+        "provider_usage_descriptive_only": {},
+        "wall_time_break_even_tasks": null
+      },
+      "small-dirty/v0.4-vs-v0.3.26": {
+        "lower_is_better_percent_savings": {},
+        "provider_usage_descriptive_only": {},
+        "wall_time_break_even_tasks": null
+      },
+      "small-dirty/v0.4-vs-plain": {
+        "lower_is_better_percent_savings": {},
+        "provider_usage_descriptive_only": {},
+        "wall_time_break_even_tasks": null
+      },
+      "small-non-git/v0.4-vs-v0.3.26": {
+        "lower_is_better_percent_savings": {},
+        "provider_usage_descriptive_only": {},
+        "wall_time_break_even_tasks": null
+      },
+      "small-non-git/v0.4-vs-plain": {
+        "lower_is_better_percent_savings": {},
+        "provider_usage_descriptive_only": {},
+        "wall_time_break_even_tasks": null
+      },
+      "medium/v0.4-vs-v0.3.26": {
+        "lower_is_better_percent_savings": {},
+        "provider_usage_descriptive_only": {},
+        "wall_time_break_even_tasks": null
+      },
+      "medium/v0.4-vs-plain": {
+        "lower_is_better_percent_savings": {},
+        "provider_usage_descriptive_only": {},
+        "wall_time_break_even_tasks": null
+      },
+      "huge-vscode/v0.4-vs-v0.3.26": {
+        "lower_is_better_percent_savings": {},
+        "provider_usage_descriptive_only": {},
+        "wall_time_break_even_tasks": null
+      },
+      "huge-vscode/v0.4-vs-plain": {
+        "lower_is_better_percent_savings": {},
+        "provider_usage_descriptive_only": {},
+        "wall_time_break_even_tasks": null
+      }
+    },
+    "provider_usage_note": "Provider counters are reported separately and are not attributed causally to navigation."
+  },
+  "checkpoint_journal_sha256": "e3de2020663eda410b049e0319f346c7c79382790625227e71a74241dcc49ac7",
+  "all_scheduled_runs_retained": true,
+  "checkpoint_journal_retained": false
+}

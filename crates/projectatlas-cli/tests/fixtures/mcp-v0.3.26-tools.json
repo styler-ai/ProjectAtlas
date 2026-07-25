@@ -1,0 +1,1611 @@
+{
+  "source": {
+    "project": "ProjectAtlas",
+    "version": "0.3.26",
+    "commit": "d3b3e157f954c7d360d821ed0385762e8b044385",
+    "runtime": "isolated installed release"
+  },
+  "tools": [
+    {
+      "name": "atlas_config",
+      "description": "Return the effective ProjectAtlas scan, purpose, and output configuration.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_file_summary",
+      "description": "Return structured TOON file intelligence: file purpose, content summary, imports, symbols, line ranges, and calls.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "description": "Repository-relative file path.",
+            "type": "string"
+          },
+          "nearest_project": {
+            "description": "Opt in to nearest indexed `ProjectAtlas` project discovery for absolute file paths.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "Maximum rows per functions/methods/classes/types/calls section.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_files",
+      "description": "Rank repository files by query, purpose, optional folder, and optional indexed text fallback before an agent opens source.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "Search query for path and purpose matching.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "folder": {
+            "description": "Folder path to constrain file lookup.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nearest_project": {
+            "description": "Opt in to nearest indexed `ProjectAtlas` project discovery for absolute folder paths.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "file_pattern": {
+            "description": "Optional repository-relative glob filter.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_content": {
+            "description": "Include indexed file text as a bounded fallback ranking signal.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "Maximum number of rows to return.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_folders",
+      "description": "Rank repository folders by query and purpose so agents choose a work area before opening files.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "Search query for path and purpose matching.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "Maximum number of rows to return.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_health",
+      "description": "Return a bounded ProjectAtlas structural health page with optional category, severity, and path-prefix filters.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start_index": {
+            "description": "Pagination start index after filters are applied.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          },
+          "limit": {
+            "description": "Maximum findings to return, capped to a safe MCP page size.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          },
+          "category": {
+            "description": "Optional finding category filter.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "severity": {
+            "description": "Optional severity filter: info, warning, or error.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path_prefix": {
+            "description": "Optional repository-relative primary or related path prefix.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary_only": {
+            "description": "Return counts and paging metadata without finding rows.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "source_only": {
+            "description": "Restrict findings to source files and folders that contain source files.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include_assets": {
+            "description": "Include non-source files and asset-only folders in the purpose queue.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include_low_priority_files": {
+            "description": "Include low-priority files in the purpose queue.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_health_resolve",
+      "description": "Mark a deterministic ProjectAtlas health finding as agent-resolved with rationale.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "required": [
+          "finding_id",
+          "category",
+          "path",
+          "rationale"
+        ],
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finding_id": {
+            "description": "Stable finding id from `atlas_health`.",
+            "type": "string"
+          },
+          "category": {
+            "description": "Finding category.",
+            "type": "string"
+          },
+          "path": {
+            "description": "Primary path.",
+            "type": "string"
+          },
+          "related_path": {
+            "description": "Optional related path.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rationale": {
+            "description": "Agent rationale for resolving the finding.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_ignore_add",
+      "description": "Add one manual ProjectAtlas ignore entry to the selected project's config.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "Ignore kind: dir-name or path-prefix. Omit only for broad remove.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "description": "Directory name or repository-relative path prefix.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_ignore_init_gitignore",
+      "description": "Create a project-root .gitignore when it is missing.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_ignore_list",
+      "description": "List effective ProjectAtlas manual ignore policy and inherited .gitignore status.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_ignore_remove",
+      "description": "Remove one manual ProjectAtlas ignore entry from the selected project's config.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "Ignore kind: dir-name or path-prefix. Omit only for broad remove.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "description": "Directory name or repository-relative path prefix.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_init",
+      "description": "Initialize ProjectAtlas project-local config, database, host MCP configs, scan/index, and purpose handoff.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "no_scan": {
+            "description": "Create/verify the project surface without running the scan/index pipeline.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "force_rescan": {
+            "description": "Run the scan/index phase even when a future freshness check could skip it.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "text_index_max_bytes": {
+            "description": "Maximum UTF-8 file size persisted into `SQLite` text search during the init scan.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_lint",
+      "description": "Run ProjectAtlas lint checks and return an ok flag, CLI-compatible exit code, and report text.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "strict_folders": {
+            "description": "Deprecated compatibility flag matching the CLI.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "purpose_level": {
+            "description": "Purpose lint strictness: low, medium, or strict.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "report_untracked": {
+            "description": "Include untracked-file report.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "strict_untracked": {
+            "description": "Make untracked-file findings fail lint.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_map",
+      "description": "Write the explicit compatibility ProjectAtlas map export for older workflows.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "json": {
+            "description": "Write JSON compatibility content when true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "force": {
+            "description": "Force map generation even in CI-like environments.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_mcp_config",
+      "description": "Return a generated ProjectAtlas MCP config document for mcp-json, codex, claude-code, or opencode hosts.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "description": "MCP server name to emit. Defaults to projectatlas.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "harness": {
+            "description": "Harness config shape: mcp-json, codex, claude-code, or opencode.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nearest_project": {
+            "description": "Include mcp --nearest-project in generated startup args.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_next",
+      "description": "Recommend top indexed folders/files with reasons and deterministic follow-up commands for a task query.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "Search query for path and purpose matching.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "Maximum number of rows to return.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_outline",
+      "description": "Return compact TOON outline and preview context for a selected file.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "description": "Repository-relative file path.",
+            "type": "string"
+          },
+          "nearest_project": {
+            "description": "Opt in to nearest indexed `ProjectAtlas` project discovery for absolute file paths.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "lines": {
+            "description": "Number of non-empty preview lines to include.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_overview",
+      "description": "Return a compact TOON overview of indexed files, folders, and purpose coverage.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_parity_report",
+      "description": "Return a ProjectAtlas repository-intelligence parity gate report for release and agent-runtime readiness.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "profile": {
+            "description": "Parity profile. Defaults to repository-intelligence.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_purpose_queue",
+      "description": "Return a bounded folder-first queue of ProjectAtlas paths that need agent purpose curation.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start_index": {
+            "description": "Pagination start index after filters are applied.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          },
+          "limit": {
+            "description": "Maximum findings to return, capped to a safe MCP page size.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          },
+          "category": {
+            "description": "Optional finding category filter.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "severity": {
+            "description": "Optional severity filter: info, warning, or error.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path_prefix": {
+            "description": "Optional repository-relative primary or related path prefix.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary_only": {
+            "description": "Return counts and paging metadata without finding rows.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "source_only": {
+            "description": "Restrict findings to source files and folders that contain source files.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include_assets": {
+            "description": "Include non-source files and asset-only folders in the purpose queue.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include_low_priority_files": {
+            "description": "Include low-priority files in the purpose queue.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_purpose_review",
+      "description": "Preview or apply agent-reviewed ProjectAtlas purpose metadata for multiple indexed paths.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "AtlasPurposeReviewItem": {
+            "description": "MCP payload for one batch purpose review item.",
+            "type": "object",
+            "properties": {
+              "path": {
+                "description": "Indexed repository-relative path.",
+                "type": "string"
+              },
+              "purpose": {
+                "description": "Agent-reviewed purpose one-liner. Required for generated suggestions.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "confirm_existing": {
+                "description": "Confirm the existing non-generated purpose after inspection.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "items": {
+            "description": "Purpose records to agent-review.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/AtlasPurposeReviewItem"
+            }
+          },
+          "apply": {
+            "description": "Apply reviewed purposes. Defaults to false for preview.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "atlas_purpose_set",
+      "description": "Set agent-approved ProjectAtlas purpose metadata for one indexed path.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "required": [
+          "path",
+          "purpose"
+        ],
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "Indexed repository-relative path.",
+            "type": "string"
+          },
+          "purpose": {
+            "description": "Agent-approved purpose one-liner.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_reset_index",
+      "description": "Preview or clear ProjectAtlas local SQLite index/cache files for recovery.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "apply": {
+            "description": "Remove runtime index/cache files when true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "dry_run": {
+            "description": "Preview cleanup without modifying files.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include_mcp_config": {
+            "description": "Also remove generated project-local MCP config.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_root",
+      "description": "Show or verify ProjectAtlas root, DB, config, and runtime identity.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verify": {
+            "description": "Return the same report shape with `verified` available for gating.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_root_set",
+      "description": "Bind a repository root, generate project-local MCP configs, and make it active for later MCP calls.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "required": [
+          "root"
+        ],
+        "properties": {
+          "root": {
+            "description": "Project root to bind and make active for later calls.",
+            "type": "string"
+          },
+          "nearest_project": {
+            "description": "Include mcp --nearest-project in generated project-local MCP configs.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_runtime_info",
+      "description": "Return ProjectAtlas runtime identity, version, capabilities, and compiled MCP tool names.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_scan",
+      "description": "Scan repository structure, import ProjectAtlas purpose metadata, rebuild symbols, and return a TOON overview.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "Repository root path. Defaults to the configured or indexed project root.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nearest_project": {
+            "description": "Opt in to nearest indexed `ProjectAtlas` project discovery for absolute paths.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_bytes": {
+            "description": "Maximum file size to parse for symbols.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "max_workers": {
+            "description": "Maximum parser worker threads.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          },
+          "timeout_seconds": {
+            "description": "Stop starting parser work after this many seconds.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "text_index_max_bytes": {
+            "description": "Maximum UTF-8 file size persisted into `SQLite` text search.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_search",
+      "description": "Search indexed files with literal, regex, or fuzzy matching, file filters, pagination, and TOON results.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "required": [
+          "pattern"
+        ],
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pattern": {
+            "description": "Literal, regex, or fuzzy pattern to search for.",
+            "type": "string"
+          },
+          "regex": {
+            "description": "Treat the pattern as a regex.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "fuzzy": {
+            "description": "Treat the pattern as a fuzzy subsequence.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "case_sensitive": {
+            "description": "Match case-sensitively.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "file_pattern": {
+            "description": "Optional repository-relative glob filter.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "context_lines": {
+            "description": "Number of context lines before and after a match.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          },
+          "start_index": {
+            "description": "Pagination start index.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          },
+          "limit": {
+            "description": "Maximum matches to return.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_session_brief",
+      "description": "Return selected project identity, index state, ranked candidates, blockers, and typed next-call recommendations for agent startup.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "Optional task query used for folder and file ranking.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "folder_limit": {
+            "description": "Maximum folder candidates to return.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          },
+          "file_limit": {
+            "description": "Maximum file candidates to return.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          },
+          "blocker_limit": {
+            "description": "Maximum health blockers to return.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_set_project_path",
+      "description": "Select the active ProjectAtlas project root for later MCP calls that omit project_path.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "required": [
+          "project_path"
+        ],
+        "properties": {
+          "project_path": {
+            "description": "Project root to make active for calls that omit `project_path`.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_settings",
+      "description": "Return ProjectAtlas local settings, config, and durable index paths.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_slice",
+      "description": "Return exact source for a selected line range or indexed symbol, after folder/file orientation.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "description": "Repository-relative file path.",
+            "type": "string"
+          },
+          "nearest_project": {
+            "description": "Opt in to nearest indexed `ProjectAtlas` project discovery for absolute file paths.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "start_line": {
+            "description": "One-based start line when no symbol is supplied.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          },
+          "end_line": {
+            "description": "Optional one-based end line.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          },
+          "symbol": {
+            "description": "Symbol name to slice instead of line numbers.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "symbol_parent": {
+            "description": "Optional parent symbol for disambiguating `symbol`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "symbol_kind": {
+            "description": "Optional symbol kind for disambiguating `symbol`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "symbol_line": {
+            "description": "Optional source line for disambiguating `symbol`.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_strip_legacy_purpose",
+      "description": "Preview or remove legacy .purpose files after their metadata has been imported to SQLite.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "Repository root path. Defaults to the configured or indexed project root.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nearest_project": {
+            "description": "Opt in to nearest indexed `ProjectAtlas` project discovery for absolute paths.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "apply": {
+            "description": "Remove legacy `.purpose` files when true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "dry_run": {
+            "description": "Preview cleanup without modifying files.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "strip_source_headers": {
+            "description": "Also report conservative source Purpose header candidates.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_symbol_relations",
+      "description": "List imports, calls, dependencies, and containment edges as compact TOON.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "description": "Optional repository-relative file path.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nearest_project": {
+            "description": "Opt in to nearest indexed `ProjectAtlas` project discovery for absolute file paths.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "Optional symbol, signature, relation, or path query.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "Maximum rows to return.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_symbols",
+      "description": "List indexed symbols by optional file and query as compact TOON.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "description": "Optional repository-relative file path.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nearest_project": {
+            "description": "Opt in to nearest indexed `ProjectAtlas` project discovery for absolute file paths.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "Optional symbol, signature, relation, or path query.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "Maximum rows to return.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_symbols_build",
+      "description": "Rebuild ProjectAtlas symbol graphs for indexed files and return a TOON build report.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "Repository root path. Defaults to the configured or indexed project root.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nearest_project": {
+            "description": "Opt in to nearest indexed `ProjectAtlas` project discovery for absolute paths.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_bytes": {
+            "description": "Maximum file size to parse for symbols.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "max_workers": {
+            "description": "Maximum parser worker threads.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          },
+          "timeout_seconds": {
+            "description": "Stop starting parser work after this many seconds.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "text_index_max_bytes": {
+            "description": "Maximum UTF-8 file size persisted into `SQLite` text search.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_task_cancel",
+      "description": "Request cancellation for a bounded MCP task-progress record.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "required": [
+          "task_id"
+        ],
+        "properties": {
+          "task_id": {
+            "description": "Opaque MCP-session-local task id.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_task_status",
+      "description": "Return typed status for a bounded MCP task-progress record.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "required": [
+          "task_id"
+        ],
+        "properties": {
+          "task_id": {
+            "description": "Opaque MCP-session-local task id.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_token_report",
+      "description": "Return ProjectAtlas token-savings telemetry for the whole index or one session.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session": {
+            "description": "Optional session id filter.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_chart": {
+            "description": "Include a readable ASCII chart in the MCP result.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "trend_window": {
+            "description": "Optional trend grouping window: day, week, month, or year.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "theme": {
+            "description": "Optional chart theme for TUI output: dark or light.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_watch_once",
+      "description": "Run one MCP-safe watcher refresh pass over the repository and rebuild changed symbols, with optional worker, timeout, and text-index size controls.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "Repository root path. Defaults to the configured or indexed project root.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nearest_project": {
+            "description": "Opt in to nearest indexed `ProjectAtlas` project discovery for absolute paths.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_workers": {
+            "description": "Maximum parser worker threads.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          },
+          "timeout_seconds": {
+            "description": "Stop starting parser work after this many seconds.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "text_index_max_bytes": {
+            "description": "Maximum UTF-8 file size persisted into `SQLite` text search.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "atlas_watch_status",
+      "description": "Return ProjectAtlas watcher availability and current operating mode.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_path": {
+            "description": "Optional project root for this call. Defaults to the active MCP project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    }
+  ]
+}

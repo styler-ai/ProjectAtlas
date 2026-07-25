@@ -111,6 +111,36 @@ def visible_markdown(text: str) -> str:
     return "".join(visible)
 
 
+def github_heading_slug(heading: str) -> str:
+    """Return the GitHub-style fragment for one plain Markdown heading."""
+
+    heading = re.sub(r"\s+#+\s*$", "", clean(heading))
+    return "".join(
+        character
+        for character in heading.casefold()
+        if character.isalnum() or character in {" ", "-", "_"}
+    ).replace(" ", "-")
+
+
+def markdown_heading_fragments(text: str) -> set[str]:
+    """Return rendered heading fragments, including GitHub duplicate suffixes."""
+
+    fragments: set[str] = set()
+    next_suffix: dict[str, int] = {}
+    for heading in HEADING_RE.finditer(visible_markdown(text)):
+        base = github_heading_slug(heading.group(2))
+        if not base:
+            continue
+        suffix = next_suffix.get(base, 0)
+        fragment = base if suffix == 0 else f"{base}-{suffix}"
+        while fragment in fragments:
+            suffix += 1
+            fragment = f"{base}-{suffix}"
+        fragments.add(fragment)
+        next_suffix[base] = suffix + 1
+    return fragments
+
+
 def parse_tasks(text: str) -> list[tuple[bool, str]]:
     return [
         (match.group(1).lower() == "x", clean(match.group(2)))
@@ -380,6 +410,25 @@ def architecture_diagram_link_failures(section: str, repo: str, root: Path) -> l
             failures.append(
                 f"architecture diagram link {url!r} has no matching local documentation file"
             )
+        elif not parsed.fragment:
+            failures.append(
+                f"architecture diagram link {url!r} must include a Markdown heading fragment"
+            )
+        else:
+            try:
+                fragments = markdown_heading_fragments(
+                    candidate.read_text(encoding="utf-8")
+                )
+            except OSError as error:
+                failures.append(
+                    f"architecture diagram link {url!r} documentation could not be read: {error}"
+                )
+                continue
+            fragment = unquote(parsed.fragment)
+            if fragment not in fragments:
+                failures.append(
+                    f"architecture diagram link {url!r} has no matching GitHub-style heading fragment"
+                )
     return failures
 
 
@@ -757,6 +806,15 @@ Mitigations:
         return issue_contract_failures(issue, tasks, "owner/repo", self_test_root)
 
     assert contract_failures({"state": "OPEN", "body": issue_contract}, expected) == []
+    punctuation_heading_contract = issue_contract.replace(
+        "#architecture-views", "#sqlite-wal-durability-and-checkpoint-flow"
+    )
+    assert contract_failures(
+        {"state": "OPEN", "body": punctuation_heading_contract}, expected
+    ) == []
+    assert markdown_heading_fragments(
+        "## Repeated heading\n## Repeated heading\n## Repeated heading-1\n"
+    ) == {"repeated-heading", "repeated-heading-1", "repeated-heading-1-1"}
     plus_marker_contract = issue_contract.replace(
         "- [ ] Keep the contract synchronized.",
         "+ [ ] Keep the contract synchronized.",
@@ -881,6 +939,22 @@ Mitigations:
         "no matching local documentation file" in failure
         for failure in contract_failures(
             {"state": "OPEN", "body": missing_architecture}, expected
+        )
+    )
+    missing_architecture_fragment = issue_contract.replace(
+        "#architecture-views", "#missing-architecture-view"
+    )
+    assert any(
+        "no matching GitHub-style heading fragment" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": missing_architecture_fragment}, expected
+        )
+    )
+    fragmentless_architecture = issue_contract.replace("#architecture-views", "")
+    assert any(
+        "must include a Markdown heading fragment" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": fragmentless_architecture}, expected
         )
     )
     duplicate_architecture = issue_contract.replace(

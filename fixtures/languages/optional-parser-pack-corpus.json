@@ -1,0 +1,3306 @@
+{
+  "schema_version": 1,
+  "source_manifest_sha256": "5e99567bfac525f155a5af9e9f0b246c9f0abb3daf07024e4997d0915fd78ac8",
+  "rows": [
+    {
+      "language_id": "abl",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/statements/empty-statement.txt",
+          "case_name": "EMPTY STATEMENT",
+          "source": ".\n",
+          "source_sha256": "eb4bd64f7014f7d42e9d358035802242741b974e8dfcd37c59f9c21ce29d781e",
+          "expected_tree": "(source_code\n  (empty_statement))\n",
+          "expected_tree_sha256": "de551077d92ca5b62bdfd05758b5ec18f0c2d4e564fd206b84742a4c883edfbc"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/statements/empty-statement.txt",
+          "case_name": "EMPTY STATEMENT incomplete",
+          "source": ".\n(\n",
+          "source_sha256": "8f9b16342fb2e2ba06589cc44d65d7f3c3f5e377a0b643fb610a44c54dcc56d9",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "actionscript",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/do.txt",
+          "case_name": "do loop",
+          "source": "do {\n\n} while (true);\n",
+          "source_sha256": "909983fd497729bf8ea64e078196ff8b7144e359cb2ed427738807e981b2265b",
+          "expected_tree": "(program\n    (do_statement\n        (statement_block)\n        (parenthesized_expression (true))\n    )\n)\n",
+          "expected_tree_sha256": "343536ddc0b762749dabf8adcafb5484a0baa2ccba6a8b8db0bf7e7e1a75394d"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/do.txt",
+          "case_name": "do loop incomplete",
+          "source": "do {\n\n} while (\n",
+          "source_sha256": "12d6326139afb718c1e28553c9fcf30ba6dde5f6b48459821de25bbd7f8f774a",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "ada",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/renames.txt",
+          "case_name": "Renames object",
+          "source": "procedure P is\n   Threshold renames With_Type_Inference;\n   A : Integer renames B;\n   CE : exception renames Constraint_Error;\n   package TIO renames Ada.Text_IO;\n   procedure Proc (A : Integer) renames Process;\n   generic procedure Proc renames Generic_Process;\nbegin\n   null;\nend P;\n",
+          "source_sha256": "78669b26b8d8ce02503bc4781e160927e295219a038bcb07fe0c33f6224dd82c",
+          "expected_tree": "(compilation\n  (compilation_unit\n    (subprogram_body\n      (procedure_specification\n        (identifier))\n      (non_empty_declarative_part\n        (object_renaming_declaration\n          (identifier)\n          (identifier))\n        (object_renaming_declaration\n          (identifier)\n          (identifier)\n          (identifier))\n        (exception_renaming_declaration\n          (identifier)\n          (identifier))\n        (package_renaming_declaration\n          (identifier)\n          (selected_component\n            (identifier)\n            (identifier)))\n        (subprogram_renaming_declaration\n          (procedure_specification\n            (identifier)\n            (formal_part\n              (parameter_specification\n                (identifier)\n                (identifier))))\n          (identifier))\n        (generic_renaming_declaration\n          (identifier)\n          (identifier)))\n      (handled_sequence_of_statements\n        (null_statement))\n      (identifier))))\n",
+          "expected_tree_sha256": "0e85966497225031b7dc4a84006bb300067edc2163b913f9cccaebceab7a062e"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/renames.txt",
+          "case_name": "Renames object incomplete",
+          "source": "procedure P is\n   Threshold renames With_Type_Inference;\n   A : Integer renames B;\n   CE : exception renames Constraint_Error;\n   package TIO renames Ada.Text_IO;\n   procedure Proc (A : Integer) renames P\n",
+          "source_sha256": "167195dbfb45448e798de03f735d09feb4a0b9cf904576d122b6d307db2b461c",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "agda",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/declaration/data-signature.txt",
+          "case_name": "Simple",
+          "source": "data Nat : Set\n",
+          "source_sha256": "bec3845a248ae64db1bfe124152871266066e85085fe0c0267cbf78b52d11e00",
+          "expected_tree": "(source_file\n    (data_signature (data_name) (expr (atom (SetN)))))\n",
+          "expected_tree_sha256": "a8cad446bba957e024260cbe3b0c3485e7d03c611570e97b2554d64f8e7dbb43"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/declaration/data-signature.txt",
+          "case_name": "Simple incomplete",
+          "source": "data Nat :\n",
+          "source_sha256": "876c3e5f88fcca0a4a5794f51a03e51e745225920bf2de4be665f92ac0d7fb63",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "al",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/namespace_case_insensitive_test.txt",
+          "case_name": "Namespace declaration with case variations",
+          "source": "namespace Microsoft.Test;\n\ncodeunit 123 TestUnit\n{\n}\n",
+          "source_sha256": "cff1fb89b11579cea9102b5c252bda6d39df252356b2c9a057e6d9201117b619",
+          "expected_tree": "(source_file\n  (namespace_declaration\n    (namespace_keyword)\n    name: (namespace_name\n      (identifier)\n      (identifier)))\n  (codeunit_declaration\n    (codeunit_keyword)\n    object_id: (integer)\n    object_name: (identifier)))\n",
+          "expected_tree_sha256": "4a8f8ccd5f01af16599618b2c41fadc1c6daf2a25fad64b0ffdbfeddb695e442"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/namespace_case_insensitive_test.txt",
+          "case_name": "Namespace declaration with case variations incomplete",
+          "source": "namespace Microsoft.Test;\n\ncodeunit 1\n",
+          "source_sha256": "ecfbc90aaf0f9195de3b70a862409b6d7d8a7d3faedd94e54293a4a9d4977fc3",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "arduino",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/basic.txt",
+          "case_name": "binary formatter",
+          "source": "byte b = B10010;\n",
+          "source_sha256": "cb571d9a3bcf7e149b9f5aa43911f5527a9950e2a3b514ce702a21423304c63b",
+          "expected_tree": "(translation_unit\n  (declaration\n    (primitive_type)\n    (init_declarator\n      (identifier)\n      (number_literal))))\n",
+          "expected_tree_sha256": "b77fc26a11178c4d3677b6a143d5577c083afd0f1f9e31ff980770742db3f7ae"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/basic.txt",
+          "case_name": "binary formatter incomplete",
+          "source": "byte b = B1\n",
+          "source_sha256": "d36ae06463bfa975225ba9244e1b0ec9e0d7d4daf323664866762f8ec1182732",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "asciidoc",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "tree-sitter-asciidoc/test/corpus/comment.txt",
+          "case_name": "comment",
+          "source": "// A single-line comment.\n\n//\n\n////\nblock comment\n\n# not title\n////\n\nhttps://www.abcdefg.com\n",
+          "source_sha256": "2eb55583b75172722369eb9fb144ed5e4e6ba5ea8d93abc703e399e36aefb04c",
+          "expected_tree": "(document\n  (block_element\n    (line_comment\n      (line_comment_marker)\n      (body)))\n  (block_element\n    (line_comment\n      (line_comment_marker)))\n  (block_element\n    (block_comment\n      (block_comment_start_marker)\n      (body)\n      (block_comment_end_marker)))\n  (block_element\n    (section_block\n      (paragraph\n        (line)))))\n",
+          "expected_tree_sha256": "a3e244bef880a7ad7edc7781de66e9486e67c5316e51786788986386be0f8144"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "tree-sitter-asciidoc/test/corpus/comment.txt",
+          "case_name": "comment incomplete",
+          "source": "// A single-line comment.\n\n//\n\n////\nblock comment\n\n# not title\n///\n",
+          "source_sha256": "b93d830fb7b8aeadf6dc829d4351ff716a077b0f0f7cb1a63481a79454696c72",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "asm",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comment.test",
+          "case_name": "Inline comment with instr one reg arg, no space between",
+          "source": "pushq %rbp; This is an in-line comment\n",
+          "source_sha256": "401f90db05c718ffc61749f32ce35108cecd0dc84c0eabb7b081ca0f7b04c494",
+          "expected_tree": "(program\n    (instruction \n        kind: (word)\n        (ident (reg)))\n    (line_comment))\n",
+          "expected_tree_sha256": "3b7f77c17a824fdc4b8db9fbf2dce309d92f93863d03c1d75a0fac7952157025"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comment.test",
+          "case_name": "Inline comment with instr one reg arg incomplete",
+          "source": "pushq %\n",
+          "source_sha256": "f72f9e08c71bd60be807c5829089376ac7cb0d688eb4f21ab07a3e5c6e70f648",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "awk",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comment.txt",
+          "case_name": "Top level comment",
+          "source": "# Hello\n{}\n",
+          "source_sha256": "2b743a1d57c323b1a38a8114a7ca194a937c77aafee5858a7d0f2e81dadcbcf6",
+          "expected_tree": "(program\n  (comment)\n  (rule\n    (block)))\n",
+          "expected_tree_sha256": "fe49d69d658be9f14e0712c5ae42cb951c636111bf8574749ba7c09a6cef9f94"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comment.txt",
+          "case_name": "Top level comment with incomplete block",
+          "source": "# Hello\n{\n",
+          "source_sha256": "ce41dc431f0e84be53050d2eebcd0a54a1139d91ef7bffe6a35720c9feb8eeac",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "beancount",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/push_pop_tag.txt",
+          "case_name": "pop tag",
+          "source": "poptag #sampleTag\n",
+          "source_sha256": "1303f4a431c4a5b5dd9e57797a8687daeb4e6b2fa52972a5eb7d66873b3d1a19",
+          "expected_tree": "(file\n    (poptag (tag))\n)\n",
+          "expected_tree_sha256": "477721eecaa61acc951fa41656da5b836a4380d865282b9eacc20663f36a7bd2"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/push_pop_tag.txt",
+          "case_name": "pop tag incomplete",
+          "source": "poptag #sampleTag",
+          "source_sha256": "6cc8e403fccfa90656759799c977ef9ee067353fdb79bdca5068e7e0b5c8f040",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "bicep",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/tests.txt",
+          "case_name": "Empty string assignment",
+          "source": "var foo = ''\n",
+          "source_sha256": "0975830e84adea9b5ce860ec0679dffa88ff8d2a586be550bb046b102aa43896",
+          "expected_tree": "(infrastructure\n  (variable_declaration\n    (identifier)\n    (string)))\n",
+          "expected_tree_sha256": "8a2fb8f0304bd38109e9f042b4db818584c43d7741130bb12b8c78e78b08bd3a"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/tests.txt",
+          "case_name": "Empty string assignment incomplete",
+          "source": "var foo\n",
+          "source_sha256": "8ccc9b0edae4616c255307ce2eb62fcfb90fc82bee5c34cdd8baf93d700391a8",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "blade",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comment.txt",
+          "case_name": "{{-- comment --}}",
+          "source": "{{-- comment --}}\n",
+          "source_sha256": "9053963d5f837b164ec5282e8215aaea7d1c7006fbcf5468a3501d32b4c96db3",
+          "expected_tree": "(document\n  (comment))\n",
+          "expected_tree_sha256": "8eaec33ca9194dbcd90461591186bbdc77e774e4c8468e9814bfd69aa1dc6e79"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comment.txt",
+          "case_name": "{{-- comment --}} incomplete",
+          "source": "{{-- comment\n",
+          "source_sha256": "0b0a937c574953ebe923ab776a5564fc99ae6e07848555b6ea1176cbc75e9d2b",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "bsl",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "grammars/bsl/test/corpus/date-literals.bsl",
+          "case_name": "Date literals with optional separators",
+          "source": "дата = '20170323';\nдата = '2017.03.23 10:45:25';\nдата = '2017\\03\\23-10~45~25';\nдата = '201703231045';\n",
+          "source_sha256": "c4e222fedbfe96ea2680af9bc64f7626c71662dcf3bfa5d24cde2af1b13247eb",
+          "expected_tree": "(source_file\n  (assignment_statement\n    left: (identifier)\n    right: (expression\n      (const_expression\n        (date))))\n  (assignment_statement\n    left: (identifier)\n    right: (expression\n      (const_expression\n        (date))))\n  (assignment_statement\n    left: (identifier)\n    right: (expression\n      (const_expression\n        (date))))\n  (assignment_statement\n    left: (identifier)\n    right: (expression\n      (const_expression\n        (date)))))\n",
+          "expected_tree_sha256": "c2ff3d8d71ce0bab40b735ae92895448fdf02137aa01e35ab40ce5c5c430dfc9"
+        },
+        "negative": {
+          "origin": "upstream-corpus-error-case",
+          "source_path": "grammars/bsl/test/corpus/date-literals.bsl",
+          "case_name": "Date literals reject missing day digit",
+          "source": "дата = '2017032';\n",
+          "source_sha256": "ab10b9f18f345a746fe69af3cdbdb645e039241b1802fe96c3b84dc1903f425c",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "c3",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/types.txt",
+          "case_name": "Array types",
+          "source": "int[*] a = { 1, 2, 3, 4, 5 };\nint[5] a = { 1, 2, 3, 4, 5 };\n",
+          "source_sha256": "1dcbfb024a33ffb9a0148705942ae3c398af3fc418d5efe7ecea18aeaafc0aac",
+          "expected_tree": "(source_file\n  (global_declaration\n    (declaration\n      (type\n        (base_type_name)\n        (type_suffix))\n      (ident)\n      (initializer_list\n        (initializer_element\n          (integer_literal))\n        (initializer_element\n          (integer_literal))\n        (initializer_element\n          (integer_literal))\n        (initializer_element\n          (integer_literal))\n        (initializer_element\n          (integer_literal)))))\n  (global_declaration\n    (declaration\n      (type\n        (base_type_name)\n        (type_suffix\n          (integer_literal)))\n      (ident)\n      (initializer_list\n        (initializer_element\n          (integer_literal))\n        (initializer_element\n          (integer_literal))\n        (initializer_element\n          (integer_literal))\n        (initializer_element\n          (integer_literal))\n        (initializer_element\n          (integer_literal))))))\n",
+          "expected_tree_sha256": "11d702adca8132095d8d8e42f2af8ff79cb342f5fb188ce24ab13b7e26915f6c"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/types.txt",
+          "case_name": "Array types incomplete",
+          "source": "int[*] a = { 1, 2, 3, 4, 5 };\nint[5] a = {\n",
+          "source_sha256": "152b6bcf73eb22c1c90131dbcc290f981600e2356202503a037d06ed15399140",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "cairo",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/directive.txt",
+          "case_name": "Lang directive",
+          "source": "%lang abc\n",
+          "source_sha256": "d02c5d690fb3305f825256cb8087d2097731dea66d0e166e39cd6d1fca9bebc1",
+          "expected_tree": "(program\n  (cairo_0_file\n    (lang_directive\n      (identifier))))\n",
+          "expected_tree_sha256": "aa77adbb53f8922e62d4bd312fd63cbd724c5259b8d90b85109dc01d71715e4c"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/directive.txt",
+          "case_name": "Lang directive incomplete",
+          "source": "%lang\n",
+          "source_sha256": "384a82b0b458e30055a422b2467b7b9549a7b3130288e04ee470f33c01af5a18",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "capnp",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/text.txt",
+          "case_name": "Test a block text",
+          "source": "const blockText :Text =\n    `foo bar baz\n    `\"qux\" `corge` 'grault'\n    \"regular\\\"quoted\\\"line\"\n    `garply\\nwaldo\\tfred\\\"plugh\\\"xyzzy\\'thud\n    ;\n",
+          "source_sha256": "b091acfb3ae782fb29e375eba30dbedfe40e72161090426c524d4a6ad0018bec",
+          "expected_tree": "(message\n  (const\n    (const_identifier)\n    (field_type\n      (primitive_type))\n    (const_value\n      (block_text\n        (string_fragment)\n        (string_fragment)\n        (string_fragment)\n        (string_fragment)\n        (escape_sequence)\n        (string_fragment)\n        (escape_sequence)\n        (string_fragment)\n        (string_fragment)\n        (escape_sequence)\n        (string_fragment)\n        (escape_sequence)\n        (string_fragment)\n        (escape_sequence)\n        (string_fragment)\n        (escape_sequence)\n        (string_fragment)\n        (escape_sequence)\n        (string_fragment)))))\n",
+          "expected_tree_sha256": "d1b6011cedd2344b92be7b6ee5ef445a35a62d14193517e056c955e4cea24a2e"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/text.txt",
+          "case_name": "Test a block text incomplete",
+          "source": "const blockText :Text =\n    `foo bar baz\n    `\"qux\" `corge` 'grault'\n    \"regular\\\"quoted\\\"line\"\n    `gar\n",
+          "source_sha256": "739662db7eae5b18a7b97ef2c6a937da5b76d0e3be37812e498a8d97d079ec2d",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "cedar",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "cedar/test/corpus/regressions/scope_slots.txt",
+          "case_name": "scope_slots",
+          "source": "permit (\n  principal is User in ?principal,\n  action,\n  resource is Photo in ?resource\n);\n",
+          "source_sha256": "c25cc5798397eb032957a310f2ef67af29fb48688e336a3ea76d124d16a35ded",
+          "expected_tree": "(policy_set\n  (policy\n    (effect)\n    (scope\n      (principal\n        (scope_constraint\n          (name\n            (identifier))\n          (slot\n            (identifier))))\n      (action)\n      (resource\n        (scope_constraint\n          (name\n            (identifier))\n          (slot\n            (identifier)))))))\n",
+          "expected_tree_sha256": "21eb96a2cde59d5f04c62bc8badc32efff708216b6a16ada27a2f239fd61102b"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "cedar/test/corpus/regressions/scope_slots.txt",
+          "case_name": "scope_slots incomplete",
+          "source": "permit (\n  principal is User in ?principal,\n  action,\n  resource\n",
+          "source_sha256": "0ad8c2b1a8294f4d979ca44fcf6cac4e973f7f12049d877b7a4d87e97b354450",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "cedarschema",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "cedarschema/test/corpus/cli/schema_a_7.txt",
+          "case_name": "schema_a_7",
+          "source": "// https://github.com/cedar-policy/cedar/blob/v4.11.2/cedar-policy-cli/sample-data/sandbox_a/schema.cedarschema#L7\n\nentity Account;\n",
+          "source_sha256": "0167381e83e63820fbe85226c660a861df76a29a938b84ac2d9749cc7c69f816",
+          "expected_tree": "(schema\n  (comment)\n  (entity_declaration\n    (identifier_list\n      (identifier))))\n",
+          "expected_tree_sha256": "2d71e15d705f61abceb85441b27382b5d8ac9b5d34784db02e8f25f13bc08ebe"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "cedarschema/test/corpus/cli/schema_a_7.txt",
+          "case_name": "schema_a_7 incomplete",
+          "source": "// https://github.com/cedar-policy/cedar/blob/v4.11.2/cedar-policy-cli/sample-data/sandbox_a/schema.cedarschema#L7\n\nentity ",
+          "source_sha256": "e82c95bbc6ce065c572235624c102066d650a4ed63f8f6919c996e591583c45c",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "cel",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/basic.txt",
+          "case_name": "Standalone identifier",
+          "source": "a\n",
+          "source_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+          "expected_tree": "(expr\n      (identifier))\n",
+          "expected_tree_sha256": "75eac4afaccc387839d70dcf4e414e65f6fea5903866e53d7f6b49b2c812e9b6"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/basic.txt",
+          "case_name": "Standalone identifier incomplete",
+          "source": "a\n(\n",
+          "source_sha256": "dc15f55179e950fafd294c8d9baffa20ec26c740682cc170393699f418729e98",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "cfml",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-language-example",
+          "source_path": "cfml/test/corpus/test.cfm",
+          "case_name": "repository CFML example",
+          "source": "<!--- This works --->\n<table>\n\n    <tr>\n      <cfloop test=\"1\">\n        <td><cfoutput>test</cfoutput></td>\n      </cfloop>\n    </tr>\n  </table>\n\n  <!--- This doesn't --->\n    <table>\n\n      <cfloop test=\"1\">\n    <tr>\n        <td><cfoutput>test</cfoutput></td>\n      </tr>\n    </cfloop>\n  </table>\n",
+          "source_sha256": "cf25914dd173ca7971d2acf0a65122a293e441d0181c4f3d04944ed45422c269",
+          "expected_tree": null,
+          "expected_tree_sha256": null
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-example",
+          "source_path": "cfml/test/corpus/test.cfm",
+          "case_name": "repository CFML example incomplete",
+          "source": "<!--- This works --->\n<table>\n\n    <tr>\n      <cfloop test=\"1\">\n        <td><cfoutput>test</cfoutput></td>\n      </cfloop>\n    </tr>\n  </table>\n\n  <!--- This doesn't --->\n    <table>\n\n      <cfloop test=\"1\">\n    <\n",
+          "source_sha256": "6b8689a9b724b837ac695c812be0d4cd3cdee4e80c47b2ff723e3c185c664d27",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "chatito",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/issues.txt",
+          "case_name": "Spaceless entities",
+          "source": "@[bookDate]\n    ~[monthNames] ~[monthDays]\n    ~[monthDays] of ~[monthNames]\n    ~[monthDayNumbers]/~[monthNumbers]\n    today\n    tomorrow\n    next ~[weekDays]\n",
+          "source_sha256": "7af66cc4fb0d3741c24bb072752927ec23ecc6210f9466668d1497e901957892",
+          "expected_tree": "(source\n  (slot_def\n    (slot)\n    (slot_body\n      (alias_ref\n        (alias))\n      (alias_ref\n        (alias))\n      (alias_ref\n        (alias))\n      (word)\n      (alias_ref\n        (alias))\n      (alias_ref\n        (alias))\n      (word)\n      (alias_ref\n        (alias))\n      (word)\n      (word)\n      (word)\n      (alias_ref\n        (alias)))))\n",
+          "expected_tree_sha256": "66de16f03128a8d577798771df63f0cf56873ac7531ae3be8fcefc45caaa04ca"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/issues.txt",
+          "case_name": "Spaceless entities incomplete",
+          "source": "@[bookDate]\n    ~[monthNames] ~[monthDays]\n    ~[monthDays] of ~[monthNames]\n    ~[monthDayNumbers]/~[monthNumbers\n",
+          "source_sha256": "29fbdcbeb7c5db150dd0c305f0cf655e1da5ae1aa23beac43fd05bd58a9092fe",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "chuck",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/language-specification/import-system/filename-resolution.txt",
+          "case_name": "Filename resolution",
+          "source": "@import \"Blarg\"\n",
+          "source_sha256": "476b4e328bf87ff9e6ff444cf85d2f6e577ed43c8fe0957a1a8b81ac0ada5a2a",
+          "expected_tree": "(source_file\n  (import_expression\n    (string)))\n",
+          "expected_tree_sha256": "275b209f60aaedf966b35e9719fac052de65cbb5ba668103cc174230f53cb31d"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/language-specification/import-system/filename-resolution.txt",
+          "case_name": "Filename resolution incomplete",
+          "source": "@import \"B\n",
+          "source_sha256": "54639f327357de5416d4008c569165f6e1769ee13b174825638381ead5e72025",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "circom",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/include.txt",
+          "case_name": "Another Include Directive",
+          "source": "include \"babyjub.circom\";\n",
+          "source_sha256": "100fb5651c675723428b2857f976429e1f9583ac078021f9c4f170439084eb47",
+          "expected_tree": "(source_file\n      (include_directive\n        (string)))\n",
+          "expected_tree_sha256": "ac22277b3d31f2991fb6b2625a040fcd9355f9fef167abb6226308691a7479bf"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/include.txt",
+          "case_name": "Another Include Directive incomplete",
+          "source": "include \"babyjub.c\n",
+          "source_sha256": "400f4ba9118355c42c53e9db38d468c8e9c578b9bccc0b1d80ad52e6869c77aa",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "clarity",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/types.txt",
+          "case_name": "Comments (This is not a type though)",
+          "source": ";; Tests start here!\n",
+          "source_sha256": "3ebe6e27c77dd741e6f2f8fee23140eaff77ba39b27f4759a4855255281fa559",
+          "expected_tree": "(source\n  (comment))\n",
+          "expected_tree_sha256": "58d3bd648831ec7d5f2c248586babce9515e07a7365259b8516765028b56f821"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/types.txt",
+          "case_name": "Comments (This is not a type though) incomplete",
+          "source": ";",
+          "source_sha256": "41b805ea7ac014e23556e98bb374702a08344268f92489a02f0880849394a1e4",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "cmake",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/escape_sequence.txt",
+          "case_name": "Escape sequence of \"\\;\" [escape_sequence]",
+          "source": "set(var \"It is \\; and \\\"\")\n",
+          "source_sha256": "b2e10ed4277572116723741c472a94040e8b2ee9abcaa43be6b47642bc788b37",
+          "expected_tree": "(source_file\n  (normal_command\n    (identifier)\n    (argument_list\n      (argument\n        (unquoted_argument))\n      (argument\n        (quoted_argument\n          (quoted_element\n            (escape_sequence)\n            (escape_sequence)\n          )\n        )\n      )\n    )\n  )\n)\n",
+          "expected_tree_sha256": "2ae5934ad2801a0d87cda8d1525a054816905f6ceedac202d276fbebe733a6c8"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/escape_sequence.txt",
+          "case_name": "Escape sequence of \"\\;\" [escape_sequence] incomplete",
+          "source": "set(var \"It is \\;\n",
+          "source_sha256": "02d0979511a5c9e06b63316ee42d68799e489975b7035cdadd697f89fa87d0e2",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "cobol",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comment.txt",
+          "case_name": "comment",
+          "source": "aaaaaa identification division.\naaaaaa program-id. a.  ,,, ;;;                                          aaaaa\n      *aaaa\n",
+          "source_sha256": "f47ac0d69c67ba897cc20b06494d90868656eb800cad80da674f32c22d21b069",
+          "expected_tree": "(start\n  (program_definition\n    (identification_division\n      (program_name))))\n",
+          "expected_tree_sha256": "4e2987e79a685ecf86b76edf0301cc0eea1756067882ba81d68524f87052bf73"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comment.txt",
+          "case_name": "comment incomplete",
+          "source": "aaaaaa identification division.\naaaaaa program-id. a",
+          "source_sha256": "190f9ce3e3813645ed293a1a97a4d8008b8742bb7997f17096dc6d9ce14d9a0f",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "commonlisp",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/basic.txt",
+          "case_name": "Functions with numbers (TODO!!!)",
+          "source": "1+\n1-\n",
+          "source_sha256": "b935e21048aa279f3e2d631350fdb96afb00a9b9316ca42d101bf937a1ee96b0",
+          "expected_tree": "(source\n  (sym_lit)\n  (sym_lit))\n",
+          "expected_tree_sha256": "996e03ffd5fc262b783233f9ccf9d79e00b85b2ad0644dee6e9b238d83a84c2e"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/basic.txt",
+          "case_name": "Functions with numbers (TODO!!!) incomplete",
+          "source": "1+\n1-\n(\n",
+          "source_sha256": "93fb3369a42dd20173621a0b2a9e425bf13ba3367095936c2fbc045e6bedec44",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "cpon",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/main.txt",
+          "case_name": "Top-level number",
+          "source": "-1\n",
+          "source_sha256": "ee3aa64bb94a50845d5024cd4bd20202a4567aed5cd5328c0d97e9920775fc28",
+          "expected_tree": "(document\n  (number))\n",
+          "expected_tree_sha256": "070e0a389790d7e852b62b35dcaa99538d9023bf5e44d10a300fdd195dbe4160"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/main.txt",
+          "case_name": "Top-level number incomplete",
+          "source": "-1\n(\n",
+          "source_sha256": "8e60c4bf358581da7c7acf0b521d3bca1b457632c57e28fe411b4c797297ccbd",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "cst",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/cst.txt",
+          "case_name": "CST without errors",
+          "source": "0:0  - 4:0    translation_unit\n0:0  - 3:1      function_definition\n0:0  - 0:3        type: primitive_type `int`\n0:4  - 0:32       declarator: function_declarator\n0:4  - 0:8          declarator: identifier `main`\n0:8  - 0:32         parameters: parameter_list\n0:8  - 0:9            \"(\"\n0:9  - 0:17           parameter_declaration\n0:9  - 0:12             type: primitive_type `int`\n0:13 - 0:17             declarator: identifier `argc`\n0:17 - 0:18           \",\"\n0:19 - 0:31           parameter_declaration\n0:19 - 0:23             type: primitive_type `char`\n0:24 - 0:31             declarator: pointer_declarator\n0:24 - 0:25               \"*\"\n0:25 - 0:31               declarator: array_declarator\n0:25 - 0:29                 declarator: identifier `argv`\n0:29 - 0:30                 \"[\"\n0:30 - 0:31                 \"]\"\n0:31 - 0:32           \")\"\n1:0  - 3:1        body: compound_statement\n1:0  - 1:1          \"{\"\n2:4  - 2:24         return_statement\n2:4  - 2:10           \"return\"\n2:11 - 2:23           identifier `EXIT_SUCCESS`\n2:23 - 2:24           \";\"\n3:0  - 3:1          \"}\"\n",
+          "source_sha256": "939767a5c1a8e5b12608a85c5ef949d3f774072b9ba18afe3db393c710e8961d",
+          "expected_tree": "(cst\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (kind))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (kind))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (field)\n    (kind)\n    (text\n      (content)))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (field)\n    (kind))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (field)\n    (kind)\n    (text\n      (content)))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (field)\n    (kind))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (literal\n    (content))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (kind))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (field)\n    (kind)\n    (text\n      (content)))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (field)\n    (kind)\n    (text\n      (content)))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (literal\n    (content))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (kind))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (field)\n    (kind)\n    (text\n      (content)))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (field)\n    (kind))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (literal\n    (content))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (field)\n    (kind))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (field)\n    (kind)\n    (text\n      (content)))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (literal\n    (content))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (literal\n    (content))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (literal\n    (content))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (field)\n    (kind))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (literal\n    (content))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (kind))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (literal\n    (content))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (node\n    (kind)\n    (text\n      (content)))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (literal\n    (content))\n  (range\n    start: (position\n      row: (number)\n      column: (number))\n    end: (position\n      row: (number)\n      column: (number)))\n  (literal\n    (content)))\n",
+          "expected_tree_sha256": "8c3efdb2713e627b656fbecac8ff22d6448b776dab56eb864dc8837f54dc2c6a"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/cst.txt",
+          "case_name": "CST without errors incomplete",
+          "source": "0:0  - 4:0    translation_unit",
+          "source_sha256": "2567c9704fa61f31950b93f7c952da8bd4d43ab9fb1995880ac34b81b2ca5b45",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "csv",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/test.txt",
+          "case_name": "Single letter",
+          "source": "a\n",
+          "source_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+          "expected_tree": "(document\n\t(row\n\t\t(field (text))))\n",
+          "expected_tree_sha256": "cd92a6a9361167a494fd27b368627e06a335002c101a307a747dbf3d91d9dee8"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/test.txt",
+          "case_name": "Single letter incomplete",
+          "source": "a\n,",
+          "source_sha256": "b7c763d40c96fc7a0731751a25215519a2579416e917eed4894a9ed9334d6f25",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "cuda",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/c/crlf.txt",
+          "case_name": "Line comments with escaped CRLF line endings",
+          "source": "// hello \\\n   this is still a comment\nthis_is_not a_comment;\n",
+          "source_sha256": "88c71884291e614e2ded4a178523d35a3f38b142ebfec3d875795a76d2d20faa",
+          "expected_tree": "(translation_unit\n  (comment)\n  (declaration (type_identifier) (identifier)))\n",
+          "expected_tree_sha256": "6417ed7a010072f31c12fda83879c388bfa33d54abc43119e93511d09e1fb5a4"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/c/crlf.txt",
+          "case_name": "Line comments with escaped CRLF line endings incomplete",
+          "source": "// hello \\\n   this is still a comment\nthis_\n",
+          "source_sha256": "d16efa4a890211bbc21d13c51ab79d6e856d4df5a57b6a66dead55183a6d17c5",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "cue",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/toplevel.txt",
+          "case_name": "literal",
+          "source": "package foo\n\n\"Hello world!\"\n",
+          "source_sha256": "af97f268f04a5d3c3a4d051c2d0673568931828beee55b1b482b6e098e27fe16",
+          "expected_tree": "(source_file\n\t(package_clause\n\t\t(package_identifier))\n\t(string))\n",
+          "expected_tree_sha256": "09753ef22b48cde5b910c85d7af6ec2c540aa599677610fb6f4f0811faab128a"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/toplevel.txt",
+          "case_name": "literal incomplete",
+          "source": "package foo\n\n\"Hello\n",
+          "source_sha256": "4b858d80b41f89c0bfeec98fc42ef585accc9109eb556b9655d7c16fbf297c41",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "d",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/expression.scm",
+          "case_name": "Division",
+          "source": "int x  = 5 / 3;\n",
+          "source_sha256": "1662b07b4d0c200680efca38d0fb4651f969e375ff72ece89963cd758baf4a04",
+          "expected_tree": "(source_file\n  (variable_declaration\n    (type\n      (int))\n    (declarator\n      (identifier)\n      (binary_expression\n        (mul_expression\n          (int_literal)\n          (int_literal))))))\n",
+          "expected_tree_sha256": "a33f8587906a95d30f5d935233585513b6319f6393e8cefabf7988d01f5aa7a5"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/expression.scm",
+          "case_name": "Division incomplete",
+          "source": "int x  = 5\n",
+          "source_sha256": "7486547abface1201502788e7d4a0621a43b9e83a79270eec6c5894bc8bdcff5",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "desktop",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/main.txt",
+          "case_name": "Comments",
+          "source": "# Hello\n\n# world\n",
+          "source_sha256": "4cbffdd55f8181f43d6341ef05b388e085c1d3435834a067929e754eedb365df",
+          "expected_tree": "(desktop_entry\n  (comment)\n  (comment))\n",
+          "expected_tree_sha256": "2484b5a6e092cb0c2efd8a5cdc1a9aaa5fb130c9399454a7d19341c33f118732"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/main.txt",
+          "case_name": "Comments incomplete",
+          "source": "# Hello\n\n# world",
+          "source_sha256": "acc962ae3792dbf71cf9acd417c404c64936b928f71311a97e040df8810c6e68",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "devicetree",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/address.txt",
+          "case_name": "Node addresses",
+          "source": "/ {\n    foo@0123456789 {};\n    bar@abcdef {};\n    baz@ABCDEF {};\n    fred@1,0 {};\n\n    prop = <&{/bar@abcdef}>;\n};\n",
+          "source_sha256": "2e22e21e73490a49fe5b42b90253d18cb06d9518d1c589e2aa53b2e3baec121e",
+          "expected_tree": "(document\n    (node\n        name: (identifier)\n        (node\n            name: (identifier)\n            address: (unit_address))\n        (node\n            name: (identifier)\n            address: (unit_address))\n        (node\n            name: (identifier)\n            address: (unit_address))\n        (node\n            name: (identifier)\n            address: (unit_address))\n        (property\n            name: (identifier)\n            value: (integer_cells\n                (reference\n                    (path\n                        (path_node\n                            name: (identifier)\n                            address: (unit_address)\n                        )\n                    )\n                )\n            )\n        )\n    )\n)\n",
+          "expected_tree_sha256": "9413cc411e89e43bb416a9c6d834c9253b7d8f06594359437862cecb0feef87a"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/address.txt",
+          "case_name": "Node addresses incomplete",
+          "source": "/ {\n    foo@0123456789 {};\n    bar@abcdef {};\n    baz@ABCDEF {};\n    fred@1,0 {};\n",
+          "source_sha256": "bbccd03a9fbe3217fe747930e7e829010d2939cd6984ce596dff96eaea5f3b15",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "dhall",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/completion.txt",
+          "case_name": "Spaces around completion (unit/CompletionA.dhall)",
+          "source": "T :: r\n",
+          "source_sha256": "b034cae902e42d615c6cb066438649c9aa0ad1e9e63dc91434a4853983e43bd3",
+          "expected_tree": "(expression\n  (completion\n    type: (primitive_expression (identifier (label)))\n    (completion_operator)\n    (primitive_expression (identifier (label)))))\n",
+          "expected_tree_sha256": "1553bdda52331172edbb2b51e9626ddd5d4ca16293527f5ba72228122c8c5212"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/completion.txt",
+          "case_name": "Spaces around completion (unit/CompletionA.dhall) incomplete",
+          "source": "T :: r\n(\n",
+          "source_sha256": "1dbe63aed45c8aa9592a776a3b0478ac647f793110535acbfb439b4a9b4504b2",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "diff",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/binary.txt",
+          "case_name": "Deleted binary file",
+          "source": "diff --git a/docs/playground.png b/docs/playground.png\ndeleted file mode 100644\nindex 9cf2a44..0000000\nBinary files a/docs/playground.png and /dev/null differ\n",
+          "source_sha256": "76b1dfcf37a40c2cca0a0b32aaf56239b65fc9568593948e0c60b7ed602d4508",
+          "expected_tree": "(source\n  (block\n    (command\n      (argument)\n      (filename))\n    (file_change\n      (mode))\n    (index\n      (commit)\n      (commit))\n    (binary_change\n      (filename)\n      (filename))))\n",
+          "expected_tree_sha256": "8e543f9e3fc1f5dc566c1d56cbf7717c371677b2ca19cdda453946fa7de8d780"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/binary.txt",
+          "case_name": "Deleted binary file incomplete",
+          "source": "diff --git a/docs/playground.png b/docs/playground.png\ndeleted file mode 100644\nindex 9cf2a44..0000000\nBinary fil\n",
+          "source_sha256": "7fd930b2a47e7f1cc79a1a46fcc8790d46c603c0309825725778e3949e2267f7",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "dot",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/blocks.txt",
+          "case_name": "Strict graph",
+          "source": "strict graph {\n  a -- b\n}\n",
+          "source_sha256": "698f3fe71461b46a50dd1630352079b95723c3690a6c915dde942e236e007078",
+          "expected_tree": "(source_file\n  block: (block\n    (stmt_list\n      (edge_stmt\n        (node_id\n          (id\n            (identifier)))\n        (edgeop)\n        (node_id\n          (id\n            (identifier)))))))\n",
+          "expected_tree_sha256": "b6fa2d37e6305c3d5457a4ff28184209bd9c4cfcd2af44fcf333ce5c565edb8d"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/blocks.txt",
+          "case_name": "Strict graph incomplete",
+          "source": "strict graph {\n  a\n",
+          "source_sha256": "2f214c598ea8456d3ea3ae606f1b364a194939e191c2f58cd83b960a6b10b565",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "elisp",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/special_read_syntax.txt",
+          "case_name": "Special read syntax",
+          "source": "#$\n",
+          "source_sha256": "66fd0a834bdfad454df150f33ba767eb8a3949bed754d9f27a3dabcd3a88f92d",
+          "expected_tree": "(source_file\n  (byte_compiled_file_name))\n",
+          "expected_tree_sha256": "a941806b4d783cb4a1c409b874061d2aa8abcbbacc1fa8f72c66cacd921c5690"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/special_read_syntax.txt",
+          "case_name": "Special read syntax incomplete",
+          "source": "#$\n(\n",
+          "source_sha256": "1557f5d333e5e0547865133deaa5f0b6a069da634182ead002b47a5a72324853",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "elixir",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/term/nil.txt",
+          "case_name": "simple literal",
+          "source": "nil\n",
+          "source_sha256": "aaf215657c1641b3e65abc4a8aa222131edbb86b8e67d208ba6c8aa9041735c3",
+          "expected_tree": "(source\n  (nil))\n",
+          "expected_tree_sha256": "73ab1b527ffbf14062175c4f29ebf1b49498328de396d895c9cfae6b229a5de6"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/term/nil.txt",
+          "case_name": "simple literal incomplete",
+          "source": "nil\n(\n",
+          "source_sha256": "fe2347af975819af483c27de43bfd621516663a6c2d27bdd432e68a5a5b49c59",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "elm",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/fieldAccess.txt",
+          "case_name": "Multiple field accessors",
+          "source": "func model =\n    model.field.second.third\n",
+          "source_sha256": "06a98d04179f407759f1485224d99196bb42955306aa8a7871956142e39636e1",
+          "expected_tree": "(file\n  (value_declaration\n    (function_declaration_left\n      (lower_case_identifier)\n      (lower_pattern\n        (lower_case_identifier)))\n    (eq)\n    (field_access_expr\n      (field_access_expr\n        (field_access_expr\n          (value_expr\n            (value_qid\n              (lower_case_identifier)))\n          (dot)\n          (lower_case_identifier))\n        (dot)\n        (lower_case_identifier))\n      (dot)\n      (lower_case_identifier))))\n",
+          "expected_tree_sha256": "7290cdef7ac41b7436a64514a891153573cdaddc607088c450a23e2ffd9ddbc7"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/fieldAccess.txt",
+          "case_name": "Multiple field accessors incomplete",
+          "source": "func model =\n    model.field.\n",
+          "source_sha256": "73cb3410eacaa73626019af161c591904b55e5cb1838679307a458f25e1457a5",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "elvish",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/literals.txt",
+          "case_name": "Rationals",
+          "source": "nop 1/2 0x10/100\n",
+          "source_sha256": "86d7456cd0af5aa303110ed2e0f0a85acc78297b9d5a8c43e060fd85c3c824c1",
+          "expected_tree": "(source_file\n  (command\n    (identifier)\n    (number)\n    (number)))\n",
+          "expected_tree_sha256": "d5fe7d53dc5b8427d61bb162632cf0b9889689c5d51cb5a29cb1c20d2aeb9806"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/literals.txt",
+          "case_name": "Rationals incomplete",
+          "source": "nop 1/2 0x10/100\n{\n",
+          "source_sha256": "0377591c7c0c1345e288e05fcbf27ec3df62bd6da901fb7618e05305eba143fd",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "enforce",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/statements/typedef.txt",
+          "case_name": "typedef",
+          "source": "typedef int i32;\n",
+          "source_sha256": "ec6ffe75cd3f437977635c86885abedd4f27152ee50c02feef0aa06e3f66a246",
+          "expected_tree": "(compilation_unit\n\t(typedef\n\t\t(type_int)\n\t\t(identifier)))\n",
+          "expected_tree_sha256": "21eb8e45af392b59b0ce21fa80b9a0c1db76b311ef1a627d9feb4c455e23a43c"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/statements/typedef.txt",
+          "case_name": "typedef incomplete",
+          "source": "typedef int\n",
+          "source_sha256": "51b5c47698b7194448de0dd5d54f8ec2e9e560aa866216aed7751a70b169bea6",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "faust",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/number.txt",
+          "case_name": "Int",
+          "source": "ints = waveform{1,+10,-100};\n",
+          "source_sha256": "41af6708ab037a111d4bd1b929a2799cccd4d712f84b9e70c43f918195c51a1f",
+          "expected_tree": "(program\n  (definition (identifier)\n    (waveform\n      (values (int) (int) (int)))))\n",
+          "expected_tree_sha256": "47e98d402b7841afdcae6b103706b434c3ff892586f46ec099b9ab7fdb09dc30"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/number.txt",
+          "case_name": "Int incomplete",
+          "source": "ints = waveform{1,+1\n",
+          "source_sha256": "ab38e782500ecff54668b21344cab36c479869b09ed69fd5624787133fb99695",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "fennel",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/regression.txt",
+          "case_name": "Comments within a list",
+          "source": "(+ 1\n ;\n 2)\n(+ 1\n ;\n )\n",
+          "source_sha256": "b6038a4afb3beb7354368ae5bdfaabf0e5a8cd4edc1622080beb2b13e9904fe5",
+          "expected_tree": "(program\n  (list\n    (symbol)\n    (number)\n    (comment)\n    (number))\n  (list\n    (symbol)\n    (number)\n    (comment)))\n",
+          "expected_tree_sha256": "550a07b3ae6f9f377a1d352c9ec874545e6e00bb4e67939b870e63c895fa85f3"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/regression.txt",
+          "case_name": "Comments within a list incomplete",
+          "source": "(+ 1\n ;\n 2)\n(+\n",
+          "source_sha256": "422a17059c6474d9cd6e920d6031594d08f72966f398e35d1f8831f89002576d",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "firrtl",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/basic.txt",
+          "case_name": "empty circuit",
+          "source": "circuit C1 :\n",
+          "source_sha256": "a4810441c84f5d4881f3f74c36f804461bedbc8d6b3e7a63b038b52456c741e3",
+          "expected_tree": "(source_file\n  (circuit (identifier)))\n",
+          "expected_tree_sha256": "10c447c967236a09e7ecc9085a32086869459e4aedae6c41f1a028be54f9d261"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/basic.txt",
+          "case_name": "empty circuit incomplete",
+          "source": "circuit\n",
+          "source_sha256": "84a3faff71dfa58fc12abd05f2b50777fb5eab660b4ee8a9c673cbd79a02a628",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "fish",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/home_dir_expansion.txt",
+          "case_name": "Home Dir Expansion",
+          "source": "echo ~\nls ~\n$cmd ~/app\n",
+          "source_sha256": "1825ce5ced6599ff8c4ad0b0a62f69f1fcc13daed82cf372d5d7ecdcb1952a65",
+          "expected_tree": "(program\n  (command\n    (word)\n    (home_dir_expansion))\n  (command\n    (word)\n    (home_dir_expansion))\n  (command\n    (variable_expansion\n      (variable_name))\n    (concatenation\n      (home_dir_expansion)\n      (word))))\n",
+          "expected_tree_sha256": "5c7b57ff2ec2ae6570d3575c5be506e6a224d2dc7cd24573215e32553be57d06"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/home_dir_expansion.txt",
+          "case_name": "Home Dir Expansion incomplete",
+          "source": "echo ~\nls ~\n$cmd ~/app",
+          "source_sha256": "ab6e7ee074879aaeec24a71de7aed0e1ed6b414e5a715b001d49c9547a9fac38",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "forth",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/word.txt",
+          "case_name": "Check word symbols",
+          "source": "x,y\ntest:parse\nmaybe?\nvar@\nsave!\n#num\n",
+          "source_sha256": "13c4d785527071ad5f49e51e80df18dc150d4ee7fce817877963a429aef4d264",
+          "expected_tree": "(source_file\n  (word)\n  (word)\n  (word)\n  (word)\n  (word)\n  (word))\n",
+          "expected_tree_sha256": "dca3a1671bff07582ec6b06d766c4c80db40d2bc355bc7df3a3990ae250c5883"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/word.txt",
+          "case_name": "Check word symbols incomplete",
+          "source": "x,y\ntest:parse\nmaybe?\nvar@\nsave!\n#num\n:",
+          "source_sha256": "6e25e715b8a6acb02ab707827d0312dece490146a27505e9eb41214b3bad2f80",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "fortran",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/cudafortran.txt",
+          "case_name": "Variable declaration (with attributes)",
+          "source": "program test\n    real, constant :: alpha\n    integer :: i\n    attributes(device) :: i\nend program test\n",
+          "source_sha256": "26f1fc485e660ed74f95e55e0ce02aa67065309c8d293a6b04691d4c1a8b1324",
+          "expected_tree": "(translation_unit\n  (program\n    (program_statement\n      (name))\n    (variable_declaration\n      (intrinsic_type)\n      (type_qualifier)\n      (identifier))\n    (variable_declaration\n      (intrinsic_type)\n      (identifier))\n    (variable_modification\n      (variable_attributes)\n      (identifier))\n    (end_program_statement\n      (name))))\n",
+          "expected_tree_sha256": "f52e4fef579deb9c4553c03c66b9f43307222f5653e0bc2846bdc461a49b1149"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/cudafortran.txt",
+          "case_name": "Variable declaration (with attributes) incomplete",
+          "source": "program test\n    real, constant :: alpha\n    integer :: i\n    attributes(\n",
+          "source_sha256": "d2dbebf5d3f9578ceba864c92aa318e231a2b04aa53e4dc4b6ad55b40b7343ae",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "fsharp_signature",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/module_abbrev.txt",
+          "case_name": "basic module abbreviation",
+          "source": "module local = Mod.local\n",
+          "source_sha256": "423c49fe12c8390e44516d8517316ba2bec77c275a72d16a818eae1fa0b03142",
+          "expected_tree": "(file\n  (module_abbrev\n    (identifier)\n    (long_identifier (identifier) (identifier))))\n",
+          "expected_tree_sha256": "4ad11bb58981f66b30006403551de3c54a82073e846aa24e5eded76518f7d1fa"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/module_abbrev.txt",
+          "case_name": "basic module abbreviation incomplete",
+          "source": "module local = Mod.",
+          "source_sha256": "3f36d34e6a7666d55d4d31a48951c6201253029328914cc105856a247b989eb7",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "gap",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/precedence.txt",
+          "case_name": "not operator precedence",
+          "source": "not true and false;\nnot 1 in [1, 2, 3];\nnot true = false;\n",
+          "source_sha256": "ca300c7c9eea99cecd666508e7b9118f9b394e91b0612418b23636e36168d48b",
+          "expected_tree": "(source_file\n  (binary_expression\n    (unary_expression (bool))\n    (bool))\n  (unary_expression\n    (binary_expression\n      (integer)\n      (list_expression\n        (integer)\n        (integer)\n        (integer))))\n  (unary_expression\n    (binary_expression\n      (bool)\n      (bool)))\n)\n",
+          "expected_tree_sha256": "a4819b847ae77dc3a1134b90d512e05bda551f5240712aa2ce1f6ac95bc7f4db"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/precedence.txt",
+          "case_name": "not operator precedence incomplete",
+          "source": "not true and false;\nnot 1 in [1, 2, 3];\nn\n",
+          "source_sha256": "e6f0019d80b857886ee57866309838ed056e8027d8639dbc0f51c8f80686c692",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "gdscript",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/funcs.txt",
+          "case_name": "Annotations and keywords",
+          "source": "@outside\n@inside static func hello():\n\tpass\n",
+          "source_sha256": "5da1f439ae0425ad71ff06a4b89e9f803a245fe79838b7bb34907c310180e538",
+          "expected_tree": "(source\n  (annotation (identifier))\n  (function_definition\n  (annotations\n    (annotation (identifier)))\n  (static_keyword)\n  (name)\n  (parameters)\n  (body\n    (pass_statement))))\n",
+          "expected_tree_sha256": "2263154ffdd7fc13d50c65d2e1a474cdeea7ed049189ef33465265eb4879cdf6"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/funcs.txt",
+          "case_name": "Annotations and keywords incomplete",
+          "source": "@outside\n@inside static func h\n",
+          "source_sha256": "c1bf2feceee17882f97a5ce62e2f3f91fafd5ef327e003e74fc43ca353511c70",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "gdshader",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comment.txt",
+          "case_name": "Multiline",
+          "source": "/* Hello World\n\n\n\n*/\n",
+          "source_sha256": "52ee2790129e24790bd50415f47ecf2b97d36c0ef45d6899755b43c044a43d7b",
+          "expected_tree": "(source_file\n  (comment))\n",
+          "expected_tree_sha256": "daa17d137a8ba2de71983bdbdadfc666b98c77d2a48e7eb2ce42ea4bbf1f3bd9"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comment.txt",
+          "case_name": "Multiline incomplete",
+          "source": "/* Hello World\n",
+          "source_sha256": "a2424d64c95a6b196e037280d10106576f879409c6f71abfc4953af824f3cc23",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "gherkin",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/when_then_only.txt",
+          "case_name": "Having only when and then as steps",
+          "source": "Feature: This is the name of a feature\n  Example: This is the title of a scenario\n    When this is a when step\n    Then this is a then step\n",
+          "source_sha256": "496f9342eb138d54c02cdcf2f008554674b3bcbeb3c576d2f53f4fa08860c8aa",
+          "expected_tree": "(feature\n  (feature_keyword)\n  (title)\n  (scenarios\n    (scenario\n      (scenario_keyword)\n      (title)\n      (steps\n        (when_step\n          (when_keyword)\n          (step_definition)\n        )\n        (then_steps\n          (then_step\n            (then_keyword)\n            (step_definition)\n          )\n        )\n      )\n    )\n  )\n)\n",
+          "expected_tree_sha256": "dfe1709458d3d134edc7afa602e2a257f4bee6f44c84af41790165dc97fb64b9"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/when_then_only.txt",
+          "case_name": "Having only when and then as steps incomplete",
+          "source": "Feature: This is the name of a feature\n  Example: This is the title of a scenario\n    When this is a\n",
+          "source_sha256": "812b378ed0a15e34f7b29d182506b523a5598b19d092f0eb6673d6093724ba91",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "gitattributes",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/gitattributes.txt",
+          "case_name": "Simple file",
+          "source": "*\ttext=auto\n",
+          "source_sha256": "2b4b47ecc056e25b1761646348781629c574d1ee548a2e6d0be2fa6233455516",
+          "expected_tree": "(file\n  (pattern\n    (wildcard))\n  (attribute\n    (builtin_attr)\n    (attr_set)\n    (string_value)))\n",
+          "expected_tree_sha256": "8be80679ff23cc8784a639c9d45173ee244efd282d5d3829ff7e87ac4fe6fc6e"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/gitattributes.txt",
+          "case_name": "Simple file incomplete",
+          "source": "*\ttext=\n",
+          "source_sha256": "e82bbd64265f27fdf4af2b49c90825c86f8377ae23042dd6c140abc563159f73",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "gleam",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "Comments",
+          "source": "////// regular comment\n\n///// regular comment\n\n//// module doc comment\n\n/// statement doc comment\n\n// regular comment\n",
+          "source_sha256": "1cb53f85c88f33e51b47908250cd62948162eda6d3cfdfa3be2c614a4099eb2a",
+          "expected_tree": "(source_file\n  (comment)\n  (comment)\n  (module_comment\n    (doc_comment_content))\n  (statement_comment\n    (doc_comment_content))\n  (comment))\n",
+          "expected_tree_sha256": "99817cd948e42a54ff398d15d34fcb68c5943fee54f594e598ae48c05cddd10b"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "Comments incomplete",
+          "source": "////// regular comment\n\n///// regular comment\n\n//// module doc comment\n\n/// statement doc comment\n\n/",
+          "source_sha256": "6e2029f2c6071696eb8cb7f4c2c43b108e31b3f2ffea217ad0809c52504e3233",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "glsl",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/basic.txt",
+          "case_name": "Uniforms",
+          "source": "uniform vec3 foo;\n",
+          "source_sha256": "52ed1cd77de4a9df2a7b3f6811ceed129748f014cb0cced13b4102dcbb7cb145",
+          "expected_tree": "(translation_unit\n  (declaration\n    (type_identifier)\n    (identifier)))\n",
+          "expected_tree_sha256": "5347032ec37e17471747346557a8a77f3b9b2ef9f8124bb2ac21f64d39c8e177"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/basic.txt",
+          "case_name": "Uniforms incomplete",
+          "source": "uniform vec3\n",
+          "source_sha256": "1192278276d4f7a6715d1e44ebe62585a389106109c9ee83420b8b31f3b78823",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "gnuplot",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "Multi line comment",
+          "source": "# This is a comment \\ \nthis is the same comment\n",
+          "source_sha256": "8da5e6852ca0f9a9b700c7aa2ab731b08146ecf07264d8d65fdb9002f07cb561",
+          "expected_tree": "(source_file\n  (comment\n    (comment_content)))\n",
+          "expected_tree_sha256": "69597c4018501b8476b122ff79cc14e724c10edba0448d75172d64ac53db3592"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "Multi line comment incomplete",
+          "source": "# This is a comment \\ \nthis is the same comment\n{\n",
+          "source_sha256": "7615194a86956556a8c576b811e0901515192f68296e6d7062448c7eb9655327",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "godot_resource",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/issues/issue-3.txt",
+          "case_name": "Constructors accept type arguments #3",
+          "source": "[resource]\ntest_array = Array[int]([42, 76])\n",
+          "source_sha256": "c16ead5d9098f20119b5ca8957c9fddfccca58125644e6f90692ca404b27582f",
+          "expected_tree": "(resource\n  (section\n    (identifier)\n    (property\n      (path)\n      (constructor\n        (identifier)\n        (identifier)\n        (arguments\n          (array\n            (integer)\n            (integer)))))))\n",
+          "expected_tree_sha256": "defceebb262baa304f61a815648734b930d88f71cb299012e4238f51e1d4259c"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/issues/issue-3.txt",
+          "case_name": "Constructors accept type arguments #3 incomplete",
+          "source": "[resource]\ntest_array = Array[i\n",
+          "source_sha256": "e11896d77d68baf43b0578191610c473fd28064621dd54fce92a15ae16651c76",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "gomod",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/go.txt",
+          "case_name": "Go directive comment",
+          "source": "go 1.14\n",
+          "source_sha256": "381f1edf3f627c412975d053b1ccfbf7770c22e2bc7b1f7a4e0b846aa39d3ac2",
+          "expected_tree": "(source_file\n\t(go_directive\n\t\t(go_version)))\n",
+          "expected_tree_sha256": "c280bc7c65da470815b7a35afc9ab547d4fccbe20fb70475e275373f992d3233"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/go.txt",
+          "case_name": "Go directive comment incomplete",
+          "source": "go 1.14\n(\n",
+          "source_sha256": "b776af95d47dd33296eaea6a79a3fd60535a49bde89ed7cded8bbdf6591df1bc",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "gotmpl",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/variables.txt",
+          "case_name": "Variable assignment",
+          "source": "{{ $variable = pipeline }}\n",
+          "source_sha256": "93e62a7ece3669110703bccef18a6f5779d9be8a6e787953b5e23d82d7dbe120",
+          "expected_tree": "(template\n    (assignment\n        (variable (identifier))\n        (function_call (identifier))))\n",
+          "expected_tree_sha256": "ea1ed6ba26961e74f90946bf52b743ed0df95443c207b3f47fefd4011f36cb94"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/variables.txt",
+          "case_name": "Variable assignment incomplete",
+          "source": "{{ $variable = pip\n",
+          "source_sha256": "bd867d8170d083ba66145d5a57c743a52c3b7fdc300dea2bc9b5eb4fae550ae7",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "hack",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/literals.txt",
+          "case_name": "Heredoc dollar no lead space",
+          "source": "<<<EOT\n$()\nEOT;\n",
+          "source_sha256": "d673e72f9ec134547069669f34136478e1b1d260b6a4f7aa5de8bc8330cea066",
+          "expected_tree": "(script\n  (expression_statement\n    (heredoc)))\n",
+          "expected_tree_sha256": "cfc37f03721578c94ea4d2b52c69f94ca4754844c28d50d53ef5cb86a8f309bb"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/literals.txt",
+          "case_name": "Heredoc dollar no lead space incomplete",
+          "source": "<<<EOT\n$()\n",
+          "source_sha256": "5964f0fb61a8f6f419a59f4671ac24ec070228392c01e31d6d01ddbda2c75690",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "haxe",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "class with comments.",
+          "source": "// This is a comment.\nclass Main {}\n",
+          "source_sha256": "d0be39096c362e4fa57f3794716586cd6bb19ca4c481a725c90c33e6250279f7",
+          "expected_tree": "(module (comment) (class_declaration (identifier) (block)))\n",
+          "expected_tree_sha256": "523a4aa03d85d5cff89bde4118c7a7fa3d7517b1e7c764be781c8ba7a8d9adc2"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "class with comments. incomplete",
+          "source": "// This is a comment.\ncla\n",
+          "source_sha256": "c07ad390a8dbf005ba408b965bd0647dca1a835770508c7fe3671ae855078e76",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "hcl",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/json.txt",
+          "case_name": "top level object",
+          "source": "{\n  \"foo\": \"bar\"\n}\n",
+          "source_sha256": "b9cd2605ea75293b16b892a97c5e4b0bc18f3dafd0cbdf897c80258d57415c80",
+          "expected_tree": "(config_file\n  (object\n    (object_start)\n    (object_elem\n      (expression\n        (literal_value\n          (string_lit\n            (quoted_template_start)\n            (template_literal)\n            (quoted_template_end))))\n      (expression\n        (literal_value\n          (string_lit\n            (quoted_template_start)\n            (template_literal)\n            (quoted_template_end)))))\n    (object_end)))\n",
+          "expected_tree_sha256": "1e1352391451ad2d3d484ee44965aab57495daf2cc87d6b7e1f7073bc50e9d9b"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/json.txt",
+          "case_name": "top level object incomplete",
+          "source": "{\n  \"foo\": \"\n",
+          "source_sha256": "0fade7450168ccd2c824e8fb95c79f661ca1cc7410d63be6c192d2bab7151f22",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "heex",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/text.txt",
+          "case_name": "Plain Text",
+          "source": "Hello World!\n",
+          "source_sha256": "03ba204e50d126e4674c005e04d82e84c21366780af1f43bd54a37816b6ab340",
+          "expected_tree": "(fragment\n  (text))\n",
+          "expected_tree_sha256": "c21cc6e019249275ebd6c88a3c430d852d39f691944366361ea3150c8ade81a7"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/text.txt",
+          "case_name": "Plain Text incomplete",
+          "source": "Hello World!\n{\n",
+          "source_sha256": "8a53729508305748d0c93d00e7a607b8a229a87f4231ea3eadcdbee0c03e8d7b",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "hlsl",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/basic.txt",
+          "case_name": "register semantics",
+          "source": "SamplerState smp : register(s0);\n",
+          "source_sha256": "9ba18256163e2cc773f1a0cf663054a54e842a2078957590a4e2cc1250dacba1",
+          "expected_tree": "(translation_unit\n  (declaration\n    (type_identifier)\n    (identifier)\n    (semantics)\n    (semantics\n      (call_expression\n        (identifier)\n        (argument_list\n          (identifier))))))\n",
+          "expected_tree_sha256": "a78e7b99b6c9b8d1befafde464a7850299b06102245b57c98130ff0262ec5c5a"
+        },
+        "negative": {
+          "origin": "upstream-corpus-error-case",
+          "source_path": "test/corpus/basic.txt",
+          "case_name": "Properties",
+          "source": "Properties {\n  _MainTex(\"Texture\", 2D) = \"white\" {}\n}\n",
+          "source_sha256": "e49a5a90477436e73ce7f783b7bb5406741f0a1abc7d6558f6bdc13d2f5fb021",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "hocon",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/main.txt",
+          "case_name": "Multiple values in path",
+          "source": "\"Fi\" \"nn\" the human: Jake the dog\n",
+          "source_sha256": "7ed6584de04f66add14676e12dfb47dc50de62d08fb1f70dd9428b51542fc3f9",
+          "expected_tree": "(document (pair\n  (path (string) (string) (unquoted_path))\n  (value (unquoted_string) (unquoted_string) (unquoted_string))\n))\n",
+          "expected_tree_sha256": "2b81125f83f556a7f135b407dc13cd887798d1911bf966fa60f6891fa49e289c"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/main.txt",
+          "case_name": "Multiple values in path incomplete",
+          "source": "\"Fi\" \"nn\" the human: ",
+          "source_sha256": "da339dcc9e520050fb6d1740f37aae57b0147f92e2bf6887fbc2670c8622f63a",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "hoon",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/aura.txt",
+          "case_name": "basic aura",
+          "source": "@ud\n@p\n",
+          "source_sha256": "ae63f687a91acabdc553e2c6d0f2d7b170071b03aa9939963e70d01f22f8dbd8",
+          "expected_tree": "(source_file\n    (aura)\n    (Gap)\n    (aura)\n)\n",
+          "expected_tree_sha256": "f59a593fec0644b611d8f334782098b159081f1c7b1d145722a19ed59d8bf192"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/aura.txt",
+          "case_name": "basic aura incomplete",
+          "source": "@ud\n@p\n(\n",
+          "source_sha256": "8a462b072826057f34593746eb4a8d03d656311bafb78a7a7cc7baf8eb2a9625",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "http",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/hard_test.txt",
+          "case_name": "Raw body wrapped with annotation comments",
+          "source": "POST example.com\n\n# @_RES\nraw body\n# @_END\n",
+          "source_sha256": "81854766209917c6cf594a0dd92fbc40d05616b3c0a885d9b268449676da2308",
+          "expected_tree": "(document\n  (section\n  request: (request\n    method: (method)\n    url: (target_url)\n    (comment\n      name: (identifier))\n    body: (raw_body)\n    (comment\n      name: (identifier)))))\n",
+          "expected_tree_sha256": "75b7b99c2a467659c5aa8db655a43a585ecd9a2f0d7b3018ac6a065f66e94ab0"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/hard_test.txt",
+          "case_name": "Raw body wrapped with annotation comments incomplete",
+          "source": "POST example.com\n\n# @_RES\nraw body\n# @",
+          "source_sha256": "7aba58dbac709997924f699732275c1b4fff9c90da44f03ac3ecc4bcc864a9d4",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "ispc",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/special.txt",
+          "case_name": "LLVM intrinsics",
+          "source": "transpose = @llvm.matrix.transpose.v8f32.i32.i32(matrix, row, column);\n",
+          "source_sha256": "32e32cf175efb28a8662591943bdb749e2354a3ccbe27ac9cecb03550de2f906",
+          "expected_tree": "(translation_unit\n    (expression_statement\n        (assignment_expression\n            left: (identifier)\n            right: (llvm_expression\n                function: (llvm_identifier)\n                arguments: (argument_list\n                    (identifier)\n                    (identifier)\n                    (identifier)\n                )\n            )\n        )\n    )\n)\n",
+          "expected_tree_sha256": "e97397c11151c4b90640e8f8acd32b988908b73a3294899af06b263dc831fcee"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/special.txt",
+          "case_name": "LLVM intrinsics incomplete",
+          "source": "transpose = @llvm.matrix.transpose.v8f32.i32.i32(m\n",
+          "source_sha256": "22a2c9651dddab50dffc35c2a202d5145c8a4227821bfad962a059aa469e1ced",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "jai",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/literals.txt",
+          "case_name": "int literals",
+          "source": "i1 :: 42;\ni2 :: 4_2;\ni3 :: 0600;\ni4 :: 0_600;\ni5 :: 0b101;\ni6 :: 0B101;\ni7 :: 0xBadFace;\ni8 :: 0xBad_Face;\ni9 :: 0x_67_7a_2f_cc_40_c6;\n",
+          "source_sha256": "991806890fb97a63bcae19dbae534cb1bf890fc942f6034e3677c52558c2c827",
+          "expected_tree": "(source_file\n\t(statement\n\t\t(declarations_that_require_a_semicolon\n\t\t\t(const_declaration\n\t\t\t\t(identifier)\n\t\t\t\t(integer))))\n\t(statement\n\t\t(declarations_that_require_a_semicolon\n\t\t\t(const_declaration\n\t\t\t\t(identifier)\n\t\t\t\t(integer))))\n\t(statement\n\t\t(declarations_that_require_a_semicolon\n\t\t\t(const_declaration\n\t\t\t\t(identifier)\n\t\t\t\t(integer))))\n\t(statement\n\t\t(declarations_that_require_a_semicolon\n\t\t\t(const_declaration\n\t\t\t\t(identifier)\n\t\t\t\t(integer))))\n\t(statement\n\t\t(declarations_that_require_a_semicolon\n\t\t\t(const_declaration\n\t\t\t\t(identifier)\n\t\t\t\t(integer))))\n\t(statement\n\t\t(declarations_that_require_a_semicolon\n\t\t\t(const_declaration\n\t\t\t\t(identifier)\n\t\t\t\t(integer))))\n\t(statement\n\t\t(declarations_that_require_a_semicolon\n\t\t\t(const_declaration\n\t\t\t\t(identifier)\n\t\t\t\t(integer))))\n\t(statement\n\t\t(declarations_that_require_a_semicolon\n\t\t\t(const_declaration\n\t\t\t\t(identifier)\n\t\t\t\t(integer))))\n\t(statement\n\t\t(declarations_that_require_a_semicolon\n\t\t\t(const_declaration\n\t\t\t\t(identifier)\n\t\t\t\t(integer)))))\n",
+          "expected_tree_sha256": "e49b4b303bc1ab836e2c149f445c5dc5af23d0b5449249a0771063e42a6d9984"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/literals.txt",
+          "case_name": "int literals incomplete",
+          "source": "i1 :: 42;\ni2 :: 4_2;\ni3 :: 0600;\ni4 :: 0_600;\ni5 :: 0b101;\ni6 :: 0B101;\ni7 :: 0xBadFace;\ni8 :: 0\n",
+          "source_sha256": "98343d0837c5978dd388150ae2440a341a33f3e28ae541e49ae8ec1337d5fafc",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "jinja2",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/string_tests.txt",
+          "case_name": "the kind of quotes you use don't matter",
+          "source": "{{ 'a' }}\n{{ \"b\" }}\n",
+          "source_sha256": "bec8346a0b413c6a26a64af45733932371282e3724355520abddee5c44309ebe",
+          "expected_tree": "(source_file\n  (lit_string)\n  (lit_string)\n)\n",
+          "expected_tree_sha256": "938b7f138a1bfbb756b2fde1022da1c03125e0ed64087d55451f8c951a5649cd"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/string_tests.txt",
+          "case_name": "the kind of quotes you use don't matter incomplete",
+          "source": "{{ 'a' }}\n{{\n",
+          "source_sha256": "f6cdf454a55c97a5802a9f8ff12882c3037cd0f82f2c469de300d451edc4cf02",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "json5",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/arrays.txt",
+          "case_name": "Array with single element",
+          "source": "[42]\n",
+          "source_sha256": "54270b9f0b875f586e01be2c995472f072e984658d51e1aa77dfaeeb8aaa0605",
+          "expected_tree": "(file\n  (array\n    (number)))\n",
+          "expected_tree_sha256": "6bfb00ff785b3c9824f512376a225a89bb5868ba06a7774d2d27c6604d330099"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/arrays.txt",
+          "case_name": "Array with single element incomplete",
+          "source": "[42]\n(\n",
+          "source_sha256": "e10744e59ed585d2010fe7cbc3ce1925ff68b4ecc1e4e574a9483739015906bc",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "jsonnet",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/assert.txt",
+          "case_name": "Assert at root",
+          "source": "assert true : 'message';\n{}\n",
+          "source_sha256": "e0545113a5f6df425438784bb5af47c6d6499a247992f50dee572a6499566e20",
+          "expected_tree": "(document\n  (assert\n    (true)\n    (string\n      (string_start)\n      (string_content)\n      (string_end)))\n  (object))\n",
+          "expected_tree_sha256": "0aa079a93fceda5ea4a921efca317c941e4428e6ad2753bd6d496750aaa7e12c"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/assert.txt",
+          "case_name": "Assert at root incomplete",
+          "source": "assert true : 'mess\n",
+          "source_sha256": "99dc34ed3009d024a3787757f21595b84aecd2e9b9813ee68625453a5e30c0cf",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "julia",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/literals.txt",
+          "case_name": "boolean literals",
+          "source": "true\nfalse\n",
+          "source_sha256": "acb2b288b9f028830645d94e3a4417e5ffc574a024576d6f69b53d989e9d93ea",
+          "expected_tree": "(source_file\n  (boolean_literal)\n  (boolean_literal))\n",
+          "expected_tree_sha256": "05aa3167174521ad99e521b515d9fcec79b074d8c9195597406ff1a5b3168215"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/literals.txt",
+          "case_name": "boolean literals incomplete",
+          "source": "true\nfalse\n{\n",
+          "source_sha256": "3b31375760fa17979c44bf99dfb7c67836d387f81bbb920984544360b5050d87",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "just",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/injections.txt",
+          "case_name": "set shell still parse empty",
+          "source": "set shell := []\n",
+          "source_sha256": "8a174291937fe6326f90b19108feb55383eb9b8ded106a779da776ac61c26bbd",
+          "expected_tree": "(source_file\n  (setting))\n",
+          "expected_tree_sha256": "878e062cf7097519b77bfdd012e356d41ae4ce7b769299c6e9c47c23fd2d7fc0"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/injections.txt",
+          "case_name": "set shell still parse empty incomplete",
+          "source": "set shell\n",
+          "source_sha256": "a73efb606f2c1eec5cefbdc1ff9bd84891703fbad55446aa7433f4196d609419",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "kcl",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/assign.txt",
+          "case_name": "assign statements",
+          "source": "k = 1\n",
+          "source_sha256": "df378274136ce1ccd5099fdde388d0d4ccc45f4dfef8355844a18fc52b833829",
+          "expected_tree": "(module\n  (assign_stmt\n    (dotted_name\n      (identifier))\n    (integer)))\n",
+          "expected_tree_sha256": "46380ee009d74559a7c8e092100a23631336798ab1a86bd000a8db9d4f19847b"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/assign.txt",
+          "case_name": "assign statements incomplete",
+          "source": "k = 1\n(\n",
+          "source_sha256": "679d0c437c76f39f1182acb28602f7aa1ceb4ec4ba11fe3d59be83290fa27a2e",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "kdl",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/node.txt",
+          "case_name": "Test Block Comment Before Node",
+          "source": "node\n",
+          "source_sha256": "389b46f0445738f6b517def165c3e490efa2eb8825c695b8ac8221565e78e4fa",
+          "expected_tree": "(document\n      (node\n        (identifier)))\n",
+          "expected_tree_sha256": "8b28019eafe0adc0a304180fca5ba0232d4435dfd2652d74ac5a89f4720f732d"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/node.txt",
+          "case_name": "Test Block Comment Before Node incomplete",
+          "source": "node\n(\n",
+          "source_sha256": "1ad8731385621909773ba890a87898d0366ecf5cc33d3c26abd2dea1a350cd6c",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "latex",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/groups.txt",
+          "case_name": "Nested curly groups",
+          "source": "Foo {Bar Baz {Qux}}\n",
+          "source_sha256": "658a49e882536c394a857e833913aea1d051d9398535de2548e3e76ba6f31122",
+          "expected_tree": "(source_file\n  (text\n    (word))\n  (curly_group\n    (text\n      (word)\n      (word))\n    (curly_group\n      (text\n        (word)))))\n",
+          "expected_tree_sha256": "6c18a81d5c621571397fa609e167c4ad15e598512f939d6c899811619f6b23af"
+        },
+        "negative": {
+          "origin": "upstream-corpus-error-case",
+          "source_path": "test/corpus/groups.txt",
+          "case_name": "Unbalanced curly braces",
+          "source": "} Foo { Bar\n",
+          "source_sha256": "28292c86b41e3ad47b0fe95be1a711c477afe95a76c7e8e9847e0995828f3519",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "lean",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/module.txt",
+          "case_name": "Single import",
+          "source": "import Foo\n",
+          "source_sha256": "4502d3387a5f72594541353f1e3c6372a8e636a266544fe45a662326533913d4",
+          "expected_tree": "(module\n  (import\n    name: (identifier)))\n",
+          "expected_tree_sha256": "1e7f9aa4b185fbbcfe35af785c2463ffb1165440468ccd45f122a5648c2f58ad"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/module.txt",
+          "case_name": "Single import incomplete",
+          "source": "import\n",
+          "source_sha256": "68e67653d93a28e22741c0d09cdd8d2525a67ad8f2b8f03948d884b7857bb520",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "ledger",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/dates.txt",
+          "case_name": "single dates",
+          "source": "2021-09-01\n    Account\n\n21-09-01\n    Account\n\n09-01\n    Account\n\n2023-4-2\n    Account\n",
+          "source_sha256": "3b382f7c48fcb51665e94128fdf604cb707a5aac1ae8331279b2a17f2d03e0ce",
+          "expected_tree": "(source_file\n  (journal_item\n    (xact\n      (plain_xact\n        (date)\n        (posting (account)))))\n  (journal_item\n    (xact\n      (plain_xact\n        (date)\n        (posting (account)))))\n  (journal_item\n    (xact\n      (plain_xact\n        (date)\n        (posting (account)))))\n  (journal_item\n    (xact\n      (plain_xact\n        (date)\n        (posting (account))))))\n",
+          "expected_tree_sha256": "27c835318a87f76407c8bd830d9f564138a6ce6bea786b9ca554d9784ae8fedd"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/dates.txt",
+          "case_name": "single dates incomplete",
+          "source": "2021-09-01\n    Account\n\n21-09-01\n    Account\n\n09-01\n    Account\n\n2023-4-2\n    Account",
+          "source_sha256": "85cd68ab2771fcacf7c23206860801eb587e3fe96e7d31be794af7e155a48d61",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "llvm",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/structure.ll",
+          "case_name": "Data Layout",
+          "source": "target datalayout = \"\"\n",
+          "source_sha256": "86a7403a3cd1bc12c3a2d12e47caf51a94b9801fc3ec9b22bfaf7a47494b2c5b",
+          "expected_tree": "(module\n  (target_definition\n    (data_layout\n      (string))))\n",
+          "expected_tree_sha256": "d261f02a304142f733a4ff101c475bc35370f588e54e5cccb27782ebd2bd809b"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/structure.ll",
+          "case_name": "Data Layout incomplete",
+          "source": "target datalayo\n",
+          "source_sha256": "d6c74029e490c7e9ed819c4db2d6857dd7469f7d23f41d5b519a4736a8e3964c",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "luau",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/test.txt",
+          "case_name": "Annotated type in loop",
+          "source": "for _, value: string in {\"1\", \"2\", \"3\"} do\nend\n",
+          "source_sha256": "c386c4e4395c92aecce4c1537c7189b38c2e4f7b2904190df9241552b77013e5",
+          "expected_tree": "(chunk\n  (for_statement\n    (for_generic_clause\n      (variable_list\n        (identifier)\n        (identifier)\n        (builtin_type))\n      (expression_list\n        (table_constructor\n          (field\n            (string\n              (string_content)))\n          (field\n            (string\n              (string_content)))\n          (field\n            (string\n              (string_content))))))))\n",
+          "expected_tree_sha256": "45368fd3746ee7d666e51b69d2a3a48dd75dec48e8d7942934ace14765c698a2"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/test.txt",
+          "case_name": "Annotated type in loop incomplete",
+          "source": "for _, value: string in {\"1\", \"2\"\n",
+          "source_sha256": "e45e9fd3883214bce0a818ff24878242afd56a746efa1da2d69c11acd0808413",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "magik",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/package.txt",
+          "case_name": "package",
+          "source": "_package user\n_package sw\n_package user\n$\n",
+          "source_sha256": "220cd1423f08046851e9ea2e197753749691fa38e796e76a228f822b666cd846",
+          "expected_tree": "(source_file\n  (package)\n  (package)\n  (package))\n",
+          "expected_tree_sha256": "e1002589339df19c5a33b284d46585cb8c775987cd58ade330cd4f97818f39fe"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/package.txt",
+          "case_name": "package incomplete",
+          "source": "_package user\n_package sw\n_pa\n",
+          "source_sha256": "28351c92986e1e9b323a99d44eb6ac41f59b552e7e4d0f1f0eb707169262f4ab",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "make",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/conflicts.mk",
+          "case_name": "Define directive (whitespace after name)",
+          "source": "define two-lines \necho foo\necho bar\nendef\n",
+          "source_sha256": "b1cdaf42423f50b67040b6b0b5c4bd51ad3da170e856448a607829655f17f264",
+          "expected_tree": "(makefile\n  (define_directive\n     name: (word)\n    value: (raw_text)))\n",
+          "expected_tree_sha256": "9c66a6484a06989cc55a9dc5b543b034009cf269c63aec528b58763685eaa631"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/conflicts.mk",
+          "case_name": "Define directive (whitespace after name) incomplete",
+          "source": "define two-lines \necho foo\nec\n",
+          "source_sha256": "2375cb31602a67613306cf3eb3cc6297e4cd2c923747f48f13132ad1cc223384",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "matlab",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/lambda.txt",
+          "case_name": "Lambda: Handle",
+          "source": "a = @sin\nb = @math.sin\n",
+          "source_sha256": "1d661550b51133de99bc2bf9879cd0d50d19d381ab60d7c285105fab4db4cec0",
+          "expected_tree": "(source_file\n  (assignment\n    (identifier)\n    (handle_operator\n      (identifier)))\n  (assignment\n    (identifier)\n    (handle_operator\n      (identifier)\n      (identifier))))\n",
+          "expected_tree_sha256": "8f94a1777841dfcbde793aafdc78156ba405d64925edb25bc74e56038db010fb"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/lambda.txt",
+          "case_name": "Lambda: Handle incomplete",
+          "source": "a = @sin\nb = @math.sin",
+          "source_sha256": "76ca54870e08e8642fd7bee21895752fec0810f06a517fbe2412c0e51ae24839",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "mermaid",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/pie.txt",
+          "case_name": "Simple Pie chart",
+          "source": "pie\n    title Key elements in Product X\n    \"Calcium\" : 42.96\n    \"Potassium\" : 50.05\n    \"Magnesium\" : 10.01\n    \"Iron\" :  5\n",
+          "source_sha256": "636c6e927ec1ff8c2f744415821fbeb37a669bd2e58f62da369ffdc5331ef5d0",
+          "expected_tree": "(source_file\n  (diagram_pie\n    (pie_stmt_title\n      (pie_title))\n    (pie_stmt_element\n      (pie_label)\n      (pie_value))\n    (pie_stmt_element\n      (pie_label)\n      (pie_value))\n    (pie_stmt_element\n      (pie_label)\n      (pie_value))\n    (pie_stmt_element\n      (pie_label)\n      (pie_value))))\n",
+          "expected_tree_sha256": "0cf11832d354560cc6aaf58477e13a437cebf86749f95861cbdfc8fcd9d657de"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/pie.txt",
+          "case_name": "Simple Pie chart incomplete",
+          "source": "pie\n    title Key elements in Product X\n    \"Calcium\" : 42.96\n    \"Potassium\" : 50.05\n    \"Magnesium\" : 10.01\n    \"Iron\" :  ",
+          "source_sha256": "3c58e6ca46189d48b93a8c1eae2ab00b4da42c497e12e6fa6e8c7933cee96ff0",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "meson",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comment.txt",
+          "case_name": "comment after command",
+          "source": "project( # it is project \n\t'wayvnc',# project name\n\t'c',\n\tversion: '0.5.0',\n\tlicense: 'ISC',\n\tdefault_options: [\n\t\t'c_std=gnu11', # option\n\t],\n\tname: '''it is \n\tsdfd\n\t''',\n)\n",
+          "source_sha256": "7e9225fed0a920a915ab198f1b8d3b1974ceaf2e4bf018112722324a8214fbae",
+          "expected_tree": "(source_file\n  (normal_command\n    (identifier)\n    (comment)\n    (variableunit\n      (string))\n    (comment)\n    (variableunit\n      (string))\n    (pair\n      (identifier)\n      (string))\n    (pair\n      (identifier)\n      (string))\n    (pair\n      (identifier)\n      (list\n        (string)\n        (comment)))\n    (pair\n      (identifier)\n      (string))))\n",
+          "expected_tree_sha256": "15208283cf3e18d661437e0aa53e1937d8bceda8f05ff628891f30767f014208"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comment.txt",
+          "case_name": "comment after command incomplete",
+          "source": "project( # it is project \n\t'wayvnc',# project name\n\t'c',\n\tversion: '0.5.0',\n\tlicense: 'ISC',\n\tdefault_options: [\n\t\t'c_std=gn\n",
+          "source_sha256": "e34e4f4db1243e56d8ac5965c3bec2ad5c778740f99be2825dc26adb4ad4989b",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "mlir",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/func.txt",
+          "case_name": "Function prototype",
+          "source": "func.func @abort()\n",
+          "source_sha256": "ee9edbd883faac29eeb9f3597de9d3f5b4fc4d28560bf6bf78057c7e2e6ee80d",
+          "expected_tree": "(toplevel\n  (operation\n    (custom_operation\n      (func_dialect\n        (symbol_ref_id)\n        (func_arg_list)))))\n",
+          "expected_tree_sha256": "adcdd11b7d30b136543cf8a3e943808fc12a29b6a70853edd040974e551ecd2f"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/func.txt",
+          "case_name": "Function prototype incomplete",
+          "source": "func.func @a\n",
+          "source_sha256": "85ddc8dabf7a2c3ca9bea2c945721e7fa669aeb166e9d1422ca9124b9676337c",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "nasm",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/macros.txt",
+          "case_name": "header guard",
+          "source": "%ifndef __SOME_INC__\n%define __SOME_INC__\n; ...\n%endif ;__SOME_INC__\n",
+          "source_sha256": "9f901892a0e4bc1a85216bb23d8d6e74245ca4ec45fe6974216cd7c23a12675d",
+          "expected_tree": "(source_file\n  (preproc_if\n    (word)\n    (body\n      (preproc_def\n        (word))\n      (comment)))\n  (comment))\n",
+          "expected_tree_sha256": "23c9e24d6301c3ca932162403e186836b90821a4b8c0d97d4ad164f20fd5e582"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/macros.txt",
+          "case_name": "header guard incomplete",
+          "source": "%ifndef __SOME_INC__\n%define __SOME_INC__\n; ...\n",
+          "source_sha256": "fed6b8c9d3b4fdb29f0edc01d0a3328468bea0df5c8ef2e3b1d852675063f76f",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "netlinx",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "Single Line",
+          "source": "// This is a comment\n// This is another comment\n",
+          "source_sha256": "1bf2c3f9af86355026ed56f054c86a23e8d39088b5bf08f48ffc6c387964fb6a",
+          "expected_tree": "(source_file\n      (comment)\n      (comment))\n",
+          "expected_tree_sha256": "cf42df78ff1b65ee917c5b42fd2ebec239fd6ffb7417fe4ca459aed5fc2f5704"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "Single Line incomplete",
+          "source": "// This is a comment\n/",
+          "source_sha256": "789fa826526a284f998c18e371247ee78d0e1df74e62af0b215c71ccfe7a32e4",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "nginx",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/medium.txt",
+          "case_name": "Medium examples #3",
+          "source": "server {\n    listen 443 ssl;\n    ssl_certificate /path/to/your/cert.pem;\n    ssl_certificate_key /path/to/your/key.pem;\n    server_name example.com;\n    return 301 https://www.example.com$request_uri;\n}\n\nserver {\n    listen 443 ssl;\n    ssl_certificate /path/to/your/cert.pem;\n    ssl_certificate_key /path/to/your/key.pem;\n    server_name www.example.com;\n    # Your normal web content block goes here\n}\n",
+          "source_sha256": "8d139bde9e20397ea4f92d739e552b46206dab3fe1a398e6f0ccbcdfc64ffe0f",
+          "expected_tree": "(source_file\n      (attribute\n        (keyword)\n        (block\n          (attribute\n            (keyword)\n            (numeric_literal)\n            (value))\n          (attribute\n            (keyword)\n            (value))\n          (attribute\n            (keyword)\n            (value))\n          (attribute\n            (keyword)\n            (value))\n          (directive\n            (keyword)\n            (numeric_literal)\n            (value))))\n      (attribute\n        (keyword)\n        (block\n          (attribute\n            (keyword)\n            (numeric_literal)\n            (value))\n          (attribute\n            (keyword)\n            (value))\n          (attribute\n            (keyword)\n            (value))\n          (attribute\n            (keyword)\n            (value))\n          (comment))))\n",
+          "expected_tree_sha256": "d486eb2d9357ffa8db17f492bfb91ce8897e7ab7dcdf0068b947feac64299bf8"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/medium.txt",
+          "case_name": "Medium examples #3 incomplete",
+          "source": "server {\n    listen 443 ssl;\n    ssl_certificate /path/to/your/cert.pem;\n    ssl_certificate_key /path/to/your/key.pem;\n    server_name example.com;\n    return 301 https://www.example.com$request_uri;\n}\n\nserver {\n    listen 443 ssl;\n    ssl_certificate /path/to/your/cert.pem;\n    ssl_certi\n",
+          "source_sha256": "d952d94c9fb3f8fe7b04b48e0a5f81eab41acd6e204811f738b7e11130a23ed0",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "nim",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "docComment",
+          "source": "## doc\ndiscard true ## doc\n  ## doc\n",
+          "source_sha256": "0614cc3e22b0a83f5a37fc6a904d8c6a5165bd7a064cc99802be9880afd2cc72",
+          "expected_tree": "(module\n  (docComment)\n  (stmt\n    (discardStmt\n      (keyw)\n      (expr\n        (primary\n          (literal\n            (bool_lit))))))\n  (docComment)\n  (docComment))\n",
+          "expected_tree_sha256": "96c0a1ea04f216a065840a3a8d0cee78de9cc5bc8017b13b917eed93c90e00f1"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "docComment incomplete",
+          "source": "## doc\ndiscard true ## doc\n  ## doc\n{\n",
+          "source_sha256": "003a625a1fc931eac2ce4305d113972aa556f8f51f52df89cde0f405da78c6b0",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "norg",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/escape.txt",
+          "case_name": "Test escaping new lines",
+          "source": "one\\\nword\n",
+          "source_sha256": "ce787c1e52fb2cd8b9c7eb0677d3c4abdeeb6515bc6d85a6355e78bb64f834b6",
+          "expected_tree": "(document\n  (paragraph\n    (paragraph_segment\n      (escape_sequence\n        (escape_sequence_prefix)\n        (any_char)))))\n",
+          "expected_tree_sha256": "e5eec08721a0b774d34a39562234bfcaca76daf93f2bf61f3601c4cdd69fec13"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/escape.txt",
+          "case_name": "Test escaping new lines incomplete",
+          "source": "one\\",
+          "source_sha256": "06fe7e5d22254f3b2ff4f635cdb05ea18da7f2ca6697d1ba1acb70a9e0564437",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "nqc",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/variables.txt",
+          "case_name": "Variable Declaration",
+          "source": "int x; // declare x\nint y,z; // declare y and z\nint *q, *p = &x; // declare ptrs q and p, p = address of x\nint a=1,b; // declare a and b, initialize a to 1\n",
+          "source_sha256": "cecbf96d39649c9b9488b4ecbda18378f8f79ef57895984a83c33b86b0034d12",
+          "expected_tree": "(translation_unit\n  (declaration\n    (primitive_type)\n    (identifier))\n  (comment)\n  (declaration\n    (primitive_type)\n    (identifier)\n    (identifier))\n  (comment)\n  (declaration\n    (primitive_type)\n    (pointer_declarator\n      (identifier))\n    (init_declarator\n      (pointer_declarator\n        (identifier))\n      (pointer_expression\n        (identifier))))\n  (comment)\n  (declaration\n    (primitive_type)\n    (init_declarator\n      (identifier)\n      (number_literal))\n    (identifier))\n  (comment))\n",
+          "expected_tree_sha256": "1cc48d368bcf314238b7a6d06476adcdb92acedd1c545a39b43ffc558d6ec876"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/variables.txt",
+          "case_name": "Variable Declaration incomplete",
+          "source": "int x; // declare x\nint y,z; // declare y and z\nint *q, *p = &x; // declare ptrs q and p, p = address of x\nint\n",
+          "source_sha256": "b250a08e2251faf719b9f81c04d804bffda7dd1b24f36b63367eb94c7b320e50",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "nushell",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/decl/script.nu",
+          "case_name": "script-002-shebang",
+          "source": "#!/usr/bin/nu env\n",
+          "source_sha256": "d46746c58abcf9d33f8cff078257409016223c89cbc5c8b5a617aae769074bea",
+          "expected_tree": "(nu_script\n  (shebang))\n",
+          "expected_tree_sha256": "549e43841d7c3e5e6f6a1562e9cdec4068cc28262a581dd2b2ec71abc8e52f00"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/decl/script.nu",
+          "case_name": "script-002-shebang incomplete",
+          "source": "#!/usr/bin/nu env\n(\n",
+          "source_sha256": "66f54219e0b4dd3ff9b8f01ef269d54d9b0eee6a48ba5a4f333f5416375b21fa",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "ocamllex",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/refill-handlers.txt",
+          "case_name": "Anonymous function",
+          "source": "refill {fun k lexbuf -> k lexbuf}\nrule main = parse _ {}\n",
+          "source_sha256": "475a23dfc1d141a310a622c1d49264ae28f081daf096b5119db08160df0aa6dc",
+          "expected_tree": "(lexer_definition\n  (refill_handler\n    (ocaml))\n  (lexer_entry\n    name: (lexer_entry_name)\n    (lexer_case\n      (any)\n      (action\n        (ocaml)))))\n",
+          "expected_tree_sha256": "bd4e369fd38c573658d2e06dc3918122a8f9d5759fdb6e8ada48bbb359f207f5"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/refill-handlers.txt",
+          "case_name": "Anonymous function incomplete",
+          "source": "refill {fun k lexbuf -> k lexbuf}\nrule m\n",
+          "source_sha256": "20d50359b144fd4e4e9c1987fc26fe8fbe0492b36a3534dee0fd7f8982aa6174",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "odin",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/declarations.txt",
+          "case_name": "Build Tags",
+          "source": "#+build darwin, linux\n",
+          "source_sha256": "d2a1c84565d5ddc81d65f9b9ff70d4f95439213ee212161d6b8cac5fd5110206",
+          "expected_tree": "(source_file\n  (build_tag))\n",
+          "expected_tree_sha256": "a0c35145837457d20c170c728a5425ff72712b5b1e773778b483e87822435f70"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/declarations.txt",
+          "case_name": "Build Tags incomplete",
+          "source": "#+",
+          "source_sha256": "c366b28ed174bb8606a2903337c66024bd02779ff3cc1aa135cdd82be61e7142",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "openscad",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/items.txt",
+          "case_name": "Nested Items",
+          "source": "module big_module() {\n  function inner_function() = undef;\n  module inner_module() cube();\n}\n\nmodule extern_module() include <other_file.scad>\n",
+          "source_sha256": "1f12911f68a006f2bf4184e930011a174117f12b83949bd0ae7167ec889882f9",
+          "expected_tree": "(source_file\n  (module_declaration\n    name: (identifier)\n    parameters: (parameters_declaration)\n    body: (union_block\n      (function_declaration\n        name: (identifier)\n        parameters: (parameters_declaration)\n        (undef))\n      (module_declaration\n        name: (identifier)\n        parameters: (parameters_declaration)\n        body: (transform_chain\n          (module_call\n            name: (identifier)\n            arguments: (arguments))))))\n  (module_declaration\n    name: (identifier)\n    parameters: (parameters_declaration)\n    body: (include_statement\n      (include_path))))\n",
+          "expected_tree_sha256": "602137f53d1c8cdf793a02246eaf03e59a0971ce152f8f70646edb9407785fac"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/items.txt",
+          "case_name": "Nested Items incomplete",
+          "source": "module big_module() {\n  function inner_function() = undef;\n  module inner_module() cube();\n}\n\nmodule e\n",
+          "source_sha256": "6881b8a9e13cb8f02314f458a066b2178662d3c16276a35aeb8c3e146accf899",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "pascal",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/inlinevar.txt",
+          "case_name": "Inline Auto Variables",
+          "source": "procedure Test;\nbegin\n  var a := 10;\nend;\n",
+          "source_sha256": "af00ffd0a726775368c5f680105b9f8496ac47249317adada0efe3907bece60b",
+          "expected_tree": "(root\n (defProc\n  (declProc\n   (kProcedure)\n   (identifier))\n  (block\n   (kBegin)\n   (assignment\n    (varAssignDef\n     (kVar)\n     (identifier))\n    (kAssign)\n    (literalNumber))\n   (kEnd))))\n",
+          "expected_tree_sha256": "97a94035e8761185735152a63da025764806d74657d5f1bd053e690ae0122c42"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/inlinevar.txt",
+          "case_name": "Inline Auto Variables incomplete",
+          "source": "procedure Test;\nbegin\n  var a\n",
+          "source_sha256": "8cd3d08d60ac4feb8da5daa7395584945450a7f57267ee23cdfa71551aec59f6",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "pem",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/pem.txt",
+          "case_name": "comments",
+          "source": "this is a comment\n-----BEGIN EC PARAMETERS-----\nBgUrgQQAIg==\n-----END EC PARAMETERS-----\n",
+          "source_sha256": "66e7f6ebf6486a64db91ad3c37c2ad01d45e8aa65fe769e77a3b24d9d7765c19",
+          "expected_tree": "(pem\n  (comment)\n  (content\n    (header\n      (dashes)\n      (label)\n      (dashes))\n    (data)\n    (footer\n      (dashes)\n      (label)\n      (dashes))))\n",
+          "expected_tree_sha256": "8bcb843da0be34e63dc188757251a76cbb34d7745806e18063a916b36da8a800"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/pem.txt",
+          "case_name": "comments incomplete",
+          "source": "this is a comment\n-----BEGIN EC PARAMETERS-----\nBgUrgQQAIg==\n--\n",
+          "source_sha256": "4e25a1ac3f8831a87a7fc9948bfcf1fbf9f25140e86528562778ea623065520b",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "pkl",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/snippetTests/basic/baseModule.txt",
+          "case_name": "basic/baseModule.pkl",
+          "source": "foo {}\n",
+          "source_sha256": "1f591b969b320a2460d9a85a93556ea7292911fd81d2c6cff187e8cee1d63c4a",
+          "expected_tree": "(module\n  (classProperty\n    (identifier)\n    (objectBody)))\n",
+          "expected_tree_sha256": "ae8f06e513aad07a113c11c76c80d5aafbc72a5b3b143b02463ec1313763fa7c"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/snippetTests/basic/baseModule.txt",
+          "case_name": "basic/baseModule.pkl incomplete",
+          "source": "foo {}\n(\n",
+          "source_sha256": "1f6bba1347cba4990b392752ac27117ba89e4eec67a72bf8af9657e72bea47d6",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "poe_filter",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/filter.txt",
+          "case_name": "Minimal block",
+          "source": "Minimal\n  BaseType \"Scroll of Wisdom\"\n  Continue\n",
+          "source_sha256": "2d4e4a309c798b62f82fe02aa3149c2698e3c81390851fa165388f96be169773",
+          "expected_tree": "(filter\n  (block\n    (condition\n      (name)\n      (string))\n    (continue)))\n",
+          "expected_tree_sha256": "f87bacc71628d070f6252d19719dde5e91b28e1718900329d7557e29256c2819"
+        },
+        "negative": {
+          "origin": "upstream-corpus-error-case",
+          "source_path": "test/corpus/filter.txt",
+          "case_name": "Errors",
+          "source": "Show\n  Rarity \" Normal\"\n\nHide\n  HasInfluence \"Shaper\n",
+          "source_sha256": "d48d49f4c1bda157db070e3ed684c954445759f31cb6873dc6eca6ff465f82c6",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "pony",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/generics.txt",
+          "case_name": "Ambiguous Generic Expressions",
+          "source": "class X[T]\n\nactor Main\n  new create(env: Env) =>\n    X\n    [None]\n\n  fun other() =>\n    X [None]\n",
+          "source_sha256": "bc65ea9d895d85545a7e28a8d433051fbfa5d33e325bb5b04e9bc26a26f83f0b",
+          "expected_tree": "(source_file\n  (class_definition\n    (identifier)\n    (generic_parameters\n      (generic_parameter\n        (identifier))))\n  (actor_definition\n    (identifier)\n    (members\n      (constructor\n        (identifier)\n        (parameters\n          (parameter\n            (identifier)\n            (base_type\n              (identifier))))\n        (block\n          (identifier)\n          (array_literal\n            (block\n              (identifier)))))\n      (method\n        (identifier)\n        (parameters)\n        (block\n          (generic_expression\n            (identifier)\n            (type_args\n              (base_type\n                (identifier)))))))))\n",
+          "expected_tree_sha256": "1ba3c8667085bb1f04dbc7abba1b3de2f616ce15e29ba4a2eabce20e53988a75"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/generics.txt",
+          "case_name": "Ambiguous Generic Expressions incomplete",
+          "source": "class X[T]\n\nactor Main\n  new create(env: Env) =>\n    X\n    [None]\n\n  fun other() =>\n    X [None",
+          "source_sha256": "237e22517c9ab35433b5bbbe41e54807910a7130641a265d0436ce500375748c",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "postscript",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/operator.txt",
+          "case_name": "operator looking like a float",
+          "source": "17e\n",
+          "source_sha256": "0515e44ff0b927b11124678d75584e6e137a39506ed21bd1a8c0d4eb2b4c9047",
+          "expected_tree": "(document\n  (operator))\n",
+          "expected_tree_sha256": "e30dc72d54c31cf37f40a9fd887bdd963e882651bd7f401004622ff672ceeaea"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/operator.txt",
+          "case_name": "operator looking like a float incomplete",
+          "source": "17e\n(\n",
+          "source_sha256": "ec0112d05393f067ef10e9645ededc399e5077cc70fd76c94814c7d8670ce41c",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "promql",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/range.txt",
+          "case_name": "range vector - simple",
+          "source": "http_requests_total[1m]\n",
+          "source_sha256": "91b8fda0182917cc0c71df9aff8a3534c9a12e6e5603e00c75d677d70e01ec48",
+          "expected_tree": "(query\n  (range_vector_selector\n    (metric_name)\n    (range_selection)))\n",
+          "expected_tree_sha256": "604447f65c7b2ff03a82f726be6e2875d32bf418f4ebbbf5ebf5882856f05d21"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/range.txt",
+          "case_name": "range vector - simple incomplete",
+          "source": "http_requests_total[1m",
+          "source_sha256": "73e19c153070e3e3a55dd95912fb6845b0040797576e93637166f5c9971c8c51",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "prql",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/variables.txt",
+          "case_name": "Variables",
+          "source": "let top_50 = (\n  from employees\n  sort salary\n  take 50\n  aggregate {total_salary = sum salary}\n)\n\nfrom top_50\n",
+          "source_sha256": "1c73f7473b5ab764452ce62a43bb339db0007dbde46825ff5431c820b76add5c",
+          "expected_tree": "(program\n  (variable\n    (keyword_let)\n    (identifier)\n    (pipeline\n      (from\n        (keyword_from)\n        (identifier))\n      (transforms\n        (sorts\n          (keyword_sort)\n          (identifier))\n        (takes\n          (keyword_take)\n          (integer))\n        (aggregate\n          (keyword_aggregate)\n          (assignment\n            (field\n              (identifier))\n            (keyword_sum)\n            (field\n              (identifier)))))))\n  (pipeline\n    (from\n      (keyword_from)\n      (identifier))))\n",
+          "expected_tree_sha256": "ec9ecb6ea9694dd3dc24c5ccac73b457452afb7c53ef793502772926ce00e716"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/variables.txt",
+          "case_name": "Variables incomplete",
+          "source": "let top_50 = (\n  from employees\n  sort salary\n  take 50\n  aggregate {total_sala\n",
+          "source_sha256": "216688d14b03a014c71ee4284d7c5f1174cf5e8058c001da728030772b2addc3",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "psv",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/test.txt",
+          "case_name": "Single letter",
+          "source": "a\n",
+          "source_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+          "expected_tree": "(document\n\t(row\n\t\t(field (text))))\n",
+          "expected_tree_sha256": "cd92a6a9361167a494fd27b368627e06a335002c101a307a747dbf3d91d9dee8"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/test.txt",
+          "case_name": "Single letter incomplete",
+          "source": "a\n|",
+          "source_sha256": "b303bee17e95794dcb0f5cdc37f53aafce084eafda7471fe0dcbb0e2dacba05b",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "puppet",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/statements.txt",
+          "case_name": "Unless Statements",
+          "source": "unless $facts['memory']['system']['totalbytes'] > 1073741824 {\n  $maxclient = 500\n}\n",
+          "source_sha256": "c5cc8011266e92112dd721036d72f58e10b1d4e82e32842a6a067bd8c36922e7",
+          "expected_tree": "(source_file\n  (unless_statement\n    (binary_expression\n      (resource_reference\n        (resource_reference\n          (resource_reference\n            (variable\n              (identifier))\n            (string\n              (string_content)))\n          (string\n            (string_content)))\n        (string\n          (string_content)))\n      (number))\n    (block\n      (assignment\n        (variable\n          (identifier))\n        (number)))))\n",
+          "expected_tree_sha256": "2bfd7e5a3e9e859350dfcb5a62f5f23b760b4d58b9c5e87724b2613cc07d7259"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/statements.txt",
+          "case_name": "Unless Statements incomplete",
+          "source": "unless $facts['memory']['system']['totalbytes'] > 107374182\n",
+          "source_sha256": "c5f941dad5bfa745b7ccc99295cd2dfc8355291b0ea84e64e19b5080be11a7c8",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "purescript",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "Block comments can't nest",
+          "source": "{- {- -}\n",
+          "source_sha256": "2f3b6f0a0ece46d4548a7bd1459076d9e17e9f911f66e297033fa7cc1dff86fd",
+          "expected_tree": "(purescript\n  (comment)\n  (empty_file))\n",
+          "expected_tree_sha256": "d91b7919a5ef05230c11f085ca3e299d4cf3a4d89d156c6e6b31287d0ba4385d"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "Block comments can't nest incomplete",
+          "source": "{- {- -}\n(\n",
+          "source_sha256": "eba4b7138e80694fa8cabd3e9aca75aec89e049b9ae292336453b069feadd9aa",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "ql",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/ctf.txt",
+          "case_name": "dataflow example from ctf",
+          "source": "from Configuration cfg, DataFlow::PathNode source, DataFlow::PathNode sink\nwhere cfg.hasFlowPath(source, sink)\nselect sink.getNode(), source, sink, \"Potential XSS vulnerability in plugin.\"\n",
+          "source_sha256": "e230ca0134957b8f3fa038470a5c3d860d34f4a1cc7685aa6ddd134c1ffe2674",
+          "expected_tree": "(ql (moduleMember \n  (select \n    (varDecl (typeExpr (className)) (varName (simpleId))) \n    (varDecl (typeExpr (moduleExpr (simpleId)) (className)) (varName (simpleId))) \n    (varDecl (typeExpr (moduleExpr (simpleId)) (className)) (varName (simpleId))) \n    (qualified_expr \n      (variable (varName (simpleId))) \n      (qualifiedRhs (predicateName) (variable (varName (simpleId))) (variable (varName (simpleId))))) \n    (asExprs \n      (asExpr (qualified_expr (variable (varName (simpleId))) (qualifiedRhs (predicateName)))) \n      (asExpr (variable (varName (simpleId)))) \n      (asExpr (variable (varName (simpleId)))) \n      (asExpr (literal (string)))))))\n",
+          "expected_tree_sha256": "f59d74b548c52e9eeebd47307dcc83855f083d2f8472c23a50b1c24e8e5f888f"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/ctf.txt",
+          "case_name": "dataflow example from ctf incomplete",
+          "source": "from Configuration cfg, DataFlow::PathNode source, DataFlow::PathNode sink\nwhere cfg.hasFlowPath(source, sink)\nselect sink.getNode(), source, sink, \"Potential XSS vulnerability in plugin.",
+          "source_sha256": "f50121afb3dcf0adc443895c603705362864395b48cfa9f56880e788fca13a2c",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "qmljs",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/compatibility.txt",
+          "case_name": "Compatibility semicolon",
+          "source": "// qtdeclarative/tests/auto/qml/qqmlecmascript/data/compatibilitySemicolon.qml\nQtObject {\n    function code() {\n        // Not correct according to ECMA 5.1, but JSC and V8 accept the following:\n        do {\n            ;\n        } while (false) true\n    }\n}\n",
+          "source_sha256": "cb93d09dfd00e7aaf1505a827c3892d1b7807c2dd307197f7da352c98ecd38ce",
+          "expected_tree": "(program\n  (comment)\n  (ui_object_definition\n    (identifier)\n    (ui_object_initializer\n      (function_declaration\n        (identifier)\n        (formal_parameters)\n        (statement_block\n          (comment)\n          (do_statement\n            (statement_block\n              (empty_statement))\n            (parenthesized_expression\n              (false)))\n          (expression_statement\n            (true)))))))\n",
+          "expected_tree_sha256": "a9c4993d05ae8f513e1e4231b973cd701bb0a54165144d122d0070e456170a90"
+        },
+        "negative": {
+          "origin": "upstream-corpus-error-case",
+          "source_path": "test/corpus/compatibility.txt",
+          "case_name": "Semicolon after array/object binding is not allowed",
+          "source": "QtObject {\n    object: QtObject {};\n    array: [QtObject {}];\n}\n",
+          "source_sha256": "d3a60f45b28e8fc8dd3176a4daa6ac8d67a56110afe8670ab585e92af5e0d683",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "racket",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/box.rkt",
+          "case_name": "box",
+          "source": "#&17\n#&\"str\"\n#& ()\n",
+          "source_sha256": "ab8d3adb0ac8530d5c58b18d98b28ea1b97f8a747ab1c2228263a26810375796",
+          "expected_tree": "(program\n  (box\n    (number))\n  (box\n    (string))\n  (box\n    (list)))\n",
+          "expected_tree_sha256": "a15b3dcab486ff578ab633fac5053955b7c0479a51b4c70ca86cc01d5a46aa1f"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/box.rkt",
+          "case_name": "box incomplete",
+          "source": "#&17\n#&\"str\"\n#& (",
+          "source_sha256": "d6432dbb48bf639a00cb821827fdd77d3a0257ae2b9942c6f1ba6b8b6ffab7a8",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "rasi",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/declaration.txt",
+          "case_name": "Declaration simple",
+          "source": "window {\n  identifier: true;\n}\n",
+          "source_sha256": "209808f29e95677c0ebf2aeffa40b56de4b287778b9e4f48bbd50f6de13387ec",
+          "expected_tree": "(stylesheet\n  (rule_set\n    selectors: (selectors\n      (id_selector\n        widget: (identifier)))\n    body: (block\n      (declaration\n        (property_name)\n        value: (boolean_value)))))\n",
+          "expected_tree_sha256": "4a17367ef77fa065d4636fc9112bbf927e391b7947afe10dc483ce1a63d11fae"
+        },
+        "negative": {
+          "origin": "upstream-corpus-error-case",
+          "source_path": "test/corpus/declaration.txt",
+          "case_name": "Declaration error missing property name",
+          "source": "window {\n  : true;\n}\n",
+          "source_sha256": "c74be78d3e10a9be0567c7a496916091671879532f982f4d4f15cff2c03f34a2",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "razor",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/escapes.txt",
+          "case_name": "Escape",
+          "source": "@@code\n",
+          "source_sha256": "73e07532801c02ad48bd7a101fe2818c34e5beff4b0c80bab487d413e807f359",
+          "expected_tree": "(compilation_unit\n  (razor_escape\n    (element)))\n",
+          "expected_tree_sha256": "914c3d52a291be3c0b301c6290d6cc07dc5e1c3fee8b8499eabae0e365a8282a"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/escapes.txt",
+          "case_name": "Escape incomplete",
+          "source": "@@",
+          "source_sha256": "3330e5ba53cb09ab97dd287ad8ba30380b88a5aca467b6c231b0a46f261c16e1",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "rbs",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/directives.txt",
+          "case_name": "wildcard use clause",
+          "source": "use Foo::*\n",
+          "source_sha256": "5c0ddf2d4e567eb6e6fb71c7a594c65b9657f61816af0d871edef5d8f77c1b4f",
+          "expected_tree": "(program\n (use_directive\n  (use_clause\n   (namespace\n    (constant)))))\n",
+          "expected_tree_sha256": "7464d942dc0213386f1dc6c40010c8124c09d5554ca950c096e85cf7a0f6ffbf"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/directives.txt",
+          "case_name": "wildcard use clause incomplete",
+          "source": "use Foo::",
+          "source_sha256": "32ff82c41548b274676ab8e548d3d7cbb4dbea966fc9f983bb078555cecd7985",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "re2c",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/ignore.txt",
+          "case_name": "Ignore",
+          "source": "/*!ignore:re2c\n  fooo barr !re2c\n*/\n",
+          "source_sha256": "09e31fbe3b3527dbb2812d5e5482955b518f8708ff700042190b65625b093893",
+          "expected_tree": "(re2c\n  (ignore_block))\n",
+          "expected_tree_sha256": "0380a844b85525f70b8465f705c6c51ededf115126977832969af6ab28f63526"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/ignore.txt",
+          "case_name": "Ignore incomplete",
+          "source": "/*!ignore:re2c\n  fooo bar\n",
+          "source_sha256": "e2b9d9bb0fb90aade206538a044bb6667dfe74e1861ea98901c701bdd670a50f",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "rego",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/aliases.txt",
+          "case_name": "Rego alias for package",
+          "source": "package myexample\nimport second.pack as second_pack\n",
+          "source_sha256": "30f3f37ae5ebfe01852c41eb489a2f6c1b0e156c3c8db37c8c9a8d4351a56ba0",
+          "expected_tree": "(source_file\n  (module\n    (package)\n    (ref\n      (var))\n    (import)\n    (ref\n      (var)\n      (ref_arg\n        (ref_arg_dot\n          (var))))\n    (as)\n    (var)))\n",
+          "expected_tree_sha256": "0e0e6eb5c2fd8fead79ad790e301784e13ba6538a9ddb7b375282b10c12bf9fb"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/aliases.txt",
+          "case_name": "Rego alias for package incomplete",
+          "source": "package myexample\nimport second.pack as ",
+          "source_sha256": "66f810679f9d355d5e05de64795c39ead6f9bbcec02b627ad120176ffb909b5e",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "robot",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/tasks-section.txt",
+          "case_name": "Simple task",
+          "source": "*** Tasks ***\n\nDo Something Cool\n    As the Tasks section is just an alias for the Test Cases section\n\n    The parsed tree should be identical to Test Cases\n",
+          "source_sha256": "6244aa478020dd3252fe24ce27db6ed1f491cd85f6f9a67a29abaa060a7f08dd",
+          "expected_tree": "(source_file\n  (section\n    (test_cases_section\n      (section_header)\n      (test_case_definition\n        (name)\n        (body\n          (statement\n            (keyword_invocation\n              (keyword\n                (name_chunk))))\n          (statement\n            (keyword_invocation\n              (keyword\n                (name_chunk)))))))))\n",
+          "expected_tree_sha256": "c2c9e4e5be97a77fdcc8e1013889f5e184267f0f88c0df4f457d6f6d2a9502ff"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/tasks-section.txt",
+          "case_name": "Simple task incomplete",
+          "source": "*** Tasks ***\n\nDo Something Cool\n    As the Tasks section is just an alias for the Test Cases section\n\n    The parsed tree should be identical to Test Cases",
+          "source_sha256": "260f7abaec799991044c36e40d5a2617b27dcac677c6a307e492de984fc11d25",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "roc",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/operators.txt",
+          "case_name": "ops_pipe",
+          "source": "a=\n\tb\n\t->test()\n\t->test2()\na=\n\tb\n\t->test()\n",
+          "source_sha256": "3d1ab2eb616e4b6231512a306987547a8d6c856073de9065739b7c810b582f18",
+          "expected_tree": "(file\n  (value_declaration\n    (decl_left\n      (identifier_pattern\n        (identifier)))\n    body: (expr_body\n      (bin_op_expr\n        part: (variable_expr\n          (identifier))\n        part: (operator)\n        part: (function_call_pnc_expr\n          caller: (variable_expr\n            (identifier)))\n        part: (operator)\n        part: (function_call_pnc_expr\n          caller: (variable_expr\n            (identifier))))))\n  (value_declaration\n    (decl_left\n      (identifier_pattern\n        (identifier)))\n    body: (expr_body\n      (bin_op_expr\n        part: (variable_expr\n          (identifier))\n        part: (operator)\n        part: (function_call_pnc_expr\n          caller: (variable_expr\n            (identifier)))))))\n",
+          "expected_tree_sha256": "44588284782676559b9fc88416a8e3e06372c966173d4daeade2dbbfbe301b83"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/operators.txt",
+          "case_name": "ops_pipe incomplete",
+          "source": "a=\n\tb\n\t->test()\n\t->test2()\na=\n",
+          "source_sha256": "70731ebc6eb90b9aceff0374e39d65a2817598a10d9148799f43dbf3b999093c",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "ron",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/tuples.txt",
+          "case_name": "A simple tuple",
+          "source": "(\"abc\", 1.23, true)\n",
+          "source_sha256": "1ed561cdf6988c9fde159a4cb3bca445866f06b6d1cdad50af36a3d5670aca50",
+          "expected_tree": "(source_file\n  (tuple\n    (string)\n    (float)\n    (boolean)))\n",
+          "expected_tree_sha256": "2db77b9f6c198f2f9026b5ba145c7f3d0b0aeadc31545f322b3a9317f4a73f8c"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/tuples.txt",
+          "case_name": "A simple tuple incomplete",
+          "source": "(\"abc\", 1.23,\n",
+          "source_sha256": "ec04409d4512bb0d1b53c30a4a8082094cadd8af7eb261fa2f9fbebeb62ea15e",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "rst",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/transitions.txt",
+          "case_name": "Transitions",
+          "source": "****\n\n^^^^^\n\n||||||\n\n~~~~~~~~~\n\n~~~~~~~~~~~~~\nI'm not valid\n",
+          "source_sha256": "88cf1b4ee6821531cfceb3d474acf420390c0766c63b0f4ddfb4ce6acb1a1d7d",
+          "expected_tree": "(document\n  (transition)\n  (transition)\n  (transition)\n  (transition)\n  (paragraph))\n",
+          "expected_tree_sha256": "7d6865b326af14ddc2d98f41f7a6a3bac2f54ab95838de7d07c2faf6b1da858c"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/transitions.txt",
+          "case_name": "Transitions incomplete",
+          "source": "****\n\n^^^^^\n\n||||||\n\n~~~~~~~~~\n\n~~~~~~~~~~~~~\nI'm not valid\n\n:role:`unterminated",
+          "source_sha256": "62304e6e67c24fe977d5aa906fe3e7b54ccdb013df21ff1a85bf06e73366060b",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "scheme",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/ext.scm",
+          "case_name": "string",
+          "source": "\"\\. \\'\"\n",
+          "source_sha256": "0987023c6caf37ad64a48767b693d1b5448c09dcd4c18aef47db9f17dc2e37ea",
+          "expected_tree": "(program\n  (string\n    (escape_sequence)\n    (escape_sequence)))\n",
+          "expected_tree_sha256": "13f6d18d75d04041a0365c2302793237fd831013e8bcc946275530431202e68e"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/ext.scm",
+          "case_name": "string incomplete",
+          "source": "\"\\. \\'\"\n(\n",
+          "source_sha256": "d98990bc60cceb9ef27caab2e0e51c0e1169ae1edd16cd7f8d9ac6d34918cc7e",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "slang",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/basic.txt",
+          "case_name": "register semantics",
+          "source": "SamplerState smp : register(s0);\n",
+          "source_sha256": "9ba18256163e2cc773f1a0cf663054a54e842a2078957590a4e2cc1250dacba1",
+          "expected_tree": "(translation_unit\n  (declaration\n    (type_identifier)\n    (type_hinted_declarator\n      (identifier)\n      (type_hint\n        (function_declarator\n          (type_identifier)\n          (parameter_list\n            (parameter_declaration\n              (type_identifier))))))))\n",
+          "expected_tree_sha256": "c03bb8b16b68e15dc563452c454704058cdc891c1aee3608fd2cbfdcb88c46d8"
+        },
+        "negative": {
+          "origin": "upstream-corpus-error-case",
+          "source_path": "test/corpus/basic.txt",
+          "case_name": "Properties",
+          "source": "Properties {\n  _MainTex(\"Texture\", 2D) = \"white\" {}\n}\n",
+          "source_sha256": "e49a5a90477436e73ce7f783b7bb5406741f0a1abc7d6558f6bdc13d2f5fb021",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "smali",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/fields",
+          "case_name": "Test a field without an access modifier",
+          "source": ".class public LA/BC;\n.super Ljava/lang/Object;\n.source \"\"\n\n.field a:Ljava/lang/String;\n",
+          "source_sha256": "c0a564761bb109b1ff671c67ad9d2cfca88a562ee205d7b4ea0eedf27aca9ec3",
+          "expected_tree": "(class_definition\n  (class_directive\n    (access_modifiers\n      (access_modifier))\n    (class_identifier\n      (identifier)\n      (identifier)))\n  (super_directive\n    (class_identifier\n      (identifier)\n      (identifier)\n      (identifier)))\n  (source_directive\n    (string))\n  (field_definition\n    (field_identifier)\n    (field_type\n      (class_identifier\n        (identifier)\n        (identifier)\n        (identifier)))))\n",
+          "expected_tree_sha256": "fc6a0b5c3af6c1d428a58087f3527d11a4098be1267f5e2a0f3abe0071f49b5a"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/fields",
+          "case_name": "Test a field without an access modifier incomplete",
+          "source": ".class public LA/BC;\n.super Ljava/lang/Object;\n.source \"\"\n\n.f\n",
+          "source_sha256": "b9ac69d8143155605fe561676704495ffec4852bae3876efb440d67d61928c64",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "smalltalk",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "Multi-line Comment",
+          "source": "highlightQuery\n\t123. \"a\nb\nc\" 234\n",
+          "source_sha256": "fee71371c5aa5b96c278c95ddc5af1c6622db68c2d2b2cf3bba881d2573a4932",
+          "expected_tree": "(method\n  (unary_selector\n    (unary_identifier))\n  (statement\n    (number))\n  (comment)\n  (statement\n    (number)))\n",
+          "expected_tree_sha256": "48ca81c54f74e0a810a3c7c2fd5bd8167f501dfc74e630b398915ba8395deb4c"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "Multi-line Comment incomplete",
+          "source": "highlightQuery\n\t123. \"a\n",
+          "source_sha256": "c04e929dc91b238e0e0c24c11f123f722d8de8563954be12ebe0ce6cf6d60fbb",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "solidity",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/library.txt",
+          "case_name": "Library",
+          "source": "library Example {}\n",
+          "source_sha256": "e6c3a427c092a6f47444a66b1ed9b9e6f5aa97ca20efcc989d4f5a1ae6c8aea3",
+          "expected_tree": "(source_file\n  (library_declaration\n    name: (identifier)\n    body: (contract_body)))\n",
+          "expected_tree_sha256": "5de23928d5562ce928dbe6b0b37037a9efb32fc91a7d21c406b67fad992ac3d7"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/library.txt",
+          "case_name": "Library incomplete",
+          "source": "library Exam\n",
+          "source_sha256": "395191ebbebdc1f151606339488a036c41a7332b115c20a2af42d554a2b3c78f",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "souffle",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/pragma.txt",
+          "case_name": "Legacy",
+          "source": ".pragma \"legacy\"\n",
+          "source_sha256": "63c041ef9ca5b8ae5de07520e5fbe3597504c12f4d266dc5216e9b7a23b548c4",
+          "expected_tree": "(program\n  (pragma key: (string)))\n",
+          "expected_tree_sha256": "ca5d4bd1f9efd26e23088f91408c935a2cd60744e77206fbb5112f840d063a3c"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/pragma.txt",
+          "case_name": "Legacy incomplete",
+          "source": ".pragma \"le\n",
+          "source_sha256": "f8838fa13ab698268d9e2c3d0a241d923b1357aec9557a421b1d85b6e1700599",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "sourcepawn",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/preprocessor_misc.txt",
+          "case_name": "preprocessor error",
+          "source": "#error This is an error message\n",
+          "source_sha256": "e8aeb785e9ab1d083bb9c20bb411e663b5d42bc555fc727f2c82441ec125e817",
+          "expected_tree": "(source_file\n  (preproc_error\n    (preproc_arg)\n  )\n)\n",
+          "expected_tree_sha256": "61f7c226f3e6df2e5a4936462cec7fc9d9b336cb254dd654b3201b999f499234"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/preprocessor_misc.txt",
+          "case_name": "preprocessor error incomplete",
+          "source": "#erro",
+          "source_sha256": "7f38e2e1b1fc176b7be5806f55f1e7c3c9970ad6aeee98c6f8a8c2082eae3a34",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "superhtml",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "tree-sitter-superhtml/test/corpus/superhtml.txt",
+          "case_name": "Ctx Tag",
+          "source": "<ctx about=\"$site.page('about')\">\n  <a href=\"$ctx.about.link()\" :text=\"$ctx.about.title\"></a>\n</ctx>\n",
+          "source_sha256": "98a9f4c4d60591420c4df1bc2f8bf6d84bce93249c1d98d9479ea2685ba34e53",
+          "expected_tree": "(document\n  (element\n    (start_tag\n      (tag_name)\n      (attribute\n        (attribute_name)\n        (quoted_attribute_value\n          (attribute_value))))\n    (element\n      (start_tag\n        (tag_name)\n        (attribute\n          (attribute_name)\n          (quoted_attribute_value\n            (attribute_value)))\n        (attribute\n          (attribute_name)\n          (quoted_attribute_value\n            (attribute_value))))\n      (end_tag\n        (tag_name)))\n    (end_tag\n      (tag_name))))\n",
+          "expected_tree_sha256": "4856c8bbeff940dbffb775217ee702f1e1b11839b609ae9711560b6e87dae4ad"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "tree-sitter-superhtml/test/corpus/superhtml.txt",
+          "case_name": "Ctx Tag incomplete",
+          "source": "<ctx about=\"$site.page('about')\">\n  <a href=\"$ctx.about.link()\" :text=\"$\n",
+          "source_sha256": "d45aa6b6fc3e34d3f13524423e264d76370de0cdd2ec10af814d23c8807370dc",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "tablegen",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/basic.td",
+          "case_name": "short def",
+          "source": "def Imm;\n",
+          "source_sha256": "960c5483826e2789b1d74319f5cc291f7e064302cd3333d8fa78d8cbdf36659b",
+          "expected_tree": "(file\n  (statement\n    (def\n      (value\n        (identifier))\n      (record_body))))\n",
+          "expected_tree_sha256": "2e6ad09097cccd55c26da38983fa8fe61c64d99f1ab56593c9e691814af9e9fa"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/basic.td",
+          "case_name": "short def incomplete",
+          "source": "def Imm;\n(\n",
+          "source_sha256": "6e5f07cf80cdaf895e2d63347ec6b2886f69614c11e5ef39c358bb5500165543",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "tact",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/import.txt",
+          "case_name": "import",
+          "source": "import \"@stdlib/deploy\";\n",
+          "source_sha256": "7140c1b8c74fc18c3a90b54f138243540aa898937daf3ecdcfa47fb8a51f06ff",
+          "expected_tree": "(source_file\n  (import\n    name: (string)))\n",
+          "expected_tree_sha256": "2b8edee4b313e6eb85d5ae902ef0223d2bcf1793de117a71866c6a6f913e33e1"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/import.txt",
+          "case_name": "import incomplete",
+          "source": "import \"@stdlib/d\n",
+          "source_sha256": "21a3baedb3dcdd0a4b51415590e2ad88c0c77b036709522aec435532f8f9cba9",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "tcl",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "Comments",
+          "source": "# this is a comment\n",
+          "source_sha256": "668dcb3c5db1e2b853ee102cb9c21df7b1d0b86196eb71745dc2c206fadf8646",
+          "expected_tree": "(source_file\n  (comment))\n",
+          "expected_tree_sha256": "daa17d137a8ba2de71983bdbdadfc666b98c77d2a48e7eb2ce42ea4bbf1f3bd9"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "Comments incomplete",
+          "source": "# this is a comment",
+          "source_sha256": "27615da3d0494b3ab8e9972d6747c31bcd24384bed9d2f5503a9802ad6352048",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "teal",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/break.txt",
+          "case_name": "Break",
+          "source": "break\n",
+          "source_sha256": "84a6ea824cac8e3bf385b549447fac0ea11f5b3c95dc67bcb342388e64f3fab3",
+          "expected_tree": "(program (break))\n",
+          "expected_tree_sha256": "b840107a55e17fd2ce48e89567a5bb527d43e5ecd876facb1968848137e94f20"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/break.txt",
+          "case_name": "Break incomplete",
+          "source": "break\n(\n",
+          "source_sha256": "feebf25108eb3326188d33f0f4921716dc3f3be74a1eedafdb027a6abdfa3bfd",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "templ",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/rawgo.txt",
+          "case_name": "Rawgo example",
+          "source": "package main\n\ntempl nameList(items []Item) {\n    {{ first := items[0] }}\n    <p>\n        { first.Name }\n    </p>\n}\n",
+          "source_sha256": "d5b2306e27f79c359b2023af84b565e1324ccad67359e2915d4b017b169e613d",
+          "expected_tree": "(source_file\n      (package_clause\n        (package_identifier))\n      (component_declaration\n        (component_identifier)\n        (parameter_list\n          (parameter_declaration\n            (identifier)\n            (slice_type\n              (type_identifier))))\n        (component_block\n          (rawgo_block\n            (statement_list\n              (short_var_declaration\n                (expression_list\n                  (identifier))\n                (expression_list\n                  (index_expression\n                    (identifier)\n                    (int_literal))))))\n          (element\n            (tag_start\n              (element_identifier))\n            (expression\n              (selector_expression\n                (identifier)\n                (field_identifier)))\n            (tag_end\n              (element_identifier))))))\n",
+          "expected_tree_sha256": "2cb3ecef3ec0213706ea528be16603c22ae368cc143268d4d71133135c88d02d"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/rawgo.txt",
+          "case_name": "Rawgo example incomplete",
+          "source": "package main\n\ntempl nameList(items []Item) {\n    {{ first := items[0] }}\n    <p>\n",
+          "source_sha256": "198d289c6c6f3da42d7236d0c208d8d396a1c7de14a501f223a50f0d1d44ce86",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "tera",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/for_loop.txt",
+          "case_name": "For statements",
+          "source": "{% for letter in name %}\n  {% if loop.index % 2 == 0 %}\n    <span style=\"color:red\">{{ letter }}</span>\n  {% else %}\n    <span style=\"color:blue\">{{ letter }}</span>\n  {% endif %}\n{% endfor %}\n",
+          "source_sha256": "6e653b9805e113e45c582fac933585508de2950eb55b8215e35ede62bee466e0",
+          "expected_tree": "(source_file\n  (content)\n  (for_statement\n    left: (identifier)\n    right: (identifier)\n    body: (content)\n    body: (if_statement\n      condition: (binary_expression\n        left: (binary_expression\n          left: (member_expression\n            value: (identifier)\n            property: (identifier))\n          right: (number))\n        right: (number))\n      consequence: (content)\n      consequence: (expression_tag\n        (identifier))\n      consequence: (content)\n      alternative: (else_clause\n        consequence: (content)\n        consequence: (expression_tag\n          (identifier))\n        consequence: (content)))\n    body: (content))\n  (content))\n",
+          "expected_tree_sha256": "9ce5ea25a7058fdf5462dc36f6e924154a2f5c8a5d706740150dc59b534b54bb"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/for_loop.txt",
+          "case_name": "For statements incomplete",
+          "source": "{% for letter in name %}\n  {% if loop.index % 2 == 0 %}\n    <span style=\"color:red\">{{ letter }}</span>\n  {% else %}\n    <span style=\"colo\n",
+          "source_sha256": "068fcebb980535f9e366205774926702ff80bf19ff71e35c65a5d2f2860fe0f9",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "terraform",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/json.txt",
+          "case_name": "top level object",
+          "source": "{\n  \"foo\": \"bar\"\n}\n",
+          "source_sha256": "b9cd2605ea75293b16b892a97c5e4b0bc18f3dafd0cbdf897c80258d57415c80",
+          "expected_tree": "(config_file\n  (object\n    (object_start)\n    (object_elem\n      (expression\n        (literal_value\n          (string_lit\n            (quoted_template_start)\n            (template_literal)\n            (quoted_template_end))))\n      (expression\n        (literal_value\n          (string_lit\n            (quoted_template_start)\n            (template_literal)\n            (quoted_template_end)))))\n    (object_end)))\n",
+          "expected_tree_sha256": "1e1352391451ad2d3d484ee44965aab57495daf2cc87d6b7e1f7073bc50e9d9b"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/json.txt",
+          "case_name": "top level object incomplete",
+          "source": "{\n  \"foo\": \"\n",
+          "source_sha256": "0fade7450168ccd2c824e8fb95c79f661ca1cc7410d63be6c192d2bab7151f22",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "thrift",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/imports.txt",
+          "case_name": "Test duplicate imports",
+          "source": "include \"common/a.thrift\"\ninclude \"common/b.thrift\"\n\ntypedef a.A A\ntypedef b.B B\n",
+          "source_sha256": "b23fc0cae5c4e5c4f3ee3892a7367d0cf829fbf24d8d128855ae5ad26a9891af",
+          "expected_tree": "(document\n  (include_statement\n    (string\n      (string_fragment)))\n  (include_statement\n    (string\n      (string_fragment)))\n  (typedef_definition\n    (definition_type\n      (identifier)\n      (identifier))\n    (typedef_identifier))\n  (typedef_definition\n    (definition_type\n      (identifier)\n      (identifier))\n    (typedef_identifier)))\n",
+          "expected_tree_sha256": "374c0c810ab5b05f881e585e744d57d67401282b6199ff040095e15a4603c05c"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/imports.txt",
+          "case_name": "Test duplicate imports incomplete",
+          "source": "include \"common/a.thrift\"\ninclude \"common/b.thrift\"\n\ntype\n",
+          "source_sha256": "99ca635d6ae03311fa11dbf8a471ceebe88c00e6afc7901ce32fafc9769fdb44",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "tsv",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/test.txt",
+          "case_name": "Single letter",
+          "source": "a\n",
+          "source_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+          "expected_tree": "(document\n\t(row\n\t\t(field (text))))\n",
+          "expected_tree_sha256": "cd92a6a9361167a494fd27b368627e06a335002c101a307a747dbf3d91d9dee8"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/test.txt",
+          "case_name": "Single letter incomplete",
+          "source": "a\n\t",
+          "source_sha256": "89e1f3b8b7a82b7da9e8b3963d917b42393860d2acfbef7418bc317ea7a75241",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "turtle",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/trig.txt",
+          "case_name": "Single Graph As Variable",
+          "source": "@prefix ex: <http://www.example.org/vocabulary#> .\n\n:G1 {\n  :Monica a ex:Person\n}\n",
+          "source_sha256": "0d3d591c2a83dcfac6eda9969e309b9ae2dbf4bdb5190e25ac537a14869499e0",
+          "expected_tree": "(document\n  (directive\n    (prefix_id\n      (namespace\n        (pn_prefix))\n      (iri_reference)))\n  (graph\n    (prefixed_name\n      (namespace)\n      (pn_local))\n    (subject\n      (prefixed_name\n        (namespace)\n        (pn_local)))\n    (property_list\n      (property\n        (predicate)\n        (object_list\n          (prefixed_name\n            (namespace\n              (pn_prefix))\n            (pn_local)))))))\n",
+          "expected_tree_sha256": "ab0b0ecd69f292048fe82b597b9a547d28c65d39a0c8d568d8d0cdae9a21948b"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/trig.txt",
+          "case_name": "Single Graph As Variable incomplete",
+          "source": "@prefix ex: <http://www.example.org/vocabulary#> .\n\n:G1 {\n",
+          "source_sha256": "a54a508372cf6d07e6a832364815322f89c07e174f7e5c29443803627ee60495",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "typespec",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/terminals.txt",
+          "case_name": "enum no trailing terminals",
+          "source": "enum Foo {\n  ...Bar\n  A\n  C: 123\n}\n",
+          "source_sha256": "14cc79e6d882f36c0785cb93db15b335d31333427503843a4abfd8876add876d",
+          "expected_tree": "(source_file\n  (enum_statement\n    (identifier\n      (plain_identifier))\n    (enum_body\n      (enum_spread_member\n        (reference_expression\n          (identifier_or_member_expression\n            (identifier\n              (plain_identifier)))))\n      (enum_member\n        (identifier\n          (plain_identifier)))\n      (enum_member\n        (identifier\n          (plain_identifier))\n        (enum_member_value\n          (decimal_literal))))))\n",
+          "expected_tree_sha256": "b8f0861e4a2d75605c48899b2c71f8e7c129d5c701522e1dac2234e08b5b54ce"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/terminals.txt",
+          "case_name": "enum no trailing terminals incomplete",
+          "source": "enum Foo {\n  ...Bar\n  A\n",
+          "source_sha256": "6705210b413addb8a520334dfa59a7a4a7cf5a882db51465b64f9f72656b90ec",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "typoscript",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/conditions/comments.txtt",
+          "case_name": "Comment Before Expression",
+          "source": "[/* comment */ true]\n",
+          "source_sha256": "de447c3e94ec9db8cdf0457ccd7bbab482c1a5b8fb2f861a844e2b0cdd632b10",
+          "expected_tree": "(typoscript\n  (condition_block\n    (condition\n      (symfony_comment)\n      (symfony_expression\n        (symfony_literal\n          (symfony_boolean))))))\n",
+          "expected_tree_sha256": "ba2612d637f57408a24a57b51d8bceb61017749db3ff756069428c4e25304b29"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/conditions/comments.txtt",
+          "case_name": "Comment Before Expression incomplete",
+          "source": "[/* comment */\n",
+          "source_sha256": "e76beb81d9022740c269f58228f9bf4ae16ae1fa0095f1ddada971110bb1c0ef",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "uxntal",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "Comments",
+          "source": "( one comment )\n\n( multiline\ncomment\n)\n\n(close)\n\n()\n\n(\n\n)\n",
+          "source_sha256": "45ddae7b7124f4e3761755cc2835bcc61f051c7249a1077c4afada4c6ff29272",
+          "expected_tree": "(program\n  (comment)\n  (comment)\n  (comment)\n  (comment)\n  (comment))\n",
+          "expected_tree_sha256": "a8107f978bec0442d058033f1ca289dc0f99706af825a6d38c47d5f1edbf62f1"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "Comments incomplete",
+          "source": "( one comment )\n\n( multiline\ncomment\n)\n\n(\n",
+          "source_sha256": "2886eb076512aa858987f55208712ee207d7b45e35a1ded5e70807cc78d7b102",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "v",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/goto_statement.txt",
+          "case_name": "Goto Statement",
+          "source": "goto foo\n",
+          "source_sha256": "795495ed21e592c8f1b5fe1aabf4060418f93d0af7dd4fdd3294a359c1145204",
+          "expected_tree": "(source_file \n  (goto_statement (label_name)))\n",
+          "expected_tree_sha256": "ce73ee270cc11acdb33e19e565adbc3744406c5e1478a852b8c6a3812b88943d"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/goto_statement.txt",
+          "case_name": "Goto Statement incomplete",
+          "source": "goto foo\n(\n",
+          "source_sha256": "a8de2ea6174ff27529a3e0c44a6da8f7590d3e15db4f3124f2d3ea28275e3bf4",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "verilog",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "single line",
+          "source": "// single line comment\n",
+          "source_sha256": "0953c3953e3dec6dd1b8fcc50688fe24e54d158996a85b102770c5b8829a973f",
+          "expected_tree": "(source_file (comment))\n",
+          "expected_tree_sha256": "68f6a3bd07e2885cf38a2c31674b1b1c135fbcd9c98ba7a329a12b1e8ffd906b"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "single line incomplete",
+          "source": "/",
+          "source_sha256": "8a5edab282632443219e051e4ade2d1d5bbc671c781051bf1437897cbdfea0f1",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "vhdl",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/declarations/incomplete_type.txt",
+          "case_name": "Minimal",
+          "source": "type t;\n",
+          "source_sha256": "9d6f23d536b10cde6f107a6989f9509702c357571b870c2c3bee6fe16bee104d",
+          "expected_tree": "(design_file\n  (incomplete_type_declaration\n    (identifier)))\n",
+          "expected_tree_sha256": "82b9df499fb83b131b44585f39439478ea41ef3666d941b5385f7d81b656ed60"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/declarations/incomplete_type.txt",
+          "case_name": "Minimal incomplete",
+          "source": "type t;\n(\n",
+          "source_sha256": "3bfea558fa09e64f83f87d41c06917770c742db55c81f63fc87d2e2651c81f5f",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "vhs",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "Comments",
+          "source": "# This is a comment in Cassette\n# This is another comment\n",
+          "source_sha256": "6fafc0a0bc8a8f4d77de997808c919ca0cc6cd706273e4c96e9f6ba69460410f",
+          "expected_tree": "(program\n (comment)\n (comment))\n",
+          "expected_tree_sha256": "7b8bb9b085abdab73b557b27b759fc596018677bd363aa6e4b16c557b3ccc1ce"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/comments.txt",
+          "case_name": "Comments incomplete",
+          "source": "# This is a comment in Cassette\n# This is another comment\n{\n",
+          "source_sha256": "3cfa7ba8a352e799b33a492de090af960daf90e65a9fee496b3a80619a555d61",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "vrl",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/literal/null.txt",
+          "case_name": "Null Literals",
+          "source": "null\n",
+          "source_sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed",
+          "expected_tree": "(program\n  (null))\n",
+          "expected_tree_sha256": "5d94b7e09067a525d046c6737a553073fd3ab998b3e40dabca86be357360e898"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/literal/null.txt",
+          "case_name": "Null Literals incomplete",
+          "source": "null\n(\n",
+          "source_sha256": "b76325448120b5d8f7d975569f9de4046dc3ed131a742c6fc29c246dbb05aecc",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "wit",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/flags.txt",
+          "case_name": "Flags",
+          "source": "interface foo {\n    flags permissions {\n        read,\n        write,\n        exec,\n    }\n}\n",
+          "source_sha256": "55553365acbeffd0ffd7c16ad3f5eaa4500b83b91ecc9a7777bf09147fb9dc2f",
+          "expected_tree": "(source_file\n  (interface_item\n    (id)\n    (body\n      (flags_items\n        (id)\n        (body\n          (flags_field)\n          (flags_field)\n          (flags_field))))))\n",
+          "expected_tree_sha256": "353c0c566897995a835c945d88c31e55f04b396d95f5dfd25ae05058269cbf56"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/flags.txt",
+          "case_name": "Flags incomplete",
+          "source": "interface foo {\n    flags permissions {\n        read,\n        wr\n",
+          "source_sha256": "b6ba62618da44e6ca422b4ab2c7cdae5d082ac5e5ee0ea01656cbb4f39c5a121",
+          "expected_error": true
+        }
+      }
+    },
+    {
+      "language_id": "yuck",
+      "fixtures": {
+        "positive": {
+          "origin": "upstream-tree-sitter-corpus",
+          "source_path": "test/corpus/test.txt",
+          "case_name": "Test includes",
+          "source": "(include \"eww.yuck\")\n",
+          "source_sha256": "41dfefa40aa6816abc631fb868ff5b1f5f697de6d39f0110297b7c50ba6ded3d",
+          "expected_tree": "(source_file\n  (list\n    (symbol)\n    (string\n      (string_fragment))))\n",
+          "expected_tree_sha256": "06a0d0e654a32d3064b99039eefec713a1a461cd066f71feb323b120caa31ac0"
+        },
+        "negative": {
+          "origin": "projectatlas-incomplete-upstream-case",
+          "source_path": "test/corpus/test.txt",
+          "case_name": "Test includes incomplete",
+          "source": "(include \"eww.\n",
+          "source_sha256": "0834f602c823df11074ca58cb2e73384d9b05ae23acaeb9e6f373091a15ca256",
+          "expected_error": true
+        }
+      }
+    }
+  ]
+}

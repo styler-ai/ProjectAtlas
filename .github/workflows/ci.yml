@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Rust
         run: |
@@ -39,7 +39,7 @@ jobs:
           rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
         with:
           tool: cargo-deny@0.20.2
 
@@ -103,6 +103,9 @@ jobs:
       - name: Tests
         run: cargo test --workspace --all-features --locked
 
+      - name: Filtered custom harness compatibility
+        run: cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled
+
       - name: Doc tests
         run: cargo test --doc --workspace --all-features --locked
 
@@ -127,7 +130,7 @@ jobs:
             os: macos-14
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Rust
         shell: bash
@@ -136,7 +139,7 @@ jobs:
           rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Plugin installer E2E
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli plugin_installer_writes_real_harness_configs --test e2e
 
       - name: Plugin update E2E
@@ -168,6 +171,11 @@ jobs:
         if: matrix.label == 'windows'
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_repairs_stale_mirror_without_registering_it --test e2e
+
+      - name: macOS unsupported parser-pack boundary E2E
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_access --test e2e
 
       - name: MCP project binding E2E
         timeout-minutes: 5

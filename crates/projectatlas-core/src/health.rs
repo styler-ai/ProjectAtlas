@@ -8,7 +8,7 @@ use std::{collections::HashMap, fmt, str::FromStr};
 pub const CATEGORY_MISSING_PURPOSE: &str = "missing-purpose";
 /// Health category for generated purpose suggestions awaiting review.
 pub const CATEGORY_SUGGESTED_PURPOSE_REVIEW: &str = "suggested-purpose-review";
-/// Health category for approved purposes whose content changed.
+/// Health category for legacy or explicitly flagged accepted-purpose records.
 pub const CATEGORY_STALE_PURPOSE: &str = "stale-purpose";
 /// Health category for approved purposes that still need agent review.
 pub const CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED: &str = "purpose-agent-review-required";
@@ -43,10 +43,11 @@ pub const RECOMMENDATION_SUGGESTED_PURPOSE_REVIEW: &str =
 pub const RECOMMENDATION_SUGGESTED_PURPOSE_REVIEW_QUEUE: &str =
     "Inspect enough context and approve or correct the purpose in SQLite.";
 /// Finding message for stale-purpose rows.
-pub const MESSAGE_STALE_PURPOSE: &str = "Path changed after its purpose was approved.";
+pub const MESSAGE_STALE_PURPOSE: &str =
+    "Accepted purpose is in a legacy or explicitly flagged review state.";
 /// Finding recommendation for stale-purpose rows.
 pub const RECOMMENDATION_STALE_PURPOSE: &str =
-    "Inspect the current summary and approve or correct the one-line purpose.";
+    "Explicitly approve the existing responsibility or correct it if inconsistent.";
 /// Finding message for purpose-agent-review-required rows.
 pub const MESSAGE_PURPOSE_AGENT_REVIEW_REQUIRED: &str =
     "Purpose is approved but has not been reviewed by an agent.";
@@ -203,7 +204,7 @@ fn suggested_purpose_findings(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
         .collect()
 }
 
-/// Find approved purposes whose indexed content changed and needs review.
+/// Find legacy or explicitly flagged accepted purposes awaiting explicit review.
 fn stale_purpose_findings(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
     nodes
         .iter()

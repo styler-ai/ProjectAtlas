@@ -14,7 +14,7 @@ Full indexing SHALL build derived data away from the currently queryable generat
 
 ### Requirement: Fresh Dependency-Aware Refresh
 
-Every normal index-backed read, watch, and one-shot refresh SHALL compare persisted fingerprints with current local content, path, rename/delete, ignore/configuration, parser/provider, and optional VCS state. A read SHALL reconcile a safe bounded delta before answering or return typed `refresh_required`; it SHALL NOT silently bless a stale database after restart. Current saved local bytes and paths SHALL remain authoritative in dirty worktrees and non-Git roots. Transient access uncertainty SHALL retain last-valid facts. Exported identity changes SHALL invalidate and re-resolve affected inbound dependents. Unchanged dirty state SHALL coalesce without repeated publication or write amplification.
+Every normal index-backed read, watch, and one-shot refresh SHALL compare persisted fingerprints with current local content, path, rename/delete, ignore/configuration, parser/provider, and optional VCS state. A read SHALL reconcile a safe bounded delta before answering or return typed `refresh_required`; it SHALL NOT silently bless a stale database after restart. Current saved local bytes and paths SHALL remain authoritative in dirty worktrees and non-Git roots. Transient access uncertainty SHALL retain last-valid facts. Every exported candidate and relation occurrence SHALL retain deterministic typed canonical resolution keys qualified by every identity-affecting project, provider/language, package, scope, and relation dimension. The union of prior and newly staged export keys SHALL use indexed bounded lookup to find and re-resolve affected resolved, ambiguous, and unresolved inbound dependents without display-name scans or one query per endpoint. Exported identity changes SHALL invalidate and re-resolve the complete admitted source closure once; exceeding the aggregate key/path/row/byte/time/cancellation budget SHALL require a typed full refresh before publication. Unchanged dirty state SHALL coalesce without repeated publication or write amplification.
 
 #### Scenario: Source changes after a prior scan
 - **WHEN** an indexed file is edited and refresh runs
@@ -31,6 +31,14 @@ Every normal index-backed read, watch, and one-shot refresh SHALL compare persis
 #### Scenario: File cannot be inspected reliably
 - **WHEN** path, permission, encoding, or root state is uncertain
 - **THEN** ProjectAtlas reports uncertainty and does not misclassify the file as deleted
+
+#### Scenario: Export resolution changes without caller bytes changing
+- **WHEN** an export is added, renamed, deleted, duplicated, or made unique while an inbound caller remains byte-for-byte unchanged
+- **THEN** old-and-new canonical keys select that caller once and its relation transitions honestly among resolved, ambiguous, and unresolved state in the same complete publication
+
+#### Scenario: One changed export has a high-degree inbound closure
+- **WHEN** indexed canonical dependency keys select more distinct owning sources than the incremental resource envelope admits
+- **THEN** ProjectAtlas returns typed full-refresh guidance before publication and preserves the prior graph, key rows, source projections, and generation without a partial closure
 
 ### Requirement: Verified Source Observation Avoids Repeated Whole-Tree Reads
 

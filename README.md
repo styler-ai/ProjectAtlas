@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.26"><img alt="release" src="https://img.shields.io/badge/release-v0.3.26-blue"></a>
+  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.0"><img alt="release" src="https://img.shields.io/badge/release-v0.4.0-blue"></a>
   <img alt="rust" src="https://img.shields.io/badge/Rust-2024-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
@@ -27,7 +27,7 @@ No required `.purpose` files. No source-header tax. No hosted index. The project
 ## Quickstart
 
 ```bash
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.26
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.4.0
 codex plugin add projectatlas --marketplace projectatlas
 ```
 
@@ -46,12 +46,12 @@ correctly keeps that pinned ref. In that case, replace only the dedicated `style
 
 ```bash
 codex plugin marketplace remove projectatlas
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.26
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.4.0
 ```
 
 Then tell Codex: "Use ProjectAtlas for this repo."
 
-That is the intended path. The plugin gives the agent the workflow skill, native runtime installer, and MCP config templates. The agent does the rest: install or verify the runtime, map the repo, keep the atlas fresh, choose the right folder, choose the right file, and read exact source only after the target is known.
+That is the intended path. The plugin gives the agent the workflow skill, native runtime installer, and MCP config templates. The agent does the rest: install or verify the runtime, index the repo, keep the atlas fresh, start each task with one compact session brief, follow its ranked next call, and read exact source only after the target is known.
 
 ## What Happens Next
 
@@ -59,21 +59,35 @@ ProjectAtlas is intentionally agent-first. In normal use you should not have to 
 
 The agent follows this loop:
 
-1. Build or refresh the local atlas.
-2. Read folder purposes before opening source.
-3. Read file purposes and content summaries inside the likely folder.
-4. Use the detailed summary, outline, symbols, or search when compressed context is enough.
-5. Open exact slices only when real code is needed.
+1. Bind the intended project and refresh only when the index may be stale.
+2. Call `atlas_session_brief` once with the task and compact output.
+3. Follow its returned summary, search, relation, health, or exact-slice call directly.
+4. Continue from returned selectors instead of restarting folder/file discovery.
+5. Open the smallest exact source slice needed to answer the task.
+
+`atlas_overview` → `atlas_folders` → `atlas_files` remains the fallback when the brief is unavailable, returns no actionable candidate, or broader repository structure is itself the task.
 
 For active sessions, the agent can run the watcher so file edits continuously refresh the database. For cleanup sessions, it can ask ProjectAtlas for missing purposes, stale metadata, duplicate folder roles, and structure drift.
 
-<p align="center">
-  <img src="docs/assets/agent-harness-funnel.svg" alt="ProjectAtlas agent harness workflow from folder purpose overview to file purpose, detailed summary, symbols, bounded search, exact source slice, and watch refresh" width="860">
-</p>
-
 ## What It Saves
 
-The current benchmark record is intentionally neutral: a representative large application audit, not a marketing toy. The savings rate is not a universal constant. It depends on repository size, how often the agent asks for orientation, and how much source code ProjectAtlas prevents the agent from opening.
+The final v0.4 navigation campaign retained all 45 preregistered trials:
+ProjectAtlas v0.4 completed 15/15, frozen v0.3.26 completed 12/15 and failed all
+three pinned VS Code setups, and the plain control completed 15/15. The final
+manual result was 41/42 completed answers; the one remaining v0.4 answer was
+technically correct but linked to invalid temporary paths. Against v0.3.26,
+v0.4 cut median net navigation context by 28–30% on the
+three small tasks, but used 47% more on the medium task. Plain navigation used
+the least context at every measured scale, while v0.4 avoided several broad and
+full reads at the cost of indexing, discovery, and skill context. See the
+[reviewed report](docs/benchmarks/v0.4-agent-navigation-evaluation.md) and
+[raw 45-trial result](docs/benchmarks/v0.4-agent-navigation-results.json).
+
+The token-overview record below is intentionally a separate representative
+large-application audit, not a marketing constant or the controlled
+counterfactual above. Its savings rate depends on repository size, how often
+the agent asks for orientation, and how much source ProjectAtlas prevents the
+agent from opening.
 
 The estimate is:
 
@@ -151,15 +165,13 @@ Token reports expose bucket, baseline, and confidence metadata so observed full-
 ProjectAtlas teaches agents this order:
 
 ```text
-overview
-  -> folders with folder_purpose
-  -> files with file_purpose and content_summary
-  -> summary or outline
-  -> symbols and relations
-  -> exact slice
+one compact session brief with purpose + graph evidence
+  -> returned summary, search, relation, health, or slice call
+  -> follow returned selectors without rediscovery
+  -> smallest exact source slice
 ```
 
-That sounds small. It is the product.
+For manual CLI work or brief fallback, use `overview` → `folders` → `files` → `summary` → `slice`.
 
 Most agent waste happens before code is edited: broad search, wrong folder, wrong file, full-file reads too early. ProjectAtlas makes "where should I look?" cheap enough that agents ask it first.
 
@@ -168,6 +180,7 @@ Most agent waste happens before code is edited: broad search, wrong folder, wron
 - `folder_purpose`: why this folder exists.
 - `file_purpose`: why this file exists.
 - `content_summary`: what currently appears inside the file.
+- `atlas_session_brief`: one compact task-oriented startup result with ranked candidates and ready next calls.
 - `summary`: the detailed file-intelligence command: purpose, summary, parser status, symbols, imports, calls, counts, and line context.
 - `slice`: exact source after the target is known.
 - `watch`: continuous local refresh while files change.
@@ -180,7 +193,7 @@ Most users can stop at the plugin install. The CLI is here for local debugging, 
 Only need the CLI yourself? Install it from the released tag:
 
 ```bash
-cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.26 projectatlas-cli --locked
+cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.4.0 projectatlas-cli --locked
 ```
 
 From this checkout:
@@ -203,7 +216,7 @@ Use `projectatlas scan` later when you want an explicit refresh.
 
 ## Manual Funnel
 
-This is the workflow the agent runs for you:
+This is the explicit CLI fallback for humans, automation, or a host without `atlas_session_brief`:
 
 ```bash
 projectatlas overview
@@ -273,8 +286,8 @@ config path, and final `mcp` command. OpenCode verification also checks `type = 
 user-managed settings or pretend those hosts have a Codex-style ProjectAtlas marketplace cache; restart
 the running host if it cached older instructions.
 
-For MCP startup, agents can call `atlas_session_brief` first to get selected project identity, index
-state, bounded ranked candidates, health blockers, and next-call recommendations. `atlas_settings`
+For task-directed MCP startup, agents call `atlas_session_brief` once with `compact: true` to get selected project identity, index
+state, bounded ranked candidates, health blockers, and ready next-call recommendations. They follow that call directly instead of repeating folder/file discovery. `atlas_settings`
 also includes a typed `mcp_session` capability block with nearest-project policy, path scope, telemetry
 mode, scan policy, runtime identity, and no-secret guarantees. `atlas_task_status` and
 `atlas_task_cancel` expose the bounded task-progress contract; existing scan/watch/search/summary/slice
@@ -282,12 +295,13 @@ calls remain synchronous in this release.
 
 ## What The Agent Gets
 
-ProjectAtlas exposes the same workflow through CLI and MCP:
+ProjectAtlas exposes the same indexed capabilities through CLI and MCP; the compact task-start route is MCP-first:
 
 | Need | CLI | MCP |
 | --- | --- | --- |
 | Select project | `projectatlas --db <repo>/.projectatlas/projectatlas.db ...` | `atlas_set_project_path` / per-call `project_path` |
 | Refresh state | `projectatlas scan` / `projectatlas watch --once` | `atlas_scan` / `atlas_watch_once` |
+| Start a task | Use the manual funnel below | `atlas_session_brief` with `compact: true`, then its returned call |
 | Understand shape | `projectatlas overview` | `atlas_overview` |
 | Pick an area | `projectatlas folders <query>` | `atlas_folders` |
 | Pick files | `projectatlas files <query> --folder <path>` | `atlas_files` |
@@ -307,7 +321,7 @@ ProjectAtlas scans with `.gitignore` awareness, hashes files with BLAKE3, stores
 
 ## Release Quality
 
-`v0.3.26` ships through the full release matrix:
+`v0.4.0` ships through the full release matrix:
 
 - Rust format, check, clippy, dependency policy, tests, doctests, and rustdoc.
 - ProjectAtlas scan, parity, database-backed purpose lint, and health checks.
@@ -334,10 +348,13 @@ skills/                   standalone agent skill snippets
 ## Docs
 
 - Published rustdoc and Pages landing page: https://styler-ai.github.io/ProjectAtlas/
+- Language & Ecosystem Support: https://styler-ai.github.io/ProjectAtlas/language-support/
 - CLI/MCP runtime crate docs: https://styler-ai.github.io/ProjectAtlas/projectatlas/
 - Core model crate docs: https://styler-ai.github.io/ProjectAtlas/projectatlas_core/
 - `docs/agent-integration.md`
 - `docs/configuration.md`
+- [`docs/language-support.md`](docs/language-support.md) — generated capability and ecosystem authority
+- [`docs/relation-support.md`](docs/relation-support.md) — generated accepted relation-family inventory
 - `docs/workflow.md`
 - `docs/structural-summaries.md`
 - `docs/benchmarks/large-application-token-savings.md`

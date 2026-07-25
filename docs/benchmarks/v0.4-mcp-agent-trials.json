@@ -1,0 +1,298 @@
+{
+  "schema_version": 1,
+  "status": "complete",
+  "scope": "OpenSpec task 7.3 forward test; task 7.6 remains the repeated publication benchmark",
+  "protocol": {
+    "date": "2026-07-24",
+    "codex_cli_version": "0.145.0",
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "xhigh",
+    "session": "ephemeral",
+    "telemetry": "disabled",
+    "user_config": "ignored",
+    "repository_rules": "ignored by the evaluation subprocess",
+    "permissions": "dangerously-bypass-approvals-and-sandbox inside the local benchmark fixtures",
+    "mutation_policy": "read-only",
+    "source_navigation_policy": "one direct read of the exact packaged skill, then ProjectAtlas MCP only",
+    "project_isolation": "one exact runtime, skill, config, and database binding per arm and fixture",
+    "purpose_contract": "identical truthful agent-reviewed folder and file purposes seeded through the public purpose set command",
+    "prompt_contract": "the task intent and audit requirements are identical; only runtime, skill, database, config, and project paths differ by arm",
+    "task_intents": {
+      "clean": "Find where rejection of an unassigned order ID is implemented and identify the affected public caller if that behavior changes. Explain why every selected file is relevant and show the smallest trustworthy source evidence needed to support the answer.",
+      "dirty": "Find the saved checkout discount threshold and amount, then identify the affected public checkout path if that behavior changes. Explain why every selected file is relevant and show the smallest trustworthy source evidence needed to support the answer.",
+      "non_git": "Find the configured timeout value and explain its behavior through the public health route. Explain why every selected file is relevant and show the smallest trustworthy source evidence needed to support the answer."
+    },
+    "audit_requirement": "list every ProjectAtlas MCP call and exact arguments; count every backtrack or wrong/nonproductive selection"
+  },
+  "arms": {
+    "v0_4_0": {
+      "runtime": "target/debug/projectatlas.exe",
+      "runtime_version": "projectatlas 0.4.0",
+      "runtime_sha256": "8c9e554b571167f44dbac5675e66af37208d8356694cfe388b177b1165039f90",
+      "runtime_bytes": 69499392,
+      "git_base_before_slice_commit": "fea33c6be246818238c03298bac1b788f3ae59d3",
+      "skill": "plugins/projectatlas/skills/projectatlas/SKILL.md",
+      "skill_sha256": "be0c2b0baa1aa9768d602ce33dcb3c81c8edf6e1a23f8cb1a4768dd922bb80f3",
+      "skill_bytes": 15860,
+      "discovery_bytes": 37299,
+      "tool_count": 40,
+      "trace_root": "target/benchmarks/mcp-composition/agent-traces/v04-reviewed-oracle-final"
+    },
+    "v0_3_26": {
+      "runtime": "{USER_HOME}/AppData/Local/ProjectAtlas/bin/projectatlas.exe",
+      "runtime_version": "projectatlas 0.3.26",
+      "runtime_sha256": "1da83933a7e5358fc3cceb4ff0e3bd51e4a4cef6b49e1baba68cccf86924c900",
+      "runtime_bytes": 43751936,
+      "frozen_commit": "d3b3e157f954c7d360d821ed0385762e8b044385",
+      "skill": "{USER_HOME}/.codex/plugins/cache/projectatlas/projectatlas/0.3.26/skills/projectatlas/SKILL.md",
+      "skill_sha256": "ac5a2561ab7fb791716d6160b060a0eacb2bf7b41d4385fa909d3e26465ff203",
+      "skill_bytes": 33977,
+      "discovery_bytes": 28933,
+      "tool_count": 40,
+      "trace_root": "target/benchmarks/mcp-composition/agent-traces/v0326-reviewed"
+    }
+  },
+  "results": [
+    {
+      "arm": "v0_4_0",
+      "fixture": "clean",
+      "correct": true,
+      "calls": 7,
+      "backtracks": 0,
+      "wrong_or_nonproductive_selections": 0,
+      "broad_content_calls": 0,
+      "direct_source_filesystem_reads": 0,
+      "emitted_mcp_bytes": 4412,
+      "runtime_navigation_bytes": 41711,
+      "cold_navigation_bytes": 57571,
+      "thread_id": "019f9422-59ac-7932-85da-6e3f001f6b18",
+      "provider_usage": {
+        "input_tokens": 248263,
+        "cached_input_tokens": 214784,
+        "output_tokens": 3150,
+        "reasoning_output_tokens": 1492
+      },
+      "tool_sequence": [
+        "atlas_session_brief",
+        "atlas_file_summary",
+        "atlas_file_summary",
+        "atlas_slice",
+        "atlas_slice",
+        "atlas_search",
+        "atlas_slice"
+      ]
+    },
+    {
+      "arm": "v0_4_0",
+      "fixture": "dirty",
+      "correct": true,
+      "calls": 8,
+      "backtracks": 0,
+      "wrong_or_nonproductive_selections": 0,
+      "broad_content_calls": 0,
+      "direct_source_filesystem_reads": 0,
+      "emitted_mcp_bytes": 5379,
+      "runtime_navigation_bytes": 42678,
+      "cold_navigation_bytes": 58538,
+      "thread_id": "019f9422-9cbe-75f3-8387-5bf96bf7e80a",
+      "provider_usage": {
+        "input_tokens": 278465,
+        "cached_input_tokens": 218880,
+        "output_tokens": 3149,
+        "reasoning_output_tokens": 1449
+      },
+      "tool_sequence": [
+        "atlas_session_brief",
+        "atlas_file_summary",
+        "atlas_file_summary",
+        "atlas_slice",
+        "atlas_file_summary",
+        "atlas_slice",
+        "atlas_slice",
+        "atlas_slice"
+      ]
+    },
+    {
+      "arm": "v0_4_0",
+      "fixture": "non_git",
+      "correct": true,
+      "calls": 9,
+      "backtracks": 0,
+      "wrong_or_nonproductive_selections": 0,
+      "broad_content_calls": 0,
+      "direct_source_filesystem_reads": 0,
+      "emitted_mcp_bytes": 5504,
+      "runtime_navigation_bytes": 42803,
+      "cold_navigation_bytes": 58663,
+      "thread_id": "019f9422-e69a-7f43-922a-1b43588c8abf",
+      "provider_usage": {
+        "input_tokens": 347561,
+        "cached_input_tokens": 310528,
+        "output_tokens": 3132,
+        "reasoning_output_tokens": 1063
+      },
+      "tool_sequence": [
+        "atlas_session_brief",
+        "atlas_file_summary",
+        "atlas_file_summary",
+        "atlas_slice",
+        "atlas_slice",
+        "atlas_file_summary",
+        "atlas_slice",
+        "atlas_search",
+        "atlas_slice"
+      ]
+    },
+    {
+      "arm": "v0_3_26",
+      "fixture": "clean",
+      "correct": true,
+      "calls": 10,
+      "backtracks": 0,
+      "wrong_or_nonproductive_selections": 0,
+      "broad_content_calls": 1,
+      "direct_source_filesystem_reads": 0,
+      "emitted_mcp_bytes": 5758,
+      "runtime_navigation_bytes": 34691,
+      "cold_navigation_bytes": 68668,
+      "thread_id": "019f9405-f7a0-7eb2-a901-acd86dfbf317",
+      "provider_usage": {
+        "input_tokens": 371337,
+        "cached_input_tokens": 332800,
+        "output_tokens": 3349,
+        "reasoning_output_tokens": 1516
+      },
+      "tool_sequence": [
+        "atlas_overview",
+        "atlas_folders",
+        "atlas_files",
+        "atlas_file_summary",
+        "atlas_symbols",
+        "atlas_symbol_relations",
+        "atlas_symbol_relations",
+        "atlas_file_summary",
+        "atlas_slice",
+        "atlas_slice"
+      ]
+    },
+    {
+      "arm": "v0_3_26",
+      "fixture": "dirty",
+      "correct": true,
+      "calls": 15,
+      "backtracks": 2,
+      "wrong_or_nonproductive_selections": 2,
+      "broad_content_calls": 1,
+      "direct_source_filesystem_reads": 0,
+      "emitted_mcp_bytes": 7465,
+      "runtime_navigation_bytes": 36398,
+      "cold_navigation_bytes": 70375,
+      "thread_id": "019f9406-50e1-7793-8c67-49fe4338e7c3",
+      "provider_usage": {
+        "input_tokens": 530027,
+        "cached_input_tokens": 505344,
+        "output_tokens": 4090,
+        "reasoning_output_tokens": 1385
+      },
+      "tool_sequence": [
+        "atlas_overview",
+        "atlas_folders",
+        "atlas_files",
+        "atlas_file_summary",
+        "atlas_file_summary",
+        "atlas_file_summary",
+        "atlas_symbol_relations",
+        "atlas_symbol_relations",
+        "atlas_symbol_relations",
+        "atlas_symbol_relations",
+        "atlas_slice",
+        "atlas_slice",
+        "atlas_slice",
+        "atlas_symbols",
+        "atlas_slice"
+      ]
+    },
+    {
+      "arm": "v0_3_26",
+      "fixture": "non_git",
+      "correct": true,
+      "calls": 9,
+      "backtracks": 0,
+      "wrong_or_nonproductive_selections": 0,
+      "broad_content_calls": 1,
+      "direct_source_filesystem_reads": 0,
+      "emitted_mcp_bytes": 5871,
+      "runtime_navigation_bytes": 34804,
+      "cold_navigation_bytes": 68781,
+      "thread_id": "019f9406-a696-7e51-900d-a4f94cd645ec",
+      "provider_usage": {
+        "input_tokens": 463152,
+        "cached_input_tokens": 419584,
+        "output_tokens": 2561,
+        "reasoning_output_tokens": 761
+      },
+      "tool_sequence": [
+        "atlas_overview",
+        "atlas_folders",
+        "atlas_files",
+        "atlas_file_summary",
+        "atlas_file_summary",
+        "atlas_file_summary",
+        "atlas_slice",
+        "atlas_slice",
+        "atlas_slice"
+      ]
+    }
+  ],
+  "aggregate": {
+    "v0_4_0": {
+      "correct": 3,
+      "calls": 24,
+      "backtracks": 0,
+      "broad_content_calls": 0,
+      "emitted_mcp_bytes": 15295,
+      "runtime_navigation_bytes": 127192,
+      "cold_navigation_bytes": 174772
+    },
+    "v0_3_26": {
+      "correct": 3,
+      "calls": 34,
+      "backtracks": 2,
+      "broad_content_calls": 3,
+      "emitted_mcp_bytes": 19094,
+      "runtime_navigation_bytes": 105893,
+      "cold_navigation_bytes": 207824
+    },
+    "v0_4_change_percent": {
+      "calls_reduced": 29.4,
+      "emitted_mcp_bytes_reduced": 19.9,
+      "runtime_navigation_bytes_increased": 20.1,
+      "cold_navigation_bytes_reduced": 15.9
+    }
+  },
+  "fixture_changes_percent": {
+    "clean": {
+      "calls_reduced": 30.0,
+      "emitted_mcp_bytes_reduced": 23.4,
+      "cold_navigation_bytes_reduced": 16.2
+    },
+    "dirty": {
+      "calls_reduced": 46.7,
+      "emitted_mcp_bytes_reduced": 27.9,
+      "cold_navigation_bytes_reduced": 16.8
+    },
+    "non_git": {
+      "calls_reduced": 0.0,
+      "emitted_mcp_bytes_reduced": 6.3,
+      "cold_navigation_bytes_reduced": 14.7
+    }
+  },
+  "disposition": {
+    "selected": "ProjectAtlas v0.4.0 packaged skill with the compatible 40-tool MCP inventory and opt-in compact projections",
+    "new_tool_required": false,
+    "tool_removed_or_renamed": false,
+    "issue_310": "defer tool classification, compact/default inventory selection, alias consolidation, and breaking removal until after v0.4.0 stabilizes",
+    "provider_usage_note": "provider token counters are retained as raw run metadata; they are not used as a causal navigation-context claim because caching and hidden model context are provider-owned",
+    "task_7_6_note": "single agent trial per arm and fixture is sufficient for task 7.3 forward testing but not for the repeated publication benchmark"
+  }
+}

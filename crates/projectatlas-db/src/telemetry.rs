@@ -5343,7 +5343,7 @@ mod tests {
                 initial.connection_busy_timeout_ms,
                 initial.normal_busy_timeout_ms
             );
-            assert_eq!(initial.normal_busy_timeout_ms, 1_000);
+            assert_eq!(initial.normal_busy_timeout_ms, 5_000);
             assert_eq!(initial.telemetry_busy_timeout_ms, 25);
             assert!(initial.wal_autocheckpoint_pages > 0);
 

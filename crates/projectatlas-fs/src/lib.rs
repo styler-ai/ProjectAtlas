@@ -2,11 +2,15 @@
 
 use blake3::Hasher;
 use ignore::{DirEntry, WalkBuilder, WalkState, gitignore::GitignoreBuilder};
-use projectatlas_core::language::detect_language_for_path;
+use projectatlas_core::language::{
+    LANGUAGE_CONTENT_DETECTION_MAX_BYTES, LanguageDetection, LanguageDetectionRequest,
+    detect_language_request, language_capability,
+};
 use projectatlas_core::{
     CoreError, IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkResource,
     IndexWorkStage, Node, NodeKind, normalize_repo_path, normalized_extension, normalized_parent,
 };
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -39,6 +43,8 @@ const DEFAULT_SCAN_MAX_SOURCE_BYTES: u64 = 16 * 1_024 * 1_024 * 1_024;
 const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Exact-byte hash read buffer size.
 const HASH_BUFFER_BYTES: usize = 8_192;
+/// Maximum linked-worktree `.git` pointer bytes inspected for policy discovery.
+const GIT_DIRECTORY_POINTER_MAX_BYTES: u64 = 64 * 1_024;
 
 /// Filesystem scanner errors.
 #[derive(Debug, Error)]
@@ -74,6 +80,10 @@ pub struct ScanOptions {
     pub exclude_dir_suffixes: Vec<String>,
     /// Repository-relative path prefixes to exclude.
     pub exclude_path_prefixes: Vec<String>,
+    /// Explicit filename or extension selectors mapped to canonical language IDs.
+    pub language_overrides: BTreeMap<String, String>,
+    /// Whether registry-known optional languages may be assigned to scanned files.
+    pub admit_optional_languages: bool,
 }
 
 impl Default for ScanOptions {
@@ -91,6 +101,8 @@ impl Default for ScanOptions {
             ],
             exclude_dir_suffixes: Vec::new(),
             exclude_path_prefixes: Vec::new(),
+            language_overrides: BTreeMap::new(),
+            admit_optional_languages: false,
         }
     }
 }
@@ -165,6 +177,24 @@ impl Default for ScanLimits {
     }
 }
 
+/// Resource work completed by one successful repository scan.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ScanWork {
+    /// Repository entries admitted by the scan budget, including folders.
+    pub entries: u64,
+    /// Exact source bytes admitted by the scan budget while hashing files.
+    pub source_bytes: u64,
+}
+
+/// Complete nodes and resource work from one successful repository scan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScanOutcome {
+    /// Complete sorted repository nodes.
+    pub nodes: Vec<Node>,
+    /// Resource work consumed while producing the nodes.
+    pub work: ScanWork,
+}
+
 /// Apply the operation-owned worker ceiling to the scan-specific limits.
 fn effective_scan_workers(limits: ScanLimits, control: &IndexWorkControl) -> usize {
     let workers = limits.effective_workers();
@@ -219,6 +249,14 @@ impl ScanBudget {
             IndexWorkResource::SourceBytes,
         )
     }
+
+    /// Snapshot the admitted work after a scan has completed.
+    fn work(&self) -> ScanWork {
+        ScanWork {
+            entries: self.entries.load(Ordering::Relaxed),
+            source_bytes: self.source_bytes.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// Atomically claim an inclusive bounded resource amount.
@@ -268,6 +306,25 @@ pub fn scan_repo_controlled(
     limits: ScanLimits,
     control: &IndexWorkControl,
 ) -> FsResult<Vec<Node>> {
+    scan_repo_controlled_with_work(root, options, limits, control).map(|outcome| outcome.nodes)
+}
+
+/// Scan a repository with explicit controls and report the admitted work.
+///
+/// The scan hashes current file bytes exactly. Cancellation, elapsed deadlines,
+/// and resource failures discard all staged nodes and work instead of returning
+/// a partial repository view.
+///
+/// # Errors
+///
+/// Returns an error when the root is invalid, filesystem metadata cannot be
+/// read, cancellation or the deadline is observed, or a scan limit is exceeded.
+pub fn scan_repo_controlled_with_work(
+    root: &Path,
+    options: &ScanOptions,
+    limits: ScanLimits,
+    control: &IndexWorkControl,
+) -> FsResult<ScanOutcome> {
     control.check(IndexWorkStage::RepositoryTraversal)?;
     if !root.is_dir() {
         return Err(FsError::RootNotDirectory(root.to_path_buf()));
@@ -325,7 +382,7 @@ pub fn scan_repo_controlled(
             if should_skip_path(&root, path, &options) {
                 return skip_entry_state(&entry);
             }
-            match scanned_node(&root, path, &budget) {
+            match scanned_node(&root, path, &options, &budget) {
                 Ok(Some(node)) => {
                     if let Ok(mut guard) = nodes.lock() {
                         guard.push(node);
@@ -365,7 +422,10 @@ pub fn scan_repo_controlled(
     })?;
     nodes.sort_by(|left, right| left.path.cmp(&right.path));
     control.check(IndexWorkStage::ScanFinalization)?;
-    Ok(nodes)
+    Ok(ScanOutcome {
+        nodes,
+        work: budget.work(),
+    })
 }
 
 /// Scan one path into a `ProjectAtlas` node when it is indexable.
@@ -425,7 +485,7 @@ pub fn scan_path_controlled(
         control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
     }
-    let node = scanned_node(&root, &absolute, &budget)?;
+    let node = scanned_node(&root, &absolute, options, &budget)?;
     control.check(IndexWorkStage::ScanFinalization)?;
     Ok(node)
 }
@@ -545,6 +605,152 @@ pub fn gitignore_excludes_path(root: &Path, path: &Path) -> FsResult<bool> {
     Ok(ignored)
 }
 
+/// Resolve the global Git excludes file selected by the same ignore engine as scans.
+///
+/// The returned path may not exist yet. Callers that retain a source-policy
+/// witness should therefore preserve the path and its absent/present state.
+#[must_use]
+pub fn git_global_excludes_path() -> Option<PathBuf> {
+    ignore::gitignore::gitconfig_excludes_path()
+}
+
+/// Return bounded external inputs that can change the standard scan ignore policy.
+///
+/// Root-contained nested `.gitignore` and `.ignore` files are covered by the
+/// recursive source observer. This inventory adds ancestor rules, repository
+/// excludes, linked-worktree metadata, and the global Git configuration inputs
+/// used by [`WalkBuilder`]. Paths are retained even when absent so creation is
+/// visible to a process-local policy witness.
+///
+/// # Errors
+///
+/// Returns an error when the root cannot be canonicalized or a linked-worktree
+/// pointer cannot be inspected within its declared bound.
+pub fn source_selection_policy_paths(root: &Path) -> FsResult<Vec<PathBuf>> {
+    let root = root.canonicalize().map_err(|source| FsError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let mut paths = BTreeSet::new();
+    for ancestor in root.ancestors() {
+        paths.insert(ancestor.join(".gitignore"));
+        paths.insert(ancestor.join(".ignore"));
+        let git = ancestor.join(".git");
+        paths.insert(git.clone());
+        match fs::metadata(&git) {
+            Ok(metadata) if metadata.is_dir() => {
+                paths.insert(git.join("info").join("exclude"));
+            }
+            Ok(metadata) if metadata.is_file() => {
+                if metadata.len() > GIT_DIRECTORY_POINTER_MAX_BYTES {
+                    return Err(FsError::Io {
+                        path: git,
+                        source: io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "linked-worktree .git pointer exceeds the policy-input limit",
+                        ),
+                    });
+                }
+                let text = fs::read_to_string(&git).map_err(|source| FsError::Io {
+                    path: git.clone(),
+                    source,
+                })?;
+                if let Some(directory) = text.strip_prefix("gitdir:").map(str::trim) {
+                    let directory = Path::new(directory);
+                    let directory = if directory.is_absolute() {
+                        directory.to_path_buf()
+                    } else {
+                        ancestor.join(directory)
+                    };
+                    paths.insert(directory.join("info").join("exclude"));
+                    let common_dir_pointer = directory.join("commondir");
+                    paths.insert(common_dir_pointer.clone());
+                    if let Some(common_dir) = read_git_directory_pointer(
+                        &common_dir_pointer,
+                        &directory,
+                        "linked-worktree commondir",
+                    )? {
+                        paths.insert(common_dir.join("info").join("exclude"));
+                    }
+                }
+            }
+            Ok(_metadata) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(FsError::Io { path: git, source });
+            }
+        }
+    }
+    if let Some(home) = home_directory() {
+        paths.insert(home.join(".gitconfig"));
+        paths.insert(home.join(".config").join("git").join("config"));
+        paths.insert(home.join(".config").join("git").join("ignore"));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    {
+        paths.insert(xdg.join("git").join("config"));
+        paths.insert(xdg.join("git").join("ignore"));
+    }
+    if let Some(global_excludes) = git_global_excludes_path() {
+        paths.insert(global_excludes);
+    }
+    Ok(paths.into_iter().collect())
+}
+
+/// Read one bounded Git directory pointer relative to its containing directory.
+fn read_git_directory_pointer(
+    path: &Path,
+    base: &Path,
+    description: &str,
+) -> FsResult<Option<PathBuf>> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(FsError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+    if metadata.len() > GIT_DIRECTORY_POINTER_MAX_BYTES {
+        return Err(FsError::Io {
+            path: path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} exceeds the policy-input limit"),
+            ),
+        });
+    }
+    let value = fs::read_to_string(path).map_err(|source| FsError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let value = Path::new(value);
+    Ok(Some(if value.is_absolute() {
+        value.to_path_buf()
+    } else {
+        base.join(value)
+    }))
+}
+
+/// Resolve the current user's home directory without adding a platform helper dependency.
+fn home_directory() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 /// Return directories whose `.gitignore` files can affect a target path.
 fn gitignore_search_dirs(root: &Path, target_dir: &Path) -> Vec<PathBuf> {
     let mut directories = Vec::new();
@@ -576,7 +782,12 @@ fn skip_entry_state(entry: &DirEntry) -> WalkState {
 }
 
 /// Convert one walker entry into an indexed node.
-fn scanned_node(root: &Path, path: &Path, budget: &ScanBudget) -> FsResult<Option<Node>> {
+fn scanned_node(
+    root: &Path,
+    path: &Path,
+    options: &ScanOptions,
+    budget: &ScanBudget,
+) -> FsResult<Option<Node>> {
     budget.control.check(IndexWorkStage::SourceMetadata)?;
     let metadata = fs::symlink_metadata(path).map_err(|source| FsError::Io {
         path: path.to_path_buf(),
@@ -589,7 +800,7 @@ fn scanned_node(root: &Path, path: &Path, budget: &ScanBudget) -> FsResult<Optio
         return folder_node(root, path).map(Some);
     }
     if metadata.is_file() {
-        return file_node(root, path, &metadata, budget).map(Some);
+        return file_node(root, path, &metadata, options, budget).map(Some);
     }
     Ok(None)
 }
@@ -687,13 +898,49 @@ fn file_node(
     root: &Path,
     path: &Path,
     metadata: &fs::Metadata,
+    options: &ScanOptions,
     budget: &ScanBudget,
 ) -> FsResult<Node> {
     let normalized = normalize_repo_path(root, path)?;
     let extension = normalized_extension(path);
-    let language = detect_language_for_path(&normalized, extension.as_deref());
     budget.control.check(IndexWorkStage::SourceHash)?;
-    let (hash, size_bytes) = hash_file(path, budget)?;
+    let explicit_override = explicit_language_override(
+        &normalized,
+        extension.as_deref(),
+        &options.language_overrides,
+    );
+    let preliminary_language = admitted_scan_language(
+        detect_language_request(LanguageDetectionRequest {
+            path: &normalized,
+            extension: extension.as_deref(),
+            explicit_override,
+            content_prefix: None,
+        })
+        .map_err(|source| FsError::Io {
+            path: path.to_path_buf(),
+            source: io::Error::new(io::ErrorKind::InvalidInput, source),
+        })?,
+        options.admit_optional_languages,
+    );
+    let hashed = hash_file(path, budget, preliminary_language.is_none())?;
+    let language = if let Some(detected) = preliminary_language {
+        Some(detected.language.to_string())
+    } else {
+        admitted_scan_language(
+            detect_language_request(LanguageDetectionRequest {
+                path: "",
+                extension: None,
+                explicit_override: None,
+                content_prefix: hashed.content_prefix.as_deref(),
+            })
+            .map_err(|source| FsError::Io {
+                path: path.to_path_buf(),
+                source: io::Error::new(io::ErrorKind::InvalidInput, source),
+            })?,
+            options.admit_optional_languages,
+        )
+        .map(|detected| detected.language.to_string())
+    };
     let mtime_ns = metadata
         .modified()
         .ok()
@@ -705,27 +952,86 @@ fn file_node(
         kind: NodeKind::File,
         extension,
         language,
-        size_bytes: Some(size_bytes),
+        size_bytes: Some(hashed.size_bytes),
         mtime_ns,
-        content_hash: Some(hash),
+        content_hash: Some(hashed.digest),
     })
 }
 
+/// Apply effective scan admission without weakening core registry recognition.
+fn admitted_scan_language(
+    detected: Option<LanguageDetection>,
+    admit_optional_languages: bool,
+) -> Option<LanguageDetection> {
+    detected.filter(|detected| {
+        admit_optional_languages
+            || language_capability(detected.language)
+                .is_none_or(|capability| capability.optional_pack.is_none())
+    })
+}
+
+/// Select one configured explicit override before built-in detector rules.
+fn explicit_language_override<'a>(
+    path: &str,
+    extension: Option<&str>,
+    overrides: &'a BTreeMap<String, String>,
+) -> Option<&'a str> {
+    if overrides.is_empty() {
+        return None;
+    }
+    let file_name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    if let Some(language) = overrides.get(file_name) {
+        return Some(language);
+    }
+    let lower_file_name = file_name.to_ascii_lowercase();
+    overrides
+        .iter()
+        .filter(|(selector, _)| selector.starts_with('.'))
+        .filter(|(selector, _)| {
+            lower_file_name.ends_with(selector.as_str())
+                || extension.is_some_and(|extension| extension.eq_ignore_ascii_case(selector))
+        })
+        .max_by_key(|(selector, _)| selector.len())
+        .map(|(_, language)| language.as_str())
+}
+
+/// Exact hash plus the bounded prefix already observed by the same source read.
+#[derive(Debug)]
+struct HashedFile {
+    /// BLAKE3 digest of every byte.
+    digest: String,
+    /// Exact source byte count.
+    size_bytes: u64,
+    /// Prefix retained only for bounded language detection.
+    content_prefix: Option<Vec<u8>>,
+}
+
 /// Hash a file with BLAKE3 for stale-purpose detection.
-fn hash_file(path: &Path, budget: &ScanBudget) -> FsResult<(String, u64)> {
+fn hash_file(
+    path: &Path,
+    budget: &ScanBudget,
+    retain_content_prefix: bool,
+) -> FsResult<HashedFile> {
     budget.control.check(IndexWorkStage::SourceHash)?;
     let file = fs::File::open(path).map_err(|source| FsError::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    hash_reader(path, file, budget)
+    hash_reader(path, file, budget, retain_content_prefix)
 }
 
 /// Hash every byte from a reader while observing cancellation and deadline state.
-fn hash_reader(path: &Path, mut reader: impl Read, budget: &ScanBudget) -> FsResult<(String, u64)> {
+fn hash_reader(
+    path: &Path,
+    mut reader: impl Read,
+    budget: &ScanBudget,
+    retain_content_prefix: bool,
+) -> FsResult<HashedFile> {
     let mut hasher = Hasher::new();
     let mut buffer = [0_u8; HASH_BUFFER_BYTES];
     let mut size_bytes = 0_u64;
+    let mut content_prefix =
+        retain_content_prefix.then(|| Vec::with_capacity(LANGUAGE_CONTENT_DETECTION_MAX_BYTES));
     loop {
         budget.control.check(IndexWorkStage::SourceHash)?;
         let count = reader.read(&mut buffer).map_err(|source| FsError::Io {
@@ -738,9 +1044,18 @@ fn hash_reader(path: &Path, mut reader: impl Read, budget: &ScanBudget) -> FsRes
         budget.claim_source_bytes(count as u64)?;
         size_bytes = size_bytes.saturating_add(count as u64);
         hasher.update(&buffer[..count]);
+        if let Some(content_prefix) = &mut content_prefix {
+            let retained =
+                LANGUAGE_CONTENT_DETECTION_MAX_BYTES.saturating_sub(content_prefix.len());
+            content_prefix.extend_from_slice(&buffer[..count.min(retained)]);
+        }
     }
     budget.control.check(IndexWorkStage::SourceHash)?;
-    Ok((hasher.finalize().to_hex().to_string(), size_bytes))
+    Ok(HashedFile {
+        digest: hasher.finalize().to_hex().to_string(),
+        size_bytes,
+        content_prefix,
+    })
 }
 
 /// Convert a system timestamp into nanoseconds since the Unix epoch.
@@ -903,19 +1218,104 @@ mod tests {
     }
 
     #[test]
+    fn controlled_scan_reports_admitted_work() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        fs::write(temp.path().join("source.rs"), "four")?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+
+        let outcome = scan_repo_controlled_with_work(
+            temp.path(),
+            &ScanOptions::default(),
+            ScanLimits::new(8, 64, 1),
+            &control,
+        )?;
+
+        require_path(&outcome.nodes, ".")?;
+        require_path(&outcome.nodes, "source.rs")?;
+        require(
+            outcome.work
+                == ScanWork {
+                    entries: 2,
+                    source_bytes: 4,
+                },
+            "scan work did not match the admitted entry and source-byte counters",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn source_policy_inventory_covers_absent_rules_and_linked_worktrees()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        let worktree_git_dir = temp
+            .path()
+            .join("git-metadata")
+            .join("worktrees")
+            .join("repo");
+        let common_git_dir = temp.path().join("git-metadata");
+        fs::create_dir_all(&repo)?;
+        fs::create_dir_all(&worktree_git_dir)?;
+        fs::create_dir_all(common_git_dir.join("info"))?;
+        fs::write(
+            repo.join(".git"),
+            format!("gitdir: {}\n", worktree_git_dir.display()),
+        )?;
+        fs::write(
+            worktree_git_dir.join("commondir"),
+            format!("{}\n", common_git_dir.display()),
+        )?;
+        fs::write(common_git_dir.join("info").join("exclude"), "ignored.rs\n")?;
+
+        let canonical_repo = repo.canonicalize()?;
+        let paths = source_selection_policy_paths(&repo)?;
+
+        require(
+            paths.contains(&canonical_repo.join(".ignore")),
+            "policy inventory omitted the possibly absent root .ignore",
+        )?;
+        require(
+            paths.contains(&canonical_repo.join(".gitignore")),
+            "policy inventory omitted the possibly absent root .gitignore",
+        )?;
+        require(
+            paths.contains(&canonical_repo.join(".git")),
+            "policy inventory omitted the linked-worktree pointer",
+        )?;
+        require(
+            paths.contains(&worktree_git_dir.join("commondir")),
+            "policy inventory omitted the linked-worktree commondir pointer",
+        )?;
+        require(
+            paths.contains(&common_git_dir.join("info").join("exclude")),
+            "policy inventory omitted the common Git exclude file",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn exact_hash_loop_observes_cancellation_between_chunks() {
         let exact_budget = ScanBudget::new(
             ScanLimits::new(8, (HASH_BUFFER_BYTES * 2) as u64, 1),
             IndexWorkControl::new(IndexCancellation::new(), None),
         );
+        let exact_source = vec![3_u8; HASH_BUFFER_BYTES + 17];
+        let exact_digest = blake3::hash(&exact_source).to_hex().to_string();
         let exact = hash_reader(
             Path::new("exact-source.rs"),
-            io::Cursor::new(vec![3_u8; HASH_BUFFER_BYTES + 17]),
+            io::Cursor::new(exact_source),
             &exact_budget,
+            false,
         );
         assert!(matches!(
             exact,
-            Ok((_hash, size_bytes)) if size_bytes == (HASH_BUFFER_BYTES + 17) as u64
+            Ok(HashedFile {
+                digest,
+                size_bytes,
+                content_prefix,
+            }) if digest == exact_digest
+                && size_bytes == (HASH_BUFFER_BYTES + 17) as u64
+                && content_prefix.is_none()
         ));
 
         let cancellation = IndexCancellation::new();
@@ -927,7 +1327,7 @@ mod tests {
             canceled: false,
         };
 
-        let result = hash_reader(Path::new("source.rs"), reader, &budget);
+        let result = hash_reader(Path::new("source.rs"), reader, &budget, false);
         assert!(matches!(
             result,
             Err(FsError::IndexWork(IndexWorkFailure::Cancelled {
@@ -943,6 +1343,7 @@ mod tests {
             Path::new("growing-source.rs"),
             io::Cursor::new(vec![7_u8; HASH_BUFFER_BYTES * 2]),
             &byte_budget,
+            false,
         );
         assert!(matches!(
             oversized,
@@ -954,6 +1355,33 @@ mod tests {
                 }
             ))
         ));
+    }
+
+    #[test]
+    fn classified_hash_retains_no_content_prefix() -> Result<(), Box<dyn Error>> {
+        let preliminary_language =
+            detect_language_request(LanguageDetectionRequest::new("source.rs", Some(".rs")))?;
+        let budget = ScanBudget::new(
+            ScanLimits::new(8, 64, 1),
+            IndexWorkControl::new(IndexCancellation::new(), None),
+        );
+
+        let hashed = hash_reader(
+            Path::new("source.rs"),
+            io::Cursor::new(b"fn main() {}\n"),
+            &budget,
+            preliminary_language.is_none(),
+        )?;
+
+        require(
+            preliminary_language.map(|detected| detected.language) == Some("rust"),
+            "preliminary extension classification did not select Rust",
+        )?;
+        require(
+            hashed.content_prefix.is_none(),
+            "classified hash retained a content prefix",
+        )?;
+        Ok(())
     }
 
     #[test]
@@ -969,6 +1397,202 @@ mod tests {
         require_path(&nodes, "src")?;
         require_path(&nodes, "src/main.rs")?;
         reject_path(&nodes, "src/.purpose")?;
+        Ok(())
+    }
+
+    #[test]
+    fn scan_uses_explicit_language_override_before_builtin_filename_rules()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        fs::write(temp.path().join("Cargo.toml"), "#!/usr/bin/env node\n")?;
+        let mut options = ScanOptions::default();
+        options
+            .language_overrides
+            .insert(".toml".to_string(), "python".to_string());
+
+        let nodes = scan_repo(temp.path(), &options)?;
+        let cargo = nodes
+            .iter()
+            .find(|node| node.path == "Cargo.toml")
+            .ok_or_else(|| io::Error::other("Cargo.toml was not scanned"))?;
+        require(
+            cargo.language.as_deref() == Some("python"),
+            "explicit language override did not win",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_language_override_fails_before_source_hashing() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let source_path = temp.path().join("source.rs");
+        fs::write(&source_path, "fn main() {}\n")?;
+        let mut options = ScanOptions::default();
+        options
+            .language_overrides
+            .insert(".rs".to_string(), "missing-language".to_string());
+
+        for _ in 0..2 {
+            let result = scan_path_controlled(
+                temp.path(),
+                &source_path,
+                &options,
+                ScanLimits::new(8, 0, 1),
+                &IndexWorkControl::new(IndexCancellation::new(), None),
+            );
+            match result {
+                Err(FsError::Io { source, .. }) => {
+                    require(
+                        source.kind() == io::ErrorKind::InvalidInput,
+                        "invalid override did not return InvalidInput",
+                    )?;
+                    require(
+                        source.to_string()
+                            == "unknown explicit language override \"missing-language\"",
+                        "invalid override diagnostic was not deterministic",
+                    )?;
+                }
+                other => {
+                    return Err(io::Error::other(format!("unexpected result: {other:?}")).into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scan_detects_bounded_shebang_from_the_existing_hash_read() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        fs::write(
+            temp.path().join("tool"),
+            "#!/usr/bin/env python\nprint('atlas')\n",
+        )?;
+
+        let nodes = scan_repo(temp.path(), &ScanOptions::default())?;
+        let tool = nodes
+            .iter()
+            .find(|node| node.path == "tool")
+            .ok_or_else(|| io::Error::other("extensionless tool was not scanned"))?;
+        require(
+            tool.language.as_deref() == Some("python"),
+            "extensionless shebang was not detected from the retained prefix",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn default_scan_keeps_optional_catalog_recognition_inactive() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let optional_path = temp.path().join("report.awk");
+        fs::write(&optional_path, "{ print $1 }\n")?;
+        fs::write(temp.path().join("main.rs"), "fn main() {}\n")?;
+
+        let recognized =
+            detect_language_request(LanguageDetectionRequest::new("report.awk", Some(".awk")))?;
+        require(
+            recognized.map(|detected| detected.language) == Some("awk"),
+            "optional AWK recognition was removed from the core catalog",
+        )?;
+
+        let nodes = scan_repo(temp.path(), &ScanOptions::default())?;
+        let optional = nodes
+            .iter()
+            .find(|node| node.path == "report.awk")
+            .ok_or_else(|| io::Error::other("optional source was not scanned"))?;
+        require(
+            optional.language.is_none(),
+            "default scan admitted an inactive optional language",
+        )?;
+        let built_in = nodes
+            .iter()
+            .find(|node| node.path == "main.rs")
+            .ok_or_else(|| io::Error::other("built-in Rust source was not scanned"))?;
+        require(
+            built_in.language.as_deref() == Some("rust"),
+            "optional-language admission changed built-in recognition",
+        )?;
+
+        let refreshed = scan_path(temp.path(), &optional_path, &ScanOptions::default())?
+            .ok_or_else(|| io::Error::other("optional source was not refreshed"))?;
+        require(
+            refreshed.language.is_none(),
+            "single-path refresh admitted an inactive optional language",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn enabled_scan_admits_optional_language_for_full_and_single_path_scans()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let optional_path = temp.path().join("report.awk");
+        fs::write(&optional_path, "{ print $1 }\n")?;
+        let options = ScanOptions {
+            admit_optional_languages: true,
+            ..ScanOptions::default()
+        };
+
+        let nodes = scan_repo(temp.path(), &options)?;
+        let optional = nodes
+            .iter()
+            .find(|node| node.path == "report.awk")
+            .ok_or_else(|| io::Error::other("optional source was not scanned"))?;
+        require(
+            optional.language.as_deref() == Some("awk"),
+            "enabled scan did not admit the optional AWK language",
+        )?;
+
+        let refreshed = scan_path(temp.path(), &optional_path, &options)?
+            .ok_or_else(|| io::Error::other("optional source was not refreshed"))?;
+        require(
+            refreshed.language.as_deref() == Some("awk"),
+            "enabled single-path refresh did not admit the optional AWK language",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn optional_override_respects_admission_and_rejected_extension_uses_content_fallback()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        fs::write(temp.path().join("report.txt"), "{ print $1 }\n")?;
+        fs::write(
+            temp.path().join("tool.awk"),
+            "#!/usr/bin/env python\nprint('atlas')\n",
+        )?;
+        let mut options = ScanOptions::default();
+        options
+            .language_overrides
+            .insert(".txt".to_string(), "awk".to_string());
+
+        let nodes = scan_repo(temp.path(), &options)?;
+        let overridden = nodes
+            .iter()
+            .find(|node| node.path == "report.txt")
+            .ok_or_else(|| io::Error::other("overridden source was not scanned"))?;
+        require(
+            overridden.language.is_none(),
+            "explicit override bypassed optional-language admission",
+        )?;
+        let content_detected = nodes
+            .iter()
+            .find(|node| node.path == "tool.awk")
+            .ok_or_else(|| io::Error::other("content-detected source was not scanned"))?;
+        require(
+            content_detected.language.as_deref() == Some("python"),
+            "rejected optional extension did not fall through to built-in content detection",
+        )?;
+
+        options.admit_optional_languages = true;
+        let nodes = scan_repo(temp.path(), &options)?;
+        let overridden = nodes
+            .iter()
+            .find(|node| node.path == "report.txt")
+            .ok_or_else(|| io::Error::other("enabled overridden source was not scanned"))?;
+        require(
+            overridden.language.as_deref() == Some("awk"),
+            "enabled scan did not admit an explicit optional-language override",
+        )?;
         Ok(())
     }
 

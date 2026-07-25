@@ -13,6 +13,11 @@ on:
         description: "Release version (e.g. v0.3.0)"
         required: true
         type: string
+      prepublish_only:
+        description: "Build, install, and test release packages without publishing"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -28,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Rust
         run: |
@@ -36,7 +41,7 @@ jobs:
           rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
         with:
           tool: cargo-deny@0.20.2
 
@@ -58,6 +63,9 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace --all-features --locked
+
+      - name: Filtered custom harness compatibility
+        run: cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled
 
       - name: Doc tests
         run: cargo test --doc --workspace --all-features --locked
@@ -94,6 +102,7 @@ jobs:
           fi
 
       - name: Release issue checklist gate
+        if: ${{ !inputs.prepublish_only }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -121,7 +130,7 @@ jobs:
             suffix: aarch64-apple-darwin
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Rust
         run: |
@@ -130,6 +139,17 @@ jobs:
 
       - name: Build
         run: cargo build --locked -p projectatlas-cli --release
+
+      - name: Build packaged contract runner
+        run: |
+          cargo test --locked --release -p projectatlas-cli --test e2e --no-run
+          contract="$(find target/release/deps -maxdepth 1 -type f -name 'e2e-*' -perm -111 -print -quit)"
+          if [[ -z "$contract" ]]; then
+            echo "Compiled packaged contract runner was not found" >&2
+            exit 1
+          fi
+          mkdir -p contract-artifacts
+          cp "$contract" contract-artifacts/projectatlas-packaged-contract
 
       - name: Package
         run: |
@@ -148,6 +168,13 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
 
+      - name: Upload packaged contract runner
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: packaged-contract-runner-${{ matrix.suffix }}
+          path: contract-artifacts/*
+          if-no-files-found: error
+
   package-windows:
     name: package windows-x64
     needs: verify
@@ -155,7 +182,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Rust
         shell: pwsh
@@ -166,6 +193,17 @@ jobs:
       - name: Build
         shell: pwsh
         run: cargo build --locked -p projectatlas-cli --release
+
+      - name: Build packaged contract runner
+        shell: pwsh
+        run: |
+          cargo test --locked --release -p projectatlas-cli --test e2e --no-run
+          $contracts = @(Get-ChildItem -LiteralPath "target\release\deps" -Filter "e2e-*.exe" -File)
+          if ($contracts.Count -ne 1) {
+            throw "Expected one compiled packaged contract runner, found $($contracts.Count)."
+          }
+          New-Item -ItemType Directory -Force -Path "contract-artifacts" | Out-Null
+          Copy-Item -LiteralPath $contracts[0].FullName -Destination "contract-artifacts\projectatlas-packaged-contract.exe"
 
       - name: Package
         shell: pwsh
@@ -190,6 +228,13 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
 
+      - name: Upload packaged contract runner
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: packaged-contract-runner-x86_64-pc-windows-msvc
+          path: contract-artifacts/*
+          if-no-files-found: error
+
   prepublish-installer-smoke-unix:
     name: prepublish installer smoke ${{ matrix.label }}
     needs: package-unix
@@ -209,13 +254,19 @@ jobs:
             suffix: aarch64-apple-darwin
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download packaged runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: projectatlas-${{ matrix.suffix }}
           path: release-assets
+
+      - name: Download packaged contract runner
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: packaged-contract-runner-${{ matrix.suffix }}
+          path: contract-artifacts
 
       - name: Install packaged runtime through plugin
         timeout-minutes: 5
@@ -274,6 +325,19 @@ jobs:
           require_args(command[1:])
           require(Path(opencode["cwd"]).resolve() == root, "opencode cwd mismatch")
           PY
+          chmod +x contract-artifacts/projectatlas-packaged-contract
+          PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
+          PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
+            contract-artifacts/projectatlas-packaged-contract \
+              mcp_advertised_tools_own_their_real_sqlite_effects --exact --nocapture
+          PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
+          PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
+            contract-artifacts/projectatlas-packaged-contract \
+              packaged_cli_surface_preserves_v0326_routes_and_defaults --exact --nocapture
+          PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
+          PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
+            contract-artifacts/projectatlas-packaged-contract \
+              packaged_cli_commands_own_their_real_sqlite_effects --exact --nocapture
 
   prepublish-installer-smoke-windows:
     name: prepublish installer smoke windows-x64
@@ -281,13 +345,19 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download packaged runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: projectatlas-x86_64-pc-windows-msvc
           path: release-assets
+
+      - name: Download packaged contract runner
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: packaged-contract-runner-x86_64-pc-windows-msvc
+          path: contract-artifacts
 
       - name: Install packaged runtime through plugin
         timeout-minutes: 5
@@ -354,9 +424,25 @@ jobs:
           Assert-Equal ([System.IO.Path]::GetFullPath($command[0])) $expectedRuntime "OpenCode command path mismatch"
           Assert-McpArgs @($command[1..($command.Count - 1)])
           Assert-Equal ([System.IO.Path]::GetFullPath($opencodeServer.cwd)) $expectedRoot "OpenCode cwd mismatch"
+          $env:PROJECTATLAS_MCP_CONTRACT_EXECUTABLE = $expectedRuntime
+          $env:PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT = [System.IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE "plugins\projectatlas"))
+          $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.exe"
+          & $contractRunner mcp_advertised_tools_own_their_real_sqlite_effects --exact --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged MCP contract failed with exit code $LASTEXITCODE."
+          }
+          & $contractRunner packaged_cli_surface_preserves_v0326_routes_and_defaults --exact --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged CLI surface contract failed with exit code $LASTEXITCODE."
+          }
+          & $contractRunner packaged_cli_commands_own_their_real_sqlite_effects --exact --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged CLI behavior contract failed with exit code $LASTEXITCODE."
+          }
 
   publish:
     name: publish
+    if: ${{ !inputs.prepublish_only }}
     needs: [prepublish-installer-smoke-unix, prepublish-installer-smoke-windows]
     runs-on: ubuntu-latest
     permissions:
@@ -367,7 +453,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -375,6 +461,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: release-assets
+          pattern: projectatlas-*
           merge-multiple: true
 
       - name: Prepare release assets
@@ -450,7 +537,7 @@ jobs:
             suffix: aarch64-apple-darwin
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install release runtime through plugin
         timeout-minutes: 5
@@ -510,7 +597,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install release runtime through plugin
         timeout-minutes: 5

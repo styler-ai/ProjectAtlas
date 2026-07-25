@@ -42,10 +42,8 @@ nonsource_files[]:
   docs/workflow.md,ProjectAtlas workflow and troubleshooting guide
   docs/projectatlas-3-architecture.md,ProjectAtlas 3 Rust architecture plan
   docs/projectatlas-v0.3.23-premortem-spec.md,ProjectAtlas v0.3.23 pre-mortem and release specification for installer drift and token TUI fixes
-  skills/codex/ProjectAtlas.md,Codex skill instructions for ProjectAtlas
   skills/codex-coding-plugin/SKILL.md,Codex plugin engineering skill for stable plugin manifests installers MCP config and cache-drift checks
   skills/codex-coding-plugin/agents/openai.yaml,Agent manifest exposing the codex-coding-plugin skill to OpenAI and Codex contexts
-  skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas
   plugins/projectatlas/.codex-plugin/plugin.json,ProjectAtlas Codex plugin manifest
   plugins/projectatlas/skills/projectatlas/SKILL.md,ProjectAtlas installable Codex skill
   templates/AGENTS.md,Agent startup snippet for ProjectAtlas

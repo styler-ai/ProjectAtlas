@@ -3,6 +3,12 @@
 
 set -e
 
+# Git exports repository-local state to hooks; test fixtures must rediscover their own roots.
+for git_variable in $(git rev-parse --local-env-vars); do
+  unset "$git_variable"
+done
+
+python3 docs/benchmarks/harness/mcp_composition.py --self-test
 cargo fmt --all --check
 cargo check --workspace --all-targets --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings

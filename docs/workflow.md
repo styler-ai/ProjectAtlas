@@ -7,11 +7,11 @@ ProjectAtlas is designed to run locally with a project-local SQLite atlas and op
 ## Recommended workflow
 
 1. `projectatlas init` (first-time setup, initial scan/index, generated MCP configs, and purpose handoff).
-2. Run `projectatlas scan` or `projectatlas watch --once` later when you need to refresh the SQLite index.
-3. Run `projectatlas config --print` when effective scan, purpose, or exclusion policy is unclear.
-4. Run `projectatlas overview`, `projectatlas folders <query>`, and `projectatlas files <query>` before broad source reads; use `projectatlas files --file-pattern <glob>` for direct glob discovery.
-5. Run `projectatlas summary <file> --limit 25` before opening full files.
-6. Run `projectatlas outline <file>` when line-level compressed context is still needed.
+2. Refresh with `atlas_watch_once`, `atlas_scan`, `projectatlas watch --once`, or `projectatlas scan` only when the SQLite index may be stale.
+3. For task-directed MCP work, call `atlas_session_brief` once with the task and `compact: true`, then follow its returned summary, search, relation, health, or slice request directly.
+4. Use `atlas_overview` → `atlas_folders` → `atlas_files`, or their CLI equivalents, only when session brief is unavailable, returns no actionable candidate, or broad repository structure is itself the task.
+5. Copy returned selectors into `atlas_slice`; use the manual CLI summary/outline/slice funnel only as a fallback.
+6. Run `projectatlas config --print` when effective scan, purpose, or exclusion policy is unclear.
 7. Run `projectatlas lint --report-untracked --purpose-level low`.
 8. Run `projectatlas map --force` only when a compatibility TOON snapshot is explicitly needed.
 9. Open a PR that references the GitHub issue (CI requires `#NNN` in title or body).
@@ -103,7 +103,7 @@ Ordinary pull requests require exact local/GitHub checklist synchronization but 
 
 ## Documentation site
 
-- `04-Docs` builds Rust API docs with `cargo doc` and deploys the generated `target/doc` artifact to GitHub Pages.
+- `04-Docs` builds Rust API docs plus the generated Language & Ecosystem Support page from the same catalog identity as `docs/language-support.md`, then deploys `target/doc` to GitHub Pages.
 - GitHub Pages should be configured for GitHub Actions deployment.
 
 ## Branching
@@ -122,7 +122,7 @@ Ordinary pull requests require exact local/GitHub checklist synchronization but 
 
 - GitHub Actions runs Rust source, dependency, unit, E2E, documentation, and packaging checks. ProjectAtlas scan, purpose, parity, and lint maintenance run locally against the developer or agent's current source state, not against the hosted Actions checkout.
 - `projectatlas lint` checks purpose/header health, non-source declarations, and untracked files; it does not require or validate the optional compatibility TOON export.
-- `projectatlas lint --purpose-level low` is the default first-pass agent gate: stale, duplicate, and repeated temporary-folder findings fail, while missing/suggested/agent-review purpose curation for folders plus high-impact files remains advisory. Use `projectatlas purpose queue` for the actionable curation list, `--purpose-level medium` when all source files must be agent-reviewed, and `--purpose-level strict` only when every indexed file and folder must be agent-reviewed.
+- `projectatlas lint --purpose-level low` is the default first-pass agent gate: duplicate and repeated temporary-folder findings fail, while missing/suggested purpose curation for folders plus high-impact files remains advisory. Use `projectatlas purpose queue` for the actionable curation list, `--purpose-level medium` when all source files must be agent-reviewed, and `--purpose-level strict` only when every indexed file and folder must be agent-reviewed.
 - PRs must reference a GitHub issue and have a milestone.
 - Ordinary PRs may reference an issue without closing it; use `Closes #NNN` only when the issue's complete checklist is ready to close.
 - Active OpenSpec task lists must be mapped in `openspec/issue-map.json`, and their authoritative GitHub task sections must exactly mirror local text, order, ownership, and checked state.
@@ -157,7 +157,7 @@ projectatlas purpose review --from-file reviewed-purposes.json --apply
 
 The purpose queue is source-focused and folder-first by default, so binary assets, asset-only roots, and low-priority source files do not dominate the next-action list. Pass `--include-low-priority-files` only when intentionally doing broad file-purpose cleanup, and pass `--include-assets` only when intentionally curating non-source files. Generated purpose suggestions remain review-required until an agent approves or corrects them.
 
-Purpose entries live in SQLite and are preserved across normal scans and deep index refreshes. Re-scanning keeps existing reviewed purposes for unchanged paths, marks changed approved files stale for review, and deactivates deleted/excluded paths instead of recreating purpose noise. Use the purpose queue or health output to approve only new or stale entries. If a repository needs reproducible strict lint from a fresh checkout, keep a reviewed batch input in the repo and replay it with `projectatlas purpose review --apply`; do not edit the SQLite database by hand.
+Purpose entries live in SQLite and are preserved across normal scans and deep index refreshes. Re-scanning preserves accepted purpose text and approval across content, symbol, summary, and graph changes; automation never invalidates or overwrites it. Deleted/excluded paths become inactive while their path-owned accepted purpose remains dormant, and a rename does not transfer approval automatically. Use the purpose queue to approve missing/generated suggestions, or use the existing purpose APIs for an explicit correction when an agent, reviewer, or user finds an accepted purpose wrong. If a repository needs reproducible strict lint from a fresh checkout, keep a reviewed batch input in the repo and replay it with `projectatlas purpose review --apply`; do not edit the SQLite database by hand.
 
 ### Legacy Purpose headers or .purpose files
 

@@ -12,11 +12,13 @@ getrandom.workspace = true
 projectatlas-core.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 whichdisk.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+rusqlite = { workspace = true, features = ["trace"] }
 
 [lints]
 workspace = true

@@ -1,17 +1,25 @@
 //! Purpose: Provide the `ProjectAtlas` 3 command-line adapter.
 
 mod atlas_map;
+#[cfg(feature = "derived-snapshot")]
+mod derived_snapshot_archive;
 mod mcp;
 mod runtime;
 mod structural;
 mod token_tui;
 
 use atlas_map::{
-    IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report, init_gitignore,
-    init_project_with_config, lint_map, list_ignore_entries, load_atlas_config,
+    AtlasMapConfig, IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report,
+    init_gitignore, init_project_with_config, lint_map, list_ignore_entries, load_atlas_config,
     remove_ignore_entry, write_map,
 };
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::parser::ValueSource;
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+#[cfg(feature = "optional-parser-supervisor")]
+use projectatlas_cli::optional_parser_lifecycle::{
+    OptionalParserPackLifecycle, OptionalParserPackLifecycleError,
+};
+use projectatlas_core::graph::{ConfidenceClass, GraphLimits, RepositoryFilePath};
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::telemetry::{
@@ -27,39 +35,49 @@ use projectatlas_core::{
 };
 use projectatlas_db::{
     AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, ProjectRootTransition,
-    ProjectRootTransitionResult, verify_project_database,
+    ProjectRootTransitionResult, RepositoryCoverageQuery, verify_project_database,
 };
 use projectatlas_service::{
-    CodeSlice, FileSummaryReport, SearchReport, SymbolSliceSelector, TokenReport,
-    TokenReportRequest, build_file_summary_from_source, load_token_report,
-    read_indexed_code_slice_from_source, read_symbol_slice_from_source, search_indexed_files,
+    COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CodeSliceBudget, CodeSliceDraft, CoverageDiscoveryReport,
+    DetailedRelationBudget, DetailedRelationQuery, FederatedStore, FileSummaryReport,
+    GitImpactSelection, RelationAnalysisMode, RelationAnalysisQuery, RelationAnchor,
+    RelationDirection, RelationResolutionFilter, SearchQuery, SearchReport, SearchRetrievalMode,
+    ServiceError, SymbolSliceSelector, TokenReport, TokenReportRequest,
+    build_file_summary_from_source, load_coverage_discovery, load_detailed_relation_page,
+    load_federated_detailed_relations, load_federated_relation_analysis, load_relation_analysis,
+    load_token_report, parse_coverage_parser, parse_coverage_relation, parse_coverage_state,
+    parse_symbol_kind, read_indexed_code_slice_from_source_bounded,
+    read_symbol_slice_from_source_bounded, search_indexed_files_with_control,
 };
 use rmcp::schemars;
 use runtime::{
     DEFAULT_HEALTH_LIMIT, InitBootstrapOptions, InitHostConfigStatus, InitSetupReport,
-    MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel, PurposeReviewRequest,
-    ScanRuntimePlan, SettingsReport, SymbolBuildOptions, UsageRuntimeInstance, WatchStatusReport,
-    absolute_path, build_settings_report, byte_count_to_tokens, canonical_project_root,
-    config_root_mismatch_error, default_mcp_project_root, defaultable_cli_project_root,
+    MAX_HEALTH_LIMIT, MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel,
+    PurposeReviewRequest, ScanRuntimePlan, SettingsReport, SymbolBuildOptions,
+    UsageRuntimeInstance, WatchStatusReport, absolute_path, build_settings_report,
+    byte_count_to_tokens, canonical_project_root, config_root_mismatch_error,
+    default_mcp_project_root, defaultable_cli_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     index_work_control, init_config_path, init_path_status, lint_database_if_present,
     next_step_report, next_step_report_payload, normalized_folder_filter,
     open_atlas_store_for_project, open_atlas_store_read_only_for_project,
-    open_fresh_atlas_store_for_project, purpose_curation_page, ranked_file_nodes_with_reasons,
-    ranked_folder_nodes_with_reasons, read_indexed_file_content,
-    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
-    render_health_page, render_purpose_curation_page, render_purpose_review_report,
-    reset_index_files, resolved_mcp_config_path, review_purposes, run_init_bootstrap,
-    run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
-    run_symbol_build_pipeline_controlled, run_watch_loop, strip_legacy_purpose,
-    validated_indexed_file_key, watcher_status_report,
+    open_federated_atlas_stores_for_project, open_fresh_atlas_store_for_project,
+    purpose_curation_page, ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons,
+    read_indexed_file_content, record_directory_walk_usage_estimate, record_usage_estimate,
+    record_usage_text, render_coverage_report, render_health_page, render_purpose_curation_page,
+    render_purpose_review_report, reset_index_files, resolved_mcp_config_path, review_purposes,
+    run_init_bootstrap, run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
+    run_symbol_build_pipeline_controlled, run_watch_loop, standalone_index_work_control,
+    strip_legacy_purpose, validate_purpose_review_admission, validated_indexed_file_key,
+    watcher_status_report,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
 #[cfg(test)]
 use token_tui::render_token_dashboard;
@@ -102,6 +120,10 @@ const REQUIRED_CLI_COMMANDS: &[RequiredCliCommand] = &[
     RequiredCliCommand::Slice,
     RequiredCliCommand::Symbols,
     RequiredCliCommand::Settings,
+    #[cfg(feature = "derived-snapshot")]
+    RequiredCliCommand::Snapshot,
+    #[cfg(feature = "optional-parser-supervisor")]
+    RequiredCliCommand::ParserPack,
     RequiredCliCommand::Root,
     RequiredCliCommand::Config,
     RequiredCliCommand::Ignore,
@@ -158,6 +180,21 @@ enum CliError {
     /// Atlas map operation failed.
     #[error("{0}")]
     AtlasMap(#[from] atlas_map::AtlasMapError),
+    /// Optional parser-pack lifecycle operation failed.
+    #[cfg(feature = "optional-parser-supervisor")]
+    #[error("{0}")]
+    ParserPack(#[from] OptionalParserPackLifecycleError),
+    /// Optional parsing failed and the requested process cleanup also failed.
+    #[cfg(feature = "optional-parser-supervisor")]
+    #[error(
+        "optional parser operation failed: {operation}; mandatory cleanup also failed: {cleanup}"
+    )]
+    OptionalParserOperationAndCleanup {
+        /// Original staging or parser failure.
+        operation: Box<Self>,
+        /// Cleanup failure observed before releasing process ownership.
+        cleanup: Box<Self>,
+    },
     /// User input was invalid.
     #[error("invalid input: {0}")]
     InvalidInput(String),
@@ -211,6 +248,9 @@ struct CliErrorPayload<'a> {
     /// Content-free database placement details for a rejected `SQLite` profile.
     #[serde(skip_serializing_if = "Option::is_none")]
     database_filesystem: Option<DatabaseFilesystemErrorPayload>,
+    /// Optional retrieval capability state and recovery guidance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search_capability: Option<SearchCapabilityErrorPayload>,
     /// Direct CLI recovery selector for a confirmed mismatch.
     #[serde(skip_serializing_if = "Option::is_none")]
     next: Option<CliRefreshNextCall<'a>>,
@@ -232,6 +272,11 @@ enum AgentErrorKind {
     DatabaseFilesystemUnsupported,
     /// The database's required local filesystem guarantees could not be established.
     DatabaseFilesystemUncertain,
+    /// The host has no accepted optional parser containment adapter.
+    #[cfg(feature = "optional-parser-supervisor")]
+    UnsupportedContainment,
+    /// The requested optional search mode has no ready generation.
+    SearchCapabilityUnavailable,
 }
 
 /// Content-free database placement details with direct recovery guidance.
@@ -249,6 +294,17 @@ struct DatabaseFilesystemErrorPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
     /// Safe recovery action.
+    recovery: &'static str,
+}
+
+/// Typed optional search-capability failure shared by CLI and MCP adapters.
+#[derive(Clone, Debug, Serialize)]
+struct SearchCapabilityErrorPayload {
+    /// Explicit retrieval mode requested by the caller.
+    requested_mode: SearchRetrievalMode,
+    /// Stable optional-capability lifecycle state.
+    state: &'static str,
+    /// Actionable recovery guidance.
     recovery: &'static str,
 }
 
@@ -270,6 +326,249 @@ enum OutputFormat {
     Toon,
     /// Pretty JSON for scripts and external machine consumers.
     Json,
+}
+
+/// Symbol-relation response contract selected by the caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RelationViewArg {
+    /// Preserve the v0.3 relation rows and ordering exactly.
+    Legacy,
+    /// Use bounded normalized-graph navigation.
+    Detailed,
+    /// Project one closed architecture, impact, or static-trace analysis.
+    Analysis,
+}
+
+/// Closed relation analysis selected on the existing symbol-relations route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RelationAnalysisModeArg {
+    /// Components, communities, cycles, purpose, complexity, and bottlenecks.
+    Architecture,
+    /// VCS-aware affected nodes and conservative dead-code candidates.
+    Impact,
+    /// One node-simple static relationship path.
+    Trace,
+}
+
+impl From<RelationAnalysisModeArg> for RelationAnalysisMode {
+    fn from(value: RelationAnalysisModeArg) -> Self {
+        match value {
+            RelationAnalysisModeArg::Architecture => Self::Architecture,
+            RelationAnalysisModeArg::Impact => Self::Impact,
+            RelationAnalysisModeArg::Trace => Self::Trace,
+        }
+    }
+}
+
+/// Detailed relation traversal direction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RelationDirectionArg {
+    /// Follow relations from each source frontier.
+    Outbound,
+    /// Follow relations into each target frontier.
+    Inbound,
+}
+
+impl From<RelationDirectionArg> for RelationDirection {
+    fn from(value: RelationDirectionArg) -> Self {
+        match value {
+            RelationDirectionArg::Outbound => Self::Outbound,
+            RelationDirectionArg::Inbound => Self::Inbound,
+        }
+    }
+}
+
+/// Lowest confidence retained by detailed relation navigation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RelationConfidenceArg {
+    /// Parser-proven exact relation.
+    Exact,
+    /// High-confidence inferred relation.
+    High,
+    /// Medium-confidence structural relation.
+    Medium,
+    /// Low-confidence fallback relation.
+    Low,
+}
+
+impl From<RelationConfidenceArg> for ConfidenceClass {
+    fn from(value: RelationConfidenceArg) -> Self {
+        match value {
+            RelationConfidenceArg::Exact => Self::Exact,
+            RelationConfidenceArg::High => Self::High,
+            RelationConfidenceArg::Medium => Self::Medium,
+            RelationConfidenceArg::Low => Self::Low,
+        }
+    }
+}
+
+/// Resolution state retained by detailed relation navigation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RelationResolutionArg {
+    /// Retain every resolution state.
+    Any,
+    /// Retain exact local targets.
+    Resolved,
+    /// Retain ambiguous references.
+    Ambiguous,
+    /// Retain unresolved references.
+    Unresolved,
+    /// Retain external targets.
+    External,
+}
+
+impl From<RelationResolutionArg> for RelationResolutionFilter {
+    fn from(value: RelationResolutionArg) -> Self {
+        match value {
+            RelationResolutionArg::Any => Self::Any,
+            RelationResolutionArg::Resolved => Self::Resolved,
+            RelationResolutionArg::Ambiguous => Self::Ambiguous,
+            RelationResolutionArg::Unresolved => Self::Unresolved,
+            RelationResolutionArg::External => Self::External,
+        }
+    }
+}
+
+/// Additive options used only by the detailed relation view.
+#[derive(Args, Debug)]
+struct DetailedRelationArgs {
+    /// Resume one exact generation- and purpose-bound detailed page.
+    #[arg(long)]
+    cursor: Option<String>,
+    /// Complete ordered project-root set for one read-only federated call.
+    #[arg(long = "root", value_name = "PATH")]
+    roots: Vec<PathBuf>,
+    /// Exact local anchor controls.
+    #[command(flatten)]
+    anchor: DetailedRelationAnchorArgs,
+    /// Relation direction and trust filters.
+    #[command(flatten)]
+    filters: DetailedRelationFilterArgs,
+    /// Traversal and output ceilings.
+    #[command(flatten)]
+    limits: DetailedRelationLimitArgs,
+    /// Optional controls used only by the analysis view.
+    #[command(flatten)]
+    analysis: Box<RelationAnalysisArgs>,
+}
+
+/// Closed controls accepted only by `symbols relations --view analysis`.
+#[derive(Args, Debug)]
+struct RelationAnalysisArgs {
+    /// Closed analysis projection computed over the bounded relation traversal.
+    #[arg(long, value_enum)]
+    analysis_mode: Option<RelationAnalysisModeArg>,
+    /// Exact JSON `RelationAnchor` (`file` or fully disambiguated `symbol`) for trace mode.
+    #[arg(long)]
+    trace_target: Option<String>,
+    /// Git scope: `working-tree`, `index`, or exact `base..head`; defaults to working-tree.
+    #[arg(long)]
+    vcs: Option<String>,
+    /// Include relationship-derived communities with containment excluded.
+    #[arg(long)]
+    include_communities: bool,
+    /// Include iterative SCC dependency-cycle findings.
+    #[arg(long)]
+    include_cycles: bool,
+    /// Include conservative dead-code candidates in impact mode.
+    #[arg(long)]
+    include_dead_code: bool,
+}
+
+/// Exact local anchor controls for detailed relation navigation.
+#[derive(Args, Debug)]
+struct DetailedRelationAnchorArgs {
+    /// Exact symbol name used as the detailed anchor; omit for a file anchor.
+    #[arg(long)]
+    symbol: Option<String>,
+    /// Optional exact parent used to disambiguate the detailed symbol anchor.
+    #[arg(long)]
+    symbol_parent: Option<String>,
+    /// Optional exact kind used to disambiguate the detailed symbol anchor.
+    #[arg(long)]
+    symbol_kind: Option<String>,
+    /// Optional exact signature used to disambiguate the detailed symbol anchor.
+    #[arg(long)]
+    symbol_signature: Option<String>,
+}
+
+/// Direction and trust filters for detailed relation navigation.
+#[derive(Args, Debug)]
+struct DetailedRelationFilterArgs {
+    /// Direction followed from every detailed frontier.
+    #[arg(long, value_enum, default_value_t = RelationDirectionArg::Outbound)]
+    direction: RelationDirectionArg,
+    /// Optional exact legacy or extended relation family.
+    #[arg(long)]
+    relation: Option<String>,
+    /// Lowest confidence retained by detailed navigation.
+    #[arg(long, value_enum, default_value_t = RelationConfidenceArg::Low)]
+    minimum_confidence: RelationConfidenceArg,
+    /// Resolution state retained by detailed navigation.
+    #[arg(long, value_enum, default_value_t = RelationResolutionArg::Any)]
+    resolution: RelationResolutionArg,
+}
+
+/// Traversal and output ceilings for detailed relation navigation.
+#[derive(Args, Debug)]
+struct DetailedRelationLimitArgs {
+    /// Maximum detailed traversal depth.
+    #[arg(long, default_value_t = 1)]
+    depth: u32,
+    /// Retain bounded exact source occurrences in detailed rows.
+    #[arg(long)]
+    include_occurrences: bool,
+    /// Maximum exact occurrences retained per detailed relation.
+    #[arg(long, default_value_t = 25)]
+    occurrence_limit: u32,
+    /// Maximum encoded bytes admitted to the detailed response.
+    #[arg(long, default_value_t = 256 * 1024)]
+    output_bytes: u32,
+}
+
+/// Optional exact symbol selector shared by the top-level slice command.
+#[derive(Args, Debug)]
+struct OptionalSymbolSelectorArgs {
+    /// Slice a symbol by name instead of passing line numbers.
+    #[arg(long)]
+    symbol: Option<String>,
+    /// Optional parent symbol for disambiguating `--symbol`.
+    #[arg(long)]
+    symbol_parent: Option<String>,
+    /// Optional symbol kind for disambiguating `--symbol`.
+    #[arg(long)]
+    symbol_kind: Option<String>,
+    /// Optional exact symbol signature for disambiguating `--symbol`.
+    #[arg(long)]
+    symbol_signature: Option<String>,
+    /// Optional source line for disambiguating `--symbol`.
+    #[arg(long)]
+    symbol_line: Option<usize>,
+    /// Maximum encoded bytes admitted to the slice response.
+    #[arg(long, default_value_t = CodeSliceBudget::DEFAULT_OUTPUT_BYTES)]
+    output_bytes: u32,
+}
+
+/// Required exact symbol selector shared by the symbol slice command.
+#[derive(Args, Debug)]
+struct RequiredSymbolSelectorArgs {
+    /// Symbol name to locate.
+    symbol: String,
+    /// Optional parent symbol for disambiguation.
+    #[arg(long)]
+    symbol_parent: Option<String>,
+    /// Optional symbol kind for disambiguation.
+    #[arg(long)]
+    symbol_kind: Option<String>,
+    /// Optional exact symbol signature for disambiguation.
+    #[arg(long)]
+    symbol_signature: Option<String>,
+    /// Optional source line for disambiguation.
+    #[arg(long)]
+    symbol_line: Option<usize>,
+    /// Maximum encoded bytes admitted to the slice response.
+    #[arg(long, default_value_t = CodeSliceBudget::DEFAULT_OUTPUT_BYTES)]
+    output_bytes: u32,
 }
 
 /// Token report presentation mode.
@@ -353,6 +652,40 @@ enum PurposeLintLevelArg {
     Medium,
     /// Require agent review for every indexed file and folder.
     Strict,
+}
+
+/// Retrieval family accepted by CLI and MCP search adapters.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Deserialize,
+    Eq,
+    PartialEq,
+    Serialize,
+    ValueEnum,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+enum SearchRetrievalModeArg {
+    /// Correctness-authoritative lexical search.
+    #[default]
+    Lexical,
+    /// Optional semantic retrieval generation.
+    Semantic,
+    /// Lexical-complete search with optional semantic ranking.
+    Hybrid,
+}
+
+impl From<SearchRetrievalModeArg> for SearchRetrievalMode {
+    fn from(value: SearchRetrievalModeArg) -> Self {
+        match value {
+            SearchRetrievalModeArg::Lexical => Self::Lexical,
+            SearchRetrievalModeArg::Semantic => Self::Semantic,
+            SearchRetrievalModeArg::Hybrid => Self::Hybrid,
+        }
+    }
 }
 
 impl From<PurposeLintLevelArg> for PurposeLintLevel {
@@ -441,6 +774,9 @@ struct Cli {
     /// Path to the `SQLite` index file.
     #[arg(long, default_value = DEFAULT_DB_PATH)]
     db: PathBuf,
+    /// Whether the database path came from the command line rather than the default.
+    #[arg(skip)]
+    database_path_is_explicit: bool,
     /// Response format to emit.
     #[arg(long, value_enum, default_value_t = OutputFormat::Toon)]
     format: OutputFormat,
@@ -455,7 +791,7 @@ struct Cli {
     require_version: Option<String>,
     /// Subcommand to execute.
     #[command(subcommand)]
-    command: Command,
+    command: Box<Command>,
 }
 
 /// Supported `ProjectAtlas` CLI commands.
@@ -546,6 +882,9 @@ enum Command {
     Search {
         /// Literal, regex, or fuzzy pattern to search for.
         pattern: String,
+        /// Retrieval family; lexical remains the default and always-available mode.
+        #[arg(long, value_enum, default_value_t)]
+        retrieval_mode: SearchRetrievalModeArg,
         /// Treat the pattern as a regex.
         #[arg(long, conflicts_with = "fuzzy")]
         regex: bool,
@@ -578,27 +917,48 @@ enum Command {
         /// Optional one-based end line.
         #[arg(long)]
         end_line: Option<usize>,
-        /// Slice a symbol by name instead of passing line numbers.
-        #[arg(long)]
-        symbol: Option<String>,
-        /// Optional parent symbol for disambiguating `--symbol`.
-        #[arg(long)]
-        symbol_parent: Option<String>,
-        /// Optional symbol kind for disambiguating `--symbol`.
-        #[arg(long)]
-        symbol_kind: Option<String>,
-        /// Optional source line for disambiguating `--symbol`.
-        #[arg(long)]
-        symbol_line: Option<usize>,
+        /// Optional exact declaration selector.
+        #[command(flatten)]
+        selector: OptionalSymbolSelectorArgs,
     },
     /// Inspect and rebuild the `ProjectAtlas` symbol graph.
     Symbols {
         /// Symbol graph subcommand to run.
         #[command(subcommand)]
-        command: SymbolsCommand,
+        command: Box<SymbolsCommand>,
     },
     /// Print local `ProjectAtlas` settings and cache/index locations.
     Settings,
+    /// Export or import a portable derived-only graph snapshot.
+    #[cfg(feature = "derived-snapshot")]
+    Snapshot {
+        /// Snapshot operation.
+        #[arg(value_enum)]
+        action: SnapshotAction,
+        /// Destination archive for export or source archive for import.
+        path: PathBuf,
+        /// Require this exact lowercase BLAKE3 digest during import.
+        #[arg(long)]
+        require_digest: Option<String>,
+        /// Optional raw 32-byte Ed25519 secret key encoded as 64 hexadecimal characters.
+        #[cfg(feature = "derived-snapshot-signatures")]
+        #[arg(long)]
+        signing_key: Option<PathBuf>,
+        /// Require an import signature from this raw 32-byte Ed25519 public key.
+        #[cfg(feature = "derived-snapshot-signatures")]
+        #[arg(long)]
+        trusted_public_key: Option<PathBuf>,
+    },
+    /// Manage the separately shipped optional parser pack.
+    #[cfg(feature = "optional-parser-supervisor")]
+    ParserPack {
+        /// Override the user-owned pack storage root for isolated verification and tests.
+        #[arg(long, hide = true)]
+        storage_root: Option<PathBuf>,
+        /// Explicit lifecycle operation.
+        #[command(subcommand)]
+        command: ParserPackCommand,
+    },
     /// Show, verify, or bind the project-local root.
     Root {
         /// Root subcommand to run.
@@ -666,6 +1026,24 @@ enum Command {
         /// Restrict findings to source files and folders that contain source files.
         #[arg(long)]
         source_only: bool,
+        /// Opt in to bounded current coverage discovery instead of structural findings.
+        #[arg(long)]
+        coverage: bool,
+        /// Optional source parser coverage filter.
+        #[arg(long, requires = "coverage")]
+        parser: Option<String>,
+        /// Optional derived-fact provider coverage filter.
+        #[arg(long, requires = "coverage")]
+        provider: Option<String>,
+        /// Optional relationship-family coverage filter.
+        #[arg(long, requires = "coverage")]
+        relation: Option<String>,
+        /// Optional complete, partial, failed, ignored, oversized, quarantined, or stale filter.
+        #[arg(long, requires = "coverage")]
+        coverage_state: Option<String>,
+        /// Optional exact coverage reason filter.
+        #[arg(long, requires = "coverage")]
+        reason: Option<String>,
     },
     /// Resolve a deterministic health finding with agent rationale.
     Health {
@@ -770,6 +1148,55 @@ enum Command {
     },
 }
 
+/// Portable derived graph snapshot operation.
+#[cfg(feature = "derived-snapshot")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+enum SnapshotAction {
+    /// Export a fresh bounded tar.zst artifact without overwriting an existing file.
+    Export,
+    /// Validate and atomically import one portable derived graph archive.
+    Import,
+}
+
+/// Explicit optional parser-pack lifecycle commands.
+#[cfg(feature = "optional-parser-supervisor")]
+#[derive(Debug, Subcommand)]
+enum ParserPackCommand {
+    /// Validate a local completed archive without installing it.
+    Verify {
+        /// Completed platform archive to validate.
+        #[arg(long)]
+        archive: PathBuf,
+    },
+    /// Install a local completed archive without enabling it.
+    Install {
+        /// Completed platform archive to install.
+        #[arg(long)]
+        archive: PathBuf,
+    },
+    /// Enable one explicitly named installed artifact for this project.
+    ///
+    /// Selecting the artifact reported by `status.rollback` performs an explicit rollback.
+    Enable {
+        /// BLAKE3 identity of the installed artifact manifest.
+        #[arg(long)]
+        artifact: String,
+    },
+    /// Install and atomically select a replacement while retaining rollback identity.
+    Update {
+        /// Completed replacement platform archive.
+        #[arg(long)]
+        archive: PathBuf,
+    },
+    /// Disable the optional pack for this project without deleting installed slots.
+    Disable,
+    /// Disable this project and remove this logical pack's user-owned slots.
+    Remove,
+    /// Print bounded content-free lifecycle state.
+    Status,
+}
+
 /// Project root diagnostics and binding subcommands.
 #[derive(Debug, Subcommand)]
 enum RootCommand {
@@ -836,6 +1263,9 @@ enum PurposeCommand {
     },
     /// Return a bounded queue of paths that need purpose curation.
     Queue {
+        /// Host-owned task label for deterministic curator work identity.
+        #[arg(long)]
+        task: Option<String>,
         /// Pagination start index after filters are applied.
         #[arg(long, default_value_t = 0)]
         start_index: usize,
@@ -926,12 +1356,18 @@ enum SymbolsCommand {
     },
     /// List symbol relations by optional file and query.
     Relations {
+        /// Preserve legacy rows or opt in to detailed normalized-graph navigation.
+        #[arg(long, value_enum, default_value_t = RelationViewArg::Legacy)]
+        view: RelationViewArg,
         /// Optional repository-relative file path.
         #[arg(long)]
         file: Option<String>,
         /// Optional source, target, or context query.
         #[arg(long)]
         query: Option<String>,
+        /// Additive normalized-graph traversal controls.
+        #[command(flatten)]
+        detailed: Box<DetailedRelationArgs>,
         /// Maximum relations to return.
         #[arg(long, default_value_t = 50)]
         limit: usize,
@@ -940,23 +1376,15 @@ enum SymbolsCommand {
     Slice {
         /// Repository-relative file path.
         file: PathBuf,
-        /// Symbol name to locate.
-        symbol: String,
-        /// Optional parent symbol for disambiguation.
-        #[arg(long)]
-        symbol_parent: Option<String>,
-        /// Optional symbol kind for disambiguation.
-        #[arg(long)]
-        symbol_kind: Option<String>,
-        /// Optional source line for disambiguation.
-        #[arg(long)]
-        symbol_line: Option<usize>,
+        /// Exact declaration selector.
+        #[command(flatten)]
+        selector: RequiredSymbolSelectorArgs,
     },
 }
 
 /// Parse arguments, execute the command, and convert failures to process exit.
 fn main() {
-    let cli = Cli::parse();
+    let cli = parse_cli();
     if let Err(error) = run(&cli) {
         let rendered =
             render_cli_error(cli.format, &error).unwrap_or_else(|_| format!("error: {error}\n"));
@@ -967,23 +1395,46 @@ fn main() {
     }
 }
 
+/// Parse CLI arguments while retaining whether `--db` was explicitly selected.
+fn parse_cli() -> Cli {
+    let matches = Cli::command().get_matches();
+    let database_path_is_explicit = matches.value_source("db") == Some(ValueSource::CommandLine);
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    cli.database_path_is_explicit = database_path_is_explicit;
+    cli
+}
+
+/// Load map and lint config with an explicit CLI database override when present.
+fn load_cli_atlas_config(cli: &Cli) -> Result<AtlasMapConfig, CliError> {
+    let config = load_atlas_config(cli.config.as_deref())?;
+    if cli.database_path_is_explicit {
+        return Ok(config.with_database_path(&cli.db));
+    }
+    Ok(config)
+}
+
 /// Execute the selected CLI command.
 fn run(cli: &Cli) -> Result<(), CliError> {
     if let Some(required_version) = cli.require_version.as_deref() {
         validate_required_runtime_version(required_version)?;
     }
     let usage_instance = UsageRuntimeInstance::new(UsageInstanceOwner::CliInvocation);
-    match &cli.command {
+    match cli.command.as_ref() {
         Command::Init {
             no_scan,
             force_rescan,
             text_index_max_bytes,
         } => {
-            let root = std::env::current_dir().map_err(|source| CliError::Io {
+            let current_dir = std::env::current_dir().map_err(|source| CliError::Io {
                 path: PathBuf::from("."),
                 source,
             })?;
-            let db_path = absolute_path(&cli.db)?;
+            let root = canonical_project_root(&current_dir)?;
+            let db_path = if cli.db.is_absolute() {
+                cli.db.clone()
+            } else {
+                root.join(&cli.db)
+            };
             let config_path = init_config_path(&root, cli.config.as_deref());
             let mut report = run_init_bootstrap(
                 &root,
@@ -1018,7 +1469,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 write_stderr("Skipping ProjectAtlas map update in CI.\n")?;
                 return Ok(());
             }
-            let config = load_atlas_config(cli.config.as_deref())?;
+            let config = load_cli_atlas_config(cli)?;
             write_map(&config, *json)?;
         }
         Command::Scan {
@@ -1182,6 +1633,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         }
         Command::Search {
             pattern,
+            retrieval_mode,
             regex,
             fuzzy,
             case_sensitive,
@@ -1191,16 +1643,20 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             limit,
         } => {
             let store = open_index_for_read(cli)?;
-            let report = search_indexed_files(
+            let report = search_indexed_files_with_control(
                 &store,
-                pattern,
-                *regex,
-                *fuzzy,
-                *case_sensitive,
-                file_pattern.as_deref(),
-                *context_lines,
-                *start_index,
-                *limit,
+                &SearchQuery {
+                    pattern,
+                    regex: *regex,
+                    fuzzy: *fuzzy,
+                    case_sensitive: *case_sensitive,
+                    file_pattern: file_pattern.as_deref(),
+                    context_lines: *context_lines,
+                    start_index: *start_index,
+                    limit: *limit,
+                    retrieval_mode: (*retrieval_mode).into(),
+                },
+                None,
             )?;
             let toon = render_search_report(&report);
             print_tracked_output_estimate(
@@ -1220,28 +1676,40 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             file,
             start_line,
             end_line,
-            symbol,
-            symbol_parent,
-            symbol_kind,
-            symbol_line,
+            selector:
+                OptionalSymbolSelectorArgs {
+                    symbol,
+                    symbol_parent,
+                    symbol_kind,
+                    symbol_signature,
+                    symbol_line,
+                    output_bytes,
+                },
         } => {
             let store = open_index_for_read(cli)?;
             let file_key = validated_indexed_file_key(&store, file)?;
             let content = read_indexed_file_content(&store, &file_key)?;
+            let output_budget = CodeSliceBudget::new(*output_bytes)?;
             let report = if let Some(symbol) = symbol {
-                read_symbol_slice_from_source(
+                read_symbol_slice_from_source_bounded(
                     &store,
                     Path::new(&file_key),
                     &SymbolSliceSelector {
                         name: symbol,
                         parent: symbol_parent.as_deref(),
                         kind: symbol_kind.as_deref(),
+                        signature: symbol_signature.as_deref(),
                         line: *symbol_line,
                     },
                     &content,
+                    output_budget,
                 )?
             } else {
-                if symbol_parent.is_some() || symbol_kind.is_some() || symbol_line.is_some() {
+                if symbol_parent.is_some()
+                    || symbol_kind.is_some()
+                    || symbol_signature.is_some()
+                    || symbol_line.is_some()
+                {
                     return Err(CliError::InvalidInput(
                         "symbol disambiguators require --symbol".to_string(),
                     ));
@@ -1251,29 +1719,28 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         "start-line is required unless --symbol is provided".to_string(),
                     )
                 })?;
-                read_indexed_code_slice_from_source(
+                read_indexed_code_slice_from_source_bounded(
                     &store,
                     Path::new(&file_key),
                     start_line,
                     *end_line,
                     &content,
+                    output_budget,
                 )?
             };
-            let toon = render_code_slice(&report);
-            print_tracked_output_text(
+            print_tracked_slice_output(
                 cli.format,
                 &store,
                 usage_instance,
                 &cli.session,
                 "slice",
-                Some(report.path.clone()),
+                Some(report.slice().path.clone()),
                 None,
                 &content,
-                &toon,
                 &report,
             )?;
         }
-        Command::Symbols { command } => match command {
+        Command::Symbols { command } => match command.as_ref() {
             SymbolsCommand::Build {
                 path,
                 max_bytes,
@@ -1321,61 +1788,326 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     &symbols,
                 )?;
             }
-            SymbolsCommand::Relations { file, query, limit } => {
-                let store = open_index_for_read(cli)?;
-                let relations =
-                    store.load_symbol_relations(file.as_deref(), query.as_deref(), *limit)?;
-                let toon = render_symbol_relations(&relations);
-                print_tracked_output_estimate(
-                    cli.format,
-                    &store,
-                    usage_instance,
-                    &cli.session,
-                    "symbol-relations",
-                    file.clone(),
-                    query.clone(),
-                    || {
-                        estimated_source_tokens_for_paths(
-                            &store,
-                            relations.iter().map(|relation| relation.path.as_str()),
-                        )
-                    },
-                    &toon,
-                    &relations,
-                )?;
+            SymbolsCommand::Relations {
+                view,
+                file,
+                query,
+                detailed,
+                limit,
+            } => {
+                let DetailedRelationArgs {
+                    cursor,
+                    roots,
+                    anchor:
+                        DetailedRelationAnchorArgs {
+                            symbol,
+                            symbol_parent,
+                            symbol_kind,
+                            symbol_signature,
+                        },
+                    filters:
+                        DetailedRelationFilterArgs {
+                            direction,
+                            relation,
+                            minimum_confidence,
+                            resolution,
+                        },
+                    limits:
+                        DetailedRelationLimitArgs {
+                            depth,
+                            include_occurrences,
+                            occurrence_limit,
+                            output_bytes,
+                        },
+                    analysis,
+                } = detailed.as_ref();
+                let RelationAnalysisArgs {
+                    analysis_mode,
+                    trace_target,
+                    vcs,
+                    include_communities,
+                    include_cycles,
+                    include_dead_code,
+                } = analysis.as_ref();
+                let analysis_controls_explicit = analysis_mode.is_some()
+                    || trace_target.is_some()
+                    || vcs.is_some()
+                    || *include_communities
+                    || *include_cycles
+                    || *include_dead_code;
+                if *view != RelationViewArg::Analysis && analysis_controls_explicit {
+                    return Err(CliError::Service(ServiceError::InvalidInput(
+                        "analysis controls require --view analysis".to_string(),
+                    )));
+                }
+                if *view == RelationViewArg::Legacy && !roots.is_empty() {
+                    return Err(CliError::Service(ServiceError::InvalidInput(
+                        "--root requires --view detailed or --view analysis".to_string(),
+                    )));
+                }
+                let federation_control = (!roots.is_empty()).then(|| {
+                    standalone_index_work_control()
+                        .with_timeout_ceiling(Duration::from_millis(10_000))
+                });
+                let mut federated_stores = if let Some(control) = federation_control.as_ref() {
+                    let selected_root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+                    Some(open_federated_atlas_stores_for_project(
+                        &cli.db,
+                        &selected_root,
+                        cli.config.as_deref(),
+                        roots,
+                        control,
+                    )?)
+                } else {
+                    None
+                };
+                let single_store = if federated_stores.is_none() {
+                    Some(open_index_for_read(cli)?)
+                } else {
+                    None
+                };
+                let store = match (&federated_stores, &single_store) {
+                    (Some(stores), _) => stores.first().map(FederatedStore::store),
+                    (None, store) => store.as_ref(),
+                }
+                .ok_or_else(|| {
+                    CliError::Service(ServiceError::InvalidInput(
+                        "relation request opened no project store".to_string(),
+                    ))
+                })?;
+                if *view == RelationViewArg::Legacy {
+                    let relations =
+                        store.load_symbol_relations(file.as_deref(), query.as_deref(), *limit)?;
+                    let toon = render_symbol_relations(&relations);
+                    print_tracked_output_estimate(
+                        cli.format,
+                        store,
+                        usage_instance,
+                        &cli.session,
+                        "symbol-relations",
+                        file.clone(),
+                        query.clone(),
+                        || {
+                            estimated_source_tokens_for_paths(
+                                store,
+                                relations.iter().map(|relation| relation.path.as_str()),
+                            )
+                        },
+                        &toon,
+                        &relations,
+                    )?;
+                } else {
+                    if query.is_some() {
+                        return Err(CliError::Service(ServiceError::InvalidInput(
+                            "detailed symbol relations use exact --symbol selectors, not --query"
+                                .to_string(),
+                        )));
+                    }
+                    let file = file.as_deref().ok_or_else(|| {
+                        CliError::Service(ServiceError::InvalidInput(
+                            "detailed symbol relations require --file".to_string(),
+                        ))
+                    })?;
+                    let file = validated_indexed_file_key(store, Path::new(file))?;
+                    let file = RepositoryFilePath::new(Path::new(&file)).map_err(|error| {
+                        CliError::Service(ServiceError::InvalidInput(error.to_string()))
+                    })?;
+                    let anchor = if let Some(symbol) = symbol {
+                        if symbol.is_empty() {
+                            return Err(CliError::Service(ServiceError::InvalidInput(
+                                "detailed relation symbol must not be empty".to_string(),
+                            )));
+                        }
+                        RelationAnchor::Symbol {
+                            file,
+                            name: symbol.clone(),
+                            symbol_kind: symbol_kind
+                                .as_deref()
+                                .map(parse_symbol_kind)
+                                .transpose()?,
+                            parent: symbol_parent.clone(),
+                            signature: symbol_signature.clone(),
+                        }
+                    } else {
+                        if symbol_parent.is_some()
+                            || symbol_kind.is_some()
+                            || symbol_signature.is_some()
+                        {
+                            return Err(CliError::Service(ServiceError::InvalidInput(
+                                "symbol disambiguators require --symbol".to_string(),
+                            )));
+                        }
+                        RelationAnchor::File { file }
+                    };
+                    let rows = u32::try_from(*limit).map_err(|_overflow| {
+                        CliError::Service(ServiceError::InvalidInput(
+                            "detailed relation limit exceeds the u32 range".to_string(),
+                        ))
+                    })?;
+                    let limits = GraphLimits::new(rows, *occurrence_limit, *depth, *output_bytes)
+                        .map_err(|error| {
+                        CliError::Service(ServiceError::InvalidInput(error.to_string()))
+                    })?;
+                    let relations = DetailedRelationQuery {
+                        anchor,
+                        direction: (*direction).into(),
+                        relation: relation
+                            .as_deref()
+                            .map(parse_coverage_relation)
+                            .transpose()?,
+                        minimum_confidence: (*minimum_confidence).into(),
+                        resolution: (*resolution).into(),
+                        include_occurrences: *include_occurrences,
+                        budget: DetailedRelationBudget::from_graph_limits(limits),
+                        cursor: cursor.clone(),
+                    };
+                    let output = if *view == RelationViewArg::Detailed {
+                        if let Some(stores) = federated_stores.take() {
+                            let control = federation_control.as_ref().ok_or_else(|| {
+                                CliError::Service(ServiceError::InvalidInput(
+                                    "federated relation control is unavailable".to_string(),
+                                ))
+                            })?;
+                            let draft = load_federated_detailed_relations(
+                                stores,
+                                &relations,
+                                Some(control),
+                            )?;
+                            let (_report, output) = draft.fit_output(Some(control), |report| {
+                                let payload = json!({ "symbol_relations": report });
+                                let toon = encode_agent_payload(&payload);
+                                serialized_output(cli.format, &toon, &payload)
+                            })?;
+                            output
+                        } else {
+                            let draft = load_detailed_relation_page(
+                                single_store.as_ref().ok_or_else(|| {
+                                    CliError::Service(ServiceError::InvalidInput(
+                                        "single-project relation store is unavailable".to_string(),
+                                    ))
+                                })?,
+                                &relations,
+                                None,
+                            )?;
+                            let (_report, output) = draft.fit_output(None, |report| {
+                                let payload = json!({ "symbol_relations": report });
+                                let toon = encode_agent_payload(&payload);
+                                serialized_output(cli.format, &toon, &payload)
+                            })?;
+                            output
+                        }
+                    } else {
+                        let vcs_explicit = vcs.is_some();
+                        let vcs = match vcs.as_deref().unwrap_or("working-tree") {
+                            "working-tree" => GitImpactSelection::WorkingTree,
+                            "index" => GitImpactSelection::Index,
+                            range => {
+                                let (base, head) = range.split_once("..").ok_or_else(|| {
+                                    CliError::Service(ServiceError::InvalidInput(
+                                        "--vcs must be working-tree, index, or an exact base..head range"
+                                            .to_string(),
+                                    ))
+                                })?;
+                                GitImpactSelection::RevisionRange {
+                                    base: base.to_string(),
+                                    head: head.to_string(),
+                                }
+                            }
+                        };
+                        let mode: RelationAnalysisMode = analysis_mode
+                            .unwrap_or(RelationAnalysisModeArg::Architecture)
+                            .into();
+                        let trace_target = trace_target
+                            .as_deref()
+                            .map(serde_json::from_str::<RelationAnchor>)
+                            .transpose()
+                            .map_err(|error| {
+                                CliError::Service(ServiceError::InvalidInput(format!(
+                                    "--trace-target must be an exact RelationAnchor JSON object: {error}"
+                                )))
+                            })?;
+                        let query = RelationAnalysisQuery {
+                            relations,
+                            mode,
+                            trace_target,
+                            vcs: (mode == RelationAnalysisMode::Impact || vcs_explicit)
+                                .then_some(vcs),
+                            include_communities: *include_communities,
+                            include_cycles: *include_cycles,
+                            include_dead_code: *include_dead_code,
+                        };
+                        if let Some(stores) = federated_stores.take() {
+                            let control = federation_control.as_ref().ok_or_else(|| {
+                                CliError::Service(ServiceError::InvalidInput(
+                                    "federated analysis control is unavailable".to_string(),
+                                ))
+                            })?;
+                            let draft =
+                                load_federated_relation_analysis(stores, &query, Some(control))?;
+                            let (_report, output) = draft.fit_output(|report| {
+                                let payload = json!({ "symbol_relations": report });
+                                let toon = encode_agent_payload(&payload);
+                                serialized_output(cli.format, &toon, &payload)
+                            })?;
+                            output
+                        } else {
+                            let draft = load_relation_analysis(
+                                single_store.as_ref().ok_or_else(|| {
+                                    CliError::Service(ServiceError::InvalidInput(
+                                        "single-project analysis store is unavailable".to_string(),
+                                    ))
+                                })?,
+                                &query,
+                                None,
+                            )?;
+                            let (_report, output) = draft.fit_output(|report| {
+                                let payload = json!({ "symbol_relations": report });
+                                let toon = encode_agent_payload(&payload);
+                                serialized_output(cli.format, &toon, &payload)
+                            })?;
+                            output
+                        }
+                    };
+                    write_stdout(&output)?;
+                }
             }
             SymbolsCommand::Slice {
                 file,
-                symbol,
-                symbol_parent,
-                symbol_kind,
-                symbol_line,
+                selector:
+                    RequiredSymbolSelectorArgs {
+                        symbol,
+                        symbol_parent,
+                        symbol_kind,
+                        symbol_signature,
+                        symbol_line,
+                        output_bytes,
+                    },
             } => {
                 let store = open_index_for_read(cli)?;
                 let file_key = validated_indexed_file_key(&store, file)?;
                 let content = read_indexed_file_content(&store, &file_key)?;
-                let report = read_symbol_slice_from_source(
+                let report = read_symbol_slice_from_source_bounded(
                     &store,
                     Path::new(&file_key),
                     &SymbolSliceSelector {
                         name: symbol,
                         parent: symbol_parent.as_deref(),
                         kind: symbol_kind.as_deref(),
+                        signature: symbol_signature.as_deref(),
                         line: *symbol_line,
                     },
                     &content,
+                    CodeSliceBudget::new(*output_bytes)?,
                 )?;
-                let toon = render_code_slice(&report);
-                print_tracked_output_text(
+                print_tracked_slice_output(
                     cli.format,
                     &store,
                     usage_instance,
                     &cli.session,
                     "symbol-slice",
-                    Some(report.path.clone()),
+                    Some(report.slice().path.clone()),
                     Some(symbol.clone()),
                     &content,
-                    &toon,
                     &report,
                 )?;
             }
@@ -1385,6 +2117,72 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             let toon = render_settings_report(&report);
             print_output(cli.format, &toon, &report)?;
         }
+        #[cfg(feature = "derived-snapshot")]
+        Command::Snapshot {
+            action,
+            path,
+            require_digest,
+            #[cfg(feature = "derived-snapshot-signatures")]
+            signing_key,
+            #[cfg(feature = "derived-snapshot-signatures")]
+            trusted_public_key,
+        } => match action {
+            SnapshotAction::Export => {
+                if require_digest.is_some() {
+                    return Err(CliError::InvalidInput(
+                        "--require-digest applies only to snapshot import".to_string(),
+                    ));
+                }
+                #[cfg(feature = "derived-snapshot-signatures")]
+                if trusted_public_key.is_some() {
+                    return Err(CliError::InvalidInput(
+                        "--trusted-public-key applies only to snapshot import".to_string(),
+                    ));
+                }
+                let store = open_index_for_read(cli)?;
+                let report = derived_snapshot_archive::export_snapshot_archive(
+                    &store,
+                    path,
+                    #[cfg(feature = "derived-snapshot-signatures")]
+                    signing_key.as_deref(),
+                )?;
+                store.finish_index_read_snapshot()?;
+                print_output(
+                    cli.format,
+                    &encode_agent_payload(&json!({ "snapshot_export": report })),
+                    &report,
+                )?;
+            }
+            SnapshotAction::Import => {
+                #[cfg(feature = "derived-snapshot-signatures")]
+                if signing_key.is_some() {
+                    return Err(CliError::InvalidInput(
+                        "--signing-key applies only to snapshot export".to_string(),
+                    ));
+                }
+                let fresh = open_index_for_read(cli)?;
+                fresh.finish_index_read_snapshot()?;
+                drop(fresh);
+                let mut store = open_index_for_mutation(cli)?;
+                let report = derived_snapshot_archive::import_snapshot_archive(
+                    &mut store,
+                    path,
+                    require_digest.as_deref(),
+                    #[cfg(feature = "derived-snapshot-signatures")]
+                    trusted_public_key.as_deref(),
+                )?;
+                print_output(
+                    cli.format,
+                    &encode_agent_payload(&json!({ "snapshot_import": report })),
+                    &report,
+                )?;
+            }
+        },
+        #[cfg(feature = "optional-parser-supervisor")]
+        Command::ParserPack {
+            storage_root,
+            command,
+        } => run_parser_pack_command(cli.format, storage_root.as_ref(), command)?,
         Command::Root { command } => match command {
             Some(RootCommand::Set {
                 path,
@@ -1412,7 +2210,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             }
         },
         Command::Config { print: _ } => {
-            let config = load_atlas_config(cli.config.as_deref())?;
+            let config = load_cli_atlas_config(cli)?;
             let report = effective_config_report(&config);
             print_output(
                 cli.format,
@@ -1518,8 +2316,43 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             path_prefix,
             summary_only,
             source_only,
+            coverage,
+            parser,
+            provider,
+            relation,
+            coverage_state,
+            reason,
         } => {
             let store = open_index_for_read(cli)?;
+            if *coverage {
+                let query = coverage_query_from_cli(
+                    *start_index,
+                    *limit,
+                    &CoverageCliFilters {
+                        path_prefix: path_prefix.as_deref(),
+                        parser: parser.as_deref(),
+                        provider: provider.as_deref(),
+                        relation: relation.as_deref(),
+                        state: coverage_state.as_deref(),
+                        reason: reason.as_deref(),
+                    },
+                )?;
+                let mut report = load_coverage_discovery(&store, query)?;
+                let toon = finalize_coverage_output(cli.format, &mut report)?;
+                print_tracked_directory_output_estimate(
+                    cli.format,
+                    &store,
+                    usage_instance,
+                    &cli.session,
+                    "health-check",
+                    None,
+                    None,
+                    || estimated_source_tokens_for_indexed_files(&store, None, None),
+                    &toon,
+                    &report,
+                )?;
+                return Ok(());
+            }
             let query = health_query_from_cli(
                 *start_index,
                 *limit,
@@ -1578,7 +2411,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             report_untracked,
             strict_untracked,
         } => {
-            let config = load_atlas_config(cli.config.as_deref())?;
+            let config = load_cli_atlas_config(cli)?;
             let (mut report, mut exit_code) = lint_map(
                 &config,
                 LintOptions {
@@ -1761,12 +2594,13 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 print_output(cli.format, &encode_agent_payload(&report), &report)?;
             }
             PurposeCommand::Review { from_file, apply } => {
+                let requests = load_purpose_review_requests(from_file)?;
+                validate_purpose_review_admission(&requests)?;
                 let store = if *apply {
                     open_index_for_mutation(cli)?
                 } else {
                     open_index_for_read(cli)?
                 };
-                let requests = load_purpose_review_requests(from_file)?;
                 let report = review_purposes(&store, &requests, *apply)?;
                 print_output(cli.format, &render_purpose_review_report(&report), &report)?;
                 if report.failed > 0 {
@@ -1774,6 +2608,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 }
             }
             PurposeCommand::Queue {
+                task,
                 start_index,
                 limit,
                 category,
@@ -1793,7 +2628,11 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     *summary_only,
                     purpose_queue_scope(*include_assets, *include_low_priority_files),
                 );
-                let page = purpose_curation_page(&store, &query)?;
+                let page = purpose_curation_page(
+                    &store,
+                    &query,
+                    task.as_deref().unwrap_or("purpose-curation"),
+                )?;
                 let toon = render_purpose_curation_page(&page);
                 store.finish_index_read_snapshot()?;
                 print_output(cli.format, &toon, &page)?;
@@ -1803,9 +2642,47 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Execute one explicit optional parser-pack lifecycle command from the selected project root.
+#[cfg(feature = "optional-parser-supervisor")]
+fn run_parser_pack_command(
+    format: OutputFormat,
+    storage_root: Option<&PathBuf>,
+    command: &ParserPackCommand,
+) -> Result<(), CliError> {
+    let project_root = std::env::current_dir().map_err(|source| CliError::Io {
+        path: PathBuf::from("."),
+        source,
+    })?;
+    let lifecycle = OptionalParserPackLifecycle::new(&project_root, storage_root.cloned())?;
+    let report = match command {
+        ParserPackCommand::Verify { archive } => lifecycle.verify(archive)?,
+        ParserPackCommand::Install { archive } => lifecycle.install(archive)?,
+        ParserPackCommand::Enable { artifact } => lifecycle.enable(artifact)?,
+        ParserPackCommand::Update { archive } => lifecycle.update(archive)?,
+        ParserPackCommand::Disable => lifecycle.disable()?,
+        ParserPackCommand::Remove => lifecycle.remove()?,
+        ParserPackCommand::Status => lifecycle.status()?,
+    };
+    let toon = encode_agent_payload(&json!({ "parser_pack": report }));
+    print_output(format, &toon, &report)
+}
+
 /// Render typed source-state failures in the selected agent/script format.
 fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, serde_json::Error> {
     let details = match error {
+        #[cfg(feature = "optional-parser-supervisor")]
+        CliError::ParserPack(source) if source.is_unsupported_containment() => {
+            Some(CliErrorPayload {
+                kind: AgentErrorKind::UnsupportedContainment,
+                message: error.to_string(),
+                refresh_required: None,
+                verification_incomplete: None,
+                project_mismatch: None,
+                database_filesystem: None,
+                search_capability: None,
+                next: None,
+            })
+        }
         CliError::RefreshRequired(report) => Some(CliErrorPayload {
             kind: AgentErrorKind::RefreshRequired,
             message: error.to_string(),
@@ -1813,6 +2690,7 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             verification_incomplete: None,
             project_mismatch: None,
             database_filesystem: None,
+            search_capability: None,
             next: Some(CliRefreshNextCall {
                 command: CLI_REFRESH_COMMAND,
                 project_path: &report.project_root,
@@ -1826,6 +2704,7 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             verification_incomplete: Some(report.as_ref()),
             project_mismatch: None,
             database_filesystem: None,
+            search_capability: None,
             next: None,
         }),
         CliError::ProjectMismatch(report) => Some(CliErrorPayload {
@@ -1835,6 +2714,25 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             verification_incomplete: None,
             project_mismatch: Some(report.as_ref()),
             database_filesystem: None,
+            search_capability: None,
+            next: None,
+        }),
+        CliError::Service(ServiceError::SearchCapabilityUnavailable {
+            requested_mode,
+            state,
+            guidance,
+        }) => Some(CliErrorPayload {
+            kind: AgentErrorKind::SearchCapabilityUnavailable,
+            message: error.to_string(),
+            refresh_required: None,
+            verification_incomplete: None,
+            project_mismatch: None,
+            database_filesystem: None,
+            search_capability: Some(SearchCapabilityErrorPayload {
+                requested_mode: *requested_mode,
+                state,
+                recovery: guidance,
+            }),
             next: None,
         }),
         _ => database_filesystem_error_payload(error).map(|(kind, database_filesystem)| {
@@ -1845,6 +2743,7 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
                 verification_incomplete: None,
                 project_mismatch: None,
                 database_filesystem: Some(database_filesystem),
+                search_capability: None,
                 next: None,
             }
         }),
@@ -2243,18 +3142,45 @@ fn write_mcp_config_file(
 
 /// Load batch purpose review requests from a JSON file.
 fn load_purpose_review_requests(path: &Path) -> Result<Vec<PurposeReviewRequest>, CliError> {
-    let text = fs::read_to_string(path).map_err(|source| CliError::Io {
+    let metadata = fs::metadata(path).map_err(|source| CliError::Io {
         path: path.to_path_buf(),
         source,
+    })?;
+    if metadata.len() > MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES {
+        return Err(CliError::InvalidInput(format!(
+            "purpose review input file contains {} bytes; maximum is {MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES}",
+            metadata.len()
+        )));
+    }
+    let file = fs::File::open(path).map_err(|source| CliError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .unwrap_or(MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES as usize)
+            .min(MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES as usize),
+    );
+    file.take(MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| CliError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if bytes.len() as u64 > MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES {
+        return Err(CliError::InvalidInput(format!(
+            "purpose review input file exceeds {MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES} bytes"
+        )));
+    }
+    let text = String::from_utf8(bytes).map_err(|source| {
+        CliError::InvalidInput(format!(
+            "purpose review input file {} is not UTF-8: {source}",
+            path.display()
+        ))
     })?;
     let value: serde_json::Value = serde_json::from_str(&text)?;
     let items = value.get("items").cloned().unwrap_or(value);
     let requests: Vec<PurposeReviewRequest> = serde_json::from_value(items)?;
-    if requests.is_empty() {
-        return Err(CliError::InvalidInput(
-            "purpose review input must contain at least one item".to_string(),
-        ));
-    }
     Ok(requests)
 }
 
@@ -2367,6 +3293,82 @@ fn health_query_from_cli(
     }
 }
 
+/// Borrowed CLI-only coverage filters before typed service parsing.
+struct CoverageCliFilters<'a> {
+    /// Optional repository path prefix.
+    path_prefix: Option<&'a str>,
+    /// Optional source parser pass.
+    parser: Option<&'a str>,
+    /// Optional fact provider pass.
+    provider: Option<&'a str>,
+    /// Optional relation family.
+    relation: Option<&'a str>,
+    /// Optional coverage state.
+    state: Option<&'a str>,
+    /// Optional exact reason.
+    reason: Option<&'a str>,
+}
+
+/// Build one typed bounded coverage query from explicit CLI filters.
+fn coverage_query_from_cli(
+    start_index: usize,
+    limit: usize,
+    filters: &CoverageCliFilters<'_>,
+) -> Result<RepositoryCoverageQuery, CliError> {
+    Ok(RepositoryCoverageQuery {
+        start_index: u32::try_from(start_index).map_err(|error| {
+            CliError::InvalidInput(format!("coverage start index is too large: {error}"))
+        })?,
+        limit: limit.clamp(1, COVERAGE_PAGE_MAX_LIMIT as usize) as u32,
+        path_prefix: trimmed_cli_filter(filters.path_prefix)
+            .map(|value| normalize_repo_path_prefix(&value)),
+        parser: trimmed_cli_filter(filters.parser)
+            .as_deref()
+            .map(parse_coverage_parser)
+            .transpose()?,
+        provider: trimmed_cli_filter(filters.provider)
+            .as_deref()
+            .map(parse_coverage_parser)
+            .transpose()?,
+        relation: trimmed_cli_filter(filters.relation)
+            .as_deref()
+            .map(parse_coverage_relation)
+            .transpose()?,
+        state: trimmed_cli_filter(filters.state)
+            .as_deref()
+            .map(parse_coverage_state)
+            .transpose()?,
+        reason: trimmed_cli_filter(filters.reason),
+    })
+}
+
+/// Stabilize format-specific encoded byte metadata before output and telemetry.
+fn finalize_coverage_output(
+    format: OutputFormat,
+    report: &mut CoverageDiscoveryReport,
+) -> Result<String, CliError> {
+    for _ in 0..4 {
+        let toon = render_coverage_report(report);
+        let rendered = serialized_output(format, &toon, report)?;
+        let output_bytes = u32::try_from(rendered.len()).map_err(|error| {
+            CliError::InvalidInput(format!("coverage output size did not fit u32: {error}"))
+        })?;
+        if output_bytes > report.max_output_bytes {
+            return Err(CliError::InvalidInput(format!(
+                "coverage output exceeded {} bytes",
+                report.max_output_bytes
+            )));
+        }
+        if report.output_bytes == output_bytes {
+            return Ok(rendered);
+        }
+        report.output_bytes = output_bytes;
+    }
+    Err(CliError::InvalidInput(
+        "coverage output byte metadata did not stabilize".to_string(),
+    ))
+}
+
 /// Return the DB scope for purpose queue CLI switches.
 fn purpose_queue_scope(include_assets: bool, include_low_priority_files: bool) -> HealthScope {
     match (include_assets, include_low_priority_files) {
@@ -2475,6 +3477,36 @@ fn print_tracked_output_text<T: serde::Serialize>(
     payload: &T,
 ) -> Result<(), CliError> {
     let output = serialized_output(format, toon, payload)?;
+    write_stdout(&output)?;
+    drop(record_usage_text(
+        store,
+        usage_instance,
+        session,
+        command,
+        path,
+        query,
+        baseline_text,
+        &output,
+    ));
+    Ok(())
+}
+
+/// Emit a bounded exact slice and record telemetry for the accepted bytes.
+fn print_tracked_slice_output(
+    format: OutputFormat,
+    store: &AtlasStore,
+    usage_instance: Option<UsageRuntimeInstance>,
+    session: &str,
+    command: &str,
+    path: Option<String>,
+    query: Option<String>,
+    baseline_text: &str,
+    report: &CodeSliceDraft,
+) -> Result<(), CliError> {
+    let output = report.fit_output(|report| {
+        let toon = render_code_slice(report);
+        serialized_output(format, &toon, report)
+    })?;
     write_stdout(&output)?;
     drop(record_usage_text(
         store,
@@ -2600,6 +3632,12 @@ enum RequiredCliCommand {
     Symbols,
     /// `projectatlas settings`.
     Settings,
+    /// `projectatlas snapshot`.
+    #[cfg(feature = "derived-snapshot")]
+    Snapshot,
+    /// `projectatlas parser-pack`.
+    #[cfg(feature = "optional-parser-supervisor")]
+    ParserPack,
     /// `projectatlas root`.
     Root,
     /// `projectatlas config`.
@@ -2651,6 +3689,10 @@ impl RequiredCliCommand {
             Self::Slice => "slice",
             Self::Symbols => "symbols",
             Self::Settings => "settings",
+            #[cfg(feature = "derived-snapshot")]
+            Self::Snapshot => "snapshot",
+            #[cfg(feature = "optional-parser-supervisor")]
+            Self::ParserPack => "parser-pack",
             Self::Root => "root",
             Self::Config => "config",
             Self::Ignore => "ignore",
@@ -2712,6 +3754,7 @@ impl RequiredCliCommand {
             },
             Self::Search => Command::Search {
                 pattern: String::new(),
+                retrieval_mode: SearchRetrievalModeArg::Lexical,
                 regex: false,
                 fuzzy: false,
                 case_sensitive: false,
@@ -2724,19 +3767,38 @@ impl RequiredCliCommand {
                 file: PathBuf::from("src/lib.rs"),
                 start_line: Some(1),
                 end_line: None,
-                symbol: None,
-                symbol_parent: None,
-                symbol_kind: None,
-                symbol_line: None,
+                selector: OptionalSymbolSelectorArgs {
+                    symbol: None,
+                    symbol_parent: None,
+                    symbol_kind: None,
+                    symbol_signature: None,
+                    symbol_line: None,
+                    output_bytes: CodeSliceBudget::DEFAULT_OUTPUT_BYTES,
+                },
             },
             Self::Symbols => Command::Symbols {
-                command: SymbolsCommand::List {
+                command: Box::new(SymbolsCommand::List {
                     file: None,
                     query: None,
                     limit: 1,
-                },
+                }),
             },
             Self::Settings => Command::Settings,
+            #[cfg(feature = "derived-snapshot")]
+            Self::Snapshot => Command::Snapshot {
+                action: SnapshotAction::Export,
+                path: PathBuf::from("snapshot.tar.zst"),
+                require_digest: None,
+                #[cfg(feature = "derived-snapshot-signatures")]
+                signing_key: None,
+                #[cfg(feature = "derived-snapshot-signatures")]
+                trusted_public_key: None,
+            },
+            #[cfg(feature = "optional-parser-supervisor")]
+            Self::ParserPack => Command::ParserPack {
+                storage_root: None,
+                command: ParserPackCommand::Status,
+            },
             Self::Root => Command::Root {
                 command: Some(RootCommand::Show),
             },
@@ -2762,6 +3824,12 @@ impl RequiredCliCommand {
                 path_prefix: None,
                 summary_only: true,
                 source_only: false,
+                coverage: false,
+                parser: None,
+                provider: None,
+                relation: None,
+                coverage_state: None,
+                reason: None,
             },
             Self::Health => Command::Health {
                 command: HealthCommand::Resolve {
@@ -2813,6 +3881,7 @@ impl RequiredCliCommand {
             Self::RuntimeInfo => Command::RuntimeInfo,
             Self::Purpose => Command::Purpose {
                 command: PurposeCommand::Queue {
+                    task: None,
                     start_index: 0,
                     limit: 1,
                     category: None,
@@ -3169,6 +4238,10 @@ fn cli_command_name(command: &Command) -> &'static str {
         Command::Slice { .. } => "slice",
         Command::Symbols { .. } => "symbols",
         Command::Settings => "settings",
+        #[cfg(feature = "derived-snapshot")]
+        Command::Snapshot { .. } => "snapshot",
+        #[cfg(feature = "optional-parser-supervisor")]
+        Command::ParserPack { .. } => "parser-pack",
         Command::Root { .. } => "root",
         Command::Config { .. } => "config",
         Command::Ignore { .. } => "ignore",
@@ -3220,9 +4293,13 @@ mod tests {
         watch_path_requires_full_scan, watcher_status_report,
     };
     use super::{
-        CliError, OutputFormat, build_runtime_info, render_cli_error, render_token_dashboard,
+        Cli, CliError, Command, OutputFormat, SearchRetrievalMode, SearchRetrievalModeArg,
+        ServiceError, build_runtime_info, render_cli_error, render_token_dashboard,
         serialized_output, truthy_env,
     };
+    #[cfg(feature = "optional-parser-supervisor")]
+    use super::{OptionalParserPackLifecycleError, ParserPackCommand};
+    use clap::Parser as _;
     use notify::EventKind;
     use projectatlas_core::symbols::{
         CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
@@ -3234,6 +4311,7 @@ mod tests {
     use rmcp::model::{CallToolRequestParams, ClientInfo};
     use rmcp::{ClientHandler, ServiceExt};
     use serde_json::{Map, Value, json};
+    use std::collections::BTreeMap;
     use std::error::Error;
     use std::fs;
     use std::io;
@@ -3487,6 +4565,8 @@ mod tests {
             ],
             exclude_dir_suffixes: Vec::new(),
             exclude_path_prefixes: vec!["docs/api".to_string()],
+            language_overrides: BTreeMap::new(),
+            admit_optional_languages: false,
         };
         require_condition(
             watch_path_affects_index(root, &root.join("src/lib.rs"), &scan_options),
@@ -3612,6 +4692,138 @@ mod tests {
             "CLI TOON lost typed filesystem details",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn cli_search_modes_parse_and_unavailable_state_is_typed() -> Result<(), Box<dyn Error>> {
+        let cli = Cli::try_parse_from([
+            "projectatlas",
+            "search",
+            "needle",
+            "--retrieval-mode",
+            "semantic",
+        ])?;
+        require_condition(
+            matches!(
+                *cli.command,
+                Command::Search {
+                    retrieval_mode: SearchRetrievalModeArg::Semantic,
+                    ..
+                }
+            ),
+            "CLI did not parse explicit semantic retrieval",
+        )?;
+
+        let error = CliError::Service(ServiceError::SearchCapabilityUnavailable {
+            requested_mode: SearchRetrievalMode::Semantic,
+            state: "not-installed",
+            guidance: "install a compatible semantic generation",
+        });
+        let json_text = render_cli_error(OutputFormat::Json, &error)?;
+        let json: Value = serde_json::from_str(&json_text)?;
+        require_condition(
+            json.pointer("/error/kind").and_then(Value::as_str)
+                == Some("search_capability_unavailable")
+                && json
+                    .pointer("/error/search_capability/requested_mode")
+                    .and_then(Value::as_str)
+                    == Some("semantic")
+                && json
+                    .pointer("/error/search_capability/state")
+                    .and_then(Value::as_str)
+                    == Some("not-installed")
+                && json
+                    .pointer("/error/search_capability/recovery")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.contains("compatible semantic")),
+            "CLI JSON lost typed semantic capability state",
+        )?;
+        let toon = render_cli_error(OutputFormat::Toon, &error)?;
+        require_condition(
+            toon.contains("search_capability_unavailable")
+                && toon.contains("requested_mode")
+                && toon.contains("semantic")
+                && toon.contains("state")
+                && toon.contains("not-installed")
+                && toon.contains("compatible semantic"),
+            "CLI TOON lost typed semantic capability state",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(feature = "optional-parser-supervisor")]
+    #[test]
+    fn parser_pack_cli_exposes_every_explicit_lifecycle_operation() -> Result<(), Box<dyn Error>> {
+        let artifact = "a".repeat(64);
+        let commands = [
+            vec![
+                "projectatlas",
+                "parser-pack",
+                "verify",
+                "--archive",
+                "pack.tar.zst",
+            ],
+            vec![
+                "projectatlas",
+                "parser-pack",
+                "install",
+                "--archive",
+                "pack.tar.zst",
+            ],
+            vec![
+                "projectatlas",
+                "parser-pack",
+                "enable",
+                "--artifact",
+                artifact.as_str(),
+            ],
+            vec![
+                "projectatlas",
+                "parser-pack",
+                "update",
+                "--archive",
+                "pack.tar.zst",
+            ],
+            vec!["projectatlas", "parser-pack", "disable"],
+            vec!["projectatlas", "parser-pack", "remove"],
+            vec!["projectatlas", "parser-pack", "status"],
+        ];
+        for arguments in commands {
+            let parsed = Cli::try_parse_from(arguments)?;
+            require_condition(
+                matches!(
+                    *parsed.command,
+                    Command::ParserPack {
+                        command: ParserPackCommand::Verify { .. }
+                            | ParserPackCommand::Install { .. }
+                            | ParserPackCommand::Enable { .. }
+                            | ParserPackCommand::Update { .. }
+                            | ParserPackCommand::Disable
+                            | ParserPackCommand::Remove
+                            | ParserPackCommand::Status,
+                        ..
+                    }
+                ),
+                "parser-pack command did not route to an explicit lifecycle operation",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "optional-parser-supervisor")]
+    #[test]
+    fn parser_pack_unsupported_containment_is_typed() -> Result<(), Box<dyn Error>> {
+        let error =
+            CliError::ParserPack(OptionalParserPackLifecycleError::UnsupportedContainment {
+                os: "test-os",
+                architecture: "test-arch",
+            });
+        let json_text = render_cli_error(OutputFormat::Json, &error)?;
+        let json: Value = serde_json::from_str(&json_text)?;
+        require_condition(
+            json.pointer("/error/kind").and_then(Value::as_str) == Some("unsupported_containment"),
+            "parser-pack unsupported host did not retain its typed error kind",
+        )
     }
 
     #[test]
@@ -4002,6 +5214,17 @@ mod tests {
         if !schema_has_property("atlas_root_set", "transition")? {
             return Err("atlas_root_set did not advertise the transition selector".into());
         }
+        if schema_has_property("atlas_health", "task")? {
+            return Err("atlas_health advertised the purpose-queue task parameter".into());
+        }
+        if !schema_has_property("atlas_purpose_queue", "task")? {
+            return Err("atlas_purpose_queue did not advertise the curator task parameter".into());
+        }
+        if !schema_has_property("atlas_session_brief", "purpose_task")?
+            || !schema_has_property("atlas_session_brief", "purpose_limit")?
+        {
+            return Err("atlas_session_brief did not advertise purpose handoff controls".into());
+        }
 
         let scan = client
             .peer()
@@ -4197,9 +5420,14 @@ mod tests {
             .into());
         }
 
+        let mut purpose_queue_args = Map::new();
+        purpose_queue_args.insert("task".to_string(), json!("mcp-smoke-purpose"));
         let purpose_queue = client
             .peer()
-            .call_tool(CallToolRequestParams::new("atlas_purpose_queue").with_arguments(Map::new()))
+            .call_tool(
+                CallToolRequestParams::new("atlas_purpose_queue")
+                    .with_arguments(purpose_queue_args),
+            )
             .await?;
         let purpose_queue_text = purpose_queue
             .content
@@ -4208,10 +5436,17 @@ mod tests {
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("purpose queue result did not contain text"))?;
         if !purpose_queue_text.contains("purpose_curation:")
+            || !purpose_queue_text.contains("project_instance_id:")
+            || !purpose_queue_text.contains("active_generation:")
+            || !purpose_queue_text.contains("task: \"mcp-smoke-purpose\"")
+            || !purpose_queue_text.contains("work_key:")
+            || !purpose_queue_text.contains("actionable: true")
+            || !purpose_queue_text.contains("curation_scope: low")
             || !purpose_queue_text.contains("source_only: true")
             || !purpose_queue_text.contains("folder_scope: all")
             || !purpose_queue_text.contains("file_scope: high_impact")
             || !purpose_queue_text.contains("purpose_curation_items[")
+            || !purpose_queue_text.contains("work_key,state_token")
             || !purpose_queue_text.contains("purpose_agent_reviewed,review_priority,review_reason")
             || !purpose_queue_text.contains("false,high,high_impact_file")
             || !purpose_queue_text.contains("suggested-purpose-review:src/main.rs:")

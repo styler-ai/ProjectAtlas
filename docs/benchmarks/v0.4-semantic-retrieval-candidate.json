@@ -1,0 +1,304 @@
+{
+  "schema": "projectatlas-semantic-candidate-evaluation-v1",
+  "candidate": {
+    "library": "fastembed",
+    "library_version": "5.17.3",
+    "runtime": "ort 2.0.0-rc.12",
+    "model": "Qdrant/bge-small-en-v1.5-onnx-Q",
+    "model_file": "model_optimized.onnx",
+    "model_file_bytes": 66465124,
+    "model_file_sha256": "51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431",
+    "license": "Apache-2.0",
+    "dimensions": 384,
+    "maximum_tokens": 384,
+    "intra_threads": 4,
+    "batch_size": 8
+  },
+  "additional_candidate_results": [
+    {
+      "model": "snowflake/snowflake-arctic-embed-xs",
+      "model_file": "model_quantized.onnx",
+      "dimensions": 384,
+      "runtime_selected_batch_size": true,
+      "cases": 17,
+      "top_1": 10,
+      "top_1_rate": 0.5882352941176471,
+      "mrr": 0.7211484593837536,
+      "recall_at_10": 1.0,
+      "maximum_repeat_delta": 0.0,
+      "warm_init_millis": 141,
+      "document_batch_millis": 732,
+      "query_batch_millis": 26,
+      "repeat_batch_millis": 806,
+      "changed_row_millis": 41,
+      "model_cache_bytes": 23687546,
+      "peak_working_set_bytes": 677478400,
+      "measured_platforms": [
+        "windows-x86_64"
+      ],
+      "accepted": false,
+      "failed_gates": [
+        "top_1_rate",
+        "mrr",
+        "peak_working_set_bytes",
+        "required_platforms"
+      ]
+    },
+    {
+      "model": "Xenova/all-MiniLM-L6-v2",
+      "model_file": "model_quantized.onnx",
+      "dimensions": 384,
+      "runtime_selected_batch_size": true,
+      "cases": 17,
+      "top_1": 11,
+      "top_1_rate": 0.6470588235294118,
+      "mrr": 0.7452614379084967,
+      "recall_at_10": 1.0,
+      "maximum_repeat_delta": 0.0,
+      "cold_cache_init_millis": 3397,
+      "document_batch_millis": 730,
+      "query_batch_millis": 22,
+      "repeat_batch_millis": 726,
+      "changed_row_millis": 37,
+      "model_cache_bytes": 23685212,
+      "peak_working_set_bytes": 685506560,
+      "measured_platforms": [
+        "windows-x86_64"
+      ],
+      "accepted": false,
+      "failed_gates": [
+        "top_1_rate",
+        "mrr",
+        "peak_working_set_bytes",
+        "required_platforms"
+      ]
+    }
+  ],
+  "package_pre_screens": [
+    {
+      "model": "jinaai/jina-embeddings-v2-base-code",
+      "selected_model_file_bytes": 641517466,
+      "accepted": false,
+      "failed_gates": [
+        "model_cache_bytes"
+      ]
+    },
+    {
+      "model": "google/embeddinggemma-300m",
+      "official_checkpoint_display_size": "1.21 GB",
+      "observed_quantized_gguf_display_size_range": "212-278 MB",
+      "accepted": false,
+      "failed_gates": [
+        "model_cache_bytes"
+      ]
+    }
+  ],
+  "environment": {
+    "source_commit": "f892e99b32bc90f95970be3f1c730b065d9f5198",
+    "os": "Microsoft Windows 11 Pro 10.0.26200 x86_64",
+    "cpu": "AMD Ryzen 7 3700X 8-Core Processor",
+    "physical_cores": 8,
+    "logical_processors": 16,
+    "visible_memory_bytes": 34267516928,
+    "rustc": "1.93.1 (01f6ddf75 2026-02-11)",
+    "cargo": "1.93.1 (083ac5135 2025-12-15)",
+    "target": "x86_64-pc-windows-msvc"
+  },
+  "gate": {
+    "minimum_top_1_rate": 0.8,
+    "minimum_mrr": 0.85,
+    "minimum_recall_at_10": 1.0,
+    "maximum_repeat_delta": 0.0,
+    "maximum_changed_row_millis": 250,
+    "maximum_warm_query_batch_millis": 250,
+    "maximum_model_cache_bytes": 104857600,
+    "maximum_peak_working_set_bytes": 402653184,
+    "required_platforms": [
+      "windows-x86_64",
+      "linux-x86_64",
+      "macos-arm64",
+      "macos-x86_64"
+    ]
+  },
+  "result": {
+    "cases": 17,
+    "top_1": 11,
+    "top_1_rate": 0.6470588235294118,
+    "mrr": 0.7303921568627452,
+    "recall_at_10": 1.0,
+    "maximum_repeat_delta": 0.0,
+    "cold_cache_init_millis": 3672,
+    "warm_init_millis": 176,
+    "document_batch_millis": 1768,
+    "query_batch_millis": 105,
+    "repeat_batch_millis": 1708,
+    "changed_row_millis": 79,
+    "model_cache_bytes": 67179203,
+    "peak_working_set_bytes": 505790464,
+    "measured_platforms": [
+      "windows-x86_64"
+    ],
+    "accepted": false,
+    "failed_gates": [
+      "top_1_rate",
+      "mrr",
+      "peak_working_set_bytes",
+      "required_platforms"
+    ]
+  },
+  "rankings": [
+    {
+      "path": "crates/projectatlas-db/src/derived_snapshot.rs",
+      "needle": "export_derived_graph_snapshot",
+      "query": "create a portable graph artifact without leaking authored project data",
+      "rank": 1,
+      "top_path": "crates/projectatlas-db/src/derived_snapshot.rs",
+      "top_score": 0.6976116895675659,
+      "expected_score": 0.6976116895675659
+    },
+    {
+      "path": "crates/projectatlas-cli/src/derived_snapshot_archive.rs",
+      "needle": "verify_archive_signature",
+      "query": "reject an imported archive signed by an untrusted identity",
+      "rank": 1,
+      "top_path": "crates/projectatlas-cli/src/derived_snapshot_archive.rs",
+      "top_score": 0.7269084453582764,
+      "expected_score": 0.7269084453582764
+    },
+    {
+      "path": "crates/projectatlas-cli/src/runtime/source_observation.rs",
+      "needle": "RefreshRequired",
+      "query": "tell an agent that saved source no longer matches the durable index",
+      "rank": 1,
+      "top_path": "crates/projectatlas-cli/src/runtime/source_observation.rs",
+      "top_score": 0.6696392893791199,
+      "expected_score": 0.6696392893791199
+    },
+    {
+      "path": "crates/projectatlas-db/src/telemetry.rs",
+      "needle": "converge_retention",
+      "query": "bound old usage detail while preserving exact aggregate token totals",
+      "rank": 1,
+      "top_path": "crates/projectatlas-db/src/telemetry.rs",
+      "top_score": 0.7267529964447021,
+      "expected_score": 0.7267529964447021
+    },
+    {
+      "path": "crates/projectatlas-service/src/federation.rs",
+      "needle": "capture_federation",
+      "query": "open several explicitly supplied repositories read only for one relation call",
+      "rank": 1,
+      "top_path": "crates/projectatlas-service/src/federation.rs",
+      "top_score": 0.6901793479919434,
+      "expected_score": 0.6901793479919434
+    },
+    {
+      "path": "crates/projectatlas-cli/src/runtime/graph_projection.rs",
+      "needle": "same_file_private_calls_resolve_and_duplicate_declarations_stay_ambiguous",
+      "query": "keep duplicate declaration targets ambiguous instead of guessing a caller destination",
+      "rank": 1,
+      "top_path": "crates/projectatlas-cli/src/runtime/graph_projection.rs",
+      "top_score": 0.7027831077575684,
+      "expected_score": 0.7027831077575684
+    },
+    {
+      "path": "crates/projectatlas-service/src/relations.rs",
+      "needle": "load_detailed_relation_page",
+      "query": "page through inbound and outbound symbol connections with a reusable selector",
+      "rank": 6,
+      "top_path": "crates/projectatlas-cli/src/token_tui.rs",
+      "top_score": 0.6623288989067078,
+      "expected_score": 0.6339489817619324
+    },
+    {
+      "path": "crates/projectatlas-core/src/support_catalog.rs",
+      "needle": "\"abap\"",
+      "query": "where is the legacy SAP programming language classified without claiming runtime support",
+      "rank": 1,
+      "top_path": "crates/projectatlas-core/src/support_catalog.rs",
+      "top_score": 0.6578455567359924,
+      "expected_score": 0.6578455567359924
+    },
+    {
+      "path": "crates/projectatlas-cli/src/runtime.rs",
+      "needle": "build_settings_report",
+      "query": "report content free database parser registry and search readiness diagnostics",
+      "rank": 6,
+      "top_path": "crates/projectatlas-core/src/support_catalog.rs",
+      "top_score": 0.6839337944984436,
+      "expected_score": 0.6516449451446533
+    },
+    {
+      "path": "crates/projectatlas-cli/src/token_tui.rs",
+      "needle": "savings_source_rows_for_width",
+      "query": "render measured and modeled agent efficiency sources in the terminal dashboard",
+      "rank": 2,
+      "top_path": "crates/projectatlas-service/src/federation.rs",
+      "top_score": 0.6649830937385559,
+      "expected_score": 0.6385242342948914
+    },
+    {
+      "path": "crates/projectatlas-service/src/lib.rs",
+      "needle": "fts_literal_token",
+      "query": "use full text candidates only when exact lexical verification stays complete",
+      "rank": 3,
+      "top_path": "crates/projectatlas-cli/src/runtime/graph_projection.rs",
+      "top_score": 0.6337100267410278,
+      "expected_score": 0.6176334023475647
+    },
+    {
+      "path": "crates/projectatlas-db/src/derived_snapshot.rs",
+      "needle": "source_state_digest",
+      "query": "bind a graph artifact to the source state that produced it",
+      "rank": 8,
+      "top_path": "crates/projectatlas-cli/src/derived_snapshot_archive.rs",
+      "top_score": 0.6708933115005493,
+      "expected_score": 0.6409682035446167
+    },
+    {
+      "path": "crates/projectatlas-db/src/lib.rs",
+      "needle": "apply_conditional_purpose",
+      "query": "prevent a stale curator from overwriting an accepted file purpose",
+      "rank": 1,
+      "top_path": "crates/projectatlas-db/src/lib.rs",
+      "top_score": 0.716155469417572,
+      "expected_score": 0.716155469417572
+    },
+    {
+      "path": "crates/projectatlas-cli/src/optional_parser_lifecycle.rs",
+      "needle": "status_reports_installed_enabled_rollback_and_stale_states",
+      "query": "show selected and rollback parser pack slots and detect stale capability state",
+      "rank": 1,
+      "top_path": "crates/projectatlas-cli/src/optional_parser_lifecycle.rs",
+      "top_score": 0.6855663657188416,
+      "expected_score": 0.6855663657188416
+    },
+    {
+      "path": "crates/projectatlas-cli/src/mcp.rs",
+      "needle": "required_mcp_surface_present",
+      "query": "verify every mandatory agent tool route exists in the generated server",
+      "rank": 1,
+      "top_path": "crates/projectatlas-cli/src/mcp.rs",
+      "top_score": 0.671619176864624,
+      "expected_score": 0.671619176864624
+    },
+    {
+      "path": "crates/projectatlas-service/src/federation.rs",
+      "needle": "revalidate_participants",
+      "query": "fail a multi repository response when one participant changes generation mid request",
+      "rank": 8,
+      "top_path": "crates/projectatlas-service/src/federation.rs",
+      "top_score": 0.6469875574111938,
+      "expected_score": 0.6148126125335693
+    },
+    {
+      "path": "crates/projectatlas-db/src/telemetry.rs",
+      "needle": "prepare_daily_capacity",
+      "query": "make room for a new daily usage aggregate under a fixed retention budget",
+      "rank": 1,
+      "top_path": "crates/projectatlas-db/src/telemetry.rs",
+      "top_score": 0.6899046301841736,
+      "expected_score": 0.6899046301841736
+    }
+  ]
+}

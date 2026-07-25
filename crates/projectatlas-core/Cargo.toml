@@ -14,5 +14,12 @@ serde_json.workspace = true
 thiserror.workspace = true
 toon-format.workspace = true
 
+[dev-dependencies]
+object.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+zstd.workspace = true
+
 [lints]
 workspace = true

@@ -2,7 +2,7 @@
 
 ### Requirement: Typed Stable Repository Graph
 
-ProjectAtlas SHALL represent projects, files, packages, declarations, external targets, relationships, source context, resolution, confidence, coverage, and generation identity through typed Rust contracts with one smallest owning module. Stable keys SHALL survive unchanged-content rescans and line movement while independent project instances, scopes, and overloads remain distinct. Legacy public relation values SHALL remain compatible; graph-only families SHALL use additive typed fields rather than changing the old exhaustive enum.
+ProjectAtlas SHALL represent projects, files, packages, declarations, external targets, relationships, source context, resolution, confidence, coverage, and generation identity through typed Rust contracts with one smallest owning module. Stable keys SHALL survive unchanged-content rescans and line movement while independent project instances, scopes, and overloads remain distinct. Legacy 0.3.26 public relation values and normal requests SHALL remain compatible; graph-only families SHALL use additive typed fields rather than changing the old exhaustive enum.
 
 #### Scenario: Repeated scan keeps identity
 - **WHEN** unchanged declarations move only by formatting or line position
@@ -26,7 +26,7 @@ ProjectAtlas SHALL represent one logical source-kind-target relationship separat
 
 ### Requirement: One Indexed Storage Owner
 
-Typed entities, deduplicated logical relationships, separate source occurrences, coverage, and generation fields SHALL be persisted as typed SQLite columns under one schema owner. The physical model SHALL support bounded indexed outbound and inbound adjacency, exact stable-key/path/kind/generation access, and affected-dependent invalidation without decoding per-edge JSON, scanning or materializing the whole graph, or relinking by display labels. Index order, coverage, and query plans SHALL be validated against representative high-cardinality and high-degree graph workloads. Graph publication SHALL not own, duplicate, overwrite, or silently approve folder/file purposes; local node and path results SHALL project purpose from the authoritative owning file/folder at query time.
+Typed entities, deduplicated logical relationships, separate source occurrences, coverage, and generation fields SHALL be persisted as typed SQLite columns under one schema owner. The physical model SHALL support bounded indexed outbound and inbound adjacency, exact stable-key/path/kind/generation access, and affected-dependent invalidation without decoding per-edge JSON, scanning or materializing the whole graph, or relinking by display labels. Index order, coverage, and query plans SHALL be validated against representative high-cardinality and high-degree graph workloads. SQLite SHALL execute direct one-hop and affected-candidate set operations and batch-load unique endpoint selectors and accepted purposes; Rust service code SHALL control multi-hop traversal, ranking, aggregate limits, and result composition without loading the complete graph. Graph publication SHALL not own, duplicate, overwrite, invalidate, or silently approve folder/file purposes; local node and path results SHALL project purpose from the authoritative owning file/folder at query time.
 
 #### Scenario: Row iteration fails after returning rows
 - **WHEN** SQLite reports corruption, I/O failure, cancellation, or schema mismatch during iteration
@@ -37,8 +37,12 @@ Typed entities, deduplicated logical relationships, separate source occurrences,
 - **THEN** SQLite uses the owning indexed adjacency path, returns explicit returned/truncated/continuation and typed at-least or exact total state, and does not scan the full high-degree adjacency or materialize unrelated graph rows solely to compute display metadata
 
 #### Scenario: Purpose changes without structural graph change
-- **WHEN** an owning file or folder purpose is reviewed or becomes stale while entity and relation identities remain unchanged
-- **THEN** later graph-backed results project the current authoritative purpose state without rewriting or duplicating graph rows
+- **WHEN** an owning file or folder purpose is explicitly approved or corrected while entity and relation identities remain unchanged
+- **THEN** later graph-backed results project the current authoritative accepted purpose without rewriting or duplicating graph rows
+
+#### Scenario: Source changes without purpose correction
+- **WHEN** source bytes, hashes, symbols, summaries, entities, relations, or generations change without an explicit purpose correction
+- **THEN** later graph-backed results retain the same accepted purpose while projecting the newly published derived facts
 
 ### Requirement: Database Architecture Remains Workload-Fit
 
@@ -62,7 +66,7 @@ ProjectAtlas SHALL maintain one versioned database architecture decision for its
 
 ### Requirement: Project-Local Storage Growth Is Bounded
 
-Each resolved runtime/request source-state binding SHALL select exactly one authoritative project database containing its authored atlas state and active complete derived generation. Normal root, `project_path`, and nearest-project discovery SHALL select `<root>/.projectatlas/projectatlas.db`; an explicit startup database MAY select a noncanonical path for an isolated host, test, migration/verification, or protected runtime binding, but it SHALL NOT be auto-discovered, attached, merged, substituted, used as a fallback, or combined with another database in one read, publication, authored mutation, telemetry write, or result. ProjectAtlas SHALL NOT split purposes, future Memory Atlas records, graph/index projections, settings, health resolutions, or telemetry for one binding into separate product databases. ProjectAtlas MAY use bounded memory or one disposable working file, implemented as a plain file or SQLite-backed spool, when admitted extraction exceeds its Rust memory budget. Even when SQLite-backed, that spool SHALL NOT be a ProjectAtlas database: it SHALL have no project identity, authored state, active generation, or query surface and SHALL be removed after publish, cancellation, failure, or ownership-validated restart recovery. Recent raw telemetry and retained aggregates SHALL have explicit row, age, and byte budgets; compaction SHALL preserve supported all-time token-report totals and declared trend semantics while reporting honestly when expired session-level detail is unavailable. Obsolete derived rows, abandoned owned staging artifacts, WAL growth, free pages, and planner statistics SHALL have measured maintenance owners. Normal agent reads SHALL NOT run an unbounded purge, blocking truncate checkpoint, or blind database rebuild/`VACUUM`, and cleanup SHALL NOT delete project identity, reviewed purposes, health resolutions, or future separately capped Memory Atlas state.
+Each resolved runtime/request source-state binding SHALL select exactly one authoritative project database containing its authored atlas state and active complete derived generation. Normal root, `project_path`, and nearest-project discovery SHALL select `<root>/.projectatlas/projectatlas.db`; an explicit startup database MAY select a noncanonical path for an isolated host, test, migration/verification, or protected runtime binding, but it SHALL NOT be auto-discovered, attached, merged, substituted, used as a fallback, or combined with another database in one read, publication, authored mutation, telemetry write, or result. ProjectAtlas SHALL NOT split purposes, future Memory Atlas records, graph/index projections, settings, health resolutions, or telemetry for one binding into separate product databases. ProjectAtlas MAY spill one admitted full projection into one bounded private SQLite-backed staging directory. The stage SHALL NOT be a second authoritative project database. It SHALL contain only rebuildable scan/graph rows and internal schema, ownership, and copy-validation metadata, including the exact root, selected project identity, staging-only marker, and target graph generation; it SHALL contain no authored rows, SHALL NOT be selected by normal root/project discovery, and SHALL expose no supported CLI/MCP result surface. ProjectAtlas SHALL checkpoint and close the staging store before ownership-validated removal after publish, cancellation, failure, or restart; incomplete or uncertain creation SHALL be retained fail-closed rather than recursively deleted. Recent raw telemetry and retained aggregates SHALL have explicit row, age, and byte budgets; compaction SHALL preserve supported all-time token-report totals and declared trend semantics while reporting honestly when expired session-level detail is unavailable. Obsolete derived rows, abandoned owned staging artifacts, WAL growth, free pages, and planner statistics SHALL have measured maintenance owners. Normal agent reads SHALL NOT run an unbounded purge, blocking truncate checkpoint, or blind database rebuild/`VACUUM`, and cleanup SHALL NOT delete project identity, reviewed purposes, health resolutions, or future separately capped Memory Atlas state.
 
 Implicit telemetry SHALL use a bounded internal runtime or invocation session instance rather than one eternal default deduplication scope. An optional caller-visible session label SHALL remain distinct from that internal instance. Session-scoped modeled accounting SHALL preserve the established per-baseline `max(baseline without ProjectAtlas) - sum(emitted with ProjectAtlas)` contribution while an instance is active; sealing or expiry SHALL NOT silently reopen discarded baseline state, and later reuse of a label SHALL start a new instance. Global supported totals SHALL remain exact after compaction while session detail and trend availability SHALL report retained, partial, expired, or unavailable truth explicitly.
 
@@ -78,13 +82,13 @@ Implicit telemetry SHALL use a bounded internal runtime or invocation session in
 - **WHEN** a caller reuses a public session label after its prior internal instance was sealed and its baseline state expired
 - **THEN** ProjectAtlas creates a new bounded session instance, preserves exact global totals, and reports prior label history as partial or expired instead of reusing or fabricating the old deduplication scope
 
-#### Scenario: Publication crashes after creating a spill artifact
-- **WHEN** ProjectAtlas restarts after cancellation or failure left an owned temporary staging artifact
-- **THEN** it validates ownership and removes or safely resumes only that non-authoritative artifact while preserving the single project database and its last complete generation
+#### Scenario: Restart encounters an owned disposable graph stage
+- **WHEN** restart cleanup encounters a direct staging directory whose SQLite marker binds the exact root and selected project
+- **THEN** ProjectAtlas closes the validating connection, removes only that non-authoritative stage with its marker last, and preserves the authoritative project database and its last complete generation
 
-#### Scenario: No production spill owner exists
-- **WHEN** measured staging remains inside bounded typed Rust memory and no spill implementation has been selected
-- **THEN** maintenance reports spill cleanup as not applicable and does not create spill infrastructure or delete arbitrary lookalike files
+#### Scenario: Staging ownership is incomplete or uncertain
+- **WHEN** restart cleanup cannot prove the exact root, selected project, and direct staging marker for a non-empty stage, or encounters a linked or lookalike stage path
+- **THEN** it retains that state fail-closed and never follows or recursively deletes it; only an empty direct stage shell may be removed
 
 #### Scenario: Indexed source shrinks substantially
 - **WHEN** obsolete derived rows and free pages accumulate after a large local source tree becomes smaller
@@ -116,7 +120,7 @@ The existing settings surface SHALL report schema compatibility and migration st
 
 ### Requirement: Authored Data And Project Identity Are Preserved
 
-Migrations, full publication, incremental updates, cleanup, rollback, and snapshot operations SHALL preserve project identity, purposes, review state, settings, and telemetry. Verified root moves preserve one project instance; independent copies/worktrees initialize or explicitly detach to a different instance. Snapshot import SHALL never overwrite destination identity.
+Migrations, full publication, incremental updates, cleanup, rollback, and snapshot operations SHALL preserve project identity, accepted purposes, approval/provenance state, settings, and telemetry. Deterministic or heuristic suggestions remain unapproved until an agent accepts them. Automation SHALL NOT invalidate an accepted purpose because source or graph state changed; explicit agent/user correction remains allowed. An absent node SHALL keep its path-owned accepted purpose dormant and excluded from current navigation; exact-path recreation MAY reactivate it, while a rename SHALL leave the old path dormant and SHALL NOT transfer approval automatically to the new path. Verified root moves preserve one project instance; independent copies/worktrees initialize or explicitly detach to a different instance. Snapshot import SHALL never overwrite destination identity.
 
 #### Scenario: Independent checkout copies an index
 - **WHEN** an accessible old root still owns the copied project identity
