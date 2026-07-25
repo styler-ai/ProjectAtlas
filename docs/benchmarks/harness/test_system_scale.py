@@ -1067,6 +1067,9 @@ time.sleep(60)
     def test_terminal_windows_job_counts_every_short_lived_child(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            direct_interpreter = str(
+                Path(sys.base_prefix) / Path(sys.executable).name
+            )
             for run in range(20):
                 output = root / f"child-{run}.bin"
                 child = (
@@ -1074,11 +1077,12 @@ time.sleep(60)
                     f"Path({str(output)!r}).write_bytes(b'x' * 65536)"
                 )
                 parent = (
-                    "import subprocess, sys; "
-                    f"subprocess.run([sys.executable, '-c', {child!r}], check=True)"
+                    "import subprocess; "
+                    f"subprocess.run([{direct_interpreter!r}, "
+                    f"'-c', {child!r}], check=True)"
                 )
                 measured = system_scale.run_measured(
-                    [sys.executable, "-c", parent],
+                    [direct_interpreter, "-c", parent],
                     cwd=root,
                     env=dict(os.environ),
                     timeout_seconds=10,
