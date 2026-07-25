@@ -5407,7 +5407,7 @@ fn plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails()
     let stale_plugin_json = r#"{"installed":[{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.0.1"}],"available":[]}"#;
     let fake_codex_script = if cfg!(windows) {
         format!(
-            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" (\r\n  echo {stale_plugin_json}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"add\" (\r\n  if not exist \"%PROJECTATLAS_FAKE_FAILURE_MARKER%\" (\r\n    echo failed>\"%PROJECTATLAS_FAKE_FAILURE_MARKER%\"\r\n    exit /b 1\r\n  )\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n"
+            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" (\r\n  echo {stale_plugin_json}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"add\" (\r\n  if exist \"%PROJECTATLAS_FAKE_FAILURE_MARKER%\" exit /b 0\r\n  echo failed>\"%PROJECTATLAS_FAKE_FAILURE_MARKER%\"\r\n  goto plugin_add_failure\r\n)\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n:plugin_add_failure\r\nexit /b 1\r\n"
         )
     } else {
         format!(
@@ -5430,20 +5430,25 @@ fn plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails()
         String::from_utf8_lossy(&installer_output.stdout),
         String::from_utf8_lossy(&installer_output.stderr)
     );
-    let reported_install_failure = installer_output_text
-        .contains("Codex ProjectAtlas plugin update failed: could not install projectatlas plugin");
-    let reported_version_mismatch = installer_output_text
-        .contains("Codex ProjectAtlas plugin update failed: installed projectatlas plugin version");
-    if !reported_install_failure && !reported_version_mismatch {
+    let normalized_installer_output = installer_output_text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let fake_codex_calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
+    if !failure_marker.exists() {
         return Err(io::Error::other(format!(
-            "installer did not report the failed plugin reinstall:\n{installer_output_text}"
+            "fake Codex plugin add failure was not exercised:\n{fake_codex_calls}"
         ))
         .into());
     }
-    if reported_install_failure && !failure_marker.exists() {
-        return Err(io::Error::other("fake Codex plugin add failure was not exercised").into());
+    if !normalized_installer_output
+        .contains("Codex ProjectAtlas plugin update failed: could not install projectatlas plugin")
+    {
+        return Err(io::Error::other(format!(
+            "installer did not report the failed plugin reinstall:\n{installer_output_text}\nfake Codex calls:\n{fake_codex_calls}"
+        ))
+        .into());
     }
-    let fake_codex_calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
     if fake_codex_calls
         .matches("plugin add projectatlas --marketplace projectatlas --json")
         .count()
