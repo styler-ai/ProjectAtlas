@@ -1737,7 +1737,7 @@ pub fn render_language_support_html() -> Result<String, fmt::Error> {
     )?;
     output.push_str("<p><strong>Complete</strong> means the fixed ProjectAtlas navigation contract, not compiler, runtime, or whole-language completeness. Final v0.4 MCP navigation revalidation retained every runtime candidate at its achieved tier because none has complete schema-bound capability and agent-navigation evidence. Planned and unavailable rows are documentation only and add nothing to runtime capability totals.</p>");
     output.push_str("<p>Detection selects a registry row; contained parsing and concrete fact providers retain honest provenance; typed resolution and atomic SQLite publication preserve exact occurrences; freshness-aware MCP navigation returns bounded selectors and exact source evidence. Maintained compatible grammars and standard queries are reused first. ProjectAtlas does not execute repository code, and absent optional packs do not burden core.</p>");
-    output.push_str("<p>The <code>legacy-modernization</code> tag is navigation context, not an automatic-conversion or target-language claim. See the <a href=\"https://github.com/styler-ai/ProjectAtlas/blob/dev/docs/language-support.md\">generated Markdown authority</a>.</p>");
+    output.push_str("<p>The <code>legacy-modernization</code> tag is navigation context, not an automatic-conversion or target-language claim. See the <a href=\"https://github.com/styler-ai/ProjectAtlas/blob/main/docs/language-support.md\">generated Markdown authority</a>.</p>");
     output.push_str("<h2>Architecture paths</h2><ul>");
     for link in ARCHITECTURE_LINKS {
         write!(
@@ -1835,42 +1835,47 @@ const ARCHITECTURE_LINKS: &[ArchitectureLink] = &[
     ArchitectureLink {
         label: "Canonical Mermaid architecture views",
         markdown_href: "projectatlas-3-architecture.md#architecture-views",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/dev/docs/projectatlas-3-architecture.md#architecture-views",
+        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#architecture-views",
     },
     ArchitectureLink {
         label: "System and component ownership",
         markdown_href: "projectatlas-3-architecture.md#system-and-component-architecture",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/dev/docs/projectatlas-3-architecture.md#system-and-component-architecture",
+        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#system-and-component-architecture",
     },
     ArchitectureLink {
         label: "Crate dependency and ownership",
         markdown_href: "projectatlas-3-architecture.md#crate-dependency-and-ownership",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/dev/docs/projectatlas-3-architecture.md#crate-dependency-and-ownership",
+        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#crate-dependency-and-ownership",
     },
     ArchitectureLink {
         label: "Database authority",
         markdown_href: "projectatlas-3-architecture.md#database-authority-and-responsibility",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/dev/docs/projectatlas-3-architecture.md#database-authority-and-responsibility",
+        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#database-authority-and-responsibility",
     },
     ArchitectureLink {
         label: "Graph physical model",
         markdown_href: "projectatlas-3-architecture.md#normalized-graph-physical-model",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/dev/docs/projectatlas-3-architecture.md#normalized-graph-physical-model",
+        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#normalized-graph-physical-model",
     },
     ArchitectureLink {
         label: "Bounded graph read",
         markdown_href: "projectatlas-3-architecture.md#bounded-graph-read-with-purpose-projection",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/dev/docs/projectatlas-3-architecture.md#bounded-graph-read-with-purpose-projection",
+        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#bounded-graph-read-with-purpose-projection",
     },
     ArchitectureLink {
         label: "MCP read communication",
         markdown_href: "projectatlas-3-architecture.md#mcp-read-communication-sequence",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/dev/docs/projectatlas-3-architecture.md#mcp-read-communication-sequence",
+        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#mcp-read-communication-sequence",
     },
     ArchitectureLink {
         label: "Transactional publication",
         markdown_href: "projectatlas-3-architecture.md#index-and-transactional-publication-flow",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/dev/docs/projectatlas-3-architecture.md#index-and-transactional-publication-flow",
+        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#index-and-transactional-publication-flow",
+    },
+    ArchitectureLink {
+        label: "Language registry to agent navigation",
+        markdown_href: "projectatlas-3-architecture.md#language-registry-to-agent-navigation",
+        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#language-registry-to-agent-navigation",
     },
 ];
 
@@ -2124,22 +2129,37 @@ mod tests {
         let identity = support_catalog_identity();
         let markdown = crate::language::render_language_support_markdown()?;
         let html = render_language_support_html()?;
+        let architecture = include_str!("../../../docs/projectatlas-3-architecture.md");
         for projection in [&markdown, &html] {
             require_test(
                 projection.contains(&identity.digest),
                 "catalog identity missing from a public projection",
             )?;
             require_test(
-                projection.contains("System and component ownership"),
-                "system architecture link missing from a public projection",
-            )?;
-            require_test(
-                projection.contains("Transactional publication"),
-                "publication architecture link missing from a public projection",
-            )?;
-            require_test(
                 projection.contains("legacy-modernization"),
                 "modernization disclaimer tag missing from a public projection",
+            )?;
+        }
+        for link in ARCHITECTURE_LINKS {
+            require_test(
+                markdown.contains(&format!("[{}]({})", link.label, link.markdown_href)),
+                "architecture link missing from Markdown projection",
+            )?;
+            require_test(
+                html.contains(&format!("href=\"{}\">{}", link.pages_href, link.label)),
+                "architecture link missing from Pages projection",
+            )?;
+            let anchor = link
+                .markdown_href
+                .strip_prefix("projectatlas-3-architecture.md#")
+                .ok_or_else(|| std::io::Error::other("invalid architecture Markdown link"))?;
+            require_test(
+                architecture.lines().any(|line| {
+                    line.strip_prefix("## ")
+                        .or_else(|| line.strip_prefix("### "))
+                        .is_some_and(|heading| markdown_anchor(heading) == anchor)
+                }),
+                "architecture link does not own a matching Markdown heading",
             )?;
         }
         require_test(
@@ -2169,5 +2189,17 @@ mod tests {
         } else {
             Err(std::io::Error::other(message).into())
         }
+    }
+
+    fn markdown_anchor(heading: &str) -> String {
+        heading
+            .chars()
+            .filter_map(|character| {
+                character
+                    .is_ascii_alphanumeric()
+                    .then(|| character.to_ascii_lowercase())
+                    .or_else(|| character.is_ascii_whitespace().then_some('-'))
+            })
+            .collect()
     }
 }

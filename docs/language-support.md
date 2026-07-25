@@ -310,6 +310,7 @@ The `legacy-modernization` tag identifies source where trustworthy dependency an
 - [Bounded graph read](projectatlas-3-architecture.md#bounded-graph-read-with-purpose-projection)
 - [MCP read communication](projectatlas-3-architecture.md#mcp-read-communication-sequence)
 - [Transactional publication](projectatlas-3-architecture.md#index-and-transactional-publication-flow)
+- [Language registry to agent navigation](projectatlas-3-architecture.md#language-registry-to-agent-navigation)
 
 ### Backend
 

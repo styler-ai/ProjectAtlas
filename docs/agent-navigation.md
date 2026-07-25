@@ -61,8 +61,7 @@ context as bounded supporting evidence:
 flowchart TD
     Task[Agent task] --> Brief[Session brief ranks folders and files once<br/>with purpose plus graph evidence]
     Brief --> Confident{Direct file candidate ready?}
-    Confident -->|yes; complete graph| Summary[Selected-file summary plus trust]
-    Confident -->|yes; truncated graph| Relations[Detailed bounded relations]
+    Confident -->|yes| Summary[Selected-file summary plus trust]
     Confident -->|no; query available| Search[Indexed search with the task query]
     Confident -->|no file candidate| Filesystem[Normal filesystem tools for exact context]
     Search --> Summary
@@ -158,7 +157,7 @@ main task:
 sequenceDiagram
     participant Host as Agent host
     participant Main as Main agent
-    participant Curator as Lowest-tier curator
+    participant Curator as Low-reasoning purpose curator
     participant Atlas as ProjectAtlas purpose APIs
 
     Host->>Main: continue source task immediately
