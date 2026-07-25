@@ -31,7 +31,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, btree_map::Entry};
 use std::fs::{self, File, OpenOptions};
 use std::num::NonZeroU32;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::{Builder as TempDirBuilder, TempDir};
 
 /// Maximum canonical keys or distinct source paths admitted by one incremental closure.
@@ -58,6 +58,8 @@ const GRAPH_STAGE_DIRECTORY_PREFIX: &str = "graph-stage-";
 const GRAPH_STAGE_LEASE_FILE_NAME: &str = "repository-graph-stage.lock";
 /// Typed disposable database inside every owned staging directory.
 const GRAPH_STAGE_DATABASE_FILE_NAME: &str = "projectatlas.db";
+/// Internal invariant failure for a staging owner already entering teardown.
+const GRAPH_STAGE_OWNER_UNAVAILABLE: &str = "repository graph staging owner is unavailable";
 /// Maximum persisted symbol-graph paths reconstructed between work checks.
 const PERSISTED_GRAPH_PATHS_PER_CHUNK: usize = 256;
 /// Stable fallback for a parser relation that omitted a usable display target.
@@ -112,11 +114,55 @@ pub(super) struct StagedRepositoryGraph {
 /// File-backed graph rows staged outside the main database writer transaction.
 struct StagedGraphDatabase {
     /// Open typed store copied into the main publication.
-    store: AtlasStore,
+    store: Option<AtlasStore>,
     /// Owning directory removed after the store closes.
-    directory: TempDir,
+    directory: Option<TempDir>,
     /// Cross-process lease preventing restart cleanup while the stage is active.
     _lease: File,
+}
+
+impl StagedGraphDatabase {
+    /// Return the live typed staging store.
+    fn store(&self) -> Result<&AtlasStore, CliError> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| CliError::InvalidInput(GRAPH_STAGE_OWNER_UNAVAILABLE.to_string()))
+    }
+
+    /// Return the live typed staging store mutably during preparation.
+    fn store_mut(&mut self) -> Result<&mut AtlasStore, CliError> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| CliError::InvalidInput(GRAPH_STAGE_OWNER_UNAVAILABLE.to_string()))
+    }
+
+    /// Return the live disposable staging directory.
+    fn directory(&self) -> Result<&TempDir, CliError> {
+        self.directory
+            .as_ref()
+            .ok_or_else(|| CliError::InvalidInput(GRAPH_STAGE_OWNER_UNAVAILABLE.to_string()))
+    }
+}
+
+impl Drop for StagedGraphDatabase {
+    fn drop(&mut self) {
+        let prepared = self.store.take().is_some();
+        let Some(directory) = self.directory.take() else {
+            return;
+        };
+        let database_path = directory.path().join(GRAPH_STAGE_DATABASE_FILE_NAME);
+        let direct_database = fs::symlink_metadata(&database_path).is_ok_and(|metadata| {
+            metadata.file_type().is_file() && !metadata.file_type().is_symlink()
+        });
+        if prepared
+            && direct_database
+            && remove_owned_graph_stage_payload(directory.path(), &database_path, None).is_ok()
+        {
+            drop(directory);
+        } else {
+            let _retained_path: PathBuf = directory.keep();
+        }
+    }
 }
 
 impl StagedRepositoryGraph {
@@ -133,7 +179,7 @@ impl StagedRepositoryGraph {
     ) -> Result<(), CliError> {
         control.check(IndexWorkStage::Publication)?;
         if let Some(database) = &self.database {
-            if !database.directory.path().is_dir() {
+            if !database.directory()?.path().is_dir() {
                 return Err(CliError::InvalidInput(
                     "repository graph staging directory is unavailable".to_string(),
                 ));
@@ -145,7 +191,7 @@ impl StagedRepositoryGraph {
             }
             publication.replace_repository_graph_from_staging(
                 self.project,
-                &database.store,
+                database.store()?,
                 Some(control),
             )?;
             control.check(IndexWorkStage::Publication)?;
@@ -814,6 +860,56 @@ fn cleanup_abandoned_graph_staging(
     cleanup_abandoned_graph_staging_while_locked(&staging_parent, root, project, control)
 }
 
+/// Remove stage payloads while retaining the validated ownership database as a crash marker.
+fn remove_owned_graph_stage_payload(
+    stage: &Path,
+    database_path: &Path,
+    control: Option<&IndexWorkControl>,
+) -> Result<(), CliError> {
+    let entries = fs::read_dir(stage).map_err(|source| CliError::Io {
+        path: stage.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        if let Some(control) = control {
+            control.check(IndexWorkStage::Publication)?;
+        }
+        let entry = entry.map_err(|source| CliError::Io {
+            path: stage.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        if path == database_path {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path).map_err(|source| CliError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let result = if metadata.file_type().is_symlink() {
+            remove_graph_stage_symlink(&path)
+        } else if metadata.file_type().is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        result.map_err(|source| CliError::Io { path, source })?;
+    }
+    Ok(())
+}
+
+/// Remove only a graph-stage symlink leaf, never its target.
+#[cfg(windows)]
+fn remove_graph_stage_symlink(path: &Path) -> std::io::Result<()> {
+    fs::remove_dir(path).or_else(|_directory_error| fs::remove_file(path))
+}
+
+/// Remove only a graph-stage symlink leaf, never its target.
+#[cfg(not(windows))]
+fn remove_graph_stage_symlink(path: &Path) -> std::io::Result<()> {
+    fs::remove_file(path)
+}
+
 /// Remove direct child stages whose typed database binds the exact project.
 fn cleanup_abandoned_graph_staging_while_locked(
     staging_parent: &Path,
@@ -848,8 +944,13 @@ fn cleanup_abandoned_graph_staging_while_locked(
             continue;
         }
         let database_path = path.join(GRAPH_STAGE_DATABASE_FILE_NAME);
-        let Ok(database_metadata) = fs::symlink_metadata(&database_path) else {
-            continue;
+        let database_metadata = match fs::symlink_metadata(&database_path) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                let _remove_empty_shell = fs::remove_dir(&path);
+                continue;
+            }
+            Err(_) => continue,
         };
         if !database_metadata.file_type().is_file() || database_metadata.file_type().is_symlink() {
             continue;
@@ -860,7 +961,13 @@ fn cleanup_abandoned_graph_staging_while_locked(
             continue;
         }
         control.check(IndexWorkStage::Publication)?;
-        fs::remove_dir_all(&path).map_err(|source| CliError::Io { path, source })?;
+        remove_owned_graph_stage_payload(&path, &database_path, Some(control))?;
+        control.check(IndexWorkStage::Publication)?;
+        fs::remove_file(&database_path).map_err(|source| CliError::Io {
+            path: database_path,
+            source,
+        })?;
+        fs::remove_dir(&path).map_err(|source| CliError::Io { path, source })?;
     }
     Ok(())
 }
@@ -894,11 +1001,25 @@ fn finish_projection_in_database(
             path: staging_parent,
             source,
         })?;
-    let database_path = directory.path().join(GRAPH_STAGE_DATABASE_FILE_NAME);
-    let mut store = AtlasStore::create_repository_graph_staging(&database_path, root, project)?;
-    store.replace_scan(nodes)?;
+    let mut database = StagedGraphDatabase {
+        store: None,
+        directory: Some(directory),
+        _lease: lease,
+    };
+    let database_path = database
+        .directory()?
+        .path()
+        .join(GRAPH_STAGE_DATABASE_FILE_NAME);
+    database.store = Some(AtlasStore::create_repository_graph_staging(
+        &database_path,
+        root,
+        project,
+    )?);
+    database.store_mut()?.replace_scan(nodes)?;
     {
-        let mut staging = store.begin_repository_graph_staging(project, generation)?;
+        let mut staging = database
+            .store_mut()?
+            .begin_repository_graph_staging(project, generation)?;
         let mut entity_batch = Vec::with_capacity(GRAPH_STAGE_ENTITY_BATCH_SIZE);
         for entity in entities.entity_by_digest.values() {
             entity_batch.push(entity);
@@ -950,9 +1071,9 @@ fn finish_projection_in_database(
         }
         staging.complete()?;
     }
-    store.checkpoint_repository_graph_staging()?;
-    store.begin_index_read_snapshot()?;
-    let _staged_generation = store.repository_graph_generation()?;
+    database.store()?.checkpoint_repository_graph_staging()?;
+    database.store()?.begin_index_read_snapshot()?;
+    let _staged_generation = database.store()?.repository_graph_generation()?;
     let retained_bytes = normalize_native_path_display(&database_path).len() as u64;
     Ok(StagedRepositoryGraph {
         project,
@@ -963,11 +1084,7 @@ fn finish_projection_in_database(
         coverage: Vec::new(),
         entity_exports: Vec::new(),
         relation_dependencies: Vec::new(),
-        database: Some(StagedGraphDatabase {
-            store,
-            directory,
-            _lease: lease,
-        }),
+        database: Some(database),
         retained_bytes,
     })
 }
@@ -2768,7 +2885,8 @@ mod tests {
         enforce_incremental_projection_budget, enforce_incremental_projection_limits,
         explicit_external_selector, finish_projection, finish_projection_in_database,
         insert_relation, is_cargo_manifest_path, registry_resolution_matches, relation_resolution,
-        repository_path_belongs_to, resolution_registry_from_exports, rust_toolchain_identity,
+        remove_owned_graph_stage_payload, repository_path_belongs_to,
+        resolution_registry_from_exports, rust_toolchain_identity,
         stage_incremental_repository_graph, try_graph_stage_lease,
     };
     use crate::runtime::{
@@ -3028,11 +3146,28 @@ mod tests {
 
         let owned = atlas_dir.join(format!("{GRAPH_STAGE_DIRECTORY_PREFIX}owned"));
         fs::create_dir(&owned)?;
+        let owned_database = owned.join(GRAPH_STAGE_DATABASE_FILE_NAME);
         drop(AtlasStore::create_repository_graph_staging(
-            &owned.join(GRAPH_STAGE_DATABASE_FILE_NAME),
+            &owned_database,
             &root,
             project,
         )?);
+        let owned_payload = owned.join("payload");
+        fs::create_dir(&owned_payload)?;
+        fs::write(owned_payload.join("row"), "discard")?;
+        let owned_link_target = temp.path().join("owned-link-target");
+        fs::create_dir(&owned_link_target)?;
+        fs::write(owned_link_target.join("sentinel"), "preserve")?;
+        let owned_payload_link = owned.join("linked-payload");
+        create_directory_link(&owned_link_target, &owned_payload_link)?;
+        let interrupted_shell =
+            atlas_dir.join(format!("{GRAPH_STAGE_DIRECTORY_PREFIX}interrupted-shell"));
+        fs::create_dir(&interrupted_shell)?;
+        let unvalidated_nonempty = atlas_dir.join(format!(
+            "{GRAPH_STAGE_DIRECTORY_PREFIX}unvalidated-nonempty"
+        ));
+        fs::create_dir(&unvalidated_nonempty)?;
+        fs::write(unvalidated_nonempty.join("sentinel"), "preserve")?;
         let lookalike = atlas_dir.join(format!("{GRAPH_STAGE_DIRECTORY_PREFIX}lookalike"));
         fs::create_dir(&lookalike)?;
         drop(AtlasStore::open_for_project(
@@ -3094,6 +3229,16 @@ mod tests {
 
         let lease = try_graph_stage_lease(&atlas_dir)?
             .ok_or("test could not acquire graph staging lease")?;
+        remove_owned_graph_stage_payload(&owned, &owned_database, Some(&control))?;
+        require(
+            owned_database.is_file() && !owned_payload.exists(),
+            "payload cleanup did not retain the ownership database until last",
+        )?;
+        require(
+            fs::symlink_metadata(&owned_payload_link).is_err()
+                && owned_link_target.join("sentinel").is_file(),
+            "payload cleanup followed or retained a linked child",
+        )?;
         cleanup_abandoned_graph_staging(&root, project, &control)?;
         require(
             owned.exists(),
@@ -3124,6 +3269,14 @@ mod tests {
         require(
             !owned.exists(),
             "restart cleanup retained an inactive owned stage",
+        )?;
+        require(
+            !interrupted_shell.exists(),
+            "restart cleanup retained an empty interrupted stage shell",
+        )?;
+        require(
+            unvalidated_nonempty.join("sentinel").is_file(),
+            "restart cleanup removed a non-empty unvalidated stage",
         )?;
         require(
             lookalike.exists(),
@@ -3229,6 +3382,37 @@ mod tests {
     }
 
     #[test]
+    fn staged_database_owner_retains_incomplete_creation() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let atlas_dir = temp.path().join(".projectatlas");
+        fs::create_dir(&atlas_dir)?;
+        let directory = tempfile::Builder::new()
+            .prefix(GRAPH_STAGE_DIRECTORY_PREFIX)
+            .tempdir_in(&atlas_dir)?;
+        let staging_path = directory.path().to_path_buf();
+        fs::write(
+            staging_path.join(GRAPH_STAGE_DATABASE_FILE_NAME),
+            "incomplete",
+        )?;
+        fs::write(staging_path.join("payload"), "preserve")?;
+        let lease = try_graph_stage_lease(&atlas_dir)?
+            .ok_or("test could not acquire graph staging lease")?;
+        let owner = super::StagedGraphDatabase {
+            store: None,
+            directory: Some(directory),
+            _lease: lease,
+        };
+
+        drop(owner);
+
+        require(
+            staging_path.join(GRAPH_STAGE_DATABASE_FILE_NAME).is_file()
+                && staging_path.join("payload").is_file(),
+            "incomplete staging creation was recursively deleted",
+        )
+    }
+
+    #[test]
     fn database_staging_publishes_and_removes_its_disposable_store() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("database-staging");
@@ -3266,9 +3450,16 @@ mod tests {
             .database
             .as_ref()
             .ok_or("database staging was not selected")?
-            .directory
+            .directory()?
             .path()
             .to_path_buf();
+        let drop_payload = staging_path.join("drop-payload");
+        fs::create_dir(&drop_payload)?;
+        fs::write(drop_payload.join("row"), "discard")?;
+        let drop_link_target = temp.path().join("drop-link-target");
+        fs::create_dir(&drop_link_target)?;
+        fs::write(drop_link_target.join("sentinel"), "preserve")?;
+        create_directory_link(&drop_link_target, &staging_path.join("drop-linked-payload"))?;
         require(
             staging_path.exists(),
             "database staging directory is missing",
@@ -3285,6 +3476,10 @@ mod tests {
         require(
             !staging_path.exists(),
             "database staging directory survived publication",
+        )?;
+        require(
+            drop_link_target.join("sentinel").is_file(),
+            "database staging drop followed a linked payload",
         )?;
         drop(store);
 

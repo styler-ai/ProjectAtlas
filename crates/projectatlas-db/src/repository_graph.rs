@@ -2992,6 +2992,7 @@ impl AtlasStore {
             params![GRAPH_STAGING_MARKER_KEY, GRAPH_STAGING_MARKER_VALUE],
         )?;
         drop_graph_rebuildable_indexes(&store.connection)?;
+        store.checkpoint_repository_graph_staging()?;
         store.validated_project_instance_id = Some(project);
         Ok(store)
     }
@@ -7450,6 +7451,30 @@ mod tests {
         )?;
         publication.complete()?;
         Ok(fixture)
+    }
+
+    #[test]
+    fn repository_graph_staging_checkpoints_ownership_before_graph_writes()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("staging-ownership");
+        let stage = project_root.join(".projectatlas").join("graph-stage-test");
+        fs::create_dir_all(&stage)?;
+        let database = stage.join("projectatlas.db");
+        let project = ProjectInstanceId::from_bytes([7; 16])?;
+        let _store =
+            AtlasStore::create_repository_graph_staging(&database, &project_root, project)?;
+
+        let main_database_only = temp.path().join("staging-main-only.db");
+        fs::copy(&database, &main_database_only)?;
+        require(
+            AtlasStore::repository_graph_staging_belongs_to(
+                &main_database_only,
+                &project_root,
+                project,
+            )?,
+            "staging ownership depended on WAL sidecars before graph writes",
+        )
     }
 
     #[test]
