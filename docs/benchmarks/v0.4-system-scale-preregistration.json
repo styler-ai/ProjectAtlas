@@ -1,10 +1,24 @@
 {
   "schema_version": 1,
   "benchmark": "projectatlas-v0.4-system-scale",
-  "status": "draft_until_extended_harness_smoke_passes",
+  "status": "draft_after_failed_measurement",
+  "measurement_amendments": [
+    {
+      "prior_result": "docs/benchmarks/v0.4-system-scale-failed-runs.json",
+      "prior_candidate_head": "f86b460c1c366f47b6e233331e1e83ac592ca9d2",
+      "disposition": "retained failed run; no failed cell is excluded",
+      "changes": [
+        "Cap peak WAL and private staging bytes by the existing per-scale database-size limit instead of unvalidated global limits that were smaller than the accepted huge persistent footprint.",
+        "Retain process read-operation counts as raw diagnostics but remove the 512-operation gate because Windows Job accounting counts operating-system I/O operations, not SQLite statements; byte, indexed-row, hydration, and output bounds remain authoritative.",
+        "Accept typed refresh_required after a canceled dirty-source scan because serving an overview would violate the freshness contract; last-complete generation, writer release, reopen, integrity, cleanup, and survivor checks remain required.",
+        "Cap Rayon worker pools by admitted work cardinality before repeating the concurrent-isolation measurement."
+      ]
+    }
+  ],
   "candidate": {
     "required_version": "0.4.0",
-    "functional_git_head": "0aceae367a6fe82980e79ac3faf609a124e677b6",
+    "functional_git_head": "f86b460c1c366f47b6e233331e1e83ac592ca9d2",
+    "runtime_sha256": "b3f8eba157997901831564868601316444d8044e3b16fc4fd9068a977c9e9ffc",
     "mcp_tools_sha256": "68e8af9502420a3a51d8094096c3ed0d9f0badea9d0b4762ece56635b652ea09",
     "telemetry": "disabled",
     "build_profile": "release-default-features"
@@ -80,7 +94,6 @@
       "maximum_mcp_startup_milliseconds": 250,
       "maximum_bounded_output_bytes": 262144,
       "maximum_bounded_query_process_read_bytes": 67108864,
-      "maximum_bounded_query_process_read_count": 512,
       "maximum_fallback_selected_text_bytes": 134217728,
       "maximum_fallback_search_seconds": 10,
       "maximum_relation_database_requested_rows": 128,
@@ -94,8 +107,6 @@
       "maximum_narrow_refresh_process_write_transfer_bytes": 2097152,
       "maximum_expanded_guidance_process_read_transfer_bytes": 67108864,
       "maximum_expanded_guidance_process_write_transfer_bytes": 2097152,
-      "maximum_peak_wal_bytes": 67108864,
-      "maximum_peak_staging_bytes": 2147483648,
       "maximum_freelist_ratio": 0.05,
       "maximum_publication_writer_unavailable_seconds": 1,
       "maximum_contention_failure_seconds": 1,

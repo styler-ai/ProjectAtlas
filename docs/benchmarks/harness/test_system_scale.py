@@ -649,6 +649,21 @@ class SystemScaleHarnessTests(unittest.TestCase):
         self.assertTrue(client.closed)
         sampler.stop.assert_not_called()
 
+    def test_post_cancellation_read_accepts_current_or_fail_closed_state(self) -> None:
+        self.assertTrue(
+            system_scale.post_cancellation_read_is_safe("overview:\n  files: 1\n")
+        )
+        self.assertTrue(
+            system_scale.post_cancellation_read_is_safe(
+                "error:\n  kind: refresh_required\n  message: source changed\n"
+            )
+        )
+        self.assertFalse(
+            system_scale.post_cancellation_read_is_safe(
+                "error:\n  kind: database_error\n  message: unavailable\n"
+            )
+        )
+
     def test_cancellation_preflight_failure_closes_client(self) -> None:
         class FakeClient:
             process = mock.Mock(pid=123)

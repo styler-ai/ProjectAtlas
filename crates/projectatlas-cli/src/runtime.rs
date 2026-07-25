@@ -3913,7 +3913,7 @@ pub(crate) struct SymbolBuildReport {
     pub(crate) binary_or_non_utf8: usize,
     /// Files skipped because the build deadline was reached.
     pub(crate) timed_out: usize,
-    /// Worker thread count requested for parser work.
+    /// Worker thread count used for parser work.
     pub(crate) max_workers: usize,
     /// Optional timeout seconds requested for parser work.
     pub(crate) timeout_seconds: Option<u64>,
@@ -4795,6 +4795,11 @@ impl SymbolBuildOptions {
     }
 }
 
+/// Bound a worker pool by its work cardinality and runtime ceiling.
+fn worker_count_for_work(work_items: usize, max_workers: usize) -> usize {
+    work_items.min(max_workers.clamp(1, INDEX_WORKER_SAFE_CEILING))
+}
+
 /// Aggregate rows and retained string bytes admitted by one symbol publication.
 #[derive(Clone, Copy, Debug)]
 struct SymbolPublicationLimits {
@@ -5139,9 +5144,10 @@ fn stage_symbols_for_nodes_with_limits(
             .into());
         }
     }
+    report.max_workers = worker_count_for_work(jobs.len(), report.max_workers);
     if !jobs.is_empty() {
         let pool = ThreadPoolBuilder::new()
-            .num_threads(options.effective_workers())
+            .num_threads(report.max_workers)
             .build()
             .map_err(|source| {
                 CliError::InvalidInput(format!("symbol worker pool failed: {source}"))
@@ -6974,8 +6980,9 @@ fn stage_structural_summaries_for_nodes_controlled(
         candidates: paths.len(),
         ..StructuralSummaryReport::default()
     };
+    let worker_count = worker_count_for_work(candidates.len(), max_workers);
     let pool = ThreadPoolBuilder::new()
-        .num_threads(max_workers.clamp(1, INDEX_WORKER_SAFE_CEILING))
+        .num_threads(worker_count)
         .build()
         .map_err(|source| {
             CliError::InvalidInput(format!("structural summary worker pool failed: {source}"))
@@ -7517,6 +7524,24 @@ mod tests {
     use projectatlas_db::RepositoryGraphRelationQuery;
     use std::error::Error;
     use std::fmt::Debug;
+
+    #[test]
+    fn worker_pools_respect_work_cardinality_and_runtime_ceiling() {
+        for (work_items, max_workers, expected) in [
+            (0, 16, 0),
+            (1, 16, 1),
+            (8, 16, 8),
+            (64, 16, 16),
+            (64, usize::MAX, INDEX_WORKER_SAFE_CEILING),
+            (8, 0, 1),
+        ] {
+            assert_eq!(
+                worker_count_for_work(work_items, max_workers),
+                expected,
+                "work_items={work_items}, max_workers={max_workers}"
+            );
+        }
+    }
 
     #[test]
     fn settings_publication_identity_rejects_mixed_snapshots() {
@@ -8148,7 +8173,7 @@ mod tests {
         let nodes = scan_repo(temp.path(), &ScanOptions::default())?;
         let mut store = AtlasStore::in_memory()?;
         store.replace_scan(&nodes)?;
-        let options = SymbolBuildOptions::new(u64::MAX, Some(1), None);
+        let options = SymbolBuildOptions::new(u64::MAX, Some(INDEX_WORKER_SAFE_CEILING), None);
         require_eq(
             &options.max_bytes,
             &MAX_SYMBOL_FILE_BYTES,
@@ -8309,6 +8334,7 @@ mod tests {
             SymbolPublicationLimits::STANDARD,
         )?;
         require_eq(&report.parsed, &1, "compatible bounded symbol build")?;
+        require_eq(&report.max_workers, &1, "single-job symbol worker count")?;
         if report.symbols == 0 || report.relations == 0 {
             return Err(io::Error::other("bounded symbol build omitted parser output").into());
         }
@@ -9381,6 +9407,11 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             "full no-op symbol candidates",
         )?;
         require_eq(
+            &full_report.symbols.max_workers,
+            &0,
+            "full no-op symbol workers",
+        )?;
+        require_eq(
             &abandoned_full_stage.exists(),
             &false,
             "full no-op abandoned graph stage",
@@ -9412,6 +9443,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             "no-op summary candidates",
         )?;
         require_eq(&report.symbols.candidates, &0, "no-op symbol candidates")?;
+        require_eq(&report.symbols.max_workers, &0, "no-op symbol workers")?;
         require_eq(
             &abandoned_incremental_stage.exists(),
             &false,
