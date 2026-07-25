@@ -67,6 +67,23 @@ const ATLAS_DIR_NAME: &str = ".projectatlas";
 const GITHOOKS_DIR_NAME: &str = ".githooks";
 const ISSUE_TEMPLATE_DIR_NAME: &str = "ISSUE_TEMPLATE";
 const PRE_PUSH_HOOK_FILE_NAME: &str = "pre-push";
+const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
 const OPENSPEC_DIR_NAME: &str = "openspec";
 const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
 const CARGO_LOCK_FILE_NAME: &str = "Cargo.lock";
@@ -3334,8 +3351,7 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
         )
         .into());
     }
-    let tracked_review_batch = StdCommand::new("git")
-        .current_dir(&workspace_root)
+    let tracked_review_batch = git_command_for_root(&workspace_root)
         .args([
             "ls-files",
             "--error-unmatch",
@@ -3379,6 +3395,45 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
         if !pre_push.contains(required) {
             return Err(io::Error::other(format!(
                 "pre-push hook is missing SQLite-first ProjectAtlas command {required:?}"
+            ))
+            .into());
+        }
+    }
+    let normalized_pre_push = pre_push.replace("\r\n", "\n");
+    let cleanup_block = "for git_variable in $(git rev-parse --local-env-vars); do\n  unset \"$git_variable\"\ndone";
+    let cleanup_position = normalized_pre_push.find(cleanup_block).ok_or_else(|| {
+        io::Error::other("pre-push hook must clear Git repository-local environment")
+    })?;
+    let first_gate_position = normalized_pre_push
+        .find("cargo fmt")
+        .ok_or_else(|| io::Error::other("pre-push hook is missing its first Rust gate"))?;
+    if cleanup_position >= first_gate_position {
+        return Err(io::Error::other(
+            "pre-push hook must clear every Git repository-local variable before running checks",
+        )
+        .into());
+    }
+    if !normalized_pre_push
+        .contains("python3 docs/benchmarks/harness/mcp_composition.py --self-test")
+    {
+        return Err(
+            io::Error::other("pre-push hook must run the Git fixture-isolation self-test").into(),
+        );
+    }
+    let reported_git_environment = git_command_for_root(&workspace_root)
+        .args(["rev-parse", "--local-env-vars"])
+        .output()?;
+    if !reported_git_environment.status.success() {
+        return Err(io::Error::other(format!(
+            "Git repository-local environment inventory failed: {}",
+            String::from_utf8_lossy(&reported_git_environment.stderr)
+        ))
+        .into());
+    }
+    for variable in String::from_utf8(reported_git_environment.stdout)?.lines() {
+        if !GIT_REPOSITORY_ENVIRONMENT_VARIABLES.contains(&variable) {
+            return Err(io::Error::other(format!(
+                "Git reported an unhandled repository-local variable: {variable}"
             ))
             .into());
         }
@@ -8307,10 +8362,7 @@ fn packaged_cli_commands_own_their_real_sqlite_effects() -> Result<(), Box<dyn E
         vec!["add", "."],
         vec!["commit", "--quiet", "-m", "baseline"],
     ] {
-        let output = StdCommand::new("git")
-            .current_dir(&repo)
-            .args(arguments)
-            .output()?;
+        let output = git_command_for_root(&repo).args(arguments).output()?;
         if !output.status.success() {
             return Err(io::Error::other(format!(
                 "CLI contract Git setup failed: {}",
@@ -8355,8 +8407,7 @@ fn packaged_cli_commands_own_their_real_sqlite_effects() -> Result<(), Box<dyn E
         "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
         (MCP_CONTRACT_METADATA_CANARY, "preserve"),
     )?;
-    let clean_status = StdCommand::new("git")
-        .current_dir(&repo)
+    let clean_status = git_command_for_root(&repo)
         .args(["status", "--porcelain"])
         .output()?;
     if !clean_status.status.success() || !clean_status.stdout.is_empty() {
@@ -8822,10 +8873,7 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
         vec!["add", "."],
         vec!["commit", "--quiet", "-m", "baseline"],
     ] {
-        let output = StdCommand::new("git")
-            .current_dir(&repo)
-            .args(arguments)
-            .output()?;
+        let output = git_command_for_root(&repo).args(arguments).output()?;
         if !output.status.success() {
             return Err(io::Error::other(format!(
                 "MCP contract Git setup failed: {}",
@@ -8871,8 +8919,7 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
         "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
         (MCP_CONTRACT_METADATA_CANARY, "preserve"),
     )?;
-    let clean_status = StdCommand::new("git")
-        .current_dir(&repo)
+    let clean_status = git_command_for_root(&repo)
         .args(["status", "--porcelain"])
         .output()?;
     if !clean_status.status.success() || !clean_status.stdout.is_empty() {
@@ -9354,8 +9401,7 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
             require_json_contains(&reopened, &["content_summary"], expected)?;
         }
         if case.name == "atlas_file_summary" {
-            let status = StdCommand::new("git")
-                .current_dir(&repo)
+            let status = git_command_for_root(&repo)
                 .args(["status", "--porcelain", "--", "src/lib.rs"])
                 .output()?;
             if !status.status.success()
@@ -12944,8 +12990,7 @@ fn exercise_normal_read_freshness(
     let config_path = repo.join(ATLAS_DIR_NAME).join("config.toml");
     fs::write(&config_path, CONFIG)?;
     if with_git_metadata {
-        let output = StdCommand::new("git")
-            .current_dir(repo)
+        let output = git_command_for_root(repo)
             .args(["init", "--quiet"])
             .output()?;
         if !output.status.success() {
@@ -13483,6 +13528,15 @@ fn exercise_normal_read_freshness(
         .into());
     }
     Ok(())
+}
+
+fn git_command_for_root(root: &Path) -> StdCommand {
+    let mut command = StdCommand::new("git");
+    command.current_dir(root);
+    for variable in GIT_REPOSITORY_ENVIRONMENT_VARIABLES {
+        command.env_remove(variable);
+    }
+    command
 }
 
 #[test]

@@ -24,6 +24,24 @@ const GIT_DIGEST_BYTES: u64 = 32;
 const GIT_PATH_VALIDATION_MULTIPLIER: u64 = 32;
 /// Fixed allowance for temporary path-validation containers.
 const GIT_PATH_VALIDATION_FIXED_BYTES: u64 = 256;
+/// Repository-selection variables that must not override the selected project root.
+const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
 
 /// Compute VCS impact and conservative dead-code findings.
 pub(super) fn impact_findings(
@@ -306,8 +324,7 @@ pub(super) fn load_vcs_paths(
             retained_bytes: retained_request_bytes,
         };
     };
-    let mut command = Command::new("git");
-    command.current_dir(root).env("GIT_OPTIONAL_LOCKS", "0");
+    let mut command = git_command(root);
     match &selection {
         GitImpactSelection::WorkingTree => {
             command.args([
@@ -385,6 +402,21 @@ pub(super) fn load_vcs_paths(
             changed_paths: Vec::new(),
             retained_bytes: command_request_bytes.saturating_add(failure.peak_bytes),
         },
+    }
+}
+
+/// Build one Git command bound to the explicitly selected repository root.
+pub(super) fn git_command(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(root).env("GIT_OPTIONAL_LOCKS", "0");
+    clear_git_repository_environment(&mut command);
+    command
+}
+
+/// Remove ambient repository selection while preserving the normal process environment.
+fn clear_git_repository_environment(command: &mut Command) {
+    for variable in GIT_REPOSITORY_ENVIRONMENT_VARIABLES {
+        command.env_remove(variable);
     }
 }
 
@@ -670,4 +702,60 @@ fn valid_revision(value: &str) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/' | b'^' | b'~')
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error;
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::io;
+
+    #[test]
+    fn git_command_removes_ambient_repository_selection() -> Result<(), Box<dyn Error>> {
+        let command = git_command(Path::new("."));
+        for variable in GIT_REPOSITORY_ENVIRONMENT_VARIABLES {
+            if !command
+                .get_envs()
+                .any(|(name, value)| name == OsStr::new(variable) && value.is_none())
+            {
+                return Err(io::Error::other(format!(
+                    "{variable} was not removed from the Git child environment"
+                ))
+                .into());
+            }
+        }
+        if !command.get_envs().any(|(name, value)| {
+            name == OsStr::new("GIT_OPTIONAL_LOCKS") && value == Some(OsStr::new("0"))
+        }) {
+            return Err(io::Error::other("Git child did not disable optional locks").into());
+        }
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir(&root)?;
+        let initialized = git_command(&root).args(["init", "--quiet"]).status()?;
+        if !initialized.success() {
+            return Err(io::Error::other("test Git repository initialization failed").into());
+        }
+        let reported = git_command(&root)
+            .args(["rev-parse", "--local-env-vars"])
+            .output()?;
+        if !reported.status.success() {
+            return Err(io::Error::other(format!(
+                "Git repository-local environment inventory failed: {}",
+                String::from_utf8_lossy(&reported.stderr)
+            ))
+            .into());
+        }
+        for variable in String::from_utf8(reported.stdout)?.lines() {
+            if !GIT_REPOSITORY_ENVIRONMENT_VARIABLES.contains(&variable) {
+                return Err(io::Error::other(format!(
+                    "Git reported an unhandled repository-local variable: {variable}"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
 }

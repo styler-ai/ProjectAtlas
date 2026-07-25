@@ -9,7 +9,6 @@ use std::error::Error;
 use std::fs;
 use std::io;
 use std::num::NonZeroU32;
-use std::process::Command;
 
 #[test]
 fn analysis_uses_real_graph_rows_dependency_sccs_and_resumable_output() -> Result<(), Box<dyn Error>>
@@ -698,9 +697,8 @@ fn vcs_impact_is_typed_for_non_git_working_tree_and_invalid_revision() -> Result
     )?;
 
     let root = temp.path().join("analysis-service");
-    let status = Command::new("git")
+    let status = impact::git_command(&root)
         .args(["init", "--quiet"])
-        .current_dir(&root)
         .status()?;
     require(status.success(), "test Git worktree initialization failed")?;
     impact.vcs = Some(GitImpactSelection::WorkingTree);
@@ -1026,7 +1024,7 @@ fn initialize_git_fixture(root: &Path) -> Result<(), Box<dyn Error>> {
         vec!["add", "--", "src", "tools"],
         vec!["commit", "--quiet", "-m", "test fixture"],
     ] {
-        let status = Command::new("git").args(args).current_dir(root).status()?;
+        let status = impact::git_command(root).args(args).status()?;
         require(status.success(), "test Git fixture command failed")?;
     }
     Ok(())

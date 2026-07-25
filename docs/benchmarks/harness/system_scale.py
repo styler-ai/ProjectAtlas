@@ -21,7 +21,12 @@ from typing import Any
 
 import psutil
 
-from mcp_composition import FIXTURES, McpClient, remove_tree
+from mcp_composition import (
+    FIXTURES,
+    McpClient,
+    clear_git_repository_environment,
+    remove_tree,
+)
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -1312,6 +1317,7 @@ def main() -> None:
         help="Use small or medium only for harness smoke; publication requires all.",
     )
     args = parser.parse_args()
+    clear_git_repository_environment()
     runtime = args.runtime.resolve(strict=True)
     preregistration = json.loads(args.preregistration.read_text(encoding="utf-8"))
     work_root = args.work_root.resolve()

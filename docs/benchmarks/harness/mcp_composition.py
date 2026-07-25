@@ -14,6 +14,7 @@ import shutil
 import stat
 import statistics
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -161,8 +162,69 @@ ARM_C_SCHEMA = {
 }
 
 
+def clear_git_repository_environment() -> None:
+    variables = subprocess.check_output(
+        ["git", "rev-parse", "--local-env-vars"], cwd=ROOT, text=True
+    ).splitlines()
+    for variable in variables:
+        os.environ.pop(variable, None)
+
+
 def command(*args: str, cwd: Path, env: dict[str, str] | None = None) -> None:
-    subprocess.run(args, cwd=cwd, env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(
+        args,
+        cwd=cwd,
+        env=env,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def self_test_git_environment_isolation() -> None:
+    clear_git_repository_environment()
+    with tempfile.TemporaryDirectory(prefix="projectatlas-git-environment-") as root:
+        sentinel = Path(root) / "sentinel"
+        fixture = Path(root) / "fixture"
+        sentinel.mkdir()
+        fixture.mkdir()
+        command("git", "init", "-q", cwd=sentinel)
+        command("git", "config", "user.name", "ProjectAtlas Benchmark", cwd=sentinel)
+        command(
+            "git",
+            "config",
+            "user.email",
+            "benchmark@projectatlas.invalid",
+            cwd=sentinel,
+        )
+        (sentinel / "sentinel.txt").write_text(
+            "preserve\n", encoding="utf-8", newline="\n"
+        )
+        command("git", "add", ".", cwd=sentinel)
+        command("git", "commit", "-q", "-m", "sentinel", cwd=sentinel)
+        before = (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=sentinel, text=True
+            ),
+            (sentinel / ".git/config").read_bytes(),
+            subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=sentinel, text=True
+            ),
+        )
+        os.environ["GIT_DIR"] = str(sentinel / ".git")
+        clear_git_repository_environment()
+        command("git", "init", "-q", cwd=fixture)
+        after = (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=sentinel, text=True
+            ),
+            (sentinel / ".git/config").read_bytes(),
+            subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=sentinel, text=True
+            ),
+        )
+        if not (fixture / ".git").is_dir() or before != after:
+            raise RuntimeError("Git fixture isolation changed the sentinel repository")
 
 
 def remove_tree(path: Path) -> None:
@@ -188,11 +250,15 @@ def prepare_fixture(name: str, destination: Path, runtime: Path, env: dict[str, 
     for path, purpose in PURPOSES[name].items():
         command(str(runtime), "purpose", "set", path, purpose, cwd=destination, env=env)
     if name == "clean":
-        status = subprocess.check_output(["git", "status", "--porcelain"], cwd=destination, text=True)
+        status = subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=destination, text=True
+        )
         if status:
             raise RuntimeError(f"clean fixture is dirty after preparation: {status}")
     elif name == "dirty":
-        status = subprocess.check_output(["git", "status", "--porcelain"], cwd=destination, text=True)
+        status = subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=destination, text=True
+        )
         if status.strip() != "M src/pricing.rs":
             raise RuntimeError(f"dirty fixture state drifted: {status}")
     elif (destination / ".git").exists():
@@ -518,10 +584,18 @@ def arm_c_analysis(summaries: list[dict[str, Any]], raw: list[dict[str, Any]]) -
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--runtime", type=Path, required=True)
+    parser.add_argument("--runtime", type=Path)
     parser.add_argument("--work-root", type=Path, default=DEFAULT_WORK)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
+    if args.self_test:
+        self_test_git_environment_isolation()
+        print("MCP composition harness self-test passed")
+        return
+    if args.runtime is None:
+        parser.error("--runtime is required unless --self-test is used")
+    clear_git_repository_environment()
     runtime = args.runtime.resolve(strict=True)
     work_root = args.work_root.resolve()
     allowed = (ROOT / "target/benchmarks/mcp-composition").resolve()
