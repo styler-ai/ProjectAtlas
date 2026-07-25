@@ -8,7 +8,7 @@
 
 use projectatlas_core::optional_parser_pack::PackPlatform;
 use projectatlas_core::symbols::ParserKind;
-use projectatlas_db::AtlasStore;
+use projectatlas_db::{AtlasStore, verify_project_database};
 use serde::Deserialize;
 use serde_json::Value;
 #[cfg(target_os = "linux")]
@@ -282,6 +282,35 @@ impl ScanProcess {
             .ok_or_else(|| io::Error::other("scan child was already consumed"))?
             .try_wait()
             .map(|status| status.is_none())
+    }
+
+    /// Abruptly terminate and reap only the owned `ProjectAtlas` parent.
+    fn terminate_parent_abruptly(&mut self, timeout: Duration) -> io::Result<()> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| io::Error::other("parent termination deadline overflowed"))?;
+        let child = self
+            .child
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scan child was already consumed"))?;
+        child.kill()?;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                if status.success() {
+                    return Err(io::Error::other(
+                        "abruptly terminated scan reported a successful exit",
+                    ));
+                }
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("scan parent did not exit within {timeout:?} after forced termination"),
+                ));
+            }
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
     }
 
     /// Wait boundedly for scan failure while continuing to drain both pipes.
@@ -794,6 +823,187 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+/// Prove abrupt `ProjectAtlas` parent death reaps its optional runtime and preserves publication.
+#[test]
+#[ignore = "requires one exact workflow-built optional parser-pack archive"]
+fn abrupt_parent_death_reaps_optional_runtime_and_preserves_active_generation()
+-> Result<(), Box<dyn Error>> {
+    let archive = std::env::var_os(OPTIONAL_PARSER_ARCHIVE_ENV)
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::other("real optional parser archive environment is absent"))?
+        .canonicalize()?;
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    let source_dir = repo.join("src");
+    let pending_dir = repo.join("pending");
+    let host = HostState::create(&temp.path().join("host-state"))?;
+    let database = repo.join(ATLAS_DIR_NAME).join(ATLAS_DATABASE_FILE_NAME);
+    fs::create_dir_all(&source_dir)?;
+    fs::write(source_dir.join("lib.rs"), "pub fn built_in() {}\n")?;
+    fs::write(
+        source_dir.join("baseline.awk"),
+        "BEGIN { print \"baseline\" }\n",
+    )?;
+
+    run_json(&repo, &host, &[OsStr::new("init")])?;
+    let mut pack_cleanup = PackCleanup::new(&repo, &host);
+    let verified = run_json(
+        &repo,
+        &host,
+        &[
+            OsStr::new("parser-pack"),
+            OsStr::new("verify"),
+            OsStr::new("--archive"),
+            archive.as_os_str(),
+        ],
+    )?;
+    let artifact = json_string(&verified, &["artifact", "artifact"])?.to_owned();
+    run_json(
+        &repo,
+        &host,
+        &[
+            OsStr::new("parser-pack"),
+            OsStr::new("install"),
+            OsStr::new("--archive"),
+            archive.as_os_str(),
+        ],
+    )?;
+    run_json(
+        &repo,
+        &host,
+        &[
+            OsStr::new("parser-pack"),
+            OsStr::new("enable"),
+            OsStr::new("--artifact"),
+            OsStr::new(&artifact),
+        ],
+    )?;
+    run_json(&repo, &host, &[OsStr::new("scan")])?;
+
+    let baseline_store = AtlasStore::open_read_only_for_project(&database, &repo)?;
+    let baseline_publication = baseline_store
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("baseline publication is missing"))?;
+    let baseline_node = baseline_store
+        .load_node_by_path("src/baseline.awk")?
+        .ok_or_else(|| io::Error::other("baseline optional node is missing"))?;
+    let baseline_parse = baseline_store
+        .load_source_parse_metadata("src/baseline.awk")?
+        .ok_or_else(|| io::Error::other("baseline optional parse metadata is missing"))?;
+    if baseline_parse.parser != ParserKind::TreeSitter {
+        return Err(io::Error::other("baseline optional source was not grammar parsed").into());
+    }
+    drop(baseline_store);
+
+    fs::create_dir(&pending_dir)?;
+    let pending_source = pending_optional_source()?;
+    for index in 0..PENDING_OPTIONAL_FILE_COUNT {
+        fs::write(
+            pending_dir.join(format!("work-{index:04}.awk")),
+            pending_source.as_bytes(),
+        )?;
+    }
+
+    let mut scan = ScanProcess::spawn(&repo, &host)?;
+    let runtime = wait_for_runtime_processes(&mut scan, PROCESS_DISCOVERY_TIMEOUT)?;
+    let tracked = runtime.tracked();
+    let mut suspended = SuspendedProcess::suspend(runtime.worker)?;
+    scan.terminate_parent_abruptly(PROCESS_EXIT_TIMEOUT)?;
+    wait_for_process_cleanup(&tracked, PROCESS_CLEANUP_TIMEOUT)?;
+    suspended.disarm_after_exit();
+    drop(scan);
+
+    verify_project_database(&database, &repo)?;
+    let retained_store = AtlasStore::open_read_only_for_project(&database, &repo)?;
+    let retained_publication = retained_store
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("retained publication is missing"))?;
+    let retained_node = retained_store
+        .load_node_by_path("src/baseline.awk")?
+        .ok_or_else(|| io::Error::other("retained baseline node is missing"))?;
+    let retained_parse = retained_store
+        .load_source_parse_metadata("src/baseline.awk")?
+        .ok_or_else(|| io::Error::other("retained baseline parse metadata is missing"))?;
+    if retained_publication != baseline_publication
+        || retained_node != baseline_node
+        || retained_parse != baseline_parse
+    {
+        return Err(io::Error::other(
+            "abrupt parent death changed the active generation or its baseline facts",
+        )
+        .into());
+    }
+    if retained_store
+        .load_node_by_path("pending/work-0000.awk")?
+        .is_some()
+        || retained_store
+            .load_source_parse_metadata("pending/work-0000.awk")?
+            .is_some()
+    {
+        return Err(
+            io::Error::other("abrupt parent death exposed uncommitted pending source").into(),
+        );
+    }
+    drop(retained_store);
+
+    fs::remove_dir_all(&pending_dir)?;
+    fs::create_dir(&pending_dir)?;
+    fs::write(pending_dir.join("work-0000.awk"), pending_source)?;
+    run_json(&repo, &host, &[OsStr::new("scan")])?;
+    verify_project_database(&database, &repo)?;
+    let recovered_store = AtlasStore::open_read_only_for_project(&database, &repo)?;
+    let recovered_publication = recovered_store
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("recovered publication is missing"))?;
+    recovered_store
+        .load_node_by_path("pending/work-0000.awk")?
+        .ok_or_else(|| io::Error::other("recovered pending node is missing"))?;
+    let recovered_pending_parse = recovered_store
+        .load_source_parse_metadata("pending/work-0000.awk")?
+        .ok_or_else(|| io::Error::other("recovered pending parse metadata is missing"))?;
+    if recovered_publication.generation <= baseline_publication.generation
+        || recovered_pending_parse.parser != ParserKind::TreeSitter
+    {
+        return Err(io::Error::other(
+            "post-crash scan did not publish a later grammar-backed generation",
+        )
+        .into());
+    }
+    drop(recovered_store);
+
+    let mut staging_residue = Vec::new();
+    for entry in fs::read_dir(repo.join(ATLAS_DIR_NAME))? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir()
+            && entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("graph-stage-")
+        {
+            staging_residue.push(entry.path());
+        }
+    }
+    if !staging_residue.is_empty() {
+        return Err(io::Error::other(format!(
+            "post-crash recovery retained repository graph staging: {}",
+            staging_residue
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+        .into());
+    }
+
+    run_json(
+        &repo,
+        &host,
+        &[OsStr::new("parser-pack"), OsStr::new("remove")],
+    )?;
+    pack_cleanup.disarm();
+    Ok(())
+}
+
 /// Prove a stalled contained worker cannot monopolize MCP control or published reads.
 #[test]
 #[ignore = "requires one exact workflow-built optional parser-pack archive"]
@@ -1164,7 +1374,7 @@ fn captured_stream_text(stream: &CapturedStream) -> String {
     format!("{}{suffix}", String::from_utf8_lossy(&stream.bytes))
 }
 
-/// Wait for exactly one platform-owned worker subtree below the scan.
+/// Wait for exactly one recognized optional-runtime subtree below the scan.
 fn wait_for_runtime_processes(
     scan: &mut ScanProcess,
     timeout: Duration,

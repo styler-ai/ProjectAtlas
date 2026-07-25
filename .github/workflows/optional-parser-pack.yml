@@ -1030,6 +1030,36 @@ jobs:
             throw "Candidate source changed during contained-worker failure verification."
           }
 
+      - name: Prove abrupt ProjectAtlas parent death cleans runtime and preserves publication
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archive = Join-Path `
+            $env:RUNNER_TEMP `
+            "parser-pack-runtime-e2e/projectatlas-broad-parser-${{ matrix.target }}.tar.zst"
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw "Normal-runtime parser-pack archive is missing."
+          }
+
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "parser-pack-runtime-e2e-target"
+          $env:PROJECTATLAS_OPTIONAL_PARSER_ARCHIVE = $archive
+          cargo test `
+            -p projectatlas-cli `
+            --test optional_parser_worker_failure `
+            --locked `
+            abrupt_parent_death_reaps_optional_runtime_and_preserves_active_generation `
+            -- `
+            --ignored `
+            --exact `
+            --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $revision = (git rev-parse HEAD).Trim()
+          $status = @(git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0 -or $revision -ne $env:GITHUB_SHA -or $status.Count -ne 0) {
+            throw "Candidate source changed during abrupt-parent-death verification."
+          }
+
       - name: Prove stalled worker cancellation preserves MCP reads and publication
         shell: pwsh
         run: |
