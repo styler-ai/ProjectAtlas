@@ -452,7 +452,7 @@ try {
             $cliManifestText.Contains('default = ["cli"]') -and
             [System.Text.RegularExpressions.Regex]::IsMatch(
                 $cliManifestText,
-                '(?ms)^cli = \[\s*"cli-core",\s*"optional-parser-supervisor",'
+                '(?ms)^cli = \[(?=[^\]]*"cli-core")(?=[^\]]*"optional-parser-supervisor")[^\]]*\]'
             ) -and
             $cliManifestText.Contains(
                 'path = "src/bin/optional_parser_pack_release.rs"'
