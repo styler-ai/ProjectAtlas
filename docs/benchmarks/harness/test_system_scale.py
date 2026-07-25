@@ -773,6 +773,31 @@ time.sleep(60)
             self.assertEqual(state["staging_bytes"], 7)
             self.assertEqual(state["stage_directories"], 1)
 
+    def test_storage_probe_tolerates_disappearing_sqlite_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            atlas = root / ".projectatlas"
+            stage = atlas / "graph-stage-test"
+            stage.mkdir(parents=True)
+            wal = atlas / "projectatlas.db-wal"
+            stage_database = stage / "projectatlas.db"
+            wal.touch()
+            stage_database.touch()
+            disappearing = {wal, stage_database}
+            real_stat = Path.stat
+
+            def stat(path: Path, *args: object, **kwargs: object) -> os.stat_result:
+                if path in disappearing:
+                    raise FileNotFoundError(path)
+                return real_stat(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "stat", new=stat):
+                state = system_scale.storage_state(root)
+
+            self.assertEqual(state["wal_bytes"], 0)
+            self.assertEqual(state["staging_bytes"], 0)
+            self.assertEqual(state["stage_directories"], 1)
+
     def test_failed_result_is_persisted_before_nonzero_exit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "result.json"

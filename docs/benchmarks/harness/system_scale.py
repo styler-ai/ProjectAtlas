@@ -115,6 +115,13 @@ def process_tree_state(root_pid: int) -> dict[str, Any]:
     return {"pids": sorted(pids), "processes": len(pids), "threads": threads}
 
 
+def file_size_or_zero(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except FileNotFoundError:
+        return 0
+
+
 def storage_state(root: Path) -> dict[str, int]:
     atlas_root = root / ".projectatlas"
     database = atlas_root / "projectatlas.db"
@@ -123,9 +130,7 @@ def storage_state(root: Path) -> dict[str, int]:
         "wal_bytes": Path(f"{database}-wal"),
         "shm_bytes": Path(f"{database}-shm"),
     }
-    result = {
-        name: path.stat().st_size if path.exists() else 0 for name, path in paths.items()
-    }
+    result = {name: file_size_or_zero(path) for name, path in paths.items()}
     stages = [
         path
         for path in atlas_root.glob(f"{GRAPH_STAGE_PREFIX}*")
@@ -134,9 +139,7 @@ def storage_state(root: Path) -> dict[str, int]:
     stage_bytes = 0
     for stage in stages:
         for name in ("projectatlas.db", "projectatlas.db-wal", "projectatlas.db-shm"):
-            candidate = stage / name
-            if candidate.exists():
-                stage_bytes += candidate.stat().st_size
+            stage_bytes += file_size_or_zero(stage / name)
     result["staging_bytes"] = stage_bytes
     result["stage_directories"] = len(stages)
     return result
