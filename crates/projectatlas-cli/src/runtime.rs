@@ -1274,7 +1274,7 @@ impl<'a> PurposeInputReader<'a> {
         }
     }
 
-    /// Read one UTF-8 input, retaining only a bounded prefix for source headers.
+    /// Read one UTF-8 input, treating non-UTF-8 source headers as purpose-free.
     fn read_text(&mut self, path: &Path) -> Result<String, CliError> {
         self.control.check(IndexWorkStage::Publication)?;
         let is_complete = self.complete_paths.contains(path)
@@ -1299,6 +1299,9 @@ impl<'a> PurposeInputReader<'a> {
         }
         match String::from_utf8(bytes) {
             Ok(content) => Ok(content),
+            Err(source) if !is_complete && source.utf8_error().error_len().is_some() => {
+                Ok(String::new())
+            }
             Err(source) if !is_complete && source.utf8_error().error_len().is_none() => {
                 let valid_up_to = source.utf8_error().valid_up_to();
                 String::from_utf8(source.into_bytes()[..valid_up_to].to_vec()).map_err(|source| {
@@ -8337,6 +8340,47 @@ mod tests {
         require_eq(&report.max_workers, &1, "single-job symbol worker count")?;
         if report.symbols == 0 || report.relations == 0 {
             return Err(io::Error::other("bounded symbol build omitted parser output").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn purpose_import_skips_non_utf8_source_headers_but_keeps_authored_inputs_strict()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let config_path = init_config_path(temp.path(), None);
+        init_project_with_config(temp.path(), Some(&config_path))?;
+        let config = load_atlas_config(Some(&config_path))?;
+        fs::write(
+            temp.path().join("binary.txt"),
+            b"// Purpose: Must not be imported from binary source.\n\xff",
+        )?;
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
+        let nodes = scan_repo(&plan.root, &plan.scan_options)?;
+        if !nodes.iter().any(|node| node.path == "binary.txt") {
+            return Err(io::Error::other("binary source fixture was not scanned").into());
+        }
+        let snapshot =
+            plan.purpose_import_snapshot_controlled(&nodes, &standalone_index_work_control())?;
+        if snapshot
+            .records
+            .iter()
+            .any(|record| record.path == "binary.txt")
+        {
+            return Err(io::Error::other("non-UTF-8 source header imported a purpose").into());
+        }
+
+        fs::write(&config.map_path, [0xff])?;
+        let strict =
+            plan.purpose_import_snapshot_controlled(&nodes, &standalone_index_work_control());
+        if !matches!(
+            strict,
+            Err(CliError::InvalidInput(message))
+                if message.contains("purpose input is not valid UTF-8")
+        ) {
+            return Err(
+                io::Error::other("non-UTF-8 authored purpose input was not rejected").into(),
+            );
         }
         Ok(())
     }
