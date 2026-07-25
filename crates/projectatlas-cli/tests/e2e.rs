@@ -8085,7 +8085,7 @@ fn symbols_watch_and_legacy_cleanup_flow() -> Result<(), Box<dyn Error>> {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("max_workers: 2"))
+        .stdout(predicate::str::contains("max_workers: 1"))
         .stdout(predicate::str::contains("timeout_seconds: 30"));
 
     Command::cargo_bin("projectatlas")?
