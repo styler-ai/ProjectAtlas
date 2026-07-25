@@ -75,7 +75,7 @@
     }
   },
   "candidate": {
-    "functional_head": "7985f0d7937438ecd569e5957e17062bfa804b1c",
+    "functional_head": "2d6319d3a153ed0ad6595c3fe9db905b9ed86c18",
     "checklist_head": "7bcf12094c30fabd5d9b9cb165646744ce7c845f",
     "setup_timeout_seconds": 1800,
     "codex": {

@@ -2,7 +2,21 @@
 
 ## Status
 
-This document defines the required agent-navigation contract for ProjectAtlas 0.4.0. ProjectAtlas 0.3.26 provides the baseline workflow described below. Automatic read freshness, normalized graph publication, purpose-plus-connection enrichment, direct relationship navigation, and closed analysis views are current v0.4 implementation behavior. The representative clean, saved-dirty, and non-Git task-7.3 forward test passes correctness, calls, backtracking, broad-read, emitted-byte, and cold-context boundaries against 0.3.26; the [agent evaluation](benchmarks/v0.4-agent-navigation-evaluation.md) reports the larger compatible discovery/runtime payload separately. Combined release verification and the repeated publication-quality task-7.6 three-arm benchmark remain target behavior until issue #308 is complete. Version 0.4 preserves the complete compatible MCP inventory. Any later compact/default inventory or breaking rationalization belongs to post-v0.4 issue #310.
+This document defines the implemented agent-navigation contract for
+ProjectAtlas 0.4.0. ProjectAtlas 0.3.26 provides the baseline workflow
+described below. Automatic read freshness, normalized graph publication,
+purpose-plus-connection enrichment, direct relationship navigation, and closed
+analysis views are current v0.4 behavior. The representative task-7.3 forward
+test passes its clean, saved-dirty, and non-Git compatibility boundaries. The
+final task-7.6 campaign retained all 45 preregistered v0.4, frozen-v0.3.26, and
+plain trials: v0.4 completed all 15, frozen v0.3.26 failed its three pinned
+VS Code setups, and final manual review passed 41 of 42 completed answers. The
+[agent evaluation](benchmarks/v0.4-agent-navigation-evaluation.md)
+reports the measured strengths, medium-context regression, huge indexing cost,
+plain-control advantage, and limitations without claiming universal savings.
+Version 0.4 preserves the complete compatible MCP inventory. Any later
+compact/default inventory or breaking rationalization belongs to post-v0.4
+issue #310.
 
 ## Product Goal
 
@@ -434,11 +448,31 @@ context falls 15.9% overall. The
 boundaries, exact call sequences, candidate identities, raw usage metadata, and
 limitations.
 
-This forward test closes only tasks 7.3 and 7.3.1. It is not a release headline. Task 7.6
-requires a fresh repeated v0.4/v0.3.26/no-ProjectAtlas benchmark after tasks 7.4
-and 7.5 stabilize the exact release candidate, including medium and pinned
-real-source large/huge work, distributions, system resource costs, break-even
-behavior, raw results, and a prominent reviewed GitHub summary.
+### Task-7.6 Final Benchmark
+
+After tasks 7.4 and 7.5 stabilized the candidate, the final campaign ran three
+repeats of five corpora across v0.4, frozen v0.3.26, and no ProjectAtlas. All
+45 rows remain in the
+[raw result](benchmarks/v0.4-agent-navigation-results.json); none was excluded.
+V0.4 and plain completed 15/15. Frozen v0.3.26 completed 12/15 and failed every
+pinned VS Code setup on a tracked non-UTF-8 source file.
+
+Manual review found all 42 produced answers substantively correct. One v0.4
+answer had invalid temporary-root citation targets, leaving a 41/42 final
+manual result. V0.4 reduced median net navigation context 28–30%
+against v0.3.26 on the small tasks and reduced several call/read counts, but
+regressed medium net context by 47% and could not be compared with v0.3.26 on
+huge source. Plain navigation used the least context on every corpus. V0.4's
+huge setup cost a median 618 seconds, 2.31 GiB peak RSS, and 3.72 GiB
+persistent storage before the agent task.
+
+The reviewed report publishes absolute values, median and observed-maximum
+percentage comparisons, all tool calls and visits, gross versus fully charged
+net context, provider counters as non-causal observations, task-7.4 resource
+reconciliation, exact identities and prompts, rerun commands, all failed and
+aborted attempts, and limitations. These results preserve the product's
+purpose-led indexed-navigation contract without relabeling it as a universal
+latency or token advantage.
 
 ## Acceptance Contract
 

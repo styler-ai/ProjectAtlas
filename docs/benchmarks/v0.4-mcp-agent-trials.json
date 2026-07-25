@@ -39,12 +39,12 @@
       "trace_root": "target/benchmarks/mcp-composition/agent-traces/v04-reviewed-oracle-final"
     },
     "v0_3_26": {
-      "runtime": "C:/Users/styler/AppData/Local/ProjectAtlas/bin/projectatlas.exe",
+      "runtime": "{USER_HOME}/AppData/Local/ProjectAtlas/bin/projectatlas.exe",
       "runtime_version": "projectatlas 0.3.26",
       "runtime_sha256": "1da83933a7e5358fc3cceb4ff0e3bd51e4a4cef6b49e1baba68cccf86924c900",
       "runtime_bytes": 43751936,
       "frozen_commit": "d3b3e157f954c7d360d821ed0385762e8b044385",
-      "skill": "C:/Users/styler/.codex/plugins/cache/projectatlas/projectatlas/0.3.26/skills/projectatlas/SKILL.md",
+      "skill": "{USER_HOME}/.codex/plugins/cache/projectatlas/projectatlas/0.3.26/skills/projectatlas/SKILL.md",
       "skill_sha256": "ac5a2561ab7fb791716d6160b060a0eacb2bf7b41d4385fa909d3e26465ff203",
       "skill_bytes": 33977,
       "discovery_bytes": 28933,

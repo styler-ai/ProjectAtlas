@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "preregistration": "F:\\media\\projects\\ProjectAtlas-dev\\docs\\benchmarks\\v0.4-system-scale-preregistration.json",
+  "preregistration": "{REPO_ROOT}\\docs\\benchmarks\\v0.4-system-scale-preregistration.json",
   "mode": "all",
   "final_measurement_eligibility": {
     "backend": "windows-job-basic-and-io-accounting-plus-psutil-peaks",
