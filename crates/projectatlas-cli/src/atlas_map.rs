@@ -352,10 +352,10 @@ pub(crate) struct EffectiveConfigReport {
 /// Build the effective configuration report used by agents and docs.
 pub(crate) fn effective_config_report(config: &AtlasMapConfig) -> EffectiveConfigReport {
     EffectiveConfigReport {
-        root: config.root.display().to_string(),
-        map_path: config.map_path.display().to_string(),
-        nonsource_files_path: config.nonsource_files_path.display().to_string(),
-        db_path: config.db_path.display().to_string(),
+        root: effective_config_path_display(&config.root),
+        map_path: effective_config_path_display(&config.map_path),
+        nonsource_files_path: effective_config_path_display(&config.nonsource_files_path),
+        db_path: effective_config_path_display(&config.db_path),
         purpose_filename: config.purpose_filename.clone(),
         source_extensions: config.source_extensions.iter().cloned().collect(),
         exclude_dir_names: config.exclude_dir_names.iter().cloned().collect(),
@@ -370,6 +370,17 @@ pub(crate) fn effective_config_report(config: &AtlasMapConfig) -> EffectiveConfi
         summary_ascii_only: config.summary_ascii_only,
         summary_no_commas: config.summary_no_commas,
     }
+}
+
+/// Render canonical paths without leaking Windows extended-path prefixes.
+#[cfg(windows)]
+fn effective_config_path_display(path: &Path) -> String {
+    projectatlas_core::normalize_native_path_display(path).replace('/', "\\")
+}
+
+#[cfg(not(windows))]
+fn effective_config_path_display(path: &Path) -> String {
+    path.display().to_string()
 }
 
 /// `ProjectAtlas` map record.
@@ -1111,6 +1122,10 @@ fn normalize_config(
         }
         None => cwd.to_path_buf(),
     };
+    let root = root.canonicalize().map_err(|source| AtlasMapError::Io {
+        path: root.clone(),
+        source,
+    })?;
     let scan = raw.scan.unwrap_or_default();
     let purpose = raw.purpose.unwrap_or_default();
     let summary = raw.summary_rules.unwrap_or_default();
@@ -2991,6 +3006,26 @@ root = "."
         }
         if config.scan_options().language_overrides != config.language_overrides {
             return Err(io::Error::other("scanner did not receive language overrides").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn config_root_uses_one_canonical_database_identity() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let nested = temp.path().join("nested");
+        fs::create_dir(&nested)?;
+        let config_path = nested.join("..").join(".projectatlas").join("config.toml");
+
+        let config = load_atlas_config_from_text(&config_path, "[project]\nroot = \".\"\n")?;
+        let expected_root = temp.path().canonicalize()?;
+
+        let expected_database = expected_root.join(".projectatlas").join("projectatlas.db");
+        if config.root != expected_root || config.db_path != expected_database {
+            return Err(io::Error::other(format!(
+                "config did not share one canonical database identity: {config:?}"
+            ))
+            .into());
         }
         Ok(())
     }

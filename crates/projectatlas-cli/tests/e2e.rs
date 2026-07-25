@@ -97,6 +97,8 @@ const FAKE_CODEX_SKILL_CONTENT: &str = "# ProjectAtlas\n";
 const FAKE_PATH_DIR: &str = "fake-path";
 const IGNORED_FIXTURE_DIR: &str = "ignored-dir";
 const ISOLATED_HOME_DIR: &str = "isolated-home";
+#[cfg(windows)]
+const WINDOWS_SYSTEM32_DIR: &str = "System32";
 #[cfg(feature = "optional-parser-supervisor")]
 const OPTIONAL_PARSER_ARCHIVE_ENV: &str = "PROJECTATLAS_OPTIONAL_PARSER_ARCHIVE";
 #[cfg(feature = "optional-parser-supervisor")]
@@ -5469,6 +5471,94 @@ fn plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails()
         if !fake_codex_calls.contains(required) {
             return Err(io::Error::other(format!(
                 "installer did not restore marketplace with call {required:?}:\n{fake_codex_calls}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_installer_without_codex_reports_clean_skip() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    let app_data = isolated_home.join("AppData").join("Roaming");
+    let local_app_data = isolated_home.join("AppData").join("Local");
+    fs::create_dir_all(&app_data)?;
+    fs::create_dir_all(&local_app_data)?;
+
+    let system_root = PathBuf::from(
+        std::env::var_os("SystemRoot")
+            .ok_or_else(|| io::Error::other("SystemRoot is unavailable"))?,
+    );
+    let powershell_dir = system_root
+        .join(WINDOWS_SYSTEM32_DIR)
+        .join("WindowsPowerShell")
+        .join("v1.0");
+    let restricted_path = std::env::join_paths([
+        system_root.join(WINDOWS_SYSTEM32_DIR),
+        powershell_dir.clone(),
+    ])?;
+    let output = StdCommand::new(powershell_dir.join("powershell.exe"))
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(
+            workspace_root()?
+                .join("plugins")
+                .join("projectatlas")
+                .join("scripts")
+                .join("install-runtime.ps1"),
+        )
+        .arg("-ProjectRoot")
+        .arg(&repo)
+        .arg("-RuntimePath")
+        .arg(assert_cmd::cargo::cargo_bin("projectatlas"))
+        .env("HOME", &isolated_home)
+        .env("USERPROFILE", &isolated_home)
+        .env("APPDATA", &app_data)
+        .env("LOCALAPPDATA", &local_app_data)
+        .env("PATH", restricted_path)
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .env_remove("PROJECTATLAS_CODEX_COMMAND")
+        .env_remove("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE")
+        .env_remove("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE")
+        .output()?;
+    let output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "clean-host installer failed without Codex:\n{output_text}"
+        ))
+        .into());
+    }
+    for required in [
+        "Codex ProjectAtlas plugin update skipped: codex command not found.",
+        "Codex MCP registry update skipped: codex command not found.",
+    ] {
+        if !output_text.contains(required) {
+            return Err(io::Error::other(format!(
+                "clean-host installer omitted {required:?}:\n{output_text}"
+            ))
+            .into());
+        }
+    }
+    for forbidden in [
+        "is not recognized as the name",
+        "Codex ProjectAtlas plugin update failed",
+        "Codex MCP registry update failed",
+    ] {
+        if output_text.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "clean-host installer emitted {forbidden:?}:\n{output_text}"
             ))
             .into());
         }
@@ -17059,10 +17149,11 @@ fn assert_packaged_cli_legacy_leaf_contracts(
         let report = run_packaged_cli_json(executable, repo, database, arguments)?;
         require_json_bool(&report, &["verified"], true)?;
     }
-    if repository_filesystem_snapshot(repo)? != filesystem_before {
-        return Err(io::Error::other(
-            "root set/show/verify changed unrelated repository filesystem state",
-        )
+    let filesystem_after_root = repository_filesystem_snapshot(repo)?;
+    if filesystem_after_root != filesystem_before {
+        return Err(io::Error::other(format!(
+            "root set/show/verify changed unrelated repository filesystem state: before={filesystem_before:?} after={filesystem_after_root:?}"
+        ))
         .into());
     }
 

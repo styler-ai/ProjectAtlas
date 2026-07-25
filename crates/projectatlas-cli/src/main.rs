@@ -1425,11 +1425,16 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             force_rescan,
             text_index_max_bytes,
         } => {
-            let root = std::env::current_dir().map_err(|source| CliError::Io {
+            let current_dir = std::env::current_dir().map_err(|source| CliError::Io {
                 path: PathBuf::from("."),
                 source,
             })?;
-            let db_path = absolute_path(&cli.db)?;
+            let root = canonical_project_root(&current_dir)?;
+            let db_path = if cli.db.is_absolute() {
+                cli.db.clone()
+            } else {
+                root.join(&cli.db)
+            };
             let config_path = init_config_path(&root, cli.config.as_deref());
             let mut report = run_init_bootstrap(
                 &root,

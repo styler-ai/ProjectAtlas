@@ -566,7 +566,7 @@ function Resolve-ProjectAtlasCodexCommand {
         }
     }
     if (-not $codexCommandPath) {
-        Write-Output "${Operation} skipped: codex command not found."
+        Write-Host "${Operation} skipped: codex command not found."
         return $null
     }
     return $codexCommandPath
