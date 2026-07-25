@@ -45,7 +45,9 @@ const PROCESS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum time for the supervisor or broker to prove process cleanup.
 const PROCESS_CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
-/// Maximum time granted to one test-owned process-inspection helper.
+/// Maximum time granted to one hosted Windows process observation.
+const PROCESS_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum time granted to one test-owned process-control helper.
 const PROCESS_HELPER_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum time granted to one foreground lifecycle command.
 const PRODUCT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
@@ -706,7 +708,8 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
         .ok_or_else(|| io::Error::other("real optional parser archive environment is absent"))?
         .canonicalize()?;
     let temp = tempfile::tempdir()?;
-    let temp_root = temp.path().canonicalize()?;
+    // The Windows cleanup broker intentionally rejects canonical `\\?\` storage paths.
+    let temp_root = temp.path().to_path_buf();
     let repo = temp_root.join("repo");
     let source_dir = repo.join("src");
     let pending_dir = repo.join("pending");
@@ -834,7 +837,8 @@ fn abrupt_parent_death_reaps_optional_runtime_and_preserves_active_generation()
         .ok_or_else(|| io::Error::other("real optional parser archive environment is absent"))?
         .canonicalize()?;
     let temp = tempfile::tempdir()?;
-    let temp_root = temp.path().canonicalize()?;
+    // The Windows cleanup broker intentionally rejects canonical `\\?\` storage paths.
+    let temp_root = temp.path().to_path_buf();
     let repo = temp_root.join("repo");
     let source_dir = repo.join("src");
     let pending_dir = repo.join("pending");
@@ -1016,7 +1020,8 @@ fn stalled_worker_cancellation_preserves_mcp_reads_and_active_generation()
         .ok_or_else(|| io::Error::other("real optional parser archive environment is absent"))?
         .canonicalize()?;
     let temp = tempfile::tempdir()?;
-    let temp_root = temp.path().canonicalize()?;
+    // The Windows cleanup broker intentionally rejects canonical `\\?\` storage paths.
+    let temp_root = temp.path().to_path_buf();
     let repo = temp_root.join("repo");
     let source_dir = repo.join("src");
     let pending_dir = repo.join("pending");
@@ -1899,6 +1904,7 @@ fn runtime_descendants(scan_pid: u32) -> Result<Vec<ProcessIdentity>, Box<dyn Er
     let rows = powershell_processes(
         WINDOWS_DESCENDANT_QUERY,
         &[(WINDOWS_SCAN_PID_ENV, scan_pid.to_string())],
+        "Windows process discovery query",
     )?;
     Ok(rows
         .into_iter()
@@ -1916,6 +1922,7 @@ fn current_processes(tracked: &[ProcessIdentity]) -> Result<Vec<ProcessIdentity>
     powershell_processes(
         WINDOWS_IDENTITY_QUERY,
         &[(WINDOWS_PROCESS_PIDS_ENV, arguments.join(","))],
+        "Windows process liveness query",
     )
 }
 
@@ -1996,26 +2003,23 @@ fn control_windows_process(
 fn powershell_processes(
     script: &str,
     environment: &[(&str, String)],
+    operation: &'static str,
 ) -> Result<Vec<ProcessIdentity>, Box<dyn Error>> {
     let mut command = windows_powershell(script);
     for (name, value) in environment {
         command.env(name, value);
     }
-    let output = run_bounded_command(
-        &mut command,
-        PROCESS_HELPER_TIMEOUT,
-        "Windows process query",
-    )?;
+    let output = run_bounded_command(&mut command, PROCESS_QUERY_TIMEOUT, operation)?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
-            "Windows process query failed: status={} stderr={}",
+            "{operation} failed: status={} stderr={}",
             output.status,
             captured_stream_text(&output.stderr)
         ))
         .into());
     }
     if output.stdout.truncated {
-        return Err(io::Error::other("Windows process query exceeded its output bound").into());
+        return Err(io::Error::other(format!("{operation} exceeded its output bound")).into());
     }
     serde_json::from_slice(&output.stdout.bytes).map_err(Into::into)
 }

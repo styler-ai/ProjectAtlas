@@ -17372,18 +17372,18 @@ fn assert_packaged_cli_edge_contracts(
         .into());
     }
     fs::remove_file(pending)?;
-    assert_packaged_cli_active_interruption(executable, repo, database)?;
+    assert_packaged_cli_restart_cleanup_interruption(executable, repo, database)?;
     Ok(())
 }
 
-/// Interrupt packaged graph work only after its disposable stage is observable.
-fn assert_packaged_cli_active_interruption(
+/// Interrupt packaged restart cleanup after one owned abandoned stage is removed.
+fn assert_packaged_cli_restart_cleanup_interruption(
     executable: &Path,
     repo: &Path,
     database: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    let pending = repo.join("src/active-cancellation.rs");
-    fs::write(&pending, "pub fn active_cancellation() {}\n")?;
+    let pending = repo.join("src/restart-cleanup.rs");
+    fs::write(&pending, "pub fn restart_cleanup_contract() {}\n")?;
     let project = AtlasStore::open(database)?
         .project_instance_id()?
         .ok_or_else(|| io::Error::other("CLI interruption fixture omitted project identity"))?;
@@ -17423,7 +17423,7 @@ fn assert_packaged_cli_active_interruption(
         if child.try_wait()?.is_some() {
             let output = child.wait_with_output()?;
             return Err(io::Error::other(format!(
-                "packaged CLI completed before active graph work could be interrupted: status={} stdout={} stderr={}",
+                "packaged CLI completed before restart cleanup could be interrupted: status={} stdout={} stderr={}",
                 output.status,
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
@@ -17434,7 +17434,7 @@ fn assert_packaged_cli_active_interruption(
             child.kill()?;
             let _status = child.wait()?;
             return Err(io::Error::other(
-                "packaged CLI exposed no graph-stage work within 30 seconds",
+                "packaged CLI exposed no restart-cleanup progress within 30 seconds",
             )
             .into());
         }
@@ -17449,7 +17449,7 @@ fn assert_packaged_cli_active_interruption(
         || interrupted_at.elapsed() > Duration::from_secs(5)
     {
         return Err(io::Error::other(format!(
-            "active packaged CLI interruption was not prompt and stream-safe: elapsed={:?} status={} stdout={} stderr={}",
+            "packaged CLI restart-cleanup interruption was not prompt and stream-safe: elapsed={:?} status={} stdout={} stderr={}",
             interrupted_at.elapsed(),
             output.status,
             String::from_utf8_lossy(&output.stdout),
@@ -17460,7 +17460,7 @@ fn assert_packaged_cli_active_interruption(
     let after = mcp_database_snapshot(database)?;
     if after != before {
         return Err(io::Error::other(
-            "active packaged CLI interruption exposed a partial SQLite generation",
+            "packaged CLI restart-cleanup interruption changed the primary SQLite state",
         )
         .into());
     }
