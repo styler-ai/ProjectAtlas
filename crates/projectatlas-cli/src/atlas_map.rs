@@ -378,6 +378,7 @@ fn effective_config_path_display(path: &Path) -> String {
     projectatlas_core::normalize_native_path_display(path).replace('/', "\\")
 }
 
+/// Render native paths unchanged on hosts without Windows extended prefixes.
 #[cfg(not(windows))]
 fn effective_config_path_display(path: &Path) -> String {
     path.display().to_string()
