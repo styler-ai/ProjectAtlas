@@ -709,12 +709,12 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
         .ok_or_else(|| io::Error::other("real optional parser archive environment is absent"))?
         .canonicalize()?;
     let temp = tempfile::tempdir()?;
-    // The Windows cleanup broker intentionally rejects canonical `\\?\` storage paths.
-    let temp_root = temp.path().to_path_buf();
+    let temp_root = temp.path().canonicalize()?;
     let repo = temp_root.join("repo");
     let source_dir = repo.join("src");
     let pending_dir = repo.join("pending");
-    let host = HostState::create(&temp_root.join("host-state"))?;
+    // Keep repository identity canonical, but broker storage non-verbatim on Windows.
+    let host = HostState::create(&temp.path().join("host-state"))?;
     let database = repo.join(ATLAS_DIR_NAME).join(ATLAS_DATABASE_FILE_NAME);
     fs::create_dir_all(&source_dir)?;
     fs::write(source_dir.join("lib.rs"), "pub fn built_in() {}\n")?;
@@ -838,12 +838,12 @@ fn abrupt_parent_death_reaps_optional_runtime_and_preserves_active_generation()
         .ok_or_else(|| io::Error::other("real optional parser archive environment is absent"))?
         .canonicalize()?;
     let temp = tempfile::tempdir()?;
-    // The Windows cleanup broker intentionally rejects canonical `\\?\` storage paths.
-    let temp_root = temp.path().to_path_buf();
+    let temp_root = temp.path().canonicalize()?;
     let repo = temp_root.join("repo");
     let source_dir = repo.join("src");
     let pending_dir = repo.join("pending");
-    let host = HostState::create(&temp_root.join("host-state"))?;
+    // Keep repository identity canonical, but broker storage non-verbatim on Windows.
+    let host = HostState::create(&temp.path().join("host-state"))?;
     let database = repo.join(ATLAS_DIR_NAME).join(ATLAS_DATABASE_FILE_NAME);
     fs::create_dir_all(&source_dir)?;
     fs::write(source_dir.join("lib.rs"), "pub fn built_in() {}\n")?;
@@ -1021,12 +1021,12 @@ fn stalled_worker_cancellation_preserves_mcp_reads_and_active_generation()
         .ok_or_else(|| io::Error::other("real optional parser archive environment is absent"))?
         .canonicalize()?;
     let temp = tempfile::tempdir()?;
-    // The Windows cleanup broker intentionally rejects canonical `\\?\` storage paths.
-    let temp_root = temp.path().to_path_buf();
+    let temp_root = temp.path().canonicalize()?;
     let repo = temp_root.join("repo");
     let source_dir = repo.join("src");
     let pending_dir = repo.join("pending");
-    let host = HostState::create(&temp_root.join("host-state"))?;
+    // Keep repository identity canonical, but broker storage non-verbatim on Windows.
+    let host = HostState::create(&temp.path().join("host-state"))?;
     let database = repo.join(ATLAS_DIR_NAME).join(ATLAS_DATABASE_FILE_NAME);
     fs::create_dir_all(&source_dir)?;
     fs::write(source_dir.join("lib.rs"), "pub fn built_in() {}\n")?;

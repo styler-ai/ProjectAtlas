@@ -2144,9 +2144,9 @@ mod tests {
         )
     }
 
-    /// Aggregate the complete matching proof set and reject one divergent candidate.
+    /// Accept one large valid proof and reject one divergent candidate.
     #[test]
-    fn aggregate_requires_complete_proofs_from_one_candidate() -> ToolResult<()> {
+    fn aggregate_accepts_large_valid_proof_and_rejects_divergent_candidate() -> ToolResult<()> {
         let accepted_path = accepted_manifest_path()?;
         let accepted_bytes = read_bounded_file(
             &accepted_path,
@@ -2167,7 +2167,11 @@ mod tests {
             .enumerate()
             .map(|(ordinal, proof)| {
                 let path = directory.path().join(format!("proof-{ordinal}.json"));
-                write_new_json(&path, proof)?;
+                let mut bytes = serde_json::to_vec(proof)?;
+                if ordinal == 0 {
+                    bytes.resize(2 * 1024 * 1024, b' ');
+                }
+                fs::write(&path, bytes)?;
                 Ok(path)
             })
             .collect::<ToolResult<Vec<_>>>()?;
