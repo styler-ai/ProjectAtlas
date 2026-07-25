@@ -17245,9 +17245,9 @@ fn assert_packaged_cli_legacy_leaf_contracts(
             io::Error::other("a frozen v0.3.26 nested CLI leaf changed SQLite state").into(),
         );
     }
-    if repository_filesystem_snapshot(repo)? != filesystem_before {
+    if repository_filesystem_snapshot(repo)? != filesystem_after_root {
         return Err(io::Error::other(
-            "a frozen v0.3.26 nested CLI leaf changed repository filesystem state",
+            "a frozen v0.3.26 nested CLI leaf changed the post-root repository filesystem state",
         )
         .into());
     }
