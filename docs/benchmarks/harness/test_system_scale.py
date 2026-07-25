@@ -2,6 +2,7 @@ import inspect
 import json
 import os
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,133 @@ import mcp_composition
 
 
 class SystemScaleHarnessTests(unittest.TestCase):
+    def test_remove_tree_tolerates_entry_disappearing_during_permission_retry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "tree"
+            root.mkdir()
+            missing = root / "vanished"
+
+            def simulate_rmtree(_path: Path, onerror: object) -> None:
+                onerror(
+                    os.unlink,
+                    str(missing),
+                    (FileNotFoundError, FileNotFoundError(), None),
+                )
+
+            with mock.patch.object(
+                mcp_composition.shutil,
+                "rmtree",
+                side_effect=simulate_rmtree,
+            ):
+                mcp_composition.remove_tree(
+                    root, allowed_parent=Path(directory)
+                )
+
+    def test_remove_tree_retries_a_transient_nonempty_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "tree"
+            root.mkdir()
+            transient = OSError("directory is not empty")
+            transient.winerror = 145
+            with mock.patch.object(
+                mcp_composition.shutil,
+                "rmtree",
+                side_effect=[transient, None],
+            ) as rmtree:
+                mcp_composition.remove_tree(
+                    root, allowed_parent=Path(directory)
+                )
+            self.assertEqual(rmtree.call_count, 2)
+            if os.name == "nt":
+                self.assertTrue(
+                    str(rmtree.call_args_list[0].args[0]).startswith("\\\\?\\")
+                )
+
+    def test_remove_tree_propagates_unrelated_errors_and_exhausted_retries(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "tree"
+            root.mkdir()
+            with mock.patch.object(
+                mcp_composition.shutil,
+                "rmtree",
+                side_effect=PermissionError("denied"),
+            ):
+                with self.assertRaises(PermissionError):
+                    mcp_composition.remove_tree(
+                        root, allowed_parent=Path(directory)
+                    )
+            transient = OSError("directory is not empty")
+            transient.winerror = 145
+            with mock.patch.object(
+                mcp_composition.shutil,
+                "rmtree",
+                side_effect=transient,
+            ) as rmtree:
+                with self.assertRaises(OSError):
+                    mcp_composition.remove_tree(
+                        root, allowed_parent=Path(directory)
+                    )
+            self.assertEqual(rmtree.call_count, 3)
+
+    @unittest.skipUnless(os.name == "nt", "Windows long-path behavior")
+    def test_remove_tree_handles_long_paths_without_following_reparse_points(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = parent / "tree"
+            current = root
+            while len(str(current)) <= 280:
+                current /= "forty-character-segment-0123456789abcdef"
+            extended_current = Path(f"\\\\?\\{current}")
+            extended_current.mkdir(parents=True)
+            (extended_current / "payload.txt").write_text(
+                "owned", encoding="utf-8"
+            )
+            mcp_composition.remove_tree(root, allowed_parent=parent)
+            self.assertFalse(root.exists())
+
+            root.mkdir()
+            metadata = mock.Mock(
+                st_mode=stat.S_IFDIR,
+                st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+            )
+            with (
+                mock.patch.object(Path, "lstat", return_value=metadata),
+                mock.patch.object(mcp_composition.shutil, "rmtree") as rmtree,
+                self.assertRaises(ValueError),
+            ):
+                mcp_composition.remove_tree(root, allowed_parent=parent)
+            rmtree.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Windows extended-path behavior")
+    def test_remove_tree_preserves_extended_paths_and_converts_unc_paths(self) -> None:
+        metadata = mock.Mock(st_mode=stat.S_IFDIR, st_file_attributes=0)
+        cases = (
+            (
+                Path(r"\\?\C:\benchmark\child"),
+                Path(r"\\?\C:\benchmark"),
+                r"\\?\C:\benchmark\child",
+            ),
+            (
+                Path(r"\\server\share\benchmark\child"),
+                Path(r"\\server\share\benchmark"),
+                r"\\?\UNC\server\share\benchmark\child",
+            ),
+        )
+        for path, parent, expected in cases:
+            with (
+                self.subTest(path=path),
+                mock.patch.object(Path, "lstat", return_value=metadata),
+                mock.patch.object(mcp_composition.shutil, "rmtree") as rmtree,
+            ):
+                mcp_composition.remove_tree(path, allowed_parent=parent)
+                self.assertEqual(str(rmtree.call_args.args[0]), expected)
+
     @staticmethod
     def process_io_fixture(
         *, incremental: bool = False

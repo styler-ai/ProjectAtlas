@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,10 +14,12 @@ from agent_navigation import (
     aggregate_runs,
     append_checkpoint,
     build_command,
+    main as agent_navigation_main,
     navigation_context,
     parse_trace,
     projectatlas_mcp_contract,
     schedule,
+    validate_candidate_source,
     write_result,
 )
 
@@ -305,15 +308,35 @@ class AgentNavigationHarnessTests(unittest.TestCase):
             root = Path(directory)
             output = root / "result.json"
             journal = root / "result.json.journal.jsonl"
-            append_checkpoint({"run_id": "one"}, journal)
-            append_checkpoint(
-                {"run_id": "two", "path": str(Path.home() / "private")},
-                journal,
+            powershell = Path(
+                r"C:\Program Files\WindowsApps"
+                r"\Microsoft.PowerShell_7.6.4.0_x64__8wekyb3d8bbwe\pwsh.exe"
             )
-            write_result(
-                {"complete": True, "path": str(Path.home() / "private")},
-                output,
-            )
+            with (
+                patch("agent_navigation.ROOT", Path(r"X:\repository")),
+                patch("agent_navigation.POWERSHELL", str(powershell)),
+            ):
+                append_checkpoint({"run_id": "one"}, journal)
+                append_checkpoint(
+                    {
+                        "run_id": "two",
+                        "path": str(Path.home() / "private"),
+                        "escaped_root": r"X:\\repository\\fixture",
+                        "nested_escaped_root": r"X:\\\\repository\\\\fixture",
+                        "powershell": str(powershell),
+                    },
+                    journal,
+                )
+                write_result(
+                    {
+                        "complete": True,
+                        "path": str(Path.home() / "private"),
+                        "escaped_root": r"X:\\repository\\fixture",
+                        "nested_escaped_root": r"X:\\\\repository\\\\fixture",
+                        "powershell": str(powershell),
+                    },
+                    output,
+                )
             self.assertEqual(
                 [
                     json.loads(line)["run_id"]
@@ -324,11 +347,110 @@ class AgentNavigationHarnessTests(unittest.TestCase):
             saved = json.loads(output.read_text())
             expected_private_path = str(Path("{USER_HOME}") / "private")
             self.assertEqual(saved["path"], expected_private_path)
+            self.assertEqual(saved["escaped_root"], r"{REPO_ROOT}\\fixture")
+            self.assertEqual(saved["nested_escaped_root"], r"{REPO_ROOT}\\\\fixture")
+            self.assertEqual(saved["powershell"], "{POWERSHELL}")
             self.assertEqual(
                 json.loads(journal.read_text().splitlines()[1])["path"],
                 expected_private_path,
             )
             self.assertFalse((root / "result.json.tmp").exists())
+
+    def test_candidate_source_identity_is_exact_and_only_preregistration_is_dirty(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "config", "user.name", "Benchmark Test"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "benchmark@example.invalid"],
+                cwd=root,
+                check=True,
+            )
+            tasks = (
+                root
+                / "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            )
+            tasks.parent.mkdir(parents=True)
+            tasks.write_text("- [ ] 7.6 final benchmark\n", encoding="utf-8")
+            (root / "harness.py").write_text("candidate = True\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "checklist"], cwd=root, check=True
+            )
+            checklist_head = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True
+            ).strip()
+            preregistration = root / "preregistration.json"
+            preregistered = {
+                "candidate": {
+                    "functional_head": "updated after candidate lock",
+                    "checklist_head": checklist_head,
+                },
+                "protocol": {"repeats": 3},
+                "rubric": {"small-clean": ["locked"]},
+            }
+            preregistration.write_text(
+                json.dumps(preregistered, indent=2) + "\n", encoding="utf-8"
+            )
+            subprocess.run(
+                ["git", "add", preregistration.name], cwd=root, check=True
+            )
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "lock preregistration"],
+                cwd=root,
+                check=True,
+            )
+            head = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True
+            ).strip()
+            preregistered["candidate"]["functional_head"] = head
+            preregistration.write_text(
+                json.dumps(preregistered, indent=2) + "\n", encoding="utf-8"
+            )
+            with patch("agent_navigation.ROOT", root):
+                identity = validate_candidate_source(preregistered, preregistration)
+                self.assertEqual(identity["functional_head"], head)
+                preregistered["rubric"]["small-clean"] = ["changed"]
+                preregistration.write_text(
+                    json.dumps(preregistered, indent=2) + "\n", encoding="utf-8"
+                )
+                with self.assertRaisesRegex(ValueError, "changed outside"):
+                    validate_candidate_source(preregistered, preregistration)
+                preregistered["rubric"]["small-clean"] = ["locked"]
+                preregistration.write_text(
+                    json.dumps(preregistered, indent=2) + "\n", encoding="utf-8"
+                )
+                (root / "unexpected.txt").write_text("dirty\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "dirty outside"):
+                    validate_candidate_source(preregistered, preregistration)
+
+    def test_main_refuses_a_retained_journal_without_creating_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "result.json"
+            journal = root / "result.json.journal.jsonl"
+            journal.write_text('{"run_id":"retained"}\n', encoding="utf-8")
+            with (
+                patch(
+                    "sys.argv",
+                    [
+                        "agent_navigation.py",
+                        "--preregistration",
+                        str(root / "missing.json"),
+                        "--output",
+                        str(output),
+                    ],
+                ),
+                self.assertRaises(SystemExit),
+            ):
+                agent_navigation_main()
+            self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":

@@ -849,7 +849,7 @@
       },
       "cleanup_failure": {
         "type": "FileNotFoundError",
-        "message": "[WinError 3] The system cannot find the path specified: 'F:\\\\media\\\\projects\\\\ProjectAtlas-dev\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r01-huge-vscode-v0.4\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r01-huge-vscode-v0.4\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
       }
     },
     {
@@ -865,7 +865,7 @@
       },
       "cleanup_failure": {
         "type": "FileNotFoundError",
-        "message": "[WinError 3] The system cannot find the path specified: 'F:\\\\media\\\\projects\\\\ProjectAtlas-dev\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r01-huge-vscode-v0.3.26\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\completions-core\\\\vscode-node\\\\lib\\\\src\\\\prompt\\\\completionsPromptFactory\\\\componentsCompletionsPromptFactory.tsx'"
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r01-huge-vscode-v0.3.26\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\completions-core\\\\vscode-node\\\\lib\\\\src\\\\prompt\\\\completionsPromptFactory\\\\componentsCompletionsPromptFactory.tsx'"
       }
     },
     {
@@ -881,7 +881,7 @@
       },
       "cleanup_failure": {
         "type": "FileNotFoundError",
-        "message": "[WinError 3] The system cannot find the path specified: 'F:\\\\media\\\\projects\\\\ProjectAtlas-dev\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r01-huge-vscode-plain\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r01-huge-vscode-plain\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
       }
     },
     {
@@ -1041,7 +1041,7 @@
       },
       "cleanup_failure": {
         "type": "FileNotFoundError",
-        "message": "[WinError 3] The system cannot find the path specified: 'F:\\\\media\\\\projects\\\\ProjectAtlas-dev\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r02-huge-vscode-v0.3.26\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\completions-core\\\\vscode-node\\\\lib\\\\src\\\\prompt\\\\completionsPromptFactory\\\\componentsCompletionsPromptFactory.tsx'"
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r02-huge-vscode-v0.3.26\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\completions-core\\\\vscode-node\\\\lib\\\\src\\\\prompt\\\\completionsPromptFactory\\\\componentsCompletionsPromptFactory.tsx'"
       }
     },
     {
@@ -1057,7 +1057,7 @@
       },
       "cleanup_failure": {
         "type": "FileNotFoundError",
-        "message": "[WinError 3] The system cannot find the path specified: 'F:\\\\media\\\\projects\\\\ProjectAtlas-dev\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r02-huge-vscode-plain\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r02-huge-vscode-plain\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
       }
     },
     {
@@ -1179,7 +1179,7 @@
       },
       "cleanup_failure": {
         "type": "FileNotFoundError",
-        "message": "[WinError 3] The system cannot find the path specified: 'F:\\\\media\\\\projects\\\\ProjectAtlas-dev\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r02-huge-vscode-v0.4\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r02-huge-vscode-v0.4\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
       }
     },
     {
@@ -1339,7 +1339,7 @@
       },
       "cleanup_failure": {
         "type": "FileNotFoundError",
-        "message": "[WinError 3] The system cannot find the path specified: 'F:\\\\media\\\\projects\\\\ProjectAtlas-dev\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r03-huge-vscode-plain\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r03-huge-vscode-plain\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
       }
     },
     {
@@ -1461,7 +1461,7 @@
       },
       "cleanup_failure": {
         "type": "FileNotFoundError",
-        "message": "[WinError 3] The system cannot find the path specified: 'F:\\\\media\\\\projects\\\\ProjectAtlas-dev\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r03-huge-vscode-v0.4\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r03-huge-vscode-v0.4\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\prompts\\\\node\\\\agent\\\\test\\\\__snapshots__\\\\agentPrompts-claude-haiku-4.5\\\\custom_instructions_not_in_system_message.spec.snap'"
       }
     },
     {
@@ -1477,7 +1477,7 @@
       },
       "cleanup_failure": {
         "type": "FileNotFoundError",
-        "message": "[WinError 3] The system cannot find the path specified: 'F:\\\\media\\\\projects\\\\ProjectAtlas-dev\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r03-huge-vscode-v0.3.26\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\completions-core\\\\vscode-node\\\\lib\\\\src\\\\prompt\\\\completionsPromptFactory\\\\componentsCompletionsPromptFactory.tsx'"
+        "message": "[WinError 3] The system cannot find the path specified: '{REPO_ROOT}\\\\target\\\\benchmarks\\\\agent-navigation\\\\final-b33164f\\\\r03-huge-vscode-v0.3.26\\\\huge-vscode\\\\extensions\\\\copilot\\\\src\\\\extension\\\\completions-core\\\\vscode-node\\\\lib\\\\src\\\\prompt\\\\completionsPromptFactory\\\\componentsCompletionsPromptFactory.tsx'"
       }
     }
   ],

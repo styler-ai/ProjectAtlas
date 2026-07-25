@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
 import os
 import platform
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -72,7 +74,12 @@ ENVIRONMENT_KEYS = {
 PATH_PLACEHOLDERS = {
     "{REPO_ROOT}": "ProjectAtlas checkout root",
     "{USER_HOME}": "current operating-system user home",
+    "{POWERSHELL}": "PowerShell executable",
 }
+TASKS_PATH = Path(
+    "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+)
+POWERSHELL = shutil.which("pwsh")
 
 
 def file_sha256(path: Path) -> str:
@@ -98,14 +105,18 @@ def redact_local_paths(value: Any) -> Any:
     if not isinstance(value, str):
         return value
     redacted = value
-    for path, placeholder in (
+    replacements = [
         (ROOT, "{REPO_ROOT}"),
         (Path.home(), "{USER_HOME}"),
+    ]
+    if POWERSHELL:
+        replacements.append((Path(POWERSHELL), "{POWERSHELL}"))
+    for path, placeholder in sorted(
+        replacements, key=lambda item: len(str(item[0])), reverse=True
     ):
-        for spelling in {str(path), str(path).replace("\\", "/")}:
-            redacted = re.sub(
-                re.escape(spelling), placeholder, redacted, flags=re.IGNORECASE
-            )
+        parts = re.split(r"[\\/]+", str(path))
+        pattern = r"[\\/]+".join(re.escape(part) for part in parts)
+        redacted = re.sub(pattern, placeholder, redacted, flags=re.IGNORECASE)
     return redacted
 
 
@@ -918,6 +929,104 @@ def validate_preregistration(preregistration: dict[str, Any]) -> dict[str, Any]:
     return identities
 
 
+def validate_candidate_source(
+    preregistration: dict[str, Any], preregistration_path: Path
+) -> dict[str, str]:
+    candidate = preregistration.get("candidate")
+    if not isinstance(candidate, dict):
+        raise ValueError("preregistration candidate must be a JSON object")
+    head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+    ).strip()
+    if candidate.get("functional_head") != head:
+        raise ValueError(
+            "functional Git head does not match the preregistered candidate"
+        )
+    try:
+        preregistration_relative = (
+            preregistration_path.resolve().relative_to(ROOT.resolve()).as_posix()
+        )
+    except ValueError as error:
+        raise ValueError("preregistration must be inside the candidate checkout") from error
+    status = subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=ROOT,
+        text=True,
+    ).splitlines()
+    dirty_paths = [
+        row[3:].split(" -> ", 1)[-1].replace("\\", "/")
+        for row in status
+        if len(row) > 3
+    ]
+    unexpected_dirty = [
+        path for path in dirty_paths if path != preregistration_relative
+    ]
+    if unexpected_dirty:
+        raise ValueError(
+            "candidate checkout is dirty outside the preregistration: "
+            + ", ".join(unexpected_dirty)
+        )
+    try:
+        committed_preregistration = json.loads(
+            subprocess.check_output(
+                ["git", "show", f"HEAD:{preregistration_relative}"],
+                cwd=ROOT,
+                text=True,
+            )
+        )
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as error:
+        raise ValueError(
+            "committed preregistration must be valid JSON at the candidate head"
+        ) from error
+    if not isinstance(committed_preregistration, dict):
+        raise ValueError("committed preregistration must be a JSON object")
+    current_locked = copy.deepcopy(preregistration)
+    committed_locked = copy.deepcopy(committed_preregistration)
+    try:
+        current_locked["candidate"].pop("functional_head")
+        committed_locked["candidate"].pop("functional_head")
+    except (AttributeError, KeyError) as error:
+        raise ValueError(
+            "both preregistrations must define candidate.functional_head"
+        ) from error
+    if current_locked != committed_locked:
+        raise ValueError(
+            "preregistration changed outside candidate.functional_head"
+        )
+    checklist_head = str(candidate.get("checklist_head", ""))
+    if (
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", checklist_head, head],
+            cwd=ROOT,
+            check=False,
+        ).returncode
+        != 0
+    ):
+        raise ValueError("checklist head is not an ancestor of the candidate")
+    if (
+        subprocess.run(
+            [
+                "git",
+                "diff",
+                "--quiet",
+                checklist_head,
+                head,
+                "--",
+                TASKS_PATH.as_posix(),
+            ],
+            cwd=ROOT,
+            check=False,
+        ).returncode
+        != 0
+    ):
+        raise ValueError("OpenSpec task state changed after the checklist head")
+    return {
+        "functional_head": head,
+        "checklist_head": checklist_head,
+        "allowed_dirty_path": preregistration_relative,
+    }
+
+
 def trial_economics(
     setup: dict[str, Any], measurement: dict[str, Any], fixture: Path
 ) -> dict[str, Any]:
@@ -1063,11 +1172,11 @@ def run_trial(
 
 
 def safe_child(path: Path, parent: Path, label: str) -> Path:
-    resolved = path.resolve()
-    allowed = parent.resolve()
-    if resolved == allowed or allowed not in resolved.parents:
+    absolute = Path(os.path.abspath(path))
+    allowed = Path(os.path.abspath(parent))
+    if absolute == allowed or allowed not in absolute.parents:
         raise ValueError(f"{label} must be a child of {allowed}")
-    return resolved
+    return absolute
 
 
 def write_result(result: dict[str, Any], output: Path) -> None:
@@ -1108,6 +1217,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             f"--repeats {args.repeats} does not match preregistered {expected_repeats}"
         )
+    source_identity = validate_candidate_source(preregistration, preregistration_path)
     identities = validate_preregistration(preregistration)
     environment = actual_environment(preregistration["candidate"])
     expected_environment = preregistration["environment"]["expected"]
@@ -1138,7 +1248,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             f"refusing to overwrite retained benchmark state: {output} or {journal}"
         )
     if work_root.exists():
-        remove_tree(work_root)
+        remove_tree(work_root, allowed_parent=allowed)
     work_root.mkdir(parents=True)
     planned = schedule(args.repeats)
     # ponytail: raw traces stay in memory for one atomic result; checkpoint if
@@ -1162,7 +1272,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             run_root = work_root / row["run_id"]
             if run_root.exists():
                 try:
-                    remove_tree(run_root)
+                    remove_tree(run_root, allowed_parent=work_root)
                 except Exception as error:
                     record["execution_status"] = "failed"
                     record["cleanup_failure"] = {
@@ -1180,6 +1290,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "repeat_count": args.repeats,
         "schedule": planned,
         "candidate_identities": identities,
+        "candidate_source_identity": source_identity,
         "environment": environment,
         "path_placeholders": PATH_PLACEHOLDERS,
         "rerun_command": [
@@ -1222,9 +1333,11 @@ def main() -> None:
     parser.add_argument("--corpus-cache", type=Path, default=DEFAULT_CORPUS_CACHE)
     parser.add_argument("--repeats", type=positive_integer, default=3)
     args = parser.parse_args()
-    if args.output.resolve().exists():
+    output = args.output.resolve()
+    journal = output.with_name(f"{output.name}.journal.jsonl")
+    if output.exists() or journal.exists():
         raise SystemExit(
-            f"refusing to overwrite existing output: {args.output.resolve()}"
+            f"refusing to overwrite retained benchmark state: {output} or {journal}"
         )
     try:
         result = run_benchmark(args)
@@ -1239,9 +1352,7 @@ def main() -> None:
                 "message": str(error),
             },
         }
-    output = args.output.resolve()
     write_result(result, output)
-    journal = output.with_name(f"{output.name}.journal.jsonl")
     if result.get("all_scheduled_runs_retained") and journal.exists():
         journal.unlink()
     if not result.get("all_scheduled_runs_retained"):

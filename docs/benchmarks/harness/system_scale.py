@@ -14,7 +14,6 @@ import shutil
 import sqlite3
 import statistics
 import subprocess
-import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -3363,9 +3362,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
     if corpus_cache == work_root or work_root in corpus_cache.parents:
         raise ValueError("--corpus-cache must not be inside --work-root")
     if work_root.exists():
-        remove_tree(
-            Path(f"\\\\?\\{work_root}") if os.name == "nt" else work_root
-        )
+        remove_tree(work_root, allowed_parent=allowed)
     work_root.mkdir(parents=True)
     env = os.environ.copy()
     env["PROJECTATLAS_NO_TELEMETRY"] = "1"

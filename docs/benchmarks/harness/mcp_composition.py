@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import copy
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -586,12 +587,52 @@ def self_test_git_environment_isolation() -> None:
             raise RuntimeError("Git fixture isolation changed the sentinel repository")
 
 
-def remove_tree(path: Path) -> None:
-    def retry(function: Any, target: str, _: Any) -> None:
-        os.chmod(target, stat.S_IWRITE)
-        function(target)
+def remove_tree(path: Path, *, allowed_parent: Path) -> None:
+    absolute = Path(os.path.abspath(path))
+    allowed = Path(os.path.abspath(allowed_parent))
+    if absolute == allowed or allowed not in absolute.parents:
+        raise ValueError(f"cleanup target must be a child of {allowed}")
+    try:
+        metadata = absolute.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(metadata.st_mode) or (
+        os.name == "nt"
+        and metadata.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    ):
+        raise ValueError(f"refusing to recursively remove linked path {absolute}")
 
-    shutil.rmtree(path, onerror=retry)
+    remove_path = absolute
+    if os.name == "nt":
+        path_text = str(absolute)
+        if not path_text.startswith("\\\\?\\"):
+            path_text = (
+                f"\\\\?\\UNC\\{path_text[2:]}"
+                if path_text.startswith("\\\\")
+                else f"\\\\?\\{path_text}"
+            )
+        remove_path = Path(path_text)
+
+    def retry(function: Any, target: str, _: Any) -> None:
+        try:
+            os.chmod(target, stat.S_IWRITE)
+            function(target)
+        except FileNotFoundError:
+            pass
+
+    for attempt in range(3):
+        try:
+            shutil.rmtree(remove_path, onerror=retry)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            directory_not_empty = (
+                error.errno == errno.ENOTEMPTY
+                or getattr(error, "winerror", None) == 145
+            )
+            if not directory_not_empty or attempt == 2:
+                raise
 
 
 def prepare_fixture(name: str, destination: Path, runtime: Path, env: dict[str, str]) -> None:
@@ -1061,7 +1102,7 @@ def main() -> None:
     if work_root == allowed or allowed not in work_root.parents:
         raise SystemExit(f"--work-root must be a child of {allowed}")
     if work_root.exists():
-        remove_tree(work_root)
+        remove_tree(work_root, allowed_parent=allowed)
     work_root.mkdir(parents=True)
     env = os.environ.copy()
     env["PROJECTATLAS_NO_TELEMETRY"] = "1"
