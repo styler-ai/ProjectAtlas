@@ -1,0 +1,230 @@
+{
+  "schema_version": 1,
+  "status": "locked_for_final_measurement",
+  "protocol": {
+    "date": "2026-07-25",
+    "repeats": 3,
+    "tail_statistic": "observed_maximum",
+    "execution": "45 sequential trials with arm order rotated once per repeat",
+    "inclusion": "Every scheduled trial is retained and included in correctness and failure counts.",
+    "exclusion": "No post-measurement exclusion path exists; preparation, timeout, malformed-output, mutation, and cleanup failures remain failed rows.",
+    "distribution_limit": "Three trials support an explicit value distribution, median, and observed maximum only; they do not support a stable percentile estimate.",
+    "provider_counter_limit": "Provider token counters are descriptive and non-causal because provider cache state is not independently controlled.",
+    "review": "Deterministic rubric results are followed by manual review of every retained final answer before publication."
+  },
+  "environment": {
+    "expected": {
+      "platform": "Windows-10-10.0.26200-SP0",
+      "python": "3.11.3",
+      "logical_cpus": 16,
+      "os_name": "nt",
+      "codex_version": "codex-cli 0.145.0",
+      "codex_sha256": "83751f15cb6a0a7b97df67752c001e3fe1c20e18ffbfec3ff63567296205eb6c"
+    }
+  },
+  "candidate": {
+    "functional_head": "f274acc1b973da16626e7cbeb7bb9acbaf10f86d",
+    "checklist_head": "7bcf12094c30fabd5d9b9cb165646744ce7c845f",
+    "setup_timeout_seconds": 1800,
+    "codex": {
+      "executable": "C:/Users/styler/AppData/Roaming/npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
+      "sha256": "83751f15cb6a0a7b97df67752c001e3fe1c20e18ffbfec3ff63567296205eb6c",
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "xhigh",
+      "sandbox": "read-only",
+      "approval_policy": "never",
+      "timeout_seconds": 900,
+      "cache_policy": "One ephemeral Codex session and fresh isolated fixture/database per trial; arm order rotates, no trial result is reused, and provider cache counters remain descriptive.",
+      "environment": {
+        "NO_COLOR": "1"
+      },
+      "config": {}
+    },
+    "arms": {
+      "v0.4": {
+        "runtime": "F:/media/projects/ProjectAtlas-dev/target/release/projectatlas.exe",
+        "runtime_sha256": "6c819a272e7d4c258f2f97357b691706b5c2aafca1e5ea5cbbc598d4b7e4e3d3",
+        "version": "projectatlas 0.4.0",
+        "require_version": "0.4.0",
+        "skill_path": "F:/media/projects/ProjectAtlas-dev/plugins/projectatlas/skills/projectatlas/SKILL.md",
+        "skill_sha256": "be0c2b0baa1aa9768d602ce33dcb3c81c8edf6e1a23f8cb1a4768dd922bb80f3",
+        "tool_discovery_bytes": 37299,
+        "mcp_args": [
+          "--require-version",
+          "0.4.0",
+          "--db",
+          "{db}",
+          "--config",
+          "{config}",
+          "mcp"
+        ],
+        "mcp_env": {
+          "PROJECTATLAS_NO_TELEMETRY": "1"
+        }
+      },
+      "v0.3.26": {
+        "runtime": "C:/Users/styler/AppData/Local/ProjectAtlas/bin/projectatlas.exe",
+        "runtime_sha256": "1da83933a7e5358fc3cceb4ff0e3bd51e4a4cef6b49e1baba68cccf86924c900",
+        "version": "projectatlas 0.3.26",
+        "require_version": "0.3.26",
+        "skill_path": "C:/Users/styler/.codex/plugins/cache/projectatlas/projectatlas/0.3.26/skills/projectatlas/SKILL.md",
+        "skill_sha256": "ac5a2561ab7fb791716d6160b060a0eacb2bf7b41d4385fa909d3e26465ff203",
+        "tool_discovery_bytes": 28933,
+        "mcp_args": [
+          "--require-version",
+          "0.3.26",
+          "--db",
+          "{db}",
+          "--config",
+          "{config}",
+          "mcp"
+        ],
+        "mcp_env": {
+          "PROJECTATLAS_NO_TELEMETRY": "1"
+        }
+      },
+      "plain": {}
+    }
+  },
+  "corpora": {
+    "small": {
+      "source": "docs/benchmarks/fixtures/mcp-composition",
+      "states": [
+        "clean",
+        "saved-dirty",
+        "non-git"
+      ],
+      "purpose_policy": "Both ProjectAtlas arms receive the same reviewed purposes through the public purpose set command; the plain control has no ProjectAtlas state."
+    },
+    "medium": {
+      "generator": "docs/benchmarks/harness/system_scale.py::prepare_medium",
+      "caller_files": 1024
+    },
+    "huge": {
+      "repository": "https://github.com/microsoft/vscode.git",
+      "release": "1.130.0",
+      "commit": "1b6a188127eeaf9194f945eb6eb89a657e93c54c",
+      "target_file": "src/vs/platform/instantiation/common/instantiation.ts"
+    }
+  },
+  "prompts": {
+    "cases": {
+      "small-clean": "Read-only source-navigation task: find where an unassigned order ID is rejected, identify the exact public caller affected if that behavior changes, explain why each selected file is relevant, and cite the smallest trustworthy source evidence. Do not modify files.",
+      "small-dirty": "Read-only source-navigation task: find the saved working-tree checkout discount threshold and amount, identify the exact public checkout path affected if that behavior changes, explain why each selected file is relevant, and cite the smallest trustworthy source evidence. Use current saved-dirty source, not only HEAD. Do not modify files.",
+      "small-non-git": "Read-only source-navigation task: find the configured timeout value and trace its behavior through the public health route, explain why each selected file is relevant, and cite the smallest trustworthy source evidence. This source tree is intentionally not a Git repository. Do not modify files.",
+      "medium": "Read-only source-navigation task: find the implementation of shared(value) in this generated Rust repository, determine how many public caller modules are affected by changing it, identify the common caller shape, and cite the smallest trustworthy implementation and caller evidence. Do not modify files.",
+      "huge-vscode": "Read-only source-navigation task in the pinned VS Code source: find the only valid way to create a ServiceIdentifier, explain how identifiers are cached and constructor dependencies are recorded, identify at least one directly affected caller or importer if that behavior changes, and cite the smallest trustworthy source evidence. Do not modify files."
+    },
+    "self_audit_marker": "BENCHMARK_SELF_AUDIT:",
+    "self_audit_instruction": "After the answer, append BENCHMARK_SELF_AUDIT: followed immediately by one JSON object and no later content. The object must be {\"productive\":{\"folders\":[string],\"files\":[string],\"relations\":[string]},\"wrong\":{\"folders\":[string],\"files\":[string],\"relations\":[string]},\"backtracks\":nonnegative integer,\"broad_reads\":nonnegative integer,\"full_reads\":nonnegative integer}. Report actual navigation only; a backtrack is a selection abandoned as irrelevant, a broad read spans many files or an unbounded search, and a full read consumes an entire source file."
+  },
+  "rubric": {
+    "method": "Case-insensitive deterministic required-term and any-of matching, followed by manual review of every answer.",
+    "cases": {
+      "small-clean": {
+        "required_terms": [
+          "save_order",
+          "order id must be assigned",
+          "submit_order"
+        ],
+        "any_of": [
+          [
+            "src/storage.rs",
+            "src\\storage.rs"
+          ],
+          [
+            "src/api.rs",
+            "src\\api.rs"
+          ]
+        ],
+        "forbidden_terms": []
+      },
+      "small-dirty": {
+        "required_terms": [
+          "apply_discount",
+          "checkout_total"
+        ],
+        "any_of": [
+          [
+            "10_000",
+            "10000",
+            "10,000"
+          ],
+          [
+            "1_000",
+            "1000",
+            "1,000"
+          ],
+          [
+            "src/pricing.rs",
+            "src\\pricing.rs"
+          ],
+          [
+            "src/checkout.rs",
+            "src\\checkout.rs"
+          ]
+        ],
+        "forbidden_terms": []
+      },
+      "small-non-git": {
+        "required_terms": [
+          "load_timeout_millis",
+          "health_response",
+          "/health",
+          "250"
+        ],
+        "any_of": [
+          [
+            "src/config.rs",
+            "src\\config.rs"
+          ],
+          [
+            "src/handler.rs",
+            "src\\handler.rs"
+          ],
+          [
+            "src/router.rs",
+            "src\\router.rs"
+          ]
+        ],
+        "forbidden_terms": []
+      },
+      "medium": {
+        "required_terms": [
+          "shared",
+          "value + 1"
+        ],
+        "any_of": [
+          [
+            "src/hub.rs",
+            "src\\hub.rs"
+          ],
+          [
+            "1024",
+            "1,024"
+          ],
+          [
+            "caller_0000",
+            "call_0000"
+          ]
+        ],
+        "forbidden_terms": []
+      },
+      "huge-vscode": {
+        "required_terms": [
+          "createDecorator",
+          "storeServiceDependency",
+          "_util.serviceIds",
+          "DI_DEPENDENCIES"
+        ],
+        "any_of": [
+          [
+            "src/vs/platform/instantiation/common/instantiation.ts",
+            "src\\vs\\platform\\instantiation\\common\\instantiation.ts"
+          ]
+        ],
+        "forbidden_terms": []
+      }
+    }
+  }
+}
