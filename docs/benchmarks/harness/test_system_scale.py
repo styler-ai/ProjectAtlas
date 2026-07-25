@@ -840,6 +840,53 @@ time.sleep(60)
                 self.assertFalse(result["passed"])
                 self.assertEqual(result["failure"]["type"], "ValueError")
 
+    def test_watch_once_applies_the_shared_worker_budget(self) -> None:
+        with mock.patch.object(
+            system_scale, "run_measured", return_value={"passed": True}
+        ) as measured:
+            result = system_scale.run_watch_once(
+                Path("projectatlas.exe"),
+                Path("fixture"),
+                {},
+                30,
+                max_workers=8,
+            )
+        self.assertEqual(result, {"passed": True})
+        self.assertEqual(
+            measured.call_args.args[0][-5:],
+            ["watch", "--once", "--max-workers", "8", "."],
+        )
+
+    def test_concurrent_worker_allocation_fails_closed_on_small_hosts(self) -> None:
+        thresholds = {
+            "maximum_worker_processes": 20,
+            "maximum_worker_processes_per_logical_cpu": 1,
+        }
+        self.assertEqual(
+            system_scale.concurrent_worker_allocation(16, 2, thresholds),
+            (16, 8, 16),
+        )
+        host_budget, _, configured = system_scale.concurrent_worker_allocation(
+            1, 2, thresholds
+        )
+        self.assertGreater(configured, host_budget)
+
+    def test_parser_worker_report_is_a_supplemental_budget_gate(self) -> None:
+        runs = [
+            {
+                "returncode": 0,
+                "stdout": json.dumps({"last_symbols": {"max_workers": 8}}),
+            },
+            {"returncode": 1, "stdout": ""},
+        ]
+        self.assertTrue(
+            system_scale.reported_parser_workers_within_budget(runs, 8)
+        )
+        runs[0]["stdout"] = json.dumps({"last_symbols": {"max_workers": 9}})
+        self.assertFalse(
+            system_scale.reported_parser_workers_within_budget(runs, 8)
+        )
+
     def test_concurrent_resource_envelope_sums_process_peaks(self) -> None:
         run = {
             "peak_rss_bytes": 10,

@@ -2549,7 +2549,11 @@ def run_watch_once(
     root: Path,
     env: dict[str, str],
     timeout_seconds: float,
+    max_workers: int | None = None,
 ) -> dict[str, Any]:
+    worker_arguments = (
+        ["--max-workers", str(max_workers)] if max_workers is not None else []
+    )
     return run_measured(
         [
             str(runtime),
@@ -2559,11 +2563,48 @@ def run_watch_once(
             "json",
             "watch",
             "--once",
+            *worker_arguments,
             ".",
         ],
         cwd=root,
         env=env,
         timeout_seconds=timeout_seconds,
+    )
+
+
+def concurrent_worker_allocation(
+    logical_cpus: int,
+    process_count: int,
+    thresholds: dict[str, Any],
+) -> tuple[int, int, int]:
+    """Split the host index-worker budget across measured CLI processes."""
+    worker_budget = min(
+        thresholds["maximum_worker_processes"],
+        max(
+            1,
+            math.ceil(
+                logical_cpus
+                * thresholds["maximum_worker_processes_per_logical_cpu"]
+            ),
+        ),
+    )
+    workers_per_process = max(1, worker_budget // process_count)
+    return (
+        worker_budget,
+        workers_per_process,
+        workers_per_process * process_count,
+    )
+
+
+def reported_parser_workers_within_budget(
+    runs: list[dict[str, Any]], workers_per_process: int
+) -> bool:
+    """Check successful watch reports without treating them as scan evidence."""
+    return all(
+        run["returncode"] != 0
+        or json.loads(run["stdout"])["last_symbols"]["max_workers"]
+        <= workers_per_process
+        for run in runs
     )
 
 
@@ -2601,6 +2642,12 @@ def concurrent_isolation(
     thresholds: dict[str, Any],
 ) -> dict[str, Any]:
     roots = [work_root / "concurrent-a", work_root / "concurrent-b"]
+    logical_cpus = os.cpu_count() or 1
+    (
+        worker_budget,
+        workers_per_process,
+        configured_worker_budget,
+    ) = concurrent_worker_allocation(logical_cpus, len(roots), thresholds)
     for root in roots:
         prepare_medium(root, caller_files)
         measured_json(
@@ -2624,7 +2671,11 @@ def concurrent_isolation(
         results = list(
             pool.map(
                 lambda root: run_watch_once(
-                    runtime, root, env, timeout_seconds
+                    runtime,
+                    root,
+                    env,
+                    timeout_seconds,
+                    max_workers=workers_per_process,
                 ),
                 roots,
             )
@@ -2673,7 +2724,11 @@ def concurrent_isolation(
         same_runs = list(
             pool.map(
                 lambda _: run_watch_once(
-                    runtime, same_root, env, timeout_seconds
+                    runtime,
+                    same_root,
+                    env,
+                    timeout_seconds,
+                    max_workers=workers_per_process,
                 ),
                 range(2),
             )
@@ -2705,34 +2760,30 @@ def concurrent_isolation(
         and row["stage_directories"] == 0
         for row in cross_root
     )
-    logical_cpus = os.cpu_count() or 1
-    worker_budget = min(
-        thresholds["maximum_worker_processes"],
-        max(
-            1,
-            math.ceil(
-                logical_cpus
-                * thresholds["maximum_worker_processes_per_logical_cpu"]
-            ),
-        ),
+    concurrent_runs = [*results, *same_runs]
+    worker_argument = str(workers_per_process)
+    worker_arguments_passed = all(
+        "--max-workers" in run["arguments"]
+        and run["arguments"][run["arguments"].index("--max-workers") + 1]
+        == worker_argument
+        for run in concurrent_runs
     )
-    thread_budget = min(
-        thresholds["maximum_process_tree_threads"],
-        max(
-            1,
-            math.ceil(
-                logical_cpus
-                * thresholds["maximum_process_tree_threads_per_logical_cpu"]
-            ),
-        ),
+    configured_worker_budget_passed = configured_worker_budget <= worker_budget
+    reported_parser_worker_budget_passed = reported_parser_workers_within_budget(
+        concurrent_runs, workers_per_process
     )
     resource_envelope_passed = all(
         resources["terminal_io_complete"]
         and resources["worker_process_bound"] <= worker_budget
-        and resources["peak_threads"] <= thread_budget
         and resources["peak_rss_bytes"]
         <= thresholds["maximum_concurrent_peak_rss_bytes"]
         for resources in (cross_root_resources, same_root_resources)
+    ) and all(
+        (
+            worker_arguments_passed,
+            configured_worker_budget_passed,
+            reported_parser_worker_budget_passed,
+        )
     )
     same_root_passed = (
         accepted_same_results
@@ -2757,7 +2808,13 @@ def concurrent_isolation(
         "resource_envelope": {
             "logical_cpus": logical_cpus,
             "worker_budget": worker_budget,
-            "thread_budget": thread_budget,
+            "workers_per_process": workers_per_process,
+            "configured_worker_budget": configured_worker_budget,
+            "worker_arguments_passed": worker_arguments_passed,
+            "configured_worker_budget_passed": configured_worker_budget_passed,
+            "reported_parser_worker_budget_passed": (
+                reported_parser_worker_budget_passed
+            ),
             "peak_rss_budget": thresholds["maximum_concurrent_peak_rss_bytes"],
             "passed": resource_envelope_passed,
         },

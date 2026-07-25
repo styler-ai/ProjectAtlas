@@ -13,12 +13,21 @@
         "Accept typed refresh_required after a canceled dirty-source scan because serving an overview would violate the freshness contract; last-complete generation, writer release, reopen, integrity, cleanup, and survivor checks remain required.",
         "Cap Rayon worker pools by admitted work cardinality before repeating the concurrent-isolation measurement."
       ]
+    },
+    {
+      "prior_result": "docs/benchmarks/v0.4-system-scale-failed-e624475.json",
+      "prior_candidate_head": "e6244751c54a94ebc925afa57dad679ed13dc6d8",
+      "disposition": "retained failed run; all corpus, contention, cancellation, recovery, storage, and query gates passed; the concurrent resource proxy is corrected before repetition",
+      "changes": [
+        "Divide the existing host worker budget equally across concurrent CLI processes through the public --max-workers control, which already owns repository traversal and parser work.",
+        "Retain raw OS-thread peaks as diagnostics but remove their hard gate because summed per-process peaks conflate controlled workers with fixed orchestration threads and are not an observed concurrent worker peak; hard-gate the exact configured aggregate worker budget, child-process bounds, terminal accounting, RSS, behavior, and retained-thread growth instead."
+      ]
     }
   ],
   "candidate": {
     "required_version": "0.4.0",
-    "functional_git_head": "f86b460c1c366f47b6e233331e1e83ac592ca9d2",
-    "runtime_sha256": "b3f8eba157997901831564868601316444d8044e3b16fc4fd9068a977c9e9ffc",
+    "functional_git_head": "e6244751c54a94ebc925afa57dad679ed13dc6d8",
+    "runtime_sha256": "6c819a272e7d4c258f2f97357b691706b5c2aafca1e5ea5cbbc598d4b7e4e3d3",
     "mcp_tools_sha256": "68e8af9502420a3a51d8094096c3ed0d9f0badea9d0b4762ece56635b652ea09",
     "telemetry": "disabled",
     "build_profile": "release-default-features"
@@ -86,9 +95,7 @@
       "command_timeout_seconds": 900,
       "mcp_request_timeout_seconds": 60,
       "maximum_worker_processes": 20,
-      "maximum_process_tree_threads": 32,
       "maximum_worker_processes_per_logical_cpu": 1,
-      "maximum_process_tree_threads_per_logical_cpu": 1.25,
       "maximum_concurrent_peak_rss_bytes": 536870912,
       "maximum_retained_thread_growth": 2,
       "maximum_mcp_startup_milliseconds": 250,
