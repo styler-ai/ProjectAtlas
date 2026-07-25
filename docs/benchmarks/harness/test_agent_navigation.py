@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_navigation import (
     aggregate_runs,
@@ -214,7 +215,7 @@ class AgentNavigationHarnessTests(unittest.TestCase):
     def test_command_construction_is_equal_except_projectatlas_capability(self) -> None:
         candidate = {
             "codex": {
-                "executable": "codex",
+                "executable": "${PROJECTATLAS_TEST_EXECUTABLE}",
                 "model": "gpt-test",
                 "reasoning_effort": "high",
                 "sandbox": "read-only",
@@ -227,7 +228,7 @@ class AgentNavigationHarnessTests(unittest.TestCase):
             },
             "arms": {
                 "v0.4": {
-                    "runtime": str(Path(__file__).resolve()),
+                    "runtime": "${PROJECTATLAS_TEST_EXECUTABLE}",
                     "skill_path": str(Path(__file__).resolve()),
                     "mcp_args": [
                         "--db",
@@ -242,12 +243,16 @@ class AgentNavigationHarnessTests(unittest.TestCase):
             },
         }
         fixture = Path("C:/fixture")
-        projectatlas, projectatlas_prompt = build_command(
-            candidate, "v0.4", fixture, "Find the implementation."
-        )
-        plain, plain_prompt = build_command(
-            candidate, "plain", fixture, "Find the implementation."
-        )
+        executable = str(Path(__file__).resolve())
+        with patch.dict("os.environ", {"PROJECTATLAS_TEST_EXECUTABLE": executable}):
+            projectatlas, projectatlas_prompt = build_command(
+                candidate, "v0.4", fixture, "Find the implementation."
+            )
+            plain, plain_prompt = build_command(
+                candidate, "plain", fixture, "Find the implementation."
+            )
+        self.assertEqual(projectatlas[0], executable)
+        self.assertEqual(plain[0], executable)
         for flag in (
             "--json",
             "--ephemeral",

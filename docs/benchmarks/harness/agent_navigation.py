@@ -310,7 +310,7 @@ def build_command(
             "read-only source tools."
         )
     arguments = [
-        str(common["executable"]),
+        str(candidate_path(common["executable"])),
         "exec",
         "--json",
         "--ephemeral",
@@ -500,7 +500,7 @@ def prepare_projectatlas_arm(
     if arm_name == "plain":
         return combine_setup_measurements([], fixture)
     candidate = preregistration["candidate"]
-    runtime = str(Path(arm["runtime"]).resolve())
+    runtime = str(candidate_path(arm["runtime"]))
     environment = os.environ.copy()
     environment.update(
         {
