@@ -27,12 +27,41 @@
     "checklist_head": "7bcf12094c30fabd5d9b9cb165646744ce7c845f",
     "setup_timeout_seconds": 1800,
     "codex": {
-      "executable": "C:/Users/styler/AppData/Roaming/npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
+      "executable": "${APPDATA}/npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
       "sha256": "83751f15cb6a0a7b97df67752c001e3fe1c20e18ffbfec3ff63567296205eb6c",
       "model": "gpt-5.6-sol",
       "reasoning_effort": "xhigh",
       "sandbox": "read-only",
       "approval_policy": "never",
+      "mcp_approval": {
+        "default_mode": "prompt",
+        "read_only_tools": [
+          "atlas_root",
+          "atlas_config",
+          "atlas_ignore_list",
+          "atlas_overview",
+          "atlas_folders",
+          "atlas_files",
+          "atlas_next",
+          "atlas_outline",
+          "atlas_file_summary",
+          "atlas_search",
+          "atlas_slice",
+          "atlas_symbols",
+          "atlas_symbol_relations",
+          "atlas_health",
+          "atlas_lint",
+          "atlas_token_report",
+          "atlas_parity_report",
+          "atlas_settings",
+          "atlas_watch_status",
+          "atlas_mcp_config",
+          "atlas_runtime_info",
+          "atlas_session_brief",
+          "atlas_task_status",
+          "atlas_purpose_queue"
+        ]
+      },
       "timeout_seconds": 900,
       "cache_policy": "One ephemeral Codex session and fresh isolated fixture/database per trial; arm order rotates, no trial result is reused, and provider cache counters remain descriptive.",
       "environment": {
@@ -42,11 +71,11 @@
     },
     "arms": {
       "v0.4": {
-        "runtime": "F:/media/projects/ProjectAtlas-dev/target/release/projectatlas.exe",
+        "runtime": "target/release/projectatlas.exe",
         "runtime_sha256": "6c819a272e7d4c258f2f97357b691706b5c2aafca1e5ea5cbbc598d4b7e4e3d3",
         "version": "projectatlas 0.4.0",
         "require_version": "0.4.0",
-        "skill_path": "F:/media/projects/ProjectAtlas-dev/plugins/projectatlas/skills/projectatlas/SKILL.md",
+        "skill_path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
         "skill_sha256": "be0c2b0baa1aa9768d602ce33dcb3c81c8edf6e1a23f8cb1a4768dd922bb80f3",
         "tool_discovery_bytes": 37299,
         "mcp_args": [
@@ -63,11 +92,11 @@
         }
       },
       "v0.3.26": {
-        "runtime": "C:/Users/styler/AppData/Local/ProjectAtlas/bin/projectatlas.exe",
+        "runtime": "${LOCALAPPDATA}/ProjectAtlas/bin/projectatlas.exe",
         "runtime_sha256": "1da83933a7e5358fc3cceb4ff0e3bd51e4a4cef6b49e1baba68cccf86924c900",
         "version": "projectatlas 0.3.26",
         "require_version": "0.3.26",
-        "skill_path": "C:/Users/styler/.codex/plugins/cache/projectatlas/projectatlas/0.3.26/skills/projectatlas/SKILL.md",
+        "skill_path": "${USERPROFILE}/.codex/plugins/cache/projectatlas/projectatlas/0.3.26/skills/projectatlas/SKILL.md",
         "skill_sha256": "ac5a2561ab7fb791716d6160b060a0eacb2bf7b41d4385fa909d3e26465ff203",
         "tool_discovery_bytes": 28933,
         "mcp_args": [

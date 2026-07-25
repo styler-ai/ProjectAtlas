@@ -33,6 +33,34 @@ DEFAULT_CORPUS_CACHE = ROOT / "target/benchmarks/system-scale/corpus-cache"
 ARMS = ("v0.4", "v0.3.26", "plain")
 CASES = ("small-clean", "small-dirty", "small-non-git", "medium", "huge-vscode")
 NON_TOOL_ITEMS = {"agent_message", "reasoning"}
+READ_ONLY_MCP_TOOLS = frozenset(
+    {
+        "atlas_config",
+        "atlas_file_summary",
+        "atlas_files",
+        "atlas_folders",
+        "atlas_health",
+        "atlas_ignore_list",
+        "atlas_lint",
+        "atlas_mcp_config",
+        "atlas_next",
+        "atlas_outline",
+        "atlas_overview",
+        "atlas_parity_report",
+        "atlas_purpose_queue",
+        "atlas_root",
+        "atlas_runtime_info",
+        "atlas_search",
+        "atlas_session_brief",
+        "atlas_settings",
+        "atlas_slice",
+        "atlas_symbol_relations",
+        "atlas_symbols",
+        "atlas_task_status",
+        "atlas_token_report",
+        "atlas_watch_status",
+    }
+)
 ENVIRONMENT_KEYS = {
     "platform",
     "python",
@@ -40,6 +68,10 @@ ENVIRONMENT_KEYS = {
     "os_name",
     "codex_version",
     "codex_sha256",
+}
+PATH_PLACEHOLDERS = {
+    "{REPO_ROOT}": "ProjectAtlas checkout root",
+    "{USER_HOME}": "current operating-system user home",
 }
 
 
@@ -49,6 +81,32 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def candidate_path(value: str) -> Path:
+    path = Path(os.path.expandvars(value))
+    if not path.is_absolute():
+        path = ROOT / path
+    return path.resolve(strict=True)
+
+
+def redact_local_paths(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: redact_local_paths(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_local_paths(item) for item in value]
+    if not isinstance(value, str):
+        return value
+    redacted = value
+    for path, placeholder in (
+        (ROOT, "{REPO_ROOT}"),
+        (Path.home(), "{USER_HOME}"),
+    ):
+        for spelling in {str(path), str(path).replace("\\", "/")}:
+            redacted = re.sub(
+                re.escape(spelling), placeholder, redacted, flags=re.IGNORECASE
+            )
+    return redacted
 
 
 def utf8_size(value: Any) -> int:
@@ -169,6 +227,7 @@ def parse_trace(raw_jsonl: str, audit_marker: str) -> dict[str, Any]:
                 "tool": item.get("tool") or item.get("tool_name") or item.get("name"),
                 "arguments": item.get("arguments", item.get("args")),
                 "status": item.get("status"),
+                "error": item.get("error"),
                 "emitted_bytes": output_bytes(item),
             }
         )
@@ -209,6 +268,19 @@ def evaluate_answer(answer: str, rubric: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def projectatlas_mcp_contract(trace: dict[str, Any], arm_name: str) -> dict[str, Any]:
+    calls = [
+        call for call in trace["mcp_calls"] if call.get("server") == "projectatlas"
+    ]
+    successful = sum(call.get("status") == "completed" for call in calls)
+    return {
+        "expected": arm_name != "plain",
+        "observed_calls": len(calls),
+        "successful_calls": successful,
+        "passed": not calls if arm_name == "plain" else successful > 0,
+    }
+
+
 def toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -227,7 +299,7 @@ def build_command(
         prompt = (
             f"{task_prompt}\n\n"
             "Before navigating, read and follow the complete packaged ProjectAtlas "
-            f"skill at this exact path: {Path(skill_path).resolve()}\n"
+            f"skill at this exact path: {candidate_path(skill_path)}\n"
             "Use the configured projectatlas MCP server as that skill directs."
         )
     else:
@@ -261,7 +333,7 @@ def build_command(
     for key, value in sorted(common.get("config", {}).items()):
         arguments.extend(["-c", f"{key}={value}"])
     if arm_name != "plain":
-        runtime = Path(arm["runtime"]).resolve()
+        runtime = candidate_path(arm["runtime"])
         replacements = {
             "fixture": str(fixture.resolve()),
             "db": str((fixture / ".projectatlas/projectatlas.db").resolve()),
@@ -279,9 +351,22 @@ def build_command(
                 "-c",
                 "mcp_servers.projectatlas.required=true",
                 "-c",
+                "mcp_servers.projectatlas.default_tools_approval_mode="
+                f"{toml_string(str(common['mcp_approval']['default_mode']))}",
+                "-c",
                 f"mcp_servers.projectatlas.cwd={toml_string(str(fixture.resolve()))}",
             ]
         )
+        for tool_name in common["mcp_approval"]["read_only_tools"]:
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tool_name) is None:
+                raise ValueError(f"invalid approved MCP tool name: {tool_name!r}")
+            arguments.extend(
+                [
+                    "-c",
+                    f"mcp_servers.projectatlas.tools.{tool_name}.approval_mode="
+                    f"{toml_string('approve')}",
+                ]
+            )
         for key, value in sorted(arm.get("mcp_env", {}).items()):
             if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None:
                 raise ValueError(f"invalid MCP environment name: {key!r}")
@@ -711,7 +796,7 @@ def percent_saving(candidate: float, baseline: float) -> float | None:
 
 
 def actual_environment(candidate: dict[str, Any]) -> dict[str, Any]:
-    executable_path = Path(candidate["codex"]["executable"]).resolve(strict=True)
+    executable_path = candidate_path(candidate["codex"]["executable"])
     executable = str(executable_path)
     version = subprocess.check_output(
         [executable, "--version"], text=True, timeout=30
@@ -737,7 +822,7 @@ def validate_preregistration(preregistration: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"rubric cases must be exactly {CASES}")
     candidate = preregistration["candidate"]
     common = candidate["codex"]
-    codex_path = Path(common["executable"]).resolve(strict=True)
+    codex_path = candidate_path(common["executable"])
     if file_sha256(codex_path) != common["sha256"]:
         raise ValueError("Codex executable SHA-256 does not match preregistration")
     protocol = preregistration["protocol"]
@@ -748,6 +833,21 @@ def validate_preregistration(preregistration: dict[str, Any]) -> dict[str, Any]:
     if common["sandbox"] != "read-only" or common["approval_policy"] != "never":
         raise ValueError(
             "publication trials require read-only sandbox and never approval"
+        )
+    mcp_approval = common["mcp_approval"]
+    read_only_tools = mcp_approval["read_only_tools"]
+    if mcp_approval["default_mode"] != "prompt":
+        raise ValueError("unlisted ProjectAtlas MCP tools must retain prompt approval")
+    if not read_only_tools or len(set(read_only_tools)) != len(read_only_tools):
+        raise ValueError(
+            "approved ProjectAtlas MCP read-only tools must be nonempty and unique"
+        )
+    approved_tools = frozenset(map(str, read_only_tools))
+    if approved_tools != READ_ONLY_MCP_TOOLS:
+        raise ValueError(
+            "approved ProjectAtlas MCP tools must match the locked read-only inventory: "
+            f"missing={sorted(READ_ONLY_MCP_TOOLS - approved_tools)}, "
+            f"unexpected={sorted(approved_tools - READ_ONLY_MCP_TOOLS)}"
         )
     reserved_config = (
         "approval_policy",
@@ -781,8 +881,8 @@ def validate_preregistration(preregistration: dict[str, Any]) -> dict[str, Any]:
                 )
             identities[arm_name] = {"projectatlas": False}
             continue
-        runtime = Path(arm["runtime"]).resolve(strict=True)
-        skill = Path(arm["skill_path"]).resolve(strict=True)
+        runtime = candidate_path(arm["runtime"])
+        skill = candidate_path(arm["skill_path"])
         runtime_sha256 = file_sha256(runtime)
         skill_sha256 = file_sha256(skill)
         if runtime_sha256 != arm["runtime_sha256"]:
@@ -910,6 +1010,7 @@ def run_trial(
     raw_jsonl = measurement.pop("stdout")
     raw_stderr = measurement.pop("stderr")
     trace = parse_trace(raw_jsonl, marker)
+    mcp_contract = projectatlas_mcp_contract(trace, row["arm"])
     correctness = evaluate_answer(
         trace["answer"], preregistration["rubric"]["cases"][row["case"]]
     )
@@ -925,6 +1026,7 @@ def run_trial(
         and not trace["invalid_lines"]
         and trace["final_response"]
         and trace["self_audit_error"] is None
+        and mcp_contract["passed"]
         and mutation["passed"]
         else "failed"
     )
@@ -952,6 +1054,7 @@ def run_trial(
         "raw_jsonl": raw_jsonl,
         "raw_stderr": raw_stderr,
         "trace": trace,
+        "projectatlas_mcp_contract": mcp_contract,
         "correctness": correctness,
         "navigation_context": navigation_context(trace, candidate["arms"][row["arm"]]),
     }
@@ -969,7 +1072,7 @@ def write_result(result: dict[str, Any], output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(f"{output.name}.tmp")
     temporary.write_text(
-        json.dumps(result, indent=2, ensure_ascii=False) + "\n",
+        json.dumps(redact_local_paths(result), indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -980,7 +1083,13 @@ def write_result(result: dict[str, Any], output: Path) -> None:
 def append_checkpoint(record: dict[str, Any], journal: Path) -> None:
     journal.parent.mkdir(parents=True, exist_ok=True)
     with journal.open("a", encoding="utf-8", newline="\n") as stream:
-        stream.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+        stream.write(
+            json.dumps(
+                redact_local_paths(record),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
@@ -1070,6 +1179,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "schedule": planned,
         "candidate_identities": identities,
         "environment": environment,
+        "path_placeholders": PATH_PLACEHOLDERS,
         "rerun_command": [
             sys.executable,
             str(Path(__file__).resolve()),

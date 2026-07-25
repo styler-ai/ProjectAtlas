@@ -13,6 +13,7 @@ from agent_navigation import (
     append_checkpoint,
     build_command,
     parse_trace,
+    projectatlas_mcp_contract,
     schedule,
     write_result,
 )
@@ -102,6 +103,23 @@ class AgentNavigationHarnessTests(unittest.TestCase):
         self.assertEqual(parsed["self_audit"]["backtracks"], 1)
         self.assertGreater(parsed["tool_emitted_bytes"], 0)
         self.assertEqual(parsed["invalid_lines"], [])
+        self.assertTrue(projectatlas_mcp_contract(parsed, "v0.4")["passed"])
+        self.assertFalse(projectatlas_mcp_contract(parsed, "plain")["passed"])
+
+    def test_projectatlas_arm_rejects_only_failed_mcp_calls(self) -> None:
+        trace = {
+            "mcp_calls": [
+                {
+                    "server": "projectatlas",
+                    "tool": "atlas_session_brief",
+                    "status": "failed",
+                    "error": {"message": "user cancelled MCP tool call"},
+                }
+            ]
+        }
+        contract = projectatlas_mcp_contract(trace, "v0.4")
+        self.assertFalse(contract["passed"])
+        self.assertEqual(contract["successful_calls"], 0)
 
     def test_parse_trace_retains_invalid_jsonl(self) -> None:
         parsed = parse_trace('{"type":"turn.started"}\nnot-json\n', MARKER)
@@ -201,12 +219,16 @@ class AgentNavigationHarnessTests(unittest.TestCase):
                 "reasoning_effort": "high",
                 "sandbox": "read-only",
                 "approval_policy": "never",
+                "mcp_approval": {
+                    "default_mode": "prompt",
+                    "read_only_tools": ["atlas_session_brief"],
+                },
                 "config": {"web_search": '"disabled"'},
             },
             "arms": {
                 "v0.4": {
-                    "runtime": "C:/runtime/projectatlas.exe",
-                    "skill_path": "C:/candidate/skills/projectatlas/SKILL.md",
+                    "runtime": str(Path(__file__).resolve()),
+                    "skill_path": str(Path(__file__).resolve()),
                     "mcp_args": [
                         "--db",
                         "{db}",
@@ -240,6 +262,18 @@ class AgentNavigationHarnessTests(unittest.TestCase):
             self.assertIn(flag, projectatlas)
             self.assertIn(flag, plain)
         self.assertIn("mcp_servers.projectatlas.required=true", projectatlas)
+        self.assertIn(
+            'mcp_servers.projectatlas.default_tools_approval_mode="prompt"',
+            projectatlas,
+        )
+        self.assertIn(
+            "mcp_servers.projectatlas.tools.atlas_session_brief."
+            'approval_mode="approve"',
+            projectatlas,
+        )
+        self.assertFalse(
+            any("tools.atlas_purpose_set" in value for value in projectatlas)
+        )
         self.assertFalse(any("mcp_servers.projectatlas" in value for value in plain))
         self.assertIn(
             str(Path(candidate["arms"]["v0.4"]["skill_path"]).resolve()),
@@ -265,8 +299,14 @@ class AgentNavigationHarnessTests(unittest.TestCase):
             output = root / "result.json"
             journal = root / "result.json.journal.jsonl"
             append_checkpoint({"run_id": "one"}, journal)
-            append_checkpoint({"run_id": "two"}, journal)
-            write_result({"complete": True}, output)
+            append_checkpoint(
+                {"run_id": "two", "path": str(Path.home() / "private")},
+                journal,
+            )
+            write_result(
+                {"complete": True, "path": str(Path.home() / "private")},
+                output,
+            )
             self.assertEqual(
                 [
                     json.loads(line)["run_id"]
@@ -274,7 +314,13 @@ class AgentNavigationHarnessTests(unittest.TestCase):
                 ],
                 ["one", "two"],
             )
-            self.assertEqual(json.loads(output.read_text()), {"complete": True})
+            saved = json.loads(output.read_text())
+            expected_private_path = str(Path("{USER_HOME}") / "private")
+            self.assertEqual(saved["path"], expected_private_path)
+            self.assertEqual(
+                json.loads(journal.read_text().splitlines()[1])["path"],
+                expected_private_path,
+            )
             self.assertFalse((root / "result.json.tmp").exists())
 
 
