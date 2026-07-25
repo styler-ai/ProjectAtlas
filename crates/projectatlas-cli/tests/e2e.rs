@@ -3216,6 +3216,21 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
             .join(GITHOOKS_DIR_NAME)
             .join(PRE_PUSH_HOOK_FILE_NAME),
     )?;
+    let cli_manifest = fs::read_to_string(
+        workspace_root
+            .join("crates")
+            .join("projectatlas-cli")
+            .join("Cargo.toml"),
+    )?;
+    if !cli_manifest
+        .lines()
+        .any(|line| line.trim() == "default-run = \"projectatlas\"")
+    {
+        return Err(io::Error::other(
+            "projectatlas-cli must keep the public CLI as Cargo's default binary",
+        )
+        .into());
+    }
     let readme = fs::read_to_string(workspace_root.join("README.md"))?;
     let gitignore = fs::read_to_string(workspace_root.join(".gitignore"))?;
     for required in [

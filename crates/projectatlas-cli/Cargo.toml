@@ -1,5 +1,6 @@
 [package]
 name = "projectatlas-cli"
+default-run = "projectatlas"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
