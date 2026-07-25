@@ -6209,11 +6209,118 @@ mod tests {
     use crate::IndexedFileText;
     use projectatlas_core::symbols::{CodeSymbol, ParserKind, SymbolGraph, SymbolRelation};
     use projectatlas_core::{Node, NodeKind};
+    use std::cell::RefCell;
     use std::error::Error;
     use std::fmt::Debug;
     use std::fs;
     use std::io;
     use std::time::{Duration, Instant};
+
+    thread_local! {
+        /// Statements executed by the connection currently under test.
+        static TRACED_STATEMENTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Record one statement executed synchronously by the traced test connection.
+    fn record_traced_statement(sql: &str) {
+        TRACED_STATEMENTS.with(|statements| statements.borrow_mut().push(sql.to_string()));
+    }
+
+    /// Execute one database operation while retaining its connection-local SQL trace.
+    fn trace_statements<T>(
+        store: &mut AtlasStore,
+        operation: impl FnOnce(&AtlasStore) -> DbResult<T>,
+    ) -> Result<(T, Vec<String>), Box<dyn Error>> {
+        TRACED_STATEMENTS.with(|statements| statements.borrow_mut().clear());
+        store.connection.trace(Some(record_traced_statement));
+        let result = operation(store);
+        store.connection.trace(None);
+        let statements =
+            TRACED_STATEMENTS.with(|statements| std::mem::take(&mut *statements.borrow_mut()));
+        Ok((result?, statements))
+    }
+
+    /// Closed production statement families allowed during detailed relation reads.
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    enum DetailedRelationTraceStatement {
+        /// Bound project singleton verification.
+        ProjectIdentity,
+        /// Complete publication metadata lookup.
+        PublicationMetadata,
+        /// Active normalized-graph generation lookup.
+        ActiveGraphGeneration,
+        /// Direction-owned indexed adjacency query.
+        AdjacencyRelations,
+        /// Stable-key relation hydration.
+        RelationsByDigest,
+        /// Stable-key endpoint entity hydration.
+        RelationEntities,
+        /// Per-relation occurrence hydration.
+        RelationOccurrences,
+        /// Purpose-owning node hydration.
+        PurposeOwners,
+    }
+
+    /// Classify one exact production statement emitted by a detailed relation read.
+    fn classify_detailed_relation_statement(
+        statement: &str,
+    ) -> Option<DetailedRelationTraceStatement> {
+        if statement
+            .contains("SELECT project_instance_id FROM project_identity WHERE singleton = 1")
+        {
+            Some(DetailedRelationTraceStatement::ProjectIdentity)
+        } else if statement.contains("SELECT state.value, fingerprint.value, generation.value")
+            && statement.contains("FROM metadata AS state")
+        {
+            Some(DetailedRelationTraceStatement::PublicationMetadata)
+        } else if statement
+            .contains("SELECT active_generation FROM project_identity WHERE singleton = 1")
+        {
+            Some(DetailedRelationTraceStatement::ActiveGraphGeneration)
+        } else if statement.contains("FROM graph_relations AS relation INDEXED BY")
+            && statement.contains("idx_graph_relations_source_kind")
+        {
+            Some(DetailedRelationTraceStatement::AdjacencyRelations)
+        } else if statement
+            .contains("JOIN graph_relations AS relation INDEXED BY idx_graph_relations_project_key")
+        {
+            Some(DetailedRelationTraceStatement::RelationsByDigest)
+        } else if statement.contains("JOIN graph_entities AS entity") {
+            Some(DetailedRelationTraceStatement::RelationEntities)
+        } else if statement.contains("FROM graph_relation_occurrences") {
+            Some(DetailedRelationTraceStatement::RelationOccurrences)
+        } else if statement.contains("FROM nodes n")
+            && statement.contains("JOIN purposes p")
+            && statement.contains("LEFT JOIN summaries s")
+        {
+            Some(DetailedRelationTraceStatement::PurposeOwners)
+        } else {
+            None
+        }
+    }
+
+    /// Require the complete traced statement multiset for one production read.
+    fn require_traced_statement_multiset(
+        statements: &[String],
+        expected: &[(DetailedRelationTraceStatement, usize)],
+        context: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut actual = BTreeMap::new();
+        for statement in statements {
+            let family = classify_detailed_relation_statement(statement).ok_or_else(|| {
+                io::Error::other(format!(
+                    "{context} executed an unclassified production statement: {statement}"
+                ))
+            })?;
+            *actual.entry(family).or_insert(0) += 1;
+        }
+        let expected = expected.iter().copied().collect::<BTreeMap<_, _>>();
+        require_eq(
+            &actual,
+            &expected,
+            &format!("{context} complete statement multiset: {statements:?}"),
+        )
+    }
 
     /// Traverse one relation family with the same bounded adjacency primitive used by the service.
     fn collect_bounded_outbound_calls(
@@ -6290,6 +6397,16 @@ mod tests {
         occurrences: Vec<RelationOccurrence>,
         /// Every coverage lifecycle state.
         coverage: Vec<CoverageRecord>,
+    }
+
+    /// Maximum production relation/occurrence fixture used by SQL trace tests.
+    struct DetailedRelationTraceFixture {
+        /// Owning project identity.
+        project: ProjectInstanceId,
+        /// Common source whose unique targets cross entity hydration chunks.
+        source: GraphEntity,
+        /// Maximum accepted relation batch.
+        relations: Vec<LogicalRelation>,
     }
 
     /// Canonical keys used by export, ambiguity, and unresolved dependency tests.
@@ -7186,6 +7303,85 @@ mod tests {
             &format!("{context} used an unbounded scan or sort: {details:?}"),
         )?;
         Ok(())
+    }
+
+    /// Publish the maximum relation batch with two occurrences per unique target.
+    fn publish_detailed_relation_trace_fixture(
+        store: &mut AtlasStore,
+        fingerprint: &str,
+    ) -> Result<DetailedRelationTraceFixture, Box<dyn Error>> {
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("bound trace fixture identity is missing"))?;
+        let generation = IndexGeneration::new(1);
+        let source_path = RepositoryFilePath::new(Path::new("src/trace-source.rs"))?;
+        let source = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: source_path.clone(),
+            },
+            generation,
+        )?;
+        let mut entities = Vec::with_capacity(MAX_REPOSITORY_GRAPH_FRONTIER + 1);
+        let mut relations = Vec::with_capacity(MAX_REPOSITORY_GRAPH_FRONTIER);
+        let mut occurrences = Vec::with_capacity(MAX_REPOSITORY_GRAPH_FRONTIER * 2);
+        entities.push(source.clone());
+        for index in 0..MAX_REPOSITORY_GRAPH_FRONTIER {
+            let name = format!("trace_target_{index:03}");
+            let target = GraphEntity::new(
+                project,
+                EntitySelector::Symbol {
+                    symbol: SymbolSelector {
+                        file: source_path.clone(),
+                        name: GraphIdentityText::new(&name)?,
+                        kind: SymbolKind::Function,
+                        parent: None,
+                        signature: GraphIdentityText::new(format!("{name}()"))?,
+                    },
+                },
+                generation,
+            )?;
+            let relation = LogicalRelation::new(
+                &source,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::resolved(&target)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?;
+            let first_line = u32::try_from(index * 2 + 1)?;
+            let second_line = first_line + 1;
+            occurrences.push(RelationOccurrence::new(
+                &relation,
+                source_path.clone(),
+                SourceSpan::new(first_line, 1, first_line, 2)?,
+                generation,
+            )?);
+            occurrences.push(RelationOccurrence::new(
+                &relation,
+                source_path.clone(),
+                SourceSpan::new(second_line, 1, second_line, 2)?,
+                generation,
+            )?);
+            entities.push(target);
+            relations.push(relation);
+        }
+
+        let mut publication = store.begin_index_publication(fingerprint)?;
+        publication.begin_scan_replacement()?;
+        publication.upsert_scan_node_batch(&[
+            graph_node(".", NodeKind::Folder, None),
+            graph_node("src", NodeKind::Folder, Some(".")),
+            graph_node("src/trace-source.rs", NodeKind::File, Some("src")),
+        ])?;
+        publication.finish_scan_replacement()?;
+        publication.replace_repository_graph(project, &entities, &relations, &occurrences, &[])?;
+        publication.complete()?;
+        Ok(DetailedRelationTraceFixture {
+            project,
+            source,
+            relations,
+        })
     }
 
     /// Publish one complete fixture and its lexical source text.
@@ -9283,6 +9479,214 @@ mod tests {
             ),
             "adjacency cancellation was not typed",
         )?;
+        store.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn detailed_relation_storage_statements_are_indexed_and_batch_bounded()
+    -> Result<(), Box<dyn Error>> {
+        use DetailedRelationTraceStatement::{
+            ActiveGraphGeneration, AdjacencyRelations, ProjectIdentity, PublicationMetadata,
+            PurposeOwners, RelationEntities, RelationOccurrences, RelationsByDigest,
+        };
+
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("detailed-relation-storage");
+        let atlas_dir = project_root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        let mut writer = AtlasStore::open_for_project(&db_path, &project_root)?;
+        let fixture =
+            publish_detailed_relation_trace_fixture(&mut writer, "detailed-relation-storage")?;
+        drop(writer);
+        let mut store = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+        let generation = store
+            .repository_graph_generation()?
+            .ok_or_else(|| io::Error::other("graph generation missing"))?;
+        let budget = maximum_repository_graph_read_budget()?;
+
+        assert_cursor_hydration_indexes(&store)?;
+
+        let one_frontier = vec![fixture.source.key().clone()];
+        let many_frontier = std::iter::once(fixture.source.key().clone())
+            .chain(
+                fixture
+                    .relations
+                    .iter()
+                    .filter_map(|relation| relation.resolution().resolved_target().cloned())
+                    .take(3),
+            )
+            .collect::<Vec<_>>();
+        require_eq(
+            &many_frontier.len(),
+            &4,
+            "multi-frontier trace fixture cardinality",
+        )?;
+        for (context, frontier) in [
+            ("one-frontier adjacency", one_frontier),
+            ("many-frontier adjacency", many_frontier),
+        ] {
+            let (page, statements) = trace_statements(&mut store, |store| {
+                store.repository_graph_adjacency_page_bounded(
+                    &frontier,
+                    RepositoryGraphDirection::Outbound,
+                    None,
+                    4,
+                    budget,
+                    None,
+                )
+            })?;
+            require(
+                page.page.rows.len() == 4 && page.page.truncated,
+                &format!("{context} did not exercise its bounded sentinel"),
+            )?;
+            require_traced_statement_multiset(
+                &statements,
+                &[
+                    (ProjectIdentity, 1),
+                    (PublicationMetadata, 1),
+                    (ActiveGraphGeneration, 1),
+                    (AdjacencyRelations, 1),
+                    (RelationEntities, 1),
+                ],
+                context,
+            )?;
+        }
+
+        let relation_digests = fixture
+            .relations
+            .iter()
+            .map(|relation| relation.key().digest_bytes())
+            .collect::<Result<Vec<_>, _>>()?;
+        for (context, digests, endpoint_chunks) in [
+            ("one-relation hydration", &relation_digests[..1], 1),
+            (
+                "128 unique endpoint hydration",
+                &relation_digests[..GRAPH_ENTITY_HYDRATION_CHUNK - 1],
+                1,
+            ),
+            (
+                "129 unique endpoint hydration",
+                &relation_digests[..GRAPH_ENTITY_HYDRATION_CHUNK],
+                2,
+            ),
+            ("maximum relation hydration", relation_digests.as_slice(), 3),
+        ] {
+            let (relations, statements) = trace_statements(&mut store, |store| {
+                store.repository_graph_relation_rows_by_digest(
+                    fixture.project,
+                    generation,
+                    digests,
+                    budget,
+                    None,
+                )
+            })?;
+            require_eq(
+                &relations.rows.len(),
+                &digests.len(),
+                &format!("{context} returned relation count"),
+            )?;
+            require_traced_statement_multiset(
+                &statements,
+                &[
+                    (ProjectIdentity, 1),
+                    (PublicationMetadata, 1),
+                    (ActiveGraphGeneration, 1),
+                    (RelationsByDigest, 1),
+                    (RelationEntities, endpoint_chunks),
+                ],
+                context,
+            )?;
+        }
+
+        for (context, relations) in [
+            ("one-relation occurrences", &fixture.relations[..1]),
+            (
+                "maximum relation occurrence batch",
+                fixture.relations.as_slice(),
+            ),
+        ] {
+            let (pages, statements) = trace_statements(&mut store, |store| {
+                store.repository_graph_occurrence_pages_bounded(relations, 1, budget, None)
+            })?;
+            require(
+                pages.pages.len() == relations.len()
+                    && pages
+                        .pages
+                        .iter()
+                        .all(|page| page.rows.len() == 1 && page.truncated),
+                &format!("{context} did not retain one row plus its occurrence sentinel"),
+            )?;
+            require_traced_statement_multiset(
+                &statements,
+                &[
+                    (ProjectIdentity, 1),
+                    (PublicationMetadata, 1),
+                    (ActiveGraphGeneration, 1),
+                    (RelationOccurrences, 1),
+                ],
+                context,
+            )?;
+        }
+        let mut oversized_occurrence_batch = fixture.relations.clone();
+        oversized_occurrence_batch.push(fixture.relations[0].clone());
+        let oversized_occurrences = require_db_error(
+            store.repository_graph_occurrence_pages_bounded(
+                &oversized_occurrence_batch,
+                1,
+                budget,
+                None,
+            ),
+            "oversized relation occurrence batch was accepted",
+        )?;
+        require(
+            matches!(oversized_occurrences, DbError::GraphContract(_)),
+            &format!("unexpected oversized occurrence error: {oversized_occurrences}"),
+        )?;
+
+        let one_purpose_path = vec![".".to_string()];
+        let one_purpose_chunk = std::iter::once(".".to_string())
+            .chain(
+                (1..crate::MAX_PURPOSE_CURATION_BATCH_ROWS)
+                    .map(|index| format!("missing/purpose-{index}.rs")),
+            )
+            .collect::<Vec<_>>();
+        let two_purpose_chunks = one_purpose_chunk
+            .iter()
+            .cloned()
+            .chain(std::iter::once("missing/purpose-overflow.rs".to_string()))
+            .collect::<Vec<_>>();
+        for (context, paths, expected) in [
+            ("one purpose owner", one_purpose_path.as_slice(), 1),
+            (
+                "one full purpose-owner chunk",
+                one_purpose_chunk.as_slice(),
+                1,
+            ),
+            ("two purpose-owner chunks", two_purpose_chunks.as_slice(), 2),
+        ] {
+            let (_purposes, statements) = trace_statements(&mut store, |store| {
+                store.load_purpose_owner_nodes_by_paths_controlled(
+                    fixture.project,
+                    generation,
+                    paths,
+                    budget,
+                    None,
+                )
+            })?;
+            require_traced_statement_multiset(
+                &statements,
+                &[
+                    (ProjectIdentity, 1),
+                    (PublicationMetadata, 1),
+                    (ActiveGraphGeneration, 1),
+                    (PurposeOwners, expected),
+                ],
+                context,
+            )?;
+        }
+
         store.finish_index_read_snapshot()?;
         Ok(())
     }
