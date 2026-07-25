@@ -13,6 +13,7 @@ from agent_navigation import (
     aggregate_runs,
     append_checkpoint,
     build_command,
+    navigation_context,
     parse_trace,
     projectatlas_mcp_contract,
     schedule,
@@ -229,7 +230,7 @@ class AgentNavigationHarnessTests(unittest.TestCase):
             "arms": {
                 "v0.4": {
                     "runtime": "${PROJECTATLAS_TEST_EXECUTABLE}",
-                    "skill_path": str(Path(__file__).resolve()),
+                    "skill_path": "${PROJECTATLAS_TEST_EXECUTABLE}",
                     "mcp_args": [
                         "--db",
                         "{db}",
@@ -251,8 +252,12 @@ class AgentNavigationHarnessTests(unittest.TestCase):
             plain, plain_prompt = build_command(
                 candidate, "plain", fixture, "Find the implementation."
             )
+            context = navigation_context(
+                {"tool_emitted_bytes": 1}, candidate["arms"]["v0.4"]
+            )
         self.assertEqual(projectatlas[0], executable)
         self.assertEqual(plain[0], executable)
+        self.assertEqual(context["skill_bytes"], Path(executable).stat().st_size)
         for flag in (
             "--json",
             "--ephemeral",
@@ -280,10 +285,7 @@ class AgentNavigationHarnessTests(unittest.TestCase):
             any("tools.atlas_purpose_set" in value for value in projectatlas)
         )
         self.assertFalse(any("mcp_servers.projectatlas" in value for value in plain))
-        self.assertIn(
-            str(Path(candidate["arms"]["v0.4"]["skill_path"]).resolve()),
-            projectatlas_prompt,
-        )
+        self.assertIn(executable, projectatlas_prompt)
         self.assertTrue(plain_prompt.startswith("Find the implementation."))
         self.assertIn("Control arm:", plain_prompt)
         self.assertIn("must not be invoked", plain_prompt)

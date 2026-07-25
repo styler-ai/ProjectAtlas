@@ -554,7 +554,9 @@ def prepare_projectatlas_arm(
 
 
 def navigation_context(trace: dict[str, Any], arm: dict[str, Any]) -> dict[str, Any]:
-    skill_bytes = Path(arm["skill_path"]).stat().st_size if arm.get("skill_path") else 0
+    skill_bytes = (
+        candidate_path(arm["skill_path"]).stat().st_size if arm.get("skill_path") else 0
+    )
     discovery_bytes = int(arm.get("tool_discovery_bytes", 0))
     gross_bytes = int(trace["tool_emitted_bytes"])
     setup_bytes = skill_bytes + discovery_bytes
