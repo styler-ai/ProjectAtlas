@@ -46,6 +46,7 @@ const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum time for the supervisor or broker to prove process cleanup.
 const PROCESS_CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Maximum time granted to one hosted Windows process observation.
+#[cfg(target_os = "windows")]
 const PROCESS_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Maximum time granted to one test-owned process-control helper.
 const PROCESS_HELPER_TIMEOUT: Duration = Duration::from_secs(5);
