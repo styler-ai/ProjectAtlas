@@ -1,12 +1,29 @@
 {
   "schema_version": 1,
   "benchmark": "projectatlas-v0.4-system-scale",
-  "status": "draft_until_harness-smoke-passes",
+  "status": "draft_until_extended_harness_smoke_passes",
   "candidate": {
     "required_version": "0.4.0",
-    "functional_git_head": "21ec4c7e52fb068b1187b6f5b36ed39dd9a2e829",
+    "functional_git_head": "0aceae367a6fe82980e79ac3faf609a124e677b6",
+    "mcp_tools_sha256": "68e8af9502420a3a51d8094096c3ed0d9f0badea9d0b4762ece56635b652ea09",
     "telemetry": "disabled",
-    "build_profile": "release-all-features"
+    "build_profile": "release-default-features"
+  },
+  "final_measurement_contract": {
+    "required_platform": "Windows",
+    "process_io_metric_backend": "Windows JobObjectBasicAndIoAccountingInformation for exact terminal tree CPU, cumulative process count, conservative worker bounds, and I/O plus psutil for sampled peak RSS, process, thread, and storage diagnostics; watch-edit baselines require 100 ms of unchanged exact Job accounting after readiness",
+    "process_io_metric_kind": "exact-terminal-owned-process-tree-accounting",
+    "non_windows_disposition": "skip smoke-only data and fail publication eligibility because terminal counters are incomplete"
+  },
+  "proof_ownership": {
+    "observer_epoch_reuse_and_invalidation": [
+      "crates/projectatlas-cli/src/mcp.rs::long_lived_mcp_query_families_reuse_one_verified_epoch",
+      "crates/projectatlas-cli/src/runtime/source_observation.rs unit tests"
+    ],
+    "relation_query_plan_and_statement_bounds": [
+      "crates/projectatlas-db/src/repository_graph.rs::detailed_relation_storage_statements_are_indexed_and_batch_bounded"
+    ],
+    "repeated_query_matrix": "repeated-call process I/O, latency, bounded output, and stable publication identity only"
   },
   "corpora": {
     "small": {
@@ -39,18 +56,31 @@
     "full scan wall time and process-tree CPU, peak RSS, workers, and I/O",
     "included corpus files and bytes plus indexed text and parsed symbol work",
     "unchanged, narrow, and expanded incremental refresh work",
-    "MCP startup, first exact verification, repeated healthy-epoch query latency, work, output, and retained RSS",
+    "MCP startup, first exact verification, repeated stable-publication query latency, work, output, and retained RSS",
+    "representative SQLite page, freelist, statistics, WAL, checkpoint, and operating-profile state",
+    "full and rebuild process I/O transfer bytes with per-scale absolute caps, reported source/pre-run-input ratios, database-adjusted initial output-efficiency and rebuild input-efficiency ratios, absolute unchanged/narrow/guidance transfer bounds, and separate peak database, WAL, SHM, staging, and persistent-size gates",
+    "bounded intrusive writer-availability sampling with a conservative interval bound plus fail-fast contention and deterministic retry",
+    "cross-root concurrent publication, same-root writer race, final identity, generation, content, integrity, and cleanup",
+    "cooperative MCP task cancellation followed by CLI and MCP reopen with last-complete generation preservation",
     "indexed and correctness-fallback search bounds",
     "SQLite version, compile options, schema, journal, synchronous, busy, checkpoint, statistics, database, WAL, and persistent bytes",
-    "concurrent isolated-project progress",
-    "forced parent termination to process-tree quiescence"
+    "process-tree worker, thread, retained-thread, child-process, CPU-efficiency, and RSS bounds",
+    "default-core in-process scan parent termination plus separately owned real-pack Linux/Windows parser containment proof"
   ],
   "thresholds": {
     "all": {
       "command_timeout_seconds": 900,
+      "mcp_request_timeout_seconds": 60,
       "maximum_worker_processes": 20,
+      "maximum_process_tree_threads": 32,
+      "maximum_worker_processes_per_logical_cpu": 1,
+      "maximum_process_tree_threads_per_logical_cpu": 1.25,
+      "maximum_concurrent_peak_rss_bytes": 536870912,
+      "maximum_retained_thread_growth": 2,
+      "maximum_mcp_startup_milliseconds": 250,
       "maximum_bounded_output_bytes": 262144,
       "maximum_bounded_query_process_read_bytes": 67108864,
+      "maximum_bounded_query_process_read_count": 512,
       "maximum_fallback_selected_text_bytes": 134217728,
       "maximum_fallback_search_seconds": 10,
       "maximum_relation_database_requested_rows": 128,
@@ -58,35 +88,61 @@
       "maximum_relation_database_decoded_bytes": 262144,
       "maximum_relation_hydrated_entities": 64,
       "maximum_relation_hydrated_purpose_paths": 128,
+      "maximum_database_adjusted_read_transfer_ratio": 40,
+      "maximum_database_adjusted_write_transfer_ratio": 32,
+      "maximum_narrow_refresh_process_read_transfer_bytes": 8388608,
+      "maximum_narrow_refresh_process_write_transfer_bytes": 2097152,
+      "maximum_expanded_guidance_process_read_transfer_bytes": 67108864,
+      "maximum_expanded_guidance_process_write_transfer_bytes": 2097152,
+      "maximum_peak_wal_bytes": 67108864,
+      "maximum_peak_staging_bytes": 2147483648,
+      "maximum_freelist_ratio": 0.05,
+      "maximum_publication_writer_unavailable_seconds": 1,
+      "maximum_contention_failure_seconds": 1,
       "maximum_retained_rss_growth_bytes": 134217728,
       "maximum_cancellation_quiescence_seconds": 5
     },
     "small": {
       "maximum_full_scan_seconds": 30,
       "maximum_unchanged_refresh_seconds": 10,
-      "maximum_query_p95_milliseconds": 3000,
-      "maximum_peak_rss_bytes": 1073741824,
+      "maximum_query_p95_milliseconds": 250,
+      "maximum_peak_rss_bytes": 268435456,
+      "maximum_full_process_read_transfer_bytes": 67108864,
+      "maximum_full_process_write_transfer_bytes": 67108864,
+      "maximum_unchanged_refresh_process_read_transfer_bytes": 1048576,
+      "maximum_database_bytes": 67108864,
       "maximum_persistent_bytes": 67108864
     },
     "medium": {
       "maximum_full_scan_seconds": 180,
       "maximum_unchanged_refresh_seconds": 30,
-      "maximum_query_p95_milliseconds": 5000,
-      "maximum_peak_rss_bytes": 2147483648,
+      "maximum_query_p95_milliseconds": 500,
+      "maximum_peak_rss_bytes": 268435456,
+      "maximum_full_process_read_transfer_bytes": 134217728,
+      "maximum_full_process_write_transfer_bytes": 536870912,
+      "maximum_unchanged_refresh_process_read_transfer_bytes": 4194304,
+      "minimum_scan_one_core_cpu_percent": 60,
+      "maximum_database_bytes": 536870912,
       "maximum_persistent_bytes": 536870912
     },
     "huge": {
       "maximum_full_scan_seconds": 900,
       "maximum_unchanged_refresh_seconds": 120,
-      "maximum_query_p95_milliseconds": 10000,
-      "maximum_peak_rss_bytes": 4294967296,
+      "maximum_query_p95_milliseconds": 2000,
+      "maximum_peak_rss_bytes": 3221225472,
+      "maximum_full_process_read_transfer_bytes": 137438953472,
+      "maximum_full_process_write_transfer_bytes": 137438953472,
+      "maximum_unchanged_refresh_process_read_transfer_bytes": 536870912,
+      "minimum_scan_one_core_cpu_percent": 80,
+      "maximum_database_bytes": 4294967296,
       "maximum_persistent_bytes": 4294967296
     }
   },
   "failure_rules": [
     "Any correctness, freshness, migration, corruption, timeout, or nonzero-exit failure rejects the candidate.",
-    "Any whole-tree or whole-node-table amplification on repeated healthy-epoch bounded reads rejects the candidate.",
-    "Any hot-query plan scan, unbounded retained materialization, worker oversubscription, unexplained busy/lock failure, or surviving canceled process rejects the candidate.",
+    "Any whole-tree or whole-node-table amplification on repeated stable-publication bounded reads, or any full, unchanged, narrow, expanded-guidance, or rebuild absolute-transfer or database-adjusted-efficiency threshold breach rejects the candidate.",
+    "Any hot-query plan scan, temporary sort, missing owning index, unbounded retained materialization, worker or thread oversubscription, unexplained busy/lock failure, excessive publication writer-unavailable interval, or surviving canceled process rejects the candidate.",
+    "Any cross-root identity leak, same-root double publication, partial canceled generation, failed reopen, nonzero final WAL/stage state, or unexpected SQLite operating-profile drift rejects the candidate.",
     "A threshold miss is reported and investigated; results are not silently excluded or thresholds changed after measurement."
   ]
 }

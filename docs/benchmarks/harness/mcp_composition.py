@@ -5,17 +5,22 @@ from __future__ import annotations
 
 import argparse
 import copy
+import ctypes
 import hashlib
 import json
 import os
 import platform
+import queue
 import re
+import signal
 import shutil
 import stat
 import statistics
 import subprocess
 import tempfile
+import threading
 import time
+from ctypes import wintypes
 from pathlib import Path
 from typing import Any
 
@@ -160,6 +165,360 @@ ARM_C_SCHEMA = {
         "additionalProperties": False,
     },
 }
+MCP_REQUEST_TIMEOUT_SECONDS = 60.0
+OWNED_PROCESS_CLEANUP_SECONDS = 5.0
+WINDOWS_CREATE_SUSPENDED = 0x00000004
+
+
+class WindowsIoCounters(ctypes.Structure):
+    _fields_ = [
+        ("read_operations", ctypes.c_ulonglong),
+        ("write_operations", ctypes.c_ulonglong),
+        ("other_operations", ctypes.c_ulonglong),
+        ("read_bytes", ctypes.c_ulonglong),
+        ("write_bytes", ctypes.c_ulonglong),
+        ("other_bytes", ctypes.c_ulonglong),
+    ]
+
+
+class WindowsJobBasicAccounting(ctypes.Structure):
+    _fields_ = [
+        ("total_user_time", ctypes.c_longlong),
+        ("total_kernel_time", ctypes.c_longlong),
+        ("this_period_user_time", ctypes.c_longlong),
+        ("this_period_kernel_time", ctypes.c_longlong),
+        ("total_page_fault_count", wintypes.DWORD),
+        ("total_processes", wintypes.DWORD),
+        ("active_processes", wintypes.DWORD),
+        ("total_terminated_processes", wintypes.DWORD),
+    ]
+
+
+class WindowsJobBasicAndIoAccounting(ctypes.Structure):
+    _fields_ = [
+        ("basic", WindowsJobBasicAccounting),
+        ("io", WindowsIoCounters),
+    ]
+
+
+class WindowsJobBasicLimit(ctypes.Structure):
+    _fields_ = [
+        ("per_process_user_time_limit", ctypes.c_longlong),
+        ("per_job_user_time_limit", ctypes.c_longlong),
+        ("limit_flags", wintypes.DWORD),
+        ("minimum_working_set_size", ctypes.c_size_t),
+        ("maximum_working_set_size", ctypes.c_size_t),
+        ("active_process_limit", wintypes.DWORD),
+        ("affinity", ctypes.c_size_t),
+        ("priority_class", wintypes.DWORD),
+        ("scheduling_class", wintypes.DWORD),
+    ]
+
+
+class WindowsJobExtendedLimit(ctypes.Structure):
+    _fields_ = [
+        ("basic_limit_information", WindowsJobBasicLimit),
+        ("io_info", WindowsIoCounters),
+        ("process_memory_limit", ctypes.c_size_t),
+        ("job_memory_limit", ctypes.c_size_t),
+        ("peak_process_memory_used", ctypes.c_size_t),
+        ("peak_job_memory_used", ctypes.c_size_t),
+    ]
+
+
+class WindowsThreadEntry(ctypes.Structure):
+    _fields_ = [
+        ("size", wintypes.DWORD),
+        ("usage", wintypes.DWORD),
+        ("thread_id", wintypes.DWORD),
+        ("owner_process_id", wintypes.DWORD),
+        ("base_priority", wintypes.LONG),
+        ("delta_priority", wintypes.LONG),
+        ("flags", wintypes.DWORD),
+    ]
+
+
+class WindowsJob:
+    """Own one suspended-before-assignment Windows process tree."""
+
+    _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+    _JOB_OBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION = 8
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+    _PROCESS_TERMINATE = 0x0001
+    _PROCESS_SET_QUOTA = 0x0100
+    _THREAD_SUSPEND_RESUME = 0x0002
+    _TH32CS_SNAPTHREAD = 0x00000004
+    _ERROR_NO_MORE_FILES = 18
+
+    def __init__(self) -> None:
+        if os.name != "nt":
+            raise RuntimeError("Windows Job ownership is only available on Windows")
+        self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._configure_signatures()
+        self.handle = self.kernel32.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.thread_handle: int | None = None
+        limits = WindowsJobExtendedLimit()
+        limits.basic_limit_information.limit_flags = (
+            self._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        )
+        if not self.kernel32.SetInformationJobObject(
+            self.handle,
+            self._JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(limits),
+            ctypes.sizeof(limits),
+        ):
+            error = ctypes.WinError(ctypes.get_last_error())
+            self.close()
+            raise error
+
+    def _configure_signatures(self) -> None:
+        self.kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        self.kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        self.kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        self.kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        self.kernel32.AssignProcessToJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+        ]
+        self.kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        self.kernel32.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+        ]
+        self.kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        self.kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        self.kernel32.TerminateJobObject.restype = wintypes.BOOL
+        self.kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        self.kernel32.OpenProcess.restype = wintypes.HANDLE
+        self.kernel32.CreateToolhelp32Snapshot.argtypes = [
+            wintypes.DWORD,
+            wintypes.DWORD,
+        ]
+        self.kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        self.kernel32.Thread32First.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(WindowsThreadEntry),
+        ]
+        self.kernel32.Thread32First.restype = wintypes.BOOL
+        self.kernel32.Thread32Next.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(WindowsThreadEntry),
+        ]
+        self.kernel32.Thread32Next.restype = wintypes.BOOL
+        self.kernel32.OpenThread.argtypes = [
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        self.kernel32.OpenThread.restype = wintypes.HANDLE
+        self.kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+        self.kernel32.ResumeThread.restype = wintypes.DWORD
+        self.kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.kernel32.CloseHandle.restype = wintypes.BOOL
+
+    def assign_suspended(self, process_id: int) -> None:
+        process_handle = self.kernel32.OpenProcess(
+            self._PROCESS_TERMINATE | self._PROCESS_SET_QUOTA,
+            False,
+            process_id,
+        )
+        if not process_handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            if not self.kernel32.AssignProcessToJobObject(
+                self.handle, process_handle
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            self.kernel32.CloseHandle(process_handle)
+        self.thread_handle = self._open_only_thread(process_id)
+
+    def _open_only_thread(self, process_id: int) -> int:
+        snapshot = self.kernel32.CreateToolhelp32Snapshot(
+            self._TH32CS_SNAPTHREAD, 0
+        )
+        if snapshot == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        thread_ids: list[int] = []
+        try:
+            entry = WindowsThreadEntry()
+            entry.size = ctypes.sizeof(entry)
+            found = self.kernel32.Thread32First(snapshot, ctypes.byref(entry))
+            while found:
+                if entry.owner_process_id == process_id:
+                    thread_ids.append(int(entry.thread_id))
+                entry.size = ctypes.sizeof(entry)
+                found = self.kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+            error = ctypes.get_last_error()
+            if error not in (0, self._ERROR_NO_MORE_FILES):
+                raise ctypes.WinError(error)
+        finally:
+            self.kernel32.CloseHandle(snapshot)
+        if len(thread_ids) != 1:
+            raise RuntimeError(
+                f"suspended process {process_id} exposed {len(thread_ids)} threads"
+            )
+        thread_handle = self.kernel32.OpenThread(
+            self._THREAD_SUSPEND_RESUME, False, thread_ids[0]
+        )
+        if not thread_handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return int(thread_handle)
+
+    def resume(self) -> None:
+        if self.thread_handle is None:
+            return
+        previous_count = self.kernel32.ResumeThread(self.thread_handle)
+        if previous_count != 1:
+            error = (
+                ctypes.WinError(ctypes.get_last_error())
+                if previous_count == 0xFFFFFFFF
+                else RuntimeError(
+                    f"primary thread suspend count was {previous_count}, expected 1"
+                )
+            )
+            self.kernel32.CloseHandle(self.thread_handle)
+            self.thread_handle = None
+            raise error
+        self.kernel32.CloseHandle(self.thread_handle)
+        self.thread_handle = None
+
+    def accounting(self) -> dict[str, int]:
+        counters = WindowsJobBasicAndIoAccounting()
+        if not self.kernel32.QueryInformationJobObject(
+            self.handle,
+            self._JOB_OBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION,
+            ctypes.byref(counters),
+            ctypes.sizeof(counters),
+            None,
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return {
+            "user_time_100ns": int(counters.basic.total_user_time),
+            "kernel_time_100ns": int(counters.basic.total_kernel_time),
+            "total_processes": int(counters.basic.total_processes),
+            "active_processes": int(counters.basic.active_processes),
+            "terminated_processes": int(
+                counters.basic.total_terminated_processes
+            ),
+            "read_count": int(counters.io.read_operations),
+            "write_count": int(counters.io.write_operations),
+            "other_count": int(counters.io.other_operations),
+            "read_bytes": int(counters.io.read_bytes),
+            "write_bytes": int(counters.io.write_bytes),
+            "other_bytes": int(counters.io.other_bytes),
+        }
+
+    def wait_for_zero_active(self, timeout_seconds: float) -> dict[str, int]:
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            accounting = self.accounting()
+            if accounting["active_processes"] == 0:
+                return accounting
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Windows Job retained active processes")
+            time.sleep(0.005)
+
+    def terminate(self) -> None:
+        if self.handle and not self.kernel32.TerminateJobObject(self.handle, 1):
+            error = ctypes.get_last_error()
+            if error != 6:
+                raise ctypes.WinError(error)
+
+    def close(self) -> None:
+        if self.thread_handle is not None:
+            self.kernel32.CloseHandle(self.thread_handle)
+            self.thread_handle = None
+        if getattr(self, "handle", None):
+            self.kernel32.CloseHandle(self.handle)
+            self.handle = None
+
+
+def spawn_owned_process(
+    arguments: list[str], **kwargs: Any
+) -> tuple[subprocess.Popen[Any], WindowsJob | None]:
+    """Spawn a process in a private tree that can be killed and reaped as a unit."""
+    if os.name != "nt":
+        return subprocess.Popen(
+            arguments, start_new_session=True, **kwargs
+        ), None
+    job = WindowsJob()
+    process: subprocess.Popen[Any] | None = None
+    try:
+        creationflags = int(kwargs.pop("creationflags", 0))
+        process = subprocess.Popen(
+            arguments,
+            creationflags=creationflags | WINDOWS_CREATE_SUSPENDED,
+            **kwargs,
+        )
+        job.assign_suspended(process.pid)
+        return process, job
+    except BaseException as error:
+        try:
+            job.terminate()
+        except BaseException as cleanup_error:
+            error.add_note(f"Windows Job termination failed: {cleanup_error}")
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=OWNED_PROCESS_CLEANUP_SECONDS)
+            except BaseException as cleanup_error:
+                error.add_note(f"root process reap failed: {cleanup_error}")
+        job.close()
+        raise
+
+
+def terminate_owned_process(
+    process: subprocess.Popen[Any],
+    job: WindowsJob | None,
+    timeout_seconds: float = OWNED_PROCESS_CLEANUP_SECONDS,
+) -> None:
+    """Kill the complete owned process tree and boundedly reap its root."""
+    cleanup_error: BaseException | None = None
+    try:
+        if job is not None and job.handle:
+            job.terminate()
+            job.wait_for_zero_active(timeout_seconds)
+        elif job is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    except BaseException as error:
+        cleanup_error = error
+    finally:
+        if job is not None:
+            job.close()
+    try:
+        process.wait(timeout=timeout_seconds)
+    except BaseException as reap_error:
+        try:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=timeout_seconds)
+        except BaseException as fallback_error:
+            reap_error.add_note(f"forced root process reap failed: {fallback_error}")
+        if cleanup_error is None:
+            cleanup_error = reap_error
+        else:
+            cleanup_error.add_note(f"root process reap failed: {reap_error}")
+    if cleanup_error is not None:
+        raise cleanup_error
 
 
 def clear_git_repository_environment() -> None:
@@ -266,8 +625,17 @@ def prepare_fixture(name: str, destination: Path, runtime: Path, env: dict[str, 
 
 
 class McpClient:
-    def __init__(self, runtime: Path, fixture: Path, env: dict[str, str]) -> None:
-        self.process = subprocess.Popen(
+    def __init__(
+        self,
+        runtime: Path,
+        fixture: Path,
+        env: dict[str, str],
+        request_timeout_seconds: float = MCP_REQUEST_TIMEOUT_SECONDS,
+    ) -> None:
+        if request_timeout_seconds <= 0:
+            raise ValueError("MCP request timeout must be positive")
+        self.request_timeout_seconds = request_timeout_seconds
+        self.process, self.job = spawn_owned_process(
             [str(runtime), "--require-version", "0.4.0", "mcp"],
             cwd=fixture,
             env=env,
@@ -277,36 +645,89 @@ class McpClient:
             text=True,
             encoding="utf-8",
         )
+        self.closed = False
         self.next_id = 1
-        started = time.perf_counter()
-        self.request(
-            "initialize",
-            {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {"name": "mcp-composition-benchmark", "version": "1"},
-            },
-        )
-        self.notify("notifications/initialized", {})
-        self.startup_ms = (time.perf_counter() - started) * 1000
+        try:
+            if self.job is not None:
+                self.job.resume()
+            started = time.perf_counter()
+            self.request(
+                "initialize",
+                {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "mcp-composition-benchmark",
+                        "version": "1",
+                    },
+                },
+            )
+            self.notify("notifications/initialized", {})
+            self.startup_ms = (time.perf_counter() - started) * 1000
+        except BaseException as error:
+            self._terminate_after(error)
+            raise
 
     def notify(self, method: str, params: dict[str, Any]) -> None:
-        self._write({"jsonrpc": "2.0", "method": method, "params": params})
+        try:
+            self._write({"jsonrpc": "2.0", "method": method, "params": params})
+        except BaseException as error:
+            self._terminate_after(error)
+            raise
 
     def request(self, method: str, params: dict[str, Any]) -> tuple[dict[str, Any], float]:
         request_id = self.next_id
         self.next_id += 1
         started = time.perf_counter()
-        self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+        try:
+            self._write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": params,
+                }
+            )
+        except BaseException as error:
+            self._terminate_after(error)
+            raise
         assert self.process.stdout is not None
-        while line := self.process.stdout.readline():
-            response = json.loads(line)
-            if response.get("id") == request_id:
-                elapsed_ms = (time.perf_counter() - started) * 1000
-                if response.get("error") is not None:
-                    raise RuntimeError(json.dumps(response["error"], sort_keys=True))
-                return response, elapsed_ms
-        raise RuntimeError(f"MCP process ended before response {request_id}")
+        result: queue.Queue[dict[str, Any] | Exception] = queue.Queue(maxsize=1)
+
+        def read_response() -> None:
+            try:
+                while line := self.process.stdout.readline():
+                    response = json.loads(line)
+                    if response.get("id") == request_id:
+                        result.put(response)
+                        return
+                result.put(RuntimeError(f"MCP process ended before response {request_id}"))
+            except Exception as error:
+                result.put(error)
+
+        reader = threading.Thread(
+            target=read_response,
+            name=f"projectatlas-mcp-response-{request_id}",
+            daemon=True,
+        )
+        reader.start()
+        try:
+            response = result.get(timeout=self.request_timeout_seconds)
+        except queue.Empty as error:
+            timeout_error = TimeoutError(
+                f"MCP request {method!r} exceeded {self.request_timeout_seconds:.3f} seconds"
+            )
+            self._terminate_after(timeout_error)
+            self._join_reader(reader, timeout_error)
+            raise timeout_error from error
+        self._join_reader(reader)
+        if isinstance(response, Exception):
+            self._terminate_after(response)
+            raise response
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if response.get("error") is not None:
+            raise RuntimeError(json.dumps(response["error"], sort_keys=True))
+        return response, elapsed_ms
 
     def call(self, name: str, arguments: dict[str, Any]) -> tuple[str, float]:
         response, elapsed_ms = self.request(
@@ -319,13 +740,51 @@ class McpClient:
         return list(response["result"]["tools"]), elapsed_ms
 
     def close(self) -> None:
-        if self.process.stdin is not None:
-            self.process.stdin.close()
+        if self.closed:
+            return
+        if self.process.stdin is not None and not self.process.stdin.closed:
+            try:
+                self.process.stdin.close()
+            except BrokenPipeError:
+                pass
         try:
             self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait(timeout=5)
+            pass
+        self._terminate()
+
+    def _terminate(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            terminate_owned_process(self.process, self.job)
+        finally:
+            for stream in (self.process.stdin, self.process.stdout):
+                if stream is not None and not stream.closed:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+
+    def _terminate_after(self, primary_error: BaseException) -> None:
+        try:
+            self._terminate()
+        except BaseException as cleanup_error:
+            primary_error.add_note(f"MCP process cleanup failed: {cleanup_error}")
+
+    def _join_reader(
+        self,
+        reader: threading.Thread,
+        primary_error: BaseException | None = None,
+    ) -> None:
+        reader.join(OWNED_PROCESS_CLEANUP_SECONDS)
+        if reader.is_alive():
+            error = RuntimeError(f"MCP response reader {reader.name!r} did not stop")
+            if primary_error is None:
+                self._terminate_after(error)
+                raise error
+            primary_error.add_note(str(error))
 
     def _write(self, payload: dict[str, Any]) -> None:
         assert self.process.stdin is not None

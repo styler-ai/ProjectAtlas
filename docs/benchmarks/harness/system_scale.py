@@ -11,21 +11,26 @@ import os
 import platform
 import re
 import shutil
+import sqlite3
 import statistics
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import psutil
 
 from mcp_composition import (
     FIXTURES,
     McpClient,
+    WindowsJob,
     clear_git_repository_environment,
     remove_tree,
+    spawn_owned_process,
+    terminate_owned_process,
 )
 
 
@@ -35,7 +40,12 @@ DEFAULT_WORK = ROOT / "target/benchmarks/system-scale/current"
 DEFAULT_OUTPUT = ROOT / "docs/benchmarks/v0.4-system-scale-raw.json"
 DEFAULT_CORPUS_CACHE = ROOT / "target/benchmarks/system-scale/corpus-cache"
 MEASURE_INTERVAL_SECONDS = 0.02
+WRITER_PROBE_INTERVAL_SECONDS = 0.005
+WATCH_BASELINE_STABLE_SECONDS = 0.1
+WATCH_BASELINE_TIMEOUT_SECONDS = 5.0
 TOON_INTEGER = r"^\s+{key}: (\d+)$"
+TOON_SCALAR = r"^\s+{key}: (.+)$"
+GRAPH_STAGE_PREFIX = "graph-stage-"
 
 
 def command(*args: str, cwd: Path, env: dict[str, str] | None = None) -> None:
@@ -53,16 +63,19 @@ def process_tree(root_pid: int) -> list[psutil.Process]:
     try:
         root = psutil.Process(root_pid)
         return [root, *root.children(recursive=True)]
-    except psutil.Error:
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
         return []
 
 
 def process_tree_rss(root_pid: int) -> int:
     total = 0
-    for process in process_tree(root_pid):
+    processes = process_tree(root_pid)
+    if not processes:
+        raise RuntimeError(f"process tree {root_pid} could not be observed")
+    for process in processes:
         try:
             total += process.memory_info().rss
-        except psutil.Error:
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
             continue
     return total
 
@@ -74,26 +87,266 @@ def process_tree_io(root_pid: int) -> dict[str, int]:
         "read_bytes": 0,
         "write_bytes": 0,
     }
-    for process in process_tree(root_pid):
+    processes = process_tree(root_pid)
+    if not processes:
+        raise RuntimeError(f"process tree {root_pid} could not be observed")
+    for process in processes:
         try:
             counters = process.io_counters()
-        except psutil.Error:
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
             continue
         for key in totals:
             totals[key] += int(getattr(counters, key))
     return totals
 
 
+def process_tree_state(root_pid: int) -> dict[str, Any]:
+    pids: list[int] = []
+    threads = 0
+    processes = process_tree(root_pid)
+    if not processes:
+        raise RuntimeError(f"process tree {root_pid} could not be observed")
+    for process in processes:
+        try:
+            pids.append(process.pid)
+            threads += process.num_threads()
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+    return {"pids": sorted(pids), "processes": len(pids), "threads": threads}
+
+
+def storage_state(root: Path) -> dict[str, int]:
+    atlas_root = root / ".projectatlas"
+    database = atlas_root / "projectatlas.db"
+    paths = {
+        "database_bytes": database,
+        "wal_bytes": Path(f"{database}-wal"),
+        "shm_bytes": Path(f"{database}-shm"),
+    }
+    result = {
+        name: path.stat().st_size if path.exists() else 0 for name, path in paths.items()
+    }
+    stages = [
+        path
+        for path in atlas_root.glob(f"{GRAPH_STAGE_PREFIX}*")
+        if path.is_dir()
+    ]
+    stage_bytes = 0
+    for stage in stages:
+        for name in ("projectatlas.db", "projectatlas.db-wal", "projectatlas.db-shm"):
+            candidate = stage / name
+            if candidate.exists():
+                stage_bytes += candidate.stat().st_size
+    result["staging_bytes"] = stage_bytes
+    result["stage_directories"] = len(stages)
+    return result
+
+
+def measured_process_write_transfer_bytes(
+    process_write_bytes: int, stdout_bytes: int, stderr_bytes: int
+) -> int:
+    """Exclude captured pipe output from Windows process I/O transfer counts."""
+    if platform.system() == "Windows":
+        captured_output_bytes = stdout_bytes + stderr_bytes
+        if process_write_bytes < captured_output_bytes:
+            raise RuntimeError(
+                "Windows process I/O observation ended before captured output completed"
+            )
+        return process_write_bytes - captured_output_bytes
+    return process_write_bytes
+
+
+def process_io_measurement_contract() -> dict[str, Any]:
+    host = platform.system()
+    if host == "Windows":
+        return {
+            "backend": "windows-job-basic-and-io-accounting-plus-psutil-peaks",
+            "kind": "exact-terminal-owned-process-tree-accounting",
+            "required_final_platform": "Windows",
+            "final_platform_eligible": True,
+            "ineligible_reason": None,
+        }
+    return {
+        "backend": f"psutil-{psutil.__version__}",
+        "kind": "sampled-nonterminal-process-tree-transfer-counters",
+        "required_final_platform": "Windows",
+        "final_platform_eligible": False,
+        "ineligible_reason": (
+            f"{host} does not provide the complete terminal process counters "
+            "required by this preregistration"
+        ),
+    }
+
+
+def final_measurement_eligibility(mode: str) -> dict[str, Any]:
+    contract = process_io_measurement_contract()
+    requested = mode == "all"
+    if not requested:
+        disposition = "skipped_nonfinal_smoke"
+    elif contract["final_platform_eligible"]:
+        disposition = "eligible"
+    else:
+        disposition = "failed_ineligible_platform"
+    return {**contract, "requested": requested, "disposition": disposition}
+
+
 class ProcessTreeSampler:
-    def __init__(self, root_pid: int) -> None:
+    def __init__(
+        self,
+        root_pid: int,
+        storage_root: Path | None = None,
+        subtract_initial_work: bool = False,
+    ) -> None:
         self.root_pid = root_pid
+        self.storage_root = storage_root
+        self.subtract_initial_work = subtract_initial_work
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._sample_until_stopped, daemon=True)
         self.peak_rss_bytes = 0
         self.peak_processes = 0
+        self.peak_threads = 0
+        self.peak_storage = {
+            "database_bytes": 0,
+            "wal_bytes": 0,
+            "shm_bytes": 0,
+            "staging_bytes": 0,
+            "stage_directories": 0,
+        }
         self.cpu_seconds: dict[int, float] = {}
         self.read_bytes: dict[int, int] = {}
         self.write_bytes: dict[int, int] = {}
+        self.initial_cpu_seconds: dict[int, float] = {}
+        self.initial_read_bytes: dict[int, int] = {}
+        self.initial_write_bytes: dict[int, int] = {}
+        self.observed_pids: set[int] = set()
+        self.error: Exception | None = None
+
+    def start(self) -> None:
+        if self.subtract_initial_work and os.name != "nt":
+            processes = process_tree(self.root_pid)
+            if not processes:
+                raise RuntimeError(
+                    f"process tree {self.root_pid} exited before baseline observation"
+                )
+            for process in processes:
+                try:
+                    cpu = process.cpu_times()
+                    io = process.io_counters()
+                    self.observed_pids.add(process.pid)
+                    self.initial_cpu_seconds[process.pid] = cpu.user + cpu.system
+                    self.initial_read_bytes[process.pid] = io.read_bytes
+                    self.initial_write_bytes[process.pid] = io.write_bytes
+                except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                    continue
+        self._sample()
+        self.thread.start()
+
+    def stop(self) -> dict[str, Any]:
+        self.stop_event.set()
+        self.thread.join(timeout=5)
+        if self.thread.is_alive():
+            raise RuntimeError("process sampler did not stop")
+        if self.error is not None:
+            raise RuntimeError("process sampler failed") from self.error
+        if self.root_pid not in self.observed_pids:
+            raise RuntimeError("process sampler never observed its root process")
+        return {
+            "sampler": f"psutil-{psutil.__version__}",
+            "interval_seconds": MEASURE_INTERVAL_SECONDS,
+            "sampled_peak_metrics": [
+                "rss_bytes",
+                "processes",
+                "threads",
+                "storage",
+            ],
+            "peak_rss_bytes": self.peak_rss_bytes,
+            "peak_processes": self.peak_processes,
+            "peak_worker_processes": max(0, self.peak_processes - 1),
+            "peak_threads": self.peak_threads,
+            "cpu_seconds": round(sum(self.cpu_seconds.values()), 6),
+            "read_bytes": sum(self.read_bytes.values()),
+            "write_bytes": sum(self.write_bytes.values()),
+            "observed_pids": sorted(self.observed_pids),
+            "peak_storage": self.peak_storage,
+        }
+
+    def _sample_until_stopped(self) -> None:
+        while not self.stop_event.is_set():
+            self._sample()
+            self.stop_event.wait(MEASURE_INTERVAL_SECONDS)
+
+    def _sample(self) -> None:
+        try:
+            processes = process_tree(self.root_pid)
+        except psutil.Error as error:
+            self.error = error
+            self.stop_event.set()
+            return
+        rss = 0
+        threads = 0
+        for process in processes:
+            try:
+                self.observed_pids.add(process.pid)
+                rss += process.memory_info().rss
+                threads += process.num_threads()
+                if os.name != "nt":
+                    cpu = process.cpu_times()
+                    self.cpu_seconds[process.pid] = max(
+                        self.cpu_seconds.get(process.pid, 0.0),
+                        max(
+                            0.0,
+                            cpu.user
+                            + cpu.system
+                            - self.initial_cpu_seconds.get(process.pid, 0.0),
+                        ),
+                    )
+                    io = process.io_counters()
+                    self.read_bytes[process.pid] = max(
+                        self.read_bytes.get(process.pid, 0),
+                        max(
+                            0,
+                            io.read_bytes - self.initial_read_bytes.get(process.pid, 0),
+                        ),
+                    )
+                    self.write_bytes[process.pid] = max(
+                        self.write_bytes.get(process.pid, 0),
+                        max(
+                            0,
+                            io.write_bytes - self.initial_write_bytes.get(process.pid, 0),
+                        ),
+                    )
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                continue
+            except psutil.Error as error:
+                self.error = error
+                self.stop_event.set()
+                return
+        self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
+        self.peak_processes = max(self.peak_processes, len(processes))
+        self.peak_threads = max(self.peak_threads, threads)
+        if self.storage_root is not None:
+            try:
+                storage = storage_state(self.storage_root)
+            except OSError as error:
+                self.error = error
+                self.stop_event.set()
+                return
+            for key, value in storage.items():
+                self.peak_storage[key] = max(self.peak_storage[key], value)
+
+
+class SQLiteWriterAvailabilitySampler:
+    def __init__(self, database: Path) -> None:
+        self.database = database
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._sample_until_stopped, daemon=True)
+        self.attempts = 0
+        self.busy_observations = 0
+        self.maximum_busy_upper_bound_seconds = 0.0
+        self.maximum_probe_gap_seconds = 0.0
+        self.busy_window_started: float | None = None
+        self.last_attempt_ended: float | None = None
+        self.error: Exception | None = None
 
     def start(self) -> None:
         self.thread.start()
@@ -101,40 +354,75 @@ class ProcessTreeSampler:
     def stop(self) -> dict[str, Any]:
         self.stop_event.set()
         self.thread.join(timeout=5)
+        if self.thread.is_alive():
+            raise RuntimeError("SQLite writer sampler did not stop")
+        if self.error is not None:
+            raise RuntimeError("SQLite writer sampler failed") from self.error
+        if self.busy_window_started is not None:
+            self.maximum_busy_upper_bound_seconds = max(
+                self.maximum_busy_upper_bound_seconds,
+                time.perf_counter() - self.busy_window_started,
+            )
         return {
-            "sampler": f"psutil-{psutil.__version__}",
-            "interval_seconds": MEASURE_INTERVAL_SECONDS,
-            "peak_rss_bytes": self.peak_rss_bytes,
-            "peak_processes": self.peak_processes,
-            "peak_worker_processes": max(0, self.peak_processes - 1),
-            "cpu_seconds": round(sum(self.cpu_seconds.values()), 6),
-            "read_bytes": sum(self.read_bytes.values()),
-            "write_bytes": sum(self.write_bytes.values()),
+            "method": "timeout-zero-begin-immediate-sampled-bound",
+            "intrusive": True,
+            "interval_seconds": WRITER_PROBE_INTERVAL_SECONDS,
+            "attempts": self.attempts,
+            "busy_observations": self.busy_observations,
+            "maximum_probe_gap_seconds": round(
+                self.maximum_probe_gap_seconds, 6
+            ),
+            "maximum_busy_upper_bound_seconds": round(
+                max(
+                    self.maximum_busy_upper_bound_seconds,
+                    self.maximum_probe_gap_seconds,
+                ),
+                6,
+            ),
         }
 
     def _sample_until_stopped(self) -> None:
         while not self.stop_event.is_set():
-            processes = process_tree(self.root_pid)
-            rss = 0
-            for process in processes:
+            attempt_started = time.perf_counter()
+            if self.last_attempt_ended is not None:
+                self.maximum_probe_gap_seconds = max(
+                    self.maximum_probe_gap_seconds,
+                    attempt_started - self.last_attempt_ended,
+                )
+            busy = False
+            if self.database.exists():
                 try:
-                    rss += process.memory_info().rss
-                    cpu = process.cpu_times()
-                    self.cpu_seconds[process.pid] = max(
-                        self.cpu_seconds.get(process.pid, 0.0), cpu.user + cpu.system
-                    )
-                    io = process.io_counters()
-                    self.read_bytes[process.pid] = max(
-                        self.read_bytes.get(process.pid, 0), io.read_bytes
-                    )
-                    self.write_bytes[process.pid] = max(
-                        self.write_bytes.get(process.pid, 0), io.write_bytes
-                    )
-                except (psutil.AccessDenied, psutil.NoSuchProcess):
-                    continue
-            self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
-            self.peak_processes = max(self.peak_processes, len(processes))
-            self.stop_event.wait(MEASURE_INTERVAL_SECONDS)
+                    connection = sqlite3.connect(self.database, timeout=0)
+                    try:
+                        connection.execute("PRAGMA busy_timeout=0")
+                        connection.execute("BEGIN IMMEDIATE")
+                        connection.rollback()
+                        self.attempts += 1
+                    finally:
+                        connection.close()
+                except sqlite3.OperationalError as error:
+                    if "locked" not in str(error).lower() and "busy" not in str(error).lower():
+                        self.error = error
+                        self.stop_event.set()
+                        return
+                    self.attempts += 1
+                    self.busy_observations += 1
+                    busy = True
+            attempt_ended = time.perf_counter()
+            if busy:
+                self.busy_window_started = (
+                    self.busy_window_started
+                    or self.last_attempt_ended
+                    or attempt_started
+                )
+            elif self.busy_window_started is not None:
+                self.maximum_busy_upper_bound_seconds = max(
+                    self.maximum_busy_upper_bound_seconds,
+                    attempt_ended - self.busy_window_started,
+                )
+                self.busy_window_started = None
+            self.last_attempt_ended = attempt_ended
+            self.stop_event.wait(WRITER_PROBE_INTERVAL_SECONDS)
 
 
 def terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
@@ -148,33 +436,160 @@ def terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
         process.kill()
 
 
-def run_measured(
+def collect_measured_process(
+    process: subprocess.Popen[bytes],
     arguments: list[str],
     *,
     cwd: Path,
-    env: dict[str, str],
     timeout_seconds: float,
+    started: float,
+    writer_probe_database: Path | None = None,
+    subtract_initial_work: bool = False,
+    start_action: Callable[[], None] | None = None,
+    job: WindowsJob | None = None,
+    resume_suspended: bool = False,
+    exact_baseline: dict[str, int] | None = None,
 ) -> dict[str, Any]:
-    started = time.perf_counter()
-    process = subprocess.Popen(
-        arguments,
-        cwd=cwd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+    sampler = ProcessTreeSampler(process.pid, cwd, subtract_initial_work)
+    writer_sampler = (
+        SQLiteWriterAvailabilitySampler(writer_probe_database)
+        if writer_probe_database is not None
+        else None
     )
-    sampler = ProcessTreeSampler(process.pid)
-    sampler.start()
+    sampler_started = False
+    writer_started = False
+    action_error: Exception | None = None
     timed_out = False
+    exact_accounting: dict[str, int] | None = None
+    drain_error: BaseException | None = None
+    sampler_error: Exception | None = None
+    writer_error: Exception | None = None
+    metrics: dict[str, Any] = {}
     try:
-        stdout, stderr = process.communicate(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        terminate_process_tree(process)
-        stdout, stderr = process.communicate(timeout=5)
-    elapsed = time.perf_counter() - started
-    metrics = sampler.stop()
+        sampler.start()
+        sampler_started = True
+        if writer_sampler is not None:
+            writer_sampler.start()
+            writer_started = True
+        if resume_suspended:
+            if job is None:
+                raise RuntimeError("suspended measured process has no Windows Job")
+            job.resume()
+        if start_action is not None:
+            try:
+                start_action()
+            except Exception as error:
+                action_error = error
+                if job is not None:
+                    job.terminate()
+                else:
+                    terminate_process_tree(process)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            if job is not None:
+                job.terminate()
+            else:
+                terminate_process_tree(process)
+            stdout, stderr = process.communicate(timeout=5)
+        elapsed = time.perf_counter() - started
+        if job is not None:
+            try:
+                drain_timeout = (
+                    5 if timed_out else max(0, timeout_seconds - elapsed)
+                )
+                exact_accounting = job.wait_for_zero_active(drain_timeout)
+            except BaseException as error:
+                drain_error = error
+                try:
+                    job.terminate()
+                    job.wait_for_zero_active(5)
+                except BaseException as cleanup_error:
+                    error.add_note(f"Windows Job cleanup failed: {cleanup_error}")
+    finally:
+        if sampler_started:
+            try:
+                metrics = sampler.stop()
+            except Exception as error:
+                sampler_error = error
+        if writer_sampler is not None and writer_started:
+            try:
+                metrics["writer_availability"] = writer_sampler.stop()
+            except Exception as error:
+                writer_error = error
+        if job is not None:
+            job.close()
+    if action_error is not None:
+        raise RuntimeError("measured process start action failed") from action_error
+    if drain_error is not None:
+        raise RuntimeError(
+            "owned Windows Job did not drain before terminal accounting"
+        ) from drain_error
+    if sampler_error is not None:
+        raise sampler_error
+    if writer_error is not None:
+        raise writer_error
+    if exact_accounting is not None:
+        baseline = exact_baseline or {
+            key: 0 for key in exact_accounting
+        }
+        metrics["cpu_seconds"] = round(
+            (
+                exact_accounting["user_time_100ns"]
+                + exact_accounting["kernel_time_100ns"]
+                - baseline["user_time_100ns"]
+                - baseline["kernel_time_100ns"]
+            )
+            / 10_000_000,
+            6,
+        )
+        for key in ("read_count", "write_count", "read_bytes", "write_bytes"):
+            metrics[key] = max(0, exact_accounting[key] - baseline[key])
+        metrics["exact_total_processes"] = (
+            exact_accounting["total_processes"]
+            - baseline["total_processes"]
+            + baseline["active_processes"]
+        )
+        metrics["exact_terminal_active_processes"] = exact_accounting[
+            "active_processes"
+        ]
+    else:
+        metrics["exact_total_processes"] = None
+        metrics["exact_terminal_active_processes"] = None
+    exact_worker_bound = (
+        max(0, metrics["exact_total_processes"] - 1)
+        if metrics["exact_total_processes"] is not None
+        else 0
+    )
+    metrics["worker_process_bound"] = max(
+        metrics["peak_worker_processes"], exact_worker_bound
+    )
+    metrics["worker_process_bound_method"] = (
+        "cumulative-owned-processes-conservative-upper-bound"
+        if exact_accounting is not None
+        else "sampled-peak"
+    )
+    metrics["terminal_io_complete"] = (
+        exact_accounting is not None
+        and exact_accounting["active_processes"] == 0
+    )
+    metrics["terminal_io_method"] = (
+        "windows-job-basic-and-io-accounting"
+        if exact_accounting is not None
+        else "live-process-sampling"
+    )
+    metrics["process_io_metric"] = {
+        **process_io_measurement_contract(),
+        "terminal_counters_complete": metrics["terminal_io_complete"],
+    }
+    stdout_bytes = len(stdout)
+    stderr_bytes = len(stderr)
     logical_cpus = os.cpu_count() or 1
+    process_read_transfer_bytes = metrics.pop("read_bytes")
+    process_write_transfer_bytes = measured_process_write_transfer_bytes(
+        metrics.pop("write_bytes"), stdout_bytes, stderr_bytes
+    )
     metrics.update(
         {
             "arguments": arguments[1:],
@@ -190,13 +605,115 @@ def run_measured(
                 else 0.0,
                 3,
             ),
-            "stdout_bytes": len(stdout),
-            "stderr_bytes": len(stderr),
+            "stdout_bytes": stdout_bytes,
+            "stderr_bytes": stderr_bytes,
+            "process_read_transfer_bytes": process_read_transfer_bytes,
+            "process_write_transfer_bytes": process_write_transfer_bytes,
             "stdout": stdout.decode("utf-8", errors="replace"),
             "stderr": stderr.decode("utf-8", errors="replace"),
         }
     )
     return metrics
+
+
+def run_measured(
+    arguments: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout_seconds: float,
+    writer_probe_database: Path | None = None,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    process, job = spawn_owned_process(
+        arguments,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        return collect_measured_process(
+            process,
+            arguments,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+            started=started,
+            writer_probe_database=writer_probe_database,
+            job=job,
+            resume_suspended=job is not None,
+        )
+    except BaseException as error:
+        try:
+            terminate_owned_process(process, job)
+        except BaseException as cleanup_error:
+            error.add_note(f"measured process cleanup failed: {cleanup_error}")
+        raise
+
+
+def wait_for_indexed_marker(
+    process: subprocess.Popen[bytes],
+    job: WindowsJob | None,
+    database: Path,
+    path: str,
+    marker: str,
+    timeout_seconds: float,
+) -> float:
+    started = time.perf_counter()
+    deadline = started + min(timeout_seconds, 30.0)
+    while time.perf_counter() < deadline:
+        if process.poll() is not None:
+            terminate_owned_process(process, job)
+            stdout, stderr = process.communicate(timeout=5)
+            raise RuntimeError(
+                "watch exited before publishing its readiness marker: "
+                f"{stdout.decode(errors='replace')}{stderr.decode(errors='replace')}"
+            )
+        try:
+            connection = sqlite3.connect(
+                f"{database.resolve().as_uri()}?mode=ro", uri=True, timeout=0
+            )
+            try:
+                row = connection.execute(
+                    "SELECT content FROM file_texts WHERE path = ?1", (path,)
+                ).fetchone()
+            finally:
+                connection.close()
+        except sqlite3.OperationalError as error:
+            if "locked" not in str(error).lower() and "busy" not in str(error).lower():
+                raise
+            row = None
+        if row is not None and marker in str(row[0]):
+            return time.perf_counter() - started
+        time.sleep(MEASURE_INTERVAL_SECONDS)
+    terminate_owned_process(process, job)
+    stdout, stderr = process.communicate(timeout=5)
+    raise RuntimeError(
+        "watch did not publish the indexed readiness marker: "
+        f"{stdout.decode(errors='replace')}{stderr.decode(errors='replace')}"
+    )
+
+
+def wait_for_idle_watch_baseline(job: WindowsJob) -> dict[str, int]:
+    """Return accounting only after the ready watcher has stopped changing."""
+    deadline = time.monotonic() + WATCH_BASELINE_TIMEOUT_SECONDS
+    previous = job.accounting()
+    stable_since = time.monotonic()
+    while True:
+        if previous["active_processes"] != 1:
+            raise RuntimeError(
+                "ready watcher did not retain exactly one active process"
+            )
+        time.sleep(MEASURE_INTERVAL_SECONDS)
+        current = job.accounting()
+        if current == previous:
+            if time.monotonic() - stable_since >= WATCH_BASELINE_STABLE_SECONDS:
+                return current
+        else:
+            previous = current
+            stable_since = time.monotonic()
+        if time.monotonic() >= deadline:
+            raise TimeoutError("ready watcher accounting did not become idle")
 
 
 def measured_json(
@@ -227,10 +744,15 @@ def measured_watch_edit(
     cwd: Path,
     env: dict[str, str],
     timeout_seconds: float,
-    warmup_seconds: float,
-    edit: Any,
-    expected_error: str | None = None,
+    edit: Callable[[], None],
+    readiness_file: Path,
+    writer_probe_database: Path,
+    expected_refresh_reason: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    readiness_path = readiness_file.relative_to(cwd).as_posix()
+    readiness_marker = f"projectatlas-watch-ready-{time.time_ns()}"
+    with readiness_file.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(f"// {readiness_marker}\n")
     arguments = [
         str(runtime),
         "--require-version",
@@ -238,82 +760,80 @@ def measured_watch_edit(
         "--format",
         "json",
         "watch",
+        ".",
         "--poll-seconds",
         "1",
         "--max-cycles",
         "2",
-        ".",
     ]
-    started = time.perf_counter()
-    process = subprocess.Popen(
+    process, job = spawn_owned_process(
         arguments,
         cwd=cwd,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    sampler = ProcessTreeSampler(process.pid)
-    sampler.start()
-    time.sleep(warmup_seconds)
-    if process.poll() is not None:
-        stdout, stderr = process.communicate()
-        sampler.stop()
-        raise RuntimeError(
-            "watcher exited before the edit: "
-            f"{stdout.decode(errors='replace')} {stderr.decode(errors='replace')}"
-        )
-    edit_started = time.perf_counter()
-    edit()
-    timed_out = False
     try:
-        stdout, stderr = process.communicate(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        terminate_process_tree(process)
-        stdout, stderr = process.communicate(timeout=5)
-    elapsed = time.perf_counter() - started
-    metrics = sampler.stop()
-    logical_cpus = os.cpu_count() or 1
-    metrics.update(
-        {
-            "arguments": arguments[1:],
-            "returncode": process.returncode,
-            "timed_out": timed_out,
-            "wall_seconds": round(elapsed, 6),
-            "watcher_warmup_seconds": round(warmup_seconds, 6),
-            "edit_to_complete_seconds": round(
-                time.perf_counter() - edit_started, 6
-            ),
-            "one_core_cpu_percent": round(
-                metrics["cpu_seconds"] / elapsed * 100 if elapsed else 0.0, 3
-            ),
-            "host_cpu_percent": round(
-                metrics["cpu_seconds"] / elapsed / logical_cpus * 100
-                if elapsed
-                else 0.0,
-                3,
-            ),
-            "stdout_bytes": len(stdout),
-            "stderr_bytes": len(stderr),
-            "stderr": stderr.decode("utf-8", errors="replace"),
-        }
-    )
-    combined_output = (stdout + stderr).decode("utf-8", errors="replace")
-    if process.returncode != 0 and (
-        expected_error is None or expected_error not in combined_output
-    ):
-        raise RuntimeError(
-            f"live watch failed ({process.returncode}): {metrics['stderr']}"
+        if job is not None:
+            job.resume()
+        readiness_seconds = wait_for_indexed_marker(
+            process,
+            job,
+            writer_probe_database,
+            readiness_path,
+            readiness_marker,
+            timeout_seconds,
         )
-    if expected_error is not None:
-        if process.returncode == 0:
-            raise RuntimeError(f"live watch did not return expected error: {expected_error}")
-        metrics["expected_error"] = expected_error
-        return metrics, {
-            "status": "refresh_required",
-            "diagnostic": combined_output.strip(),
-        }
-    return metrics, json.loads(stdout)
+        readiness_generation = database_counts(writer_probe_database)["generation"]
+        exact_baseline = (
+            wait_for_idle_watch_baseline(job) if job is not None else None
+        )
+        edit_started = time.perf_counter()
+        metrics = collect_measured_process(
+            process,
+            arguments,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+            started=edit_started,
+            writer_probe_database=writer_probe_database,
+            subtract_initial_work=True,
+            start_action=edit,
+            job=job,
+            exact_baseline=exact_baseline,
+        )
+    except BaseException as error:
+        try:
+            terminate_owned_process(process, job)
+        except BaseException as cleanup_error:
+            error.add_note(f"watch process cleanup failed: {cleanup_error}")
+        raise
+    metrics["readiness_seconds"] = round(readiness_seconds, 6)
+    metrics["readiness_path"] = readiness_path
+    metrics["readiness_generation"] = readiness_generation
+    metrics["edit_to_complete_seconds"] = metrics["wall_seconds"]
+    if expected_refresh_reason is not None:
+        if metrics["returncode"] != 1:
+            raise RuntimeError(
+                "watch did not return the expected refresh guidance: "
+                f"{metrics['stdout']}{metrics['stderr']}"
+            )
+        payload = json.loads(metrics["stderr"])
+        error = payload.get("error", {})
+        refresh = error.get("refresh_required", {})
+        if (
+            error.get("kind") != "refresh_required"
+            or refresh.get("reason") != expected_refresh_reason
+        ):
+            raise RuntimeError(
+                "watch returned different refresh guidance: "
+                f"{metrics['stdout']}{metrics['stderr']}"
+            )
+        metrics.pop("stdout")
+        metrics.pop("stderr")
+        return metrics, refresh
+    if metrics["returncode"] != 0:
+        raise RuntimeError(f"watch failed ({metrics['returncode']}): {metrics['stderr']}")
+    return metrics, json.loads(metrics.pop("stdout"))
 
 
 def git_commit_fixture(path: Path) -> None:
@@ -526,22 +1046,37 @@ def corpus_facts(root: Path) -> dict[str, Any]:
 
 
 def persistent_sizes(root: Path) -> dict[str, int]:
-    database = root / ".projectatlas/projectatlas.db"
-    paths = {
-        "database_bytes": database,
-        "wal_bytes": Path(f"{database}-wal"),
-        "shm_bytes": Path(f"{database}-shm"),
-    }
-    result = {
-        name: path.stat().st_size if path.exists() else 0 for name, path in paths.items()
-    }
-    result["total_bytes"] = sum(result.values())
+    result = storage_state(root)
+    result["total_bytes"] = sum(
+        result[key]
+        for key in ("database_bytes", "wal_bytes", "shm_bytes", "staging_bytes")
+    )
     return result
+
+
+def io_transfer_ratio(
+    process_transfer_bytes: int,
+    admitted_source_bytes: int,
+    pre_run_database_bytes: int,
+) -> float:
+    return process_transfer_bytes / max(
+        1, admitted_source_bytes + pre_run_database_bytes
+    )
 
 
 def toon_integer(text: str, key: str) -> int | None:
     match = re.search(TOON_INTEGER.format(key=re.escape(key)), text, re.MULTILINE)
     return int(match.group(1)) if match else None
+
+
+def toon_scalar(text: str, key: str) -> str | None:
+    match = re.search(TOON_SCALAR.format(key=re.escape(key)), text, re.MULTILINE)
+    if match is None:
+        return None
+    value = match.group(1).strip()
+    if value.startswith('"'):
+        return str(json.loads(value))
+    return value
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -554,10 +1089,16 @@ def mcp_queries(
     root: Path,
     env: dict[str, str],
     query: dict[str, Any],
+    request_timeout_seconds: float,
 ) -> dict[str, Any]:
-    client = McpClient(runtime, root, env)
-    sampler = ProcessTreeSampler(client.process.pid)
-    sampler.start()
+    client = McpClient(
+        runtime,
+        root,
+        env,
+        request_timeout_seconds=request_timeout_seconds,
+    )
+    sampler = ProcessTreeSampler(client.process.pid, root)
+    sampler_started = False
     calls: list[dict[str, Any]] = []
 
     def call(tool: str, arguments: dict[str, Any], phase: str) -> str:
@@ -572,7 +1113,18 @@ def mcp_queries(
                 "elapsed_ms": round(elapsed_ms, 3),
                 "output_bytes": len(text.encode("utf-8")),
                 "process_io": {
-                    key: max(0, io_after[key] - io_before[key]) for key in io_before
+                    "read_operations": max(
+                        0, io_after["read_count"] - io_before["read_count"]
+                    ),
+                    "write_operations": max(
+                        0, io_after["write_count"] - io_before["write_count"]
+                    ),
+                    "read_transfer_bytes": max(
+                        0, io_after["read_bytes"] - io_before["read_bytes"]
+                    ),
+                    "write_transfer_bytes": max(
+                        0, io_after["write_bytes"] - io_before["write_bytes"]
+                    ),
                 },
                 "work": {
                     key: toon_integer(text, key)
@@ -597,8 +1149,14 @@ def mcp_queries(
         return text
 
     try:
+        sampler.start()
+        sampler_started = True
         call("atlas_overview", {}, "first_exact_verification")
+        publication_before = database_publication_state(
+            root / ".projectatlas/projectatlas.db"
+        )
         rss_before = process_tree_rss(client.process.pid)
+        state_before = process_tree_state(client.process.pid)
         requests = [
             ("atlas_overview", {}),
             (
@@ -638,31 +1196,90 @@ def mcp_queries(
         ]
         for repetition in range(5):
             for tool, arguments in requests:
-                call(tool, arguments, f"healthy_epoch_{repetition + 1}")
+                call(tool, arguments, f"repeated_query_{repetition + 1}")
         rss_after = process_tree_rss(client.process.pid)
+        state_after = process_tree_state(client.process.pid)
+        publication_after = database_publication_state(
+            root / ".projectatlas/projectatlas.db"
+        )
     finally:
-        client.close()
-        process_metrics = sampler.stop()
+        try:
+            if sampler_started:
+                process_metrics = sampler.stop()
+        finally:
+            client.close()
 
-    healthy_latencies = [
-        row["elapsed_ms"] for row in calls if row["phase"].startswith("healthy_epoch_")
+    repeated_latencies = [
+        row["elapsed_ms"]
+        for row in calls
+        if row["phase"].startswith("repeated_query_")
     ]
     return {
         "startup_ms": round(client.startup_ms, 3),
         "rss_before_repeated_bytes": rss_before,
         "rss_after_repeated_bytes": rss_after,
         "retained_rss_growth_bytes": rss_after - rss_before,
-        "healthy_query_median_ms": round(statistics.median(healthy_latencies), 3),
-        "healthy_query_p95_ms": round(percentile(healthy_latencies, 0.95), 3),
+        "state_before_repeated": state_before,
+        "state_after_repeated": state_after,
+        "retained_thread_growth": state_after["threads"] - state_before["threads"],
+        "retained_child_process_growth": (
+            state_after["processes"] - state_before["processes"]
+        ),
+        "stable_publication": {
+            "handshake": "first-successful-atlas_overview",
+            "before": publication_before,
+            "after": publication_after,
+            "stable": publication_after == publication_before,
+        },
+        "repeated_query_median_ms": round(statistics.median(repeated_latencies), 3),
+        "repeated_query_p95_ms": round(percentile(repeated_latencies, 0.95), 3),
         "maximum_output_bytes": max(row["output_bytes"] for row in calls),
         "process": process_metrics,
         "calls": calls,
     }
 
 
-def database_counts(database: Path) -> dict[str, int]:
-    import sqlite3
+def database_publication_state(database: Path) -> dict[str, Any]:
+    connection = sqlite3.connect(
+        f"{database.resolve().as_uri()}?mode=ro", uri=True
+    )
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        values = dict(
+            connection.execute(
+                "SELECT key, value FROM metadata WHERE key IN "
+                "('index_publication_state', 'index_publication_fingerprint', "
+                "'index_publication_generation', 'purpose.authored_revision')"
+            )
+        )
+        return {
+            "state": values.get("index_publication_state"),
+            "contract_fingerprint": values.get("index_publication_fingerprint"),
+            "generation": int(values.get("index_publication_generation", "0")),
+            "authored_purpose_revision": int(
+                values.get("purpose.authored_revision", "0")
+            ),
+        }
+    finally:
+        connection.close()
 
+
+def database_writer_available(database: Path) -> bool:
+    connection = sqlite3.connect(database, timeout=0)
+    try:
+        connection.execute("PRAGMA busy_timeout=0")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.rollback()
+        return True
+    except sqlite3.OperationalError as error:
+        if "locked" in str(error).lower() or "busy" in str(error).lower():
+            return False
+        raise
+    finally:
+        connection.close()
+
+
+def database_counts(database: Path) -> dict[str, int]:
     connection = sqlite3.connect(database)
     try:
         tables = (
@@ -696,12 +1313,45 @@ def database_counts(database: Path) -> dict[str, int]:
         connection.close()
 
 
+def database_profile(database: Path) -> dict[str, Any]:
+    connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+        page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+        freelist_pages = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+        quick_check = str(connection.execute("PRAGMA quick_check(1)").fetchone()[0])
+        stat1_present = (
+            connection.execute(
+                "SELECT COUNT(*) FROM sqlite_schema "
+                "WHERE type = 'table' AND name = 'sqlite_stat1'"
+            ).fetchone()[0]
+            == 1
+        )
+        project_root = connection.execute(
+            "SELECT value FROM metadata WHERE key = 'project_root'"
+        ).fetchone()
+        return {
+            "page_size": page_size,
+            "page_count": page_count,
+            "page_bytes": page_size * page_count,
+            "freelist_pages": freelist_pages,
+            "freelist_ratio": (
+                round(freelist_pages / page_count, 6) if page_count else 0.0
+            ),
+            "quick_check": quick_check,
+            "sqlite_stat1_present": stat1_present,
+            "project_root": project_root[0] if project_root else None,
+        }
+    finally:
+        connection.close()
+
+
 def run_incremental(
     runtime: Path,
     root: Path,
     env: dict[str, str],
     timeout_seconds: float,
-    watcher_warmup_seconds: float,
 ) -> dict[str, Any]:
     database = root / ".projectatlas/projectatlas.db"
     before = database_counts(database)
@@ -716,8 +1366,9 @@ def run_incremental(
         cwd=root,
         env=env,
         timeout_seconds=timeout_seconds,
-        warmup_seconds=watcher_warmup_seconds,
         edit=narrow_edit,
+        readiness_file=root / "src/caller_0001.rs",
+        writer_probe_database=database,
     )
     after_narrow = database_counts(database)
     hub = root / "src/hub.rs"
@@ -734,11 +1385,13 @@ def run_incremental(
         cwd=root,
         env=env,
         timeout_seconds=timeout_seconds,
-        warmup_seconds=watcher_warmup_seconds,
         edit=expanded_edit,
-        expected_error="dependency-aware incremental closure exceeded its safe limit",
+        readiness_file=root / "src/caller_0002.rs",
+        writer_probe_database=database,
+        expected_refresh_reason="dependency_closure_limit",
     )
     after_guidance = database_counts(database)
+    pre_rebuild_database_bytes = database.stat().st_size
     rebuild_run, rebuild = measured_json(
         runtime,
         ["scan", "."],
@@ -761,6 +1414,7 @@ def run_incremental(
                 "counts": after_guidance,
             },
             "rebuild": {
+                "pre_run_database_bytes": pre_rebuild_database_bytes,
                 "process": rebuild_run,
                 "report": rebuild,
                 "counts": after_rebuild,
@@ -781,7 +1435,11 @@ def run_case(
     incremental: bool = False,
 ) -> dict[str, Any]:
     timeout_seconds = preregistration["thresholds"]["all"]["command_timeout_seconds"]
+    mcp_request_timeout_seconds = preregistration["thresholds"]["all"][
+        "mcp_request_timeout_seconds"
+    ]
     facts = corpus_facts(root)
+    pre_scan_database_bytes = storage_state(root)["database_bytes"]
     scan_run, scan = measured_json(
         runtime,
         ["scan", "."],
@@ -789,6 +1447,7 @@ def run_case(
         env=env,
         timeout_seconds=timeout_seconds,
     )
+    post_scan_database_bytes = storage_state(root)["database_bytes"]
     settings_run, settings = measured_json(
         runtime,
         ["settings"],
@@ -809,25 +1468,112 @@ def run_case(
             root,
             env,
             timeout_seconds,
-            max(2.0, scan_run["wall_seconds"] * 1.5 + 1.0),
         )
         if incremental
         else None
     )
+    database = root / ".projectatlas/projectatlas.db"
     result = {
         "scale": scale,
         "variant": variant,
         "root": str(root),
         "corpus": facts,
-        "scan": {"process": scan_run, "report": scan},
+        "scan": {
+            "pre_run_database_bytes": pre_scan_database_bytes,
+            "post_run_database_bytes": post_scan_database_bytes,
+            "process": scan_run,
+            "report": scan,
+        },
         "settings": {"process": settings_run, "report": settings},
         "unchanged_refresh": {"process": unchanged_run, "report": unchanged},
         "incremental": incremental_result,
         "persistent": persistent_sizes(root),
-        "queries": mcp_queries(runtime, root, env, query),
+        "database_profile": database_profile(database),
+        "queries": mcp_queries(
+            runtime,
+            root,
+            env,
+            query,
+            request_timeout_seconds=mcp_request_timeout_seconds,
+        ),
     }
     result["checks"] = evaluate_case(result, preregistration)
     return result
+
+
+def evaluate_process_io_contract(
+    result: dict[str, Any], preregistration: dict[str, Any]
+) -> dict[str, Any]:
+    """Calculate the evaluator's preregistered process-I/O operands and gates."""
+    all_limits = preregistration["thresholds"]["all"]
+    limits = preregistration["thresholds"][result["scale"]]
+    scan = result["scan"]
+    process = scan["process"]
+    source_bytes = scan["report"]["text_index"]["bytes"]
+    pre_scan_database_bytes = scan["pre_run_database_bytes"]
+    post_scan_database_bytes = scan["post_run_database_bytes"]
+    evaluation = {
+        "full_source_input_read_ratio": io_transfer_ratio(
+            process["process_read_transfer_bytes"],
+            source_bytes,
+            pre_scan_database_bytes,
+        ),
+        "full_source_input_write_ratio": io_transfer_ratio(
+            process["process_write_transfer_bytes"],
+            source_bytes,
+            pre_scan_database_bytes,
+        ),
+        "full_output_efficiency_read_ratio": io_transfer_ratio(
+            process["process_read_transfer_bytes"],
+            source_bytes,
+            post_scan_database_bytes,
+        ),
+        "full_output_efficiency_write_ratio": io_transfer_ratio(
+            process["process_write_transfer_bytes"],
+            source_bytes,
+            post_scan_database_bytes,
+        ),
+        "full_read_transfer_within_absolute_cap": (
+            process["process_read_transfer_bytes"]
+            <= limits["maximum_full_process_read_transfer_bytes"]
+        ),
+        "full_write_transfer_within_absolute_cap": (
+            process["process_write_transfer_bytes"]
+            <= limits["maximum_full_process_write_transfer_bytes"]
+        ),
+    }
+    if result.get("incremental") is not None:
+        guidance = result["incremental"]["expanded"]["guidance"]["process"]
+        rebuild = result["incremental"]["expanded"]["rebuild"]
+        rebuild_source_bytes = rebuild["report"]["text_index"]["bytes"]
+        rebuild_database_bytes = rebuild["pre_run_database_bytes"]
+        evaluation.update(
+            {
+                "expanded_guidance_read_within_absolute_cap": (
+                    guidance["process_read_transfer_bytes"]
+                    <= all_limits[
+                        "maximum_expanded_guidance_process_read_transfer_bytes"
+                    ]
+                ),
+                "expanded_guidance_write_within_absolute_cap": (
+                    guidance["process_write_transfer_bytes"]
+                    <= all_limits[
+                        "maximum_expanded_guidance_process_write_transfer_bytes"
+                    ]
+                ),
+                "rebuild_input_efficiency_read_ratio": io_transfer_ratio(
+                    rebuild["process"]["process_read_transfer_bytes"],
+                    rebuild_source_bytes,
+                    rebuild_database_bytes,
+                ),
+                "rebuild_input_efficiency_write_ratio": io_transfer_ratio(
+                    rebuild["process"]["process_write_transfer_bytes"],
+                    rebuild_source_bytes,
+                    rebuild_database_bytes,
+                ),
+            }
+        )
+    return evaluation
 
 
 def evaluate_case(
@@ -836,8 +1582,45 @@ def evaluate_case(
     all_limits = preregistration["thresholds"]["all"]
     limits = preregistration["thresholds"][result["scale"]]
     report = result["scan"]["report"]
+    scan_process = result["scan"]["process"]
+    unchanged_process = result["unchanged_refresh"]["process"]
     indexed_files = result["settings"]["report"]["index"]["files"]
+    settings = result["settings"]["report"]
+    database_settings = settings["database"]
+    operating_profile = database_settings["operating_profile"]
+    telemetry = settings["telemetry"]
+    profile = result["database_profile"]
     corpus_limits = preregistration["corpora"][result["scale"]]
+    logical_cpus = os.cpu_count() or 1
+    worker_budget = min(
+        all_limits["maximum_worker_processes"],
+        max(
+            1,
+            math.ceil(
+                logical_cpus
+                * all_limits["maximum_worker_processes_per_logical_cpu"]
+            ),
+        ),
+    )
+    thread_budget = min(
+        all_limits["maximum_process_tree_threads"],
+        max(
+            1,
+            math.ceil(
+                logical_cpus
+                * all_limits["maximum_process_tree_threads_per_logical_cpu"]
+            ),
+        ),
+    )
+    process_io = evaluate_process_io_contract(result, preregistration)
+    full_read_ratio = process_io["full_source_input_read_ratio"]
+    full_write_ratio = process_io["full_source_input_write_ratio"]
+    full_output_efficiency_read_ratio = process_io[
+        "full_output_efficiency_read_ratio"
+    ]
+    full_output_efficiency_write_ratio = process_io[
+        "full_output_efficiency_write_ratio"
+    ]
     checks = [
         (
             "minimum indexed files",
@@ -855,6 +1638,14 @@ def evaluate_case(
             <= limits["maximum_full_scan_seconds"],
         ),
         (
+            "MCP startup milliseconds",
+            result["queries"]["startup_ms"],
+            "<=",
+            all_limits["maximum_mcp_startup_milliseconds"],
+            result["queries"]["startup_ms"]
+            <= all_limits["maximum_mcp_startup_milliseconds"],
+        ),
+        (
             "full scan peak RSS bytes",
             result["scan"]["process"]["peak_rss_bytes"],
             "<=",
@@ -863,12 +1654,26 @@ def evaluate_case(
             <= limits["maximum_peak_rss_bytes"],
         ),
         (
-            "worker processes",
-            result["scan"]["process"]["peak_worker_processes"],
+            "worker process bound",
+            result["scan"]["process"]["worker_process_bound"],
             "<=",
-            all_limits["maximum_worker_processes"],
-            result["scan"]["process"]["peak_worker_processes"]
-            <= all_limits["maximum_worker_processes"],
+            worker_budget,
+            result["scan"]["process"]["worker_process_bound"]
+            <= worker_budget,
+        ),
+        (
+            "reported parser workers",
+            report["symbols"]["max_workers"],
+            "<=",
+            worker_budget,
+            report["symbols"]["max_workers"] <= worker_budget,
+        ),
+        (
+            "process-tree threads",
+            scan_process["peak_threads"],
+            "<=",
+            thread_budget,
+            scan_process["peak_threads"] <= thread_budget,
         ),
         (
             "unchanged refresh wall seconds",
@@ -879,11 +1684,11 @@ def evaluate_case(
             <= limits["maximum_unchanged_refresh_seconds"],
         ),
         (
-            "healthy query p95 milliseconds",
-            result["queries"]["healthy_query_p95_ms"],
+            "repeated query p95 milliseconds",
+            result["queries"]["repeated_query_p95_ms"],
             "<=",
             limits["maximum_query_p95_milliseconds"],
-            result["queries"]["healthy_query_p95_ms"]
+            result["queries"]["repeated_query_p95_ms"]
             <= limits["maximum_query_p95_milliseconds"],
         ),
         (
@@ -903,12 +1708,158 @@ def evaluate_case(
             <= all_limits["maximum_retained_rss_growth_bytes"],
         ),
         (
+            "retained thread growth",
+            result["queries"]["retained_thread_growth"],
+            "<=",
+            all_limits["maximum_retained_thread_growth"],
+            result["queries"]["retained_thread_growth"]
+            <= all_limits["maximum_retained_thread_growth"],
+        ),
+        (
+            "retained child process growth",
+            result["queries"]["retained_child_process_growth"],
+            "==",
+            0,
+            result["queries"]["retained_child_process_growth"] == 0,
+        ),
+        (
             "persistent bytes",
             result["persistent"]["total_bytes"],
             "<=",
             limits["maximum_persistent_bytes"],
             result["persistent"]["total_bytes"]
             <= limits["maximum_persistent_bytes"],
+        ),
+        (
+            "post-scan database bytes",
+            result["scan"]["post_run_database_bytes"],
+            "<=",
+            limits["maximum_database_bytes"],
+            result["scan"]["post_run_database_bytes"]
+            <= limits["maximum_database_bytes"],
+        ),
+        (
+            "final database bytes",
+            result["persistent"]["database_bytes"],
+            "<=",
+            limits["maximum_database_bytes"],
+            result["persistent"]["database_bytes"]
+            <= limits["maximum_database_bytes"],
+        ),
+        (
+            "complete terminal scan I/O observation",
+            scan_process["terminal_io_complete"],
+            "==",
+            True,
+            scan_process["terminal_io_complete"],
+        ),
+        (
+            "complete terminal unchanged-refresh I/O observation",
+            unchanged_process["terminal_io_complete"],
+            "==",
+            True,
+            unchanged_process["terminal_io_complete"],
+        ),
+        (
+            "full scan source/input read-transfer amplification ratio (reported)",
+            round(full_read_ratio, 6),
+            "reported",
+            None,
+            True,
+        ),
+        (
+            "full scan output-efficiency read-transfer ratio",
+            round(full_output_efficiency_read_ratio, 6),
+            "<=",
+            all_limits["maximum_database_adjusted_read_transfer_ratio"],
+            full_output_efficiency_read_ratio
+            <= all_limits["maximum_database_adjusted_read_transfer_ratio"],
+        ),
+        (
+            "full scan process read-transfer bytes",
+            scan_process["process_read_transfer_bytes"],
+            "<=",
+            limits["maximum_full_process_read_transfer_bytes"],
+            process_io["full_read_transfer_within_absolute_cap"],
+        ),
+        (
+            "full scan source/input write-transfer amplification ratio (reported)",
+            round(full_write_ratio, 6),
+            "reported",
+            None,
+            True,
+        ),
+        (
+            "full scan output-efficiency write-transfer ratio",
+            round(full_output_efficiency_write_ratio, 6),
+            "<=",
+            all_limits["maximum_database_adjusted_write_transfer_ratio"],
+            full_output_efficiency_write_ratio
+            <= all_limits["maximum_database_adjusted_write_transfer_ratio"],
+        ),
+        (
+            "full scan process write-transfer bytes",
+            scan_process["process_write_transfer_bytes"],
+            "<=",
+            limits["maximum_full_process_write_transfer_bytes"],
+            process_io["full_write_transfer_within_absolute_cap"],
+        ),
+        (
+            "unchanged refresh process read-transfer bytes",
+            unchanged_process["process_read_transfer_bytes"],
+            "<=",
+            limits["maximum_unchanged_refresh_process_read_transfer_bytes"],
+            unchanged_process["process_read_transfer_bytes"]
+            <= limits["maximum_unchanged_refresh_process_read_transfer_bytes"],
+        ),
+        (
+            "unchanged refresh process write-transfer bytes",
+            unchanged_process["process_write_transfer_bytes"],
+            "==",
+            0,
+            unchanged_process["process_write_transfer_bytes"] == 0,
+        ),
+        (
+            "peak WAL bytes",
+            max(
+                scan_process["peak_storage"]["wal_bytes"],
+                unchanged_process["peak_storage"]["wal_bytes"],
+            ),
+            "<=",
+            all_limits["maximum_peak_wal_bytes"],
+            max(
+                scan_process["peak_storage"]["wal_bytes"],
+                unchanged_process["peak_storage"]["wal_bytes"],
+            )
+            <= all_limits["maximum_peak_wal_bytes"],
+        ),
+        (
+            "peak staging bytes",
+            max(
+                scan_process["peak_storage"]["staging_bytes"],
+                unchanged_process["peak_storage"]["staging_bytes"],
+            ),
+            "<=",
+            all_limits["maximum_peak_staging_bytes"],
+            max(
+                scan_process["peak_storage"]["staging_bytes"],
+                unchanged_process["peak_storage"]["staging_bytes"],
+            )
+            <= all_limits["maximum_peak_staging_bytes"],
+        ),
+        (
+            "final WAL bytes",
+            result["persistent"]["wal_bytes"],
+            "==",
+            0,
+            result["persistent"]["wal_bytes"] == 0,
+        ),
+        (
+            "final graph stages",
+            result["persistent"]["stage_directories"],
+            "==",
+            0,
+            result["persistent"]["stage_directories"] == 0,
         ),
         (
             "symbol parse timeouts",
@@ -937,7 +1888,111 @@ def evaluate_case(
             ]
             == "wal",
         ),
+        (
+            "schema compatibility",
+            database_settings["schema"]["compatibility"],
+            "==",
+            "current",
+            database_settings["schema"]["compatibility"] == "current"
+            and database_settings["schema"]["runtime_version"]
+            == database_settings["schema"]["stored_version"],
+        ),
+        (
+            "synchronous mode",
+            operating_profile["observed_synchronous_mode"],
+            "==",
+            "full",
+            operating_profile["observed_synchronous_mode"] == "full",
+        ),
+        (
+            "normal busy timeout milliseconds",
+            telemetry["normal_busy_timeout_ms"],
+            "==",
+            5000,
+            telemetry["normal_busy_timeout_ms"] == 5000
+            and telemetry["connection_busy_timeout_ms"] == 5000,
+        ),
+        (
+            "telemetry busy timeout milliseconds",
+            telemetry["telemetry_busy_timeout_ms"],
+            "==",
+            25,
+            telemetry["telemetry_busy_timeout_ms"] == 25,
+        ),
+        (
+            "WAL autocheckpoint pages",
+            telemetry["wal_autocheckpoint_pages"],
+            "==",
+            1000,
+            telemetry["wal_autocheckpoint_pages"] == 1000,
+        ),
+        (
+            "telemetry-disabled checkpoint state",
+            {
+                "raw_rows": telemetry["raw_rows"],
+                "writes_since_checkpoint": telemetry["writes_since_checkpoint"],
+                "checkpoint_state": telemetry["checkpoint_state"],
+            },
+            "==",
+            {
+                "raw_rows": 0,
+                "writes_since_checkpoint": 0,
+                "checkpoint_state": "not_due",
+            },
+            telemetry["raw_rows"] == 0
+            and telemetry["writes_since_checkpoint"] == 0
+            and telemetry["checkpoint_state"] == "not_due",
+        ),
+        (
+            "SQLite statistics policy",
+            {
+                "policy": telemetry["statistics_policy"],
+                "state": telemetry["statistics_state"],
+                "sqlite_stat1_present": profile["sqlite_stat1_present"],
+            },
+            "==",
+            {
+                "policy": "not_configured",
+                "state": "not_initialized",
+                "sqlite_stat1_present": False,
+            },
+            telemetry["statistics_policy"] == "not_configured"
+            and telemetry["statistics_state"] == "not_initialized"
+            and not profile["sqlite_stat1_present"],
+        ),
+        (
+            "database quick check",
+            profile["quick_check"],
+            "==",
+            "ok",
+            profile["quick_check"] == "ok",
+        ),
+        (
+            "database page bytes",
+            profile["page_bytes"],
+            "==",
+            result["persistent"]["database_bytes"],
+            profile["page_bytes"] == result["persistent"]["database_bytes"],
+        ),
+        (
+            "database freelist ratio",
+            profile["freelist_ratio"],
+            "<=",
+            all_limits["maximum_freelist_ratio"],
+            profile["freelist_ratio"] <= all_limits["maximum_freelist_ratio"],
+        ),
     ]
+    if "minimum_scan_one_core_cpu_percent" in limits:
+        checks.append(
+            (
+                "scan one-core CPU percent",
+                scan_process["one_core_cpu_percent"],
+                ">=",
+                limits["minimum_scan_one_core_cpu_percent"],
+                scan_process["one_core_cpu_percent"]
+                >= limits["minimum_scan_one_core_cpu_percent"],
+            )
+        )
     if "maximum_indexed_files" in corpus_limits:
         maximum = corpus_limits["maximum_indexed_files"]
         checks.append(
@@ -961,14 +2016,35 @@ def evaluate_case(
             )
         )
 
-    healthy_calls = [
+    repeated_calls = [
         call
         for call in result["queries"]["calls"]
-        if call["phase"].startswith("healthy_epoch_")
+        if call["phase"].startswith("repeated_query_")
     ]
+    publication = result["queries"]["stable_publication"]
+    checks.extend(
+        [
+            (
+                "stable publication starts complete",
+                publication["before"],
+                "complete",
+                "stable complete publication with fingerprint",
+                publication["before"]["state"] == "complete"
+                and publication["before"]["generation"] > 0
+                and bool(publication["before"]["contract_fingerprint"]),
+            ),
+            (
+                "publication remains stable across repeated queries",
+                publication["after"],
+                "==",
+                publication["before"],
+                publication["stable"],
+            ),
+        ]
+    )
     bounded_reads = [
-        call["process_io"]["read_bytes"]
-        for call in healthy_calls
+        call["process_io"]["read_transfer_bytes"]
+        for call in repeated_calls
         if call["tool"] != "atlas_search"
     ]
     maximum_bounded_read = max(bounded_reads, default=0)
@@ -982,10 +2058,46 @@ def evaluate_case(
             <= all_limits["maximum_bounded_query_process_read_bytes"],
         )
     )
+    maximum_read_count = max(
+        (
+                call["process_io"]["read_operations"]
+            for call in repeated_calls
+            if call["tool"] != "atlas_search"
+        ),
+        default=0,
+    )
+    checks.append(
+        (
+            "bounded query process read operations",
+            maximum_read_count,
+            "<=",
+            all_limits["maximum_bounded_query_process_read_count"],
+            maximum_read_count
+            <= all_limits["maximum_bounded_query_process_read_count"],
+        )
+    )
+    for key in ("active_nodes", "visited_nodes"):
+        values = [
+            call["work"][key]
+            for call in repeated_calls
+            if call["work"][key] is not None
+        ]
+        checks.append(
+            (
+                f"bounded query {key.replace('_', ' ')}",
+                max(values, default=0),
+                "<=",
+                all_limits["maximum_relation_database_requested_rows"],
+                all(
+                    value <= all_limits["maximum_relation_database_requested_rows"]
+                    for value in values
+                ),
+            )
+        )
 
     fallback_calls = [
         call
-        for call in healthy_calls
+        for call in repeated_calls
         if call["tool"] == "atlas_search" and call["arguments"].get("regex") is True
     ]
     fallback_bytes = [call["work"]["searched_bytes"] for call in fallback_calls]
@@ -1035,7 +2147,7 @@ def evaluate_case(
     )
 
     relation_calls = [
-        call for call in healthy_calls if call["tool"] == "atlas_symbol_relations"
+        call for call in repeated_calls if call["tool"] == "atlas_symbol_relations"
     ]
     checks.append(
         (
@@ -1090,11 +2202,24 @@ def evaluate_case(
         incremental = result["incremental"]
         before = incremental["before"]
         narrow = incremental["narrow"]
-        guidance = incremental["expanded"]["guidance"]
+        expanded = incremental["expanded"]
+        guidance = expanded["guidance"]
         rebuild = incremental["expanded"]["rebuild"]
         caller_files = preregistration["corpora"]["medium"]["caller_files"]
+        guidance_report = guidance["report"]
+        guidance_changed = guidance_report.get("changed")
+        guidance_sample_paths = guidance_report.get("sample_paths")
+        rebuild_read_ratio = process_io["rebuild_input_efficiency_read_ratio"]
+        rebuild_write_ratio = process_io["rebuild_input_efficiency_write_ratio"]
         checks.extend(
             [
+                (
+                    "complete narrow terminal I/O observation",
+                    narrow["process"]["terminal_io_complete"],
+                    "==",
+                    True,
+                    narrow["process"]["terminal_io_complete"],
+                ),
                 (
                     "narrow text candidates",
                     narrow["report"]["text_index"]["candidates"],
@@ -1110,11 +2235,27 @@ def evaluate_case(
                     narrow["report"]["last_symbols"]["parsed"] == 1,
                 ),
                 (
+                    "narrow watcher readiness publication",
+                    narrow["process"]["readiness_generation"],
+                    "==",
+                    before["generation"] + 1,
+                    narrow["process"]["readiness_generation"]
+                    == before["generation"] + 1,
+                ),
+                (
                     "narrow publication generation",
                     narrow["counts"]["generation"],
                     "==",
-                    before["generation"] + 1,
-                    narrow["counts"]["generation"] == before["generation"] + 1,
+                    narrow["process"]["readiness_generation"] + 1,
+                    narrow["counts"]["generation"]
+                    == narrow["process"]["readiness_generation"] + 1,
+                ),
+                (
+                    "narrow watcher backend",
+                    narrow["report"]["mode"],
+                    "==",
+                    "notify",
+                    narrow["report"]["mode"] == "notify",
                 ),
                 (
                     "narrow relation resolution",
@@ -1133,6 +2274,125 @@ def evaluate_case(
                     <= limits["maximum_unchanged_refresh_seconds"],
                 ),
                 (
+                    "narrow refresh process read-transfer bytes",
+                    narrow["process"]["process_read_transfer_bytes"],
+                    "<=",
+                    all_limits["maximum_narrow_refresh_process_read_transfer_bytes"],
+                    narrow["process"]["process_read_transfer_bytes"]
+                    <= all_limits[
+                        "maximum_narrow_refresh_process_read_transfer_bytes"
+                    ],
+                ),
+                (
+                    "narrow refresh process write-transfer bytes",
+                    narrow["process"]["process_write_transfer_bytes"],
+                    "<=",
+                    all_limits["maximum_narrow_refresh_process_write_transfer_bytes"],
+                    narrow["process"]["process_write_transfer_bytes"]
+                    <= all_limits[
+                        "maximum_narrow_refresh_process_write_transfer_bytes"
+                    ],
+                ),
+                (
+                    "publication writer probe attempts",
+                    narrow["process"]["writer_availability"]["attempts"],
+                    ">",
+                    0,
+                    narrow["process"]["writer_availability"]["attempts"] > 0,
+                ),
+                (
+                    "publication writer-unavailable upper bound seconds",
+                    narrow["process"]["writer_availability"][
+                        "maximum_busy_upper_bound_seconds"
+                    ],
+                    "<=",
+                    all_limits[
+                        "maximum_publication_writer_unavailable_seconds"
+                    ],
+                    narrow["process"]["writer_availability"][
+                        "maximum_busy_upper_bound_seconds"
+                    ]
+                    <= all_limits[
+                        "maximum_publication_writer_unavailable_seconds"
+                    ],
+                ),
+                (
+                    "expanded watcher readiness publication",
+                    guidance["process"]["readiness_generation"],
+                    "==",
+                    narrow["counts"]["generation"] + 1,
+                    guidance["process"]["readiness_generation"]
+                    == narrow["counts"]["generation"] + 1,
+                ),
+                (
+                    "complete expanded terminal I/O observation",
+                    guidance["process"]["terminal_io_complete"],
+                    "==",
+                    True,
+                    guidance["process"]["terminal_io_complete"],
+                ),
+                (
+                    "expanded closure guidance scope",
+                    guidance_report.get("scope"),
+                    "==",
+                    "full",
+                    guidance_report.get("scope") == "full",
+                ),
+                (
+                    "expanded closure changed graph footprint",
+                    guidance_changed,
+                    ">",
+                    caller_files,
+                    isinstance(guidance_changed, int)
+                    and guidance_changed > caller_files,
+                ),
+                (
+                    "expanded closure modified graph footprint",
+                    guidance_report.get("modified"),
+                    "==",
+                    guidance_changed,
+                    isinstance(guidance_changed, int)
+                    and guidance_report.get("modified") == guidance_changed,
+                ),
+                (
+                    "expanded closure added graph footprint",
+                    guidance_report.get("added"),
+                    "==",
+                    0,
+                    guidance_report.get("added") == 0,
+                ),
+                (
+                    "expanded closure removed graph footprint",
+                    guidance_report.get("removed"),
+                    "==",
+                    0,
+                    guidance_report.get("removed") == 0,
+                ),
+                (
+                    "expanded closure sample path count",
+                    (
+                        len(guidance_sample_paths)
+                        if isinstance(guidance_sample_paths, list)
+                        else None
+                    ),
+                    "between",
+                    f"1..{caller_files}",
+                    isinstance(guidance_sample_paths, list)
+                    and 0 < len(guidance_sample_paths) <= caller_files,
+                ),
+                (
+                    "expanded closure sample identifies fixture source",
+                    guidance_sample_paths,
+                    "contains",
+                    "src/hub.rs or src/caller_*.rs",
+                    isinstance(guidance_sample_paths, list)
+                    and any(
+                        path == "src/hub.rs" or path.startswith("src/caller_")
+                        for path in guidance_sample_paths
+                        if isinstance(path, str)
+                    ),
+                ),
+                (
                     "expanded closure returns refresh guidance",
                     guidance["report"]["status"],
                     "==",
@@ -1140,25 +2400,83 @@ def evaluate_case(
                     guidance["report"]["status"] == "refresh_required",
                 ),
                 (
+                    "expanded closure guidance reason",
+                    guidance["report"]["reason"],
+                    "==",
+                    "dependency_closure_limit",
+                    guidance["report"]["reason"] == "dependency_closure_limit",
+                ),
+                (
                     "expanded guidance preserves generation",
                     guidance["counts"]["generation"],
                     "==",
-                    narrow["counts"]["generation"],
-                    guidance["counts"] == narrow["counts"],
+                    guidance["process"]["readiness_generation"],
+                    guidance["counts"]["generation"]
+                    == guidance["process"]["readiness_generation"],
                 ),
                 (
-                    "expanded guidance writes no database bytes",
-                    guidance["process"]["write_bytes"],
-                    "==",
+                    "expanded guidance wall seconds",
+                    guidance["process"]["edit_to_complete_seconds"],
+                    "<=",
+                    limits["maximum_full_scan_seconds"],
+                    guidance["process"]["edit_to_complete_seconds"]
+                    <= limits["maximum_full_scan_seconds"],
+                ),
+                (
+                    "expanded guidance process read-transfer bytes",
+                    guidance["process"]["process_read_transfer_bytes"],
+                    "<=",
+                    all_limits[
+                        "maximum_expanded_guidance_process_read_transfer_bytes"
+                    ],
+                    process_io["expanded_guidance_read_within_absolute_cap"],
+                ),
+                (
+                    "expanded guidance process write-transfer bytes",
+                    guidance["process"]["process_write_transfer_bytes"],
+                    "<=",
+                    all_limits[
+                        "maximum_expanded_guidance_process_write_transfer_bytes"
+                    ],
+                    process_io["expanded_guidance_write_within_absolute_cap"],
+                ),
+                (
+                    "expanded guidance writer probe attempts",
+                    guidance["process"]["writer_availability"]["attempts"],
+                    ">",
                     0,
-                    guidance["process"]["write_bytes"] == 0,
+                    guidance["process"]["writer_availability"]["attempts"] > 0,
+                ),
+                (
+                    "expanded guidance writer-unavailable seconds",
+                    guidance["process"]["writer_availability"][
+                        "maximum_busy_upper_bound_seconds"
+                    ],
+                    "<=",
+                    all_limits[
+                        "maximum_publication_writer_unavailable_seconds"
+                    ],
+                    guidance["process"]["writer_availability"][
+                        "maximum_busy_upper_bound_seconds"
+                    ]
+                    <= all_limits[
+                        "maximum_publication_writer_unavailable_seconds"
+                    ],
+                ),
+                (
+                    "complete rebuild terminal I/O observation",
+                    rebuild["process"]["terminal_io_complete"],
+                    "==",
+                    True,
+                    rebuild["process"]["terminal_io_complete"],
                 ),
                 (
                     "explicit rebuild generation",
                     rebuild["counts"]["generation"],
                     "==",
-                    narrow["counts"]["generation"] + 1,
-                    rebuild["counts"]["generation"] == narrow["counts"]["generation"] + 1,
+                    guidance["counts"]["generation"] + 1,
+                    rebuild["counts"]["generation"]
+                    == guidance["counts"]["generation"] + 1,
                 ),
                 (
                     "explicit rebuild resolved relations",
@@ -1184,6 +2502,45 @@ def evaluate_case(
                     rebuild["process"]["wall_seconds"]
                     <= limits["maximum_full_scan_seconds"],
                 ),
+                (
+                    "explicit rebuild input-efficiency read-transfer ratio",
+                    round(rebuild_read_ratio, 6),
+                    "<=",
+                    all_limits["maximum_database_adjusted_read_transfer_ratio"],
+                    rebuild_read_ratio
+                    <= all_limits["maximum_database_adjusted_read_transfer_ratio"],
+                ),
+                (
+                    "explicit rebuild process read-transfer bytes",
+                    rebuild["process"]["process_read_transfer_bytes"],
+                    "<=",
+                    limits["maximum_full_process_read_transfer_bytes"],
+                    rebuild["process"]["process_read_transfer_bytes"]
+                    <= limits["maximum_full_process_read_transfer_bytes"],
+                ),
+                (
+                    "explicit rebuild input-efficiency write-transfer ratio",
+                    round(rebuild_write_ratio, 6),
+                    "<=",
+                    all_limits["maximum_database_adjusted_write_transfer_ratio"],
+                    rebuild_write_ratio
+                    <= all_limits["maximum_database_adjusted_write_transfer_ratio"],
+                ),
+                (
+                    "explicit rebuild process write-transfer bytes",
+                    rebuild["process"]["process_write_transfer_bytes"],
+                    "<=",
+                    limits["maximum_full_process_write_transfer_bytes"],
+                    rebuild["process"]["process_write_transfer_bytes"]
+                    <= limits["maximum_full_process_write_transfer_bytes"],
+                ),
+                (
+                    "incremental and rebuild leave no graph stage",
+                    result["persistent"]["stage_directories"],
+                    "==",
+                    0,
+                    result["persistent"]["stage_directories"] == 0,
+                ),
             ]
         )
     return [
@@ -1198,35 +2555,481 @@ def evaluate_case(
     ]
 
 
-def concurrent_isolation(
+def run_watch_once(
     runtime: Path,
-    roots: list[Path],
+    root: Path,
     env: dict[str, str],
     timeout_seconds: float,
 ) -> dict[str, Any]:
+    return run_measured(
+        [
+            str(runtime),
+            "--require-version",
+            "0.4.0",
+            "--format",
+            "json",
+            "watch",
+            "--once",
+            ".",
+        ],
+        cwd=root,
+        env=env,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def aggregate_process_metrics(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return conservative host-wide upper bounds from concurrent process runs."""
+    return {
+        "method": "sum-of-per-process-peaks-conservative-upper-bound",
+        "peak_rss_bytes": sum(run["peak_rss_bytes"] for run in runs),
+        "peak_worker_processes": sum(
+            run["peak_worker_processes"] for run in runs
+        ),
+        "worker_process_bound": sum(
+            run["worker_process_bound"] for run in runs
+        ),
+        "peak_threads": sum(run["peak_threads"] for run in runs),
+        "cpu_seconds": round(sum(run["cpu_seconds"] for run in runs), 6),
+        "process_read_transfer_bytes": sum(
+            run["process_read_transfer_bytes"] for run in runs
+        ),
+        "process_write_transfer_bytes": sum(
+            run["process_write_transfer_bytes"] for run in runs
+        ),
+        "terminal_io_complete": all(
+            run["terminal_io_complete"] for run in runs
+        ),
+    }
+
+
+def concurrent_isolation(
+    runtime: Path,
+    work_root: Path,
+    env: dict[str, str],
+    timeout_seconds: float,
+    caller_files: int,
+    thresholds: dict[str, Any],
+) -> dict[str, Any]:
+    roots = [work_root / "concurrent-a", work_root / "concurrent-b"]
+    for root in roots:
+        prepare_medium(root, caller_files)
+        measured_json(
+            runtime,
+            ["scan", "."],
+            cwd=root,
+            env=env,
+            timeout_seconds=timeout_seconds,
+        )
+    databases = [root / ".projectatlas/projectatlas.db" for root in roots]
+    before = [database_counts(database) for database in databases]
+    markers = ["concurrent-root-a", "concurrent-root-b"]
+    for root, marker in zip(roots, markers, strict=True):
+        with (root / "src/caller_0000.rs").open(
+            "a", encoding="utf-8", newline="\n"
+        ) as stream:
+            stream.write(f"// {marker}\n")
+
     started = time.perf_counter()
     with ThreadPoolExecutor(max_workers=len(roots)) as pool:
-        futures = [
-            pool.submit(
-                measured_json,
-                runtime,
-                ["watch", "--once", "."],
-                cwd=root,
-                env=env,
-                timeout_seconds=timeout_seconds,
+        results = list(
+            pool.map(
+                lambda root: run_watch_once(
+                    runtime, root, env, timeout_seconds
+                ),
+                roots,
             )
-            for root in roots
-        ]
-        results = [future.result()[0] for future in futures]
+        )
+    cross_root_resources = aggregate_process_metrics(results)
+    cross_root: list[dict[str, Any]] = []
+    for index, (root, database, own_marker, foreign_marker) in enumerate(
+        zip(roots, databases, markers, reversed(markers), strict=True)
+    ):
+        after = database_counts(database)
+        profile = database_profile(database)
+        with sqlite3.connect(database) as connection:
+            content = str(
+                connection.execute(
+                    "SELECT content FROM file_texts WHERE path = 'src/caller_0000.rs'"
+                ).fetchone()[0]
+            )
+        expected_root = root.resolve().as_posix()
+        observed_root = str(profile["project_root"]).replace("\\", "/")
+        root_matches = (
+            observed_root.casefold() == expected_root.casefold()
+            if os.name == "nt"
+            else observed_root == expected_root
+        )
+        cross_root.append(
+            {
+                "root": str(root),
+                "before": before[index],
+                "after": after,
+                "profile": profile,
+                "own_marker_present": own_marker in content,
+                "foreign_marker_absent": foreign_marker not in content,
+                "root_matches": root_matches,
+                "stage_directories": storage_state(root)["stage_directories"],
+            }
+        )
+
+    same_root = roots[0]
+    same_database = databases[0]
+    same_before = database_counts(same_database)
+    with (same_root / "src/caller_0001.rs").open(
+        "a", encoding="utf-8", newline="\n"
+    ) as stream:
+        stream.write("// same-root-race\n")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        same_runs = list(
+            pool.map(
+                lambda _: run_watch_once(
+                    runtime, same_root, env, timeout_seconds
+                ),
+                range(2),
+            )
+        )
+    same_root_resources = aggregate_process_metrics(same_runs)
+    same_after = database_counts(same_database)
+    accepted_same_results = all(
+        not run["timed_out"]
+        and (
+            run["returncode"] == 0
+        or (
+            run["returncode"] != 0
+            and any(
+                marker in (run["stdout"] + run["stderr"]).lower()
+                for marker in ("busy", "locked", "refresh_required")
+            )
+        )
+        )
+        for run in same_runs
+    )
+    cross_root_passed = all(
+        run["returncode"] == 0 and not run["timed_out"] for run in results
+    ) and all(
+        row["after"]["generation"] == row["before"]["generation"] + 1
+        and row["profile"]["quick_check"] == "ok"
+        and row["own_marker_present"]
+        and row["foreign_marker_absent"]
+        and row["root_matches"]
+        and row["stage_directories"] == 0
+        for row in cross_root
+    )
+    logical_cpus = os.cpu_count() or 1
+    worker_budget = min(
+        thresholds["maximum_worker_processes"],
+        max(
+            1,
+            math.ceil(
+                logical_cpus
+                * thresholds["maximum_worker_processes_per_logical_cpu"]
+            ),
+        ),
+    )
+    thread_budget = min(
+        thresholds["maximum_process_tree_threads"],
+        max(
+            1,
+            math.ceil(
+                logical_cpus
+                * thresholds["maximum_process_tree_threads_per_logical_cpu"]
+            ),
+        ),
+    )
+    resource_envelope_passed = all(
+        resources["terminal_io_complete"]
+        and resources["worker_process_bound"] <= worker_budget
+        and resources["peak_threads"] <= thread_budget
+        and resources["peak_rss_bytes"]
+        <= thresholds["maximum_concurrent_peak_rss_bytes"]
+        for resources in (cross_root_resources, same_root_resources)
+    )
+    same_root_passed = (
+        accepted_same_results
+        and any(run["returncode"] == 0 for run in same_runs)
+        and same_after["generation"] == same_before["generation"] + 1
+        and database_profile(same_database)["quick_check"] == "ok"
+        and storage_state(same_root)["stage_directories"] == 0
+    )
     return {
         "wall_seconds": round(time.perf_counter() - started, 6),
         "roots": [str(root) for root in roots],
         "runs": results,
-        "passed": all(result["returncode"] == 0 for result in results),
+        "cross_root_resources": cross_root_resources,
+        "cross_root": cross_root,
+        "same_root": {
+            "before": same_before,
+            "after": same_after,
+            "runs": same_runs,
+            "resources": same_root_resources,
+            "passed": same_root_passed,
+        },
+        "resource_envelope": {
+            "logical_cpus": logical_cpus,
+            "worker_budget": worker_budget,
+            "thread_budget": thread_budget,
+            "peak_rss_budget": thresholds["maximum_concurrent_peak_rss_bytes"],
+            "passed": resource_envelope_passed,
+        },
+        "passed": cross_root_passed
+        and same_root_passed
+        and resource_envelope_passed,
     }
 
 
-def cancellation_quiescence(
+def publication_contention(
+    runtime: Path,
+    root: Path,
+    env: dict[str, str],
+    timeout_seconds: float,
+    maximum_failure_seconds: float,
+) -> dict[str, Any]:
+    database = root / ".projectatlas/projectatlas.db"
+    before = database_counts(database)
+    with (root / "src/caller_0002.rs").open(
+        "a", encoding="utf-8", newline="\n"
+    ) as stream:
+        stream.write("// publication-contention\n")
+    blocker = sqlite3.connect(database)
+    try:
+        blocker.execute("BEGIN IMMEDIATE")
+        failed = run_watch_once(runtime, root, env, maximum_failure_seconds)
+        after_failure = database_counts(database)
+    finally:
+        blocker.rollback()
+        blocker.close()
+    retry = run_watch_once(runtime, root, env, timeout_seconds)
+    after_retry = database_counts(database)
+    diagnostic = (failed["stdout"] + failed["stderr"]).lower()
+    typed_busy = any(
+        marker in diagnostic
+        for marker in ("database is locked", "database is busy", "writer acquisition")
+    )
+    passed = (
+        failed["returncode"] != 0
+        and not failed["timed_out"]
+        and failed["wall_seconds"] <= maximum_failure_seconds
+        and typed_busy
+        and after_failure == before
+        and retry["returncode"] == 0
+        and after_retry["generation"] == before["generation"] + 1
+        and database_profile(database)["quick_check"] == "ok"
+        and storage_state(root)["stage_directories"] == 0
+    )
+    return {
+        "before": before,
+        "blocked_run": failed,
+        "after_blocked_run": after_failure,
+        "typed_busy": typed_busy,
+        "retry": retry,
+        "after_retry": after_retry,
+        "passed": passed,
+    }
+
+
+def cooperative_cancellation_reopen(
+    runtime: Path,
+    root: Path,
+    env: dict[str, str],
+    threshold_seconds: float,
+    request_timeout_seconds: float,
+) -> dict[str, Any]:
+    database = root / ".projectatlas/projectatlas.db"
+    before = database_counts(database)
+    pending = root / "pending-cancellation"
+    pending.mkdir()
+    source = (
+        "pub fn pending_contract() { let value = 1_u64; let _ = value; }\n"
+        * 128
+    )
+    for index in range(512):
+        (pending / f"work-{index:04}.rs").write_text(
+            source, encoding="utf-8", newline="\n"
+        )
+    rpc_timeout_seconds = min(request_timeout_seconds, threshold_seconds)
+    client = McpClient(
+        runtime,
+        root,
+        env,
+        request_timeout_seconds=rpc_timeout_seconds,
+    )
+    known = {client.process.pid}
+    started_text = ""
+    status_text = ""
+    cancel_text = ""
+    terminal_state = None
+    cancellation_seconds = None
+    active_work_observed = False
+    same_client_read = ""
+    state_after_cancel: dict[str, Any] | None = None
+    writer_released = False
+    after = before
+
+    def call_before(
+        mcp_client: McpClient,
+        tool: str,
+        arguments: dict[str, Any],
+        deadline: float,
+    ) -> tuple[str, float]:
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"MCP cancellation flow exceeded its deadline before {tool}"
+            )
+        mcp_client.request_timeout_seconds = min(
+            request_timeout_seconds, remaining
+        )
+        return mcp_client.call(tool, arguments)
+
+    try:
+        state_before = process_tree_state(client.process.pid)
+        started_text, _ = client.call(
+            "atlas_scan",
+            {
+                "project_path": str(root),
+                "path": str(root),
+                "background": True,
+                "max_workers": 1,
+            },
+        )
+        task_id = toon_scalar(started_text, "task_id")
+        if task_id is None:
+            raise RuntimeError(f"background scan omitted task id: {started_text}")
+        active_deadline = time.perf_counter() + threshold_seconds
+        while time.perf_counter() <= active_deadline:
+            status_text, _ = call_before(
+                client,
+                "atlas_task_status",
+                {"task_id": task_id},
+                active_deadline,
+            )
+            known.update(member.pid for member in process_tree(client.process.pid))
+            state = toon_scalar(status_text, "state")
+            if state == "running":
+                active_work_observed = True
+                break
+            if state in {"canceled", "failed", "succeeded"}:
+                break
+            time.sleep(0.025)
+        cancel_started = time.perf_counter()
+        deadline = cancel_started + threshold_seconds
+        cancel_text, _ = call_before(
+            client,
+            "atlas_task_cancel",
+            {"task_id": task_id},
+            deadline,
+        )
+        while time.perf_counter() <= deadline:
+            status_text, _ = call_before(
+                client,
+                "atlas_task_status",
+                {"task_id": task_id},
+                deadline,
+            )
+            known.update(member.pid for member in process_tree(client.process.pid))
+            match = re.search(
+                r"^\s+state: (pending|running|canceled|failed|succeeded)$",
+                status_text,
+                re.MULTILINE,
+            )
+            terminal_state = match.group(1) if match else None
+            if terminal_state in {"canceled", "failed", "succeeded"}:
+                cancellation_seconds = time.perf_counter() - cancel_started
+                break
+            time.sleep(0.025)
+        quiescence_deadline = cancel_started + threshold_seconds
+        while time.perf_counter() <= quiescence_deadline:
+            known.update(member.pid for member in process_tree(client.process.pid))
+            state_after_cancel = process_tree_state(client.process.pid)
+            children = [
+                pid
+                for pid in state_after_cancel["pids"]
+                if pid != client.process.pid
+            ]
+            writer_released = database_writer_available(database)
+            if not children and writer_released:
+                same_client_read, _ = call_before(
+                    client,
+                    "atlas_overview",
+                    {},
+                    quiescence_deadline,
+                )
+                after = database_counts(database)
+                break
+            time.sleep(0.025)
+    finally:
+        client.close()
+    _, cli_settings = measured_json(
+        runtime,
+        ["settings"],
+        cwd=root,
+        env=env,
+        timeout_seconds=threshold_seconds,
+    )
+    reopened = McpClient(
+        runtime,
+        root,
+        env,
+        request_timeout_seconds=request_timeout_seconds,
+    )
+    try:
+        reopened_settings, _ = reopened.call("atlas_settings", {})
+    finally:
+        reopened.close()
+    final = database_counts(database)
+    survivors = []
+    for pid in known:
+        try:
+            process = psutil.Process(pid)
+            if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                survivors.append(pid)
+        except psutil.Error:
+            continue
+    passed = (
+        active_work_observed
+        and terminal_state == "canceled"
+        and cancellation_seconds is not None
+        and cancellation_seconds <= threshold_seconds
+        and "cancellation_requested" in cancel_text
+        and same_client_read.startswith("overview:")
+        and state_after_cancel is not None
+        and state_after_cancel["processes"] == 1
+        and state_after_cancel["threads"] <= state_before["threads"] + 2
+        and writer_released
+        and after == before
+        and final == before
+        and cli_settings["database"]["publication"]["generation"]
+        == before["generation"]
+        and toon_integer(reopened_settings, "generation") == before["generation"]
+        and database_profile(database)["quick_check"] == "ok"
+        and storage_state(root)["stage_directories"] == 0
+        and not survivors
+    )
+    return {
+        "task_start": started_text,
+        "last_status": status_text,
+        "cancel": cancel_text,
+        "active_work_observed": active_work_observed,
+        "terminal_state": terminal_state,
+        "cancellation_seconds": (
+            round(cancellation_seconds, 6)
+            if cancellation_seconds is not None
+            else None
+        ),
+        "before": before,
+        "after": after,
+        "state_before": state_before,
+        "state_after_cancel": state_after_cancel,
+        "same_client_read": same_client_read,
+        "writer_released_before_server_close": writer_released,
+        "final": final,
+        "survivors": survivors,
+        "passed": passed,
+    }
+
+
+def forced_termination_quiescence(
     runtime: Path,
     source_root: Path,
     work_root: Path,
@@ -1256,8 +3059,6 @@ def cancellation_quiescence(
     deadline = time.perf_counter() + 2
     while process.poll() is None and time.perf_counter() < deadline:
         known.update(member.pid for member in process_tree(process.pid))
-        if len(known) > 1:
-            break
         time.sleep(MEASURE_INTERVAL_SECONDS)
     if process.poll() is not None:
         return {
@@ -1284,10 +3085,16 @@ def cancellation_quiescence(
         if not survivors:
             elapsed = time.perf_counter() - requested
             return {
-                "passed": True,
+                "scope": "default-core in-process scan parent",
+                "passed": len(known) == 1,
                 "quiescence_seconds": round(elapsed, 6),
                 "known_processes": len(known),
                 "survivors": [],
+                "reason": (
+                    None
+                    if len(known) == 1
+                    else "default-core scan unexpectedly created child processes"
+                ),
             }
         time.sleep(MEASURE_INTERVAL_SECONDS)
     for pid in survivors:
@@ -1296,11 +3103,151 @@ def cancellation_quiescence(
         except psutil.Error:
             continue
     return {
+        "scope": "default-core in-process scan parent",
         "passed": False,
         "quiescence_seconds": round(time.perf_counter() - requested, 6),
         "known_processes": len(known),
         "survivors": survivors,
     }
+
+
+def publication_identity_errors(
+    preregistration: dict[str, Any],
+    *,
+    git_head: str,
+    runtime_sha256: str,
+    mcp_tools_sha256: str,
+    runtime_info: dict[str, Any],
+    dirty_paths: list[str],
+    preregistration_path: str,
+) -> list[str]:
+    candidate = preregistration["candidate"]
+    errors = []
+    if preregistration.get("status") != "locked_for_final_measurement":
+        errors.append("preregistration is not locked for final measurement")
+    if candidate.get("functional_git_head") != git_head:
+        errors.append("functional Git head does not match the preregistered candidate")
+    if candidate.get("runtime_sha256") != runtime_sha256:
+        errors.append("runtime SHA-256 does not match the preregistered candidate")
+    if candidate.get("mcp_tools_sha256") != mcp_tools_sha256:
+        errors.append("MCP tool inventory/schema digest does not match the candidate")
+    if runtime_info.get("project") != "ProjectAtlas":
+        errors.append("runtime identity is not ProjectAtlas")
+    if runtime_info.get("version") != candidate.get("required_version"):
+        errors.append("runtime version does not match the preregistered candidate")
+    capabilities = set(runtime_info.get("capabilities", []))
+    if not {"mcp", "sqlite", "toon"}.issubset(capabilities):
+        errors.append("runtime omitted required MCP, SQLite, or TOON capability")
+    if runtime_info.get("text_format") != "TOON":
+        errors.append("runtime text format is not TOON")
+    if len(runtime_info.get("mcp_tools", [])) != 40:
+        errors.append("runtime does not advertise the frozen 40-tool MCP surface")
+    unexpected_dirty = [
+        path for path in dirty_paths if path.replace("\\", "/") != preregistration_path
+    ]
+    if unexpected_dirty:
+        errors.append(
+            "tracked benchmark source is dirty outside the preregistration: "
+            + ", ".join(unexpected_dirty)
+        )
+    return errors
+
+
+def validate_publication_identity(
+    runtime: Path,
+    preregistration: dict[str, Any],
+    preregistration_path: Path,
+) -> dict[str, Any]:
+    git_head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+    ).strip()
+    runtime_sha256 = hashlib.sha256(runtime.read_bytes()).hexdigest()
+    runtime_process = subprocess.run(
+        [
+            str(runtime),
+            "--require-version",
+            str(preregistration["candidate"]["required_version"]),
+            "--format",
+            "json",
+            "runtime-info",
+        ],
+        cwd=ROOT,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if runtime_process.returncode != 0:
+        raise RuntimeError(
+            "candidate runtime-info failed before fixture preparation: "
+            + runtime_process.stderr
+        )
+    runtime_info = json.loads(runtime_process.stdout)
+    identity_env = os.environ.copy()
+    identity_env["PROJECTATLAS_NO_TELEMETRY"] = "1"
+    mcp_client = McpClient(
+        runtime,
+        ROOT,
+        identity_env,
+        request_timeout_seconds=preregistration["thresholds"]["all"][
+            "mcp_request_timeout_seconds"
+        ],
+    )
+    try:
+        mcp_tools, _ = mcp_client.tools()
+    finally:
+        mcp_client.close()
+    mcp_tools_sha256 = hashlib.sha256(
+        json.dumps(
+            mcp_tools, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+    ).hexdigest()
+    status_rows = subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=ROOT,
+        text=True,
+    ).splitlines()
+    dirty_paths = [
+        row[3:].split(" -> ", 1)[-1].replace("\\", "/")
+        for row in status_rows
+        if len(row) > 3
+    ]
+    preregistration_relative = preregistration_path.resolve().relative_to(ROOT).as_posix()
+    errors = publication_identity_errors(
+        preregistration,
+        git_head=git_head,
+        runtime_sha256=runtime_sha256,
+        mcp_tools_sha256=mcp_tools_sha256,
+        runtime_info=runtime_info,
+        dirty_paths=dirty_paths,
+        preregistration_path=preregistration_relative,
+    )
+    if errors:
+        raise RuntimeError(
+            "publication candidate identity rejected before fixture preparation: "
+            + "; ".join(errors)
+        )
+    return {
+        "git_head": git_head,
+        "runtime_sha256": runtime_sha256,
+        "mcp_tools_sha256": mcp_tools_sha256,
+        "runtime_info": runtime_info,
+        "dirty_tracked_paths": dirty_paths,
+        "allowed_dirty_path": preregistration_relative,
+    }
+
+
+def write_result(result: dict[str, Any], output: Path) -> None:
+    """Persist every result, then fail the command when any gate rejected it."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(result, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    print(output)
+    if not result["passed"]:
+        raise SystemExit(1)
 
 
 def main() -> None:
@@ -1317,18 +3264,55 @@ def main() -> None:
         help="Use small or medium only for harness smoke; publication requires all.",
     )
     args = parser.parse_args()
+    try:
+        run_benchmark(args)
+    except Exception as error:
+        write_result(
+            {
+                "schema_version": 1,
+                "preregistration": str(args.preregistration.resolve()),
+                "mode": args.only,
+                "final_measurement_eligibility": final_measurement_eligibility(
+                    args.only
+                ),
+                "publication_eligible": False,
+                "passed": False,
+                "failure": {
+                    "type": type(error).__name__,
+                    "message": str(error),
+                },
+            },
+            args.output,
+        )
+
+
+def run_benchmark(args: argparse.Namespace) -> None:
     clear_git_repository_environment()
     runtime = args.runtime.resolve(strict=True)
-    preregistration = json.loads(args.preregistration.read_text(encoding="utf-8"))
+    preregistration_path = args.preregistration.resolve(strict=True)
+    preregistration = json.loads(preregistration_path.read_text(encoding="utf-8"))
+    measurement_eligibility = final_measurement_eligibility(args.only)
+    if (
+        measurement_eligibility["requested"]
+        and not measurement_eligibility["final_platform_eligible"]
+    ):
+        raise RuntimeError(measurement_eligibility["ineligible_reason"])
+    publication_identity = (
+        validate_publication_identity(runtime, preregistration, preregistration_path)
+        if args.only == "all"
+        else None
+    )
     work_root = args.work_root.resolve()
     allowed = (ROOT / "target/benchmarks/system-scale").resolve()
     if work_root == allowed or allowed not in work_root.parents:
-        raise SystemExit(f"--work-root must be a child of {allowed}")
+        raise ValueError(f"--work-root must be a child of {allowed}")
     corpus_cache = args.corpus_cache.resolve()
     if corpus_cache != allowed and allowed not in corpus_cache.parents:
-        raise SystemExit(f"--corpus-cache must be {allowed} or one of its children")
+        raise ValueError(
+            f"--corpus-cache must be {allowed} or one of its children"
+        )
     if corpus_cache == work_root or work_root in corpus_cache.parents:
-        raise SystemExit("--corpus-cache must not be inside --work-root")
+        raise ValueError("--corpus-cache must not be inside --work-root")
     if work_root.exists():
         remove_tree(
             Path(f"\\\\?\\{work_root}") if os.name == "nt" else work_root
@@ -1416,12 +3400,47 @@ def main() -> None:
 
     timeout = preregistration["thresholds"]["all"]["command_timeout_seconds"]
     concurrency = (
-        concurrent_isolation(runtime, [small["clean"], medium], env, timeout)
+        concurrent_isolation(
+            runtime,
+            work_root,
+            env,
+            timeout,
+            preregistration["corpora"]["medium"]["caller_files"],
+            preregistration["thresholds"]["all"],
+        )
         if args.only == "all"
         else None
     )
-    cancellation = (
-        cancellation_quiescence(
+    contention = (
+        publication_contention(
+            runtime,
+            work_root / "concurrent-b",
+            env,
+            timeout,
+            preregistration["thresholds"]["all"][
+                "maximum_contention_failure_seconds"
+            ],
+        )
+        if args.only == "all"
+        else None
+    )
+    cooperative_cancellation = (
+        cooperative_cancellation_reopen(
+            runtime,
+            huge,
+            env,
+            preregistration["thresholds"]["all"][
+                "maximum_cancellation_quiescence_seconds"
+            ],
+            preregistration["thresholds"]["all"][
+                "mcp_request_timeout_seconds"
+            ],
+        )
+        if args.only == "all"
+        else None
+    )
+    default_core_parent_termination = (
+        forced_termination_quiescence(
             runtime,
             huge,
             work_root,
@@ -1435,9 +3454,11 @@ def main() -> None:
     )
     result = {
         "schema_version": 1,
-        "preregistration": str(args.preregistration.resolve()),
+        "preregistration": str(preregistration_path),
+        "effective_preregistration": preregistration,
         "mode": args.only,
-        "publication_eligible": args.only == "all",
+        "final_measurement_eligibility": measurement_eligibility,
+        "publication_eligible": False,
         "candidate": {
             "version": subprocess.check_output([runtime, "--version"], text=True).strip(),
             "runtime": str(runtime),
@@ -1446,6 +3467,7 @@ def main() -> None:
             "git_head": subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
             ).strip(),
+            "publication_identity": publication_identity,
         },
         "environment": {
             "platform": platform.platform(),
@@ -1456,20 +3478,33 @@ def main() -> None:
         },
         "cases": cases,
         "concurrent_isolation": concurrency,
-        "cancellation": cancellation,
+        "publication_contention": contention,
+        "cooperative_cancellation": cooperative_cancellation,
+        "default_core_parent_termination": default_core_parent_termination,
     }
     result["passed"] = (
         all(check["passed"] for case in cases for check in case["checks"])
+        and (
+            args.only != "all"
+            or measurement_eligibility["final_platform_eligible"]
+        )
         and (concurrency is None or concurrency["passed"])
-        and (cancellation is None or cancellation["passed"])
+        and (contention is None or contention["passed"])
+        and (
+            cooperative_cancellation is None
+            or cooperative_cancellation["passed"]
+        )
+        and (
+            default_core_parent_termination is None
+            or default_core_parent_termination["passed"]
+        )
     )
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(result, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-        newline="\n",
+    result["publication_eligible"] = (
+        args.only == "all"
+        and measurement_eligibility["final_platform_eligible"]
+        and result["passed"]
     )
-    print(args.output)
+    write_result(result, args.output)
 
 
 if __name__ == "__main__":
