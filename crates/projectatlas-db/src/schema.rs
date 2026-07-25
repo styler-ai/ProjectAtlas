@@ -394,6 +394,8 @@ const FILE_TEXT_FTS_SCHEMA_SQL: &str = "
 ";
 
 /// Covering access path for bounded import-alias discovery.
+const SYMBOL_RELATION_LOOKUP_INDEX_NAME: &str = "idx_symbol_import_alias_lookup";
+/// DDL for the bounded import-alias discovery access path.
 const SYMBOL_RELATION_LOOKUP_SCHEMA_SQL: &str = "
     CREATE INDEX IF NOT EXISTS idx_symbol_import_alias_lookup
         ON symbol_relations(kind, path, line, source_name, target_name);
@@ -1671,7 +1673,7 @@ fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResul
     Ok(())
 }
 
-/// Validate schema 15 exactly outside the disposable graph tables rebuilt by migration.
+/// Validate schema 15 outside objects introduced or rebuilt by its migration.
 fn validate_disposable_graph_predecessor_shape(connection: &Connection) -> DbResult<()> {
     let expected = schema_contract()?;
     let found = read_schema_contract(connection)?;
@@ -1731,7 +1733,9 @@ fn validate_disposable_graph_predecessor_shape(connection: &Connection) -> DbRes
     let expected_indexes = expected
         .indexes
         .iter()
-        .filter(|index| !index.table.starts_with("graph_"))
+        .filter(|index| {
+            !index.table.starts_with("graph_") && index.name != SYMBOL_RELATION_LOOKUP_INDEX_NAME
+        })
         .collect::<Vec<_>>();
     let found_indexes = found
         .indexes
@@ -2546,6 +2550,13 @@ mod tests {
             drop(connection);
 
             let store = AtlasStore::open_for_project(&db_path, &root)?;
+            store.connection.query_row(
+                "SELECT COUNT(*)
+                 FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup
+                 WHERE kind = 'imports'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
             if read_metadata(&store.connection, SCHEMA_VERSION_KEY)?
                 != Some(SCHEMA_VERSION.to_string())
                 || read_metadata(&store.connection, PROJECT_ROOT_KEY)?
@@ -2726,9 +2737,29 @@ mod tests {
             "lexical-publication",
         )?;
         set_metadata(&store.connection, INDEX_PUBLICATION_GENERATION_KEY, "7")?;
+        store
+            .connection
+            .execute_batch("DROP INDEX idx_symbol_import_alias_lookup")?;
         drop(store);
 
+        let expected_root = normalize_native_path_display(&root);
+        let (preflight, _) = preflight(&database, Some(&expected_root))?;
+        if preflight.state != SchemaState::UpgradeRequired
+            || preflight.schema_version != Some(LEXICAL_SCHEMA_VERSION)
+        {
+            return Err(io::Error::other(
+                "schema-15 preflight did not admit the released index shape",
+            )
+            .into());
+        }
         let reopened = AtlasStore::open_for_project(&database, &root)?;
+        reopened.connection.query_row(
+            "SELECT COUNT(*)
+             FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup
+             WHERE kind = 'imports'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
         let migrated = reopened.connection.query_row(
             "SELECT project_instance_id, active_generation FROM project_identity
               WHERE singleton = 1",
@@ -2788,6 +2819,8 @@ mod tests {
             )
             .into());
         }
+        drop(reopened);
+        drop(AtlasStore::open_for_project(&database, &root)?);
         Ok(())
     }
 
@@ -3224,30 +3257,40 @@ mod tests {
     }
 
     #[test]
-    fn required_graph_index_drift_is_refused_without_mutation() -> Result<(), Box<dyn Error>> {
+    fn required_index_drift_is_refused_without_mutation() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
-        let root = temp.path().join("repository");
-        fs::create_dir_all(&root)?;
-        let db_path = temp.path().join("projectatlas.db");
-        drop(AtlasStore::open_for_project(&db_path, &root)?);
-        {
-            let connection = Connection::open(&db_path)?;
-            connection.execute_batch(
-                "DROP INDEX idx_graph_relations_target_kind;
-                 PRAGMA wal_checkpoint(TRUNCATE);",
-            )?;
+        for missing_index in [
+            "idx_graph_relations_target_kind",
+            SYMBOL_RELATION_LOOKUP_INDEX_NAME,
+        ] {
+            let case = temp.path().join(missing_index);
+            let root = case.join("repository");
+            fs::create_dir_all(&root)?;
+            let db_path = case.join("projectatlas.db");
+            drop(AtlasStore::open_for_project(&db_path, &root)?);
+            {
+                let connection = Connection::open(&db_path)?;
+                connection.execute_batch(&format!(
+                    "DROP INDEX {missing_index};
+                     PRAGMA wal_checkpoint(TRUNCATE);"
+                ))?;
+            }
+            let database_before = fs::read(&db_path)?;
+            let inventory_before = directory_entry_names(&case)?;
+            let Err(error) = AtlasStore::open_for_project(&db_path, &root) else {
+                return Err(io::Error::other(format!(
+                    "missing required index {missing_index} unexpectedly passed preflight"
+                ))
+                .into());
+            };
+            if !matches!(error, DbError::SchemaShape { .. }) {
+                return Err(io::Error::other(format!(
+                    "missing required index {missing_index} returned the wrong error"
+                ))
+                .into());
+            }
+            require_unchanged(&case, &db_path, &database_before, &inventory_before)?;
         }
-        let database_before = fs::read(&db_path)?;
-        let inventory_before = directory_entry_names(temp.path())?;
-        let Err(error) = AtlasStore::open_for_project(&db_path, &root) else {
-            return Err(
-                io::Error::other("missing graph index unexpectedly passed preflight").into(),
-            );
-        };
-        if !matches!(error, DbError::SchemaShape { .. }) {
-            return Err(io::Error::other("missing graph index returned the wrong error").into());
-        }
-        require_unchanged(temp.path(), &db_path, &database_before, &inventory_before)?;
         Ok(())
     }
 
@@ -3511,6 +3554,17 @@ mod tests {
             )
             .into());
         }
+        let migrated_index = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'index' AND name = 'idx_symbol_import_alias_lookup'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if migrated_index != 0 {
+            return Err(
+                io::Error::other("failed migration retained the target lookup index").into(),
+            );
+        }
         let publication_keys = connection.query_row(
             "SELECT COUNT(*) FROM metadata WHERE key IN (?1, ?2, ?3)",
             params![
@@ -3556,6 +3610,17 @@ mod tests {
         initialize(&connection, Some(&normalize_native_path_display(&root)))?;
         if read_metadata(&connection, SCHEMA_VERSION_KEY)? != Some(SCHEMA_VERSION.to_string()) {
             return Err(io::Error::other("retry did not advance the final schema version").into());
+        }
+        let migrated_index = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'index' AND name = 'idx_symbol_import_alias_lookup'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if migrated_index != 1 {
+            return Err(
+                io::Error::other("migration retry did not create the target lookup index").into(),
+            );
         }
         let migrated = connection.query_row(
             "SELECT
