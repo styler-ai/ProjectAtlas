@@ -382,19 +382,163 @@ impl From<OptionalParserPackManifestError> for ParserSupervisorError {
     }
 }
 
-/// Metadata used to detect mutation of one already verified payload.
-#[derive(Debug)]
-struct PayloadObservation {
-    /// Canonical payload path.
-    path: PathBuf,
-    /// Manifest-owned payload responsibility.
-    role: ParserPackPayloadRole,
-    /// Exact manifest-bound byte count.
+/// Constant-size filesystem identity used to detect mutation without rehashing a hot path.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FileChangeEpoch {
+    /// Observed file length.
     bytes: u64,
-    /// Exact manifest-bound SHA-256.
-    sha256: String,
     /// Modification timestamp when the host filesystem exposes one.
     modified: Option<SystemTime>,
+    /// Filesystem device identity.
+    #[cfg(unix)]
+    device: u64,
+    /// Filesystem inode identity.
+    #[cfg(unix)]
+    inode: u64,
+    /// Last metadata-change time, which cannot be restored through ordinary mtime APIs.
+    #[cfg(unix)]
+    changed_seconds: i64,
+    /// Nanosecond component of the last metadata-change time.
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+    /// Windows file attributes captured while an owned handle denies writes and replacement.
+    #[cfg(windows)]
+    attributes: u32,
+    /// Windows creation time captured while an owned handle denies writes and replacement.
+    #[cfg(windows)]
+    created: u64,
+}
+
+impl FileChangeEpoch {
+    /// Capture the platform metadata that changes when an observed file is replaced or mutated.
+    fn from_metadata(metadata: &Metadata) -> Self {
+        if !metadata.is_file() {
+            return Self::default();
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            Self {
+                bytes: metadata.len(),
+                modified: metadata.modified().ok(),
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                changed_seconds: metadata.ctime(),
+                changed_nanoseconds: metadata.ctime_nsec(),
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+
+            Self {
+                bytes: metadata.len(),
+                modified: metadata.modified().ok(),
+                attributes: metadata.file_attributes(),
+                created: metadata.creation_time(),
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Self {
+                bytes: metadata.len(),
+                modified: metadata.modified().ok(),
+            }
+        }
+    }
+}
+
+/// Open one observed file while denying Windows write and replacement sharing.
+fn open_observed_file(path: &Path) -> Result<File, ParserSupervisorError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_SHARE_READ: u32 = 1;
+        options.share_mode(FILE_SHARE_READ);
+    }
+    options
+        .open(path)
+        .map_err(|source| ParserSupervisorError::ArtifactRead {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+/// One file observed before digest verification and kept write-locked on Windows.
+#[derive(Debug)]
+struct FileObservation {
+    /// Canonical file path.
+    path: PathBuf,
+    /// Constant-size identity captured before digest verification.
+    epoch: FileChangeEpoch,
+    /// Owned handle that denies Windows write and replacement sharing.
+    #[cfg(windows)]
+    write_guard: Option<File>,
+}
+
+impl FileObservation {
+    /// Capture one regular file before its digest is read and verified.
+    fn capture(path: PathBuf) -> Result<Self, ParserSupervisorError> {
+        let write_guard = open_observed_file(&path)?;
+        let metadata =
+            write_guard
+                .metadata()
+                .map_err(|source| ParserSupervisorError::ArtifactRead {
+                    path: path.clone(),
+                    source,
+                })?;
+        if !metadata.is_file() {
+            return Err(ParserSupervisorError::PayloadMismatch {
+                path,
+                reason: "payload is not a regular file",
+            });
+        }
+        Ok(Self {
+            path,
+            epoch: FileChangeEpoch::from_metadata(&metadata),
+            #[cfg(windows)]
+            write_guard: Some(write_guard),
+        })
+    }
+
+    /// Return whether the guarded path still resolves to the captured file identity.
+    fn is_current(&self) -> Result<bool, ParserSupervisorError> {
+        #[cfg(windows)]
+        if self.write_guard.is_none() {
+            return Ok(false);
+        }
+        let metadata =
+            fs::metadata(&self.path).map_err(|source| ParserSupervisorError::ArtifactRead {
+                path: self.path.clone(),
+                source,
+            })?;
+        Ok(metadata.is_file() && FileChangeEpoch::from_metadata(&metadata) == self.epoch)
+    }
+
+    /// Build deliberately unavailable file authority for process-free tests.
+    #[cfg(test)]
+    fn unavailable(path: PathBuf) -> Self {
+        Self {
+            path,
+            epoch: FileChangeEpoch::default(),
+            #[cfg(windows)]
+            write_guard: None,
+        }
+    }
+}
+
+/// Metadata used to detect mutation around and after payload digest verification.
+#[derive(Debug)]
+struct PayloadObservation {
+    /// Guarded canonical payload file.
+    file: FileObservation,
+    /// Manifest-owned payload responsibility.
+    role: ParserPackPayloadRole,
 }
 
 impl PayloadObservation {
@@ -402,7 +546,9 @@ impl PayloadObservation {
     fn contributes_to_launch(&self, language_id: &str) -> bool {
         matches!(
             &self.role,
-            ParserPackPayloadRole::Worker | ParserPackPayloadRole::ContainmentBroker
+            ParserPackPayloadRole::Worker
+                | ParserPackPayloadRole::ContainmentBroker
+                | ParserPackPayloadRole::AcceptedManifest
         ) || matches!(
             &self.role,
             ParserPackPayloadRole::GrammarLibrary {
@@ -411,19 +557,9 @@ impl PayloadObservation {
         )
     }
 
-    /// Rehash one payload before it can contribute to fresh launch authority.
+    /// Return whether one payload retains the identity captured before digest verification.
     fn is_current(&self) -> Result<bool, ParserSupervisorError> {
-        let Ok(metadata) = fs::metadata(&self.path) else {
-            return Ok(false);
-        };
-        if !metadata.is_file()
-            || metadata.len() != self.bytes
-            || metadata.modified().ok() != self.modified
-        {
-            return Ok(false);
-        }
-        let bytes = read_bounded_file(&self.path, self.bytes)?;
-        Ok(sha256_hex(&bytes) == self.sha256)
+        self.file.is_current()
     }
 }
 
@@ -444,8 +580,8 @@ struct VerifiedParserPackLaunch {
     accepted_grammars: Vec<String>,
     /// Exact artifact-manifest byte identity independently observed by Rust.
     artifact: ParserArtifactIdentity,
-    /// Manifest-bound SHA-256 of the logical capability manifest.
-    accepted_manifest_sha256: String,
+    /// Guarded artifact manifest captured before verification and rechecked afterward.
+    artifact_manifest: FileObservation,
     /// Cheap metadata observations for every already hashed payload.
     payloads: Vec<PayloadObservation>,
 }
@@ -461,6 +597,8 @@ impl VerifiedParserPackLaunch {
         let pack_root = canonical_directory(pack_root)?;
         let accepted_path = canonical_direct_file(&pack_root, ACCEPTED_MANIFEST_FILE_NAME)?;
         let artifact_path = canonical_direct_file(&pack_root, ARTIFACT_MANIFEST_FILE_NAME)?;
+        let mut accepted_manifest = Some(FileObservation::capture(accepted_path.clone())?);
+        let artifact_manifest_file = FileObservation::capture(artifact_path.clone())?;
         let accepted_bytes = read_bounded_file(
             &accepted_path,
             u64::try_from(OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES).unwrap_or(u64::MAX),
@@ -487,6 +625,22 @@ impl VerifiedParserPackLaunch {
         let mut payloads = Vec::with_capacity(artifact_manifest.files.len());
         for payload in &artifact_manifest.files {
             let path = canonical_payload_file(&pack_root, payload.path.as_str())?;
+            let file = if matches!(payload.role, ParserPackPayloadRole::AcceptedManifest) {
+                if path != accepted_path {
+                    return Err(ParserSupervisorError::PayloadMismatch {
+                        path,
+                        reason: "accepted capability manifest is not at its defined artifact path",
+                    });
+                }
+                accepted_manifest
+                    .take()
+                    .ok_or_else(|| ParserSupervisorError::PayloadMismatch {
+                        path: path.clone(),
+                        reason: "artifact contains more than one accepted capability manifest",
+                    })?
+            } else {
+                FileObservation::capture(path.clone())?
+            };
             let bytes = read_bounded_file(&path, payload.bytes)?;
             if u64::try_from(bytes.len()).ok() != Some(payload.bytes) {
                 return Err(ParserSupervisorError::PayloadMismatch {
@@ -500,13 +654,9 @@ impl VerifiedParserPackLaunch {
                     reason: "payload SHA-256 differs from the artifact manifest",
                 });
             }
-            let metadata = file_metadata(&path)?;
             payloads.push(PayloadObservation {
-                path: path.clone(),
+                file,
                 role: payload.role.clone(),
-                bytes: payload.bytes,
-                sha256: payload.sha256.as_str().to_owned(),
-                modified: metadata.modified().ok(),
             });
             match &payload.role {
                 ParserPackPayloadRole::Worker => worker = Some(path),
@@ -588,25 +738,14 @@ impl VerifiedParserPackLaunch {
                 .map(|grammar| grammar.language_id.clone())
                 .collect(),
             artifact: ParserArtifactIdentity::for_bytes(&artifact_bytes),
-            accepted_manifest_sha256,
+            artifact_manifest: artifact_manifest_file,
             payloads,
         })
     }
 
-    /// Return whether the manifests and payloads used by one launch still match.
+    /// Return whether the manifests and active payloads retain their verified filesystem identity.
     fn is_current_for(&self, language_id: &str) -> Result<bool, ParserSupervisorError> {
-        let artifact_bytes = read_bounded_file(
-            &self.pack_root.join(ARTIFACT_MANIFEST_FILE_NAME),
-            u64::try_from(OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES).unwrap_or(u64::MAX),
-        )?;
-        if ParserArtifactIdentity::for_bytes(&artifact_bytes) != self.artifact {
-            return Ok(false);
-        }
-        let accepted_bytes = read_bounded_file(
-            &self.pack_root.join(ACCEPTED_MANIFEST_FILE_NAME),
-            u64::try_from(OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES).unwrap_or(u64::MAX),
-        )?;
-        if sha256_hex(&accepted_bytes) != self.accepted_manifest_sha256 {
+        if !self.artifact_manifest.is_current()? {
             return Ok(false);
         }
         for payload in self
@@ -3349,7 +3488,28 @@ impl OptionalParserSupervisor {
             return Ok(());
         }
         self.shutdown_resident()?;
-        self.launch = VerifiedParserPackLaunch::load(&self.pack_root)?;
+        let refreshed = VerifiedParserPackLaunch::load(&self.pack_root)?;
+        if !refreshed.is_current_for(language_id)? {
+            return Err(ParserSupervisorError::PayloadMismatch {
+                path: self.pack_root.clone(),
+                reason: "artifact changed during digest revalidation",
+            });
+        }
+        self.replace_verified_launch(refreshed)
+    }
+
+    /// Replace launch observations only when the content-addressed artifact identity is unchanged.
+    fn replace_verified_launch(
+        &mut self,
+        refreshed: VerifiedParserPackLaunch,
+    ) -> Result<(), ParserSupervisorError> {
+        if refreshed.artifact != self.launch.artifact {
+            return Err(ParserSupervisorError::PayloadMismatch {
+                path: self.pack_root.join(ARTIFACT_MANIFEST_FILE_NAME),
+                reason: "artifact identity changed inside its immutable slot",
+            });
+        }
+        self.launch = refreshed;
         Ok(())
     }
 
@@ -3699,7 +3859,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         let platform = host_pack_platform()
             .ok_or_else(|| io::Error::other("host has no optional-parser containment target"))?;
         Ok(VerifiedParserPackLaunch {
-            pack_root,
+            pack_root: pack_root.clone(),
             platform,
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             worker: peer.to_path_buf(),
@@ -3707,7 +3867,9 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             containment_broker: Some(peer.to_path_buf()),
             accepted_grammars: vec!["hostile".to_owned()],
             artifact: ParserArtifactIdentity::for_bytes(b"parser-supervisor-hostile-peer"),
-            accepted_manifest_sha256: "0".repeat(64),
+            artifact_manifest: FileObservation::unavailable(
+                pack_root.join(ARTIFACT_MANIFEST_FILE_NAME),
+            ),
             payloads: Vec::new(),
         })
     }
@@ -3729,15 +3891,15 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
 
         let mut launch = test_launch(peer)?;
         launch.pack_root = temp.path().to_path_buf();
-        launch.accepted_manifest_sha256 = sha256_hex(accepted_bytes);
+        launch.artifact_manifest =
+            FileObservation::capture(temp.path().join(ARTIFACT_MANIFEST_FILE_NAME))
+                .map_err(|error| io::Error::other(error.to_string()))?;
         launch.payloads = vec![PayloadObservation {
-            path: payload_path.clone(),
+            file: FileObservation::capture(payload_path.clone())
+                .map_err(|error| io::Error::other(error.to_string()))?,
             role: ParserPackPayloadRole::GrammarLibrary {
                 language_id: "hostile".to_owned(),
             },
-            bytes: 7,
-            sha256: sha256_hex(b"trusted"),
-            modified: Some(modified),
         }];
         let grammar = ParserLanguageIdentity::new("hostile")
             .map_err(|error| io::Error::other(error.to_string()))?;
@@ -3766,7 +3928,20 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             resident: Some(resident),
         };
 
-        fs::write(&payload_path, b"mutated")?;
+        let mutation = fs::write(&payload_path, b"mutated");
+        #[cfg(windows)]
+        if mutation.is_err() {
+            if fs::read(&payload_path)? != b"trusted" {
+                return Err(io::Error::other(
+                    "Windows write guard reported failure after changing payload bytes",
+                ));
+            }
+            supervisor
+                .shutdown()
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            return Ok(());
+        }
+        mutation?;
         File::options()
             .write(true)
             .open(&payload_path)?
@@ -4003,23 +4178,31 @@ mod tests {
 
     use super::*;
 
+    /// Build process-free verified launch metadata for focused supervisor tests.
+    fn metadata_only_launch() -> VerifiedParserPackLaunch {
+        let pack_root = PathBuf::from("metadata-only-pack");
+        VerifiedParserPackLaunch {
+            pack_root: pack_root.clone(),
+            platform: PackPlatform::LinuxX86_64,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            worker: pack_root.join("projectatlas-parser-worker"),
+            #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+            containment_broker: Some(pack_root.join("projectatlas-parser-containment.exe")),
+            accepted_grammars: vec!["alpha".to_owned(), "zeta".to_owned()],
+            artifact: ParserArtifactIdentity::for_bytes(b"artifact"),
+            artifact_manifest: FileObservation::unavailable(
+                pack_root.join(ARTIFACT_MANIFEST_FILE_NAME),
+            ),
+            payloads: Vec::new(),
+        }
+    }
+
     /// Build a process-free supervisor value for public metadata delegation tests.
     fn metadata_only_supervisor() -> OptionalParserSupervisor {
-        let pack_root = PathBuf::from("metadata-only-pack");
+        let launch = metadata_only_launch();
         OptionalParserSupervisor {
-            pack_root: pack_root.clone(),
-            launch: VerifiedParserPackLaunch {
-                pack_root: pack_root.clone(),
-                platform: PackPlatform::LinuxX86_64,
-                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-                worker: pack_root.join("projectatlas-parser-worker"),
-                #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-                containment_broker: Some(pack_root.join("projectatlas-parser-containment.exe")),
-                accepted_grammars: vec!["alpha".to_owned(), "zeta".to_owned()],
-                artifact: ParserArtifactIdentity::for_bytes(b"artifact"),
-                accepted_manifest_sha256: "0".repeat(64),
-                payloads: Vec::new(),
-            },
+            pack_root: launch.pack_root.clone(),
+            launch,
             memory_limits: ParserMemoryLimits::PRODUCTION,
             resident: None,
         }
@@ -4039,28 +4222,51 @@ mod tests {
     }
 
     #[test]
-    fn payload_observation_rehashes_same_size_same_mtime_content()
+    fn supervisor_rejects_artifact_identity_change_inside_selected_slot() {
+        let mut supervisor = metadata_only_supervisor();
+        let selected = supervisor.artifact_identity().clone();
+        let mut replacement = metadata_only_launch();
+        replacement.artifact = ParserArtifactIdentity::for_bytes(b"replacement-artifact");
+
+        assert!(matches!(
+            supervisor.replace_verified_launch(replacement),
+            Err(ParserSupervisorError::PayloadMismatch {
+                reason: "artifact identity changed inside its immutable slot",
+                ..
+            })
+        ));
+        assert_eq!(supervisor.artifact_identity(), &selected);
+    }
+
+    #[test]
+    fn payload_observation_detects_same_size_same_mtime_change_epoch()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("worker");
         fs::write(&path, b"trusted")?;
         let modified = fs::metadata(&path)?.modified()?;
         let observation = PayloadObservation {
-            path: path.clone(),
+            file: FileObservation::capture(path.clone())?,
             role: ParserPackPayloadRole::Worker,
-            bytes: 7,
-            sha256: sha256_hex(b"trusted"),
-            modified: Some(modified),
         };
         require_test(observation.is_current()?, "initial payload was rejected")?;
 
-        fs::write(&path, b"mutated")?;
+        let mutation = fs::write(&path, b"mutated");
+        #[cfg(windows)]
+        if mutation.is_err() {
+            require_test(
+                observation.is_current()? && fs::read(&path)? == b"trusted",
+                "Windows write guard reported failure after changing payload identity",
+            )?;
+            return Ok(());
+        }
+        mutation?;
         File::options()
             .write(true)
             .open(&path)?
             .set_times(fs::FileTimes::new().set_modified(modified))?;
         require_test(
-            fs::metadata(&path)?.len() == observation.bytes
+            fs::metadata(&path)?.len() == observation.file.epoch.bytes
                 && fs::metadata(&path)?.modified()? == modified,
             "test mutation did not preserve size and modification time",
         )?;
@@ -4071,20 +4277,40 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_file_observation_releases_delete_share_on_drop()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("guarded-payload");
+        fs::write(&path, b"trusted")?;
+        let observation = FileObservation::capture(path.clone())?;
+
+        require_test(
+            fs::remove_file(&path).is_err() && path.is_file(),
+            "Windows observation did not deny payload deletion",
+        )?;
+        drop(observation);
+        fs::remove_file(&path)?;
+        require_test(
+            !path.exists(),
+            "dropping Windows observation did not release payload deletion",
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn payload_observation_revalidates_only_launch_inputs() {
         let observation = |role| PayloadObservation {
-            path: PathBuf::new(),
+            file: FileObservation::unavailable(PathBuf::new()),
             role,
-            bytes: 0,
-            sha256: String::new(),
-            modified: None,
         };
 
         assert!(observation(ParserPackPayloadRole::Worker).contributes_to_launch("rust"));
         assert!(
             observation(ParserPackPayloadRole::ContainmentBroker).contributes_to_launch("rust")
         );
+        assert!(observation(ParserPackPayloadRole::AcceptedManifest).contributes_to_launch("rust"));
         assert!(
             observation(ParserPackPayloadRole::GrammarLibrary {
                 language_id: "rust".to_owned(),
