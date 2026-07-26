@@ -12,7 +12,7 @@ Issue #311 SHALL mirror the local `complete-v040-release-readiness` tasks exactl
 - **THEN** #311 remains open and milestone completion is not claimed
 
 ### Requirement: One exact promotion head owns all prepublication proof
-ProjectAtlas SHALL first prove one locked release-content head after every v0.4.0 implementation, readiness artifact, and other milestone issue is reconciled. It SHALL then permit exactly one commit that changes only #311 OpenSpec task checkbox state, mirror that state to the GitHub issue, and treat the resulting `dev` SHA as the exact promotion head. Clean optional-parser and prepublish evidence MAY carry forward only across that verified non-release-impacting diff. Ordinary exact-head CI, strict OpenSpec, IssueOps, ProjectAtlas low lint, and review checks SHALL pass on the promotion head, and any other change SHALL invalidate the affected evidence.
+ProjectAtlas SHALL first prove one locked release-content head after every v0.4.0 implementation, readiness artifact, and other milestone issue is reconciled. It SHALL then permit exactly one commit that changes only #311 OpenSpec task checkbox state, mirror that state to the GitHub issue, and treat the resulting `dev` SHA as the exact promotion head. Clean optional-parser and prepublish evidence MAY carry forward only across that verified non-release-impacting diff. Ordinary exact-head CI, strict OpenSpec, IssueOps, ProjectAtlas low lint, and review checks SHALL pass on the promotion head, and any other tree change SHALL invalidate the affected evidence.
 
 #### Scenario: Release-content proof is ready to reconcile
 - **WHEN** all required local gates and hosted runs complete successfully
@@ -23,7 +23,7 @@ ProjectAtlas SHALL first prove one locked release-content head after every v0.4.
 - **THEN** the resulting `dev` SHA becomes the exact promotion head, unaffected clean-construction and prepublish proof remains valid, and ordinary exact-head gates run before #311 closes
 
 #### Scenario: Promotion head changes after proof
-- **WHEN** reconciliation changes any other path or a later commit changes the exact promotion head
+- **WHEN** reconciliation changes any other path or a later commit changes the exact promotion tree
 - **THEN** readiness returns to the release-content lock and affected proof is rerun before completion
 
 #### Scenario: A required gate fails or is skipped
@@ -31,7 +31,7 @@ ProjectAtlas SHALL first prove one locked release-content head after every v0.4.
 - **THEN** release readiness remains incomplete
 
 ### Requirement: Existing workflows prove the real release boundary
-Release readiness SHALL use the existing `01-CI`, `optional-parser-pack`, and `02-Release` workflows. It SHALL require cross-platform packaged CLI/MCP smoke, explicit empty-cache Linux and Windows optional-parser construction, and `02-Release` package and installer proof with `prepublish_only=true`.
+Release readiness SHALL use the existing `01-CI`, `optional-parser-pack`, and `02-Release` workflows. It SHALL require cross-platform source-built CLI/MCP E2E, explicit empty-cache Linux and Windows optional-parser construction, and `02-Release` package and installer proof with `prepublish_only=true`.
 
 #### Scenario: Clean optional-parser proof succeeds
 - **WHEN** the exact release-content head is dispatched with `clean_construction=true` and `target=all`
@@ -43,10 +43,10 @@ Release readiness SHALL use the existing `01-CI`, `optional-parser-pack`, and `0
 
 #### Scenario: Ordinary candidate behavior succeeds
 - **WHEN** exact-head `01-CI` completes
-- **THEN** Rust verification and packaged E2E smoke succeed on Linux, Windows, macOS x64, and macOS arm64
+- **THEN** Rust verification and source-built CLI/MCP E2E smoke succeed on Linux, Windows, macOS x64, and macOS arm64
 
 ### Requirement: Promotion remains reversible until readiness is complete
-The release process SHALL leave `main`, version tags, and GitHub releases untouched until every readiness task is complete. It SHALL prepare an exact `dev`-to-`main` promotion only after review feedback, OpenSpec, IssueOps, ProjectAtlas, package, installer, and platform evidence is reconciled.
+The release process SHALL leave `main`, version tags, and GitHub releases untouched until every readiness task is complete. It SHALL prepare a merge-commit `dev`-to-`main` promotion only after review feedback, OpenSpec, IssueOps, ProjectAtlas, package, installer, and platform evidence is reconciled. `main` SHALL be an ancestor of the promotion head, squash and rebase SHALL be refused, and the resulting merge commit SHALL have the promotion head as a parent with an identical Git tree.
 
 #### Scenario: Readiness is incomplete
 - **WHEN** any readiness condition is not proven
@@ -55,6 +55,10 @@ The release process SHALL leave `main`, version tags, and GitHub releases untouc
 #### Scenario: Readiness is complete
 - **WHEN** every v0.4.0 milestone issue is checked and closed and the exact promotion is ready
 - **THEN** milestone IssueOps passes and the existing main-triggered release path may publish the candidate
+
+#### Scenario: Promotion preserves verified content
+- **WHEN** the prepared promotion is merged after readiness completes
+- **THEN** the resulting `main` SHA has the verified promotion head as a parent and the same Git tree, and `02-Release` repeats verification, packaging, and installer smoke on that `main` SHA before publication
 
 ### Requirement: Post-release verification and cleanup have a durable owner
 Before #311 closes, a dedicated non-milestone v0.4.0 post-release issue SHALL own independent publication verification and workspace consolidation. The release goal SHALL remain active until that issue is completed.

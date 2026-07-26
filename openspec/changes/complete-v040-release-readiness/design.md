@@ -4,7 +4,7 @@ Issue #308 and its feature proof are closed, #340 is merged and closed, and #341
 
 The existing release path already has the required mechanics:
 
-- `01-CI` owns Rust quality and packaged CLI/MCP smoke on Linux, Windows, macOS x64, and macOS arm64.
+- `01-CI` owns Rust quality and source-built CLI/MCP E2E smoke on Linux, Windows, macOS x64, and macOS arm64.
 - `optional-parser-pack` owns explicit cache-free Linux and Windows optional-pack construction and full runtime proof.
 - `02-Release` owns version validation, package construction, installer smoke, release assets, and publication; `prepublish_only=true` exercises the package and installer path without publishing.
 - `03-Auto-Release` dispatches `02-Release` after an eligible version reaches `main`.
@@ -41,7 +41,9 @@ A new release driver was rejected because the current workflows already own the 
 
 First, lock one release-content head after #341 is closed and every v0.4.0 implementation and readiness artifact is merged. Run the complete local gates, ordinary CI, explicit clean optional-parser construction, prepublish release packaging, and review disposition on that head.
 
-Once those tasks are true, one bounded reconciliation commit may change only the #311 OpenSpec task checkbox state. Mirror that state to the GitHub issue, and treat the resulting `dev` SHA as the exact promotion head. Clean optional-parser and prepublish proof carry forward because the verified diff changes no runtime, workflow, package, installer, or documentation input. Ordinary exact-head CI, strict OpenSpec, IssueOps, ProjectAtlas low lint, and review checks still run on the promotion head before #311 closes. Any other path change, or any later commit, invalidates the affected proof and restarts the boundary at the release-content lock.
+Once those tasks are true, one bounded reconciliation commit may change only the #311 OpenSpec task checkbox state. Mirror that state to the GitHub issue, and treat the resulting `dev` SHA as the exact promotion head. Clean optional-parser and prepublish proof carry forward because the verified diff changes no runtime, workflow, package, installer, or documentation input. Ordinary exact-head CI, strict OpenSpec, IssueOps, ProjectAtlas low lint, and review checks still run on the promotion head before #311 closes. Any other path change, or any later tree change, invalidates the affected proof and restarts the boundary at the release-content lock.
+
+Promote only when `main` is an ancestor of the promotion head, and use a merge commit rather than squash or rebase. The resulting `main` commit must have the promotion head as a parent and the same Git tree. Its new SHA is therefore not a content change, and the actual `02-Release` run still repeats verification, packaging, and installer smoke on that `main` SHA before publication.
 
 ### Separate prepublication readiness from post-release operations
 
@@ -66,6 +68,7 @@ Until readiness is complete, `main`, tags, and releases remain untouched. If any
 ## Risks / Trade-offs
 
 - **Checklist reconciliation advances the commit after expensive proof** → Permit one verified task-state-only commit, carry forward only unaffected behavioral proof, and run ordinary exact-head gates on its promotion head before closure.
+- **Promotion changes the verified tree or hides it behind squash/rebase** → Require `main` ancestry, a merge commit with the promotion head as a parent, identical Git trees, and actual release verification on the resulting `main` SHA.
 - **A green older run is mistaken for final evidence** → Compare every required run's `headSha` with the locked candidate before closure.
 - **The milestone gate becomes circular around post-release cleanup** → Keep #311 prepublication-only and create the non-milestone post-release owner before closure.
 - **A prepublish run is mistaken for publication** → Require `prepublish_only=true`, verify no tag or release was created, and leave publication to the existing main-triggered workflow.
@@ -81,7 +84,7 @@ Until readiness is complete, `main`, tags, and releases remain untouched. If any
 5. Run the complete local gates, exact-head `01-CI`, clean optional-parser proof, and `02-Release` with `prepublish_only=true` on that head.
 6. Reconcile #311 in one task-state-only commit and mirror the GitHub checklist; its resulting `dev` SHA is the exact promotion head.
 7. Run ordinary exact-head CI, strict OpenSpec, IssueOps, ProjectAtlas low lint, and review checks on the promotion head, close #311, and then pass milestone IssueOps.
-8. Promote the exact head to `main`; let the existing release workflow publish v0.4.0.
+8. Promote with a merge commit after verifying `main` ancestry and identical promotion/main trees; let the existing release workflow verify the resulting `main` SHA and publish v0.4.0.
 9. Independently verify the published release and only then perform the post-release cleanup.
 
 Rollback before promotion is ordinary correction followed by a new release-content lock and reconciliation. After promotion, retain all source lanes and release artifacts until the publishing failure is understood; never use workspace cleanup as rollback.
