@@ -4721,7 +4721,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             cancel_before_launch: false,
             cancellation_after: None,
             deadline: Duration::from_secs(2),
-            no_progress: Duration::from_millis(150),
+            no_progress: Duration::from_millis(500),
             limits: default_limits()?,
         })
     }

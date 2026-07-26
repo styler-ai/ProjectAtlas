@@ -18,6 +18,11 @@ use projectatlas_core::optional_parser_protocol::{
 };
 
 #[allow(dead_code, unused_imports)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[path = "../src/parser_linux_authority.rs"]
+mod parser_linux_authority;
+
+#[allow(dead_code, unused_imports)]
 #[path = "../src/parser_supervisor.rs"]
 mod parser_supervisor;
 
