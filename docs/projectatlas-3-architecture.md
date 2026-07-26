@@ -1830,7 +1830,10 @@ accepted manifest, and selected grammar. A stalled pathname lookup therefore can
 retain the caller or start another filesystem worker. Only a proven-current result
 permits resident reuse: uncertainty shuts down the resident without a reload, while
 an observed change shuts it down and enters the existing bounded digest reload
-before any replacement is accepted.
+before any replacement is accepted. One no-progress epoch begins at parse admission
+and remains fixed through currentness, digest reload, Linux sealing, platform
+admission, `SessionOpen`, and identity-validated READY. Only validated READY or
+advancing session-bound parser progress starts a later no-progress interval.
 
 This is one concrete `projectatlas-cli` supervisor, not separate runtime and release
 implementations. Normal staging and a CLI-owned fresh-artifact verifier reuse its
@@ -2192,7 +2195,8 @@ flowchart TB
     Registry --> BuiltIn[Built-in parser owner]
     Registry --> Fallback[Conservative default-core fallback]
     Registry -. verified and enabled .-> Supervisor[Bounded Rust supervisor]
-    Supervisor --> Currentness[One bounded process-wide worker probes up to five launch epochs]
+    Supervisor --> ProgressEpoch[One no-progress epoch through identity-validated READY]
+    ProgressEpoch --> Currentness[One bounded process-wide worker probes up to five launch epochs]
     Currentness --> Current{Verified launch inputs current?}
     Current -->|observed drift| Shutdown[Terminate and reap any resident]
     Shutdown --> Reload[Bounded digest reload; require the same artifact identity]
@@ -2221,13 +2225,13 @@ flowchart TB
     ParseMeta --> Prepared[Typed publication candidate]
     Facts --> Prepared
     Prepared --> Publish[Atomic SQLite generation publication]
-    Currentness -. blocked, timed out, or canceled .-> Preserve
+    Currentness -. blocked, timed out, or canceled .-> FailureCleanup[Terminate and reap resident]
     Reload -. read or identity failure .-> Preserve
     Platform -. launch, authority, containment, or admission failure .-> Preserve[Fail closed; terminate, reap, and join if started; preserve MCP and previous generation]
-    Open -. write, timeout, or cancellation .-> OpeningCleanup[Opening failed; terminate and reap resident]
-    Ready -. stalled or invalid READY .-> OpeningCleanup
-    Gate -. identity mismatch .-> OpeningCleanup
-    OpeningCleanup --> Preserve
+    Open -. write, timeout, or cancellation .-> FailureCleanup
+    Ready -. stalled or invalid READY .-> FailureCleanup
+    Gate -. identity mismatch .-> FailureCleanup
+    FailureCleanup --> Preserve
     Validate -. failure, limit, or cancellation .-> Preserve
 ```
 

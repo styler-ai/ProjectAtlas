@@ -731,13 +731,13 @@ impl PayloadObservation {
     }
 }
 
-/// Request-owned stop bounds for a changed-artifact reload.
+/// Request-owned stop bounds shared by every pre-READY artifact phase.
 struct ArtifactIoControl<'a> {
     /// Immutable absolute request deadline.
     absolute_deadline: Instant,
-    /// Fixed start of changed-artifact work; file reads do not extend the bound.
+    /// Fixed pre-READY progress epoch; artifact work does not extend the bound.
     last_progress: Instant,
-    /// Maximum changed-artifact reload duration without parser progress.
+    /// Maximum pre-READY interval without validated parser progress.
     no_progress_timeout: Duration,
     /// Request-owned cooperative cancellation signal.
     cancellation: &'a IndexCancellation,
@@ -784,7 +784,7 @@ struct ArtifactCurrentnessRequest {
     probe: ArtifactCurrentnessProbe,
     /// Immutable absolute request deadline.
     absolute_deadline: Instant,
-    /// Fixed start of the metadata probe.
+    /// Caller-owned pre-READY progress epoch.
     last_progress: Instant,
     /// Maximum metadata-probe duration.
     no_progress_timeout: Duration,
@@ -1017,9 +1017,12 @@ impl SealedLinuxPayload {
         })
         .map_err(authority_error)?;
         let mut file = File::from(descriptor);
-        if executable {
-            fchmod(&file, Mode::S_IRUSR | Mode::S_IXUSR).map_err(authority_error)?;
-        }
+        let mode = if executable {
+            Mode::S_IRUSR | Mode::S_IXUSR
+        } else {
+            Mode::S_IRUSR
+        };
+        fchmod(&file, mode).map_err(authority_error)?;
         for chunk in bytes.chunks(ARTIFACT_READ_CHUNK_BYTES) {
             control.poll()?;
             file.write_all(chunk)
@@ -1140,14 +1143,14 @@ impl VerifiedParserPackLaunch {
     fn load_controlled(
         pack_root: &Path,
         language_id: &str,
+        last_progress: Instant,
         absolute_deadline: Instant,
         no_progress_timeout: Duration,
         cancellation: &IndexCancellation,
     ) -> Result<Self, ParserSupervisorError> {
-        let started = Instant::now();
         let control = ArtifactIoControl {
             absolute_deadline,
-            last_progress: started,
+            last_progress,
             no_progress_timeout,
             cancellation,
         };
@@ -1158,7 +1161,7 @@ impl VerifiedParserPackLaunch {
             move || {
                 let worker_control = ArtifactIoControl {
                     absolute_deadline,
-                    last_progress: started,
+                    last_progress,
                     no_progress_timeout,
                     cancellation: &worker_cancellation,
                 };
@@ -1405,6 +1408,7 @@ impl VerifiedParserPackLaunch {
     fn prepare_resident_launch_controlled(
         &self,
         language_id: &str,
+        last_progress: Instant,
         absolute_deadline: Instant,
         no_progress_timeout: Duration,
         cancellation: &IndexCancellation,
@@ -1448,10 +1452,9 @@ impl VerifiedParserPackLaunch {
         let accepted_manifest = self.accepted_manifest_bytes.clone();
         let native_import_policy = self.native_import_policy_bytes.clone();
         let worker_cancellation = cancellation.clone();
-        let started = Instant::now();
         let control = ArtifactIoControl {
             absolute_deadline,
-            last_progress: started,
+            last_progress,
             no_progress_timeout,
             cancellation,
         };
@@ -1459,7 +1462,7 @@ impl VerifiedParserPackLaunch {
             move || {
                 let worker_control = ArtifactIoControl {
                     absolute_deadline,
-                    last_progress: started,
+                    last_progress,
                     no_progress_timeout,
                     cancellation: &worker_cancellation,
                 };
@@ -2656,6 +2659,7 @@ impl ResidentParserSession {
         launch: &VerifiedParserPackLaunch,
         grammar: ParserLanguageIdentity,
         memory_limits: ParserMemoryLimits,
+        last_progress: Instant,
         absolute_deadline: Instant,
         no_progress_timeout: Duration,
         cancellation: &IndexCancellation,
@@ -2665,6 +2669,7 @@ impl ResidentParserSession {
         let command = {
             let authority = launch.prepare_resident_launch_controlled(
                 grammar.as_str(),
+                last_progress,
                 absolute_deadline,
                 no_progress_timeout,
                 cancellation,
@@ -2679,6 +2684,7 @@ impl ResidentParserSession {
             launch,
             grammar,
             memory_limits,
+            last_progress,
             absolute_deadline,
             no_progress_timeout,
             cancellation,
@@ -2691,6 +2697,7 @@ impl ResidentParserSession {
         launch: &VerifiedParserPackLaunch,
         grammar: ParserLanguageIdentity,
         memory_limits: ParserMemoryLimits,
+        last_progress: Instant,
         absolute_deadline: Instant,
         no_progress_timeout: Duration,
         cancellation: &IndexCancellation,
@@ -2877,11 +2884,10 @@ impl ResidentParserSession {
                 };
             }
         }
-        let started = Instant::now();
         let opening: Result<(), ParserSupervisorError> = (|| {
             resident.wait_for_admission(
                 absolute_deadline,
-                started,
+                last_progress,
                 no_progress_timeout,
                 cancellation,
             )?;
@@ -2892,14 +2898,14 @@ impl ResidentParserSession {
                 session_open,
                 "SessionOpen write",
                 absolute_deadline,
-                started,
+                last_progress,
                 no_progress_timeout,
                 cancellation,
             )?;
             let ready_bytes = resident.wait_for_frame(
                 "READY",
                 absolute_deadline,
-                started,
+                last_progress,
                 no_progress_timeout,
                 cancellation,
             )?;
@@ -2930,6 +2936,7 @@ impl ResidentParserSession {
         source: &[u8],
         source_identity: ParserSourceIdentity,
         limits: ParserRequestLimits,
+        mut last_progress: Instant,
         absolute_deadline: Instant,
         no_progress_timeout: Duration,
         cancellation: &IndexCancellation,
@@ -2960,7 +2967,6 @@ impl ResidentParserSession {
         request_bytes.extend_from_slice(&source_header.encode());
         request_bytes.extend_from_slice(source);
 
-        let mut last_progress = Instant::now();
         self.send_bytes(
             request_bytes,
             "request write",
@@ -4317,8 +4323,10 @@ impl OptionalParserSupervisor {
 
     /// Parse bounded raw source through one grammar-affined contained worker.
     ///
-    /// `absolute_deadline` is never extended by progress. Only identity-validated
-    /// progress that advances stage or work resets `no_progress_timeout`.
+    /// `absolute_deadline` is never extended by progress. One pre-READY epoch
+    /// covers currentness, reload, sealing, admission, and opening. A newly
+    /// validated READY or later identity-validated advancing progress resets
+    /// `no_progress_timeout`.
     /// `cancellation` is polled while waiting for admission, writes, and output.
     ///
     /// # Errors
@@ -4335,16 +4343,18 @@ impl OptionalParserSupervisor {
         no_progress_timeout: Duration,
         cancellation: &IndexCancellation,
     ) -> Result<ParserCompletionEvidence, ParserSupervisorError> {
+        let last_progress = Instant::now();
         poll_stop(
             "request admission",
             absolute_deadline,
-            Instant::now(),
+            last_progress,
             no_progress_timeout,
             cancellation,
         )?;
         let source_identity = ParserSourceIdentity::for_bytes(source)?;
         self.refresh_changed_artifact(
             language_id,
+            last_progress,
             absolute_deadline,
             no_progress_timeout,
             cancellation,
@@ -4358,17 +4368,25 @@ impl OptionalParserSupervisor {
                 self.shutdown_resident()?;
             }
         }
+        let mut resident_opened = false;
         if self.resident.is_none() {
             let grammar = self.launch.require_grammar(language_id)?;
             self.resident = Some(ResidentParserSession::launch(
                 &self.launch,
                 grammar,
                 self.memory_limits,
+                last_progress,
                 absolute_deadline,
                 no_progress_timeout,
                 cancellation,
             )?);
+            resident_opened = true;
         }
+        let request_last_progress = if resident_opened {
+            Instant::now()
+        } else {
+            last_progress
+        };
         let result = self
             .resident
             .as_mut()
@@ -4380,6 +4398,7 @@ impl OptionalParserSupervisor {
                 source,
                 source_identity,
                 limits,
+                request_last_progress,
                 absolute_deadline,
                 no_progress_timeout,
                 cancellation,
@@ -4417,14 +4436,14 @@ impl OptionalParserSupervisor {
     fn refresh_changed_artifact(
         &mut self,
         language_id: &str,
+        last_progress: Instant,
         absolute_deadline: Instant,
         no_progress_timeout: Duration,
         cancellation: &IndexCancellation,
     ) -> Result<(), ParserSupervisorError> {
-        let started = Instant::now();
         let control = ArtifactIoControl {
             absolute_deadline,
-            last_progress: started,
+            last_progress,
             no_progress_timeout,
             cancellation,
         };
@@ -4442,6 +4461,7 @@ impl OptionalParserSupervisor {
         let refreshed = VerifiedParserPackLaunch::load_controlled(
             &self.pack_root,
             language_id,
+            last_progress,
             absolute_deadline,
             no_progress_timeout,
             cancellation,
@@ -4711,6 +4731,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         cancellation_after: Option<Duration>,
         deadline: Duration,
         no_progress: Duration,
+        pre_launch_elapsed: Duration,
         limits: ParserRequestLimits,
     }
 
@@ -4728,6 +4749,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             cancellation_after: None,
             deadline: Duration::from_secs(2),
             no_progress: Duration::from_millis(500),
+            pre_launch_elapsed: Duration::ZERO,
             limits: default_limits()?,
         })
     }
@@ -4873,6 +4895,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             &launch,
             grammar,
             ParserMemoryLimits::PRODUCTION,
+            Instant::now(),
             deadline,
             Duration::from_millis(150),
             &cancellation,
@@ -4970,6 +4993,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
                 &supervisor.launch,
                 grammar,
                 ParserMemoryLimits::PRODUCTION,
+                Instant::now(),
                 deadline,
                 Duration::from_millis(150),
                 &cancellation,
@@ -5055,13 +5079,14 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
                 cancellation.cancel();
             })
         });
-        let deadline = Instant::now()
-            .checked_add(case.deadline)
-            .unwrap_or_else(Instant::now);
+        let now = Instant::now();
+        let last_progress = now.checked_sub(case.pre_launch_elapsed).unwrap_or(now);
+        let deadline = now.checked_add(case.deadline).unwrap_or(now);
         let resident = ResidentParserSession::launch_command(
             &launch,
             grammar,
             ParserMemoryLimits::PRODUCTION,
+            last_progress,
             deadline,
             case.no_progress,
             &cancellation,
@@ -5077,6 +5102,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
                     &source,
                     ParserSourceIdentity::for_bytes(&source)?,
                     case.limits,
+                    Instant::now(),
                     deadline,
                     case.no_progress,
                     &cancellation,
@@ -5143,6 +5169,11 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             let mut opening_cancel = case("opening-cancel", ExpectedFailure::Cancelled)?;
             opening_cancel.cancel_before_launch = true;
             opening_cancel
+        },
+        {
+            let mut shared_epoch = case("pre-ready-shared-epoch", ExpectedFailure::NoProgress)?;
+            shared_epoch.pre_launch_elapsed = shared_epoch.no_progress + Duration::from_millis(1);
+            shared_epoch
         },
         case("pre-ready-stall", ExpectedFailure::NoProgress)?,
         case("ready-session", ExpectedFailure::Ready("session"))?,
@@ -5582,6 +5613,7 @@ mod tests {
         assert!(matches!(
             supervisor.refresh_changed_artifact(
                 "alpha",
+                Instant::now(),
                 Instant::now() + Duration::from_secs(1),
                 Duration::from_secs(1),
                 &cancellation,
@@ -5664,6 +5696,11 @@ mod tests {
             false,
             &control,
         )?;
+        assert_eq!(
+            payload.file.metadata()?.permissions().mode() & 0o777,
+            0o400,
+            "sealed document authority retained executable or writable mode bits"
+        );
         let status = fcntl(&payload.file, FcntlArg::F_GETFL)?;
         assert_eq!(status & OFlag::O_ACCMODE.bits(), OFlag::O_RDONLY.bits());
         let seals = fcntl(&payload.file, FcntlArg::F_GET_SEALS)?;
