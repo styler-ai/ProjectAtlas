@@ -4295,19 +4295,21 @@ fn external_candidate_batch_sql(key_count: usize) -> String {
         "WITH affected(entity_key) AS (VALUES {values})
          SELECT relation.target_entity_key
            FROM affected
-           JOIN graph_relations AS relation INDEXED BY idx_graph_relations_source_kind
-             ON relation.source_entity_key = affected.entity_key
+           CROSS JOIN graph_relations AS relation
+                      INDEXED BY idx_graph_relations_source_kind
            JOIN graph_entities AS external
              ON external.entity_key = relation.target_entity_key
-          WHERE external.entity_kind = 'external'
+          WHERE relation.source_entity_key = affected.entity_key
+            AND external.entity_kind = 'external'
          UNION ALL
          SELECT relation.source_entity_key
            FROM affected
-           JOIN graph_relations AS relation INDEXED BY idx_graph_relations_target_kind
-             ON relation.target_entity_key = affected.entity_key
+           CROSS JOIN graph_relations AS relation
+                      INDEXED BY idx_graph_relations_target_kind
            JOIN graph_entities AS external
              ON external.entity_key = relation.source_entity_key
-          WHERE external.entity_kind = 'external'"
+          WHERE relation.target_entity_key = affected.entity_key
+            AND external.entity_kind = 'external'"
     )
 }
 
@@ -7282,26 +7284,37 @@ mod tests {
             )?;
         }
 
-        let sql = format!("EXPLAIN QUERY PLAN {}", external_candidate_batch_sql(2));
-        let bindings = [Value::Blob(vec![0_u8; 32]), Value::Blob(vec![1_u8; 32])];
-        let mut statement = store.connection.prepare(&sql)?;
-        let details = statement
-            .query_map(params_from_iter(bindings.iter()), |row| {
-                row.get::<_, String>(3)
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        require(
-            [
-                "idx_graph_relations_source_kind",
-                "idx_graph_relations_target_kind",
-            ]
-            .iter()
-            .all(|index| details.iter().any(|detail| detail.contains(index)))
-                && details
-                    .iter()
-                    .all(|detail| !detail.contains("SCAN graph_relations")),
-            &format!("batched external cleanup was not index-bounded: {details:?}"),
-        )?;
+        for key_count in [2, EXTERNAL_CANDIDATE_KEYS_PER_QUERY] {
+            let sql = format!(
+                "EXPLAIN QUERY PLAN {}",
+                external_candidate_batch_sql(key_count)
+            );
+            let bindings = (0..key_count)
+                .map(|_| Value::Blob(vec![0_u8; 32]))
+                .collect::<Vec<_>>();
+            let mut statement = store.connection.prepare(&sql)?;
+            let details = statement
+                .query_map(params_from_iter(bindings.iter()), |row| {
+                    row.get::<_, String>(3)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            require(
+                [
+                    "SEARCH relation USING INDEX idx_graph_relations_source_kind (source_entity_key=?)",
+                    "SEARCH relation USING INDEX idx_graph_relations_target_kind (target_entity_key=?)",
+                ]
+                .iter()
+                .all(|seek| details.iter().any(|detail| detail.contains(seek)))
+                    && details.iter().all(|detail| {
+                        !detail.contains("SCAN relation")
+                            && !detail.contains("SCAN graph_relations")
+                            && !detail.contains("USE TEMP B-TREE")
+                    }),
+                &format!(
+                    "{key_count}-key external cleanup batch was not driven by indexed point seeks: {details:?}"
+                ),
+            )?;
+        }
         Ok(())
     }
 
