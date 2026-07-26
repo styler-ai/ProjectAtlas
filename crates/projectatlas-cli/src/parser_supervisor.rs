@@ -2035,7 +2035,10 @@ impl ResidentParserSession {
                 ParserFrameKind::Failure => {
                     let failure = decode_parser_failure_for_request(frame, &request)?;
                     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-                    self.enforce_memory_bound("request failure", true)?;
+                    match self.enforce_memory_bound("request failure", true) {
+                        Ok(()) | Err(ParserSupervisorError::ChildExited { code: Some(0), .. }) => {}
+                        Err(error) => return Err(error),
+                    }
                     return Err(ParserSupervisorError::WorkerFailure {
                         code: failure.code(),
                     });
