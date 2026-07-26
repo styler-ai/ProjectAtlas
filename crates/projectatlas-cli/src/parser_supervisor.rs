@@ -3,12 +3,7 @@
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-#[cfg(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "windows", target_arch = "x86_64")
-))]
-use std::process::Stdio;
-use std::process::{Child, ChildStdout, Command, ExitStatus};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
