@@ -12,7 +12,7 @@ Issue #311 SHALL mirror the local `complete-v040-release-readiness` tasks exactl
 - **THEN** #311 remains open and milestone completion is not claimed
 
 ### Requirement: One exact promotion head owns all prepublication proof
-ProjectAtlas SHALL first prove one locked release-content head after every v0.4.0 implementation, readiness artifact, and other milestone issue is reconciled. It SHALL then permit exactly one commit that changes only #311 OpenSpec task checkbox state, mirror that state to the GitHub issue, and treat the resulting `dev` SHA as the exact promotion head. Required local and hosted evidence SHALL be rerun on that head, and a later change SHALL invalidate the affected evidence.
+ProjectAtlas SHALL first prove one locked release-content head after every v0.4.0 implementation, readiness artifact, and other milestone issue is reconciled. It SHALL then permit exactly one commit that changes only #311 OpenSpec task checkbox state, mirror that state to the GitHub issue, and treat the resulting `dev` SHA as the exact promotion head. Clean optional-parser and prepublish evidence MAY carry forward only across that verified non-release-impacting diff. Ordinary exact-head CI, strict OpenSpec, IssueOps, ProjectAtlas low lint, and review checks SHALL pass on the promotion head, and any other change SHALL invalidate the affected evidence.
 
 #### Scenario: Release-content proof is ready to reconcile
 - **WHEN** all required local gates and hosted runs complete successfully
@@ -20,10 +20,10 @@ ProjectAtlas SHALL first prove one locked release-content head after every v0.4.
 
 #### Scenario: Checklist state is reconciled
 - **WHEN** the bounded reconciliation commit and mirrored issue state contain no change beyond completed #311 task checkboxes
-- **THEN** the resulting `dev` SHA becomes the exact promotion head and every required exact-head gate is rerun before #311 closes
+- **THEN** the resulting `dev` SHA becomes the exact promotion head, unaffected clean-construction and prepublish proof remains valid, and ordinary exact-head gates run before #311 closes
 
 #### Scenario: Promotion head changes after proof
-- **WHEN** any later commit changes the exact promotion head
+- **WHEN** reconciliation changes any other path or a later commit changes the exact promotion head
 - **THEN** readiness returns to the release-content lock and affected proof is rerun before completion
 
 #### Scenario: A required gate fails or is skipped
@@ -34,11 +34,11 @@ ProjectAtlas SHALL first prove one locked release-content head after every v0.4.
 Release readiness SHALL use the existing `01-CI`, `optional-parser-pack`, and `02-Release` workflows. It SHALL require cross-platform packaged CLI/MCP smoke, explicit empty-cache Linux and Windows optional-parser construction, and `02-Release` package and installer proof with `prepublish_only=true`.
 
 #### Scenario: Clean optional-parser proof succeeds
-- **WHEN** the exact promotion head is dispatched with `clean_construction=true` and `target=all`
+- **WHEN** the exact release-content head is dispatched with `clean_construction=true` and `target=all`
 - **THEN** Linux and Windows bypass cache restore and save, complete construction plus fresh-runner and runtime proof, and produce the complete aggregate result
 
 #### Scenario: Prepublish release proof succeeds
-- **WHEN** `02-Release` runs on the exact promotion head with version `v0.4.0` and `prepublish_only=true`
+- **WHEN** `02-Release` runs on the exact release-content head with version `v0.4.0` and `prepublish_only=true`
 - **THEN** every required package and installer smoke job succeeds without creating a tag or GitHub release
 
 #### Scenario: Ordinary candidate behavior succeeds

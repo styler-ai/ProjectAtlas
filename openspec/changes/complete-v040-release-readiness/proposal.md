@@ -7,7 +7,7 @@ ProjectAtlas v0.4.0 has completed its feature program, but release issue #311 st
 - Replace #311's stale initiative checklist with a mapped release-readiness checklist whose state can be verified by IssueOps.
 - Make milestone IssueOps reject open issues before publication.
 - Land the remaining installer trust-boundary correction and close every other v0.4.0 milestone issue against exact-head local, hosted, and review evidence.
-- Prove one locked release-content head, reconcile its completed checklist in one bounded commit, and rerun the required gates on the resulting exact promotion head.
+- Prove one exact release-content head, carry that proof only across one verified task-state-only reconciliation commit, and require ordinary exact-head gates on the resulting promotion head.
 - Run `02-Release` in `prepublish_only` mode so the real package and installer paths are proven without creating a tag or GitHub release.
 - Prepare the exact `dev`-to-`main` promotion while keeping `main` and publication untouched until readiness is complete.
 - Create a separate non-milestone post-release issue that owns published-release verification and the user-requested safe branch, worktree, and external ProjectAtlas checkout cleanup.

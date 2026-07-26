@@ -8,7 +8,7 @@ overview -> folders -> files -> summary/outline/symbols -> slice
 
 Version 0.4 must improve what an agent learns from that funnel without adding mandatory orchestration. The selected local source tree on disk is the indexed truth, including uncommitted edits and non-Git projects; VCS state is optional context, never a substitute for current bytes. SQLite remains the project-local index source of truth, TOON remains the compact default agent format, `.gitignore` remains dynamically authoritative, and authored purposes/settings/telemetry remain outside disposable derived data.
 
-The earlier implementation branch mixed useful graph/storage work with a per-task proof system. Recovery therefore happens commit by commit: reapply behavior that still fits this design, independently verify it on current `dev`, reject the proof machinery, and quarantine superseded recovery refs until post-v0.4.0 cleanup verifies and removes them through issue #311.
+The earlier implementation branch mixed useful graph/storage work with a per-task proof system. Recovery therefore happens commit by commit: reapply behavior that still fits this design, independently verify it on current `dev`, reject the proof machinery, and quarantine superseded recovery refs until post-v0.4.0 cleanup verifies and removes them through issue #346.
 
 ### Source recovery decisions
 
