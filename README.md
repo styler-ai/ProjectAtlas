@@ -1,260 +1,132 @@
 # ProjectAtlas
 
 <p align="center">
-  <img src="docs/assets/projectatlas-mascot.png" alt="ProjectAtlas mascot holding a repository map labeled src, docs, tests, and issues" width="720">
+  <img src="docs/assets/projectatlas-mascot.png" alt="Ani, the ProjectAtlas mascot, holding a repository map labeled src, docs, tests, and issues" width="720">
+</p>
+
+<h3 align="center">Give your coding agent a map before it opens the repository.</h3>
+
+<p align="center">
+  <strong>Index once. Keep it fresh incrementally. Reuse the intelligence across agents, sessions, and tasks.</strong>
 </p>
 
 <p align="center">
-  <strong>A Rust-native local code index and atlas for coding agents.</strong><br>
-  It gives Codex, Claude Code, OpenCode, and other MCP-capable agents a complete SQLite-backed index before they spend context reading the wrong files.
+  ProjectAtlas is a Rust-native, local repository-intelligence layer for coding agents.<br>
+  It turns your codebase into a persistent SQLite atlas of purposes, summaries, symbols, relations, search text, and exact source slices.
 </p>
 
 <p align="center">
   <a href="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.0"><img alt="release" src="https://img.shields.io/badge/release-v0.4.0-blue"></a>
-  <img alt="rust" src="https://img.shields.io/badge/Rust-2024-orange">
-  <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
+  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.0"><img alt="ProjectAtlas v0.4.0" src="https://img.shields.io/badge/release-v0.4.0-0969da"></a>
+  <img alt="Rust 2024" src="https://img.shields.io/badge/Rust-2024-f74c00">
+  <img alt="Local SQLite" src="https://img.shields.io/badge/index-local%20SQLite-1a7f37">
+  <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-8250df">
 </p>
 
-ProjectAtlas is the missing local code index between "agent, fix this repo" and "agent, please do not open half the codebase first."
+| **Up to 99.8%** | **~160–166 ms** |
+| :---: | :---: |
+| estimated navigation context avoided¹ | representative warm indexed reads¹ |
+| **40 MCP tools** | **Local by design** |
+| one native CLI + MCP runtime | no hosted code index required |
 
-It keeps a fast local SQLite index of folders, files, one-line purposes, deterministic content summaries, symbols, relations, search text, health findings, and token telemetry. The agent starts with the indexed atlas, narrows to the right folder and file, then escalates to outlines, symbols, or exact source slices only when correctness needs real code.
+ProjectAtlas gives Codex, Claude Code, OpenCode, and other MCP-capable agents a durable understanding of where code lives and how it connects. Instead of repeatedly walking folders and opening broad files, the agent asks the atlas, follows graph-guided candidates, and reads the smallest exact source slice that can answer the task.
 
-Ani is the ProjectAtlas mascot. The versioned design references live in [`docs/design/ani-mascot-reference.png`](docs/design/ani-mascot-reference.png), [`docs/design/projectatlas-mascot-clean-transparent.svg`](docs/design/projectatlas-mascot-clean-transparent.svg), and [`docs/design/token-impact-tui-reference.png`](docs/design/token-impact-tui-reference.png).
-
-No required `.purpose` files. No source-header tax. No hosted index. The project lives beside your repo in `.projectatlas/`, returns compact TOON by default, and runs as a native Rust CLI plus MCP server.
-
-## Quickstart
+## Install for Codex
 
 ```bash
 codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.4.0
 codex plugin add projectatlas --marketplace projectatlas
 ```
 
-If Codex already has an older ProjectAtlas marketplace snapshot cached, refresh
-the configured Git snapshot before reinstalling the plugin:
+Then tell Codex:
 
-```bash
-codex plugin marketplace upgrade projectatlas --json
-codex plugin remove projectatlas --marketplace projectatlas
-codex plugin add projectatlas --marketplace projectatlas
-codex plugin list --marketplace projectatlas --available --json
-```
+> Use ProjectAtlas for this repo.
 
-If the marketplace source is pinned to an older release tag, `marketplace upgrade`
-correctly keeps that pinned ref. In that case, replace only the dedicated `styler-ai/ProjectAtlas` source after confirming no unrelated plugin depends on it, then install again with the commands above:
+The plugin supplies the ProjectAtlas workflow skill, verifies or installs the native runtime, generates project-local MCP configuration, and keeps the official Codex plugin and MCP registration aligned with the selected release.
 
-```bash
-codex plugin marketplace remove projectatlas
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.4.0
-```
+Already installed an older version? [Use the upgrade path](#upgrade-projectatlas).
 
-Then tell Codex: "Use ProjectAtlas for this repo."
+## Stop rediscovering the same repository
 
-That is the intended path. The plugin gives the agent the workflow skill, native runtime installer, and MCP config templates. The agent does the rest: install or verify the runtime, index the repo, keep the atlas fresh, start each task with one compact session brief, follow its ranked next call, and read exact source only after the target is known.
+| Without a persistent atlas | With ProjectAtlas |
+| --- | --- |
+| Guess a folder from the task description | Start from ranked folder and file purposes |
+| Search broadly and open several candidates | Follow summaries, symbols, and relation evidence |
+| Re-read whole files in later sessions | Reuse the project-local SQLite intelligence |
+| Spend context before the real edit is known | Escalate to the smallest exact source slice |
+| Repeat full orientation after changes | Refresh changed files incrementally with `watch` |
 
-## What Happens Next
+The larger the repository and the more often agents work in it, the more useful the persistent index becomes. The first scan builds reusable intelligence; later tasks query it directly, while the watcher updates changed paths instead of rebuilding the agent's understanding from scratch.
 
-ProjectAtlas is intentionally agent-first. In normal use you should not have to memorize command syntax.
-
-The agent follows this loop:
-
-1. Bind the intended project and refresh only when the index may be stale.
-2. Call `atlas_session_brief` once with the task and compact output.
-3. Follow its returned summary, search, relation, health, or exact-slice call directly.
-4. Continue from returned selectors instead of restarting folder/file discovery.
-5. Open the smallest exact source slice needed to answer the task.
-
-`atlas_overview` → `atlas_folders` → `atlas_files` remains the fallback when the brief is unavailable, returns no actionable candidate, or broader repository structure is itself the task.
-
-For active sessions, the agent can run the watcher so file edits continuously refresh the database. For cleanup sessions, it can ask ProjectAtlas for missing purposes, stale metadata, duplicate folder roles, and structure drift.
-
-## What It Saves
-
-The final v0.4 navigation campaign retained all 45 preregistered trials:
-ProjectAtlas v0.4 completed 15/15, frozen v0.3.26 completed 12/15 and failed all
-three pinned VS Code setups, and the plain control completed 15/15. The final
-manual result was 41/42 completed answers; the one remaining v0.4 answer was
-technically correct but linked to invalid temporary paths. Against v0.3.26,
-v0.4 cut median net navigation context by 28–30% on the
-three small tasks, but used 47% more on the medium task. Plain navigation used
-the least context at every measured scale, while v0.4 avoided several broad and
-full reads at the cost of indexing, discovery, and skill context. See the
-[reviewed report](docs/benchmarks/v0.4-agent-navigation-evaluation.md) and
-[raw 45-trial result](docs/benchmarks/v0.4-agent-navigation-results.json).
-
-The token-overview record below is intentionally a separate representative
-large-application audit, not a marketing constant or the controlled
-counterfactual above. Its savings rate depends on repository size, how often
-the agent asks for orientation, and how much source ProjectAtlas prevents the
-agent from opening.
-
-The estimate is:
-
-```text
-without ProjectAtlas = avoided candidate files, directory walks, and full-file reads
-with ProjectAtlas    = compact TOON payloads returned by overview, folders, files, summaries, search, symbols, and slices
-legacy gross saved   = without ProjectAtlas - with ProjectAtlas
-savings rate         = legacy gross saved / without ProjectAtlas
-tokens avoided       = measured saved + deduped modeled avoided
-file reads avoided   = observed summary/slice replacements + search-modeled narrowing
-```
-
-The default estimator is deliberately simple and local: `ceil(chars_or_bytes / 4)`. It is a workflow estimate, not provider billing telemetry. Reports preserve the legacy gross saved number for continuity and also expose `measured_tokens_saved`, `gross_modeled_tokens_avoided`, `deduped_modeled_tokens_avoided`, conservative headline `tokens_avoided`, and likely file reads avoided split into observed summary/slice replacements versus search-modeled narrowing.
-
-| Signal | Result |
-| --- | ---: |
-| Files | 679 |
-| Folders | 206 |
-| Indexed text files | 554 |
-| Indexed text bytes | 7,088,446 |
-| Symbols | 5,145 |
-| Relations | 12,122 |
-| Token telemetry calls | 142 |
-| Average baseline avoided per call | 1,557,144 tokens |
-| Average ProjectAtlas payload per call | 2,997 tokens |
-| Total estimated without ProjectAtlas | 221,114,448 tokens |
-| Total estimated with ProjectAtlas | 425,622 tokens |
-| Legacy gross estimated saved | 220,688,826 tokens |
-| Observed savings rate for this workload | 99.8% |
+## The context difference
 
 <p align="center">
-  <img src="docs/assets/token-savings-bar.svg" alt="Token savings benchmark bar chart: without ProjectAtlas 221.1 million estimated tokens, with ProjectAtlas 0.4 million estimated tokens across 142 calls" width="820">
+  <img src="docs/assets/token-savings-donut.svg" alt="Donut chart showing 99.8% estimated navigation context avoided and 0.2% returned as compact ProjectAtlas payloads in a representative 142-call large-application audit" width="760">
 </p>
 
-That bar chart is intentionally lopsided. The point of ProjectAtlas is not that every repository magically saves 99.8%; the point is that repeated agent lookups in a large repo should read compact folder/file intelligence first, not broad source trees first.
+<p align="center">
+  <img src="docs/assets/token-savings-bar.svg" alt="Bar chart comparing 221.1 million estimated navigation tokens without ProjectAtlas with 0.4 million compact ProjectAtlas payload tokens in the same representative audit" width="860">
+</p>
 
-Sizing intuition:
+¹ The published representative audit covered a 679-file application and 142 ProjectAtlas calls after indexing: 221,114,448 estimated navigation tokens without ProjectAtlas versus 425,622 compact payload tokens with ProjectAtlas, a workload-specific 99.8% reduction. Warm indexed CLI reads in that audit were approximately 160–166 ms. These are offline `chars/bytes ÷ 4` workflow estimates—not provider billing counters—and results vary by repository and usage. See the [full corpus, formula, measurements, and limitations](docs/benchmarks/large-application-token-savings.md).
 
-| Workload shape | What usually happens |
+## How ProjectAtlas works
+
+```mermaid
+flowchart TB
+    Repo["Your repository"] --> Scan["Rust-native scan<br/>+ incremental watch"]
+    Scan --> DB[("Local SQLite atlas")]
+    DB --> Intel["Purposes · summaries<br/>symbols · relation graph"]
+    Intel --> Guide["Compact CLI / MCP<br/>task guidance"]
+    Guide --> Agent["Codex · Claude Code<br/>OpenCode · MCP agents"]
+    Agent --> Slice["Right file<br/>smallest exact slice"]
+```
+
+The database is durable product state, not a throwaway prompt. Folder and file purposes explain why paths exist; deterministic summaries explain what is currently inside them; symbols and relations connect the code; health findings expose drift; token telemetry shows how the atlas-first workflow is behaving.
+
+When files change, `projectatlas watch` refreshes the affected index data. Agent-reviewed purposes persist across scans and become stale for review when their source changes instead of silently disappearing.
+
+## Built for the agent hot path
+
+| Advantage | What it means |
 | --- | --- |
-| Small repo, few lookups | Savings are real but modest because there is less wrong code to avoid. |
-| Medium repo, repeated feature work | Savings grow when folder and file purpose prevent wrong-file reads. |
-| Large repo, many exploratory lookups | Savings can become very high because each lookup avoids broad candidate sets and repeated full-file reads. |
+| **Rust-native performance** | One compiled CLI and MCP server for scanning, watching, querying, and exact reads. |
+| **Persistent SQLite intelligence** | Repository structure, purposes, summaries, symbols, relations, search text, health, and telemetry survive across sessions. |
+| **Graph-guided navigation** | Agents can move from task intent to related folders, files, symbols, calls, imports, and exact source without broad reads. |
+| **Compact by default** | CLI and MCP return TOON-first bounded results designed for agent context. |
+| **Local and credential-free** | Normal indexing and navigation require no hosted code index, API key, or remote embedding service. |
+| **Repository-aware boundaries** | Project identity, database paths, `.gitignore`, ProjectAtlas ignores, and per-call project routing keep repositories isolated. |
+| **Incremental freshness** | `watch` and `watch --once` update changed content while preserving durable reviewed intent. |
+| **Cross-platform releases** | Packaged and tested for Windows x64, Linux x64, macOS x64, and macOS arm64. |
 
-## Expected Large-Repo Latency
+## One atlas, every supported agent
 
-The latency sample below is for warm indexed reads after ProjectAtlas has already scanned the repo. Initial scan/watch refresh is a different operation because it hashes files, updates SQLite, refreshes text, and parses symbol candidates.
-
-Benchmark scale:
-
-| Repo shape | Size |
-| --- | ---: |
-| Files | 679 |
-| Folders | 206 |
-| Indexed text files | 554 |
-| Indexed text bytes | 7.1 MB |
-| Symbols | 5,145 |
-| Relations | 12,122 |
-
-Warm CLI reads from that audit stayed around 160-166 ms:
-
-| Command shape | Sample latency |
-| --- | ---: |
-| `summary <large-source-file> --limit 25` | ~165 ms |
-| `files workflow --folder .github/workflows --limit 20` | ~164 ms |
-| `token` | ~161 ms |
-| `overview` | ~166 ms |
-
-For a comparable large application, the practical expectation is that warm orientation commands stay comfortably sub-second and usually feel like ordinary CLI reads. The scan/build step can take longer, but the agent should not pay that full cost for every lookup; it should use `watch` or `watch --once` to keep the database fresh and then read from the indexed atlas.
-
-Token reports expose bucket, baseline, and confidence metadata so observed full-file compression is not silently mixed with modeled navigation savings. That is deliberate: normal agent orientation stays local, fast, and credential-free.
-
-## The Funnel
-
-ProjectAtlas teaches agents this order:
-
-```text
-one compact session brief with purpose + graph evidence
-  -> returned summary, search, relation, health, or slice call
-  -> follow returned selectors without rediscovery
-  -> smallest exact source slice
-```
-
-For manual CLI work or brief fallback, use `overview` → `folders` → `files` → `summary` → `slice`.
-
-Most agent waste happens before code is edited: broad search, wrong folder, wrong file, full-file reads too early. ProjectAtlas makes "where should I look?" cheap enough that agents ask it first.
-
-## Core Ideas
-
-- `folder_purpose`: why this folder exists.
-- `file_purpose`: why this file exists.
-- `content_summary`: what currently appears inside the file.
-- `atlas_session_brief`: one compact task-oriented startup result with ranked candidates and ready next calls.
-- `summary`: the detailed file-intelligence command: purpose, summary, parser status, symbols, imports, calls, counts, and line context.
-- `slice`: exact source after the target is known.
-- `watch`: continuous local refresh while files change.
-- `token`: estimated context saved by the atlas-first workflow.
-
-## CLI Reference
-
-Most users can stop at the plugin install. The CLI is here for local debugging, automation, and release verification.
-
-Only need the CLI yourself? Install it from the released tag:
-
-```bash
-cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.4.0 projectatlas-cli --locked
-```
-
-From this checkout:
-
-```bash
-cargo install --path crates/projectatlas-cli --locked
-```
-
-Then initialize and inspect a repo:
+`projectatlas init` creates the project-local database and generates absolute, version-pinned MCP configs for Codex/generic MCP hosts, Claude Code, and OpenCode:
 
 ```bash
 projectatlas init
-projectatlas overview
 ```
 
-`projectatlas init` is the one-call first-run bootstrap: it creates `.projectatlas/`, writes default config and
-non-source scaffolding when missing, initializes `.projectatlas/projectatlas.db`, runs the initial scan/index, writes
-project-local MCP configs for Codex/generic MCP, Claude Code, and OpenCode, and returns the purpose-curation handoff.
-Use `projectatlas scan` later when you want an explicit refresh.
+| Host | Generated configuration |
+| --- | --- |
+| Codex / generic MCP | `.projectatlas/projectatlas.mcp.json` |
+| Claude Code | `.projectatlas/projectatlas.claude.mcp.json` |
+| OpenCode | `.projectatlas/projectatlas.opencode.json` |
 
-## Manual Funnel
+The generated configs bind the verified runtime, required version, selected project database, config path, and working directory where the host supports it. A shared MCP server can still address several repositories safely through per-call `project_path`.
 
-This is the explicit CLI fallback for humans, automation, or a host without `atlas_session_brief`:
+### CLI installation
+
+Install the released Rust CLI directly:
 
 ```bash
-projectatlas overview
-projectatlas folders "auth"
-projectatlas files "login" --folder src
-projectatlas summary src/main.rs --limit 25
-projectatlas slice src/main.rs --start-line 1 --end-line 80
+cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.4.0 projectatlas-cli --locked
+projectatlas init
 ```
 
-For active work:
+### Runtime installers
 
-```bash
-projectatlas watch
-```
-
-For a human token dashboard:
-
-```bash
-projectatlas token --view tui
-```
-
-That opens the Ratatui token impact dashboard: a readable reconciled `Without ProjectAtlas - With ProjectAtlas = Saved by ProjectAtlas` equation, file reads avoided, observed summaries/slices, modeled narrowing, source rows, calibration notes, and compact status hints. The default theme is dark; use `projectatlas token --view tui --theme light` for light terminal color schemes. Ani remains the ProjectAtlas mascot in the design assets, but the token TUI defers mascot rendering until a future focused pass.
-
-For a local tokenizer calibration of indexed UTF-8 files, add `--tokenizer o200k_base` or `--tokenizer cl100k_base`.
-
-## Agent And MCP Setup
-
-ProjectAtlas ships plugin metadata and installer scripts for Codex and Claude Code, plus an OpenCode MCP config template.
-
-`projectatlas init` writes project-local MCP configs automatically. Regenerate them manually when needed:
-
-```bash
-projectatlas --format json --db .projectatlas/projectatlas.db mcp-config > .projectatlas/projectatlas.mcp.json
-projectatlas --format json --db .projectatlas/projectatlas.db mcp-config --harness claude-code > .projectatlas/projectatlas.claude.mcp.json
-projectatlas --format json --db .projectatlas/projectatlas.db mcp-config --harness opencode > .projectatlas/projectatlas.opencode.json
-```
-
-Or run the installer from the target project root:
+From a ProjectAtlas source checkout or installed plugin:
 
 ```powershell
 plugins/projectatlas/scripts/install-runtime.ps1
@@ -264,104 +136,110 @@ plugins/projectatlas/scripts/install-runtime.ps1
 bash plugins/projectatlas/scripts/install-runtime.sh
 ```
 
-The generated configs pin the runtime version, project database, config path, and working directory where the host supports it.
-When `codex` is available, the installer also repairs a stale official Codex
-`projectatlas` marketplace/plugin cache to the runtime release tag, then repairs
-a stale global `codex mcp` registry entry named `projectatlas` so it uses the
-verified runtime and this project's `.projectatlas` DB/config. It verifies the
-Codex ProjectAtlas skill artifact when Codex exposes the plugin source path,
-reports Claude Code/OpenCode generated-config status, and warns on stale
-official ProjectAtlas release pins in downstream `.github/workflows` files. Set
-`PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1` only if you intentionally manage the
-Codex ProjectAtlas plugin marketplace yourself, and
-`PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1` only if you intentionally manage
-that global Codex MCP entry yourself. After updates, agents should verify with
-`codex plugin list --marketplace projectatlas --json` and
-`codex mcp get projectatlas` or `codex mcp list`.
+The installers verify runtime identity before writing configuration. When Codex is available, they also detect and repair a stale official ProjectAtlas marketplace/plugin cache and global `projectatlas` MCP entry. Claude Code and OpenCode configurations are parsed and verified without taking ownership of unrelated user-managed host settings.
 
-Claude Code and OpenCode convergence is generated-config based: the installer parses the generated
-host JSON and verifies the absolute runtime path, `--require-version`, selected DB path, optional
-config path, and final `mcp` command. OpenCode verification also checks `type = "local"`,
-`enabled = true`, and the project `cwd`. The installer does not mutate Claude Code or OpenCode
-user-managed settings or pretend those hosts have a Codex-style ProjectAtlas marketplace cache; restart
-the running host if it cached older instructions.
+## Upgrade ProjectAtlas
 
-For task-directed MCP startup, agents call `atlas_session_brief` once with `compact: true` to get selected project identity, index
-state, bounded ranked candidates, health blockers, and ready next-call recommendations. They follow that call directly instead of repeating folder/file discovery. `atlas_settings`
-also includes a typed `mcp_session` capability block with nearest-project policy, path scope, telemetry
-mode, scan policy, runtime identity, and no-secret guarantees. `atlas_task_status` and
-`atlas_task_cancel` expose the bounded task-progress contract; existing scan/watch/search/summary/slice
-calls remain synchronous in this release.
+Refresh the dedicated marketplace snapshot, reinstall, and verify the selected release:
 
-## What The Agent Gets
+```bash
+codex plugin marketplace upgrade projectatlas --json
+codex plugin remove projectatlas --marketplace projectatlas
+codex plugin add projectatlas --marketplace projectatlas
+codex plugin list --marketplace projectatlas --available --json
+```
 
-ProjectAtlas exposes the same indexed capabilities through CLI and MCP; the compact task-start route is MCP-first:
+If the marketplace was intentionally pinned to an older tag, replace only the dedicated ProjectAtlas source:
+
+```bash
+codex plugin marketplace remove projectatlas
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.4.0
+codex plugin add projectatlas --marketplace projectatlas
+```
+
+## The agent workflow
+
+MCP-capable agents start with one compact task brief and follow its returned selectors:
+
+```text
+task
+  → atlas_session_brief
+  → ranked purpose, summary, search, or relation evidence
+  → exact file or symbol slice
+  → edit and test
+```
+
+For manual CLI use—or when the compact brief is unavailable—the explicit funnel is:
+
+```bash
+projectatlas overview
+projectatlas folders "authentication"
+projectatlas files "login" --folder src
+projectatlas summary src/auth.rs --limit 25
+projectatlas slice src/auth.rs --start-line 1 --end-line 80
+```
+
+Then keep the atlas current:
+
+```bash
+projectatlas watch
+```
+
+## What the agent can ask
 
 | Need | CLI | MCP |
 | --- | --- | --- |
-| Select project | `projectatlas --db <repo>/.projectatlas/projectatlas.db ...` | `atlas_set_project_path` / per-call `project_path` |
-| Refresh state | `projectatlas scan` / `projectatlas watch --once` | `atlas_scan` / `atlas_watch_once` |
-| Start a task | Use the manual funnel below | `atlas_session_brief` with `compact: true`, then its returned call |
-| Understand shape | `projectatlas overview` | `atlas_overview` |
-| Pick an area | `projectatlas folders <query>` | `atlas_folders` |
-| Pick files | `projectatlas files <query> --folder <path>` | `atlas_files` |
-| Inspect a file | `projectatlas summary <file>` | `atlas_file_summary` |
-| See symbols | `projectatlas symbols list --file <file>` | `atlas_symbols` |
-| Search narrowly | `projectatlas search <pattern> --file-pattern <glob>` | `atlas_search` |
-| Read exact code | `projectatlas slice <file> --start-line <n> --end-line <m>` | `atlas_slice` |
-| Find cleanup work | `projectatlas health-check --source-only --limit <n>` | `atlas_health` |
-| Curate purposes | `projectatlas purpose queue --limit <n>` / `projectatlas purpose set <path> "<purpose>"` / `projectatlas purpose review --from-file <json> --apply` | `atlas_purpose_queue` / `atlas_purpose_set` / `atlas_purpose_review` |
-| Report savings | `projectatlas token` | `atlas_token_report` |
+| Start a task | manual funnel | `atlas_session_brief` |
+| Understand repository shape | `projectatlas overview` | `atlas_overview` |
+| Choose an area | `projectatlas folders <query>` | `atlas_folders` |
+| Rank candidate files | `projectatlas files <query>` | `atlas_files` |
+| Inspect file intelligence | `projectatlas summary <file>` | `atlas_file_summary` |
+| Follow the code graph | `projectatlas symbols ...` | `atlas_symbols` / `atlas_symbol_relations` |
+| Search a bounded scope | `projectatlas search ...` | `atlas_search` |
+| Read exact code | `projectatlas slice ...` | `atlas_slice` |
+| Curate durable purposes | `projectatlas purpose ...` | `atlas_purpose_queue` / `atlas_purpose_set` / `atlas_purpose_review` |
+| Find structure drift | `projectatlas health-check` | `atlas_health` |
+| Measure context savings | `projectatlas token` | `atlas_token_report` |
 
-## Why Rust
+Use `projectatlas token --view tui` for the human token-impact dashboard, including conservative tokens avoided, likely file reads avoided, observed summary/slice replacements, modeled narrowing, and optional local tokenizer calibration.
 
-Because this sits in the agent hot path.
+## Local-first security
 
-ProjectAtlas scans with `.gitignore` awareness, hashes files with BLAKE3, stores state in SQLite, watches changes with `notify`, filters paths with `globset`, emits TOON for compact context, and parses symbols through Rust-native adapters. The point is not "Rust because Rust." The point is fast local repository intelligence that agents can call repeatedly without turning orientation into the expensive step.
+ProjectAtlas indexes source into the repository's own `.projectatlas/projectatlas.db`. Normal scans, searches, summaries, symbol traversal, and token reports are offline and require no ProjectAtlas cloud account.
 
-## Release Quality
+- `.gitignore` rules are inherited dynamically; explicit ProjectAtlas ignores are a stricter second layer.
+- Generated MCP configs use absolute runtime, database, and config paths with a release-version guard.
+- Project selection is explicit, and per-call `project_path` is available for shared or concurrent hosts.
+- Token telemetry stays local and uses an offline estimator by default.
+- Release gates exercise packaged installers and generated Codex, Claude Code, and OpenCode configuration on supported platforms.
 
-`v0.4.0` ships through the full release matrix:
+ProjectAtlas does not replace the security boundary of the coding agent that calls it. It makes repository intelligence local, inspectable, and independently usable.
 
-- Rust format, check, clippy, dependency policy, tests, doctests, and rustdoc.
-- ProjectAtlas scan, parity, database-backed purpose lint, and health checks.
-- Linux x64, Windows x64, macOS x64, and macOS arm64 packages.
-- Prepublish packaged-runtime installer smokes.
-- Postpublish release-runtime installer smokes.
-- Codex, Claude Code, and OpenCode MCP config generation checks.
+## Release quality
 
-## Repository Layout
+Every release runs:
 
-```text
-crates/
-  projectatlas-cli/       CLI, MCP server, release-facing runtime logic
-  projectatlas-core/      shared models, TOON rendering, telemetry
-  projectatlas-db/        SQLite storage
-  projectatlas-fs/        .gitignore-aware scanning
-  projectatlas-service/   summaries, search, slices, health
-  projectatlas-symbols/   symbol extraction
-docs/                     architecture, workflow, configuration
-plugins/projectatlas/     Codex and Claude Code plugin metadata, OpenCode MCP config template
-skills/                   standalone agent skill snippets
-```
+- Rust formatting, compile checks, strict Clippy, dependency policy, tests, doctests, and rustdoc.
+- Real CLI and MCP smoke/E2E coverage.
+- ProjectAtlas scan, database-backed purpose lint, parity, and health checks.
+- Linux x64, Windows x64, macOS x64, and macOS arm64 packaging.
+- Clean prepublish installer smokes before a tag can go live.
+- Postpublish installation and runtime verification against released assets.
 
-## Docs
+## Documentation
 
-- Published rustdoc and Pages landing page: https://styler-ai.github.io/ProjectAtlas/
-- Language & Ecosystem Support: https://styler-ai.github.io/ProjectAtlas/language-support/
-- CLI/MCP runtime crate docs: https://styler-ai.github.io/ProjectAtlas/projectatlas/
-- Core model crate docs: https://styler-ai.github.io/ProjectAtlas/projectatlas_core/
-- `docs/agent-integration.md`
-- `docs/configuration.md`
-- [`docs/language-support.md`](docs/language-support.md) — generated capability and ecosystem authority
-- [`docs/relation-support.md`](docs/relation-support.md) — generated accepted relation-family inventory
-- `docs/workflow.md`
-- `docs/structural-summaries.md`
-- `docs/benchmarks/large-application-token-savings.md`
-- `docs/projectatlas-3-architecture.md`
+- [Live ProjectAtlas documentation](https://styler-ai.github.io/ProjectAtlas/)
+- [Agent integration](docs/agent-integration.md)
+- [Configuration](docs/configuration.md)
+- [Workflow and troubleshooting](docs/workflow.md)
+- [Language and ecosystem support](docs/language-support.md)
+- [Relation support](docs/relation-support.md)
+- [ProjectAtlas architecture](docs/projectatlas-3-architecture.md)
+- [Token-savings methodology](docs/benchmarks/large-application-token-savings.md)
+- [Complete v0.4 navigation evaluation](docs/benchmarks/v0.4-agent-navigation-evaluation.md)
 
-Documentation closeout rule: after a PR changes installation, CLI behavior, MCP behavior, release process, public API, token reporting, or documented agent workflow, update README and the relevant docs/Page-facing content before closing the PR and linked issues. If no docs-facing behavior changed, explicitly confirm README and the published docs surface are still current in the PR checklist.
+Ani is the ProjectAtlas mascot. Versioned design references live in [`docs/design/`](docs/design/).
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).
