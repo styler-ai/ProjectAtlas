@@ -688,7 +688,7 @@ def mapped_issue_numbers(issue_map: dict[str, tuple[Owner, ...]]) -> set[int]:
     return {owner.issue for owners in issue_map.values() for owner in owners}
 
 
-def milestone_mapping_failures(
+def milestone_issue_failures(
     milestone: str, issues: list[dict[str, object]], mapped_issues: set[int]
 ) -> list[str]:
     failures: list[str] = []
@@ -697,6 +697,11 @@ def milestone_mapping_failures(
         if number not in mapped_issues:
             failures.append(
                 f"#{number} in milestone {milestone} has no local OpenSpec mapping"
+            )
+        state = str(item.get("state", "")).upper()
+        if state != "CLOSED":
+            failures.append(
+                f"#{number} in milestone {milestone} is {state or 'UNKNOWN'}, not CLOSED"
             )
     return failures
 
@@ -708,7 +713,7 @@ def check_milestone_complete(
     issues = milestone_issues(repo, milestone)
     if not issues:
         return [f"milestone {milestone!r} has no issues"]
-    failures.extend(milestone_mapping_failures(milestone, issues, mapped_issues))
+    failures.extend(milestone_issue_failures(milestone, issues, mapped_issues))
     for item in issues:
         number = positive_issue(item.get("number"), "issue number")
         if number not in mapped_issues:
@@ -1023,9 +1028,14 @@ Mitigations:
         1,
         2,
     }
-    assert milestone_mapping_failures(
-        "v1.0.0-00", [{"number": 1}, {"number": 3}], {1, 2}
-    ) == ["#3 in milestone v1.0.0-00 has no local OpenSpec mapping"]
+    assert milestone_issue_failures(
+        "v1.0.0-00",
+        [{"number": 1, "state": "closed"}, {"number": 3, "state": "open"}],
+        {1, 2},
+    ) == [
+        "#3 in milestone v1.0.0-00 has no local OpenSpec mapping",
+        "#3 in milestone v1.0.0-00 is OPEN, not CLOSED",
+    ]
     try:
         validate_unique_issue_ownership(
             Path("issue-map.json"),

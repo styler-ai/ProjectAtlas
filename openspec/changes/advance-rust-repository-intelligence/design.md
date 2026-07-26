@@ -8,7 +8,7 @@ overview -> folders -> files -> summary/outline/symbols -> slice
 
 Version 0.4 must improve what an agent learns from that funnel without adding mandatory orchestration. The selected local source tree on disk is the indexed truth, including uncommitted edits and non-Git projects; VCS state is optional context, never a substitute for current bytes. SQLite remains the project-local index source of truth, TOON remains the compact default agent format, `.gitignore` remains dynamically authoritative, and authored purposes/settings/telemetry remain outside disposable derived data.
 
-The earlier implementation branch mixed useful graph/storage work with a per-task proof system. Recovery therefore happens commit by commit: reapply behavior that still fits this design, independently verify it on current `dev`, reject the proof machinery, and quarantine superseded recovery refs until post-v0.4.0 cleanup verifies and removes them through issue #311.
+The earlier implementation branch mixed useful graph/storage work with a per-task proof system. Recovery therefore happens commit by commit: reapply behavior that still fits this design, independently verify it on current `dev`, reject the proof machinery, and quarantine superseded recovery refs until post-v0.4.0 cleanup verifies and removes them through issue #346.
 
 ### Source recovery decisions
 
@@ -53,7 +53,7 @@ The old hard-coded three-hop query, graph-scale/evidence runners, task receipts,
 3. Complete database architecture/reconciliation task 2.0, reopened short-transaction staging task 2.3, real SQLite/MCP contract task 2.7, and bounded storage-lifecycle task 2.8 before task 3.2 or dependent graph navigation; finish dependency-aware convergence and the verified source-observation epoch in tasks 3.2, 3.3, and 3.5 before graph signals enter normal navigation; at each later task, land its smallest database delta and real round-trip coverage before service/adapter code.
 4. Stabilize language and relation contracts before richer analysis or optional packs.
 5. Complete issue #308 before bounded project memory in #314 consumes the database/session boundaries.
-6. Run combined compatibility, packaging, platform, benchmark, and release readiness in #311 after #308 and #314 stabilize.
+6. Run combined compatibility, packaging, platform, benchmark, and release readiness in #311 after #308 stabilizes. Issue #314 is deferred until after v0.4.0 and consumes those released boundaries instead of blocking readiness.
 7. Preserve the complete pre-v0.4 MCP inventory through #308 and freeze it as the packaged v0.4 baseline. After all v0.4 feature behavior is stable, task 7.3.1 compares the current compatible composition with additive schema/default/next-call changes and the smallest credible dedicated or additional calls for the canonical feature workflows; it keeps the current surface when best or tied and implements only a materially better compatible additive boundary. Issue #310 alone owns later public tool classification, compact/default selection, consolidation, or breaking removal; it must not duplicate #308 graph, freshness, ranking, or session-brief behavior.
 
 ### Section-closeout architecture and pre-mortem reflection

@@ -20,7 +20,7 @@ Agent harnesses can preserve a recent transcript, compact a long conversation, r
 - Treating Git history or a hosted repository as more authoritative than the selected current local source state.
 - A background daemon, generic memory-provider abstraction, generic database export/import product, or one MCP tool per administrative operation.
 
-This change is planned for v0.4.0 and is ready for implementation only after #308 stabilizes the database, publication, freshness, session-brief, and MCP-surface boundaries it depends on.
+This change is deferred until after v0.4.0 and is ready for implementation only after #308 has merged, shipped, and been exercised through the database, publication, freshness, session-brief, and MCP-surface boundaries it depends on.
 
 ## Acceptance criteria
 

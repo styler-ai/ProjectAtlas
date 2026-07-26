@@ -3957,7 +3957,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "owner_slices",
         "visible_markdown",
         "remote != expected",
-        "milestone_mapping_failures",
+        "milestone_issue_failures",
         "REQUIRED_OPEN_ISSUE_HEADINGS",
         "architecture_diagram_link_failures",
         "MITIGATION_RE",
