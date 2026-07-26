@@ -696,17 +696,22 @@ struct PayloadObservation {
 impl PayloadObservation {
     /// Return whether this payload can affect one grammar-affined worker launch.
     fn contributes_to_launch(&self, language_id: &str) -> bool {
-        matches!(
+        let shared_launch_input = matches!(
             &self.role,
             ParserPackPayloadRole::Worker
                 | ParserPackPayloadRole::ContainmentBroker
                 | ParserPackPayloadRole::AcceptedManifest
-        ) || matches!(
-            &self.role,
-            ParserPackPayloadRole::GrammarLibrary {
-                language_id: payload_language
-            } if payload_language == language_id
-        )
+        );
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        let shared_launch_input =
+            shared_launch_input || matches!(&self.role, ParserPackPayloadRole::NativeImportPolicy);
+        shared_launch_input
+            || matches!(
+                &self.role,
+                ParserPackPayloadRole::GrammarLibrary {
+                    language_id: payload_language
+                } if payload_language == language_id
+            )
     }
 
     /// Return whether one payload retains the identity captured before digest verification.
@@ -1103,7 +1108,8 @@ struct ArtifactCurrentnessProbe {
 }
 
 /// Number of path identities that can affect one grammar-affined launch:
-/// artifact manifest, worker, broker, accepted manifest, and selected grammar.
+/// artifact manifest, worker, platform authority (broker or native policy),
+/// accepted manifest, and selected grammar.
 const MAX_CURRENTNESS_PROBE_FILES: usize = 5;
 
 impl ArtifactCurrentnessProbe {
@@ -5786,6 +5792,48 @@ mod tests {
         assert!(
             !observation(ParserPackPayloadRole::NativeAuditReport).contributes_to_launch("rust")
         );
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        assert!(
+            observation(ParserPackPayloadRole::NativeImportPolicy).contributes_to_launch("rust")
+        );
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        assert!(
+            !observation(ParserPackPayloadRole::NativeImportPolicy).contributes_to_launch("rust")
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn linux_currentness_probe_detects_native_policy_drift()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let artifact_path = temp.path().join(ARTIFACT_MANIFEST_FILE_NAME);
+        let policy_path = temp.path().join(NATIVE_IMPORT_POLICY_FILE_NAME);
+        fs::write(&artifact_path, b"artifact")?;
+        fs::write(&policy_path, b"trusted")?;
+        let modified = fs::metadata(&policy_path)?.modified()?;
+
+        let mut launch = metadata_only_launch();
+        launch.pack_root = temp.path().to_path_buf();
+        launch.artifact_manifest = FileObservation::capture(artifact_path)?;
+        launch.payloads = vec![PayloadObservation {
+            file: FileObservation::capture(policy_path.clone())?,
+            role: ParserPackPayloadRole::NativeImportPolicy,
+            bytes: 7,
+            sha256: encode_sha256(Sha256::digest(b"trusted")),
+        }];
+        let probe = launch.currentness_probe("alpha");
+        assert!(probe.is_current(None)?);
+
+        fs::write(&policy_path, b"changed")?;
+        File::options()
+            .write(true)
+            .open(&policy_path)?
+            .set_times(fs::FileTimes::new().set_modified(modified))?;
+        assert_eq!(fs::metadata(&policy_path)?.len(), 7);
+        assert_eq!(fs::metadata(&policy_path)?.modified()?, modified);
+        assert!(!probe.is_current(None)?);
+        Ok(())
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

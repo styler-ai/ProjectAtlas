@@ -1824,11 +1824,13 @@ kind; every later request and response remains session-bound and rejects replay.
 Before each parse request, the supervisor sends an owned constant-size path/epoch
 plan to one lazy process-wide metadata worker. The caller keeps its original
 cancellation, absolute-deadline, and no-progress bounds while that worker owns the
-only artifact-I/O lease. A stalled pathname lookup therefore cannot retain the
-caller or start another filesystem worker. Only a proven-current result permits
-resident reuse: uncertainty shuts down the resident without a reload, while an
-observed change shuts it down and enters the existing bounded digest reload before
-any replacement is accepted.
+only artifact-I/O lease. The plan covers at most five launch inputs: the artifact
+manifest, worker, platform authority (Windows broker or Linux native-import policy),
+accepted manifest, and selected grammar. A stalled pathname lookup therefore cannot
+retain the caller or start another filesystem worker. Only a proven-current result
+permits resident reuse: uncertainty shuts down the resident without a reload, while
+an observed change shuts it down and enters the existing bounded digest reload
+before any replacement is accepted.
 
 This is one concrete `projectatlas-cli` supervisor, not separate runtime and release
 implementations. Normal staging and a CLI-owned fresh-artifact verifier reuse its
@@ -2192,7 +2194,8 @@ flowchart TB
     Registry -. verified and enabled .-> Supervisor[Bounded Rust supervisor]
     Supervisor --> Currentness[One bounded process-wide worker probes up to five launch epochs]
     Currentness --> Current{Verified launch inputs current?}
-    Current -->|no| Reload[Bounded digest reload; require the same artifact identity]
+    Current -->|observed drift| Shutdown[Terminate and reap any resident]
+    Shutdown --> Reload[Bounded digest reload; require the same artifact identity]
     Current -->|yes| Resident{Healthy resident for this grammar?}
     Reload --> Resident
     Resident -->|no| Platform{Accepted optional-pack target}
@@ -2221,6 +2224,10 @@ flowchart TB
     Currentness -. blocked, timed out, or canceled .-> Preserve
     Reload -. read or identity failure .-> Preserve
     Platform -. launch, authority, containment, or admission failure .-> Preserve[Fail closed; terminate, reap, and join if started; preserve MCP and previous generation]
+    Open -. write, timeout, or cancellation .-> OpeningCleanup[Opening failed; terminate and reap resident]
+    Ready -. stalled or invalid READY .-> OpeningCleanup
+    Gate -. identity mismatch .-> OpeningCleanup
+    OpeningCleanup --> Preserve
     Validate -. failure, limit, or cancellation .-> Preserve
 ```
 
