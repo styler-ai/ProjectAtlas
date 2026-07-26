@@ -3163,6 +3163,11 @@ fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<
     )?;
     for required in [
         "For task-directed work in an existing indexed repository",
+        "On first use in each distinct project root",
+        "Every project root owns its own `.projectatlas/projectatlas.db`",
+        "**Fresh existing index:** make no indexing call",
+        "**Changed files:** use `atlas_watch_once`",
+        "**Deep symbol/graph rebuild:** use `atlas_symbols_build` only when",
         "`atlas_session_brief` once at task-oriented startup",
         "`atlas_session_brief` once at task-oriented startup with `query`, `project_path` when needed, and `compact: true`",
         "start with `file_limit: 3`, `folder_limit: 3`, `blocker_limit: 1`, and `purpose_limit: 1`",
@@ -3177,6 +3182,13 @@ fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<
         "`connections_truncated` describes the compact sample",
         "Do not guess a symbol line or other disambiguator",
         "Fall back to `atlas_overview` only when the session-brief MCP tool is unavailable",
+        "partition a large queue into bounded, non-overlapping batches",
+        "becomes `approved`, `source: agent`, and `agent_reviewed: true` immediately",
+        "add one durable pointer to the nearest harness instruction file",
+        "a runtime `version` matching the selected plugin release",
+        "resolve the installer from the installed, version-matched ProjectAtlas plugin root",
+        "-ProjectRoot \"<target-project-root>\"",
+        "Do not assume an unrelated target repository contains `plugins/projectatlas/scripts`",
     ] {
         if !skill.contains(required) {
             return Err(io::Error::other(format!(

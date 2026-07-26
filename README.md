@@ -254,14 +254,21 @@ projectatlas --format json --db .projectatlas/projectatlas.db mcp-config --harne
 projectatlas --format json --db .projectatlas/projectatlas.db mcp-config --harness opencode > .projectatlas/projectatlas.opencode.json
 ```
 
-Or run the installer from the target project root:
+For normal setup, point your agent to
+[https://github.com/styler-ai/ProjectAtlas](https://github.com/styler-ai/ProjectAtlas)
+and ask it to install and set up ProjectAtlas through its plugin store or the
+supported method best suited to that agent harness.
+
+For manual setup, resolve the version-matched installer from an installed
+ProjectAtlas plugin or source checkout, then pass the target project root
+separately:
 
 ```powershell
-plugins/projectatlas/scripts/install-runtime.ps1
+& "<ProjectAtlas checkout>\plugins\projectatlas\scripts\install-runtime.ps1" -ProjectRoot "<target project root>"
 ```
 
 ```bash
-bash plugins/projectatlas/scripts/install-runtime.sh
+bash "<ProjectAtlas checkout>/plugins/projectatlas/scripts/install-runtime.sh" "<target project root>"
 ```
 
 The generated configs pin the runtime version, project database, config path, and working directory where the host supports it.

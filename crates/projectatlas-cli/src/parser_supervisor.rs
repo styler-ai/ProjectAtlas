@@ -3,12 +3,7 @@
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-#[cfg(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "windows", target_arch = "x86_64")
-))]
-use std::process::Stdio;
-use std::process::{Child, ChildStdout, Command, ExitStatus};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
@@ -60,6 +55,8 @@ const WORKER_SERVE_ARGUMENT: &str = "--serve";
 const BROKER_SERVE_ARGUMENT: &str = "serve-worker";
 /// Poll interval for cancellation and bounded child state.
 const SUPERVISOR_POLL_INTERVAL: Duration = Duration::from_millis(20);
+/// Parent-only random record that orders each stdout frame against stderr.
+const PARSER_DIAGNOSTIC_FENCE_BYTES: usize = 32;
 /// Grace period for a healthy worker to close after its input pipe closes.
 const SUPERVISOR_GRACEFUL_CLOSE: Duration = Duration::from_millis(500);
 /// Hard cleanup ceiling after a child session becomes terminal.
@@ -390,10 +387,44 @@ impl From<OptionalParserPackManifestError> for ParserSupervisorError {
 struct PayloadObservation {
     /// Canonical payload path.
     path: PathBuf,
+    /// Manifest-owned payload responsibility.
+    role: ParserPackPayloadRole,
     /// Exact manifest-bound byte count.
     bytes: u64,
+    /// Exact manifest-bound SHA-256.
+    sha256: String,
     /// Modification timestamp when the host filesystem exposes one.
     modified: Option<SystemTime>,
+}
+
+impl PayloadObservation {
+    /// Return whether this payload can affect one grammar-affined worker launch.
+    fn contributes_to_launch(&self, language_id: &str) -> bool {
+        matches!(
+            &self.role,
+            ParserPackPayloadRole::Worker | ParserPackPayloadRole::ContainmentBroker
+        ) || matches!(
+            &self.role,
+            ParserPackPayloadRole::GrammarLibrary {
+                language_id: payload_language
+            } if payload_language == language_id
+        )
+    }
+
+    /// Rehash one payload before it can contribute to fresh launch authority.
+    fn is_current(&self) -> Result<bool, ParserSupervisorError> {
+        let Ok(metadata) = fs::metadata(&self.path) else {
+            return Ok(false);
+        };
+        if !metadata.is_file()
+            || metadata.len() != self.bytes
+            || metadata.modified().ok() != self.modified
+        {
+            return Ok(false);
+        }
+        let bytes = read_bounded_file(&self.path, self.bytes)?;
+        Ok(sha256_hex(&bytes) == self.sha256)
+    }
 }
 
 /// Complete private launch authority derived from one exact immutable artifact.
@@ -472,7 +503,9 @@ impl VerifiedParserPackLaunch {
             let metadata = file_metadata(&path)?;
             payloads.push(PayloadObservation {
                 path: path.clone(),
+                role: payload.role.clone(),
                 bytes: payload.bytes,
+                sha256: payload.sha256.as_str().to_owned(),
                 modified: metadata.modified().ok(),
             });
             match &payload.role {
@@ -560,8 +593,8 @@ impl VerifiedParserPackLaunch {
         })
     }
 
-    /// Return whether all cheap immutable-artifact observations still match.
-    fn is_current(&self) -> Result<bool, ParserSupervisorError> {
+    /// Return whether the manifests and payloads used by one launch still match.
+    fn is_current_for(&self, language_id: &str) -> Result<bool, ParserSupervisorError> {
         let artifact_bytes = read_bounded_file(
             &self.pack_root.join(ARTIFACT_MANIFEST_FILE_NAME),
             u64::try_from(OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES).unwrap_or(u64::MAX),
@@ -576,14 +609,12 @@ impl VerifiedParserPackLaunch {
         if sha256_hex(&accepted_bytes) != self.accepted_manifest_sha256 {
             return Ok(false);
         }
-        for payload in &self.payloads {
-            let Ok(metadata) = fs::metadata(&payload.path) else {
-                return Ok(false);
-            };
-            if !metadata.is_file()
-                || metadata.len() != payload.bytes
-                || metadata.modified().ok() != payload.modified
-            {
+        for payload in self
+            .payloads
+            .iter()
+            .filter(|payload| payload.contributes_to_launch(language_id))
+        {
+            if !payload.is_current()? {
                 return Ok(false);
             }
         }
@@ -819,11 +850,11 @@ enum ParserIoThreadError {
     /// The Windows broker admission record differed from the fixed contract.
     #[error("Windows admission record mismatch")]
     AdmissionMismatch,
-    /// The bounded diagnostic stream exceeded its fixed byte ceiling.
-    #[error("diagnostic stream exceeded {maximum} bytes")]
-    DiagnosticOverflow {
-        /// Inclusive byte ceiling.
-        maximum: usize,
+    /// A worker or broker wrote bytes outside the framed protocol.
+    #[error("unexpected diagnostic bytes: {diagnostic}")]
+    UnexpectedDiagnostic {
+        /// Bounded lossy rendering of the first observed bytes.
+        diagnostic: String,
     },
 }
 
@@ -843,9 +874,15 @@ enum FrameReaderEvent {
 enum DiagnosticReaderEvent {
     /// Platform admission completed and protocol input may begin.
     AdmissionAccepted,
+    /// The parent-authored fence after one complete stdout frame was observed.
+    FenceObserved,
     /// Terminal bounded reader failure.
     Failure(ParserIoThreadError),
 }
+
+/// One random parent-only record used to order independent standard pipes.
+#[derive(Clone, Copy)]
+struct DiagnosticFence([u8; PARSER_DIAGNOSTIC_FENCE_BYTES]);
 
 /// One exact write owned by the fixed worker-input thread.
 struct WriterCommand {
@@ -894,13 +931,32 @@ fn read_one_frame(input: &mut impl Read) -> Result<Option<Vec<u8>>, ParserIoThre
     Ok(Some(frame))
 }
 
-/// Own worker stdout until EOF or the first bounded framing failure.
-fn frame_reader_loop(mut stdout: ChildStdout, events: &SyncSender<FrameReaderEvent>) {
+/// Own worker stdout and fence every complete or failed frame through the diagnostic pipe.
+fn frame_reader_loop(
+    mut stdout: ChildStdout,
+    mut diagnostic_fence_writer: impl Write,
+    diagnostic_fence: DiagnosticFence,
+    events: &SyncSender<FrameReaderEvent>,
+) {
     loop {
         let event = match read_one_frame(&mut stdout) {
             Ok(Some(frame)) => FrameReaderEvent::Frame(frame),
             Ok(None) => FrameReaderEvent::EndOfStream,
             Err(error) => FrameReaderEvent::Failure(error),
+        };
+        let event = if matches!(event, FrameReaderEvent::EndOfStream) {
+            event
+        } else {
+            match diagnostic_fence_writer
+                .write_all(&diagnostic_fence.0)
+                .and_then(|()| diagnostic_fence_writer.flush())
+            {
+                Ok(()) => event,
+                Err(source) => FrameReaderEvent::Failure(ParserIoThreadError::Stream {
+                    operation: "write diagnostic fence",
+                    source,
+                }),
+            }
         };
         let terminal = !matches!(event, FrameReaderEvent::Frame(_));
         if events.send(event).is_err() || terminal {
@@ -913,6 +969,7 @@ fn frame_reader_loop(mut stdout: ChildStdout, events: &SyncSender<FrameReaderEve
 fn diagnostic_reader_loop(
     mut stderr: impl Read,
     expect_windows_admission: bool,
+    diagnostic_fence: DiagnosticFence,
     events: &SyncSender<DiagnosticReaderEvent>,
 ) -> Result<Vec<u8>, ParserIoThreadError> {
     if expect_windows_admission {
@@ -952,50 +1009,56 @@ fn diagnostic_reader_loop(
         return Ok(Vec::new());
     }
 
-    let mut diagnostics = Vec::new();
-    let mut chunk = [0_u8; 4 * 1024];
     loop {
-        let count = match stderr.read(&mut chunk) {
-            Ok(0) => return Ok(diagnostics),
-            Ok(count) => count,
-            Err(source) if source.kind() == io::ErrorKind::Interrupted => continue,
-            Err(source) => {
-                let message = source.to_string();
-                return if events
-                    .send(DiagnosticReaderEvent::Failure(
-                        ParserIoThreadError::Stream {
+        let mut observed = [0_u8; PARSER_DIAGNOSTIC_FENCE_BYTES];
+        let mut observed_len = 0_usize;
+        while observed_len < observed.len() {
+            match stderr.read(&mut observed[observed_len..]) {
+                Ok(0) if observed_len == 0 => return Ok(Vec::new()),
+                Ok(0) => break,
+                Ok(count) => observed_len = observed_len.saturating_add(count),
+                Err(source) if source.kind() == io::ErrorKind::Interrupted => {}
+                Err(source) => {
+                    let message = source.to_string();
+                    return if events
+                        .send(DiagnosticReaderEvent::Failure(
+                            ParserIoThreadError::Stream {
+                                operation: "read diagnostic stream",
+                                source,
+                            },
+                        ))
+                        .is_ok()
+                    {
+                        Ok(observed[..observed_len].to_vec())
+                    } else {
+                        Err(ParserIoThreadError::Stream {
                             operation: "read diagnostic stream",
-                            source,
-                        },
-                    ))
-                    .is_ok()
-                {
-                    Ok(diagnostics)
-                } else {
-                    Err(ParserIoThreadError::Stream {
-                        operation: "read diagnostic stream",
-                        source: io::Error::other(message),
-                    })
-                };
+                            source: io::Error::other(message),
+                        })
+                    };
+                }
             }
-        };
-        if count > PARSER_MAX_STDERR_BYTES.saturating_sub(diagnostics.len()) {
-            return if events
-                .send(DiagnosticReaderEvent::Failure(
-                    ParserIoThreadError::DiagnosticOverflow {
-                        maximum: PARSER_MAX_STDERR_BYTES,
-                    },
-                ))
-                .is_ok()
-            {
-                Ok(diagnostics)
-            } else {
-                Err(ParserIoThreadError::DiagnosticOverflow {
-                    maximum: PARSER_MAX_STDERR_BYTES,
-                })
-            };
         }
-        diagnostics.extend_from_slice(&chunk[..count]);
+        if observed_len == observed.len() && observed == diagnostic_fence.0 {
+            if events.send(DiagnosticReaderEvent::FenceObserved).is_err() {
+                return Ok(Vec::new());
+            }
+            continue;
+        }
+        let diagnostics = observed[..observed_len].to_vec();
+        let diagnostic = bounded_diagnostic(&diagnostics);
+        return if events
+            .send(DiagnosticReaderEvent::Failure(
+                ParserIoThreadError::UnexpectedDiagnostic {
+                    diagnostic: diagnostic.clone(),
+                },
+            ))
+            .is_ok()
+        {
+            Ok(diagnostics)
+        } else {
+            Err(ParserIoThreadError::UnexpectedDiagnostic { diagnostic })
+        };
     }
 }
 
@@ -1643,6 +1706,8 @@ struct ResidentParserSession {
     frame_reader: FrameReader,
     /// Owned bounded diagnostic/admission reader.
     diagnostic_reader: DiagnosticReader,
+    /// Parent-authored diagnostic fences already observed ahead of their frame event.
+    pending_diagnostic_fences: usize,
     /// Bounded Linux resident-memory accounting retained through cleanup.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     memory_observer: Arc<Mutex<LinuxMemoryObserver>>,
@@ -1687,10 +1752,24 @@ impl ResidentParserSession {
         let _ = memory_limits;
         let session = fresh_session_identity()?;
         let containment = containment_for_platform(launch.platform);
+        let diagnostic_fence = fresh_diagnostic_fence()?;
+        let (diagnostic_pipe, child_diagnostic_writer) =
+            io::pipe().map_err(|source| ParserSupervisorError::IoThread {
+                phase: "diagnostic pipe startup",
+                message: source.to_string(),
+            })?;
+        let diagnostic_fence_writer = child_diagnostic_writer.try_clone().map_err(|source| {
+            ParserSupervisorError::IoThread {
+                phase: "diagnostic pipe startup",
+                message: source.to_string(),
+            }
+        })?;
+        command.stderr(Stdio::from(child_diagnostic_writer));
         let program = PathBuf::from(command.get_program());
         let mut child = command
             .spawn()
             .map_err(|source| ParserSupervisorError::Spawn { program, source })?;
+        drop(command);
         let stdin = child
             .stdin
             .take()
@@ -1699,17 +1778,12 @@ impl ResidentParserSession {
             .stdout
             .take()
             .ok_or(ParserSupervisorError::MissingPipe { stream: "stdout" });
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or(ParserSupervisorError::MissingPipe { stream: "stderr" });
-        let (stdin, stdout, stderr) = match (stdin, stdout, stderr) {
-            (Ok(stdin), Ok(stdout), Ok(stderr)) => (stdin, stdout, stderr),
-            (stdin, stdout, stderr) => {
+        let (stdin, stdout) = match (stdin, stdout) {
+            (Ok(stdin), Ok(stdout)) => (stdin, stdout),
+            (stdin, stdout) => {
                 let operation = stdin
                     .err()
                     .or_else(|| stdout.err())
-                    .or_else(|| stderr.err())
                     .unwrap_or(ParserSupervisorError::MissingPipe { stream: "unknown" });
                 return Err(attach_cleanup(
                     operation,
@@ -1738,7 +1812,14 @@ impl ResidentParserSession {
         let (frame_sender, frame_events) = mpsc::sync_channel(1);
         let frame_handle = thread::Builder::new()
             .name("parser-supervisor-stdout".to_owned())
-            .spawn(move || frame_reader_loop(stdout, &frame_sender))
+            .spawn(move || {
+                frame_reader_loop(
+                    stdout,
+                    diagnostic_fence_writer,
+                    diagnostic_fence,
+                    &frame_sender,
+                );
+            })
             .map_err(|source| ParserSupervisorError::IoThread {
                 phase: "stdout reader startup",
                 message: source.to_string(),
@@ -1758,7 +1839,12 @@ impl ResidentParserSession {
         let diagnostic_handle = thread::Builder::new()
             .name("parser-supervisor-stderr".to_owned())
             .spawn(move || {
-                diagnostic_reader_loop(stderr, expect_windows_admission, &diagnostic_sender)
+                diagnostic_reader_loop(
+                    diagnostic_pipe,
+                    expect_windows_admission,
+                    diagnostic_fence,
+                    &diagnostic_sender,
+                )
             })
             .map_err(|source| ParserSupervisorError::IoThread {
                 phase: "diagnostic reader startup",
@@ -1805,6 +1891,7 @@ impl ResidentParserSession {
                 events: diagnostic_events,
                 handle: Some(diagnostic_handle),
             },
+            pending_diagnostic_fences: 0,
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             memory_observer,
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -1963,7 +2050,10 @@ impl ResidentParserSession {
                 ParserFrameKind::Failure => {
                     let failure = decode_parser_failure_for_request(frame, &request)?;
                     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-                    self.enforce_memory_bound("request failure", true)?;
+                    match self.enforce_memory_bound("request failure", true) {
+                        Ok(()) | Err(ParserSupervisorError::ChildExited { code: Some(0), .. }) => {}
+                        Err(error) => return Err(error),
+                    }
                     return Err(ParserSupervisorError::WorkerFailure {
                         code: failure.code(),
                     });
@@ -1999,6 +2089,12 @@ impl ResidentParserSession {
                 no_progress_timeout,
             )) {
                 Ok(DiagnosticReaderEvent::AdmissionAccepted) => return Ok(()),
+                Ok(DiagnosticReaderEvent::FenceObserved) => {
+                    return Err(ParserSupervisorError::IoThread {
+                        phase: "containment admission",
+                        message: "diagnostic fence arrived before admission".to_owned(),
+                    });
+                }
                 Ok(DiagnosticReaderEvent::Failure(ParserIoThreadError::AdmissionMismatch)) => {
                     return Err(ParserSupervisorError::InvalidAdmission);
                 }
@@ -2111,23 +2207,149 @@ impl ResidentParserSession {
                 no_progress_timeout,
                 cancellation,
             )?;
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            self.enforce_memory_bound(phase, false)?;
             if let Some(event) = try_frame_event(&self.frame_reader.events)? {
+                self.synchronize_frame_event(
+                    &event,
+                    phase,
+                    absolute_deadline,
+                    last_progress,
+                    no_progress_timeout,
+                    cancellation,
+                )?;
                 return self.finish_frame_event(event, phase);
             }
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            self.enforce_memory_bound(phase, false)?;
             self.check_diagnostic_reader(phase)?;
             match self.frame_reader.events.recv_timeout(next_poll_wait(
                 absolute_deadline,
                 last_progress,
                 no_progress_timeout,
             )) {
-                Ok(event) => return self.finish_frame_event(event, phase),
+                Ok(event) => {
+                    self.synchronize_frame_event(
+                        &event,
+                        phase,
+                        absolute_deadline,
+                        last_progress,
+                        no_progress_timeout,
+                        cancellation,
+                    )?;
+                    return self.finish_frame_event(event, phase);
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(ParserSupervisorError::IoThread {
                         phase,
                         message: "stdout reader closed".to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Order one stdout event against every earlier diagnostic-pipe write.
+    fn synchronize_frame_event(
+        &mut self,
+        event: &FrameReaderEvent,
+        phase: &'static str,
+        absolute_deadline: Instant,
+        last_progress: Instant,
+        no_progress_timeout: Duration,
+        cancellation: &IndexCancellation,
+    ) -> Result<(), ParserSupervisorError> {
+        if matches!(event, FrameReaderEvent::EndOfStream) {
+            self.wait_for_diagnostic_termination(
+                phase,
+                absolute_deadline,
+                last_progress,
+                no_progress_timeout,
+                cancellation,
+            )
+        } else {
+            self.wait_for_diagnostic_fence(
+                phase,
+                absolute_deadline,
+                last_progress,
+                no_progress_timeout,
+                cancellation,
+            )
+        }
+    }
+
+    /// Drain the diagnostic boundary before accepting clean stdout termination.
+    fn wait_for_diagnostic_termination(
+        &mut self,
+        phase: &'static str,
+        absolute_deadline: Instant,
+        last_progress: Instant,
+        no_progress_timeout: Duration,
+        cancellation: &IndexCancellation,
+    ) -> Result<(), ParserSupervisorError> {
+        loop {
+            poll_stop(
+                phase,
+                absolute_deadline,
+                last_progress,
+                no_progress_timeout,
+                cancellation,
+            )?;
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            self.enforce_memory_bound(phase, false)?;
+            self.check_diagnostic_reader(phase)?;
+            if thread_finished(self.diagnostic_reader.handle.as_ref()) {
+                self.check_diagnostic_reader(phase)?;
+                return Ok(());
+            }
+            thread::sleep(next_poll_wait(
+                absolute_deadline,
+                last_progress,
+                no_progress_timeout,
+            ));
+        }
+    }
+
+    /// Require the parent-authored stderr fence for one complete stdout frame.
+    fn wait_for_diagnostic_fence(
+        &mut self,
+        phase: &'static str,
+        absolute_deadline: Instant,
+        last_progress: Instant,
+        no_progress_timeout: Duration,
+        cancellation: &IndexCancellation,
+    ) -> Result<(), ParserSupervisorError> {
+        if self.pending_diagnostic_fences > 0 {
+            self.pending_diagnostic_fences = self.pending_diagnostic_fences.saturating_sub(1);
+            return Ok(());
+        }
+        loop {
+            poll_stop(
+                phase,
+                absolute_deadline,
+                last_progress,
+                no_progress_timeout,
+                cancellation,
+            )?;
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            match self.enforce_memory_bound(phase, false) {
+                Ok(()) | Err(ParserSupervisorError::ChildExited { code: Some(0), .. }) => {}
+                Err(error) => return Err(error),
+            }
+            match self.diagnostic_reader.events.recv_timeout(next_poll_wait(
+                absolute_deadline,
+                last_progress,
+                no_progress_timeout,
+            )) {
+                Ok(DiagnosticReaderEvent::FenceObserved) => return Ok(()),
+                Ok(DiagnosticReaderEvent::Failure(error)) => {
+                    self.termination_requested = true;
+                    return Err(io_thread_error(phase, &error));
+                }
+                Ok(DiagnosticReaderEvent::AdmissionAccepted) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(ParserSupervisorError::IoThread {
+                        phase,
+                        message: "diagnostic reader closed before frame fence".to_owned(),
                     });
                 }
             }
@@ -2151,15 +2373,29 @@ impl ResidentParserSession {
         result
     }
 
-    /// Surface diagnostic overflow or premature diagnostic-stream closure.
+    /// Surface diagnostic bytes and retain frame fences observed ahead of stdout.
     fn check_diagnostic_reader(
         &mut self,
         phase: &'static str,
     ) -> Result<(), ParserSupervisorError> {
-        match self.diagnostic_reader.events.try_recv() {
-            Ok(DiagnosticReaderEvent::Failure(error)) => Err(io_thread_error(phase, &error)),
-            Ok(DiagnosticReaderEvent::AdmissionAccepted)
-            | Err(TryRecvError::Empty | TryRecvError::Disconnected) => Ok(()),
+        loop {
+            match self.diagnostic_reader.events.try_recv() {
+                Ok(DiagnosticReaderEvent::Failure(error)) => {
+                    self.termination_requested = true;
+                    return Err(io_thread_error(phase, &error));
+                }
+                Ok(DiagnosticReaderEvent::FenceObserved) => {
+                    self.pending_diagnostic_fences = self
+                        .pending_diagnostic_fences
+                        .checked_add(1)
+                        .ok_or_else(|| ParserSupervisorError::IoThread {
+                            phase,
+                            message: "diagnostic fence count overflowed".to_owned(),
+                        })?;
+                }
+                Ok(DiagnosticReaderEvent::AdmissionAccepted) => {}
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return Ok(()),
+            }
         }
     }
 
@@ -2644,6 +2880,13 @@ fn fresh_session_identity() -> Result<ParserSessionIdentity, ParserSupervisorErr
     Ok(ParserSessionIdentity::for_entropy(&entropy))
 }
 
+/// Generate one parent-only marker that a worker cannot forge before a frame.
+fn fresh_diagnostic_fence() -> Result<DiagnosticFence, ParserSupervisorError> {
+    let mut entropy = [0_u8; PARSER_DIAGNOSTIC_FENCE_BYTES];
+    getrandom::fill(&mut entropy).map_err(|_source| ParserSupervisorError::EntropyUnavailable)?;
+    Ok(DiagnosticFence(entropy))
+}
+
 /// Convert a private I/O thread failure at the public typed boundary.
 fn io_thread_error(phase: &'static str, error: &ParserIoThreadError) -> ParserSupervisorError {
     ParserSupervisorError::IoThread {
@@ -3041,17 +3284,19 @@ impl OptionalParserSupervisor {
             no_progress_timeout,
             cancellation,
         )?;
-        self.refresh_changed_artifact()?;
-        let grammar = self.launch.require_grammar(language_id)?;
         let source_identity = ParserSourceIdentity::for_bytes(source)?;
-        if self
-            .resident
-            .as_ref()
-            .is_some_and(|resident| resident.grammar != grammar)
-        {
-            self.shutdown_resident()?;
+        if let Some(resident) = self.resident.as_ref() {
+            let grammar_changed = self
+                .launch
+                .require_grammar(language_id)
+                .map_or(true, |grammar| resident.grammar != grammar);
+            if grammar_changed {
+                self.shutdown_resident()?;
+            }
         }
         if self.resident.is_none() {
+            self.refresh_changed_artifact(language_id)?;
+            let grammar = self.launch.require_grammar(language_id)?;
             self.resident = Some(ResidentParserSession::launch(
                 &self.launch,
                 grammar,
@@ -3099,8 +3344,8 @@ impl OptionalParserSupervisor {
     }
 
     /// Replace launch authority only after observed artifact mutation.
-    fn refresh_changed_artifact(&mut self) -> Result<(), ParserSupervisorError> {
-        if let Ok(true) = self.launch.is_current() {
+    fn refresh_changed_artifact(&mut self, language_id: &str) -> Result<(), ParserSupervisorError> {
+        if let Ok(true) = self.launch.is_current_for(language_id) {
             return Ok(());
         }
         self.shutdown_resident()?;
@@ -3344,6 +3589,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         Response(&'static str),
         Limit(&'static str),
         InvalidControl(ParserFrameKind),
+        Worker(ParserFailureCode),
     }
 
     struct Case {
@@ -3404,6 +3650,9 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
                 },
                 ExpectedFailure::Limit(expected),
             ) => field == &expected,
+            (ParserSupervisorError::WorkerFailure { code }, ExpectedFailure::Worker(expected)) => {
+                code == &expected
+            }
             (
                 ParserSupervisorError::Protocol {
                     source: ParserProtocolError::InvalidControlJson { kind, .. },
@@ -3583,7 +3832,12 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         )?,
         case("completion-truncated", ExpectedFailure::Io)?,
         case("completion-oversized", ExpectedFailure::Io)?,
+        case(
+            "failure-exit",
+            ExpectedFailure::Worker(ParserFailureCode::ParseRejected),
+        )?,
         case("stderr-flood", ExpectedFailure::Io)?,
+        case("stderr-completion", ExpectedFailure::Io)?,
         case(
             "limit-output",
             ExpectedFailure::Limit("completion.output_bytes"),
@@ -3686,6 +3940,70 @@ mod tests {
         assert!(supervisor.accepts_language("zeta"));
         assert!(!supervisor.accepts_language("missing"));
         assert!(!supervisor.accepts_language("INVALID"));
+    }
+
+    #[test]
+    fn payload_observation_rehashes_same_size_same_mtime_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("worker");
+        fs::write(&path, b"trusted")?;
+        let modified = fs::metadata(&path)?.modified()?;
+        let observation = PayloadObservation {
+            path: path.clone(),
+            role: ParserPackPayloadRole::Worker,
+            bytes: 7,
+            sha256: sha256_hex(b"trusted"),
+            modified: Some(modified),
+        };
+        require_test(observation.is_current()?, "initial payload was rejected")?;
+
+        fs::write(&path, b"mutated")?;
+        File::options()
+            .write(true)
+            .open(&path)?
+            .set_times(fs::FileTimes::new().set_modified(modified))?;
+        require_test(
+            fs::metadata(&path)?.len() == observation.bytes
+                && fs::metadata(&path)?.modified()? == modified,
+            "test mutation did not preserve size and modification time",
+        )?;
+        require_test(
+            !observation.is_current()?,
+            "same-size same-mtime payload mutation retained launch authority",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn payload_observation_revalidates_only_launch_inputs() {
+        let observation = |role| PayloadObservation {
+            path: PathBuf::new(),
+            role,
+            bytes: 0,
+            sha256: String::new(),
+            modified: None,
+        };
+
+        assert!(observation(ParserPackPayloadRole::Worker).contributes_to_launch("rust"));
+        assert!(
+            observation(ParserPackPayloadRole::ContainmentBroker).contributes_to_launch("rust")
+        );
+        assert!(
+            observation(ParserPackPayloadRole::GrammarLibrary {
+                language_id: "rust".to_owned(),
+            })
+            .contributes_to_launch("rust")
+        );
+        assert!(
+            !observation(ParserPackPayloadRole::GrammarLibrary {
+                language_id: "python".to_owned(),
+            })
+            .contributes_to_launch("rust")
+        );
+        assert!(
+            !observation(ParserPackPayloadRole::NativeAuditReport).contributes_to_launch("rust")
+        );
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -4050,14 +4368,26 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let mut bytes = PARSER_WINDOWS_BROKER_ADMISSION_RECORD.to_vec();
         bytes.extend_from_slice(b"bounded diagnostic");
-        let (events, receiver) = mpsc::sync_channel(1);
-        let diagnostics = diagnostic_reader_loop(Cursor::new(bytes), true, &events)?;
+        let (events, receiver) = mpsc::sync_channel(2);
+        let diagnostics = diagnostic_reader_loop(
+            Cursor::new(bytes),
+            true,
+            DiagnosticFence([0xA5; PARSER_DIAGNOSTIC_FENCE_BYTES]),
+            &events,
+        )?;
         require_test(
             matches!(
                 receiver.recv_timeout(Duration::from_secs(1))?,
                 DiagnosticReaderEvent::AdmissionAccepted
             ),
             "diagnostics became visible before admission",
+        )?;
+        require_test(
+            matches!(
+                receiver.recv_timeout(Duration::from_secs(1))?,
+                DiagnosticReaderEvent::Failure(ParserIoThreadError::UnexpectedDiagnostic { .. })
+            ),
+            "bounded diagnostic bytes did not fail closed",
         )?;
         require_test(
             diagnostics == b"bounded diagnostic",
