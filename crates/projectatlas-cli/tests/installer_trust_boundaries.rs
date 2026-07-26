@@ -1,4 +1,4 @@
-//! Verify release bootstraps never execute source discovered in a target project.
+//! Verify release bootstraps treat target projects as untrusted installer input.
 
 use assert_cmd::Command;
 use std::env;
@@ -13,6 +13,12 @@ use std::time::Duration;
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Unreachable release endpoint that makes any remaining source fallback observable.
 const UNREACHABLE_RELEASE_BASE_URL: &str = "http://127.0.0.1:9/projectatlas-test";
+/// Project-local MCP config files written by both release bootstraps.
+const GENERATED_MCP_CONFIG_FILES: [&str; 3] = [
+    "projectatlas.mcp.json",
+    "projectatlas.claude.mcp.json",
+    "projectatlas.opencode.json",
+];
 
 #[test]
 fn bootstraps_never_derive_executable_source_from_the_target_project() -> Result<(), Box<dyn Error>>
@@ -120,6 +126,55 @@ fn powershell_bootstrap_rejects_project_state_reparse_points_before_writing()
     )
 }
 
+#[cfg(windows)]
+#[test]
+fn powershell_bootstrap_rejects_redirected_config_outputs() -> Result<(), Box<dyn Error>> {
+    for config_name in GENERATED_MCP_CONFIG_FILES {
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("target");
+        let atlas_dir = target.join(".projectatlas");
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&atlas_dir)?;
+        fs::create_dir(&outside)?;
+        let sentinel = outside.join("sentinel.txt");
+        fs::write(&sentinel, "unchanged\n")?;
+        let redirected_output = atlas_dir.join(config_name);
+
+        let link_output = Command::new("cmd")
+            .timeout(INSTALL_TIMEOUT)
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&redirected_output)
+            .arg(&outside)
+            .output()?;
+        require(
+            link_output.status.success(),
+            format!(
+                "failed to create config reparse-point fixture for {config_name}: {}",
+                String::from_utf8_lossy(&link_output.stderr)
+            ),
+        )?;
+
+        let output = run_powershell_runtime_install(&target, root.path())?;
+        require(
+            !output.status.success(),
+            format!("PowerShell bootstrap accepted redirected output {config_name}"),
+        )?;
+        require(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("must not be a symlink, junction, or reparse point"),
+            format!(
+                "PowerShell bootstrap did not explain redirected output {config_name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
+        require(
+            fs::read_to_string(&sentinel)? == "unchanged\n",
+            format!("PowerShell bootstrap overwrote redirected output {config_name}"),
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn posix_bootstrap_treats_hostile_target_source_as_data() -> Result<(), Box<dyn Error>> {
@@ -158,16 +213,7 @@ fn posix_bootstrap_rejects_project_state_symlinks_before_writing() -> Result<(),
     let installed_runtime = root.path().join(".local/bin/projectatlas");
     symlink(&outside, target.join(".projectatlas"))?;
 
-    let installer = workspace_root()?.join("plugins/projectatlas/scripts/install-runtime.sh");
-    let output = isolated_command("bash", root.path())?
-        .arg(installer)
-        .arg(&target)
-        .env(
-            "PROJECTATLAS_RUNTIME_PATH",
-            assert_cmd::cargo::cargo_bin("projectatlas"),
-        )
-        .env("PROJECTATLAS_VERSION", release_version())
-        .output()?;
+    let output = run_posix_runtime_install(&target, root.path())?;
     require(
         !output.status.success(),
         "POSIX bootstrap accepted a project-state symlink",
@@ -185,6 +231,42 @@ fn posix_bootstrap_rejects_project_state_symlinks_before_writing() -> Result<(),
             && !installed_runtime.exists(),
         "POSIX bootstrap mutated state before rejecting the project-state symlink",
     )
+}
+
+#[cfg(unix)]
+#[test]
+fn posix_bootstrap_rejects_redirected_config_outputs() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::symlink;
+
+    for config_name in GENERATED_MCP_CONFIG_FILES {
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("target");
+        let atlas_dir = target.join(".projectatlas");
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&atlas_dir)?;
+        fs::create_dir(&outside)?;
+        let sentinel = outside.join("sentinel.txt");
+        fs::write(&sentinel, "unchanged\n")?;
+        symlink(&sentinel, atlas_dir.join(config_name))?;
+
+        let output = run_posix_runtime_install(&target, root.path())?;
+        require(
+            !output.status.success(),
+            format!("POSIX bootstrap accepted redirected output {config_name}"),
+        )?;
+        require(
+            String::from_utf8_lossy(&output.stderr).contains("must not be a symlink"),
+            format!(
+                "POSIX bootstrap did not explain redirected output {config_name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
+        require(
+            fs::read_to_string(&sentinel)? == "unchanged\n",
+            format!("POSIX bootstrap overwrote redirected output {config_name}"),
+        )?;
+    }
+    Ok(())
 }
 
 /// A target project whose apparent CLI package would execute a marker-writing build script.
@@ -292,6 +374,25 @@ fn run_powershell_runtime_install(
         .arg(assert_cmd::cargo::cargo_bin("projectatlas"))
         .arg("-ProjectAtlasVersion")
         .arg(release_version());
+    Ok(command.output()?)
+}
+
+#[cfg(unix)]
+/// Run the POSIX bootstrap with an already-built runtime and isolated host state.
+fn run_posix_runtime_install(
+    project_root: &Path,
+    isolated_root: &Path,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    let installer = workspace_root()?.join("plugins/projectatlas/scripts/install-runtime.sh");
+    let mut command = isolated_command("bash", isolated_root)?;
+    command
+        .arg(installer)
+        .arg(project_root)
+        .env(
+            "PROJECTATLAS_RUNTIME_PATH",
+            assert_cmd::cargo::cargo_bin("projectatlas"),
+        )
+        .env("PROJECTATLAS_VERSION", release_version());
     Ok(command.output()?)
 }
 

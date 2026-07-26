@@ -796,6 +796,18 @@ opencode_config_path="$atlas_dir/projectatlas.opencode.json"
 flat_config="$project_root/projectatlas.toml"
 project_config="$atlas_dir/config.toml"
 
+assert_config_output_path() {
+  output_path=$1
+  if [ -L "$output_path" ] || [ -h "$output_path" ]; then
+    printf '%s\n' "ProjectAtlas MCP config output must not be a symlink: $output_path" >&2
+    return 1
+  fi
+  if [ -e "$output_path" ] && [ ! -f "$output_path" ]; then
+    printf '%s\n' "ProjectAtlas MCP config output must be a regular file: $output_path" >&2
+    return 1
+  fi
+}
+
 write_mcp_config() {
   output_path=$1
   harness=${2:-}
@@ -809,6 +821,7 @@ write_mcp_config() {
   if [ -n "$harness" ]; then
     set -- "$@" --harness "$harness"
   fi
+  assert_config_output_path "$output_path"
   "$projectatlas_bin" "$@" > "$output_path"
 }
 

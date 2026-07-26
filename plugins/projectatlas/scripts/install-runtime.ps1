@@ -36,6 +36,18 @@ function Assert-ProjectAtlasDirectPath {
     }
 }
 
+function Assert-ProjectAtlasDirectFilePath {
+    param(
+        [string]$Path,
+        [string]$Label
+    )
+    Assert-ProjectAtlasDirectPath $Path $Label
+    $item = Get-Item -Force -LiteralPath $Path -ErrorAction SilentlyContinue
+    if ($item -and -not ($item -is [System.IO.FileInfo])) {
+        throw "$Label must be a regular file: $Path"
+    }
+}
+
 function Resolve-PluginReleaseVersion {
     $scriptDirectory = Split-Path -Parent $PSCommandPath
     $pluginRoot = Split-Path -Parent $scriptDirectory
@@ -1207,6 +1219,7 @@ function Write-ProjectAtlasMcpConfig {
     }
     $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
     $mcpConfigText = ($mcpConfig -join [Environment]::NewLine) + [Environment]::NewLine
+    Assert-ProjectAtlasDirectFilePath $OutputPath "ProjectAtlas MCP config output"
     [System.IO.File]::WriteAllText($OutputPath, $mcpConfigText, $utf8NoBom)
 }
 
