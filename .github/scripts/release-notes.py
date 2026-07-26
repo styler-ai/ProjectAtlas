@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime
 
 
 def run(args, check=True):
@@ -21,7 +22,12 @@ def clean(text):
 
 
 def note_title(text):
-    title = re.sub(r"^(bug|feat|fix|docs|chore):\s*", "", clean(text), flags=re.I)
+    title = re.sub(
+        r"^(bug|feat|fix|docs|chore|test)(?:\([^)]+\))?!?:\s*",
+        "",
+        clean(text),
+        flags=re.I,
+    )
     return title[:1].upper() + title[1:]
 
 
@@ -45,38 +51,17 @@ def previous_tag_from(tags, version):
     return max(candidates)[1] if candidates else ""
 
 
-def pr_summary(body, fallback):
-    lines = (body or "").splitlines()
-    in_summary = False
-    summary = []
-    for raw in lines:
-        line = raw.strip()
-        if line.startswith("## "):
-            if in_summary:
-                break
-            in_summary = line.lstrip("#").strip().lower() == "summary"
-            continue
-        if in_summary and line:
-            if line.startswith(("- ", "* ")):
-                line = line[2:].strip()
-            summary.append(clean(line))
-    if summary:
-        return summary[:3]
-    for raw in lines:
-        line = raw.strip()
-        if line and not line.startswith("#"):
-            return [clean(line[2:] if line.startswith(("- ", "* ")) else line)]
-    return [fallback]
-
-
 def issue_numbers(body):
     seen = set()
     numbers = []
-    for match in re.finditer(r"#([0-9]+)", body or ""):
-        number = int(match.group(1))
-        if number not in seen:
-            seen.add(number)
-            numbers.append(number)
+    for line in (body or "").splitlines():
+        if not re.search(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b", line, re.I):
+            continue
+        for match in re.finditer(r"#([0-9]+)", line):
+            number = int(match.group(1))
+            if number not in seen:
+                seen.add(number)
+                numbers.append(number)
     return numbers
 
 
@@ -109,15 +94,26 @@ def previous_tag(version):
     return previous_tag_from(process.stdout.splitlines(), version) if process.returncode == 0 else ""
 
 
+def merged_after(timestamp, cutoff):
+    return bool(timestamp) and datetime.fromisoformat(
+        timestamp.replace("Z", "+00:00")
+    ).timestamp() > cutoff
+
+
 def merged_prs(repo, start_tag):
     range_spec = f"{start_tag}..HEAD" if start_tag else "HEAD"
+    cutoff = (
+        int(run(["git", "show", "-s", "--format=%ct", start_tag]).stdout.strip())
+        if start_tag
+        else 0
+    )
     shas = run(["git", "rev-list", "--reverse", range_spec]).stdout.splitlines()
     prs = []
     seen = set()
     for sha in shas:
         for pr in gh_json(f"/repos/{repo}/commits/{sha}/pulls"):
             number = pr.get("number")
-            if pr.get("merged_at") and number not in seen:
+            if number not in seen and merged_after(pr.get("merged_at"), cutoff):
                 seen.add(number)
                 prs.append(pr)
     return prs
@@ -142,17 +138,21 @@ def write_notes(repo, version):
     for pr in prs:
         author = pr.get("user", {}).get("login", "unknown")
         changelog.append(f"- #{pr['number']} {clean(pr['title'])} @{author}")
-        fixed = [item for item in (issue(repo, number) for number in issue_numbers(pr.get("body"))) if item]
-        if fixed:
-            for item in fixed:
-                section = section_for(item.get("title", ""), item.get("labels", []))
-                sections[section].append(
-                    f"- {note_title(item['title'])}. ([#{item['number']}]({item['html_url']}), [#{pr['number']}]({pr['html_url']}))"
-                )
-        else:
-            section = section_for(pr.get("title", ""))
-            for line in pr_summary(pr.get("body"), pr["title"]):
-                sections[section].append(f"- {line} ([#{pr['number']}]({pr['html_url']}))")
+        closed_issues = [
+            item
+            for item in (
+                issue(repo, number) for number in issue_numbers(pr.get("body"))
+            )
+            if item
+        ]
+        links = [
+            f"[#{item['number']}]({item['html_url']})" for item in closed_issues
+        ]
+        links.append(f"[#{pr['number']}]({pr['html_url']})")
+        section = section_for(pr.get("title", ""), pr.get("labels", []))
+        sections[section].append(
+            f"- {note_title(pr['title']).rstrip('.')}. ({', '.join(links)})"
+        )
 
     wrote_section = False
     for name in SECTIONS:
@@ -181,20 +181,18 @@ def write_notes(repo, version):
 
 
 def self_test():
-    body = """## Summary
-
-- First fix.
-- Second fix.
-
-## Verification
-
-- cargo test
-"""
-    assert pr_summary(body, "fallback") == ["First fix.", "Second fix."]
-    assert issue_numbers("Fixes #177, #180 and resolves #188.") == [177, 180, 188]
+    assert issue_numbers("Related #10.\nFixes #177, #180 and resolves #188.\nSee #190.") == [
+        177,
+        180,
+        188,
+    ]
     assert note_title("bug: stale runtime remains") == "Stale runtime remains"
+    assert note_title("docs(memory): specify the Memory Atlas") == "Specify the Memory Atlas"
+    assert note_title("test(parser): keep cancellation bounded") == "Keep cancellation bounded"
     assert section_for("fix(db): reject stale paths") == "Bug Fixes"
     assert section_for("feat(cli): add root diagnostics") == "New Features"
+    assert merged_after("2026-07-05T18:59:26Z", 1783277965)
+    assert not merged_after("2026-07-05T18:59:26Z", 1783277966)
     assert previous_tag_from(["v0.3.15", "v0.3.16"], "v0.3.17") == "v0.3.16"
     assert previous_tag_from(["v0.3.15", "v0.3.16", "v0.3.17"], "v0.3.17") == "v0.3.16"
     print("release notes self-test passed")
