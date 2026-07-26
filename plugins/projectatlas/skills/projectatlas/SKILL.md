@@ -93,10 +93,10 @@ Use `atlas_runtime_info` first. CLI fallback:
 
 `projectatlas --format json runtime-info`
 
-The runtime must report ProjectAtlas major version 3+, MCP, SQLite, TOON, and the installed plugin version. If missing or stale, run the repository plugin installer from the target root:
+The runtime must report the expected ProjectAtlas runtime version and capabilities, including MCP, SQLite, and TOON. Verify the installed plugin version separately through the harness plugin inventory. If the runtime, plugin, or generated configuration is missing or stale, resolve the version-matched installer from the installed ProjectAtlas plugin root or a ProjectAtlas source checkout, then pass the target project root separately:
 
-- Windows: `plugins/projectatlas/scripts/install-runtime.ps1`
-- Linux/macOS: `bash plugins/projectatlas/scripts/install-runtime.sh`
+- Windows: `& "<ProjectAtlas plugin or checkout>\scripts\install-runtime.ps1" -ProjectRoot "<target project root>"` (use `plugins\projectatlas\scripts` inside a source checkout)
+- Linux/macOS: `bash "<ProjectAtlas plugin or checkout>/scripts/install-runtime.sh" "<target project root>"` (use `plugins/projectatlas/scripts` inside a source checkout)
 
 Prefer installer-generated absolute host configs:
 
