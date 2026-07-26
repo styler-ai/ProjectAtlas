@@ -18,4 +18,4 @@
 
 - [x] 4.1 Update the owning telemetry architecture view and user documentation for read-only benchmark validation, typed report ownership, CLI/MCP/TUI flow, provenance, compatibility, limitations, and provider-counter separation; render every changed Mermaid block and inspect semantic and visual correctness.
 - [x] 4.2 Run focused core/service/DB-read-only/CLI/MCP/TUI tests, `cargo fmt --check`, workspace check, Clippy, full tests, doc tests, rustdoc, dependency policy, strict OpenSpec validation, ProjectAtlas lint, and IssueOps synchronization; capture and visually inspect a real normal-width dashboard render.
-- [ ] 4.3 Inspect and disposition all live PR review threads plus Codex and Dependabot feedback on the exact head, then synchronize the completed OpenSpec and GitHub issue checklists before merge and closure.
+- [x] 4.3 Inspect and disposition all live PR review threads plus Codex and Dependabot feedback on the exact head, then synchronize the completed OpenSpec and GitHub issue checklists before merge and closure.
