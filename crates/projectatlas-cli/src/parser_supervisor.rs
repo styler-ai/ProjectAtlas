@@ -2359,7 +2359,13 @@ impl ResidentParserSession {
             }
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             self.enforce_memory_bound(phase, false)?;
-            self.check_diagnostic_reader(phase)?;
+            self.check_diagnostic_reader(
+                phase,
+                absolute_deadline,
+                last_progress,
+                no_progress_timeout,
+                cancellation,
+            )?;
             match self.frame_reader.events.recv_timeout(next_poll_wait(
                 absolute_deadline,
                 last_progress,
@@ -2435,9 +2441,21 @@ impl ResidentParserSession {
             )?;
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             self.enforce_memory_bound(phase, false)?;
-            self.check_diagnostic_reader(phase)?;
+            self.check_diagnostic_reader(
+                phase,
+                absolute_deadline,
+                last_progress,
+                no_progress_timeout,
+                cancellation,
+            )?;
             if thread_finished(self.diagnostic_reader.handle.as_ref()) {
-                self.check_diagnostic_reader(phase)?;
+                self.check_diagnostic_reader(
+                    phase,
+                    absolute_deadline,
+                    last_progress,
+                    no_progress_timeout,
+                    cancellation,
+                )?;
                 return Ok(());
             }
             thread::sleep(next_poll_wait(
@@ -2482,7 +2500,15 @@ impl ResidentParserSession {
                 Ok(DiagnosticReaderEvent::FenceObserved) => return Ok(()),
                 Ok(DiagnosticReaderEvent::Failure(error)) => {
                     self.termination_requested = true;
-                    return Err(io_thread_error(phase, &error));
+                    return Err(diagnostic_failure_after_exit_observation(
+                        &mut self.child,
+                        phase,
+                        &error,
+                        absolute_deadline,
+                        last_progress,
+                        no_progress_timeout,
+                        cancellation,
+                    ));
                 }
                 Ok(DiagnosticReaderEvent::AdmissionAccepted) | Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
@@ -2516,12 +2542,24 @@ impl ResidentParserSession {
     fn check_diagnostic_reader(
         &mut self,
         phase: &'static str,
+        absolute_deadline: Instant,
+        last_progress: Instant,
+        no_progress_timeout: Duration,
+        cancellation: &IndexCancellation,
     ) -> Result<(), ParserSupervisorError> {
         loop {
             match self.diagnostic_reader.events.try_recv() {
                 Ok(DiagnosticReaderEvent::Failure(error)) => {
                     self.termination_requested = true;
-                    return Err(io_thread_error(phase, &error));
+                    return Err(diagnostic_failure_after_exit_observation(
+                        &mut self.child,
+                        phase,
+                        &error,
+                        absolute_deadline,
+                        last_progress,
+                        no_progress_timeout,
+                        cancellation,
+                    ));
                 }
                 Ok(DiagnosticReaderEvent::FenceObserved) => {
                     self.pending_diagnostic_fences = self
@@ -3032,6 +3070,50 @@ fn io_thread_error(phase: &'static str, error: &ParserIoThreadError) -> ParserSu
         phase,
         message: bounded_message(error.to_string()),
     }
+}
+
+/// Preserve fail-closed diagnostics while allowing the Windows broker to prove a memory exit.
+fn diagnostic_failure_after_exit_observation(
+    child: &mut Child,
+    phase: &'static str,
+    error: &ParserIoThreadError,
+    absolute_deadline: Instant,
+    last_progress: Instant,
+    no_progress_timeout: Duration,
+    cancellation: &IndexCancellation,
+) -> ParserSupervisorError {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        let no_progress_deadline = last_progress
+            .checked_add(no_progress_timeout)
+            .unwrap_or(absolute_deadline);
+        let observation_deadline = absolute_deadline.min(no_progress_deadline);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status))
+                    if status.code() == Some(PARSER_WINDOWS_BROKER_MEMORY_LIMIT_EXIT_CODE) =>
+                {
+                    return ParserSupervisorError::WindowsJobMemoryLimitExceeded { phase };
+                }
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) => {}
+            }
+            let now = Instant::now();
+            if cancellation.is_cancelled() || now >= observation_deadline {
+                break;
+            }
+            thread::sleep(SUPERVISOR_POLL_INTERVAL.min(observation_deadline.duration_since(now)));
+        }
+    }
+    #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+    let _ = (
+        child,
+        absolute_deadline,
+        last_progress,
+        no_progress_timeout,
+        cancellation,
+    );
+    io_thread_error(phase, error)
 }
 
 /// Bound one internal diagnostic without splitting UTF-8.
@@ -4397,15 +4479,41 @@ mod tests {
     #[test]
     fn windows_job_memory_exit_code_is_reserved_and_typed() -> Result<(), Box<dyn std::error::Error>>
     {
-        let mut memory_exit = Command::new("cmd.exe")
-            .args([
-                "/D",
-                "/C",
-                "exit",
-                &PARSER_WINDOWS_BROKER_MEMORY_LIMIT_EXIT_CODE.to_string(),
-            ])
-            .spawn()?;
-        memory_exit.wait()?;
+        let mut memory_command = Command::new("powershell.exe");
+        memory_command
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+            .arg(format!(
+                "Start-Sleep -Milliseconds 250; exit {PARSER_WINDOWS_BROKER_MEMORY_LIMIT_EXIT_CODE}"
+            ));
+        let mut memory_exit = memory_command.spawn()?;
+        require_test(
+            memory_exit.try_wait()?.is_none(),
+            "delayed broker memory-limit process exited before observation",
+        )?;
+        let diagnostic = ParserIoThreadError::UnexpectedDiagnostic {
+            diagnostic: "tree-sitter failed to allocate 8".to_owned(),
+        };
+        let started = Instant::now();
+        let memory_diagnostic_result = diagnostic_failure_after_exit_observation(
+            &mut memory_exit,
+            "request response",
+            &diagnostic,
+            started + Duration::from_secs(2),
+            started,
+            Duration::from_secs(2),
+            &IndexCancellation::new(),
+        );
+        if !matches!(
+            memory_diagnostic_result,
+            ParserSupervisorError::WindowsJobMemoryLimitExceeded {
+                phase: "request response"
+            }
+        ) {
+            return Err(std::io::Error::other(format!(
+                "reserved broker memory-limit status did not override diagnostic bytes: {memory_diagnostic_result:?}"
+            ))
+            .into());
+        }
         let memory_result =
             frame_event_result(FrameReaderEvent::EndOfStream, &mut memory_exit, "READY");
         if !matches!(
@@ -4422,6 +4530,27 @@ mod tests {
             .args(["/D", "/C", "exit", "125"])
             .spawn()?;
         ordinary_exit.wait()?;
+        let ordinary_diagnostic_result = diagnostic_failure_after_exit_observation(
+            &mut ordinary_exit,
+            "request response",
+            &diagnostic,
+            started + Duration::from_secs(1),
+            started,
+            Duration::from_secs(1),
+            &IndexCancellation::new(),
+        );
+        if !matches!(
+            ordinary_diagnostic_result,
+            ParserSupervisorError::IoThread {
+                phase: "request response",
+                ..
+            }
+        ) {
+            return Err(std::io::Error::other(format!(
+                "ordinary broker failure status replaced fail-closed diagnostics: {ordinary_diagnostic_result:?}"
+            ))
+            .into());
+        }
         let ordinary_result =
             frame_event_result(FrameReaderEvent::EndOfStream, &mut ordinary_exit, "READY");
         if !matches!(
