@@ -531,6 +531,9 @@ const SEVERITY_EXPECTED_SEPARATOR: &str = ", ";
 const SEVERITY_EXPECTED_FINAL_SEPARATOR: &str = ", or ";
 /// Token trend validation error suffix.
 const TOKEN_TREND_WINDOW_ERROR_SUFFIX: &str = "expected day, week, month, or year";
+/// Validation error for benchmark evidence on token trend requests.
+const TOKEN_TREND_BENCHMARK_ERROR: &str =
+    "benchmark_results is only supported for token overview reports";
 /// Internal mismatch when a trend request returns the overview variant.
 const TOKEN_TRENDS_RESULT_VARIANT_MISMATCH: &str = "token trend request returned an overview";
 /// Internal mismatch when an overview request returns the trends variant.
@@ -1118,6 +1121,8 @@ struct AtlasTokenParams {
     include_chart: Option<bool>,
     /// Optional trend grouping window: day, week, month, or year.
     trend_window: Option<String>,
+    /// Optional repository-relative agent-navigation benchmark result.
+    benchmark_results: Option<String>,
     /// Optional chart theme for TUI output: dark or light.
     theme: Option<String>,
 }
@@ -6812,6 +6817,11 @@ impl ProjectAtlasMcpServer {
             let include_chart = params.include_chart.unwrap_or(false);
             let chart_theme = Self::parse_token_chart_theme(params.theme.as_deref())?;
             if let Some(window) = params.trend_window.as_deref() {
+                if params.benchmark_results.is_some() {
+                    return Err(CliError::InvalidInput(
+                        TOKEN_TREND_BENCHMARK_ERROR.to_string(),
+                    ));
+                }
                 let window = TokenTrendWindow::parse(window).ok_or_else(|| {
                     CliError::InvalidInput(format!(
                         "unsupported token trend window {window:?}; {TOKEN_TREND_WINDOW_ERROR_SUFFIX}"
@@ -6846,6 +6856,7 @@ impl ProjectAtlasMcpServer {
                 &store,
                 TokenReportRequest::Overview {
                     caller_label: params.session.as_deref(),
+                    benchmark_results: params.benchmark_results.as_deref().map(Path::new),
                 },
             )? {
                 TokenReport::Overview(overview) => overview,

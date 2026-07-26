@@ -2371,6 +2371,115 @@ funnel usage. The goal is not perfect accounting; the goal is a useful,
 consistent local metric that shows whether ProjectAtlas is reducing context
 load.
 
+### Read-Only Agent-Efficiency Benchmark
+
+The optional agent-efficiency comparison is immutable publication evidence, not
+live telemetry. A caller may attach one repository-relative benchmark result to
+the existing token overview with CLI `--benchmark-results <path>` or MCP
+`benchmark_results`. The selected project's SQLite database remains
+authoritative only for observed and modeled live usage; ProjectAtlas never
+copies the benchmark into SQLite or creates a cache, sidecar, telemetry event,
+or background loader for it.
+
+```mermaid
+sequenceDiagram
+    participant Request as CLI or MCP overview request
+    participant Service as projectatlas-service
+    participant DB as projectatlas.db
+    participant Artifact as Benchmark JSON
+    participant Report as projectatlas-core TokenOverview
+    participant Adapters as JSON, TOON, MCP, and Ratatui
+
+    Request->>Service: Optional repository-relative benchmark path
+    Service->>DB: Read bounded live telemetry snapshot
+    DB-->>Service: Existing token overview
+    alt no benchmark path
+        Service->>Report: Attach unavailable comparison
+    else benchmark path supplied
+        Service->>Service: Gate direct regular file under captured root
+        alt boundary violation
+            Service-->>Request: Hard request error
+        else safe direct file
+            Service->>Artifact: Read through 8 MiB limit + 1
+            Artifact-->>Service: Exact bytes or I/O failure
+            alt I/O or typed decode failure
+                Service->>Report: Attach failed comparison
+            else decoded artifact
+                Service->>Service: Validate identities, runs, distributions, providers, capabilities
+                alt contract mismatch
+                    Service->>Report: Attach incompatible comparison
+                else retained failed or unmatched trials
+                    Service->>Report: Attach partial matched evidence
+                else all required trials matched
+                    Service->>Report: Attach compatible evidence
+                end
+            end
+        end
+    end
+    opt typed report completed
+        Service->>DB: Revalidate captured project binding
+        Service->>Report: Return one typed overview
+        Report-->>Adapters: Identical agent_efficiency values
+    end
+    Note over Artifact,DB: Benchmark evidence never enters SQLite
+    Note over Report,Adapters: Provider counters remain descriptive-only and non-causal
+```
+
+`projectatlas-service` owns the trust boundary. It resolves the requested path
+under the captured project root, rejects absolute paths, parent traversal,
+symlinks, Windows reparse points, non-regular files, and any canonical target
+outside that root, then preflights metadata, reads through an 8 MiB `limit + 1`,
+and rechecks the open handle plus canonical path, size, and modification
+metadata after the read. Windows opens deny write/delete sharing and open the
+final reparse point itself rather than following it; the share lock prevents
+replacement during the read, while metadata comparison is change detection
+rather than a stable file-index claim. Path-boundary violations remain hard
+request errors. Missing, unreadable, changed, oversized, or malformed artifacts
+produce a bounded `failed` comparison without exposing partial decoded values.
+
+The supported contract validates schema version 1; exact v0.4 and frozen
+v0.3.26 semantic identities and runtime/skill digests; a plain control with
+ProjectAtlas disabled; candidate source heads; the complete five-workload,
+three-arm, repeated schedule; a one-to-one retained schedule/run inventory;
+zero excluded trials; completed and failed run accounting; bounded group,
+comparison, distribution, and MCP-call collections; finite nonnegative values
+whose medians and observed maxima reconcile; descriptive-only provider
+counters; and reconciled capability call/byte rows. The comparison preserves
+failed trials outside matched denominators rather than turning them into zero.
+
+The closed states have one meaning across all adapters:
+
+| State | Meaning |
+| --- | --- |
+| `unavailable` | No benchmark path was supplied; the existing token overview is unchanged. |
+| `failed` | The requested file could not be read or decoded safely, or no matched evidence survives. |
+| `incompatible` | JSON decoded, but its schema, identities, schedule, run accounting, metrics, provider labels, or capability contract is unsupported. |
+| `partial` | Valid matched evidence is visible while retained failed or unmatched trials remain explicit. |
+| `compatible` | Every required candidate and baseline trial is matched and valid. |
+
+The final v0.4 benchmark therefore keeps the frozen-v0.3.26 huge-corpus setup
+failures visible: that baseline row and the overall comparison are `partial`,
+while the plain-control row remains `compatible`. The report retains a BLAKE3
+digest of the exact artifact bytes plus bounded release/runtime/source
+identities. It does not expose local paths, prompts, answers, or raw traces.
+
+`projectatlas-core` owns the closed comparison enums and the single
+backward-compatible defaulted `TokenOverview.agent_efficiency` field. CLI
+JSON/TOON, MCP, and Ratatui render that same typed overview and perform no
+independent parsing or arithmetic. Capability rows report trace-completed
+ProjectAtlas MCP calls and emitted bytes by discovery, summary/slice, search,
+symbols/relations, or bounded `other` responsibility. Provider input,
+cached-input, output, and reasoning counters remain descriptive-only and never
+contribute to navigation savings, `tokens_avoided`, file-read avoidance, or
+break-even arithmetic.
+
+The optional path costs one synchronous `O(file bytes + retained bounded rows)`
+read and validation pass, with file bytes capped at 8 MiB and every repeated
+collection capped before projection. There is no cache, worker pool, SQLite
+write, schema or migration, retention or WAL/checkpoint policy, query-plan
+change, or persistent-size growth. Omitting the path preserves the existing
+fast token overview.
+
 Token accounting model:
 
 - Estimate baseline tokens as the content and exploration the agent avoided:
