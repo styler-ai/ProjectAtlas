@@ -8,6 +8,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -421,6 +422,14 @@ fn invoke_linux_launch_test_hook() -> Result<(), ParserSupervisorError> {
 }
 
 impl ParserSupervisorError {
+    /// Return whether the caller stopped an otherwise live protocol operation.
+    const fn is_caller_stop(&self) -> bool {
+        matches!(
+            self,
+            Self::Cancelled { .. } | Self::DeadlineExceeded { .. } | Self::NoProgress { .. }
+        )
+    }
+
     /// Return whether mandatory process, pipe, reap, or thread cleanup failed.
     ///
     /// [`Self::OperationAndCleanup`] is itself a cleanup failure even when its
@@ -545,6 +554,75 @@ struct FileObservation {
     write_guard: Option<File>,
 }
 
+/// Owned constant-size file identity safe to move behind bounded filesystem I/O.
+#[derive(Debug)]
+struct FileCurrentnessProbe {
+    /// Canonical path whose current identity must still match.
+    path: PathBuf,
+    /// Identity captured before digest verification.
+    epoch: FileChangeEpoch,
+    /// Whether Windows still owns the deny-write/delete handle.
+    #[cfg(windows)]
+    guarded: bool,
+    /// Deterministic metadata-boundary blocker for cancellation tests.
+    #[cfg(test)]
+    blocker: Option<std::sync::Arc<MetadataProbeBlocker>>,
+}
+
+/// Deterministically pauses the test-only path-observation boundary.
+#[cfg(test)]
+#[derive(Debug)]
+struct MetadataProbeBlocker {
+    /// Signals that the filesystem worker reached the metadata boundary.
+    entered: SyncSender<()>,
+    /// Releases the worker so the real metadata lookup can continue.
+    release: std::sync::Mutex<Receiver<()>>,
+}
+
+#[cfg(test)]
+impl MetadataProbeBlocker {
+    /// Pause immediately before the real metadata lookup.
+    fn wait(&self) -> Result<(), ParserSupervisorError> {
+        self.entered
+            .send(())
+            .map_err(|_closed| ParserSupervisorError::IoThread {
+                phase: ARTIFACT_IO_PHASE,
+                message: "metadata-probe entry receiver closed".to_owned(),
+            })?;
+        self.release
+            .lock()
+            .map_err(|_poisoned| ParserSupervisorError::IoThread {
+                phase: ARTIFACT_IO_PHASE,
+                message: "metadata-probe release lock was poisoned".to_owned(),
+            })?
+            .recv()
+            .map_err(|_closed| ParserSupervisorError::IoThread {
+                phase: ARTIFACT_IO_PHASE,
+                message: "metadata-probe release sender closed".to_owned(),
+            })
+    }
+}
+
+impl FileCurrentnessProbe {
+    /// Observe the path and compare it with the verified change epoch.
+    fn is_current(&self) -> Result<bool, ParserSupervisorError> {
+        #[cfg(test)]
+        if let Some(blocker) = &self.blocker {
+            blocker.wait()?;
+        }
+        #[cfg(windows)]
+        if !self.guarded {
+            return Ok(false);
+        }
+        let metadata =
+            fs::metadata(&self.path).map_err(|source| ParserSupervisorError::ArtifactRead {
+                path: self.path.clone(),
+                source,
+            })?;
+        Ok(metadata.is_file() && FileChangeEpoch::from_metadata(&metadata) == self.epoch)
+    }
+}
+
 impl FileObservation {
     /// Capture one regular file before its digest is read and verified.
     fn capture(path: PathBuf) -> Result<Self, ParserSupervisorError> {
@@ -571,17 +649,21 @@ impl FileObservation {
     }
 
     /// Return whether the guarded path still resolves to the captured file identity.
+    #[cfg(test)]
     fn is_current(&self) -> Result<bool, ParserSupervisorError> {
-        #[cfg(windows)]
-        if self.write_guard.is_none() {
-            return Ok(false);
+        self.currentness_probe().is_current()
+    }
+
+    /// Copy only the bounded path and metadata needed by the filesystem worker.
+    fn currentness_probe(&self) -> FileCurrentnessProbe {
+        FileCurrentnessProbe {
+            path: self.path.clone(),
+            epoch: self.epoch,
+            #[cfg(windows)]
+            guarded: self.write_guard.is_some(),
+            #[cfg(test)]
+            blocker: None,
         }
-        let metadata =
-            fs::metadata(&self.path).map_err(|source| ParserSupervisorError::ArtifactRead {
-                path: self.path.clone(),
-                source,
-            })?;
-        Ok(metadata.is_file() && FileChangeEpoch::from_metadata(&metadata) == self.epoch)
     }
 
     /// Build deliberately unavailable file authority for process-free tests.
@@ -628,6 +710,7 @@ impl PayloadObservation {
     }
 
     /// Return whether one payload retains the identity captured before digest verification.
+    #[cfg(test)]
     fn is_current(&self) -> Result<bool, ParserSupervisorError> {
         self.file.is_current()
     }
@@ -687,6 +770,126 @@ impl ArtifactIoLease {
 impl Drop for ArtifactIoLease {
     fn drop(&mut self) {
         ARTIFACT_IO_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+/// One metadata-probe request owned by the process-wide filesystem worker.
+struct ArtifactCurrentnessRequest {
+    /// Exact constant-size path observations for this parse request.
+    probe: ArtifactCurrentnessProbe,
+    /// Immutable absolute request deadline.
+    absolute_deadline: Instant,
+    /// Fixed start of the metadata probe.
+    last_progress: Instant,
+    /// Maximum metadata-probe duration.
+    no_progress_timeout: Duration,
+    /// Request-owned cooperative cancellation signal.
+    cancellation: IndexCancellation,
+    /// One-shot response channel; a canceled caller may close it before completion.
+    response: SyncSender<Result<bool, ParserSupervisorError>>,
+    /// Process-wide admission retained even when a filesystem call remains blocked.
+    lease: ArtifactIoLease,
+}
+
+/// Start the single lazy process-wide metadata worker.
+fn artifact_currentness_sender()
+-> Result<&'static SyncSender<ArtifactCurrentnessRequest>, ParserSupervisorError> {
+    static WORKER: OnceLock<Result<SyncSender<ArtifactCurrentnessRequest>, String>> =
+        OnceLock::new();
+
+    match WORKER.get_or_init(|| {
+        let (sender, receiver) = mpsc::sync_channel::<ArtifactCurrentnessRequest>(1);
+        thread::Builder::new()
+            .name("projectatlas-artifact-currentness".to_owned())
+            .spawn(move || {
+                while let Ok(request) = receiver.recv() {
+                    let ArtifactCurrentnessRequest {
+                        probe,
+                        absolute_deadline,
+                        last_progress,
+                        no_progress_timeout,
+                        cancellation,
+                        response,
+                        lease,
+                    } = request;
+                    let control = ArtifactIoControl {
+                        absolute_deadline,
+                        last_progress,
+                        no_progress_timeout,
+                        cancellation: &cancellation,
+                    };
+                    let result = probe.is_current(Some(&control));
+                    drop(lease);
+                    let _send_result = response.try_send(result);
+                }
+            })
+            .map(|worker| {
+                drop(worker);
+                sender
+            })
+            .map_err(|source| bounded_message(source.to_string()))
+    }) {
+        Ok(sender) => Ok(sender),
+        Err(message) => Err(ParserSupervisorError::IoThread {
+            phase: ARTIFACT_IO_PHASE,
+            message: message.clone(),
+        }),
+    }
+}
+
+/// Run one hot-path metadata probe without exposing blocking filesystem calls to the caller.
+fn run_bounded_artifact_currentness(
+    probe: ArtifactCurrentnessProbe,
+    control: &ArtifactIoControl<'_>,
+) -> Result<bool, ParserSupervisorError> {
+    control.poll()?;
+    let sender = artifact_currentness_sender()?;
+    let lease = ArtifactIoLease::acquire()?;
+    let (response, receiver) = mpsc::sync_channel(1);
+    let request = ArtifactCurrentnessRequest {
+        probe,
+        absolute_deadline: control.absolute_deadline,
+        last_progress: control.last_progress,
+        no_progress_timeout: control.no_progress_timeout,
+        cancellation: control.cancellation.clone(),
+        response,
+        lease,
+    };
+    match sender.try_send(request) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_request)) => {
+            return Err(ParserSupervisorError::IoThread {
+                phase: ARTIFACT_IO_PHASE,
+                message: "parser-pack currentness worker is still active".to_owned(),
+            });
+        }
+        Err(TrySendError::Disconnected(_request)) => {
+            return Err(ParserSupervisorError::IoThread {
+                phase: ARTIFACT_IO_PHASE,
+                message: "parser-pack currentness worker disconnected".to_owned(),
+            });
+        }
+    }
+
+    loop {
+        control.poll()?;
+        match receiver.recv_timeout(next_poll_wait(
+            control.absolute_deadline,
+            control.last_progress,
+            control.no_progress_timeout,
+        )) {
+            Ok(result) => {
+                control.poll()?;
+                return result;
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(ParserSupervisorError::IoThread {
+                    phase: ARTIFACT_IO_PHASE,
+                    message: "parser-pack currentness response disconnected".to_owned(),
+                });
+            }
+        }
     }
 }
 
@@ -764,6 +967,20 @@ struct SealedLinuxPayload {
     file: File,
 }
 
+/// Create a modern memfd and retry only the unsupported-flag legacy-kernel case.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn create_memfd_with_legacy_fallback<T>(
+    flags: nix::sys::memfd::MFdFlags,
+    mode_flag: nix::libc::c_uint,
+    mut create: impl FnMut(nix::sys::memfd::MFdFlags) -> Result<T, nix::errno::Errno>,
+) -> Result<T, nix::errno::Errno> {
+    let requested_flags = flags | nix::sys::memfd::MFdFlags::from_bits_retain(mode_flag);
+    match create(requested_flags) {
+        Err(nix::errno::Errno::EINVAL) => create(flags),
+        result => result,
+    }
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 impl SealedLinuxPayload {
     /// Copy already verified bytes into one immutable anonymous file.
@@ -775,6 +992,7 @@ impl SealedLinuxPayload {
         control: &ArtifactIoControl<'_>,
     ) -> Result<Self, ParserSupervisorError> {
         use nix::fcntl::{FcntlArg, SealFlag, fcntl};
+        use nix::libc;
         use nix::sys::memfd::{MFdFlags, memfd_create};
         use nix::sys::stat::{Mode, fchmod};
 
@@ -783,8 +1001,16 @@ impl SealedLinuxPayload {
                 role,
                 source: io::Error::from_raw_os_error(source as i32),
             };
-        let descriptor = memfd_create(name, MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING)
-            .map_err(authority_error)?;
+        let flags = MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING;
+        let mode_flag = if executable {
+            libc::MFD_EXEC
+        } else {
+            libc::MFD_NOEXEC_SEAL
+        };
+        let descriptor = create_memfd_with_legacy_fallback(flags, mode_flag, |attempt_flags| {
+            memfd_create(name, attempt_flags)
+        })
+        .map_err(authority_error)?;
         let mut file = File::from(descriptor);
         if executable {
             fchmod(&file, Mode::S_IRUSR | Mode::S_IXUSR).map_err(authority_error)?;
@@ -865,6 +1091,37 @@ struct VerifiedParserPackLaunch {
     artifact_manifest: FileObservation,
     /// Cheap metadata observations for every already hashed payload.
     payloads: Vec<PayloadObservation>,
+    /// Test-only pause at the real currentness metadata boundary.
+    #[cfg(test)]
+    currentness_blocker: Option<std::sync::Arc<MetadataProbeBlocker>>,
+}
+
+/// One complete owned change-epoch probe for a grammar-affined parse request.
+struct ArtifactCurrentnessProbe {
+    /// Artifact manifest and every payload that can affect the requested launch.
+    files: Vec<FileCurrentnessProbe>,
+}
+
+/// Number of path identities that can affect one grammar-affined launch:
+/// artifact manifest, worker, broker, accepted manifest, and selected grammar.
+const MAX_CURRENTNESS_PROBE_FILES: usize = 5;
+
+impl ArtifactCurrentnessProbe {
+    /// Require every path to retain its verified constant-size identity.
+    fn is_current(
+        &self,
+        control: Option<&ArtifactIoControl<'_>>,
+    ) -> Result<bool, ParserSupervisorError> {
+        for file in &self.files {
+            if let Some(control) = control {
+                control.poll()?;
+            }
+            if !file.is_current()? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
 }
 
 impl VerifiedParserPackLaunch {
@@ -900,7 +1157,10 @@ impl VerifiedParserPackLaunch {
                     cancellation: &worker_cancellation,
                 };
                 let refreshed = Self::load_inner(&pack_root, Some(&worker_control))?;
-                if !refreshed.is_current_for(&language_id, Some(&worker_control))? {
+                if !refreshed
+                    .currentness_probe(&language_id)
+                    .is_current(Some(&worker_control))?
+                {
                     return Err(ParserSupervisorError::PayloadMismatch {
                         path: pack_root,
                         reason: "artifact changed during digest revalidation",
@@ -1094,34 +1354,26 @@ impl VerifiedParserPackLaunch {
             native_import_policy_bytes,
             artifact_manifest: artifact_manifest_file,
             payloads,
+            #[cfg(test)]
+            currentness_blocker: None,
         })
     }
 
-    /// Return whether the manifests and active payloads retain their verified filesystem identity.
-    fn is_current_for(
-        &self,
-        language_id: &str,
-        control: Option<&ArtifactIoControl<'_>>,
-    ) -> Result<bool, ParserSupervisorError> {
-        if let Some(control) = control {
-            control.poll()?;
+    /// Copy the constant-size identities needed for one bounded currentness probe.
+    fn currentness_probe(&self, language_id: &str) -> ArtifactCurrentnessProbe {
+        let mut files = Vec::with_capacity(MAX_CURRENTNESS_PROBE_FILES);
+        files.push(self.artifact_manifest.currentness_probe());
+        files.extend(
+            self.payloads
+                .iter()
+                .filter(|payload| payload.contributes_to_launch(language_id))
+                .map(|payload| payload.file.currentness_probe()),
+        );
+        #[cfg(test)]
+        if let (Some(file), Some(blocker)) = (files.first_mut(), &self.currentness_blocker) {
+            file.blocker = Some(std::sync::Arc::clone(blocker));
         }
-        if !self.artifact_manifest.is_current()? {
-            return Ok(false);
-        }
-        for payload in self
-            .payloads
-            .iter()
-            .filter(|payload| payload.contributes_to_launch(language_id))
-        {
-            if let Some(control) = control {
-                control.poll()?;
-            }
-            if !payload.is_current()? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        ArtifactCurrentnessProbe { files }
     }
 
     /// Validate one requested grammar against the exact accepted manifest.
@@ -1240,7 +1492,7 @@ impl VerifiedParserPackLaunch {
                         "selected grammar",
                         "projectatlas-selected-grammar",
                         &grammar_bytes,
-                        false,
+                        true,
                         &worker_control,
                     )?,
                 })
@@ -2620,7 +2872,7 @@ impl ResidentParserSession {
             }
         }
         let started = Instant::now();
-        let opening = (|| {
+        let opening: Result<(), ParserSupervisorError> = (|| {
             resident.wait_for_admission(
                 absolute_deadline,
                 started,
@@ -2652,6 +2904,9 @@ impl ResidentParserSession {
             Ok(())
         })();
         if let Err(operation) = opening {
+            if operation.is_caller_stop() {
+                resident.termination_requested = true;
+            }
             return match resident.shutdown() {
                 Ok(()) => Err(operation),
                 Err(cleanup) => Err(ParserSupervisorError::OperationAndCleanup {
@@ -4125,13 +4380,20 @@ impl OptionalParserSupervisor {
             );
         match result {
             Ok(evidence) => Ok(evidence),
-            Err(operation) => match self.take_and_shutdown_resident() {
-                Ok(()) => Err(operation),
-                Err(cleanup) => Err(ParserSupervisorError::OperationAndCleanup {
-                    operation: Box::new(operation),
-                    cleanup: Box::new(cleanup),
-                }),
-            },
+            Err(operation) => {
+                if operation.is_caller_stop()
+                    && let Some(resident) = self.resident.as_mut()
+                {
+                    resident.termination_requested = true;
+                }
+                match self.take_and_shutdown_resident() {
+                    Ok(()) => Err(operation),
+                    Err(cleanup) => Err(ParserSupervisorError::OperationAndCleanup {
+                        operation: Box::new(operation),
+                        cleanup: Box::new(cleanup),
+                    }),
+                }
+            }
         }
     }
 
@@ -4153,7 +4415,21 @@ impl OptionalParserSupervisor {
         no_progress_timeout: Duration,
         cancellation: &IndexCancellation,
     ) -> Result<(), ParserSupervisorError> {
-        if let Ok(true) = self.launch.is_current_for(language_id, None) {
+        let started = Instant::now();
+        let control = ArtifactIoControl {
+            absolute_deadline,
+            last_progress: started,
+            no_progress_timeout,
+            cancellation,
+        };
+        let probe = self.launch.currentness_probe(language_id);
+        let current = match run_bounded_artifact_currentness(probe, &control) {
+            Ok(current) => current,
+            Err(operation) => {
+                return Err(attach_cleanup(operation, self.take_and_shutdown_resident()));
+            }
+        };
+        if current {
             return Ok(());
         }
         self.shutdown_resident()?;
@@ -4425,6 +4701,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         scenario: &'static str,
         expected: ExpectedFailure,
         source_bytes: usize,
+        cancel_before_launch: bool,
         cancellation_after: Option<Duration>,
         deadline: Duration,
         no_progress: Duration,
@@ -4441,6 +4718,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             scenario,
             expected,
             source_bytes: 32,
+            cancel_before_launch: false,
             cancellation_after: None,
             deadline: Duration::from_secs(2),
             no_progress: Duration::from_millis(150),
@@ -4544,6 +4822,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
                 pack_root.join(ARTIFACT_MANIFEST_FILE_NAME),
             ),
             payloads: Vec::new(),
+            currentness_blocker: None,
         })
     }
 
@@ -4604,6 +4883,98 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             memory_limits: ParserMemoryLimits::PRODUCTION,
             resident: Some(resident),
         };
+
+        let (entered_sender, entered_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        supervisor.launch.currentness_blocker = Some(std::sync::Arc::new(MetadataProbeBlocker {
+            entered: entered_sender,
+            release: std::sync::Mutex::new(release_receiver),
+        }));
+        let blocked_cancellation = IndexCancellation::new();
+        let caller_cancellation = blocked_cancellation.clone();
+        let blocked_deadline = Instant::now()
+            .checked_add(Duration::from_secs(5))
+            .ok_or_else(|| io::Error::other("blocked currentness deadline overflow"))?;
+        let blocked_limits = default_limits()?;
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        let caller = thread::spawn(move || {
+            let result = supervisor.parse(
+                "hostile",
+                &[b'x'; 32],
+                blocked_limits,
+                blocked_deadline,
+                Duration::from_secs(5),
+                &caller_cancellation,
+            );
+            let _send_result = result_sender.send((result, supervisor));
+        });
+        entered_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|source| io::Error::other(source.to_string()))?;
+        blocked_cancellation.cancel();
+        let (blocked_result, returned_supervisor) = result_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|source| io::Error::other(source.to_string()))?;
+        if !matches!(
+            blocked_result,
+            Err(ParserSupervisorError::Cancelled {
+                phase: ARTIFACT_IO_PHASE
+            })
+        ) {
+            return Err(io::Error::other(format!(
+                "blocked currentness returned the wrong result: {blocked_result:?}"
+            )));
+        }
+        if returned_supervisor.resident.is_some() {
+            return Err(io::Error::other(
+                "blocked currentness retained the canceled resident",
+            ));
+        }
+        if ArtifactIoLease::acquire().is_ok() {
+            return Err(io::Error::other(
+                "blocked currentness admitted a second artifact reader",
+            ));
+        }
+        release_sender
+            .send(())
+            .map_err(|_closed| io::Error::other("metadata-probe release receiver closed"))?;
+        caller
+            .join()
+            .map_err(|_panic| io::Error::other("blocked currentness caller panicked"))?;
+        let permit_deadline = Instant::now() + Duration::from_secs(1);
+        while ARTIFACT_IO_ACTIVE.load(Ordering::Acquire) && Instant::now() < permit_deadline {
+            thread::yield_now();
+        }
+        if ARTIFACT_IO_ACTIVE.load(Ordering::Acquire) {
+            return Err(io::Error::other(
+                "blocked currentness did not release the artifact reader",
+            ));
+        }
+
+        supervisor = returned_supervisor;
+        supervisor.launch.currentness_blocker = None;
+        let cancellation = IndexCancellation::new();
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(2))
+            .ok_or_else(|| io::Error::other("resident reuse deadline overflow"))?;
+        let grammar = ParserLanguageIdentity::new("hostile")
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        supervisor.resident = Some(
+            ResidentParserSession::launch_command(
+                &supervisor.launch,
+                grammar,
+                ParserMemoryLimits::PRODUCTION,
+                deadline,
+                Duration::from_millis(150),
+                &cancellation,
+                command_for(peer, "idle-close")?,
+            )
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "resident reuse test relaunch failed after blocked currentness: {error:?}"
+                ))
+            })?,
+        );
 
         let mutation = fs::write(&payload_path, b"mutated");
         #[cfg(windows)]
@@ -4668,6 +5039,9 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         })?;
         let grammar = ParserLanguageIdentity::new("hostile")?;
         let cancellation = IndexCancellation::new();
+        if case.cancel_before_launch {
+            cancellation.cancel();
+        }
         let cancellation_thread = case.cancellation_after.map(|delay| {
             let cancellation = cancellation.clone();
             thread::spawn(move || {
@@ -4703,7 +5077,12 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
                 );
                 match operation {
                     Ok(evidence) => resident.shutdown().map(|()| evidence),
-                    Err(operation) => Err(attach_cleanup(operation, resident.shutdown())),
+                    Err(operation) => {
+                        if operation.is_caller_stop() {
+                            resident.termination_requested = true;
+                        }
+                        Err(attach_cleanup(operation, resident.shutdown()))
+                    }
                 }
             }
             Err(error) => Err(error),
@@ -4754,6 +5133,11 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
     require_reused_resident_payload_revalidation(peer)?;
 
     let mut cases = vec![
+        {
+            let mut opening_cancel = case("opening-cancel", ExpectedFailure::Cancelled)?;
+            opening_cancel.cancel_before_launch = true;
+            opening_cancel
+        },
         case("pre-ready-stall", ExpectedFailure::NoProgress)?,
         case("ready-session", ExpectedFailure::Ready("session"))?,
         case("ready-artifact", ExpectedFailure::Ready("artifact"))?,
@@ -4855,6 +5239,9 @@ mod tests {
 
     use super::*;
 
+    /// Serializes tests that deliberately hold the process-wide artifact-I/O lease.
+    static ARTIFACT_IO_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Reader that injects one transient interrupted read.
     struct InterruptOnceReader {
         /// Remaining deterministic input bytes.
@@ -4914,6 +5301,7 @@ mod tests {
                 pack_root.join(ARTIFACT_MANIFEST_FILE_NAME),
             ),
             payloads: Vec::new(),
+            currentness_blocker: None,
         }
     }
 
@@ -4991,6 +5379,9 @@ mod tests {
     #[test]
     fn changed_artifact_reload_returns_while_reader_is_blocked()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _test_guard = ARTIFACT_IO_TEST_LOCK
+            .lock()
+            .map_err(|_poisoned| io::Error::other("artifact I/O test lock was poisoned"))?;
         let cancellation = IndexCancellation::new();
         let started = Instant::now();
         let absolute_deadline = started + Duration::from_secs(5);
@@ -5096,6 +5487,87 @@ mod tests {
     }
 
     #[test]
+    fn currentness_probe_returns_while_path_observer_is_blocked()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _test_guard = ARTIFACT_IO_TEST_LOCK
+            .lock()
+            .map_err(|_poisoned| io::Error::other("artifact I/O test lock was poisoned"))?;
+        let cancellation = IndexCancellation::new();
+        let started = Instant::now();
+        let absolute_deadline = started + Duration::from_secs(5);
+        let no_progress_timeout = Duration::from_secs(5);
+        let (entered_sender, entered_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        let temp = tempfile::tempdir()?;
+        let observed_path = temp.path().join("artifact.json");
+        fs::write(&observed_path, b"verified")?;
+        let observation = FileObservation::capture(observed_path)?;
+        let mut file_probe = observation.currentness_probe();
+        file_probe.blocker = Some(std::sync::Arc::new(MetadataProbeBlocker {
+            entered: entered_sender,
+            release: std::sync::Mutex::new(release_receiver),
+        }));
+        let probe = ArtifactCurrentnessProbe {
+            files: vec![file_probe],
+        };
+        let caller_cancellation = cancellation.clone();
+        let caller = thread::spawn(move || {
+            let control = ArtifactIoControl {
+                absolute_deadline,
+                last_progress: started,
+                no_progress_timeout,
+                cancellation: &caller_cancellation,
+            };
+            let result = run_bounded_artifact_currentness(probe, &control);
+            let _result_send = result_sender.send(result);
+        });
+
+        entered_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|source| io::Error::other(source.to_string()))?;
+        cancellation.cancel();
+        let result = result_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|source| io::Error::other(source.to_string()))?;
+        let returned_cancelled = matches!(
+            result,
+            Err(ParserSupervisorError::Cancelled {
+                phase: ARTIFACT_IO_PHASE
+            })
+        );
+        let refused_second_reader = matches!(
+            ArtifactIoLease::acquire(),
+            Err(ParserSupervisorError::IoThread {
+                phase: ARTIFACT_IO_PHASE,
+                ..
+            })
+        );
+        release_sender.send(())?;
+        caller
+            .join()
+            .map_err(|_panic| io::Error::other("currentness caller panicked"))?;
+        let permit_deadline = Instant::now() + Duration::from_secs(1);
+        while ARTIFACT_IO_ACTIVE.load(Ordering::Acquire) && Instant::now() < permit_deadline {
+            thread::yield_now();
+        }
+
+        require_test(
+            returned_cancelled,
+            "blocked pathname observation retained the canceled request",
+        )?;
+        require_test(
+            refused_second_reader,
+            "blocked pathname observation permitted another artifact reader",
+        )?;
+        require_test(
+            ArtifactIoLease::acquire().is_ok(),
+            "artifact reader permit was not reusable after currentness completion",
+        )
+        .map_err(Into::into)
+    }
+
+    #[test]
     fn changed_artifact_refresh_propagates_request_cancellation() {
         let mut supervisor = metadata_only_supervisor();
         let cancellation = IndexCancellation::new();
@@ -5127,7 +5599,7 @@ mod tests {
         };
 
         assert!(matches!(
-            launch.is_current_for("alpha", Some(&control)),
+            launch.currentness_probe("alpha").is_current(Some(&control)),
             Err(ParserSupervisorError::Cancelled {
                 phase: ARTIFACT_IO_PHASE
             })
@@ -5136,8 +5608,40 @@ mod tests {
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
+    fn memfd_creation_retries_only_unsupported_modern_flags() {
+        use nix::errno::Errno;
+        use nix::libc;
+        use nix::sys::memfd::MFdFlags;
+
+        let base = MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING;
+        let requested = base | MFdFlags::from_bits_retain(libc::MFD_EXEC);
+        let mut attempts = Vec::new();
+        let descriptor = create_memfd_with_legacy_fallback(base, libc::MFD_EXEC, |flags| {
+            attempts.push(flags);
+            if attempts.len() == 1 {
+                Err(Errno::EINVAL)
+            } else {
+                Ok(7)
+            }
+        });
+        assert_eq!(descriptor, Ok(7));
+        assert_eq!(attempts, vec![requested, base]);
+
+        let mut denied_attempts = Vec::new();
+        let denied = create_memfd_with_legacy_fallback(base, libc::MFD_EXEC, |flags| {
+            denied_attempts.push(flags);
+            Err::<i32, _>(Errno::EPERM)
+        });
+        assert_eq!(denied, Err(Errno::EPERM));
+        assert_eq!(denied_attempts, vec![requested]);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
     fn sealed_linux_payload_is_read_only_complete_and_immutable()
     -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
         use nix::fcntl::{FcntlArg, OFlag, SealFlag, fcntl};
 
         let cancellation = IndexCancellation::new();
@@ -5170,6 +5674,19 @@ mod tests {
         assert!(payload.file.set_len(0).is_err());
         let mut writer = payload.file.try_clone()?;
         assert!(writer.write_all(b"attacker").is_err());
+
+        let executable = SealedLinuxPayload::from_verified_bytes(
+            "test worker",
+            "projectatlas-sealed-worker-test",
+            b"verified executable authority",
+            true,
+            &control,
+        )?;
+        assert_ne!(
+            executable.file.metadata()?.permissions().mode() & 0o100,
+            0,
+            "sealed worker authority is not executable"
+        );
         Ok(())
     }
 

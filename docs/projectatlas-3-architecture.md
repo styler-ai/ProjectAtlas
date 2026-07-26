@@ -1821,6 +1821,14 @@ never the absolute deadline. The first supervisor control is one strict `Session
 containing only protocol version plus fresh process-session entropy. READY must bind
 that exact session to the independently observed artifact and installed containment
 kind; every later request and response remains session-bound and rejects replay.
+Before each parse request, the supervisor sends an owned constant-size path/epoch
+plan to one lazy process-wide metadata worker. The caller keeps its original
+cancellation, absolute-deadline, and no-progress bounds while that worker owns the
+only artifact-I/O lease. A stalled pathname lookup therefore cannot retain the
+caller or start another filesystem worker. Only a proven-current result permits
+resident reuse: uncertainty shuts down the resident without a reload, while an
+observed change shuts it down and enters the existing bounded digest reload before
+any replacement is accepted.
 
 This is one concrete `projectatlas-cli` supervisor, not separate runtime and release
 implementations. Normal staging and a CLI-owned fresh-artifact verifier reuse its
@@ -1887,23 +1895,30 @@ removed through the optional-pack lifecycle. Linux artifact construction eagerly
 maps and audits the exact allowed system runtime DSOs before `main`. Immediately
 before each new Linux resident, the bounded artifact-I/O owner re-reads and rehashes
 only the trusted worker and selected grammar against their verified artifact rows,
-copies those bytes plus the already verified bounded documents into read-only memfds,
-and applies the complete write/grow/shrink/seal set. It executes the sealed worker
-through `/proc/self/fd` and inherits only the four dynamically identified authority
-descriptors alongside the exact protocol pipes; parent descriptors remain
-close-on-exec throughout concurrent process creation. The worker validates every
-descriptor, seal, bound, digest, manifest relationship, selected grammar, and its
-own sealed executable mapping before closing the three document descriptors. It then
-installs hard resource/address-space limits and `no_new_privs`, hard-requires fully
-enforced Landlock ABI v3 with read access only to the selected sealed grammar object,
-and installs seccomp process/exec/socket denial before reading `SessionOpen`. The
-first authenticated grammar request must match that descriptor-bound grammar and is
-loaded directly from the retained descriptor. A validated READY is the first
+copies those bytes plus the already verified bounded documents into sealed memfds,
+and applies the complete write/grow/shrink/seal set. Linux 6.3 and newer receives
+explicit executable worker and selected-grammar memfds plus non-executable document
+memfds; an `EINVAL` retry without those newer flags preserves the pre-6.3 kernel
+contract.
+Hosted packaged proof runs with `vm.memfd_noexec=1`. The supervisor executes the
+sealed worker through `/proc/self/fd` and inherits only the four dynamically
+identified authority descriptors alongside the exact protocol pipes; parent
+descriptors remain close-on-exec throughout concurrent process creation. The worker
+validates every authority descriptor, seal, and bound; reads and closes the three
+bounded document descriptors while validating their digests, manifest relationships,
+and selected grammar; then validates its sealed executable mapping, eager runtime
+DSOs, and one-thread state with only the grammar descriptor retained. It installs hard
+resource/address-space limits and `no_new_privs`, hard-requires fully enforced Landlock
+ABI v3 with read access only to the selected sealed grammar object, and installs
+seccomp process/exec/socket denial before reading `SessionOpen`. The first
+authenticated grammar request must match that descriptor-bound grammar and is loaded
+directly from the retained descriptor. A validated READY is the first
 acknowledgement that binds the fresh session, artifact, and containment; the
 supervisor sends no grammar identity or source bytes before it. Same-language
-resident reuse retains the constant-size metadata probes; it does not recopy or
-rehash the grammar. Delegated cgroup v2 improves accounting when available but is
-not a hidden ordinary-user prerequisite. Missing primitives fail closed.
+resident reuse sends the constant-size metadata plan through the persistent bounded
+worker; it does not create a thread, recopy, or rehash the grammar per source file.
+Delegated cgroup v2 improves accounting when available but is not a hidden ordinary-
+user prerequisite. Missing primitives fail closed.
 
 The Windows PowerShell surface is release-harness code, not a normal runtime
 dependency. Separate scripts remain only where authority changes: pinned input
@@ -2175,11 +2190,17 @@ flowchart TB
     Registry --> BuiltIn[Built-in parser owner]
     Registry --> Fallback[Conservative default-core fallback]
     Registry -. verified and enabled .-> Supervisor[Bounded Rust supervisor]
-    Supervisor --> Platform{Accepted optional-pack target}
-    Platform -->|Linux| LinuxSeal[Rehash worker plus selected grammar; seal worker, documents, policy, and one grammar]
+    Supervisor --> Currentness[One bounded process-wide worker probes up to five launch epochs]
+    Currentness --> Current{Verified launch inputs current?}
+    Current -->|no| Reload[Bounded digest reload; require the same artifact identity]
+    Current -->|yes| Resident{Healthy resident for this grammar?}
+    Reload --> Resident
+    Resident -->|no| Platform{Accepted optional-pack target}
+    Platform -->|Linux| LinuxSeal[Rehash worker plus selected grammar; seal executable worker plus grammar and non-executable documents]
     LinuxSeal --> LinuxBoot[Execute sealed worker; exact pipes plus four authority descriptors]
-    LinuxBoot --> LinuxVerify[Validate seals, digests, manifest relations, executable mapping, and one thread]
-    LinuxVerify --> LinuxContain[Close documents; hard limits plus no_new_privs plus grammar-only Landlock v3 plus seccomp]
+    LinuxBoot --> LinuxAuthority[Validate descriptors and seals; read and close documents; validate digests, relations, and selected grammar]
+    LinuxAuthority --> LinuxVerify[Validate executable mapping, eager runtime DSOs, and one-thread state]
+    LinuxVerify --> LinuxContain[Hard limits plus no_new_privs plus grammar-only Landlock v3 plus seccomp]
     Platform -->|Windows| Broker[Artifact-bound containment broker]
     Broker --> WindowsContain[Suspended LPAC worker; exact handles plus no-breakaway Job and completion port]
     WindowsContain --> Admission[Resume then fixed admission record]
@@ -2189,6 +2210,7 @@ flowchart TB
     Open --> Ready[Worker emits READY: session plus artifact plus containment]
     Ready --> Gate[Supervisor validates the exact launch]
     Gate --> Request[First request must match sealed grammar; load only the retained descriptor; bounded source allowed]
+    Resident -->|yes| Request
     Request --> Validate[Contained worker parses; supervisor validates session-bound result]
     Validate --> ParseMeta[Grammar-backed source parse metadata]
     BuiltIn --> Facts[Symbols and relations with fact provenance]
@@ -2196,11 +2218,9 @@ flowchart TB
     ParseMeta --> Prepared[Typed publication candidate]
     Facts --> Prepared
     Prepared --> Publish[Atomic SQLite generation publication]
-    LinuxSeal -. seal or launch failure .-> Preserve[Fail closed; terminate, reap, and join if started; preserve MCP and previous generation]
-    LinuxVerify -. authority or mapping failure .-> Preserve
-    LinuxContain -. containment failure .-> Preserve
-    WindowsContain -. admission failure .-> Preserve
-    AdmissionGate -. malformed, truncated, or failed .-> Preserve
+    Currentness -. blocked, timed out, or canceled .-> Preserve
+    Reload -. read or identity failure .-> Preserve
+    Platform -. launch, authority, containment, or admission failure .-> Preserve[Fail closed; terminate, reap, and join if started; preserve MCP and previous generation]
     Validate -. failure, limit, or cancellation .-> Preserve
 ```
 

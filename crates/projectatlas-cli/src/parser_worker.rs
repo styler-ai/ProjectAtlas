@@ -436,7 +436,7 @@ enum WorkerStartupError {
     Protocol(#[from] ParserProtocolError),
     /// Linux containment failed before any protocol input was read.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    #[error("optional parser Linux containment failed at {stage:?}: {source}")]
+    #[error("{source} (Linux containment stage {stage:?})")]
     LinuxContainment {
         /// Closed containment stage.
         stage: parser_worker_containment::ParserWorkerContainmentStage,

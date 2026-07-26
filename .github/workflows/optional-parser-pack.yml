@@ -1014,6 +1014,12 @@ jobs:
 
           $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "parser-pack-runtime-e2e-target"
           $env:PROJECTATLAS_OPTIONAL_PARSER_ARCHIVE = $archive
+          sudo --non-interactive sysctl -q -w vm.memfd_noexec=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $memfdNoexec = (sysctl -n vm.memfd_noexec).Trim()
+          if ($LASTEXITCODE -ne 0 -or $memfdNoexec -ne "1") {
+            throw "Linux packaged authority proof requires vm.memfd_noexec=1."
+          }
           cargo test `
             -p projectatlas-cli `
             --test parser_launch_authority `
