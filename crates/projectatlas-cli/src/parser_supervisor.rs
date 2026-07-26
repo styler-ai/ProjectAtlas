@@ -5,7 +5,8 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::sync::{Arc, Mutex};
@@ -107,6 +108,9 @@ impl ParserMemoryLimits {
 const ARTIFACT_READ_CHUNK_BYTES: usize = 64 * 1024;
 /// Request phase used while revalidating changed parser-pack payloads.
 const ARTIFACT_REVALIDATION_PHASE: &str = "artifact revalidation";
+/// Only one potentially blocked changed-artifact reader may exist per process.
+/// ponytail: use a killable helper process if stuck kernel reads become an observed problem.
+static ARTIFACT_REVALIDATION_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Maximum bytes read from one kernel-owned Linux accounting record.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const LINUX_MEMORY_RECORD_MAX_BYTES: u64 = 64 * 1024;
@@ -590,6 +594,74 @@ impl ArtifactRevalidationControl<'_> {
     }
 }
 
+/// Process-wide lease that caps potentially blocked artifact readers at one.
+struct ArtifactRevalidationLease;
+
+impl ArtifactRevalidationLease {
+    /// Acquire the only changed-artifact reader slot.
+    fn acquire() -> Result<Self, ParserSupervisorError> {
+        ARTIFACT_REVALIDATION_ACTIVE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_inactive| Self)
+            .map_err(|_active| ParserSupervisorError::IoThread {
+                phase: ARTIFACT_REVALIDATION_PHASE,
+                message: "another changed-artifact reader is still active".to_owned(),
+            })
+    }
+}
+
+impl Drop for ArtifactRevalidationLease {
+    fn drop(&mut self) {
+        ARTIFACT_REVALIDATION_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+/// Run potentially blocking artifact I/O behind a request-bounded worker.
+fn run_artifact_revalidation<T>(
+    operation: impl FnOnce() -> Result<T, ParserSupervisorError> + Send + 'static,
+    control: &ArtifactRevalidationControl<'_>,
+) -> Result<T, ParserSupervisorError>
+where
+    T: Send + 'static,
+{
+    control.poll()?;
+    let lease = ArtifactRevalidationLease::acquire()?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let worker = thread::Builder::new()
+        .name("projectatlas-artifact-revalidation".to_owned())
+        .spawn(move || {
+            let result = operation();
+            drop(lease);
+            let _send_result = sender.send(result);
+        })
+        .map_err(|source| ParserSupervisorError::IoThread {
+            phase: ARTIFACT_REVALIDATION_PHASE,
+            message: bounded_message(source.to_string()),
+        })?;
+    drop(worker);
+
+    loop {
+        control.poll()?;
+        match receiver.recv_timeout(next_poll_wait(
+            control.absolute_deadline,
+            control.last_progress,
+            control.no_progress_timeout,
+        )) {
+            Ok(result) => {
+                control.poll()?;
+                return result;
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(ParserSupervisorError::IoThread {
+                    phase: ARTIFACT_REVALIDATION_PHASE,
+                    message: "changed-artifact reader disconnected".to_owned(),
+                });
+            }
+        }
+    }
+}
+
 /// Bytes and digest produced together by one bounded artifact-file pass.
 struct BoundedArtifactRead {
     /// Exact bounded file bytes.
@@ -634,16 +706,30 @@ impl VerifiedParserPackLaunch {
         no_progress_timeout: Duration,
         cancellation: &IndexCancellation,
     ) -> Result<Self, ParserSupervisorError> {
+        let started = Instant::now();
         let control = ArtifactRevalidationControl {
             absolute_deadline,
-            last_progress: Instant::now(),
+            last_progress: started,
             no_progress_timeout,
             cancellation,
         };
-        Self::load_inner(pack_root, Some(&control))
+        let pack_root = pack_root.to_path_buf();
+        let worker_cancellation = cancellation.clone();
+        run_artifact_revalidation(
+            move || {
+                let worker_control = ArtifactRevalidationControl {
+                    absolute_deadline,
+                    last_progress: started,
+                    no_progress_timeout,
+                    cancellation: &worker_cancellation,
+                };
+                Self::load_inner(&pack_root, Some(&worker_control))
+            },
+            &control,
+        )
     }
 
-    /// Validate one artifact with optional request-owned stop bounds.
+    /// Validate one artifact with optional worker-side request bounds.
     fn load_inner(
         pack_root: &Path,
         control: Option<&ArtifactRevalidationControl<'_>>,
@@ -4384,30 +4470,42 @@ mod tests {
 
     use super::*;
 
-    /// Reader that cancels the active request after yielding its first chunk.
-    struct CancelAfterFirstRead {
+    /// Reader that injects one transient interrupted read.
+    struct InterruptOnceReader {
         /// Remaining deterministic input bytes.
         input: Cursor<Vec<u8>>,
-        /// Request signal cancelled after the first successful read.
-        cancellation: IndexCancellation,
         /// Whether one transient interrupted read has already been injected.
         did_interrupt: bool,
-        /// Whether cancellation has already been delivered.
-        did_cancel: bool,
     }
 
-    impl Read for CancelAfterFirstRead {
+    impl Read for InterruptOnceReader {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
             if !self.did_interrupt {
                 self.did_interrupt = true;
                 return Err(io::ErrorKind::Interrupted.into());
             }
-            let read = self.input.read(buffer)?;
-            if read > 0 && !self.did_cancel {
-                self.did_cancel = true;
-                self.cancellation.cancel();
-            }
-            Ok(read)
+            self.input.read(buffer)
+        }
+    }
+
+    /// Reader that reports entry and blocks until the test releases it.
+    struct BlockingReader {
+        /// Signals that the worker entered the in-flight read.
+        entered: SyncSender<()>,
+        /// Releases the deliberately stalled read.
+        release: Receiver<()>,
+    }
+
+    impl Read for BlockingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.entered
+                .send(())
+                .map_err(|_closed| io::Error::other("blocking reader entry receiver closed"))?;
+            self.release
+                .recv()
+                .map_err(|_closed| io::Error::other("blocking reader release sender closed"))?;
+            buffer[0] = b'x';
+            Ok(1)
         }
     }
 
@@ -4472,46 +4570,142 @@ mod tests {
     }
 
     #[test]
-    fn changed_artifact_reload_retries_interruption_and_honors_cancellation()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let cancellation = IndexCancellation::new();
-        let control = ArtifactRevalidationControl {
-            absolute_deadline: Instant::now() + Duration::from_secs(1),
-            last_progress: Instant::now(),
-            no_progress_timeout: Duration::from_secs(1),
-            cancellation: &cancellation,
-        };
-        let mut reader = CancelAfterFirstRead {
-            input: Cursor::new(vec![b'x'; ARTIFACT_READ_CHUNK_BYTES * 3]),
-            cancellation: cancellation.clone(),
+    fn bounded_artifact_read_retries_interruption() -> Result<(), Box<dyn std::error::Error>> {
+        let expected = vec![b'x'; ARTIFACT_READ_CHUNK_BYTES * 3];
+        let expected_sha256 = encode_sha256(Sha256::digest(&expected));
+        let mut reader = InterruptOnceReader {
+            input: Cursor::new(expected.clone()),
             did_interrupt: false,
-            did_cancel: false,
         };
         let mut bytes = Vec::new();
         let mut sha256 = Sha256::new();
-        let result = read_bounded_chunks(
+        read_bounded_chunks(
             &mut reader,
             Path::new("changed-payload"),
             u64::try_from(ARTIFACT_READ_CHUNK_BYTES * 3)?,
             &mut bytes,
             &mut sha256,
-            Some(&control),
-        );
+            None,
+        )?;
 
         require_test(
-            matches!(
-                result,
-                Err(ParserSupervisorError::Cancelled {
-                    phase: ARTIFACT_REVALIDATION_PHASE
-                })
-            ),
-            "changed-artifact reload ignored cancellation",
+            bytes == expected,
+            "bounded artifact read changed bytes after an interrupted read",
         )?;
         require_test(
-            bytes.len() == ARTIFACT_READ_CHUNK_BYTES,
-            "changed-artifact reload read past its first bounded chunk",
+            encode_sha256(sha256.finalize()) == expected_sha256,
+            "bounded artifact read changed its digest after an interrupted read",
+        )
+        .map_err(Into::into)
+    }
+
+    #[test]
+    fn changed_artifact_reload_returns_while_reader_is_blocked()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cancellation = IndexCancellation::new();
+        let started = Instant::now();
+        let absolute_deadline = started + Duration::from_secs(5);
+        let no_progress_timeout = Duration::from_secs(5);
+        let (entered_sender, entered_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let (finished_sender, finished_receiver) = mpsc::sync_channel(1);
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        let caller_cancellation = cancellation.clone();
+        let worker_cancellation = cancellation.clone();
+        let caller = thread::spawn(move || {
+            let control = ArtifactRevalidationControl {
+                absolute_deadline,
+                last_progress: started,
+                no_progress_timeout,
+                cancellation: &caller_cancellation,
+            };
+            let result = run_artifact_revalidation(
+                move || {
+                    let worker_control = ArtifactRevalidationControl {
+                        absolute_deadline,
+                        last_progress: started,
+                        no_progress_timeout,
+                        cancellation: &worker_cancellation,
+                    };
+                    let mut reader = BlockingReader {
+                        entered: entered_sender,
+                        release: release_receiver,
+                    };
+                    let mut bytes = Vec::new();
+                    let mut sha256 = Sha256::new();
+                    let result = read_bounded_chunks(
+                        &mut reader,
+                        Path::new("blocked-payload"),
+                        u64::try_from(ARTIFACT_READ_CHUNK_BYTES).unwrap_or(u64::MAX),
+                        &mut bytes,
+                        &mut sha256,
+                        Some(&worker_control),
+                    );
+                    let worker_cancelled = matches!(
+                        &result,
+                        Err(ParserSupervisorError::Cancelled {
+                            phase: ARTIFACT_REVALIDATION_PHASE
+                        })
+                    );
+                    let _finished_result = finished_sender.send(worker_cancelled);
+                    result
+                },
+                &control,
+            );
+            let _result_send = result_sender.send(result);
+        });
+
+        let entered = entered_receiver.recv_timeout(Duration::from_secs(1));
+        cancellation.cancel();
+        let result = result_receiver.recv_timeout(Duration::from_secs(1));
+        let returned_cancelled = matches!(
+            result.as_ref(),
+            Ok(Err(ParserSupervisorError::Cancelled {
+                phase: ARTIFACT_REVALIDATION_PHASE
+            }))
+        );
+        let refused_second_reader = matches!(
+            ArtifactRevalidationLease::acquire(),
+            Err(ParserSupervisorError::IoThread {
+                phase: ARTIFACT_REVALIDATION_PHASE,
+                ..
+            })
+        );
+
+        let release_result = release_sender.send(());
+        caller
+            .join()
+            .map_err(|_panic| io::Error::other("artifact revalidation caller panicked"))?;
+        let worker_cancelled = finished_receiver.recv_timeout(Duration::from_secs(1));
+        let permit_deadline = Instant::now() + Duration::from_secs(1);
+        while ARTIFACT_REVALIDATION_ACTIVE.load(Ordering::Acquire)
+            && Instant::now() < permit_deadline
+        {
+            thread::yield_now();
+        }
+
+        entered.map_err(|source| io::Error::other(source.to_string()))?;
+        let _returned = result.map_err(|source| io::Error::other(source.to_string()))?;
+        release_result?;
+        let worker_cancelled =
+            worker_cancelled.map_err(|source| io::Error::other(source.to_string()))?;
+        require_test(
+            returned_cancelled,
+            "blocked artifact read retained the canceled request",
         )?;
-        Ok(())
+        require_test(
+            refused_second_reader,
+            "blocked artifact read permitted another reload worker",
+        )?;
+        require_test(
+            worker_cancelled,
+            "released artifact reader continued after request cancellation",
+        )?;
+        require_test(
+            ArtifactRevalidationLease::acquire().is_ok(),
+            "artifact reader permit was not reusable after worker completion",
+        )
+        .map_err(Into::into)
     }
 
     #[test]
