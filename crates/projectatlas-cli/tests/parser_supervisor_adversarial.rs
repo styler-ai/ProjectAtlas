@@ -218,6 +218,19 @@ fn hostile_peer(scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
             diagnostic.flush()?;
             thread::sleep(Duration::from_secs(5));
         }
+        "stderr-completion" => {
+            diagnostic.write_all(b"bounded diagnostic")?;
+            diagnostic.flush()?;
+            thread::sleep(Duration::from_millis(50));
+            write_completion(
+                &mut output,
+                &request,
+                request.source().byte_len(),
+                1,
+                1,
+                "source_file",
+            )?;
+        }
         "limit-source" => write_completion(
             &mut output,
             &request,

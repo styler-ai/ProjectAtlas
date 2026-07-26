@@ -392,8 +392,27 @@ struct PayloadObservation {
     path: PathBuf,
     /// Exact manifest-bound byte count.
     bytes: u64,
+    /// Exact manifest-bound SHA-256.
+    sha256: String,
     /// Modification timestamp when the host filesystem exposes one.
     modified: Option<SystemTime>,
+}
+
+impl PayloadObservation {
+    /// Rehash one payload before it can contribute to fresh launch authority.
+    fn is_current(&self) -> Result<bool, ParserSupervisorError> {
+        let Ok(metadata) = fs::metadata(&self.path) else {
+            return Ok(false);
+        };
+        if !metadata.is_file()
+            || metadata.len() != self.bytes
+            || metadata.modified().ok() != self.modified
+        {
+            return Ok(false);
+        }
+        let bytes = read_bounded_file(&self.path, self.bytes)?;
+        Ok(sha256_hex(&bytes) == self.sha256)
+    }
 }
 
 /// Complete private launch authority derived from one exact immutable artifact.
@@ -473,6 +492,7 @@ impl VerifiedParserPackLaunch {
             payloads.push(PayloadObservation {
                 path: path.clone(),
                 bytes: payload.bytes,
+                sha256: payload.sha256.as_str().to_owned(),
                 modified: metadata.modified().ok(),
             });
             match &payload.role {
@@ -560,7 +580,7 @@ impl VerifiedParserPackLaunch {
         })
     }
 
-    /// Return whether all cheap immutable-artifact observations still match.
+    /// Return whether every manifest and payload digest still matches.
     fn is_current(&self) -> Result<bool, ParserSupervisorError> {
         let artifact_bytes = read_bounded_file(
             &self.pack_root.join(ARTIFACT_MANIFEST_FILE_NAME),
@@ -577,13 +597,7 @@ impl VerifiedParserPackLaunch {
             return Ok(false);
         }
         for payload in &self.payloads {
-            let Ok(metadata) = fs::metadata(&payload.path) else {
-                return Ok(false);
-            };
-            if !metadata.is_file()
-                || metadata.len() != payload.bytes
-                || metadata.modified().ok() != payload.modified
-            {
+            if !payload.is_current()? {
                 return Ok(false);
             }
         }
@@ -825,6 +839,12 @@ enum ParserIoThreadError {
         /// Inclusive byte ceiling.
         maximum: usize,
     },
+    /// A worker or broker wrote bytes outside the framed protocol.
+    #[error("unexpected diagnostic bytes: {diagnostic}")]
+    UnexpectedDiagnostic {
+        /// Bounded lossy rendering of the first observed bytes.
+        diagnostic: String,
+    },
 }
 
 /// One bounded stdout-reader event.
@@ -996,6 +1016,19 @@ fn diagnostic_reader_loop(
             };
         }
         diagnostics.extend_from_slice(&chunk[..count]);
+        let diagnostic = bounded_diagnostic(&diagnostics);
+        return if events
+            .send(DiagnosticReaderEvent::Failure(
+                ParserIoThreadError::UnexpectedDiagnostic {
+                    diagnostic: diagnostic.clone(),
+                },
+            ))
+            .is_ok()
+        {
+            Ok(diagnostics)
+        } else {
+            Err(ParserIoThreadError::UnexpectedDiagnostic { diagnostic })
+        };
     }
 }
 
@@ -2113,16 +2146,20 @@ impl ResidentParserSession {
             )?;
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             self.enforce_memory_bound(phase, false)?;
+            self.check_diagnostic_reader(phase)?;
             if let Some(event) = try_frame_event(&self.frame_reader.events)? {
+                self.check_diagnostic_reader(phase)?;
                 return self.finish_frame_event(event, phase);
             }
-            self.check_diagnostic_reader(phase)?;
             match self.frame_reader.events.recv_timeout(next_poll_wait(
                 absolute_deadline,
                 last_progress,
                 no_progress_timeout,
             )) {
-                Ok(event) => return self.finish_frame_event(event, phase),
+                Ok(event) => {
+                    self.check_diagnostic_reader(phase)?;
+                    return self.finish_frame_event(event, phase);
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(ParserSupervisorError::IoThread {
@@ -2157,7 +2194,10 @@ impl ResidentParserSession {
         phase: &'static str,
     ) -> Result<(), ParserSupervisorError> {
         match self.diagnostic_reader.events.try_recv() {
-            Ok(DiagnosticReaderEvent::Failure(error)) => Err(io_thread_error(phase, &error)),
+            Ok(DiagnosticReaderEvent::Failure(error)) => {
+                self.termination_requested = true;
+                Err(io_thread_error(phase, &error))
+            }
             Ok(DiagnosticReaderEvent::AdmissionAccepted)
             | Err(TryRecvError::Empty | TryRecvError::Disconnected) => Ok(()),
         }
@@ -3041,17 +3081,19 @@ impl OptionalParserSupervisor {
             no_progress_timeout,
             cancellation,
         )?;
-        self.refresh_changed_artifact()?;
-        let grammar = self.launch.require_grammar(language_id)?;
         let source_identity = ParserSourceIdentity::for_bytes(source)?;
-        if self
-            .resident
-            .as_ref()
-            .is_some_and(|resident| resident.grammar != grammar)
-        {
-            self.shutdown_resident()?;
+        if let Some(resident) = self.resident.as_ref() {
+            let grammar_changed = self
+                .launch
+                .require_grammar(language_id)
+                .map_or(true, |grammar| resident.grammar != grammar);
+            if grammar_changed {
+                self.shutdown_resident()?;
+            }
         }
         if self.resident.is_none() {
+            self.refresh_changed_artifact()?;
+            let grammar = self.launch.require_grammar(language_id)?;
             self.resident = Some(ResidentParserSession::launch(
                 &self.launch,
                 grammar,
@@ -3584,6 +3626,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         case("completion-truncated", ExpectedFailure::Io)?,
         case("completion-oversized", ExpectedFailure::Io)?,
         case("stderr-flood", ExpectedFailure::Io)?,
+        case("stderr-completion", ExpectedFailure::Io)?,
         case(
             "limit-output",
             ExpectedFailure::Limit("completion.output_bytes"),
@@ -3686,6 +3729,38 @@ mod tests {
         assert!(supervisor.accepts_language("zeta"));
         assert!(!supervisor.accepts_language("missing"));
         assert!(!supervisor.accepts_language("INVALID"));
+    }
+
+    #[test]
+    fn payload_observation_rehashes_same_size_same_mtime_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("worker");
+        fs::write(&path, b"trusted")?;
+        let modified = fs::metadata(&path)?.modified()?;
+        let observation = PayloadObservation {
+            path: path.clone(),
+            bytes: 7,
+            sha256: sha256_hex(b"trusted"),
+            modified: Some(modified),
+        };
+        require_test(observation.is_current()?, "initial payload was rejected")?;
+
+        fs::write(&path, b"mutated")?;
+        File::options()
+            .write(true)
+            .open(&path)?
+            .set_times(fs::FileTimes::new().set_modified(modified))?;
+        require_test(
+            fs::metadata(&path)?.len() == observation.bytes
+                && fs::metadata(&path)?.modified()? == modified,
+            "test mutation did not preserve size and modification time",
+        )?;
+        require_test(
+            !observation.is_current()?,
+            "same-size same-mtime payload mutation retained launch authority",
+        )?;
+        Ok(())
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -4050,7 +4125,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let mut bytes = PARSER_WINDOWS_BROKER_ADMISSION_RECORD.to_vec();
         bytes.extend_from_slice(b"bounded diagnostic");
-        let (events, receiver) = mpsc::sync_channel(1);
+        let (events, receiver) = mpsc::sync_channel(2);
         let diagnostics = diagnostic_reader_loop(Cursor::new(bytes), true, &events)?;
         require_test(
             matches!(
@@ -4058,6 +4133,13 @@ mod tests {
                 DiagnosticReaderEvent::AdmissionAccepted
             ),
             "diagnostics became visible before admission",
+        )?;
+        require_test(
+            matches!(
+                receiver.recv_timeout(Duration::from_secs(1))?,
+                DiagnosticReaderEvent::Failure(ParserIoThreadError::UnexpectedDiagnostic { .. })
+            ),
+            "bounded diagnostic bytes did not fail closed",
         )?;
         require_test(
             diagnostics == b"bounded diagnostic",
