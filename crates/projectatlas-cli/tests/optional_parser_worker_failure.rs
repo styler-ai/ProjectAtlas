@@ -36,7 +36,7 @@ const ATLAS_DIR_NAME: &str = ".projectatlas";
 /// Repository-local database file.
 const ATLAS_DATABASE_FILE_NAME: &str = "projectatlas.db";
 /// Number of pending optional files that keeps the one resident worker observable.
-const PENDING_OPTIONAL_FILE_COUNT: usize = 1_024;
+const PENDING_OPTIONAL_FILE_COUNT: usize = 256;
 /// Functions per pending file, keeping the fixture bounded while adding real parser work.
 const PENDING_OPTIONAL_FUNCTION_COUNT: usize = 256;
 /// Maximum time to observe one exact scan-owned worker subtree.
@@ -1198,14 +1198,11 @@ fn projectatlas_command(repo: &Path, host: &HostState) -> Command {
 fn run_json(repo: &Path, host: &HostState, arguments: &[&OsStr]) -> Result<Value, Box<dyn Error>> {
     let mut command = projectatlas_command(repo, host);
     command.arg("--format").arg("json").args(arguments);
-    let output = run_bounded_command(
-        &mut command,
-        PRODUCT_COMMAND_TIMEOUT,
-        "projectatlas command",
-    )?;
+    let operation = format!("projectatlas {arguments:?}");
+    let output = run_bounded_command(&mut command, PRODUCT_COMMAND_TIMEOUT, &operation)?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
-            "projectatlas command failed\nstdout:\n{}\nstderr:\n{}",
+            "{operation} failed\nstdout:\n{}\nstderr:\n{}",
             captured_stream_text(&output.stdout),
             captured_stream_text(&output.stderr)
         ))
@@ -1240,7 +1237,7 @@ fn require_optional_worker_failure(output: &CapturedOutput) -> Result<(), Box<dy
 fn run_bounded_command(
     command: &mut Command,
     timeout: Duration,
-    operation: &'static str,
+    operation: &str,
 ) -> io::Result<CapturedOutput> {
     command
         .stdin(Stdio::null())
