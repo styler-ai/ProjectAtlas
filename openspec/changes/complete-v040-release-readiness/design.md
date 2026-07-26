@@ -1,0 +1,90 @@
+## Context
+
+Issue #308 and its feature proof are closed, #340 is merged and closed, and #341 has only its final explicit empty-cache construction proof left. Issue #311 still contains an obsolete split of the pre-closure #308 program, is not mapped in `openspec/issue-map.json`, and includes a post-release cleanup checkbox that cannot truthfully be completed before publication.
+
+The existing release path already has the required mechanics:
+
+- `01-CI` owns Rust quality and packaged CLI/MCP smoke on Linux, Windows, macOS x64, and macOS arm64.
+- `optional-parser-pack` owns explicit cache-free Linux and Windows optional-pack construction and full runtime proof.
+- `02-Release` owns version validation, package construction, installer smoke, release assets, and publication; `prepublish_only=true` exercises the package and installer path without publishing.
+- `03-Auto-Release` dispatches `02-Release` after an eligible version reaches `main`.
+- `02-Release` requires every issue in milestone `v0.4.0-00` to be mapped, checked, and closed before publication.
+
+The user also requires branch, worktree, and external ProjectAtlas checkout cleanup only after v0.4.0 is published and independently verified. Release readiness and post-release cleanup therefore need separate owners even though both remain part of the same active release goal.
+
+## Goals / Non-Goals
+
+**Goals:**
+
+- Make #311 a concise, mapped, mechanically synchronized readiness owner.
+- Prove one exact final `dev` head through the existing local and hosted release surfaces.
+- Keep `main`, tags, and GitHub releases untouched until all prepublication evidence is green.
+- Prepare an exact `dev`-to-`main` promotion that can pass the existing milestone gate.
+- Preserve a durable post-release owner for independent publication verification and safe workspace consolidation.
+
+**Non-Goals:**
+
+- Add or change product runtime behavior, Rust APIs, crate boundaries, SQLite state, CLI/MCP schemas, package formats, or dependencies.
+- Create a second release workflow, test framework, evidence ledger, or task-specific receipt scheme.
+- Reopen completed #308 work, absorb #314 into v0.4.0, or claim hosted success from local tests.
+- Delete any branch, worktree, or checkout before publication verification and unique-work inventory.
+
+## Decisions
+
+### Reuse the existing release workflows
+
+The change records and executes the existing `01-CI`, `optional-parser-pack`, `02-Release`, and `03-Auto-Release` contracts. No workflow or release orchestrator is added.
+
+A new release driver was rejected because the current workflows already own the real package, installer, platform, and publication boundaries. Duplicating them would create drift without increasing proof.
+
+### Bind readiness to one exact candidate
+
+The final candidate is one exact `dev` commit after every v0.4.0 implementation and readiness artifact is merged. Ordinary CI, explicit clean optional-parser construction, prepublish release packaging, review disposition, strict OpenSpec, IssueOps, and repository checks must all apply to that head or an explicitly generated merge commit whose parents are unchanged.
+
+Any later candidate change invalidates the affected hosted proof and requires rerunning it. A prior successful run is diagnostic history, not final-candidate evidence.
+
+### Separate prepublication readiness from post-release operations
+
+Issue #311 remains in milestone `v0.4.0-00` and owns only work that can be completed before `main` promotion. Before #311 closes, a dedicated non-milestone v0.4.0 post-release issue must exist and own:
+
+- published tag, GitHub release, asset, checksum, and installer verification;
+- installed runtime, plugin, MCP, CLI, and representative real E2E smoke;
+- branch and worktree inventory;
+- removal of only merged, obsolete, or superseded ProjectAtlas lanes;
+- confirmation that the primary repository is the only long-term ProjectAtlas root.
+
+Keeping that task unchecked inside #311 was rejected because `02-Release` correctly blocks publication when a milestone issue is open or incomplete. Checking cleanup before publication was rejected as false evidence.
+
+### Keep evidence behavior-focused
+
+OpenSpec and GitHub tasks state the behavior and gate to complete. Existing Actions runs, test definitions, workflow artifacts, release checksums, and review threads remain the evidence sources. The issue will not grow per-task SHA receipts, bespoke test identifiers, or duplicate status comments.
+
+### Preserve the promotion rollback boundary
+
+Until readiness is complete, `main`, tags, and releases remain untouched. If any candidate gate fails, fix the owning branch, produce a new exact candidate, and rerun affected proof. If the release workflow fails after `main` promotion, do not clean worktrees or delete branches; diagnose and retry the owning release path while the post-release issue remains open.
+
+## Risks / Trade-offs
+
+- **A documentation-only change advances the candidate after expensive proof** → Merge all readiness artifacts before locking the candidate and dispatching final hosted proof.
+- **A green older run is mistaken for final evidence** → Compare every required run's `headSha` with the locked candidate before closure.
+- **The milestone gate becomes circular around post-release cleanup** → Keep #311 prepublication-only and create the non-milestone post-release owner before closure.
+- **A prepublish run is mistaken for publication** → Require `prepublish_only=true`, verify no tag or release was created, and leave publication to the existing main-triggered workflow.
+- **Installer or plugin state passes in source but fails when packaged** → Require real package/installer smoke and installed CLI/MCP behavior from the release workflow.
+- **Cleanup removes unique or dirty work** → Inventory dirtiness, unique commits, PR ownership, and merge/supersession status before each removal; retain uncertain lanes.
+
+## Migration Plan
+
+1. Land the bounded installer trust fix and reconcile all live review feedback.
+2. Add this change to `openspec/issue-map.json` and replace #311's obsolete body with the exact local checklist.
+3. Complete and close #341 on an exact candidate after its Linux and Windows empty-cache proof.
+4. Merge all remaining readiness artifacts into `dev`, then lock the exact candidate head.
+5. Run the complete local gates, exact-head `01-CI`, clean optional-parser proof, and `02-Release` with `prepublish_only=true`.
+6. Create and verify the post-release issue, prepare the exact `dev`-to-`main` promotion, pass milestone IssueOps, and close #311.
+7. Promote the exact candidate to `main`; let the existing release workflow publish v0.4.0.
+8. Independently verify the published release and only then perform the post-release cleanup.
+
+Rollback before promotion is ordinary candidate correction on `dev`. After promotion, retain all source lanes and release artifacts until the publishing failure is understood; never use workspace cleanup as rollback.
+
+## Open Questions
+
+None.
