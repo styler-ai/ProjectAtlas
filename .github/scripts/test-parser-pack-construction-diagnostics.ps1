@@ -538,6 +538,12 @@ try {
             $workflowText.Contains('path: ${{ runner.temp }}/parser-pack-output/build')) `
         "Reusable Cargo layer trust, miss, rejection, or path boundary drifted."
     Require `
+        ($workflowText.Contains("/usr/bin/readlink") -and
+            $workflowText.Contains('/proc/$processIdText/exe') -and
+            $workflowText.Contains("/memfd:projectatlas-parser-worker") -and
+            -not $workflowText.Contains("/bin/ps -eo pid=,args=")) `
+        "Linux runtime residue detection must follow the sealed worker executable identity."
+    Require `
         ($ast.Extent.Text.Contains('"reusable-cargo-target-validation"') -and
             $ast.Extent.Text.LastIndexOf(
                 "Assert-ReusableCargoTarget",

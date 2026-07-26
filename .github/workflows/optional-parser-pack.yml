@@ -964,10 +964,14 @@ jobs:
               )
             }
             return @(
-              & /bin/ps -eo pid=,args= |
+              & /bin/ps -eo pid= |
                 ForEach-Object {
-                  if ($_ -match '^\s*(\d+)\s+.*(?:/|\\)projectatlas-parser-worker(?:\s|$)') {
-                    [int]$Matches[1]
+                  $processIdText = $_.Trim()
+                  if ($processIdText -match '^\d+$') {
+                    $executableTarget = & /usr/bin/readlink "/proc/$processIdText/exe" 2>$null
+                    if ($executableTarget -match '^/memfd:projectatlas-parser-worker(?: \(deleted\))?$') {
+                      [int]$processIdText
+                    }
                   }
                 }
             )
