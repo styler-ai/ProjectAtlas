@@ -1,35 +1,35 @@
-<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc" viewBox="0 0 600 310">
-  <title id="title">ProjectAtlas token savings benchmark bar chart</title>
-  <desc id="desc">Bar chart for 142 benchmark calls: without ProjectAtlas 221.1 million estimated tokens, with ProjectAtlas 0.4 million estimated tokens, estimated saved 220.7 million tokens.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc" viewBox="0 0 600 330">
+  <title id="title">ProjectAtlas modeled candidate-context bar chart</title>
+  <desc id="desc">Bar chart for 142 indexed calls comparing a 221.1 million-token modeled candidate-read baseline with 0.4 million compact ProjectAtlas payload tokens.</desc>
   <style>
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2328; }
     .muted { fill: #57606a; font-size: 15px; }
     .label { font-size: 18px; font-weight: 600; }
     .value { font-size: 17px; font-weight: 600; }
     .track { fill: #d0d7de; }
-    .without { fill: #cf222e; }
+    .baseline { fill: #cf222e; }
     .with { fill: #1a7f37; }
     .saved { fill: #0969da; }
     @media (prefers-color-scheme: dark) {
       text { fill: #f0f6fc; }
       .muted { fill: #8c959f; }
       .track { fill: #30363d; }
-      .without { fill: #f85149; }
+      .baseline { fill: #f85149; }
       .with { fill: #3fb950; }
       .saved { fill: #58a6ff; }
     }
   </style>
-  <text x="24" y="34" class="label">Estimated navigation context</text>
+  <text x="24" y="34" class="label">Modeled candidate-context compression</text>
   <text x="24" y="58" class="muted">Linear scale · representative 679-file, 142-call audit</text>
 
-  <text x="24" y="102" class="label">Without ProjectAtlas</text>
-  <text x="24" y="127" class="value">221.1M estimated navigation tokens</text>
+  <text x="24" y="102" class="label">Modeled candidate-read baseline</text>
+  <text x="24" y="127" class="value">221.1M candidate-file and path tokens</text>
   <rect x="24" y="143" width="552" height="30" rx="4" class="track" />
-  <rect x="24" y="143" width="552" height="30" rx="4" class="without" />
+  <rect x="24" y="143" width="552" height="30" rx="4" class="baseline" />
 
-  <text x="24" y="219" class="label">With ProjectAtlas</text>
-  <text x="24" y="244" class="value">0.4M compact payload tokens</text>
+  <text x="24" y="219" class="label">Compact ProjectAtlas payloads</text>
+  <text x="24" y="244" class="value">0.4M returned guidance tokens</text>
   <rect x="24" y="260" width="552" height="30" rx="4" class="track" />
   <rect x="24" y="260" width="2" height="30" rx="1" class="with" />
-  <text x="300" y="244" class="muted">220.7M avoided · 99.8% for this workload</text>
+  <text x="24" y="318" class="muted">99.8% smaller than this model · not a plain-agent arm or billing counter</text>
 </svg>

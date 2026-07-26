@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc" viewBox="0 0 600 340">
-  <title id="title">Representative ProjectAtlas navigation-context audit</title>
-  <desc id="desc">Donut chart showing 99.8 percent estimated navigation context avoided and 0.2 percent returned as compact ProjectAtlas payloads across 142 calls in a 679-file application.</desc>
+  <title id="title">Representative ProjectAtlas candidate-context audit</title>
+  <desc id="desc">Donut chart showing that compact ProjectAtlas payloads omitted 99.8 percent of a modeled candidate-read baseline across 142 calls in a 679-file application.</desc>
   <style>
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2328; }
     .title { font-size: 22px; font-weight: 700; }
@@ -22,7 +22,7 @@
     }
   </style>
 
-  <text x="24" y="34" class="title">Estimated navigation context</text>
+  <text x="24" y="34" class="title">Modeled candidate-context compression</text>
   <text x="24" y="58" class="muted">Representative 679-file · 142-call large-application audit</text>
 
   <g transform="translate(140 192) rotate(-90)">
@@ -31,15 +31,15 @@
   </g>
 
   <text x="140" y="188" text-anchor="middle" class="headline">99.8%</text>
-  <text x="140" y="215" text-anchor="middle" class="label">avoided</text>
+  <text x="140" y="215" text-anchor="middle" class="label">not returned</text>
 
   <rect x="270" y="120" width="18" height="18" rx="3" class="avoided-key" />
-  <text x="302" y="135" class="label">220.7M tokens avoided</text>
-  <text x="302" y="160" class="muted">99.8% of the modeled baseline</text>
+  <text x="302" y="135" class="label">220.7M modeled tokens filtered</text>
+  <text x="302" y="160" class="muted">candidate baseline minus payloads</text>
 
   <rect x="270" y="202" width="18" height="18" rx="3" class="payload" />
   <text x="302" y="217" class="label">0.4M payload tokens</text>
   <text x="302" y="242" class="muted">0.2% returned as compact guidance</text>
 
-  <text x="24" y="322" class="muted">Offline workflow estimate · full methodology linked below</text>
+  <text x="24" y="322" class="muted">Offline navigation model · not a plain-agent arm or billing counter</text>
 </svg>
