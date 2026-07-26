@@ -987,7 +987,7 @@ fn approve_grammar_selection(
 }
 
 /// Convert manifest or payload admission failure to a closed worker response.
-#[cfg(any(test, not(all(target_os = "linux", target_arch = "x86_64"))))]
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 const fn grammar_admission_failure(error: &WorkerStartupError) -> ParserFailureCode {
     match error {
         WorkerStartupError::UnknownGrammar(_) => ParserFailureCode::LanguageMismatch,
@@ -999,7 +999,7 @@ const fn grammar_admission_failure(error: &WorkerStartupError) -> ParserFailureC
 }
 
 /// Hash the exact immutable artifact manifest independently inside the worker.
-#[cfg(any(test, not(all(target_os = "linux", target_arch = "x86_64"))))]
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 fn observe_artifact_identity(
     pack_root: &Path,
 ) -> Result<ParserArtifactIdentity, WorkerStartupError> {

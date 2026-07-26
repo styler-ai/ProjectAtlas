@@ -637,7 +637,6 @@ impl PayloadObservation {
     fn linux_spec(&self) -> VerifiedLinuxPayloadSpec {
         VerifiedLinuxPayloadSpec {
             path: self.file.path.clone(),
-            role: self.role.clone(),
             bytes: self.bytes,
             sha256: self.sha256.clone(),
         }
@@ -751,8 +750,6 @@ struct BoundedArtifactRead {
 struct VerifiedLinuxPayloadSpec {
     /// Canonical path already constrained to the parser-pack root.
     path: PathBuf,
-    /// Manifest-owned payload responsibility.
-    role: ParserPackPayloadRole,
     /// Exact declared byte count.
     bytes: u64,
     /// Exact lowercase SHA-256 digest.
@@ -5282,6 +5279,29 @@ mod tests {
 
         use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 
+        let cancellation = IndexCancellation::new();
+        let control = ArtifactIoControl {
+            absolute_deadline: Instant::now() + Duration::from_secs(1),
+            last_progress: Instant::now(),
+            no_progress_timeout: Duration::from_secs(1),
+            cancellation: &cancellation,
+        };
+        let payload = |name| {
+            SealedLinuxPayload::from_verified_bytes(
+                "test payload",
+                name,
+                b"verified authority",
+                false,
+                &control,
+            )
+        };
+        let authority = LinuxResidentLaunchAuthority {
+            worker: payload("projectatlas-test-worker")?,
+            artifact_manifest: payload("projectatlas-test-artifact")?,
+            accepted_manifest: payload("projectatlas-test-accepted")?,
+            native_import_policy: payload("projectatlas-test-policy")?,
+            grammar: payload("projectatlas-test-grammar")?,
+        };
         let inherited = File::open("/dev/null")?;
         fcntl(&inherited, FcntlArg::F_SETFD(FdFlag::empty()))?;
         let descriptor = inherited.as_raw_fd();
@@ -5293,7 +5313,7 @@ mod tests {
                 "parser-worker-fd-check",
             ])
             .arg(descriptor.to_string());
-        close_inherited_descriptors_on_exec(&mut command);
+        inherit_linux_authority_on_exec(&mut command, authority);
 
         if command.status()?.success() {
             Ok(())
