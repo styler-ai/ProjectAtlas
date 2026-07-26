@@ -178,6 +178,7 @@ pub fn render_token_overview(overview: &TokenOverview) -> String {
                 "confidence": overview.read_avoidance_confidence,
                 "plain_language": "ProjectAtlas summaries, search results, and slices were used instead of opening likely whole files.",
             },
+            "agent_efficiency": overview.agent_efficiency,
             "calibration": overview.calibration,
             "savings_rate": savings_rate,
             "totals": {

@@ -326,6 +326,251 @@ pub struct TokenCalibrationOverview {
     pub heuristic_to_calibrated_ratio: Option<f64>,
 }
 
+/// Validation state for optional agent-efficiency benchmark evidence.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEfficiencyEvidenceState {
+    /// No benchmark artifact was requested.
+    #[default]
+    Unavailable,
+    /// The requested artifact could not be read or decoded safely.
+    Failed,
+    /// The artifact decoded but does not match the supported release contract.
+    Incompatible,
+    /// Some matched evidence is valid while retained failures remain explicit.
+    Partial,
+    /// All required candidate and baseline trials matched successfully.
+    Compatible,
+}
+
+impl AgentEfficiencyEvidenceState {
+    /// Return the stable serialized label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::Failed => "failed",
+            Self::Incompatible => "incompatible",
+            Self::Partial => "partial",
+            Self::Compatible => "compatible",
+        }
+    }
+}
+
+/// Baseline arm compared with the `v0.4` candidate.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEfficiencyBaseline {
+    /// Frozen `ProjectAtlas` `v0.3.26` runtime and packaged skill.
+    FrozenProjectAtlasV0326,
+    /// Codex navigation without `ProjectAtlas`.
+    PlainCodex,
+}
+
+/// Identity retained from one validated benchmark artifact.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentEfficiencyArtifactIdentity {
+    /// Supported benchmark schema version.
+    pub schema_version: u32,
+    /// Digest algorithm used for `artifact_digest`.
+    pub artifact_digest_kind: String,
+    /// Digest of the exact validated artifact bytes.
+    pub artifact_digest: String,
+    /// Candidate runtime semantic version.
+    pub candidate_version: String,
+    /// Candidate runtime SHA-256 identity.
+    pub candidate_runtime_sha256: String,
+    /// Candidate functional source commit.
+    pub candidate_functional_head: String,
+    /// Candidate checklist source commit.
+    pub candidate_checklist_head: String,
+    /// Frozen `ProjectAtlas` runtime semantic version.
+    pub frozen_version: String,
+    /// Frozen `ProjectAtlas` runtime `SHA-256` identity.
+    pub frozen_runtime_sha256: String,
+}
+
+/// Closed navigation metric projected from matched benchmark trials.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEfficiencyMetricKind {
+    /// All tool calls made by the agent.
+    TotalToolCalls,
+    /// Calls made through the `ProjectAtlas` MCP server.
+    ProjectAtlasCalls,
+    /// Productive folder selections.
+    ProductiveFolders,
+    /// Productive file selections.
+    ProductiveFiles,
+    /// Productive relation selections.
+    ProductiveRelations,
+    /// Wrong folder selections.
+    WrongFolders,
+    /// Wrong file selections.
+    WrongFiles,
+    /// Wrong relation selections.
+    WrongRelations,
+    /// Broad source reads.
+    BroadReads,
+    /// Full source-file reads.
+    FullReads,
+    /// Navigation backtracks.
+    Backtracks,
+    /// Gross navigation-context bytes.
+    GrossNavigationBytes,
+    /// Net navigation-context bytes including setup material.
+    NetNavigationBytes,
+    /// Gross navigation-context heuristic tokens.
+    GrossNavigationTokens,
+    /// Net navigation-context heuristic tokens including setup material.
+    NetNavigationTokens,
+    /// Candidate setup wall time.
+    SetupWallSeconds,
+    /// Per-task runtime wall time after setup.
+    RuntimeWallSeconds,
+    /// Persistent bytes retained after the trial.
+    PersistentBytes,
+}
+
+/// Candidate and baseline distribution summary for one navigation metric.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AgentEfficiencyMetricComparison {
+    /// Metric represented by this row.
+    pub metric: AgentEfficiencyMetricKind,
+    /// Median across matched candidate trials.
+    pub candidate_median: f64,
+    /// Median across matched baseline trials.
+    pub baseline_median: f64,
+    /// Observed maximum across matched candidate trials.
+    pub candidate_maximum: f64,
+    /// Observed maximum across matched baseline trials.
+    pub baseline_maximum: f64,
+    /// Lower-is-better median percentage saving, absent for a zero denominator.
+    pub median_percent_saving: Option<f64>,
+}
+
+/// Workload-specific setup/runtime break-even truth.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentEfficiencyBreakEven {
+    /// Validated benchmark workload name.
+    pub workload: String,
+    /// Tasks required to repay setup wall time, or `None` when no positive saving exists.
+    pub wall_time_tasks: Option<u64>,
+}
+
+/// Provider counter represented only as descriptive benchmark context.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEfficiencyProviderMetricKind {
+    /// Provider input-token counter.
+    InputTokens,
+    /// Provider cached-input-token counter.
+    CachedInputTokens,
+    /// Provider cache-write input-token counter.
+    CacheWriteInputTokens,
+    /// Provider output-token counter.
+    OutputTokens,
+    /// Provider reasoning-output-token counter.
+    ReasoningOutputTokens,
+}
+
+/// Descriptive-only candidate and baseline provider counter.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AgentEfficiencyProviderMetric {
+    /// Provider counter represented by this row.
+    pub metric: AgentEfficiencyProviderMetricKind,
+    /// Candidate median reported by the provider.
+    pub candidate_median: f64,
+    /// Baseline median reported by the provider.
+    pub baseline_median: f64,
+    /// Candidate observed maximum reported by the provider.
+    pub candidate_maximum: f64,
+    /// Baseline observed maximum reported by the provider.
+    pub baseline_maximum: f64,
+    /// Always false because provider counters do not prove navigation causality.
+    pub causal_attribution: bool,
+}
+
+/// One matched baseline comparison projected from the benchmark artifact.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AgentEfficiencyBaselineRow {
+    /// Compared baseline arm.
+    pub baseline: AgentEfficiencyBaseline,
+    /// Evidence state for this baseline.
+    pub state: AgentEfficiencyEvidenceState,
+    /// Candidate and baseline trials that completed the same workload and repeat.
+    pub matched_trials: usize,
+    /// Failed candidate trials retained outside matched denominators.
+    pub candidate_failed_trials: usize,
+    /// Failed baseline trials retained outside matched denominators.
+    pub baseline_failed_trials: usize,
+    /// Completed trials without a completed counterpart.
+    pub unmatched_trials: usize,
+    /// Bounded matched navigation distributions.
+    pub metrics: Vec<AgentEfficiencyMetricComparison>,
+    /// Workload-specific setup/runtime break-even truth.
+    pub break_even: Vec<AgentEfficiencyBreakEven>,
+    /// Provider counters retained as descriptive-only context.
+    pub provider_usage_descriptive_only: Vec<AgentEfficiencyProviderMetric>,
+}
+
+/// Durable `ProjectAtlas` navigation capability represented in the benchmark.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEfficiencyCapability {
+    /// Initial project, purpose, and connection discovery.
+    Discovery,
+    /// Summary, outline, and exact-slice compression.
+    SummaryAndSlice,
+    /// Lexical search narrowing.
+    Search,
+    /// Symbol and relation navigation.
+    SymbolsAndRelations,
+    /// Trace-completed `ProjectAtlas` calls outside the supported named groups.
+    Other,
+}
+
+/// Trace-completed `v0.4` MCP calls grouped by navigation responsibility.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentEfficiencyCapabilityContribution {
+    /// Capability responsibility represented by this row.
+    pub capability: AgentEfficiencyCapability,
+    /// Trace-completed `ProjectAtlas` MCP calls.
+    pub calls: usize,
+    /// Bytes emitted by those MCP calls.
+    pub emitted_bytes: u64,
+}
+
+/// Optional controlled benchmark comparison attached to live token telemetry.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AgentEfficiencyComparison {
+    /// Overall evidence state.
+    pub state: AgentEfficiencyEvidenceState,
+    /// Bounded explanation for unavailable, failed, incompatible, or partial evidence.
+    pub reason: Option<String>,
+    /// Validated artifact and runtime identity.
+    pub artifact: Option<AgentEfficiencyArtifactIdentity>,
+    /// Frozen-v0.3.26 and plain-control rows.
+    pub baselines: Vec<AgentEfficiencyBaselineRow>,
+    /// Trace-completed candidate MCP calls grouped without causal token attribution.
+    pub capabilities: Vec<AgentEfficiencyCapabilityContribution>,
+    /// Whether provider counters are explicitly non-causal.
+    pub provider_counters_descriptive_only: bool,
+}
+
+impl Default for AgentEfficiencyComparison {
+    fn default() -> Self {
+        Self {
+            state: AgentEfficiencyEvidenceState::Unavailable,
+            reason: Some("benchmark artifact not supplied".to_string()),
+            artifact: None,
+            baselines: Vec::new(),
+            capabilities: Vec::new(),
+            provider_counters_descriptive_only: true,
+        }
+    }
+}
+
 /// Token savings overview.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TokenOverview {
@@ -379,6 +624,9 @@ pub struct TokenOverview {
     /// Availability of caller-label and retained raw detail for this report.
     #[serde(default)]
     pub detail_availability: UsageDetailAvailability,
+    /// Optional validated controlled benchmark evidence kept separate from live accounting.
+    #[serde(default)]
+    pub agent_efficiency: AgentEfficiencyComparison,
 }
 
 /// Token trend grouping window.
@@ -659,6 +907,7 @@ impl TokenOverview {
             read_avoidance_confidence: READ_AVOIDANCE_CONFIDENCE_NOT_RECORDED.to_string(),
             calibration: None,
             detail_availability: UsageDetailAvailability::Retained,
+            agent_efficiency: AgentEfficiencyComparison::default(),
             buckets,
         }
     }
@@ -666,6 +915,11 @@ impl TokenOverview {
     /// Attach a local tokenizer calibration section.
     pub fn set_calibration(&mut self, calibration: TokenCalibrationOverview) {
         self.calibration = Some(calibration);
+    }
+
+    /// Attach one validated controlled benchmark comparison.
+    pub fn set_agent_efficiency(&mut self, comparison: AgentEfficiencyComparison) {
+        self.agent_efficiency = comparison;
     }
 
     /// Apply exact separated accounting totals loaded from durable aggregates.
@@ -1450,12 +1704,13 @@ fn is_modeled_bucket(bucket: &TokenBucketOverview) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        READ_AVOIDANCE_CONFIDENCE_MODELED, READ_AVOIDANCE_CONFIDENCE_NOT_RECORDED,
-        READ_AVOIDANCE_CONFIDENCE_OBSERVED, READ_AVOIDANCE_SCOPE,
-        TOKEN_BUCKET_FULL_FILE_COMPRESSION, TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_ESTIMATE_KIND,
-        TOKEN_ESTIMATE_SCOPE, TOKEN_ESTIMATOR, TelemetryContractError, TokenAccountingTotals,
-        TokenOverview, TokenTrendReport, TokenTrendWindow, UsageDetailAvailability,
-        UsageInstanceId, UsageInstanceOwner, usage_from_estimates, usage_from_text,
+        AgentEfficiencyEvidenceState, READ_AVOIDANCE_CONFIDENCE_MODELED,
+        READ_AVOIDANCE_CONFIDENCE_NOT_RECORDED, READ_AVOIDANCE_CONFIDENCE_OBSERVED,
+        READ_AVOIDANCE_SCOPE, TOKEN_BUCKET_FULL_FILE_COMPRESSION,
+        TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_ESTIMATE_KIND, TOKEN_ESTIMATE_SCOPE,
+        TOKEN_ESTIMATOR, TelemetryContractError, TokenAccountingTotals, TokenOverview,
+        TokenTrendReport, TokenTrendWindow, UsageDetailAvailability, UsageInstanceId,
+        UsageInstanceOwner, usage_from_estimates, usage_from_text,
     };
     use std::io;
 
@@ -1542,11 +1797,27 @@ mod tests {
             .as_object_mut()
             .ok_or_else(|| io::Error::other("serialized token overview was not an object"))?;
         overview_object.remove("detail_availability");
+        overview_object.remove("agent_efficiency");
         let decoded_overview: TokenOverview = serde_json::from_value(overview_value)?;
         require_eq(
             &decoded_overview.detail_availability,
             &UsageDetailAvailability::Unavailable,
             "missing overview detail availability",
+        )?;
+        require_eq(
+            &decoded_overview.agent_efficiency.state,
+            &AgentEfficiencyEvidenceState::Unavailable,
+            "missing agent-efficiency evidence state",
+        )?;
+        require_eq(
+            &decoded_overview.agent_efficiency.baselines,
+            &Vec::new(),
+            "missing agent-efficiency baseline rows",
+        )?;
+        require_eq(
+            &AgentEfficiencyEvidenceState::Partial.as_str(),
+            &"partial",
+            "agent-efficiency evidence encoding",
         )?;
 
         let trends = TokenTrendReport::new(None, TokenTrendWindow::Day, Vec::new());

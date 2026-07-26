@@ -30,6 +30,7 @@
     },
     "publish-rustdoc-readme-links": 300,
     "reuse-unchanged-ci-build-layers": 341,
+    "show-agent-efficiency-dashboard": 340,
     "simplify-token-tui-dashboard": 296
   }
 }

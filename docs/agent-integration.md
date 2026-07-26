@@ -255,7 +255,7 @@ Prefer MCP tools when the harness exposes them. Use CLI fallbacks only when the 
 - `atlas_slice`: fetch exact line or symbol source only after selection.
 - `atlas_health`: find cleanup/refactor/DRY structure issues. Use `limit`, `start_index`, `category`, `severity`, `path_prefix`, `summary_only`, or `source_only` for large health surfaces.
 - `atlas_watch_once`: bounded refresh after local file changes when no continuous watcher is running.
-- `atlas_token_report`: report estimated token savings.
+- `atlas_token_report`: report estimated token savings; optionally pass one repository-relative `benchmark_results` artifact for validated publication evidence.
 - `atlas_settings` and `atlas_watch_status`: diagnose runtime/index/cache state.
 - `atlas_reset_index`: preview or clear local SQLite/cache files when the index is corrupt or intentionally being rebuilt.
 - `atlas_strip_legacy_purpose`: remove migrated `.purpose` files when explicitly requested.
@@ -304,6 +304,7 @@ This preserves normal atlas reads while preventing usage telemetry writes to `.p
 | Curating missing or generated purposes | `atlas_purpose_queue`, then `atlas_purpose_set` or `atlas_purpose_review` | `projectatlas purpose queue --limit <n>`, then `projectatlas purpose set ...` or `projectatlas purpose review --from-file <json> --apply` |
 | Intentional health conflict | `atlas_health_resolve` | `projectatlas health resolve ... --rationale <why>` |
 | User asks for saved tokens | `atlas_token_report` | `projectatlas token` |
+| Compare the controlled navigation benchmark with live token context | `atlas_token_report` with repository-relative `benchmark_results` | `projectatlas token --benchmark-results <path>` |
 | Human asks for a terminal token dashboard | `atlas_token_report` first for agent state | `projectatlas token --view tui` |
 | Runtime/index diagnostics | `atlas_settings`, `atlas_watch_status`, `atlas_runtime_info` | `projectatlas settings`, `projectatlas watch-status`, `projectatlas runtime-info` |
 | Generate harness MCP config | `atlas_mcp_config` | `projectatlas --format json --db .projectatlas/projectatlas.db mcp-config` |
@@ -332,6 +333,38 @@ The default token report is a fast offline heuristic, not provider billing telem
 ProjectAtlas payload text with `ceil(chars / 4)` and file-size baselines with `ceil(bytes / 4)`. Reports expose
 bucket, baseline kind, confidence, accounting layer, provider, model, tokenizer backend, and accuracy labels so agents can separate
 observed full-file compression from modeled navigation savings. Use `tokens_avoided` for the conservative headline because repeated modeled baselines are deduped there; `estimated_saved` remains the legacy gross compatibility value. Local tokenizer calibration is explicit with `projectatlas token --tokenizer o200k_base` or `projectatlas token --tokenizer cl100k_base`; normal orientation and `atlas_token_report` must stay local and fast.
+
+To attach the controlled v0.4 navigation benchmark to the existing overview,
+pass its repository-relative path:
+
+```bash
+projectatlas token --benchmark-results docs/benchmarks/v0.4-agent-navigation-results.json
+projectatlas --format json token --benchmark-results docs/benchmarks/v0.4-agent-navigation-results.json
+projectatlas token --view tui --benchmark-results docs/benchmarks/v0.4-agent-navigation-results.json
+```
+
+The equivalent MCP request adds:
+
+```json
+{
+  "benchmark_results": "docs/benchmarks/v0.4-agent-navigation-results.json"
+}
+```
+
+The path is optional and applies only to token overviews, not trend reports.
+ProjectAtlas accepts only a direct regular file below the selected project root
+and reads at most 8 MiB. No path yields `unavailable`; safe read/decode failures
+yield `failed`; a decoded but unsupported contract yields `incompatible`;
+retained unmatched failures yield `partial`; and fully matched evidence yields
+`compatible`. Absolute, parent-escaping, symlink, reparse-point, and non-file
+paths are rejected at the request boundary.
+
+The comparison is read-only publication evidence. It is attached once as
+`TokenOverview.agent_efficiency` and rendered identically by CLI JSON/TOON,
+`atlas_token_report`, and the Ratatui overview. The benchmark is never written
+to SQLite, added to live `tokens_avoided` or file-read estimates, or cached.
+Provider token counters remain descriptive-only; capability rows report calls
+and emitted bytes without claiming per-tool token causality.
 
 Read-avoidance counters are also local workflow estimates. Observed
 summary/outline/slice replacements are stronger evidence than search-modeled

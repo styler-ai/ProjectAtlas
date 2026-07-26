@@ -1080,6 +1080,9 @@ enum Command {
         /// Optional local tokenizer calibration for indexed UTF-8 files.
         #[arg(long, value_parser = ["o200k_base", "cl100k_base"])]
         tokenizer: Option<String>,
+        /// Optional repository-relative agent-navigation benchmark result.
+        #[arg(long, value_name = "PATH")]
+        benchmark_results: Option<PathBuf>,
         /// Color theme for the human terminal dashboard.
         #[arg(long, value_enum, default_value_t = TokenTheme::Dark)]
         theme: TokenTheme,
@@ -2443,6 +2446,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             view,
             trend,
             tokenizer,
+            benchmark_results,
             theme,
         } => {
             let store = open_index_for_current_read(cli)?;
@@ -2450,6 +2454,12 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 if tokenizer.is_some() {
                     return Err(CliError::InvalidInput(
                         "--tokenizer is only supported for token overview reports".to_string(),
+                    ));
+                }
+                if benchmark_results.is_some() {
+                    return Err(CliError::InvalidInput(
+                        "--benchmark-results is only supported for token overview reports"
+                            .to_string(),
                     ));
                 }
                 let report = match load_token_report(
@@ -2482,6 +2492,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     &store,
                     TokenReportRequest::Overview {
                         caller_label: session.as_deref(),
+                        benchmark_results: benchmark_results.as_deref(),
                     },
                 )? {
                     TokenReport::Overview(overview) => overview,
@@ -3851,6 +3862,7 @@ impl RequiredCliCommand {
                 view: TokenView::Agent,
                 trend: None,
                 tokenizer: None,
+                benchmark_results: None,
                 theme: TokenTheme::Dark,
             },
             Self::Parity => Command::Parity {

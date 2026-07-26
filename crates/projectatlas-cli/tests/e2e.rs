@@ -116,7 +116,10 @@ const MCP_CONTRACT_EXECUTABLE_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE"
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 const MCP_CONTRACT_METADATA_CANARY: &str = "mcp_contract_metadata_canary";
 const MCP_V040_TOOLS_SHA256: &str =
-    "68e8af9502420a3a51d8094096c3ed0d9f0badea9d0b4762ece56635b652ea09";
+    "0c21ea673bdb9cdff48203a274db04fbaccb888bd362407d46fc1bcc0e506b28";
+const AGENT_EFFICIENCY_BENCHMARK_PATH: &str =
+    "../../docs/benchmarks/v0.4-agent-navigation-results.json";
+const AGENT_EFFICIENCY_PARTIAL_FILE: &str = "partial.json";
 const SUBDIR_CONFIG_DIR: &str = "config";
 const SESSION_TEST_FILE_NAME: &str = "session.rs";
 #[cfg(any(
@@ -7783,6 +7786,360 @@ fn no_telemetry_readonly_cli_smoke() -> Result<(), Box<dyn Error>> {
     for suffix in ["-wal", "-shm", "-journal"] {
         if sqlite_sidecar_path(&db, suffix).exists() {
             return Err(io::Error::other("pure report created a SQLite sidecar").into());
+        }
+    }
+    Ok(())
+}
+
+/// Write a synthetic fully matched variant of the published benchmark.
+fn write_fully_matched_benchmark_fixture(destination: &Path) -> Result<(), Box<dyn Error>> {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(AGENT_EFFICIENCY_BENCHMARK_PATH);
+    let mut artifact: Value = serde_json::from_slice(&fs::read(source)?)?;
+    let runs = artifact
+        .get_mut("runs")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| io::Error::other("benchmark runs are missing"))?;
+    let frozen_trace = runs
+        .iter()
+        .find(|run| {
+            run.get("arm").and_then(Value::as_str) == Some("v0.3.26")
+                && run.get("execution_status").and_then(Value::as_str) == Some("completed")
+        })
+        .and_then(|run| run.get("trace"))
+        .cloned()
+        .ok_or_else(|| io::Error::other("completed frozen benchmark trace is missing"))?;
+    for run in runs {
+        if run.get("case").and_then(Value::as_str) == Some("huge-vscode")
+            && run.get("arm").and_then(Value::as_str) == Some("v0.3.26")
+        {
+            let run = run
+                .as_object_mut()
+                .ok_or_else(|| io::Error::other("benchmark run is not an object"))?;
+            run.insert(
+                "execution_status".to_string(),
+                Value::String("completed".to_string()),
+            );
+            run.insert("trace".to_string(), frozen_trace.clone());
+        }
+    }
+
+    let aggregate = artifact
+        .get_mut("aggregate")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| io::Error::other("benchmark aggregate is missing"))?;
+    aggregate.insert("completed".to_string(), Value::from(45));
+    aggregate.insert("failed".to_string(), Value::from(0));
+    let groups = aggregate
+        .get_mut("groups")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| io::Error::other("benchmark groups are missing"))?;
+    let matched_group = groups
+        .get("huge-vscode/plain")
+        .cloned()
+        .ok_or_else(|| io::Error::other("matched benchmark donor group is missing"))?;
+    let frozen_group = groups
+        .get_mut("huge-vscode/v0.3.26")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| io::Error::other("frozen benchmark group is missing"))?;
+    let frozen_run_ids = frozen_group
+        .get("run_ids")
+        .cloned()
+        .ok_or_else(|| io::Error::other("frozen benchmark run ids are missing"))?;
+    *frozen_group = matched_group
+        .as_object()
+        .cloned()
+        .ok_or_else(|| io::Error::other("matched benchmark group is not an object"))?;
+    frozen_group.insert("run_ids".to_string(), frozen_run_ids);
+
+    let comparisons = aggregate
+        .get_mut("comparisons")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| io::Error::other("benchmark comparisons are missing"))?;
+    let matched_comparison = comparisons
+        .get("huge-vscode/v0.4-vs-plain")
+        .cloned()
+        .ok_or_else(|| io::Error::other("matched benchmark comparison is missing"))?;
+    comparisons.insert(
+        "huge-vscode/v0.4-vs-v0.3.26".to_string(),
+        matched_comparison,
+    );
+    fs::write(destination, serde_json::to_vec(&artifact)?)?;
+    Ok(())
+}
+
+/// Run one telemetry-disabled JSON token overview.
+fn token_overview_json(
+    repo: &Path,
+    database: &Path,
+    benchmark_results: Option<&str>,
+) -> Result<Value, Box<dyn Error>> {
+    let mut command = Command::cargo_bin("projectatlas")?;
+    command
+        .current_dir(repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "json", "--db"])
+        .arg(database)
+        .arg("token");
+    if let Some(path) = benchmark_results {
+        command.args(["--benchmark-results", path]);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "token overview failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+/// Compare adapter payloads while allowing equivalent floating-point text round-trips.
+fn json_values_equivalent(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => left
+            .as_f64()
+            .zip(right.as_f64())
+            .is_some_and(|(left, right)| {
+                (left - right).abs() <= f64::EPSILON * 8.0 * left.abs().max(right.abs()).max(1.0)
+            }),
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| json_values_equivalent(left, right))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, left)| {
+                    right
+                        .get(key)
+                        .is_some_and(|right| json_values_equivalent(left, right))
+                })
+        }
+        _ => left == right,
+    }
+}
+
+#[test]
+fn agent_efficiency_cli_mcp_contract_is_typed_read_only_and_isolated() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn atlas() {}\n",
+    )?;
+    let database = temp.path().join("projectatlas.db");
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&database)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    let published_source =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(AGENT_EFFICIENCY_BENCHMARK_PATH);
+    let partial_path = repo.join(AGENT_EFFICIENCY_PARTIAL_FILE);
+    let compatible_path = repo.join("compatible.json");
+    let stale_path = repo.join("stale.json");
+    let malformed_path = repo.join("malformed.json");
+    let outside_path = temp.path().join("outside.json");
+    fs::copy(&published_source, &partial_path)?;
+    fs::copy(&published_source, &outside_path)?;
+    write_fully_matched_benchmark_fixture(&compatible_path)?;
+    let mut stale: Value = serde_json::from_slice(&fs::read(&published_source)?)?;
+    stale
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("published benchmark is not an object"))?
+        .insert("schema_version".to_string(), Value::from(2));
+    fs::write(&stale_path, serde_json::to_vec(&stale)?)?;
+    fs::write(&malformed_path, b"{")?;
+
+    #[cfg(unix)]
+    let indirect_argument = {
+        std::os::unix::fs::symlink(&partial_path, repo.join("indirect.json"))?;
+        "indirect.json"
+    };
+    #[cfg(windows)]
+    let indirect_argument = {
+        let junction_target = repo.join("benchmark-target");
+        let junction = repo.join("indirect");
+        fs::create_dir(&junction_target)?;
+        fs::copy(
+            &partial_path,
+            junction_target.join(AGENT_EFFICIENCY_PARTIAL_FILE),
+        )?;
+        let output = StdCommand::new("cmd")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&junction_target)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "failed to create benchmark reparse-point fixture: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        "indirect/partial.json"
+    };
+
+    let mcp_config = mcp_config_for_harness(&repo, &database, "mcp-json")?;
+    let (mcp_command, mcp_args) = mcp_command_and_args(&mcp_config)?;
+    let connection = Connection::open(&database)?;
+    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    drop(connection);
+    let unavailable = token_overview_json(&repo, &database, None)?;
+    require_json_string(&unavailable, &["agent_efficiency", "state"], "unavailable")?;
+    require_json_string(&unavailable, &["estimate_kind"], "heuristic")?;
+    let database_before = fs::read(&database)?;
+    let sidecars_before = ["-wal", "-shm", "-journal"].map(|suffix| {
+        let path = sqlite_sidecar_path(&database, suffix);
+        let bytes = path.exists().then(|| fs::read(&path)).transpose();
+        (path, bytes)
+    });
+    let sidecars_before = sidecars_before
+        .into_iter()
+        .map(|(path, bytes)| Ok((path, bytes?)))
+        .collect::<Result<Vec<_>, io::Error>>()?;
+    let artifact_snapshots = [
+        (&partial_path, fs::read(&partial_path)?),
+        (&compatible_path, fs::read(&compatible_path)?),
+        (&stale_path, fs::read(&stale_path)?),
+        (&malformed_path, fs::read(&malformed_path)?),
+        (&outside_path, fs::read(&outside_path)?),
+    ];
+
+    let partial = token_overview_json(&repo, &database, Some(AGENT_EFFICIENCY_PARTIAL_FILE))?;
+    require_json_string(&partial, &["agent_efficiency", "state"], "partial")?;
+    require_json_usize(
+        &partial,
+        &[
+            "agent_efficiency",
+            "baselines",
+            "0",
+            "baseline_failed_trials",
+        ],
+        3,
+    )?;
+    let compatible = token_overview_json(&repo, &database, Some("compatible.json"))?;
+    require_json_string(&compatible, &["agent_efficiency", "state"], "compatible")?;
+    let stale = token_overview_json(&repo, &database, Some("stale.json"))?;
+    require_json_string(&stale, &["agent_efficiency", "state"], "incompatible")?;
+    let malformed = token_overview_json(&repo, &database, Some("malformed.json"))?;
+    require_json_string(&malformed, &["agent_efficiency", "state"], "failed")?;
+    let missing = token_overview_json(&repo, &database, Some("missing.json"))?;
+    require_json_string(&missing, &["agent_efficiency", "state"], "failed")?;
+
+    let toon = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--db")
+        .arg(&database)
+        .args([
+            "token",
+            "--benchmark-results",
+            AGENT_EFFICIENCY_PARTIAL_FILE,
+        ])
+        .output()?;
+    if !toon.status.success() {
+        return Err(io::Error::other("TOON benchmark token overview failed").into());
+    }
+    let toon: Value = toon_format::decode_default(&String::from_utf8(toon.stdout)?)?;
+    if !json_values_equivalent(
+        &toon["token_savings"]["agent_efficiency"],
+        &partial["agent_efficiency"],
+    ) {
+        return Err(io::Error::other("CLI JSON and TOON benchmark reports diverged").into());
+    }
+
+    let absolute_argument = outside_path.to_string_lossy().to_string();
+    let messages = [
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-agent-efficiency-e2e","version":"0.1.0"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{"benchmark_results":AGENT_EFFICIENCY_PARTIAL_FILE}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{"benchmark_results":"compatible.json"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{"benchmark_results":"stale.json"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{"benchmark_results":"malformed.json"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{"benchmark_results":"../outside.json"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{"benchmark_results":absolute_argument}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{"benchmark_results":indirect_argument}}}).to_string(),
+    ];
+    let mcp_stdout = run_mcp_stdio_with_env(
+        &mcp_command,
+        &repo,
+        &mcp_args,
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+    )?;
+    for (id, cli_report) in [
+        (2, &partial),
+        (3, &compatible),
+        (4, &unavailable),
+        (5, &stale),
+        (6, &malformed),
+    ] {
+        let mcp: Value = toon_format::decode_default(&mcp_tool_text(&mcp_stdout, id)?)?;
+        if !json_values_equivalent(
+            &mcp["token_savings"]["agent_efficiency"],
+            &cli_report["agent_efficiency"],
+        ) {
+            return Err(io::Error::other(format!(
+                "MCP and CLI benchmark reports diverged for response {id}"
+            ))
+            .into());
+        }
+    }
+    for id in [7, 8, 9] {
+        if !mcp_tool_text(&mcp_stdout, id)?.contains("invalid input") {
+            return Err(io::Error::other(format!(
+                "MCP benchmark path boundary did not reject response {id}"
+            ))
+            .into());
+        }
+    }
+
+    for path in [
+        absolute_argument.as_str(),
+        "../outside.json",
+        indirect_argument,
+    ] {
+        Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .arg("--db")
+            .arg(&database)
+            .args(["token", "--benchmark-results", path])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("invalid input"));
+    }
+
+    if fs::read(&database)? != database_before {
+        return Err(io::Error::other("benchmark reports mutated the SQLite database").into());
+    }
+    for (path, before) in artifact_snapshots {
+        if fs::read(path)? != before {
+            return Err(
+                io::Error::other(format!("benchmark report rewrote {}", path.display())).into(),
+            );
+        }
+    }
+    for (path, before) in sidecars_before {
+        let after = path.exists().then(|| fs::read(&path)).transpose()?;
+        if after != before {
+            return Err(io::Error::other(format!(
+                "benchmark report changed SQLite sidecar {}: before={:?}, after={:?}",
+                path.display(),
+                before.as_ref().map(Vec::len),
+                after.as_ref().map(Vec::len)
+            ))
+            .into());
         }
     }
     Ok(())

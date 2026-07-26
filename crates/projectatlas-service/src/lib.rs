@@ -1,5 +1,6 @@
 //! Purpose: Provide shared `ProjectAtlas` query services for CLI and MCP adapters.
 
+mod agent_efficiency;
 mod analysis;
 mod federation;
 mod import_aliases;
@@ -25,6 +26,7 @@ pub use relations::{
     parse_relation_confidence, parse_relation_direction, parse_relation_resolution,
 };
 
+use agent_efficiency::load_agent_efficiency_comparison;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use import_aliases::{ImportAliasMap, load_import_alias_map};
 use projectatlas_core::graph::{
@@ -190,6 +192,8 @@ pub enum TokenReportRequest<'a> {
     Overview {
         /// Optional caller-visible label filter.
         caller_label: Option<&'a str>,
+        /// Optional repository-relative controlled benchmark artifact.
+        benchmark_results: Option<&'a Path>,
     },
     /// Load retained token trends for an optional caller label and window.
     Trends {
@@ -244,10 +248,18 @@ pub fn load_token_report(
     store: &AtlasStore,
     request: TokenReportRequest<'_>,
 ) -> ServiceResult<TokenReport> {
-    let _selected_project = selected_project_binding(store)?;
+    let selected_project = selected_project_binding(store)?;
     let report = match request {
-        TokenReportRequest::Overview { caller_label } => {
-            TokenReport::Overview(Box::new(store.token_overview(caller_label)?))
+        TokenReportRequest::Overview {
+            caller_label,
+            benchmark_results,
+        } => {
+            let mut overview = store.token_overview(caller_label)?;
+            overview.set_agent_efficiency(load_agent_efficiency_comparison(
+                &selected_project,
+                benchmark_results,
+            )?);
+            TokenReport::Overview(Box::new(overview))
         }
         TokenReportRequest::Trends {
             caller_label,
@@ -3370,7 +3382,9 @@ mod tests {
         CoverageRecord, GraphIdentityText, GraphLimitKind, RepositoryNodePath,
     };
     use projectatlas_core::symbols::{ParserKind, SymbolGraph};
-    use projectatlas_core::telemetry::UsageDetailAvailability;
+    use projectatlas_core::telemetry::{
+        AgentEfficiencyBaseline, AgentEfficiencyEvidenceState, UsageDetailAvailability,
+    };
     use projectatlas_core::{Node, Purpose, PurposeSource, PurposeStatus, normalized_parent};
     use std::error::Error;
     use std::io;
@@ -3384,8 +3398,13 @@ mod tests {
         fs::create_dir_all(&atlas_dir)?;
         let store = AtlasStore::open_for_project(&atlas_dir.join("projectatlas.db"), &root)?;
 
-        let overview =
-            load_token_report(&store, TokenReportRequest::Overview { caller_label: None })?;
+        let overview = load_token_report(
+            &store,
+            TokenReportRequest::Overview {
+                caller_label: None,
+                benchmark_results: None,
+            },
+        )?;
         match overview {
             TokenReport::Overview(overview) => {
                 require_eq(&overview.calls, &0, "empty overview calls")?;
@@ -3393,6 +3412,11 @@ mod tests {
                     &overview.detail_availability,
                     &UsageDetailAvailability::Retained,
                     "empty overview detail availability",
+                )?;
+                require_eq(
+                    &overview.agent_efficiency.state,
+                    &AgentEfficiencyEvidenceState::Unavailable,
+                    "empty overview agent-efficiency state",
                 )?;
             }
             TokenReport::Trends(_) => {
@@ -3425,11 +3449,149 @@ mod tests {
         if !matches!(
             load_token_report(
                 &unbound,
-                TokenReportRequest::Overview { caller_label: None }
+                TokenReportRequest::Overview {
+                    caller_label: None,
+                    benchmark_results: None,
+                }
             ),
             Err(ServiceError::SelectedProjectUnavailable)
         ) {
             return Err(io::Error::other("unbound token report did not fail closed").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn token_report_service_bounds_and_classifies_benchmark_evidence() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("benchmark-service");
+        let atlas_dir = root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let store = AtlasStore::open_for_project(&atlas_dir.join("projectatlas.db"), &root)?;
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/benchmarks/v0.4-agent-navigation-results.json");
+        let published = root.join("published.json");
+        fs::copy(&source, &published)?;
+
+        let report = load_token_report(
+            &store,
+            TokenReportRequest::Overview {
+                caller_label: None,
+                benchmark_results: Some(Path::new("published.json")),
+            },
+        )?;
+        let TokenReport::Overview(report) = report else {
+            return Err(io::Error::other("benchmark request returned token trends").into());
+        };
+        require_eq(
+            &report.agent_efficiency.state,
+            &AgentEfficiencyEvidenceState::Partial,
+            "published benchmark state",
+        )?;
+        let frozen = report
+            .agent_efficiency
+            .baselines
+            .iter()
+            .find(|row| row.baseline == AgentEfficiencyBaseline::FrozenProjectAtlasV0326)
+            .ok_or_else(|| io::Error::other("frozen baseline row missing"))?;
+        require_eq(
+            &frozen.baseline_failed_trials,
+            &3,
+            "published frozen failed trials",
+        )?;
+
+        fs::write(root.join("malformed.json"), b"{")?;
+        let malformed = load_token_report(
+            &store,
+            TokenReportRequest::Overview {
+                caller_label: None,
+                benchmark_results: Some(Path::new("malformed.json")),
+            },
+        )?;
+        let TokenReport::Overview(malformed) = malformed else {
+            return Err(io::Error::other("malformed request returned token trends").into());
+        };
+        require_eq(
+            &malformed.agent_efficiency.state,
+            &AgentEfficiencyEvidenceState::Failed,
+            "malformed benchmark state",
+        )?;
+
+        let stale = String::from_utf8(fs::read(&source)?)?.replacen(
+            "\"schema_version\": 1",
+            "\"schema_version\": 2",
+            1,
+        );
+        fs::write(root.join("stale.json"), stale)?;
+        let stale = load_token_report(
+            &store,
+            TokenReportRequest::Overview {
+                caller_label: None,
+                benchmark_results: Some(Path::new("stale.json")),
+            },
+        )?;
+        let TokenReport::Overview(stale) = stale else {
+            return Err(io::Error::other("stale request returned token trends").into());
+        };
+        require_eq(
+            &stale.agent_efficiency.state,
+            &AgentEfficiencyEvidenceState::Incompatible,
+            "stale benchmark state",
+        )?;
+
+        let missing = load_token_report(
+            &store,
+            TokenReportRequest::Overview {
+                caller_label: None,
+                benchmark_results: Some(Path::new("missing.json")),
+            },
+        )?;
+        let TokenReport::Overview(missing) = missing else {
+            return Err(io::Error::other("missing request returned token trends").into());
+        };
+        require_eq(
+            &missing.agent_efficiency.state,
+            &AgentEfficiencyEvidenceState::Failed,
+            "missing benchmark state",
+        )?;
+
+        fs::write(
+            root.join("oversized.json"),
+            vec![b' '; super::agent_efficiency::BENCHMARK_MAX_BYTES + 1],
+        )?;
+        let oversized = load_token_report(
+            &store,
+            TokenReportRequest::Overview {
+                caller_label: None,
+                benchmark_results: Some(Path::new("oversized.json")),
+            },
+        )?;
+        let TokenReport::Overview(oversized) = oversized else {
+            return Err(io::Error::other("oversized request returned token trends").into());
+        };
+        require_eq(
+            &oversized.agent_efficiency.state,
+            &AgentEfficiencyEvidenceState::Failed,
+            "oversized benchmark state",
+        )?;
+
+        for escaped in [published.as_path(), Path::new("../outside.json")] {
+            if !matches!(
+                load_token_report(
+                    &store,
+                    TokenReportRequest::Overview {
+                        caller_label: None,
+                        benchmark_results: Some(escaped),
+                    },
+                ),
+                Err(ServiceError::InvalidInput(_))
+            ) {
+                return Err(io::Error::other(
+                    "escaping benchmark path did not fail at the service boundary",
+                )
+                .into());
+            }
         }
         Ok(())
     }

@@ -1,9 +1,12 @@
 //! Purpose: Render token telemetry as package-backed terminal dashboards.
 
 use projectatlas_core::telemetry::{
-    TOKEN_ACCOUNTING_OBSERVED_DELTA, TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_FULL_FILE,
-    TOKEN_BASELINE_SELECTED_CANDIDATES, TOKEN_BUCKET_FULL_FILE_COMPRESSION, TokenBucketOverview,
-    TokenOverview, TokenTrendPeriod, TokenTrendReport,
+    AgentEfficiencyBaseline, AgentEfficiencyBaselineRow, AgentEfficiencyCapability,
+    AgentEfficiencyCapabilityContribution, AgentEfficiencyComparison, AgentEfficiencyEvidenceState,
+    AgentEfficiencyMetricComparison, AgentEfficiencyMetricKind, TOKEN_ACCOUNTING_OBSERVED_DELTA,
+    TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_FULL_FILE, TOKEN_BASELINE_SELECTED_CANDIDATES,
+    TOKEN_BUCKET_FULL_FILE_COMPRESSION, TokenBucketOverview, TokenOverview, TokenTrendPeriod,
+    TokenTrendReport,
 };
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -17,7 +20,7 @@ use std::cell::Cell as StdCell;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Fixed terminal height for the token overview dashboard snapshot.
-const DASHBOARD_HEIGHT: u16 = 48;
+const DASHBOARD_HEIGHT: u16 = 60;
 /// Fixed terminal height for the token trend dashboard snapshot.
 const TREND_DASHBOARD_HEIGHT: u16 = 30;
 /// Reserved terminal-canvas color; overview frames leave the shell background visible.
@@ -242,6 +245,7 @@ fn render_overview_frame(frame: &mut Frame<'_>, overview: &TokenOverview, sessio
             Constraint::Length(6),
             Constraint::Length(6),
             Constraint::Min(8),
+            Constraint::Length(12),
             Constraint::Length(4),
             Constraint::Length(1),
         ])
@@ -252,8 +256,9 @@ fn render_overview_frame(frame: &mut Frame<'_>, overview: &TokenOverview, sessio
     render_file_reads_card(frame, sections[2], overview);
     render_composition_and_signal(frame, sections[3], overview);
     render_savings_breakdown_table(frame, sections[4], overview);
-    render_calibration_notes(frame, sections[5], overview);
-    render_status_bar(frame, sections[6]);
+    render_agent_efficiency(frame, sections[5], overview);
+    render_calibration_notes(frame, sections[6], overview);
+    render_status_bar(frame, sections[7]);
 }
 
 /// Return a screenshot-matched dashboard panel.
@@ -885,6 +890,474 @@ fn render_savings_breakdown_table(frame: &mut Frame<'_>, area: Rect, overview: &
         .column_spacing(1)
         .block(panel("WHERE THE SAVINGS CAME FROM"));
     frame.render_widget(table, area);
+}
+
+/// Draw validated benchmark evidence without mixing it into live token accounting.
+fn render_agent_efficiency(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
+    let block = panel("AGENT EFFICIENCY");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let comparison = &overview.agent_efficiency;
+    let compact = inner.width < 136;
+    let mut lines = Vec::with_capacity(10);
+    lines.push(agent_efficiency_identity_line(comparison, compact));
+
+    if matches!(
+        comparison.state,
+        AgentEfficiencyEvidenceState::Compatible | AgentEfficiencyEvidenceState::Partial
+    ) {
+        for baseline in [
+            AgentEfficiencyBaseline::FrozenProjectAtlasV0326,
+            AgentEfficiencyBaseline::PlainCodex,
+        ] {
+            if let Some(row) = comparison
+                .baselines
+                .iter()
+                .find(|row| row.baseline == baseline)
+            {
+                lines.extend(agent_efficiency_baseline_lines(
+                    row,
+                    compact,
+                    usize::from(inner.width),
+                ));
+            }
+        }
+        lines.extend(agent_efficiency_capability_lines(
+            &comparison.capabilities,
+            compact,
+        ));
+    }
+
+    if let Some(reason) = comparison.reason.as_deref() {
+        let prefix = if comparison.state == AgentEfficiencyEvidenceState::Partial {
+            "Note: "
+        } else {
+            "Reason: "
+        };
+        let available = usize::from(inner.width).saturating_sub(prefix.len());
+        lines.push(Line::from(vec![
+            Span::styled(prefix, muted_bold_style().bg(THEME_PANEL)),
+            Span::styled(
+                bounded_dashboard_text(reason, available),
+                Style::default()
+                    .fg(agent_efficiency_state_color(comparison.state))
+                    .bg(THEME_PANEL),
+            ),
+        ]));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(body_style().bg(THEME_PANEL))
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
+}
+
+/// Return the evidence state and bounded artifact identity line.
+fn agent_efficiency_identity_line(
+    comparison: &AgentEfficiencyComparison,
+    compact: bool,
+) -> Line<'static> {
+    let state_label = if compact { "State " } else { "Evidence " };
+    let mut spans = vec![
+        Span::styled(state_label, muted_bold_style().bg(THEME_PANEL)),
+        Span::styled(
+            comparison.state.as_str(),
+            Style::default()
+                .fg(agent_efficiency_state_color(comparison.state))
+                .bg(THEME_PANEL)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if let Some(artifact) = comparison.artifact.as_ref() {
+        let identity = if compact {
+            format!(
+                " | artifact s{} cand {} sha {}",
+                artifact.schema_version,
+                bounded_dashboard_text(&artifact.candidate_version, 22),
+                short_identity(&artifact.artifact_digest)
+            )
+        } else {
+            format!(
+                " | artifact {} schema {} | candidate {} | runtime {} | source {}",
+                short_identity(&artifact.artifact_digest),
+                artifact.schema_version,
+                bounded_dashboard_text(&artifact.candidate_version, 28),
+                short_identity(&artifact.candidate_runtime_sha256),
+                short_identity(&artifact.candidate_functional_head)
+            )
+        };
+        spans.push(Span::styled(identity, body_style().bg(THEME_PANEL)));
+    }
+    Line::from(spans)
+}
+
+/// Return the bounded normal or compact rows for one typed baseline.
+fn agent_efficiency_baseline_lines(
+    row: &AgentEfficiencyBaselineRow,
+    compact: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let label = agent_efficiency_baseline_label(row.baseline);
+    let color = agent_efficiency_baseline_color(row.baseline);
+    let productive_files =
+        agent_efficiency_metric_pair(row, AgentEfficiencyMetricKind::ProductiveFiles);
+    let wrong_files = agent_efficiency_metric_pair(row, AgentEfficiencyMetricKind::WrongFiles);
+    let counts = if compact {
+        format!(
+            "{label} [{}] m={} f(c/b)={}/{} u={}",
+            row.state.as_str(),
+            grouped_count(row.matched_trials),
+            grouped_count(row.candidate_failed_trials),
+            grouped_count(row.baseline_failed_trials),
+            grouped_count(row.unmatched_trials)
+        )
+    } else {
+        format!(
+            "{label} [{}] | matched {} | failed candidate/baseline {}/{} | unmatched {} | file visits p/w c/b {productive_files} {wrong_files}",
+            row.state.as_str(),
+            grouped_count(row.matched_trials),
+            grouped_count(row.candidate_failed_trials),
+            grouped_count(row.baseline_failed_trials),
+            grouped_count(row.unmatched_trials)
+        )
+    };
+    let calls = agent_efficiency_metric_pair(row, AgentEfficiencyMetricKind::TotalToolCalls);
+    let broad_reads = agent_efficiency_metric_pair(row, AgentEfficiencyMetricKind::BroadReads);
+    let full_reads = agent_efficiency_metric_pair(row, AgentEfficiencyMetricKind::FullReads);
+    let backtracks = agent_efficiency_metric_pair(row, AgentEfficiencyMetricKind::Backtracks);
+    let context = agent_efficiency_metric_pair(row, AgentEfficiencyMetricKind::NetNavigationBytes);
+    let context_saving =
+        agent_efficiency_metric_saving_label(row, AgentEfficiencyMetricKind::NetNavigationBytes);
+    let metrics = if compact {
+        format!("c/b calls {calls} | reads {broad_reads} | net ctx {context} ({context_saving})")
+    } else {
+        format!(
+            "candidate/baseline calls {calls} | reads broad/full {broad_reads} {full_reads} | backtracks {backtracks} | net context {context} ({context_saving})"
+        )
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            counts,
+            Style::default()
+                .fg(color)
+                .bg(THEME_PANEL)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(metrics, body_style().bg(THEME_PANEL))),
+    ];
+    if !compact {
+        lines.push(agent_efficiency_runtime_line(row, color, width));
+    }
+    lines
+}
+
+/// Return runtime, clamped context-savings bar, and typed break-even truth.
+fn agent_efficiency_runtime_line(
+    row: &AgentEfficiencyBaselineRow,
+    color: Color,
+    width: usize,
+) -> Line<'static> {
+    let runtime = agent_efficiency_metric_pair(row, AgentEfficiencyMetricKind::RuntimeWallSeconds);
+    let context_saving =
+        agent_efficiency_metric_saving(row, AgentEfficiencyMetricKind::NetNavigationBytes);
+    let runtime_prefix = format!("runtime c/b {runtime} | context saved ");
+    let mut spans = vec![Span::styled(
+        runtime_prefix.clone(),
+        body_style().bg(THEME_PANEL),
+    )];
+    let saving_label = context_saving.map(bounded_percentage);
+    let saving_width = if let Some(label) = saving_label.as_ref() {
+        7usize.saturating_add(label.chars().count())
+    } else {
+        3
+    };
+    if let Some(percent) = context_saving {
+        spans.extend(block_bar(6, percent / 100.0, color).spans);
+        spans.push(Span::styled(
+            format!(" {}", saving_label.as_deref().unwrap_or("n/a")),
+            Style::default().fg(color).bg(THEME_PANEL),
+        ));
+    } else {
+        spans.push(Span::styled("n/a", muted_style().bg(THEME_PANEL)));
+    }
+    let break_even_prefix = " | break-even: ";
+    let break_even_width = width.saturating_sub(
+        runtime_prefix
+            .chars()
+            .count()
+            .saturating_add(saving_width)
+            .saturating_add(break_even_prefix.len()),
+    );
+    spans.push(Span::styled(
+        format!(
+            "{break_even_prefix}{}",
+            bounded_dashboard_text(&agent_efficiency_break_even_label(row), break_even_width)
+        ),
+        body_style().bg(THEME_PANEL),
+    ));
+    Line::from(spans)
+}
+
+/// Return bounded capability call/byte rows without causal savings claims.
+fn agent_efficiency_capability_lines(
+    capabilities: &[AgentEfficiencyCapabilityContribution],
+    compact: bool,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        if compact {
+            "MCP capability calls/bytes only (no causal savings):"
+        } else {
+            "Capability calls/emitted bytes only; no causal savings attribution:"
+        },
+        muted_bold_style().bg(THEME_PANEL),
+    ))];
+    if capabilities.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "none recorded",
+            muted_style().bg(THEME_PANEL),
+        )));
+        return lines;
+    }
+
+    let entries = capabilities
+        .iter()
+        .map(|capability| {
+            format!(
+                "{} {}/{}",
+                agent_efficiency_capability_label(capability.capability, compact),
+                grouped_count(capability.calls),
+                compact_bytes(capability.emitted_bytes)
+            )
+        })
+        .collect::<Vec<_>>();
+    let chunk_size = if compact { 3 } else { entries.len() };
+    for chunk in entries.chunks(chunk_size.max(1)) {
+        lines.push(Line::from(Span::styled(
+            chunk.join(" | "),
+            Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL),
+        )));
+    }
+    lines
+}
+
+/// Return the display label for one closed baseline identity.
+fn agent_efficiency_baseline_label(baseline: AgentEfficiencyBaseline) -> &'static str {
+    match baseline {
+        AgentEfficiencyBaseline::FrozenProjectAtlasV0326 => "Frozen v0.3.26",
+        AgentEfficiencyBaseline::PlainCodex => "Plain Codex",
+    }
+}
+
+/// Return the semantic color for one baseline identity.
+fn agent_efficiency_baseline_color(baseline: AgentEfficiencyBaseline) -> Color {
+    match baseline {
+        AgentEfficiencyBaseline::FrozenProjectAtlasV0326 => THEME_BLUE,
+        AgentEfficiencyBaseline::PlainCodex => THEME_INK_WHITE,
+    }
+}
+
+/// Return the semantic color for one evidence state.
+fn agent_efficiency_state_color(state: AgentEfficiencyEvidenceState) -> Color {
+    match state {
+        AgentEfficiencyEvidenceState::Compatible => THEME_GREEN,
+        AgentEfficiencyEvidenceState::Partial => THEME_YELLOW,
+        AgentEfficiencyEvidenceState::Unavailable => THEME_MUTED,
+        AgentEfficiencyEvidenceState::Failed | AgentEfficiencyEvidenceState::Incompatible => {
+            THEME_RED
+        }
+    }
+}
+
+/// Find one metric row without copying comparison arithmetic into the adapter.
+fn agent_efficiency_metric(
+    row: &AgentEfficiencyBaselineRow,
+    metric: AgentEfficiencyMetricKind,
+) -> Option<&AgentEfficiencyMetricComparison> {
+    row.metrics.iter().find(|value| value.metric == metric)
+}
+
+/// Format the typed candidate/baseline medians for one metric.
+fn agent_efficiency_metric_pair(
+    row: &AgentEfficiencyBaselineRow,
+    metric: AgentEfficiencyMetricKind,
+) -> String {
+    let Some(value) = agent_efficiency_metric(row, metric) else {
+        return "n/a".to_string();
+    };
+    format!(
+        "{}/{}",
+        agent_efficiency_metric_value(metric, value.candidate_median),
+        agent_efficiency_metric_value(metric, value.baseline_median)
+    )
+}
+
+/// Return the typed savings percentage for one metric.
+fn agent_efficiency_metric_saving(
+    row: &AgentEfficiencyBaselineRow,
+    metric: AgentEfficiencyMetricKind,
+) -> Option<f64> {
+    agent_efficiency_metric(row, metric)?
+        .median_percent_saving
+        .filter(|value| value.is_finite())
+}
+
+/// Format a typed saving without substituting a zero denominator.
+fn agent_efficiency_metric_saving_label(
+    row: &AgentEfficiencyBaselineRow,
+    metric: AgentEfficiencyMetricKind,
+) -> String {
+    agent_efficiency_metric_saving(row, metric)
+        .map_or_else(|| "n/a".to_string(), bounded_percentage)
+}
+
+/// Format one benchmark metric with a compact durable unit.
+fn agent_efficiency_metric_value(metric: AgentEfficiencyMetricKind, value: f64) -> String {
+    match metric {
+        AgentEfficiencyMetricKind::GrossNavigationBytes
+        | AgentEfficiencyMetricKind::NetNavigationBytes
+        | AgentEfficiencyMetricKind::PersistentBytes => compact_byte_value(value),
+        AgentEfficiencyMetricKind::SetupWallSeconds
+        | AgentEfficiencyMetricKind::RuntimeWallSeconds => format!("{value:.1}s"),
+        _ => compact_numeric_value(value),
+    }
+}
+
+/// Format a finite percentage in a bounded dashboard field.
+fn bounded_percentage(value: f64) -> String {
+    if value.abs() >= 10_000.0 {
+        format!("{value:.1e}%")
+    } else {
+        format!("{value:.1}%")
+    }
+}
+
+/// Format a validated count or token value with bounded decimal units.
+fn compact_numeric_value(value: f64) -> String {
+    for (unit, suffix) in [
+        (1_000_000_000_000_000.0, "P"),
+        (1_000_000_000_000.0, "T"),
+        (1_000_000_000.0, "G"),
+        (1_000_000.0, "M"),
+        (1_000.0, "K"),
+    ] {
+        if value.abs() >= unit {
+            return format!("{:.1}{suffix}", value / unit);
+        }
+    }
+    if value.fract().abs() < f64::EPSILON {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    }
+}
+
+/// Format workload-specific break-even values without deriving a replacement aggregate.
+fn agent_efficiency_break_even_label(row: &AgentEfficiencyBaselineRow) -> String {
+    if row.break_even.is_empty() {
+        return "n/a".to_string();
+    }
+    row.break_even
+        .iter()
+        .map(|value| {
+            let workload = match value.workload.as_str() {
+                "small-clean" => "clean",
+                "small-dirty" => "dirty",
+                "small-non-git" => "non-git",
+                "huge-vscode" => "huge",
+                workload => workload,
+            };
+            format!(
+                "{}={}",
+                bounded_dashboard_text(workload, 16),
+                value
+                    .wall_time_tasks
+                    .map_or_else(|| "n/a".to_string(), |tasks| tasks.to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Return the compact label for one closed navigation capability.
+fn agent_efficiency_capability_label(
+    capability: AgentEfficiencyCapability,
+    compact: bool,
+) -> &'static str {
+    match (capability, compact) {
+        (AgentEfficiencyCapability::Search, _) => "search",
+        (AgentEfficiencyCapability::Other, _) => "other",
+        (AgentEfficiencyCapability::Discovery, true) => "disc",
+        (AgentEfficiencyCapability::SummaryAndSlice, true) => "sum/slice",
+        (AgentEfficiencyCapability::SymbolsAndRelations, true) => "sym/rel",
+        (AgentEfficiencyCapability::Discovery, false) => "discovery",
+        (AgentEfficiencyCapability::SummaryAndSlice, false) => "summary+slice",
+        (AgentEfficiencyCapability::SymbolsAndRelations, false) => "symbols+relations",
+    }
+}
+
+/// Format exact byte counts compactly for bounded dashboard rows.
+fn compact_bytes(value: u64) -> String {
+    if value >= 1_125_899_906_842_624 {
+        compact_integer_unit(value, 1_125_899_906_842_624, "PiB")
+    } else if value >= 1_099_511_627_776 {
+        compact_integer_unit(value, 1_099_511_627_776, "TiB")
+    } else if value >= 1_073_741_824 {
+        compact_integer_unit(value, 1_073_741_824, "GiB")
+    } else if value >= 1_048_576 {
+        compact_integer_unit(value, 1_048_576, "MiB")
+    } else if value >= 1_024 {
+        compact_integer_unit(value, 1_024, "KiB")
+    } else {
+        format!("{value}B")
+    }
+}
+
+/// Format one integer value to one decimal place in the selected binary unit.
+fn compact_integer_unit(value: u64, unit: u64, suffix: &str) -> String {
+    let rounded_tenths = (u128::from(value) * 10 + u128::from(unit) / 2) / u128::from(unit);
+    let whole = rounded_tenths / 10;
+    let tenth = rounded_tenths % 10;
+    format!("{whole}.{tenth}{suffix}")
+}
+
+/// Format a validated floating-point byte metric compactly.
+fn compact_byte_value(value: f64) -> String {
+    if value >= 1_125_899_906_842_624.0 {
+        format!("{:.1}PiB", value / 1_125_899_906_842_624.0)
+    } else if value >= 1_099_511_627_776.0 {
+        format!("{:.1}TiB", value / 1_099_511_627_776.0)
+    } else if value >= 1_073_741_824.0 {
+        format!("{:.1}GiB", value / 1_073_741_824.0)
+    } else if value >= 1_048_576.0 {
+        format!("{:.1}MiB", value / 1_048_576.0)
+    } else if value >= 1_024.0 {
+        format!("{:.1}KiB", value / 1_024.0)
+    } else {
+        format!("{value:.0}B")
+    }
+}
+
+/// Return a short digest or commit identity for the bounded TUI.
+fn short_identity(value: &str) -> String {
+    value.chars().take(12).collect()
+}
+
+/// Bound trusted display text without allowing it to consume adjacent fields.
+fn bounded_dashboard_text(value: &str, max_chars: usize) -> String {
+    let character_count = value.chars().count();
+    if character_count <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    let mut output = value.chars().take(max_chars - 3).collect::<String>();
+    output.push_str("...");
+    output
 }
 
 /// Draw calibration notes without duplicating headline totals.
@@ -1816,17 +2289,22 @@ fn signed_count(value: isize) -> String {
 mod tests {
     use super::{
         DASHBOARD_HEIGHT, THEME_BAR_EMPTY, THEME_BG, THEME_BLUE, THEME_GREEN, THEME_INK_WHITE,
-        THEME_YELLOW, TokenDashboardTheme, block_bar, dashboard_width, grouped_count,
-        reconciled_without_projectatlas, reference_title, render_dashboard_to_string,
-        render_overview_frame, render_token_dashboard, render_token_dashboard_with_theme,
-        render_token_trend_dashboard, render_token_trend_dashboard_with_theme,
-        savings_source_rows_for_width, signed_count, signed_trend_points, signed_y_bounds,
+        THEME_MUTED, THEME_RED, THEME_YELLOW, TokenDashboardTheme, block_bar, dashboard_width,
+        grouped_count, reconciled_without_projectatlas, reference_title,
+        render_dashboard_to_string, render_overview_frame, render_token_dashboard,
+        render_token_dashboard_with_theme, render_token_trend_dashboard,
+        render_token_trend_dashboard_with_theme, savings_source_rows_for_width, signed_count,
+        signed_trend_points, signed_y_bounds,
     };
     use projectatlas_core::telemetry::{
-        TOKEN_ACCOUNTING_MODELED_AVOIDANCE, TOKEN_BASELINE_DIRECTORY_WALK,
-        TOKEN_BASELINE_SELECTED_CANDIDATES, TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
-        TOKEN_CONFIDENCE_INFERRED, TOKEN_CONFIDENCE_POLICY_ESTIMATE, TOKEN_DEDUPE_SCOPE_SESSION,
-        TokenOverview, TokenTrendPeriod, TokenTrendReport, TokenTrendWindow, usage_from_estimates,
+        AgentEfficiencyArtifactIdentity, AgentEfficiencyBaseline, AgentEfficiencyBaselineRow,
+        AgentEfficiencyBreakEven, AgentEfficiencyCapability, AgentEfficiencyCapabilityContribution,
+        AgentEfficiencyComparison, AgentEfficiencyEvidenceState, AgentEfficiencyMetricComparison,
+        AgentEfficiencyMetricKind, TOKEN_ACCOUNTING_MODELED_AVOIDANCE,
+        TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_SELECTED_CANDIDATES,
+        TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_CONFIDENCE_INFERRED,
+        TOKEN_CONFIDENCE_POLICY_ESTIMATE, TOKEN_DEDUPE_SCOPE_SESSION, TokenOverview,
+        TokenTrendPeriod, TokenTrendReport, TokenTrendWindow, usage_from_estimates,
         usage_from_estimates_with_accounting, usage_from_text,
     };
     use ratatui::Terminal;
@@ -1884,6 +2362,7 @@ mod tests {
             "SAVINGS COMPOSITION",
             "SIGNAL",
             "WHERE THE SAVINGS CAME FROM",
+            "AGENT EFFICIENCY",
             "CALIBRATION & NOTES",
         ] {
             assert!(dashboard.contains(&reference_title(title)));
@@ -1907,6 +2386,7 @@ mod tests {
                 &reference_title("FILE READS AVOIDED"),
                 &reference_title("SAVINGS COMPOSITION"),
                 &reference_title("WHERE THE SAVINGS CAME FROM"),
+                &reference_title("AGENT EFFICIENCY"),
                 &reference_title("CALIBRATION & NOTES"),
             ],
         );
@@ -2190,6 +2670,7 @@ mod tests {
         assert!(dashboard.contains(&reference_title("FILE READS AVOIDED")));
         assert!(dashboard.contains(&reference_title("WHERE THE SAVINGS CAME FROM")));
         assert!(dashboard.contains("Fewer candidates"));
+        assert!(dashboard.contains(&reference_title("AGENT EFFICIENCY")));
         assert!(dashboard.contains(&reference_title("CALIBRATION & NOTES")));
         assert!(!dashboard.contains("Saved-token trends"));
     }
@@ -2296,6 +2777,280 @@ mod tests {
 
         let empty = block_bar(10, -1.0, THEME_BLUE);
         assert_bar_segments(&empty, 0, 10, THEME_BLUE);
+    }
+
+    #[test]
+    fn agent_efficiency_panel_renders_compatible_and_partial_typed_evidence() {
+        let mut compatible = sample_overview();
+        compatible.agent_efficiency = sample_agent_efficiency(false);
+        let compatible_buffer = render_overview_buffer_at_width(&compatible, Some("s"), 140);
+        let compatible_panel = agent_efficiency_panel_text(&compatible_buffer);
+
+        for text in [
+            "Evidence compatible",
+            "artifact 111111111111 schema 1",
+            "candidate projectatlas 0.4.0",
+            "Frozen v0.3.26 [compatible]",
+            "Plain Codex [compatible]",
+            "matched 12",
+            "candidate/baseline calls 12/30",
+            "file visits p/w c/b 4/10 0/3",
+            "reads broad/full 2/8 1/5",
+            "backtracks 0/1",
+            "net context 16.0KiB/64.0KiB (75.0%)",
+            "runtime c/b 30.0s/50.0s",
+            "break-even: clean=1",
+            "huge=n/a",
+            "Capability calls/emitted bytes only; no causal savings attribution:",
+            "discovery 7/2.0KiB",
+            "summary+slice 11/4.0KiB",
+            "search 5/1.0KiB",
+            "symbols+relations 3/512B",
+        ] {
+            assert!(
+                compatible_panel.contains(text),
+                "compatible panel should contain {text:?}"
+            );
+        }
+        assert_cell_style(
+            &compatible_buffer,
+            "compatible",
+            THEME_GREEN,
+            Modifier::BOLD,
+        );
+        assert_cell_style(
+            &compatible_buffer,
+            "Frozen v0.3.26",
+            THEME_BLUE,
+            Modifier::BOLD,
+        );
+        assert_cell_style(
+            &compatible_buffer,
+            "Plain Codex",
+            THEME_INK_WHITE,
+            Modifier::BOLD,
+        );
+
+        let mut partial = sample_overview();
+        partial.agent_efficiency = sample_agent_efficiency(true);
+        let partial_buffer = render_overview_buffer_at_width(&partial, Some("s"), 140);
+        let partial_panel = agent_efficiency_panel_text(&partial_buffer);
+        assert!(partial_panel.contains("Evidence partial"));
+        assert!(partial_panel.contains("Frozen v0.3.26 [partial]"));
+        assert!(partial_panel.contains("failed candidate/baseline 0/3"));
+        assert!(partial_panel.contains("unmatched 3"));
+        assert!(partial_panel.contains("Plain Codex [compatible]"));
+        assert!(partial_panel.contains("frozen huge-corpus setup retained three failures"));
+        assert_cell_style(&partial_buffer, "partial", THEME_YELLOW, Modifier::BOLD);
+    }
+
+    #[test]
+    fn agent_efficiency_panel_preserves_explicit_invalid_states_without_zero_rows() {
+        for (state, reason, color) in [
+            (
+                AgentEfficiencyEvidenceState::Unavailable,
+                "benchmark artifact not supplied",
+                THEME_MUTED,
+            ),
+            (
+                AgentEfficiencyEvidenceState::Failed,
+                "benchmark artifact could not be decoded",
+                THEME_RED,
+            ),
+            (
+                AgentEfficiencyEvidenceState::Incompatible,
+                "candidate identity does not match the supported release",
+                THEME_RED,
+            ),
+        ] {
+            let mut overview = sample_overview();
+            overview.agent_efficiency = AgentEfficiencyComparison {
+                state,
+                reason: Some(reason.to_string()),
+                artifact: None,
+                baselines: Vec::new(),
+                capabilities: Vec::new(),
+                provider_counters_descriptive_only: true,
+            };
+            let buffer = render_overview_buffer_at_width(&overview, Some("s"), 140);
+            let panel = agent_efficiency_panel_text(&buffer);
+
+            assert!(panel.contains(&format!("Evidence {}", state.as_str())));
+            assert!(panel.contains(reason));
+            assert!(!panel.contains("Frozen v0.3.26"));
+            assert!(!panel.contains("Plain Codex"));
+            assert!(!panel.contains("candidate/baseline calls"));
+            assert!(!panel.contains("0.0%"));
+            assert_cell_style(&buffer, state.as_str(), color, Modifier::BOLD);
+        }
+    }
+
+    #[test]
+    fn agent_efficiency_panel_keeps_compact_evidence_visible_without_overflow() {
+        let mut overview = sample_overview();
+        overview.agent_efficiency = sample_agent_efficiency(true);
+        let buffer = render_overview_buffer_at_width(&overview, Some("s"), 80);
+        let panel = agent_efficiency_panel_text(&buffer);
+
+        for text in [
+            "State partial",
+            "artifact s1 cand projectatlas 0.4.0",
+            "Frozen v0.3.26 [partial] m=12 f(c/b)=0/3 u=3",
+            "Plain Codex [compatible] m=15 f(c/b)=0/0 u=0",
+            "c/b calls 12/30",
+            "reads 2/8",
+            "net ctx 16.0KiB/64.0KiB (75.0%)",
+            "MCP capability calls/bytes only (no causal savings):",
+            "disc 7/2.0KiB",
+            "sum/slice 11/4.0KiB",
+            "search 5/1.0KiB",
+            "sym/rel 3/512B",
+            "frozen huge-corpus setup retained three failures",
+        ] {
+            assert!(
+                panel.contains(text),
+                "compact panel should contain {text:?}"
+            );
+        }
+        assert!(
+            !panel.contains("runtime c/b"),
+            "compact layout should spend its bounded rows on required call/read/context truth"
+        );
+
+        let Some((_, title_y)) = find_text(&buffer, &reference_title("AGENT EFFICIENCY")) else {
+            unreachable!("agent-efficiency title should render");
+        };
+        for y in (title_y + 1)..(title_y + 11) {
+            assert_eq!(
+                buffer.cell((78, y)).map(ratatui::buffer::Cell::symbol),
+                Some("│"),
+                "compact panel right border should remain intact at row {y}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_efficiency_panel_uses_compact_rows_below_normal_width() {
+        let mut overview = sample_overview();
+        overview.agent_efficiency = sample_agent_efficiency(true);
+        let buffer = render_overview_buffer_at_width(&overview, Some("s"), 120);
+        let panel = agent_efficiency_panel_text(&buffer);
+
+        for text in [
+            "State partial",
+            "Frozen v0.3.26 [partial]",
+            "Plain Codex [compatible]",
+            "MCP capability calls/bytes only (no causal savings):",
+            "sym/rel 3/512B",
+            "frozen huge-corpus setup retained three failures",
+        ] {
+            assert!(
+                panel.contains(text),
+                "120-column panel should contain {text:?}; panel:\n{panel}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_efficiency_panel_bounds_maximum_valid_values_and_other_capability() {
+        let mut overview = sample_overview();
+        overview.agent_efficiency = sample_agent_efficiency(true);
+        for baseline in &mut overview.agent_efficiency.baselines {
+            for metric in &mut baseline.metrics {
+                metric.candidate_median = 9_007_199_254_740_991.0;
+                metric.baseline_median = 9_007_199_254_740_991.0;
+                metric.candidate_maximum = 9_007_199_254_740_991.0;
+                metric.baseline_maximum = 9_007_199_254_740_991.0;
+            }
+        }
+        overview
+            .agent_efficiency
+            .capabilities
+            .push(AgentEfficiencyCapabilityContribution {
+                capability: AgentEfficiencyCapability::Other,
+                calls: 4_096,
+                emitted_bytes: 9_007_199_254_740_991,
+            });
+
+        let buffer = render_overview_buffer_at_width(&overview, Some("s"), 80);
+        let panel = agent_efficiency_panel_text(&buffer);
+        for text in [
+            "State partial",
+            "Frozen v0.3.26 [partial]",
+            "Plain Codex [compatible]",
+            "c/b calls 9.0P/9.0P",
+            "net ctx 8.0PiB/8.0PiB",
+            "MCP capability calls/bytes only (no causal savings):",
+            "other 4,096/8.0PiB",
+            "frozen huge-corpus setup retained three failures",
+        ] {
+            assert!(
+                panel.contains(text),
+                "maximum-value panel should contain {text:?}; panel:\n{panel}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_efficiency_panel_clamps_visual_ratio_and_preserves_unavailable_ratio() {
+        let mut overview = sample_overview();
+        overview.agent_efficiency = sample_agent_efficiency(false);
+        let frozen = overview
+            .agent_efficiency
+            .baselines
+            .iter_mut()
+            .find(|row| row.baseline == AgentEfficiencyBaseline::FrozenProjectAtlasV0326);
+        let Some(frozen) = frozen else {
+            unreachable!("sample comparison should contain the frozen baseline");
+        };
+        let context = frozen
+            .metrics
+            .iter_mut()
+            .find(|value| value.metric == AgentEfficiencyMetricKind::NetNavigationBytes);
+        let Some(context) = context else {
+            unreachable!("sample comparison should contain net context");
+        };
+        context.median_percent_saving = Some(250.0);
+
+        let clamped_buffer = render_overview_buffer_at_width(&overview, Some("s"), 140);
+        let Some((_, clamped_y)) = find_text(&clamped_buffer, "context saved") else {
+            unreachable!("normal comparison should render the context-savings bar");
+        };
+        let clamped_line = line_symbols(&clamped_buffer, clamped_y);
+        assert!(clamped_line.contains("250.0%"));
+        assert_eq!(
+            clamped_line.chars().filter(|value| *value == '█').count(),
+            6
+        );
+        assert_eq!(
+            clamped_line.chars().filter(|value| *value == '░').count(),
+            0
+        );
+
+        let context = overview
+            .agent_efficiency
+            .baselines
+            .iter_mut()
+            .find(|row| row.baseline == AgentEfficiencyBaseline::FrozenProjectAtlasV0326)
+            .and_then(|row| {
+                row.metrics
+                    .iter_mut()
+                    .find(|value| value.metric == AgentEfficiencyMetricKind::NetNavigationBytes)
+            });
+        let Some(context) = context else {
+            unreachable!("sample comparison should retain net context");
+        };
+        context.median_percent_saving = None;
+
+        let unavailable_buffer = render_overview_buffer_at_width(&overview, Some("s"), 140);
+        let Some((_, unavailable_y)) = find_text(&unavailable_buffer, "context saved") else {
+            unreachable!("normal comparison should render unavailable context savings");
+        };
+        let unavailable_line = line_symbols(&unavailable_buffer, unavailable_y);
+        assert!(unavailable_line.contains("context saved n/a"));
+        assert!(!unavailable_line.contains('█'));
+        assert!(!unavailable_line.contains('░'));
+        assert!(!unavailable_line.contains("0.0%"));
     }
 
     #[test]
@@ -2454,6 +3209,184 @@ mod tests {
                 TOKEN_DEDUPE_SCOPE_SESSION,
             ),
         ])
+    }
+
+    fn sample_agent_efficiency(partial: bool) -> AgentEfficiencyComparison {
+        let frozen_state = if partial {
+            AgentEfficiencyEvidenceState::Partial
+        } else {
+            AgentEfficiencyEvidenceState::Compatible
+        };
+        AgentEfficiencyComparison {
+            state: frozen_state,
+            reason: partial.then(|| "frozen huge-corpus setup retained three failures".to_string()),
+            artifact: Some(AgentEfficiencyArtifactIdentity {
+                schema_version: 1,
+                artifact_digest_kind: "sha256".to_string(),
+                artifact_digest: "1111111111111111111111111111111111111111111111111111111111111111"
+                    .to_string(),
+                candidate_version: "projectatlas 0.4.0".to_string(),
+                candidate_runtime_sha256:
+                    "2222222222222222222222222222222222222222222222222222222222222222".to_string(),
+                candidate_functional_head: "3333333333333333333333333333333333333333".to_string(),
+                candidate_checklist_head: "4444444444444444444444444444444444444444".to_string(),
+                frozen_version: "projectatlas 0.3.26".to_string(),
+                frozen_runtime_sha256:
+                    "5555555555555555555555555555555555555555555555555555555555555555".to_string(),
+            }),
+            baselines: vec![
+                sample_agent_efficiency_baseline(
+                    AgentEfficiencyBaseline::FrozenProjectAtlasV0326,
+                    frozen_state,
+                    12,
+                    if partial { 3 } else { 0 },
+                ),
+                sample_agent_efficiency_baseline(
+                    AgentEfficiencyBaseline::PlainCodex,
+                    AgentEfficiencyEvidenceState::Compatible,
+                    15,
+                    0,
+                ),
+            ],
+            capabilities: vec![
+                AgentEfficiencyCapabilityContribution {
+                    capability: AgentEfficiencyCapability::Discovery,
+                    calls: 7,
+                    emitted_bytes: 2_048,
+                },
+                AgentEfficiencyCapabilityContribution {
+                    capability: AgentEfficiencyCapability::SummaryAndSlice,
+                    calls: 11,
+                    emitted_bytes: 4_096,
+                },
+                AgentEfficiencyCapabilityContribution {
+                    capability: AgentEfficiencyCapability::Search,
+                    calls: 5,
+                    emitted_bytes: 1_024,
+                },
+                AgentEfficiencyCapabilityContribution {
+                    capability: AgentEfficiencyCapability::SymbolsAndRelations,
+                    calls: 3,
+                    emitted_bytes: 512,
+                },
+            ],
+            provider_counters_descriptive_only: true,
+        }
+    }
+
+    fn sample_agent_efficiency_baseline(
+        baseline: AgentEfficiencyBaseline,
+        state: AgentEfficiencyEvidenceState,
+        matched_trials: usize,
+        baseline_failed_trials: usize,
+    ) -> AgentEfficiencyBaselineRow {
+        AgentEfficiencyBaselineRow {
+            baseline,
+            state,
+            matched_trials,
+            candidate_failed_trials: 0,
+            baseline_failed_trials,
+            unmatched_trials: baseline_failed_trials,
+            metrics: vec![
+                sample_agent_efficiency_metric(
+                    AgentEfficiencyMetricKind::TotalToolCalls,
+                    12.0,
+                    30.0,
+                    Some(60.0),
+                ),
+                sample_agent_efficiency_metric(
+                    AgentEfficiencyMetricKind::BroadReads,
+                    2.0,
+                    8.0,
+                    Some(75.0),
+                ),
+                sample_agent_efficiency_metric(
+                    AgentEfficiencyMetricKind::FullReads,
+                    1.0,
+                    5.0,
+                    Some(80.0),
+                ),
+                sample_agent_efficiency_metric(
+                    AgentEfficiencyMetricKind::ProductiveFiles,
+                    4.0,
+                    10.0,
+                    Some(60.0),
+                ),
+                sample_agent_efficiency_metric(
+                    AgentEfficiencyMetricKind::WrongFiles,
+                    0.0,
+                    3.0,
+                    Some(100.0),
+                ),
+                sample_agent_efficiency_metric(
+                    AgentEfficiencyMetricKind::Backtracks,
+                    0.0,
+                    1.0,
+                    Some(100.0),
+                ),
+                sample_agent_efficiency_metric(
+                    AgentEfficiencyMetricKind::NetNavigationBytes,
+                    16_384.0,
+                    65_536.0,
+                    Some(75.0),
+                ),
+                sample_agent_efficiency_metric(
+                    AgentEfficiencyMetricKind::RuntimeWallSeconds,
+                    30.0,
+                    50.0,
+                    Some(40.0),
+                ),
+            ],
+            break_even: vec![
+                AgentEfficiencyBreakEven {
+                    workload: "small-clean".to_string(),
+                    wall_time_tasks: Some(1),
+                },
+                AgentEfficiencyBreakEven {
+                    workload: "small-dirty".to_string(),
+                    wall_time_tasks: Some(1),
+                },
+                AgentEfficiencyBreakEven {
+                    workload: "small-non-git".to_string(),
+                    wall_time_tasks: None,
+                },
+                AgentEfficiencyBreakEven {
+                    workload: "medium".to_string(),
+                    wall_time_tasks: None,
+                },
+                AgentEfficiencyBreakEven {
+                    workload: "huge-vscode".to_string(),
+                    wall_time_tasks: None,
+                },
+            ],
+            provider_usage_descriptive_only: Vec::new(),
+        }
+    }
+
+    fn sample_agent_efficiency_metric(
+        metric: AgentEfficiencyMetricKind,
+        candidate_median: f64,
+        baseline_median: f64,
+        median_percent_saving: Option<f64>,
+    ) -> AgentEfficiencyMetricComparison {
+        AgentEfficiencyMetricComparison {
+            metric,
+            candidate_median,
+            baseline_median,
+            candidate_maximum: candidate_median,
+            baseline_maximum: baseline_median,
+            median_percent_saving,
+        }
+    }
+
+    fn agent_efficiency_panel_text(buffer: &Buffer) -> String {
+        let Some((_, title_y)) = find_text(buffer, &reference_title("AGENT EFFICIENCY")) else {
+            unreachable!("agent-efficiency title should render");
+        };
+        (title_y..(title_y + 12).min(buffer.area.height))
+            .map(|y| line_symbols(buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn render_overview_buffer(overview: &TokenOverview, session: Option<&str>) -> Buffer {
