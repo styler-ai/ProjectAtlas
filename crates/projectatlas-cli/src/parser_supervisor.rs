@@ -392,6 +392,8 @@ impl From<OptionalParserPackManifestError> for ParserSupervisorError {
 struct PayloadObservation {
     /// Canonical payload path.
     path: PathBuf,
+    /// Manifest-owned payload responsibility.
+    role: ParserPackPayloadRole,
     /// Exact manifest-bound byte count.
     bytes: u64,
     /// Exact manifest-bound SHA-256.
@@ -401,6 +403,19 @@ struct PayloadObservation {
 }
 
 impl PayloadObservation {
+    /// Return whether this payload can affect one grammar-affined worker launch.
+    fn contributes_to_launch(&self, language_id: &str) -> bool {
+        matches!(
+            &self.role,
+            ParserPackPayloadRole::Worker | ParserPackPayloadRole::ContainmentBroker
+        ) || matches!(
+            &self.role,
+            ParserPackPayloadRole::GrammarLibrary {
+                language_id: payload_language
+            } if payload_language == language_id
+        )
+    }
+
     /// Rehash one payload before it can contribute to fresh launch authority.
     fn is_current(&self) -> Result<bool, ParserSupervisorError> {
         let Ok(metadata) = fs::metadata(&self.path) else {
@@ -493,6 +508,7 @@ impl VerifiedParserPackLaunch {
             let metadata = file_metadata(&path)?;
             payloads.push(PayloadObservation {
                 path: path.clone(),
+                role: payload.role.clone(),
                 bytes: payload.bytes,
                 sha256: payload.sha256.as_str().to_owned(),
                 modified: metadata.modified().ok(),
@@ -582,8 +598,8 @@ impl VerifiedParserPackLaunch {
         })
     }
 
-    /// Return whether every manifest and payload digest still matches.
-    fn is_current(&self) -> Result<bool, ParserSupervisorError> {
+    /// Return whether the manifests and payloads used by one launch still match.
+    fn is_current_for(&self, language_id: &str) -> Result<bool, ParserSupervisorError> {
         let artifact_bytes = read_bounded_file(
             &self.pack_root.join(ARTIFACT_MANIFEST_FILE_NAME),
             u64::try_from(OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES).unwrap_or(u64::MAX),
@@ -598,7 +614,11 @@ impl VerifiedParserPackLaunch {
         if sha256_hex(&accepted_bytes) != self.accepted_manifest_sha256 {
             return Ok(false);
         }
-        for payload in &self.payloads {
+        for payload in self
+            .payloads
+            .iter()
+            .filter(|payload| payload.contributes_to_launch(language_id))
+        {
             if !payload.is_current()? {
                 return Ok(false);
             }
@@ -3280,7 +3300,7 @@ impl OptionalParserSupervisor {
             }
         }
         if self.resident.is_none() {
-            self.refresh_changed_artifact()?;
+            self.refresh_changed_artifact(language_id)?;
             let grammar = self.launch.require_grammar(language_id)?;
             self.resident = Some(ResidentParserSession::launch(
                 &self.launch,
@@ -3329,8 +3349,8 @@ impl OptionalParserSupervisor {
     }
 
     /// Replace launch authority only after observed artifact mutation.
-    fn refresh_changed_artifact(&mut self) -> Result<(), ParserSupervisorError> {
-        if let Ok(true) = self.launch.is_current() {
+    fn refresh_changed_artifact(&mut self, language_id: &str) -> Result<(), ParserSupervisorError> {
+        if let Ok(true) = self.launch.is_current_for(language_id) {
             return Ok(());
         }
         self.shutdown_resident()?;
@@ -3936,6 +3956,7 @@ mod tests {
         let modified = fs::metadata(&path)?.modified()?;
         let observation = PayloadObservation {
             path: path.clone(),
+            role: ParserPackPayloadRole::Worker,
             bytes: 7,
             sha256: sha256_hex(b"trusted"),
             modified: Some(modified),
@@ -3957,6 +3978,37 @@ mod tests {
             "same-size same-mtime payload mutation retained launch authority",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn payload_observation_revalidates_only_launch_inputs() {
+        let observation = |role| PayloadObservation {
+            path: PathBuf::new(),
+            role,
+            bytes: 0,
+            sha256: String::new(),
+            modified: None,
+        };
+
+        assert!(observation(ParserPackPayloadRole::Worker).contributes_to_launch("rust"));
+        assert!(
+            observation(ParserPackPayloadRole::ContainmentBroker).contributes_to_launch("rust")
+        );
+        assert!(
+            observation(ParserPackPayloadRole::GrammarLibrary {
+                language_id: "rust".to_owned(),
+            })
+            .contributes_to_launch("rust")
+        );
+        assert!(
+            !observation(ParserPackPayloadRole::GrammarLibrary {
+                language_id: "python".to_owned(),
+            })
+            .contributes_to_launch("rust")
+        );
+        assert!(
+            !observation(ParserPackPayloadRole::NativeAuditReport).contributes_to_launch("rust")
+        );
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
