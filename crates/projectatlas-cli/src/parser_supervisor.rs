@@ -105,6 +105,8 @@ impl ParserMemoryLimits {
 }
 /// Bounded chunks used while reading artifact files.
 const ARTIFACT_READ_CHUNK_BYTES: usize = 64 * 1024;
+/// Request phase used while revalidating changed parser-pack payloads.
+const ARTIFACT_REVALIDATION_PHASE: &str = "artifact revalidation";
 /// Maximum bytes read from one kernel-owned Linux accounting record.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const LINUX_MEMORY_RECORD_MAX_BYTES: u64 = 64 * 1024;
@@ -563,6 +565,39 @@ impl PayloadObservation {
     }
 }
 
+/// Request-owned stop bounds for a changed-artifact reload.
+struct ArtifactRevalidationControl<'a> {
+    /// Immutable absolute request deadline.
+    absolute_deadline: Instant,
+    /// Fixed start of changed-artifact work; file reads do not extend the bound.
+    last_progress: Instant,
+    /// Maximum changed-artifact reload duration without parser progress.
+    no_progress_timeout: Duration,
+    /// Request-owned cooperative cancellation signal.
+    cancellation: &'a IndexCancellation,
+}
+
+impl ArtifactRevalidationControl<'_> {
+    /// Reject cancellation or an expired request bound before more reload work.
+    fn poll(&self) -> Result<(), ParserSupervisorError> {
+        poll_stop(
+            ARTIFACT_REVALIDATION_PHASE,
+            self.absolute_deadline,
+            self.last_progress,
+            self.no_progress_timeout,
+            self.cancellation,
+        )
+    }
+}
+
+/// Bytes and digest produced together by one bounded artifact-file pass.
+struct BoundedArtifactRead {
+    /// Exact bounded file bytes.
+    bytes: Vec<u8>,
+    /// Lowercase SHA-256 computed during the bounded read.
+    sha256: String,
+}
+
 /// Complete private launch authority derived from one exact immutable artifact.
 #[derive(Debug)]
 struct VerifiedParserPackLaunch {
@@ -589,6 +624,33 @@ struct VerifiedParserPackLaunch {
 impl VerifiedParserPackLaunch {
     /// Validate and canonicalize one exact artifact before process creation.
     fn load(pack_root: &Path) -> Result<Self, ParserSupervisorError> {
+        Self::load_inner(pack_root, None)
+    }
+
+    /// Reload a changed artifact while honoring the active parse request bounds.
+    fn load_controlled(
+        pack_root: &Path,
+        absolute_deadline: Instant,
+        no_progress_timeout: Duration,
+        cancellation: &IndexCancellation,
+    ) -> Result<Self, ParserSupervisorError> {
+        let control = ArtifactRevalidationControl {
+            absolute_deadline,
+            last_progress: Instant::now(),
+            no_progress_timeout,
+            cancellation,
+        };
+        Self::load_inner(pack_root, Some(&control))
+    }
+
+    /// Validate one artifact with optional request-owned stop bounds.
+    fn load_inner(
+        pack_root: &Path,
+        control: Option<&ArtifactRevalidationControl<'_>>,
+    ) -> Result<Self, ParserSupervisorError> {
+        if let Some(control) = control {
+            control.poll()?;
+        }
         let platform =
             host_pack_platform().ok_or(ParserSupervisorError::UnsupportedContainment {
                 os: std::env::consts::OS,
@@ -599,17 +661,19 @@ impl VerifiedParserPackLaunch {
         let artifact_path = canonical_direct_file(&pack_root, ARTIFACT_MANIFEST_FILE_NAME)?;
         let mut accepted_manifest = Some(FileObservation::capture(accepted_path.clone())?);
         let artifact_manifest_file = FileObservation::capture(artifact_path.clone())?;
-        let accepted_bytes = read_bounded_file(
+        let accepted_read = read_bounded_file(
             &accepted_path,
             u64::try_from(OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES).unwrap_or(u64::MAX),
+            control,
         )?;
-        let artifact_bytes = read_bounded_file(
+        let artifact_read = read_bounded_file(
             &artifact_path,
             u64::try_from(OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES).unwrap_or(u64::MAX),
+            control,
         )?;
-        let logical = OptionalParserPackManifest::from_json(&accepted_bytes)?;
+        let logical = OptionalParserPackManifest::from_json(&accepted_read.bytes)?;
         let artifact_manifest: OptionalParserPackArtifactManifest =
-            serde_json::from_slice(&artifact_bytes)
+            serde_json::from_slice(&artifact_read.bytes)
                 .map_err(|source| ParserSupervisorError::ArtifactManifestJson { source })?;
         artifact_manifest.validate(&logical)?;
         if artifact_manifest.platform != platform {
@@ -641,14 +705,14 @@ impl VerifiedParserPackLaunch {
             } else {
                 FileObservation::capture(path.clone())?
             };
-            let bytes = read_bounded_file(&path, payload.bytes)?;
-            if u64::try_from(bytes.len()).ok() != Some(payload.bytes) {
+            let payload_read = read_bounded_file(&path, payload.bytes, control)?;
+            if u64::try_from(payload_read.bytes.len()).ok() != Some(payload.bytes) {
                 return Err(ParserSupervisorError::PayloadMismatch {
                     path,
                     reason: "payload byte count differs from the artifact manifest",
                 });
             }
-            if sha256_hex(&bytes) != payload.sha256.as_str() {
+            if payload_read.sha256 != payload.sha256.as_str() {
                 return Err(ParserSupervisorError::PayloadMismatch {
                     path,
                     reason: "payload SHA-256 differs from the artifact manifest",
@@ -716,7 +780,7 @@ impl VerifiedParserPackLaunch {
                 path: accepted_path.clone(),
                 reason: "artifact does not contain its accepted capability manifest",
             })?;
-        if sha256_hex(&accepted_bytes) != accepted_manifest_sha256 {
+        if accepted_read.sha256 != accepted_manifest_sha256 {
             return Err(ParserSupervisorError::PayloadMismatch {
                 path: accepted_path,
                 reason: "accepted capability manifest does not match its artifact payload row",
@@ -737,7 +801,7 @@ impl VerifiedParserPackLaunch {
                 .iter()
                 .map(|grammar| grammar.language_id.clone())
                 .collect(),
-            artifact: ParserArtifactIdentity::for_bytes(&artifact_bytes),
+            artifact: ParserArtifactIdentity::for_bytes(&artifact_read.bytes),
             artifact_manifest: artifact_manifest_file,
             payloads,
         })
@@ -897,8 +961,12 @@ fn file_metadata(path: &Path) -> Result<Metadata, ParserSupervisorError> {
     })
 }
 
-/// Read one exact regular file without permitting growth beyond its bound.
-fn read_bounded_file(path: &Path, maximum: u64) -> Result<Vec<u8>, ParserSupervisorError> {
+/// Read and hash one exact regular file without permitting growth beyond its bound.
+fn read_bounded_file(
+    path: &Path,
+    maximum: u64,
+    control: Option<&ArtifactRevalidationControl<'_>>,
+) -> Result<BoundedArtifactRead, ParserSupervisorError> {
     let mut file = File::open(path).map_err(|source| ParserSupervisorError::ArtifactRead {
         path: path.to_path_buf(),
         source,
@@ -924,13 +992,8 @@ fn read_bounded_file(path: &Path, maximum: u64) -> Result<Vec<u8>, ParserSupervi
     }
     let capacity = usize::try_from(metadata.len()).unwrap_or(ARTIFACT_READ_CHUNK_BYTES);
     let mut bytes = Vec::with_capacity(capacity);
-    let mut bounded = Read::by_ref(&mut file).take(maximum.saturating_add(1));
-    bounded
-        .read_to_end(&mut bytes)
-        .map_err(|source| ParserSupervisorError::ArtifactRead {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let mut sha256 = Sha256::new();
+    read_bounded_chunks(&mut file, path, maximum, &mut bytes, &mut sha256, control)?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum {
         return Err(ParserSupervisorError::ArtifactFileTooLarge {
             path: path.to_path_buf(),
@@ -938,17 +1001,62 @@ fn read_bounded_file(path: &Path, maximum: u64) -> Result<Vec<u8>, ParserSupervi
             maximum,
         });
     }
-    Ok(bytes)
+    Ok(BoundedArtifactRead {
+        bytes,
+        sha256: encode_sha256(sha256.finalize()),
+    })
 }
 
-/// Compute lowercase SHA-256 for one exact payload.
-fn sha256_hex(bytes: &[u8]) -> String {
+/// Read bounded chunks while polling active request stop conditions.
+fn read_bounded_chunks(
+    reader: &mut impl Read,
+    path: &Path,
+    maximum: u64,
+    bytes: &mut Vec<u8>,
+    sha256: &mut Sha256,
+    control: Option<&ArtifactRevalidationControl<'_>>,
+) -> Result<(), ParserSupervisorError> {
+    let mut chunk = vec![0_u8; ARTIFACT_READ_CHUNK_BYTES].into_boxed_slice();
+    loop {
+        if let Some(control) = control {
+            control.poll()?;
+        }
+        let remaining = maximum
+            .saturating_add(1)
+            .saturating_sub(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        if remaining == 0 {
+            break;
+        }
+        let limit = usize::try_from(remaining)
+            .unwrap_or(ARTIFACT_READ_CHUNK_BYTES)
+            .min(ARTIFACT_READ_CHUNK_BYTES);
+        let read = match reader.read(&mut chunk[..limit]) {
+            Ok(read) => read,
+            Err(source) if source.kind() == io::ErrorKind::Interrupted => continue,
+            Err(source) => {
+                return Err(ParserSupervisorError::ArtifactRead {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        if read == 0 {
+            break;
+        }
+        sha256.update(&chunk[..read]);
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    Ok(())
+}
+
+/// Encode one SHA-256 digest as lowercase hexadecimal.
+fn encode_sha256(digest: impl AsRef<[u8]>) -> String {
     const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
-    let digest = Sha256::digest(bytes);
+    let digest = digest.as_ref();
     let mut encoded = String::with_capacity(digest.len().saturating_mul(2));
     for byte in digest {
-        encoded.push(char::from(LOWER_HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(LOWER_HEX[usize::from(byte & 0x0f)]));
+        encoded.push(char::from(LOWER_HEX[usize::from(*byte >> 4)]));
+        encoded.push(char::from(LOWER_HEX[usize::from(*byte & 0x0f)]));
     }
     encoded
 }
@@ -3506,7 +3614,12 @@ impl OptionalParserSupervisor {
             cancellation,
         )?;
         let source_identity = ParserSourceIdentity::for_bytes(source)?;
-        self.refresh_changed_artifact(language_id)?;
+        self.refresh_changed_artifact(
+            language_id,
+            absolute_deadline,
+            no_progress_timeout,
+            cancellation,
+        )?;
         if let Some(resident) = self.resident.as_ref() {
             let grammar_changed = self
                 .launch
@@ -3565,12 +3678,23 @@ impl OptionalParserSupervisor {
     }
 
     /// Replace launch authority only after observed artifact mutation.
-    fn refresh_changed_artifact(&mut self, language_id: &str) -> Result<(), ParserSupervisorError> {
+    fn refresh_changed_artifact(
+        &mut self,
+        language_id: &str,
+        absolute_deadline: Instant,
+        no_progress_timeout: Duration,
+        cancellation: &IndexCancellation,
+    ) -> Result<(), ParserSupervisorError> {
         if let Ok(true) = self.launch.is_current_for(language_id) {
             return Ok(());
         }
         self.shutdown_resident()?;
-        let refreshed = VerifiedParserPackLaunch::load(&self.pack_root)?;
+        let refreshed = VerifiedParserPackLaunch::load_controlled(
+            &self.pack_root,
+            absolute_deadline,
+            no_progress_timeout,
+            cancellation,
+        )?;
         if !refreshed.is_current_for(language_id)? {
             return Err(ParserSupervisorError::PayloadMismatch {
                 path: self.pack_root.clone(),
@@ -4260,6 +4384,33 @@ mod tests {
 
     use super::*;
 
+    /// Reader that cancels the active request after yielding its first chunk.
+    struct CancelAfterFirstRead {
+        /// Remaining deterministic input bytes.
+        input: Cursor<Vec<u8>>,
+        /// Request signal cancelled after the first successful read.
+        cancellation: IndexCancellation,
+        /// Whether one transient interrupted read has already been injected.
+        did_interrupt: bool,
+        /// Whether cancellation has already been delivered.
+        did_cancel: bool,
+    }
+
+    impl Read for CancelAfterFirstRead {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.did_interrupt {
+                self.did_interrupt = true;
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            let read = self.input.read(buffer)?;
+            if read > 0 && !self.did_cancel {
+                self.did_cancel = true;
+                self.cancellation.cancel();
+            }
+            Ok(read)
+        }
+    }
+
     /// Build process-free verified launch metadata for focused supervisor tests.
     fn metadata_only_launch() -> VerifiedParserPackLaunch {
         let pack_root = PathBuf::from("metadata-only-pack");
@@ -4318,6 +4469,68 @@ mod tests {
             })
         ));
         assert_eq!(supervisor.artifact_identity(), &selected);
+    }
+
+    #[test]
+    fn changed_artifact_reload_retries_interruption_and_honors_cancellation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cancellation = IndexCancellation::new();
+        let control = ArtifactRevalidationControl {
+            absolute_deadline: Instant::now() + Duration::from_secs(1),
+            last_progress: Instant::now(),
+            no_progress_timeout: Duration::from_secs(1),
+            cancellation: &cancellation,
+        };
+        let mut reader = CancelAfterFirstRead {
+            input: Cursor::new(vec![b'x'; ARTIFACT_READ_CHUNK_BYTES * 3]),
+            cancellation: cancellation.clone(),
+            did_interrupt: false,
+            did_cancel: false,
+        };
+        let mut bytes = Vec::new();
+        let mut sha256 = Sha256::new();
+        let result = read_bounded_chunks(
+            &mut reader,
+            Path::new("changed-payload"),
+            u64::try_from(ARTIFACT_READ_CHUNK_BYTES * 3)?,
+            &mut bytes,
+            &mut sha256,
+            Some(&control),
+        );
+
+        require_test(
+            matches!(
+                result,
+                Err(ParserSupervisorError::Cancelled {
+                    phase: ARTIFACT_REVALIDATION_PHASE
+                })
+            ),
+            "changed-artifact reload ignored cancellation",
+        )?;
+        require_test(
+            bytes.len() == ARTIFACT_READ_CHUNK_BYTES,
+            "changed-artifact reload read past its first bounded chunk",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn changed_artifact_refresh_propagates_request_cancellation() {
+        let mut supervisor = metadata_only_supervisor();
+        let cancellation = IndexCancellation::new();
+        cancellation.cancel();
+
+        assert!(matches!(
+            supervisor.refresh_changed_artifact(
+                "alpha",
+                Instant::now() + Duration::from_secs(1),
+                Duration::from_secs(1),
+                &cancellation,
+            ),
+            Err(ParserSupervisorError::Cancelled {
+                phase: ARTIFACT_REVALIDATION_PHASE
+            })
+        ));
     }
 
     #[test]
