@@ -7799,16 +7799,27 @@ fn write_fully_matched_benchmark_fixture(destination: &Path) -> Result<(), Box<d
         .get_mut("runs")
         .and_then(Value::as_array_mut)
         .ok_or_else(|| io::Error::other("benchmark runs are missing"))?;
+    let frozen_trace = runs
+        .iter()
+        .find(|run| {
+            run.get("arm").and_then(Value::as_str) == Some("v0.3.26")
+                && run.get("execution_status").and_then(Value::as_str) == Some("completed")
+        })
+        .and_then(|run| run.get("trace"))
+        .cloned()
+        .ok_or_else(|| io::Error::other("completed frozen benchmark trace is missing"))?;
     for run in runs {
         if run.get("case").and_then(Value::as_str) == Some("huge-vscode")
             && run.get("arm").and_then(Value::as_str) == Some("v0.3.26")
         {
-            run.as_object_mut()
-                .ok_or_else(|| io::Error::other("benchmark run is not an object"))?
-                .insert(
-                    "execution_status".to_string(),
-                    Value::String("completed".to_string()),
-                );
+            let run = run
+                .as_object_mut()
+                .ok_or_else(|| io::Error::other("benchmark run is not an object"))?;
+            run.insert(
+                "execution_status".to_string(),
+                Value::String("completed".to_string()),
+            );
+            run.insert("trace".to_string(), frozen_trace.clone());
         }
     }
 

@@ -622,6 +622,8 @@ fn validate_schedule_and_runs(
             matches!(run.execution_status.as_str(), "completed" | "failed"),
             "benchmark run has an unsupported execution status",
         )?;
+        let mut projectatlas_calls = 0usize;
+        let mut completed_projectatlas_calls = 0usize;
         if let Some(trace) = run.trace.as_ref() {
             require(
                 trace.mcp_calls.len() <= BENCHMARK_MAX_MCP_CALLS_PER_RUN,
@@ -637,8 +639,22 @@ fn validate_schedule_and_runs(
                         && call.emitted_bytes <= BENCHMARK_MAX_EXACT_INTEGER,
                     "benchmark MCP-call identity, status, or emitted-byte value is invalid",
                 )?;
+                if call.server == "projectatlas" {
+                    projectatlas_calls += 1;
+                    completed_projectatlas_calls += usize::from(call.status == "completed");
+                }
             }
         }
+        require(
+            run.arm != PLAIN_ARM || projectatlas_calls == 0,
+            "plain benchmark run contains a ProjectAtlas MCP call",
+        )?;
+        require(
+            run.execution_status != "completed"
+                || run.arm == PLAIN_ARM
+                || completed_projectatlas_calls > 0,
+            "completed ProjectAtlas benchmark run has no completed ProjectAtlas MCP call",
+        )?;
         require(
             runs.insert(run.run_id.as_str(), run).is_none(),
             "benchmark contains duplicate retained run ids",
@@ -1252,13 +1268,13 @@ fn project_capabilities(
     let mut counts = [0usize; 5];
     let mut bytes = [0u64; 5];
     let mut total_calls = 0usize;
-    for run in runs.iter().filter(|run| {
-        run.arm == CANDIDATE_ARM && run.execution_status == "completed" && !run.excluded
-    }) {
-        let trace = run
-            .trace
-            .as_ref()
-            .ok_or_else(|| "completed candidate run is missing its trace".to_string())?;
+    for run in runs
+        .iter()
+        .filter(|run| run.arm == CANDIDATE_ARM && !run.excluded)
+    {
+        let Some(trace) = run.trace.as_ref() else {
+            continue;
+        };
         for call in &trace.mcp_calls {
             require(
                 call.server == "projectatlas",
@@ -1622,7 +1638,10 @@ struct BenchmarkProviderComparison {
 
 #[cfg(test)]
 mod tests {
-    use super::{BenchmarkArtifact, require, validate_and_project};
+    use super::{
+        BenchmarkArtifact, BenchmarkMcpCall, BenchmarkRun, BenchmarkTrace, CANDIDATE_ARM,
+        PLAIN_ARM, project_capabilities, require, validate_and_project,
+    };
     use projectatlas_core::telemetry::{
         AgentEfficiencyBaseline, AgentEfficiencyCapability, AgentEfficiencyEvidenceState,
     };
@@ -1638,6 +1657,27 @@ mod tests {
         validate_and_project(artifact, &bytes)
             .err()
             .ok_or_else(|| io::Error::other("modified benchmark unexpectedly validated").into())
+    }
+
+    fn mcp_calls_for_arm<'a>(
+        artifact: &'a mut serde_json::Value,
+        arm: &str,
+    ) -> Result<&'a mut Vec<serde_json::Value>, io::Error> {
+        artifact
+            .get_mut("runs")
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|runs| {
+                runs.iter_mut().find_map(|run| {
+                    (run.get("arm").and_then(serde_json::Value::as_str) == Some(arm))
+                        .then(|| {
+                            run.get_mut("trace")
+                                .and_then(|value| value.get_mut("mcp_calls"))
+                                .and_then(serde_json::Value::as_array_mut)
+                        })
+                        .flatten()
+                })
+            })
+            .ok_or_else(|| io::Error::other(format!("{arm} benchmark MCP calls are missing")))
     }
 
     #[test]
@@ -1713,6 +1753,65 @@ mod tests {
             )
             .map_err(io::Error::other)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn benchmark_validation_enforces_each_arm_mcp_contract()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/benchmarks/v0.4-agent-navigation-results.json");
+        let published: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
+
+        let mut contaminated_plain = published.clone();
+        let candidate_call = mcp_calls_for_arm(&mut contaminated_plain, CANDIDATE_ARM)?
+            .first()
+            .cloned()
+            .ok_or_else(|| io::Error::other("candidate benchmark MCP call is missing"))?;
+        mcp_calls_for_arm(&mut contaminated_plain, PLAIN_ARM)?.push(candidate_call);
+        require(
+            rejected_benchmark_reason(&contaminated_plain)?.contains("plain benchmark run"),
+            "contaminated plain control did not fail MCP-contract validation",
+        )
+        .map_err(io::Error::other)?;
+
+        let mut call_free_candidate = published;
+        mcp_calls_for_arm(&mut call_free_candidate, CANDIDATE_ARM)?.clear();
+        require(
+            rejected_benchmark_reason(&call_free_candidate)?.contains("no completed ProjectAtlas"),
+            "call-free completed ProjectAtlas run did not fail MCP-contract validation",
+        )
+        .map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_candidate_completed_calls_are_projected() -> Result<(), Box<dyn std::error::Error>> {
+        let capabilities = project_capabilities(&[BenchmarkRun {
+            run_id: "failed-candidate".to_string(),
+            repeat: 1,
+            workload: "small-clean".to_string(),
+            arm: CANDIDATE_ARM.to_string(),
+            excluded: false,
+            execution_status: "failed".to_string(),
+            trace: Some(BenchmarkTrace {
+                mcp_calls: vec![BenchmarkMcpCall {
+                    server: "projectatlas".to_string(),
+                    tool: "atlas_search".to_string(),
+                    status: "completed".to_string(),
+                    emitted_bytes: 42,
+                }],
+            }),
+        }])
+        .map_err(io::Error::other)?;
+        require(
+            capabilities.len() == 1
+                && capabilities[0].capability == AgentEfficiencyCapability::Search
+                && capabilities[0].calls == 1
+                && capabilities[0].emitted_bytes == 42,
+            "failed candidate trace-completed call was not projected",
+        )
+        .map_err(io::Error::other)?;
         Ok(())
     }
 
