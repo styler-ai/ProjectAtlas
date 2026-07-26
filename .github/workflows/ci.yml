@@ -172,6 +172,11 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_repairs_stale_mirror_without_registering_it --test e2e
 
+      - name: Windows installer trust boundaries
+        if: matrix.label == 'windows'
+        timeout-minutes: 10
+        run: cargo test --locked -p projectatlas-cli --all-features --test installer_trust_boundaries
+
       - name: macOS unsupported parser-pack boundary E2E
         if: runner.os == 'macOS'
         timeout-minutes: 5
