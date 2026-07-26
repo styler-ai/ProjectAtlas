@@ -2,6 +2,7 @@
 
 <p align="center">
   <img src="docs/assets/projectatlas-mascot.png" alt="Ani, the ProjectAtlas mascot, holding a repository map labeled src, docs, tests, and issues" width="720">
+  <br><em>Ani, your repository cartographer.</em>
 </p>
 
 <h3 align="center">Give your coding agent a map before it opens the repository.</h3>
