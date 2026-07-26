@@ -6,17 +6,12 @@
 
 ## 2. Final Candidate
 
-- [ ] 2.1 Merge every remaining v0.4.0 readiness change into `dev`, confirm #314 remains outside the release, and lock one exact candidate with no uncommitted source changes or unresolved review feedback.
-- [ ] 2.2 Run the complete pre-push gate, strict OpenSpec validation, ProjectAtlas candidate scan and low lint, and IssueOps synchronization on the locked candidate; confirm this release-only change adds no Rust API, crate, dependency, schema, migration, SQLite write path, or runtime behavior.
-- [ ] 2.3 Complete issue #341's explicit empty-cache Linux and Windows construction on the candidate, reconcile its OpenSpec and GitHub checklist, resolve live feedback, and close #341.
+- [ ] 2.1 Complete issue #341's explicit empty-cache Linux and Windows construction, reconcile and land its OpenSpec and GitHub checklist state, resolve live feedback, and close #341.
+- [ ] 2.2 Merge every remaining v0.4.0 readiness change into `dev`, confirm #314 remains outside the release, and lock one release-content head with no uncommitted source changes or unresolved review feedback.
+- [ ] 2.3 Run the complete pre-push gate, strict OpenSpec validation, ProjectAtlas candidate scan and low lint, and IssueOps synchronization on the locked release-content head; confirm this release-only change adds no Rust API, crate, dependency, schema, migration, SQLite write path, or runtime behavior.
 
 ## 3. Prepublication Proof
 
 - [ ] 3.1 Run exact-head `01-CI` and require Rust verification plus packaged CLI/MCP E2E smoke on Linux, Windows, macOS x64, and macOS arm64.
 - [ ] 3.2 Run `02-Release` for `v0.4.0` with `prepublish_only=true` and require every package and installer-smoke job to succeed on its supported platform.
-- [ ] 3.3 Verify the prepublish run created no tag or GitHub release and reconcile package, checksum, installer, runtime, plugin, MCP, CLI, documentation, and release-note identities against the exact candidate.
-
-## 4. Promotion Readiness
-
-- [ ] 4.1 Prepare an exact `dev`-to-`main` promotion, re-audit all PR threads plus Codex and Dependabot feedback, confirm every other `v0.4.0-00` issue is mapped, fully checked, and closed, and keep `main`, tags, and releases unchanged.
-- [ ] 4.2 Reconcile the local and GitHub checklists after tasks 1.1 through 4.1 are complete, while keeping the post-release verification and cleanup issue open until v0.4.0 is published, independently verified, and safely consolidated.
+- [ ] 3.3 Verify the prepublish run created no tag or GitHub release; reconcile package, checksum, installer, runtime, plugin, MCP, CLI, documentation, and release-note identities; prepare the `dev`-to-`main` promotion without merging it; re-audit PR threads plus Codex and Dependabot feedback; and keep `main`, tags, releases, and post-release issue #346 unchanged.

@@ -37,11 +37,11 @@ The change records and executes the existing `01-CI`, `optional-parser-pack`, `0
 
 A new release driver was rejected because the current workflows already own the real package, installer, platform, and publication boundaries. Duplicating them would create drift without increasing proof.
 
-### Bind readiness to one exact candidate
+### Bind readiness to one exact promotion head
 
-The final candidate is one exact `dev` commit after every v0.4.0 implementation and readiness artifact is merged. Ordinary CI, explicit clean optional-parser construction, prepublish release packaging, review disposition, strict OpenSpec, IssueOps, and repository checks must all apply to that head or an explicitly generated merge commit whose parents are unchanged.
+First, lock one release-content head after #341 is closed and every v0.4.0 implementation and readiness artifact is merged. Run the complete local gates, ordinary CI, explicit clean optional-parser construction, prepublish release packaging, and review disposition on that head.
 
-Any later candidate change invalidates the affected hosted proof and requires rerunning it. A prior successful run is diagnostic history, not final-candidate evidence.
+Once those tasks are true, one bounded reconciliation commit may change only the #311 OpenSpec task checkbox state. Mirror that state to the GitHub issue, and treat the resulting `dev` SHA as the exact promotion head. Rerun the required exact-head CI, clean optional-parser construction, prepublish packaging, review, IssueOps, and repository checks on that promotion head before closing #311. Any other change, or any later commit, invalidates the affected proof and restarts the boundary at the release-content lock.
 
 ### Separate prepublication readiness from post-release operations
 
@@ -65,7 +65,7 @@ Until readiness is complete, `main`, tags, and releases remain untouched. If any
 
 ## Risks / Trade-offs
 
-- **A documentation-only change advances the candidate after expensive proof** → Merge all readiness artifacts before locking the candidate and dispatching final hosted proof.
+- **Checklist reconciliation advances the commit after expensive proof** → Permit one task-state-only commit, then rerun every required gate on its resulting exact promotion head before closure.
 - **A green older run is mistaken for final evidence** → Compare every required run's `headSha` with the locked candidate before closure.
 - **The milestone gate becomes circular around post-release cleanup** → Keep #311 prepublication-only and create the non-milestone post-release owner before closure.
 - **A prepublish run is mistaken for publication** → Require `prepublish_only=true`, verify no tag or release was created, and leave publication to the existing main-triggered workflow.
@@ -76,14 +76,15 @@ Until readiness is complete, `main`, tags, and releases remain untouched. If any
 
 1. Land the bounded installer trust fix and reconcile all live review feedback.
 2. Add this change to `openspec/issue-map.json` and replace #311's obsolete body with the exact local checklist.
-3. Complete and close #341 on an exact candidate after its Linux and Windows empty-cache proof.
-4. Merge all remaining readiness artifacts into `dev`, then lock the exact candidate head.
-5. Run the complete local gates, exact-head `01-CI`, clean optional-parser proof, and `02-Release` with `prepublish_only=true`.
-6. Create and verify the post-release issue, prepare the exact `dev`-to-`main` promotion, reconcile every readiness task, close #311, and then pass milestone IssueOps.
-7. Promote the exact candidate to `main`; let the existing release workflow publish v0.4.0.
-8. Independently verify the published release and only then perform the post-release cleanup.
+3. Complete and close #341 after its Linux and Windows empty-cache proof and land its reconciled checklist state.
+4. Merge all remaining readiness artifacts into `dev`, then lock the release-content head.
+5. Run the complete local gates, exact-head `01-CI`, clean optional-parser proof, and `02-Release` with `prepublish_only=true` on that head.
+6. Reconcile #311 in one task-state-only commit and mirror the GitHub checklist; its resulting `dev` SHA is the exact promotion head.
+7. Rerun every required exact-head gate on the promotion head, close #311, and then pass milestone IssueOps.
+8. Promote the exact head to `main`; let the existing release workflow publish v0.4.0.
+9. Independently verify the published release and only then perform the post-release cleanup.
 
-Rollback before promotion is ordinary candidate correction on `dev`. After promotion, retain all source lanes and release artifacts until the publishing failure is understood; never use workspace cleanup as rollback.
+Rollback before promotion is ordinary correction followed by a new release-content lock and reconciliation. After promotion, retain all source lanes and release artifacts until the publishing failure is understood; never use workspace cleanup as rollback.
 
 ## Open Questions
 
