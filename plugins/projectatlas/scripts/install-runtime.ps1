@@ -1220,7 +1220,17 @@ function Write-ProjectAtlasMcpConfig {
     $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
     $mcpConfigText = ($mcpConfig -join [Environment]::NewLine) + [Environment]::NewLine
     Assert-ProjectAtlasDirectFilePath $OutputPath "ProjectAtlas MCP config output"
-    [System.IO.File]::WriteAllText($OutputPath, $mcpConfigText, $utf8NoBom)
+    $temporaryOutputPath = Join-Path $atlasDir (".projectatlas-mcp-config-" + [guid]::NewGuid().ToString("N") + ".tmp")
+    try {
+        [System.IO.File]::WriteAllText($temporaryOutputPath, $mcpConfigText, $utf8NoBom)
+        Assert-ProjectAtlasDirectFilePath $OutputPath "ProjectAtlas MCP config output"
+        Move-Item -LiteralPath $temporaryOutputPath -Destination $OutputPath -Force
+    }
+    finally {
+        if ([System.IO.File]::Exists($temporaryOutputPath)) {
+            [System.IO.File]::Delete($temporaryOutputPath)
+        }
+    }
 }
 
 Write-ProjectAtlasMcpConfig $mcpConfigPath $null

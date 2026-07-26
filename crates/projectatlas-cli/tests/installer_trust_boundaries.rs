@@ -175,6 +175,16 @@ fn powershell_bootstrap_rejects_redirected_config_outputs() -> Result<(), Box<dy
     Ok(())
 }
 
+#[cfg(windows)]
+#[test]
+fn powershell_bootstrap_atomically_replaces_hard_linked_config_outputs()
+-> Result<(), Box<dyn Error>> {
+    installer_atomically_replaces_hard_linked_config_outputs(
+        "PowerShell",
+        run_powershell_runtime_install,
+    )
+}
+
 #[cfg(unix)]
 #[test]
 fn posix_bootstrap_treats_hostile_target_source_as_data() -> Result<(), Box<dyn Error>> {
@@ -264,6 +274,51 @@ fn posix_bootstrap_rejects_redirected_config_outputs() -> Result<(), Box<dyn Err
         require(
             fs::read_to_string(&sentinel)? == "unchanged\n",
             format!("POSIX bootstrap overwrote redirected output {config_name}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn posix_bootstrap_atomically_replaces_hard_linked_config_outputs() -> Result<(), Box<dyn Error>> {
+    installer_atomically_replaces_hard_linked_config_outputs("POSIX", run_posix_runtime_install)
+}
+
+/// Verify publication replaces hostile hard links without changing their external inodes.
+fn installer_atomically_replaces_hard_linked_config_outputs(
+    host: &str,
+    run_installer: fn(&Path, &Path) -> Result<std::process::Output, Box<dyn Error>>,
+) -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let target = root.path().join("target");
+    let atlas_dir = target.join(".projectatlas");
+    let outside = root.path().join("outside");
+    fs::create_dir_all(&atlas_dir)?;
+    fs::create_dir(&outside)?;
+
+    let mut sentinels = Vec::with_capacity(GENERATED_MCP_CONFIG_FILES.len());
+    for config_name in GENERATED_MCP_CONFIG_FILES {
+        let sentinel = outside.join(format!("{config_name}.sentinel"));
+        fs::write(&sentinel, "unchanged\n")?;
+        fs::hard_link(&sentinel, atlas_dir.join(config_name))?;
+        sentinels.push((config_name, sentinel));
+    }
+
+    let output = run_installer(&target, root.path())?;
+    require(
+        output.status.success(),
+        format!(
+            "{host} bootstrap failed to replace hard-linked config outputs: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    for (config_name, sentinel) in sentinels {
+        require(
+            fs::read_to_string(&sentinel)? == "unchanged\n"
+                && fs::read_to_string(atlas_dir.join(config_name))? != "unchanged\n",
+            format!("{host} bootstrap did not safely replace hard-linked output {config_name}"),
         )?;
     }
     Ok(())

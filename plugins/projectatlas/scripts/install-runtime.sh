@@ -822,7 +822,19 @@ write_mcp_config() {
     set -- "$@" --harness "$harness"
   fi
   assert_config_output_path "$output_path"
-  "$projectatlas_bin" "$@" > "$output_path"
+  temporary_output=$(mktemp "$atlas_dir/.projectatlas-mcp-config.XXXXXX")
+  if ! "$projectatlas_bin" "$@" > "$temporary_output"; then
+    rm -f "$temporary_output"
+    return 1
+  fi
+  if ! assert_config_output_path "$output_path"; then
+    rm -f "$temporary_output"
+    return 1
+  fi
+  if ! mv -f "$temporary_output" "$output_path"; then
+    rm -f "$temporary_output"
+    return 1
+  fi
 }
 
 canonical_path() {
