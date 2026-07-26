@@ -2192,9 +2192,6 @@ impl ResidentParserSession {
                 no_progress_timeout,
                 cancellation,
             )?;
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            self.enforce_memory_bound(phase, false)?;
-            self.check_diagnostic_reader(phase)?;
             if let Some(event) = try_frame_event(&self.frame_reader.events)? {
                 self.synchronize_frame_event(
                     &event,
@@ -2206,6 +2203,9 @@ impl ResidentParserSession {
                 )?;
                 return self.finish_frame_event(event, phase);
             }
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            self.enforce_memory_bound(phase, false)?;
+            self.check_diagnostic_reader(phase)?;
             match self.frame_reader.events.recv_timeout(next_poll_wait(
                 absolute_deadline,
                 last_progress,
@@ -2316,7 +2316,10 @@ impl ResidentParserSession {
                 cancellation,
             )?;
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            self.enforce_memory_bound(phase, false)?;
+            match self.enforce_memory_bound(phase, false) {
+                Ok(()) | Err(ParserSupervisorError::ChildExited { code: Some(0), .. }) => {}
+                Err(error) => return Err(error),
+            }
             match self.diagnostic_reader.events.recv_timeout(next_poll_wait(
                 absolute_deadline,
                 last_progress,
