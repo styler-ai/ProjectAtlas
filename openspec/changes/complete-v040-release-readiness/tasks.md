@@ -1,7 +1,7 @@
 ## 1. Release Ownership
 
 - [x] 1.1 Land the bounded installer trust-boundary correction with focused Windows and POSIX behavior tests, the complete local gate, exact-head hosted CI, and all live review feedback resolved.
-- [x] 1.2 Map `complete-v040-release-readiness` to issue #311, replace the obsolete #308 split with this exact checklist and its pre-mortem ownership, and pass ordinary IssueOps synchronization.
+- [x] 1.2 Map `complete-v040-release-readiness` to issue #311, replace the obsolete #308 split with this exact checklist and its pre-mortem ownership, make milestone IssueOps reject open issues, and pass ordinary IssueOps synchronization.
 - [x] 1.3 Create a dedicated non-milestone v0.4.0 post-release issue that owns publication verification and safe ProjectAtlas branch, worktree, and external-checkout cleanup.
 
 ## 2. Final Candidate
@@ -18,5 +18,5 @@
 
 ## 4. Promotion Readiness
 
-- [ ] 4.1 Prepare an exact `dev`-to-`main` promotion, re-audit all PR threads plus Codex and Dependabot feedback, and pass the complete `v0.4.0-00` milestone IssueOps gate without changing `main`, tags, or releases.
-- [ ] 4.2 Close #311 only after every readiness task and mitigation is true, while keeping the post-release verification and cleanup issue open until v0.4.0 is published, independently verified, and safely consolidated.
+- [ ] 4.1 Prepare an exact `dev`-to-`main` promotion, re-audit all PR threads plus Codex and Dependabot feedback, confirm every other `v0.4.0-00` issue is mapped, fully checked, and closed, and keep `main`, tags, and releases unchanged.
+- [ ] 4.2 Reconcile the local and GitHub checklists after tasks 1.1 through 4.1 are complete, while keeping the post-release verification and cleanup issue open until v0.4.0 is published, independently verified, and safely consolidated.

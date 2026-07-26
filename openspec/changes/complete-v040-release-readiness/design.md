@@ -79,7 +79,7 @@ Until readiness is complete, `main`, tags, and releases remain untouched. If any
 3. Complete and close #341 on an exact candidate after its Linux and Windows empty-cache proof.
 4. Merge all remaining readiness artifacts into `dev`, then lock the exact candidate head.
 5. Run the complete local gates, exact-head `01-CI`, clean optional-parser proof, and `02-Release` with `prepublish_only=true`.
-6. Create and verify the post-release issue, prepare the exact `dev`-to-`main` promotion, pass milestone IssueOps, and close #311.
+6. Create and verify the post-release issue, prepare the exact `dev`-to-`main` promotion, reconcile every readiness task, close #311, and then pass milestone IssueOps.
 7. Promote the exact candidate to `main`; let the existing release workflow publish v0.4.0.
 8. Independently verify the published release and only then perform the post-release cleanup.
 

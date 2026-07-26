@@ -5,6 +5,7 @@ ProjectAtlas v0.4.0 has completed its feature program, but release issue #311 st
 ## What Changes
 
 - Replace #311's stale initiative checklist with a mapped release-readiness checklist whose state can be verified by IssueOps.
+- Make milestone IssueOps reject open issues before publication.
 - Land the remaining installer trust-boundary correction and close every other v0.4.0 milestone issue against exact-head local, hosted, and review evidence.
 - Freeze one exact `dev` candidate only after full Rust, CLI, MCP, installer, package, OpenSpec, IssueOps, ProjectAtlas, and platform proof succeeds.
 - Run `02-Release` in `prepublish_only` mode so the real package and installer paths are proven without creating a tag or GitHub release.
