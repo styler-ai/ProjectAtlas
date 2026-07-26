@@ -702,6 +702,7 @@ impl VerifiedParserPackLaunch {
     /// Reload a changed artifact while honoring the active parse request bounds.
     fn load_controlled(
         pack_root: &Path,
+        language_id: &str,
         absolute_deadline: Instant,
         no_progress_timeout: Duration,
         cancellation: &IndexCancellation,
@@ -714,6 +715,7 @@ impl VerifiedParserPackLaunch {
             cancellation,
         };
         let pack_root = pack_root.to_path_buf();
+        let language_id = language_id.to_owned();
         let worker_cancellation = cancellation.clone();
         run_artifact_revalidation(
             move || {
@@ -723,7 +725,14 @@ impl VerifiedParserPackLaunch {
                     no_progress_timeout,
                     cancellation: &worker_cancellation,
                 };
-                Self::load_inner(&pack_root, Some(&worker_control))
+                let refreshed = Self::load_inner(&pack_root, Some(&worker_control))?;
+                if !refreshed.is_current_for(&language_id, Some(&worker_control))? {
+                    return Err(ParserSupervisorError::PayloadMismatch {
+                        path: pack_root,
+                        reason: "artifact changed during digest revalidation",
+                    });
+                }
+                Ok(refreshed)
             },
             &control,
         )
@@ -894,7 +903,14 @@ impl VerifiedParserPackLaunch {
     }
 
     /// Return whether the manifests and active payloads retain their verified filesystem identity.
-    fn is_current_for(&self, language_id: &str) -> Result<bool, ParserSupervisorError> {
+    fn is_current_for(
+        &self,
+        language_id: &str,
+        control: Option<&ArtifactRevalidationControl<'_>>,
+    ) -> Result<bool, ParserSupervisorError> {
+        if let Some(control) = control {
+            control.poll()?;
+        }
         if !self.artifact_manifest.is_current()? {
             return Ok(false);
         }
@@ -903,6 +919,9 @@ impl VerifiedParserPackLaunch {
             .iter()
             .filter(|payload| payload.contributes_to_launch(language_id))
         {
+            if let Some(control) = control {
+                control.poll()?;
+            }
             if !payload.is_current()? {
                 return Ok(false);
             }
@@ -3771,22 +3790,17 @@ impl OptionalParserSupervisor {
         no_progress_timeout: Duration,
         cancellation: &IndexCancellation,
     ) -> Result<(), ParserSupervisorError> {
-        if let Ok(true) = self.launch.is_current_for(language_id) {
+        if let Ok(true) = self.launch.is_current_for(language_id, None) {
             return Ok(());
         }
         self.shutdown_resident()?;
         let refreshed = VerifiedParserPackLaunch::load_controlled(
             &self.pack_root,
+            language_id,
             absolute_deadline,
             no_progress_timeout,
             cancellation,
         )?;
-        if !refreshed.is_current_for(language_id)? {
-            return Err(ParserSupervisorError::PayloadMismatch {
-                path: self.pack_root.clone(),
-                reason: "artifact changed during digest revalidation",
-            });
-        }
         self.replace_verified_launch(refreshed)
     }
 
@@ -4721,6 +4735,26 @@ mod tests {
                 Duration::from_secs(1),
                 &cancellation,
             ),
+            Err(ParserSupervisorError::Cancelled {
+                phase: ARTIFACT_REVALIDATION_PHASE
+            })
+        ));
+    }
+
+    #[test]
+    fn controlled_artifact_currentness_polls_before_metadata() {
+        let launch = metadata_only_launch();
+        let cancellation = IndexCancellation::new();
+        cancellation.cancel();
+        let control = ArtifactRevalidationControl {
+            absolute_deadline: Instant::now() + Duration::from_secs(1),
+            last_progress: Instant::now(),
+            no_progress_timeout: Duration::from_secs(1),
+            cancellation: &cancellation,
+        };
+
+        assert!(matches!(
+            launch.is_current_for("alpha", Some(&control)),
             Err(ParserSupervisorError::Cancelled {
                 phase: ARTIFACT_REVALIDATION_PHASE
             })
