@@ -18,4 +18,4 @@
 
 ## 4. Finite Reconciliation
 
-- [ ] 4.1 After tasks 1.1 through 3.3 are true, create one commit whose only repository change is checking those completed tasks and this reconciliation task, mirror #311 exactly, and require ordinary exact-head CI, strict OpenSpec, IssueOps, ProjectAtlas low lint, review checks, `main` ancestry, and an identical-tree merge-commit promotion to pass before closure; carry clean-construction and prepublish proof forward only across that verified task-state-only diff.
+- [ ] 4.1 After tasks 1.1 through 3.3 are true, create one commit whose only repository change is checking those completed tasks and this reconciliation task, mirror #311 exactly, verify the diff is task-state-only, and carry clean-construction and prepublish proof forward only across that verified diff.
