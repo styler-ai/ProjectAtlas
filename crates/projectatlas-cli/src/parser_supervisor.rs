@@ -916,7 +916,7 @@ fn read_one_frame(input: &mut impl Read) -> Result<Option<Vec<u8>>, ParserIoThre
     Ok(Some(frame))
 }
 
-/// Own worker stdout and fence every complete frame through the diagnostic pipe.
+/// Own worker stdout and fence every complete or failed frame through the diagnostic pipe.
 fn frame_reader_loop(
     mut stdout: ChildStdout,
     mut diagnostic_fence_writer: impl Write,
@@ -925,18 +925,23 @@ fn frame_reader_loop(
 ) {
     loop {
         let event = match read_one_frame(&mut stdout) {
-            Ok(Some(frame)) => match diagnostic_fence_writer
+            Ok(Some(frame)) => FrameReaderEvent::Frame(frame),
+            Ok(None) => FrameReaderEvent::EndOfStream,
+            Err(error) => FrameReaderEvent::Failure(error),
+        };
+        let event = if matches!(event, FrameReaderEvent::EndOfStream) {
+            event
+        } else {
+            match diagnostic_fence_writer
                 .write_all(&diagnostic_fence.0)
                 .and_then(|()| diagnostic_fence_writer.flush())
             {
-                Ok(()) => FrameReaderEvent::Frame(frame),
+                Ok(()) => event,
                 Err(source) => FrameReaderEvent::Failure(ParserIoThreadError::Stream {
                     operation: "write diagnostic fence",
                     source,
                 }),
-            },
-            Ok(None) => FrameReaderEvent::EndOfStream,
-            Err(error) => FrameReaderEvent::Failure(error),
+            }
         };
         let terminal = !matches!(event, FrameReaderEvent::Frame(_));
         if events.send(event).is_err() || terminal {
@@ -2235,8 +2240,8 @@ impl ResidentParserSession {
         no_progress_timeout: Duration,
         cancellation: &IndexCancellation,
     ) -> Result<(), ParserSupervisorError> {
-        if matches!(event, FrameReaderEvent::Frame(_)) {
-            self.wait_for_diagnostic_fence(
+        if matches!(event, FrameReaderEvent::EndOfStream) {
+            self.wait_for_diagnostic_termination(
                 phase,
                 absolute_deadline,
                 last_progress,
@@ -2244,7 +2249,7 @@ impl ResidentParserSession {
                 cancellation,
             )
         } else {
-            self.wait_for_diagnostic_termination(
+            self.wait_for_diagnostic_fence(
                 phase,
                 absolute_deadline,
                 last_progress,
@@ -2254,7 +2259,7 @@ impl ResidentParserSession {
         }
     }
 
-    /// Drain the diagnostic boundary before accepting terminal stdout state.
+    /// Drain the diagnostic boundary before accepting clean stdout termination.
     fn wait_for_diagnostic_termination(
         &mut self,
         phase: &'static str,
@@ -2319,8 +2324,7 @@ impl ResidentParserSession {
                     self.termination_requested = true;
                     return Err(io_thread_error(phase, &error));
                 }
-                Ok(DiagnosticReaderEvent::AdmissionAccepted) => {}
-                Err(RecvTimeoutError::Timeout) => self.require_child_running(phase)?,
+                Ok(DiagnosticReaderEvent::AdmissionAccepted) | Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(ParserSupervisorError::IoThread {
                         phase,
@@ -3564,6 +3568,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         Response(&'static str),
         Limit(&'static str),
         InvalidControl(ParserFrameKind),
+        Worker(ParserFailureCode),
     }
 
     struct Case {
@@ -3624,6 +3629,9 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
                 },
                 ExpectedFailure::Limit(expected),
             ) => field == &expected,
+            (ParserSupervisorError::WorkerFailure { code }, ExpectedFailure::Worker(expected)) => {
+                code == &expected
+            }
             (
                 ParserSupervisorError::Protocol {
                     source: ParserProtocolError::InvalidControlJson { kind, .. },
@@ -3803,6 +3811,10 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         )?,
         case("completion-truncated", ExpectedFailure::Io)?,
         case("completion-oversized", ExpectedFailure::Io)?,
+        case(
+            "failure-exit",
+            ExpectedFailure::Worker(ParserFailureCode::ParseRejected),
+        )?,
         case("stderr-flood", ExpectedFailure::Io)?,
         case("stderr-completion", ExpectedFailure::Io)?,
         case(

@@ -10,10 +10,11 @@ use projectatlas_core::optional_parser_protocol::PARSER_WINDOWS_BROKER_ADMISSION
 use projectatlas_core::optional_parser_protocol::{
     PARSER_FRAME_HEADER_BYTES, PARSER_MAX_STDERR_BYTES, PARSER_PROTOCOL_VERSION,
     ParserArtifactIdentity, ParserCompletion, ParserCompletionEvidence, ParserContainmentKind,
-    ParserControl, ParserFrame, ParserFrameHeader, ParserFrameKind, ParserLanguageIdentity,
-    ParserProgress, ParserProgressStage, ParserReady, ParserRequest, ParserRequestIdentity,
-    ParserResponseIdentity, ParserSessionIdentity, ParserSyntaxKind,
-    decode_parser_request_for_session, decode_parser_session_open, encode_parser_control,
+    ParserControl, ParserFailure, ParserFailureCode, ParserFrame, ParserFrameHeader,
+    ParserFrameKind, ParserLanguageIdentity, ParserProgress, ParserProgressStage, ParserReady,
+    ParserRequest, ParserRequestIdentity, ParserResponseIdentity, ParserSessionIdentity,
+    ParserSyntaxKind, decode_parser_request_for_session, decode_parser_session_open,
+    encode_parser_control,
 };
 
 #[allow(dead_code, unused_imports)]
@@ -212,6 +213,16 @@ fn hostile_peer(scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
         "completion-oversized" => {
             write_oversized_header(&mut output, ParserFrameKind::Completion)?;
+            thread::sleep(Duration::from_secs(5));
+        }
+        "failure-exit" => {
+            write_control(
+                &mut output,
+                &ParserControl::Failure(ParserFailure::new(
+                    ParserResponseIdentity::for_request(&request),
+                    ParserFailureCode::ParseRejected,
+                )),
+            )?;
         }
         "stderr-flood" => {
             diagnostic.write_all(&vec![b'x'; PARSER_MAX_STDERR_BYTES + 1])?;
