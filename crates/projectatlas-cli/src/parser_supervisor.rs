@@ -3285,6 +3285,7 @@ impl OptionalParserSupervisor {
             cancellation,
         )?;
         let source_identity = ParserSourceIdentity::for_bytes(source)?;
+        self.refresh_changed_artifact(language_id)?;
         if let Some(resident) = self.resident.as_ref() {
             let grammar_changed = self
                 .launch
@@ -3295,7 +3296,6 @@ impl OptionalParserSupervisor {
             }
         }
         if self.resident.is_none() {
-            self.refresh_changed_artifact(language_id)?;
             let grammar = self.launch.require_grammar(language_id)?;
             self.resident = Some(ResidentParserSession::launch(
                 &self.launch,
@@ -3712,6 +3712,100 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         })
     }
 
+    fn require_reused_resident_payload_revalidation(peer: &Path) -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let accepted_bytes = b"accepted-manifest";
+        fs::write(
+            temp.path().join(ARTIFACT_MANIFEST_FILE_NAME),
+            b"parser-supervisor-hostile-peer",
+        )?;
+        fs::write(
+            temp.path().join(ACCEPTED_MANIFEST_FILE_NAME),
+            accepted_bytes,
+        )?;
+        let payload_path = temp.path().join("hostile-grammar");
+        fs::write(&payload_path, b"trusted")?;
+        let modified = fs::metadata(&payload_path)?.modified()?;
+
+        let mut launch = test_launch(peer)?;
+        launch.pack_root = temp.path().to_path_buf();
+        launch.accepted_manifest_sha256 = sha256_hex(accepted_bytes);
+        launch.payloads = vec![PayloadObservation {
+            path: payload_path.clone(),
+            role: ParserPackPayloadRole::GrammarLibrary {
+                language_id: "hostile".to_owned(),
+            },
+            bytes: 7,
+            sha256: sha256_hex(b"trusted"),
+            modified: Some(modified),
+        }];
+        let grammar = ParserLanguageIdentity::new("hostile")
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let cancellation = IndexCancellation::new();
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(2))
+            .ok_or_else(|| io::Error::other("resident reuse deadline overflow"))?;
+        let resident = ResidentParserSession::launch_command(
+            &launch,
+            grammar,
+            ParserMemoryLimits::PRODUCTION,
+            deadline,
+            Duration::from_millis(150),
+            &cancellation,
+            command_for(peer, "idle-close")?,
+        )
+        .map_err(|error| {
+            io::Error::other(format!(
+                "resident reuse test launch failed before mutation: {error:?}"
+            ))
+        })?;
+        let mut supervisor = OptionalParserSupervisor {
+            pack_root: temp.path().to_path_buf(),
+            launch,
+            memory_limits: ParserMemoryLimits::PRODUCTION,
+            resident: Some(resident),
+        };
+
+        fs::write(&payload_path, b"mutated")?;
+        File::options()
+            .write(true)
+            .open(&payload_path)?
+            .set_times(fs::FileTimes::new().set_modified(modified))?;
+        if fs::metadata(&payload_path)?.len() != 7
+            || fs::metadata(&payload_path)?.modified()? != modified
+        {
+            return Err(io::Error::other(
+                "resident reuse mutation did not preserve size and modification time",
+            ));
+        }
+
+        let source = vec![b'x'; 32];
+        let operation = supervisor.parse(
+            "hostile",
+            &source,
+            default_limits()?,
+            deadline,
+            Duration::from_millis(150),
+            &cancellation,
+        );
+        let Err(error) = operation else {
+            return Err(io::Error::other(
+                "mutated launch payload was accepted by a reused resident",
+            ));
+        };
+        if error.has_mandatory_cleanup_failure() {
+            return Err(io::Error::other(format!(
+                "mutated launch payload did not cleanly destroy the resident: {error:?}"
+            )));
+        }
+        if supervisor.resident.is_some() {
+            return Err(io::Error::other(
+                "mutated launch payload retained the resident session",
+            ));
+        }
+        Ok(())
+    }
+
     fn operate(
         peer: &Path,
         case: &Case,
@@ -3804,6 +3898,8 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         }
         Ok(())
     }
+
+    require_reused_resident_payload_revalidation(peer)?;
 
     let mut cases = vec![
         case("pre-ready-stall", ExpectedFailure::NoProgress)?,
