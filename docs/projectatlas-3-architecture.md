@@ -1804,13 +1804,13 @@ derived-state refresh rather than mixing old and new keys.
 
 Broader native grammar coverage belongs to one explicit optional-pack lifecycle.
 One ProjectAtlas-owned, separately packaged parser-worker executable remains inside
-the existing seven-crate workspace. The `projectatlas-cli` runtime supervises one
-global broker-owned grammar-affined worker session for v0.4.0: Linux launches the
-worker directly, while Windows launches one artifact-bound responsibility-specific
-containment broker that owns exactly one worker grandchild and its Job Object. The
-session loads one manifest-approved grammar at a time, groups work by grammar and
-path, and restarts the worker when its grammar changes or its state becomes
-unhealthy. The worker accepts only bounded raw source
+the existing seven-crate workspace. For v0.4.0, each ProjectAtlas process owns one
+optional-parser supervisor with at most one grammar-affined resident session: Linux
+launches the worker directly, while Windows launches one artifact-bound
+responsibility-specific containment broker that owns exactly one worker grandchild
+and its Job Object. The resident loads one manifest-approved grammar at a time,
+groups work by grammar and path, and restarts when its grammar changes or its state
+becomes unhealthy. The worker accepts only bounded raw source
 bytes for that language; repository paths, commands, compilers, builds, environment
 blocks, URLs, and network requests are outside the protocol. Bounded Rust owns
 strict framing, existing task admission, deadlines, session-bound monotonically
@@ -1854,12 +1854,15 @@ succeeds. `Drop` never turns cleanup failure into success; normal control flow r
 it and retains both typed causes when the operation also failed.
 
 The OS adapter establishes the boundary before grammar loading. It clears and
-allowlists environment plus inherited handles, allows read-only access only to
-immutable pack artifacts and exact unavoidable loader/runtime state, denies repository
-filesystem reach, child creation/further exec, and network access, installs the
-platform memory/process controls, and owns process-group kill/orphan prevention.
-Job Objects and cgroups contribute resource control but are not treated as complete
-capability sandboxes.
+allowlists environment plus inherited handles, denies repository filesystem reach,
+child creation/further exec, and network access, installs the platform memory/process
+controls, and owns process-group kill/orphan prevention. Windows grants its contained
+worker read-only access to the exact immutable pack artifacts. Linux instead hands the
+worker sealed descriptor authority for the verified artifact manifest, accepted
+manifest, native-import policy, and one selected grammar; the worker consumes the
+documents before containment and retains read access only to that sealed grammar
+object. Job Objects and cgroups contribute resource control but are not treated as
+complete capability sandboxes.
 
 The launch mechanism is proven before runtime integration. The accepted optional-
 pack targets are Linux x86-64 and Windows x86-64. On Windows, Rust owns one
@@ -1881,16 +1884,26 @@ exit, including the reserved broker status, cannot impersonate that proof.
 The empty artifact-scoped AppContainer profile is
 bounded unavoidable Windows sandbox state, exposes no repository/user data, and is
 removed through the optional-pack lifecycle. Linux artifact construction eagerly
-maps and audits the exact allowed system runtime DSOs before `main`. Linux then
-starts only the trusted ProjectAtlas worker with exact protocol pipes, one thread,
-and no grammar or source payload. That worker installs hard resource/address-space
-limits and `no_new_privs`, hard-requires fully enforced Landlock ABI v3 with
-read-only access only beneath the immutable pack root, and installs seccomp
-process/exec/socket denial before reading `SessionOpen`. A validated READY
-is the first acknowledgement that binds the fresh session, artifact, and containment;
-the supervisor sends no grammar identity or source bytes before it. Delegated cgroup
-v2 improves accounting when available but is not a hidden ordinary-user prerequisite.
-Missing primitives fail closed.
+maps and audits the exact allowed system runtime DSOs before `main`. Immediately
+before each new Linux resident, the bounded artifact-I/O owner re-reads and rehashes
+only the trusted worker and selected grammar against their verified artifact rows,
+copies those bytes plus the already verified bounded documents into read-only memfds,
+and applies the complete write/grow/shrink/seal set. It executes the sealed worker
+through `/proc/self/fd` and inherits only the four dynamically identified authority
+descriptors alongside the exact protocol pipes; parent descriptors remain
+close-on-exec throughout concurrent process creation. The worker validates every
+descriptor, seal, bound, digest, manifest relationship, selected grammar, and its
+own sealed executable mapping before closing the three document descriptors. It then
+installs hard resource/address-space limits and `no_new_privs`, hard-requires fully
+enforced Landlock ABI v3 with read access only to the selected sealed grammar object,
+and installs seccomp process/exec/socket denial before reading `SessionOpen`. The
+first authenticated grammar request must match that descriptor-bound grammar and is
+loaded directly from the retained descriptor. A validated READY is the first
+acknowledgement that binds the fresh session, artifact, and containment; the
+supervisor sends no grammar identity or source bytes before it. Same-language
+resident reuse retains the constant-size metadata probes; it does not recopy or
+rehash the grammar. Delegated cgroup v2 improves accounting when available but is
+not a hidden ordinary-user prerequisite. Missing primitives fail closed.
 
 The Windows PowerShell surface is release-harness code, not a normal runtime
 dependency. Separate scripts remain only where authority changes: pinned input
@@ -2163,8 +2176,10 @@ flowchart TB
     Registry --> Fallback[Conservative default-core fallback]
     Registry -. verified and enabled .-> Supervisor[Bounded Rust supervisor]
     Supervisor --> Platform{Accepted optional-pack target}
-    Platform -->|Linux| LinuxBoot[Trusted worker; exact pipes; one thread; eager runtime DSOs]
-    LinuxBoot --> LinuxContain[Hard limits plus no_new_privs plus Landlock v3 plus seccomp]
+    Platform -->|Linux| LinuxSeal[Rehash worker plus selected grammar; seal worker, documents, policy, and one grammar]
+    LinuxSeal --> LinuxBoot[Execute sealed worker; exact pipes plus four authority descriptors]
+    LinuxBoot --> LinuxVerify[Validate seals, digests, manifest relations, executable mapping, and one thread]
+    LinuxVerify --> LinuxContain[Close documents; hard limits plus no_new_privs plus grammar-only Landlock v3 plus seccomp]
     Platform -->|Windows| Broker[Artifact-bound containment broker]
     Broker --> WindowsContain[Suspended LPAC worker; exact handles plus no-breakaway Job and completion port]
     WindowsContain --> Admission[Resume then fixed admission record]
@@ -2173,7 +2188,7 @@ flowchart TB
     AdmissionGate --> Open
     Open --> Ready[Worker emits READY: session plus artifact plus containment]
     Ready --> Gate[Supervisor validates the exact launch]
-    Gate --> Request[Grammar identity and bounded raw source now allowed]
+    Gate --> Request[First request must match sealed grammar; load only the retained descriptor; bounded source allowed]
     Request --> Validate[Contained worker parses; supervisor validates session-bound result]
     Validate --> ParseMeta[Grammar-backed source parse metadata]
     BuiltIn --> Facts[Symbols and relations with fact provenance]
@@ -2181,7 +2196,9 @@ flowchart TB
     ParseMeta --> Prepared[Typed publication candidate]
     Facts --> Prepared
     Prepared --> Publish[Atomic SQLite generation publication]
-    LinuxContain -. admission failure .-> Preserve[Terminate, reap, join, preserve MCP and previous generation]
+    LinuxSeal -. seal or launch failure .-> Preserve[Fail closed; terminate, reap, and join if started; preserve MCP and previous generation]
+    LinuxVerify -. authority or mapping failure .-> Preserve
+    LinuxContain -. containment failure .-> Preserve
     WindowsContain -. admission failure .-> Preserve
     AdmissionGate -. malformed, truncated, or failed .-> Preserve
     Validate -. failure, limit, or cancellation .-> Preserve

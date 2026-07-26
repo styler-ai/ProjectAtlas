@@ -1,7 +1,11 @@
 //! Bounded process supervision for the separately shipped optional parser pack.
 
 use std::fs::{self, File, Metadata};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use std::io::Seek;
 use std::io::{self, Read, Write};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -13,6 +17,11 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use crate::parser_linux_authority::{
+    ACCEPTED_FD_ARGUMENT, ARTIFACT_FD_ARGUMENT, GRAMMAR_FD_ARGUMENT, POLICY_FD_ARGUMENT,
+    SERVE_ARGUMENT,
+};
 use projectatlas_core::IndexCancellation;
 use projectatlas_core::optional_parser_pack::{
     OPTIONAL_PARSER_PACK_LINUX_MEMORY_PROBE_BYTES, OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES,
@@ -48,9 +57,6 @@ use thiserror::Error;
 const ACCEPTED_MANIFEST_FILE_NAME: &str = "accepted-capabilities.json";
 /// Exact immutable artifact manifest packaged beside the worker.
 const ARTIFACT_MANIFEST_FILE_NAME: &str = "artifact-manifest.json";
-/// Only accepted worker operation.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const WORKER_SERVE_ARGUMENT: &str = "--serve";
 /// Only accepted Windows broker operation.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 const BROKER_SERVE_ARGUMENT: &str = "serve-worker";
@@ -106,11 +112,14 @@ impl ParserMemoryLimits {
 }
 /// Bounded chunks used while reading artifact files.
 const ARTIFACT_READ_CHUNK_BYTES: usize = 64 * 1024;
-/// Request phase used while revalidating changed parser-pack payloads.
-const ARTIFACT_REVALIDATION_PHASE: &str = "artifact revalidation";
-/// Only one potentially blocked changed-artifact reader may exist per process.
+/// Request phase used while reading parser-pack launch authority.
+const ARTIFACT_IO_PHASE: &str = "artifact authority";
+/// Only one potentially blocked artifact reader may exist per process.
 /// ponytail: use a killable helper process if stuck kernel reads become an observed problem.
-static ARTIFACT_REVALIDATION_ACTIVE: AtomicBool = AtomicBool::new(false);
+static ARTIFACT_IO_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// One-shot deterministic handoff used only by debug-build Linux race tests.
+#[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64"))]
+static LINUX_LAUNCH_TEST_HOOK: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
 /// Maximum bytes read from one kernel-owned Linux accounting record.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const LINUX_MEMORY_RECORD_MAX_BYTES: u64 = 64 * 1024;
@@ -167,6 +176,16 @@ pub enum ParserSupervisorError {
         /// Artifact file being read.
         path: PathBuf,
         /// Filesystem failure.
+        #[source]
+        source: io::Error,
+    },
+    /// Linux could not construct one immutable launch payload.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[error("could not construct sealed Linux parser launch authority for {role}")]
+    LinuxLaunchAuthority {
+        /// Stable payload responsibility.
+        role: &'static str,
+        /// Operating-system failure.
         #[source]
         source: io::Error,
     },
@@ -362,6 +381,45 @@ pub enum ParserSupervisorError {
     },
 }
 
+/// Install one debug-build hook after sealed authority is ready and before spawn.
+#[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64"))]
+#[doc(hidden)]
+pub fn install_linux_launch_test_hook(
+    hook: impl FnOnce() + Send + 'static,
+) -> Result<(), ParserSupervisorError> {
+    let mut slot =
+        LINUX_LAUNCH_TEST_HOOK
+            .lock()
+            .map_err(|_poisoned| ParserSupervisorError::IoThread {
+                phase: "Linux launch test hook",
+                message: "test hook lock is poisoned".to_owned(),
+            })?;
+    if slot.is_some() {
+        return Err(ParserSupervisorError::IoThread {
+            phase: "Linux launch test hook",
+            message: "another test hook is already installed".to_owned(),
+        });
+    }
+    *slot = Some(Box::new(hook));
+    Ok(())
+}
+
+/// Invoke and remove the one installed debug-build Linux launch hook.
+#[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64"))]
+fn invoke_linux_launch_test_hook() -> Result<(), ParserSupervisorError> {
+    let hook = LINUX_LAUNCH_TEST_HOOK
+        .lock()
+        .map_err(|_poisoned| ParserSupervisorError::IoThread {
+            phase: "Linux launch test hook",
+            message: "test hook lock is poisoned".to_owned(),
+        })?
+        .take();
+    if let Some(hook) = hook {
+        hook();
+    }
+    Ok(())
+}
+
 impl ParserSupervisorError {
     /// Return whether mandatory process, pipe, reap, or thread cleanup failed.
     ///
@@ -545,6 +603,12 @@ struct PayloadObservation {
     file: FileObservation,
     /// Manifest-owned payload responsibility.
     role: ParserPackPayloadRole,
+    /// Exact manifest-owned byte count.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    bytes: u64,
+    /// Exact manifest-owned SHA-256 digest.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    sha256: String,
 }
 
 impl PayloadObservation {
@@ -567,10 +631,21 @@ impl PayloadObservation {
     fn is_current(&self) -> Result<bool, ParserSupervisorError> {
         self.file.is_current()
     }
+
+    /// Retain the immutable manifest row without retaining the source handle.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn linux_spec(&self) -> VerifiedLinuxPayloadSpec {
+        VerifiedLinuxPayloadSpec {
+            path: self.file.path.clone(),
+            role: self.role.clone(),
+            bytes: self.bytes,
+            sha256: self.sha256.clone(),
+        }
+    }
 }
 
 /// Request-owned stop bounds for a changed-artifact reload.
-struct ArtifactRevalidationControl<'a> {
+struct ArtifactIoControl<'a> {
     /// Immutable absolute request deadline.
     absolute_deadline: Instant,
     /// Fixed start of changed-artifact work; file reads do not extend the bound.
@@ -581,11 +656,11 @@ struct ArtifactRevalidationControl<'a> {
     cancellation: &'a IndexCancellation,
 }
 
-impl ArtifactRevalidationControl<'_> {
+impl ArtifactIoControl<'_> {
     /// Reject cancellation or an expired request bound before more reload work.
     fn poll(&self) -> Result<(), ParserSupervisorError> {
         poll_stop(
-            ARTIFACT_REVALIDATION_PHASE,
+            ARTIFACT_IO_PHASE,
             self.absolute_deadline,
             self.last_progress,
             self.no_progress_timeout,
@@ -595,47 +670,47 @@ impl ArtifactRevalidationControl<'_> {
 }
 
 /// Process-wide lease that caps potentially blocked artifact readers at one.
-struct ArtifactRevalidationLease;
+struct ArtifactIoLease;
 
-impl ArtifactRevalidationLease {
-    /// Acquire the only changed-artifact reader slot.
+impl ArtifactIoLease {
+    /// Acquire the only artifact-reader slot.
     fn acquire() -> Result<Self, ParserSupervisorError> {
-        ARTIFACT_REVALIDATION_ACTIVE
+        ARTIFACT_IO_ACTIVE
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map(|_inactive| Self)
             .map_err(|_active| ParserSupervisorError::IoThread {
-                phase: ARTIFACT_REVALIDATION_PHASE,
-                message: "another changed-artifact reader is still active".to_owned(),
+                phase: ARTIFACT_IO_PHASE,
+                message: "another parser-pack artifact reader is still active".to_owned(),
             })
     }
 }
 
-impl Drop for ArtifactRevalidationLease {
+impl Drop for ArtifactIoLease {
     fn drop(&mut self) {
-        ARTIFACT_REVALIDATION_ACTIVE.store(false, Ordering::Release);
+        ARTIFACT_IO_ACTIVE.store(false, Ordering::Release);
     }
 }
 
 /// Run potentially blocking artifact I/O behind a request-bounded worker.
-fn run_artifact_revalidation<T>(
+fn run_bounded_artifact_io<T>(
     operation: impl FnOnce() -> Result<T, ParserSupervisorError> + Send + 'static,
-    control: &ArtifactRevalidationControl<'_>,
+    control: &ArtifactIoControl<'_>,
 ) -> Result<T, ParserSupervisorError>
 where
     T: Send + 'static,
 {
     control.poll()?;
-    let lease = ArtifactRevalidationLease::acquire()?;
+    let lease = ArtifactIoLease::acquire()?;
     let (sender, receiver) = mpsc::sync_channel(1);
     let worker = thread::Builder::new()
-        .name("projectatlas-artifact-revalidation".to_owned())
+        .name("projectatlas-artifact-authority".to_owned())
         .spawn(move || {
             let result = operation();
             drop(lease);
             let _send_result = sender.send(result);
         })
         .map_err(|source| ParserSupervisorError::IoThread {
-            phase: ARTIFACT_REVALIDATION_PHASE,
+            phase: ARTIFACT_IO_PHASE,
             message: bounded_message(source.to_string()),
         })?;
     drop(worker);
@@ -654,8 +729,8 @@ where
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 return Err(ParserSupervisorError::IoThread {
-                    phase: ARTIFACT_REVALIDATION_PHASE,
-                    message: "changed-artifact reader disconnected".to_owned(),
+                    phase: ARTIFACT_IO_PHASE,
+                    message: "parser-pack artifact reader disconnected".to_owned(),
                 });
             }
         }
@@ -670,6 +745,102 @@ struct BoundedArtifactRead {
     sha256: String,
 }
 
+/// Manifest-owned identity needed to re-read one launch payload exactly.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Clone, Debug)]
+struct VerifiedLinuxPayloadSpec {
+    /// Canonical path already constrained to the parser-pack root.
+    path: PathBuf,
+    /// Manifest-owned payload responsibility.
+    role: ParserPackPayloadRole,
+    /// Exact declared byte count.
+    bytes: u64,
+    /// Exact lowercase SHA-256 digest.
+    sha256: String,
+}
+
+/// Read-only, fully sealed Linux launch payload.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug)]
+struct SealedLinuxPayload {
+    /// Read-only descriptor for the sealed memfd inode.
+    file: File,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+impl SealedLinuxPayload {
+    /// Copy already verified bytes into one immutable anonymous file.
+    fn from_verified_bytes(
+        role: &'static str,
+        name: &str,
+        bytes: &[u8],
+        executable: bool,
+        control: &ArtifactIoControl<'_>,
+    ) -> Result<Self, ParserSupervisorError> {
+        use nix::fcntl::{FcntlArg, SealFlag, fcntl};
+        use nix::sys::memfd::{MFdFlags, memfd_create};
+        use nix::sys::stat::{Mode, fchmod};
+
+        let authority_error =
+            |source: nix::errno::Errno| ParserSupervisorError::LinuxLaunchAuthority {
+                role,
+                source: io::Error::from_raw_os_error(source as i32),
+            };
+        let descriptor = memfd_create(name, MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING)
+            .map_err(authority_error)?;
+        let mut file = File::from(descriptor);
+        if executable {
+            fchmod(&file, Mode::S_IRUSR | Mode::S_IXUSR).map_err(authority_error)?;
+        }
+        for chunk in bytes.chunks(ARTIFACT_READ_CHUNK_BYTES) {
+            control.poll()?;
+            file.write_all(chunk)
+                .map_err(|source| ParserSupervisorError::LinuxLaunchAuthority { role, source })?;
+        }
+        file.rewind()
+            .map_err(|source| ParserSupervisorError::LinuxLaunchAuthority { role, source })?;
+        let required = SealFlag::F_SEAL_WRITE
+            | SealFlag::F_SEAL_GROW
+            | SealFlag::F_SEAL_SHRINK
+            | SealFlag::F_SEAL_SEAL;
+        fcntl(&file, FcntlArg::F_ADD_SEALS(required)).map_err(authority_error)?;
+        let observed = fcntl(&file, FcntlArg::F_GET_SEALS).map_err(authority_error)?;
+        if observed & required.bits() != required.bits() {
+            return Err(ParserSupervisorError::PayloadMismatch {
+                path: PathBuf::from(name),
+                reason: "Linux launch authority does not carry the complete seal set",
+            });
+        }
+
+        let read_only_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+        let read_only = File::open(&read_only_path)
+            .map_err(|source| ParserSupervisorError::LinuxLaunchAuthority { role, source })?;
+        drop(file);
+        Ok(Self { file: read_only })
+    }
+
+    /// Return the process-local descriptor identity retained through spawn.
+    fn raw_fd(&self) -> i32 {
+        self.file.as_raw_fd()
+    }
+}
+
+/// Exact immutable authority consumed by one Linux resident launch.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug)]
+struct LinuxResidentLaunchAuthority {
+    /// Executable parser worker.
+    worker: SealedLinuxPayload,
+    /// Exact artifact-manifest bytes.
+    artifact_manifest: SealedLinuxPayload,
+    /// Exact accepted-capability manifest bytes.
+    accepted_manifest: SealedLinuxPayload,
+    /// Exact native-import policy bytes.
+    native_import_policy: SealedLinuxPayload,
+    /// One grammar selected for this resident.
+    grammar: SealedLinuxPayload,
+}
+
 /// Complete private launch authority derived from one exact immutable artifact.
 #[derive(Debug)]
 struct VerifiedParserPackLaunch {
@@ -677,9 +848,6 @@ struct VerifiedParserPackLaunch {
     pack_root: PathBuf,
     /// Accepted target bound by the artifact manifest.
     platform: PackPlatform,
-    /// Exact executable launched on Linux.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    worker: PathBuf,
     /// Exact containment broker launched on Windows.
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     containment_broker: Option<PathBuf>,
@@ -687,6 +855,15 @@ struct VerifiedParserPackLaunch {
     accepted_grammars: Vec<String>,
     /// Exact artifact-manifest byte identity independently observed by Rust.
     artifact: ParserArtifactIdentity,
+    /// Exact already verified artifact-manifest bytes retained for Linux handoff.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    artifact_manifest_bytes: Vec<u8>,
+    /// Exact already verified accepted-capability bytes retained for Linux handoff.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    accepted_manifest_bytes: Vec<u8>,
+    /// Exact already verified native-import policy bytes retained for Linux handoff.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    native_import_policy_bytes: Vec<u8>,
     /// Guarded artifact manifest captured before verification and rechecked afterward.
     artifact_manifest: FileObservation,
     /// Cheap metadata observations for every already hashed payload.
@@ -708,7 +885,7 @@ impl VerifiedParserPackLaunch {
         cancellation: &IndexCancellation,
     ) -> Result<Self, ParserSupervisorError> {
         let started = Instant::now();
-        let control = ArtifactRevalidationControl {
+        let control = ArtifactIoControl {
             absolute_deadline,
             last_progress: started,
             no_progress_timeout,
@@ -717,9 +894,9 @@ impl VerifiedParserPackLaunch {
         let pack_root = pack_root.to_path_buf();
         let language_id = language_id.to_owned();
         let worker_cancellation = cancellation.clone();
-        run_artifact_revalidation(
+        run_bounded_artifact_io(
             move || {
-                let worker_control = ArtifactRevalidationControl {
+                let worker_control = ArtifactIoControl {
                     absolute_deadline,
                     last_progress: started,
                     no_progress_timeout,
@@ -741,7 +918,7 @@ impl VerifiedParserPackLaunch {
     /// Validate one artifact with optional worker-side request bounds.
     fn load_inner(
         pack_root: &Path,
-        control: Option<&ArtifactRevalidationControl<'_>>,
+        control: Option<&ArtifactIoControl<'_>>,
     ) -> Result<Self, ParserSupervisorError> {
         if let Some(control) = control {
             control.poll()?;
@@ -781,6 +958,8 @@ impl VerifiedParserPackLaunch {
         let mut worker = None;
         let mut containment_broker = None;
         let mut accepted_payload_sha256 = None;
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        let mut native_import_policy_bytes = None;
         let mut payloads = Vec::with_capacity(artifact_manifest.files.len());
         for payload in &artifact_manifest.files {
             let path = canonical_payload_file(&pack_root, payload.path.as_str())?;
@@ -816,6 +995,10 @@ impl VerifiedParserPackLaunch {
             payloads.push(PayloadObservation {
                 file,
                 role: payload.role.clone(),
+                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                bytes: payload.bytes,
+                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                sha256: payload.sha256.as_str().to_owned(),
             });
             match &payload.role {
                 ParserPackPayloadRole::Worker => worker = Some(path),
@@ -823,11 +1006,16 @@ impl VerifiedParserPackLaunch {
                 ParserPackPayloadRole::AcceptedManifest => {
                     accepted_payload_sha256 = Some(payload.sha256.as_str().to_owned());
                 }
+                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                ParserPackPayloadRole::NativeImportPolicy => {
+                    native_import_policy_bytes = Some(payload_read.bytes.clone());
+                }
                 ParserPackPayloadRole::FixtureCorpus
                 | ParserPackPayloadRole::ProjectLicense
-                | ParserPackPayloadRole::NativeImportPolicy
                 | ParserPackPayloadRole::NativeAuditReport
                 | ParserPackPayloadRole::GrammarLibrary { .. } => {}
+                #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+                ParserPackPayloadRole::NativeImportPolicy => {}
             }
         }
 
@@ -883,12 +1071,16 @@ impl VerifiedParserPackLaunch {
         }
         #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
         let _ = containment_broker;
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        let native_import_policy_bytes =
+            native_import_policy_bytes.ok_or_else(|| ParserSupervisorError::PayloadMismatch {
+                path: pack_root.clone(),
+                reason: "Linux artifact does not contain its native-import policy",
+            })?;
 
         Ok(Self {
             pack_root,
             platform,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            worker: expected_worker,
             #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
             containment_broker,
             accepted_grammars: logical
@@ -897,6 +1089,12 @@ impl VerifiedParserPackLaunch {
                 .map(|grammar| grammar.language_id.clone())
                 .collect(),
             artifact: ParserArtifactIdentity::for_bytes(&artifact_read.bytes),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            artifact_manifest_bytes: artifact_read.bytes,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            accepted_manifest_bytes: accepted_read.bytes,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            native_import_policy_bytes,
             artifact_manifest: artifact_manifest_file,
             payloads,
         })
@@ -906,7 +1104,7 @@ impl VerifiedParserPackLaunch {
     fn is_current_for(
         &self,
         language_id: &str,
-        control: Option<&ArtifactRevalidationControl<'_>>,
+        control: Option<&ArtifactIoControl<'_>>,
     ) -> Result<bool, ParserSupervisorError> {
         if let Some(control) = control {
             control.poll()?;
@@ -946,6 +1144,135 @@ impl VerifiedParserPackLaunch {
         }
         Ok(language)
     }
+
+    /// Build immutable authority for one Linux grammar-affined resident.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn prepare_resident_launch_controlled(
+        &self,
+        language_id: &str,
+        absolute_deadline: Instant,
+        no_progress_timeout: Duration,
+        cancellation: &IndexCancellation,
+    ) -> Result<LinuxResidentLaunchAuthority, ParserSupervisorError> {
+        let mut workers = self
+            .payloads
+            .iter()
+            .filter(|payload| matches!(payload.role, ParserPackPayloadRole::Worker));
+        let worker = workers.next().map(PayloadObservation::linux_spec);
+        if worker.is_none() || workers.next().is_some() {
+            return Err(ParserSupervisorError::PayloadMismatch {
+                path: self.pack_root.clone(),
+                reason: "artifact must bind exactly one Linux worker payload",
+            });
+        }
+        let mut grammars = self.payloads.iter().filter(|payload| {
+            matches!(
+                &payload.role,
+                ParserPackPayloadRole::GrammarLibrary {
+                    language_id: payload_language
+                } if payload_language == language_id
+            )
+        });
+        let grammar = grammars.next().map(PayloadObservation::linux_spec);
+        if grammar.is_none() || grammars.next().is_some() {
+            return Err(ParserSupervisorError::PayloadMismatch {
+                path: self.pack_root.clone(),
+                reason: "artifact must bind exactly one selected grammar payload",
+            });
+        }
+
+        let worker = worker.ok_or_else(|| ParserSupervisorError::PayloadMismatch {
+            path: self.pack_root.clone(),
+            reason: "artifact has no Linux worker payload",
+        })?;
+        let grammar = grammar.ok_or_else(|| ParserSupervisorError::PayloadMismatch {
+            path: self.pack_root.clone(),
+            reason: "artifact has no selected grammar payload",
+        })?;
+        let artifact_manifest = self.artifact_manifest_bytes.clone();
+        let accepted_manifest = self.accepted_manifest_bytes.clone();
+        let native_import_policy = self.native_import_policy_bytes.clone();
+        let worker_cancellation = cancellation.clone();
+        let started = Instant::now();
+        let control = ArtifactIoControl {
+            absolute_deadline,
+            last_progress: started,
+            no_progress_timeout,
+            cancellation,
+        };
+        run_bounded_artifact_io(
+            move || {
+                let worker_control = ArtifactIoControl {
+                    absolute_deadline,
+                    last_progress: started,
+                    no_progress_timeout,
+                    cancellation: &worker_cancellation,
+                };
+                let worker_bytes = read_verified_linux_payload(&worker, &worker_control)?;
+                let grammar_bytes = read_verified_linux_payload(&grammar, &worker_control)?;
+                Ok(LinuxResidentLaunchAuthority {
+                    worker: SealedLinuxPayload::from_verified_bytes(
+                        "worker",
+                        "projectatlas-parser-worker",
+                        &worker_bytes,
+                        true,
+                        &worker_control,
+                    )?,
+                    artifact_manifest: SealedLinuxPayload::from_verified_bytes(
+                        "artifact manifest",
+                        "projectatlas-artifact-manifest",
+                        &artifact_manifest,
+                        false,
+                        &worker_control,
+                    )?,
+                    accepted_manifest: SealedLinuxPayload::from_verified_bytes(
+                        "accepted capability manifest",
+                        "projectatlas-accepted-manifest",
+                        &accepted_manifest,
+                        false,
+                        &worker_control,
+                    )?,
+                    native_import_policy: SealedLinuxPayload::from_verified_bytes(
+                        "native-import policy",
+                        "projectatlas-native-policy",
+                        &native_import_policy,
+                        false,
+                        &worker_control,
+                    )?,
+                    grammar: SealedLinuxPayload::from_verified_bytes(
+                        "selected grammar",
+                        "projectatlas-selected-grammar",
+                        &grammar_bytes,
+                        false,
+                        &worker_control,
+                    )?,
+                })
+            },
+            &control,
+        )
+    }
+}
+
+/// Re-read one manifest-owned Linux payload and require its exact bytes and digest.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn read_verified_linux_payload(
+    spec: &VerifiedLinuxPayloadSpec,
+    control: &ArtifactIoControl<'_>,
+) -> Result<Vec<u8>, ParserSupervisorError> {
+    let read = read_bounded_file(&spec.path, spec.bytes, Some(control))?;
+    if u64::try_from(read.bytes.len()).ok() != Some(spec.bytes) {
+        return Err(ParserSupervisorError::PayloadMismatch {
+            path: spec.path.clone(),
+            reason: "launch payload byte count differs from the artifact manifest",
+        });
+    }
+    if read.sha256 != spec.sha256 {
+        return Err(ParserSupervisorError::PayloadMismatch {
+            path: spec.path.clone(),
+            reason: "launch payload SHA-256 differs from the artifact manifest",
+        });
+    }
+    Ok(read.bytes)
 }
 
 /// Return the accepted target for the current host or refuse before reading source.
@@ -1070,7 +1397,7 @@ fn file_metadata(path: &Path) -> Result<Metadata, ParserSupervisorError> {
 fn read_bounded_file(
     path: &Path,
     maximum: u64,
-    control: Option<&ArtifactRevalidationControl<'_>>,
+    control: Option<&ArtifactIoControl<'_>>,
 ) -> Result<BoundedArtifactRead, ParserSupervisorError> {
     let mut file = File::open(path).map_err(|source| ParserSupervisorError::ArtifactRead {
         path: path.to_path_buf(),
@@ -1119,7 +1446,7 @@ fn read_bounded_chunks(
     maximum: u64,
     bytes: &mut Vec<u8>,
     sha256: &mut Sha256,
-    control: Option<&ArtifactRevalidationControl<'_>>,
+    control: Option<&ArtifactIoControl<'_>>,
 ) -> Result<(), ParserSupervisorError> {
     let mut chunk = vec![0_u8; ARTIFACT_READ_CHUNK_BYTES].into_boxed_slice();
     loop {
@@ -2079,6 +2406,19 @@ impl ResidentParserSession {
         cancellation: &IndexCancellation,
     ) -> Result<Self, ParserSupervisorError> {
         let memory_limits = memory_limits.checked()?;
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        let command = {
+            let authority = launch.prepare_resident_launch_controlled(
+                grammar.as_str(),
+                absolute_deadline,
+                no_progress_timeout,
+                cancellation,
+            )?;
+            #[cfg(debug_assertions)]
+            invoke_linux_launch_test_hook()?;
+            platform_command(launch, authority, memory_limits)?
+        };
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
         let command = platform_command(launch, memory_limits)?;
         Self::launch_command(
             launch,
@@ -3144,32 +3484,44 @@ impl ResidentParserSession {
     }
 }
 
-/// Mark every child descriptor above stderr close-on-exec without mutating the parent.
+/// Inherit only the sealed Linux authority descriptors needed after `exec`.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[expect(
     unsafe_code,
-    reason = "Command has no safe descriptor-sanitizing hook; this pre-exec closure performs one async-signal-safe Linux syscall"
+    reason = "Command has no safe descriptor-sanitizing hook; this pre-exec closure performs only async-signal-safe Linux syscalls"
 )]
-fn close_inherited_descriptors_on_exec(command: &mut Command) {
+fn inherit_linux_authority_on_exec(command: &mut Command, authority: LinuxResidentLaunchAuthority) {
     use nix::libc;
     use std::os::unix::process::CommandExt;
 
-    // SAFETY: `pre_exec` runs after fork. The closure performs only the
-    // allocation-free `close_range` syscall and constructs an OS error from
-    // errno. CLOEXEC preserves Rust's spawn-error pipe until a successful exec.
+    let inherited = [
+        authority.artifact_manifest.raw_fd(),
+        authority.accepted_manifest.raw_fd(),
+        authority.native_import_policy.raw_fd(),
+        authority.grammar.raw_fd(),
+    ];
+    // SAFETY: `pre_exec` runs after fork. The closure retains every source
+    // descriptor and performs only allocation-free `close_range` and `fcntl`
+    // syscalls. Parent descriptors remain CLOEXEC, so concurrent spawns cannot
+    // inherit them. Rust's spawn-error pipe remains CLOEXEC until successful exec.
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
+            let _authority_guard = &authority;
             let result = libc::syscall(
                 libc::SYS_close_range,
                 3_u32,
                 u32::MAX,
                 libc::CLOSE_RANGE_CLOEXEC | libc::CLOSE_RANGE_UNSHARE,
             );
-            if result == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
+            if result != 0 {
+                return Err(io::Error::last_os_error());
             }
+            for descriptor in inherited {
+                if libc::fcntl(descriptor, libc::F_SETFD, 0) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            Ok(())
         });
     }
 }
@@ -3178,6 +3530,7 @@ fn close_inherited_descriptors_on_exec(command: &mut Command) {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn platform_command(
     launch: &VerifiedParserPackLaunch,
+    authority: LinuxResidentLaunchAuthority,
     _memory_limits: ParserMemoryLimits,
 ) -> Result<Command, ParserSupervisorError> {
     use std::os::unix::process::CommandExt;
@@ -3188,16 +3541,29 @@ fn platform_command(
             reason: "Linux supervisor received another platform artifact",
         });
     }
-    let mut command = Command::new(&launch.worker);
+    let worker_fd = authority.worker.raw_fd();
+    let artifact_fd = authority.artifact_manifest.raw_fd();
+    let accepted_fd = authority.accepted_manifest.raw_fd();
+    let policy_fd = authority.native_import_policy.raw_fd();
+    let grammar_fd = authority.grammar.raw_fd();
+    let mut command = Command::new(format!("/proc/self/fd/{worker_fd}"));
     command
-        .arg(WORKER_SERVE_ARGUMENT)
+        .arg(SERVE_ARGUMENT)
+        .arg(ARTIFACT_FD_ARGUMENT)
+        .arg(artifact_fd.to_string())
+        .arg(ACCEPTED_FD_ARGUMENT)
+        .arg(accepted_fd.to_string())
+        .arg(POLICY_FD_ARGUMENT)
+        .arg(policy_fd.to_string())
+        .arg(GRAMMAR_FD_ARGUMENT)
+        .arg(grammar_fd.to_string())
         .current_dir(&launch.pack_root)
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    close_inherited_descriptors_on_exec(&mut command);
+    inherit_linux_authority_on_exec(&mut command, authority);
     Ok(command)
 }
 
@@ -4167,12 +4533,16 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         Ok(VerifiedParserPackLaunch {
             pack_root: pack_root.clone(),
             platform,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            worker: peer.to_path_buf(),
             #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
             containment_broker: Some(peer.to_path_buf()),
             accepted_grammars: vec!["hostile".to_owned()],
             artifact: ParserArtifactIdentity::for_bytes(b"parser-supervisor-hostile-peer"),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            artifact_manifest_bytes: b"parser-supervisor-hostile-peer".to_vec(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            accepted_manifest_bytes: Vec::new(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            native_import_policy_bytes: Vec::new(),
             artifact_manifest: FileObservation::unavailable(
                 pack_root.join(ARTIFACT_MANIFEST_FILE_NAME),
             ),
@@ -4206,6 +4576,10 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             role: ParserPackPayloadRole::GrammarLibrary {
                 language_id: "hostile".to_owned(),
             },
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            bytes: 7,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            sha256: encode_sha256(Sha256::digest(b"trusted")),
         }];
         let grammar = ParserLanguageIdentity::new("hostile")
             .map_err(|error| io::Error::other(error.to_string()))?;
@@ -4529,12 +4903,16 @@ mod tests {
         VerifiedParserPackLaunch {
             pack_root: pack_root.clone(),
             platform: PackPlatform::LinuxX86_64,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            worker: pack_root.join("projectatlas-parser-worker"),
             #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
             containment_broker: Some(pack_root.join("projectatlas-parser-containment.exe")),
             accepted_grammars: vec!["alpha".to_owned(), "zeta".to_owned()],
             artifact: ParserArtifactIdentity::for_bytes(b"artifact"),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            artifact_manifest_bytes: b"artifact".to_vec(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            accepted_manifest_bytes: Vec::new(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            native_import_policy_bytes: Vec::new(),
             artifact_manifest: FileObservation::unavailable(
                 pack_root.join(ARTIFACT_MANIFEST_FILE_NAME),
             ),
@@ -4627,15 +5005,15 @@ mod tests {
         let caller_cancellation = cancellation.clone();
         let worker_cancellation = cancellation.clone();
         let caller = thread::spawn(move || {
-            let control = ArtifactRevalidationControl {
+            let control = ArtifactIoControl {
                 absolute_deadline,
                 last_progress: started,
                 no_progress_timeout,
                 cancellation: &caller_cancellation,
             };
-            let result = run_artifact_revalidation(
+            let result = run_bounded_artifact_io(
                 move || {
-                    let worker_control = ArtifactRevalidationControl {
+                    let worker_control = ArtifactIoControl {
                         absolute_deadline,
                         last_progress: started,
                         no_progress_timeout,
@@ -4658,7 +5036,7 @@ mod tests {
                     let worker_cancelled = matches!(
                         &result,
                         Err(ParserSupervisorError::Cancelled {
-                            phase: ARTIFACT_REVALIDATION_PHASE
+                            phase: ARTIFACT_IO_PHASE
                         })
                     );
                     let _finished_result = finished_sender.send(worker_cancelled);
@@ -4675,13 +5053,13 @@ mod tests {
         let returned_cancelled = matches!(
             result.as_ref(),
             Ok(Err(ParserSupervisorError::Cancelled {
-                phase: ARTIFACT_REVALIDATION_PHASE
+                phase: ARTIFACT_IO_PHASE
             }))
         );
         let refused_second_reader = matches!(
-            ArtifactRevalidationLease::acquire(),
+            ArtifactIoLease::acquire(),
             Err(ParserSupervisorError::IoThread {
-                phase: ARTIFACT_REVALIDATION_PHASE,
+                phase: ARTIFACT_IO_PHASE,
                 ..
             })
         );
@@ -4692,9 +5070,7 @@ mod tests {
             .map_err(|_panic| io::Error::other("artifact revalidation caller panicked"))?;
         let worker_cancelled = finished_receiver.recv_timeout(Duration::from_secs(1));
         let permit_deadline = Instant::now() + Duration::from_secs(1);
-        while ARTIFACT_REVALIDATION_ACTIVE.load(Ordering::Acquire)
-            && Instant::now() < permit_deadline
-        {
+        while ARTIFACT_IO_ACTIVE.load(Ordering::Acquire) && Instant::now() < permit_deadline {
             thread::yield_now();
         }
 
@@ -4716,7 +5092,7 @@ mod tests {
             "released artifact reader continued after request cancellation",
         )?;
         require_test(
-            ArtifactRevalidationLease::acquire().is_ok(),
+            ArtifactIoLease::acquire().is_ok(),
             "artifact reader permit was not reusable after worker completion",
         )
         .map_err(Into::into)
@@ -4736,7 +5112,7 @@ mod tests {
                 &cancellation,
             ),
             Err(ParserSupervisorError::Cancelled {
-                phase: ARTIFACT_REVALIDATION_PHASE
+                phase: ARTIFACT_IO_PHASE
             })
         ));
     }
@@ -4746,7 +5122,7 @@ mod tests {
         let launch = metadata_only_launch();
         let cancellation = IndexCancellation::new();
         cancellation.cancel();
-        let control = ArtifactRevalidationControl {
+        let control = ArtifactIoControl {
             absolute_deadline: Instant::now() + Duration::from_secs(1),
             last_progress: Instant::now(),
             no_progress_timeout: Duration::from_secs(1),
@@ -4756,9 +5132,48 @@ mod tests {
         assert!(matches!(
             launch.is_current_for("alpha", Some(&control)),
             Err(ParserSupervisorError::Cancelled {
-                phase: ARTIFACT_REVALIDATION_PHASE
+                phase: ARTIFACT_IO_PHASE
             })
         ));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn sealed_linux_payload_is_read_only_complete_and_immutable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use nix::fcntl::{FcntlArg, OFlag, SealFlag, fcntl};
+
+        let cancellation = IndexCancellation::new();
+        let control = ArtifactIoControl {
+            absolute_deadline: Instant::now() + Duration::from_secs(1),
+            last_progress: Instant::now(),
+            no_progress_timeout: Duration::from_secs(1),
+            cancellation: &cancellation,
+        };
+        let payload = SealedLinuxPayload::from_verified_bytes(
+            "test payload",
+            "projectatlas-sealed-payload-test",
+            b"verified authority",
+            false,
+            &control,
+        )?;
+        let status = fcntl(&payload.file, FcntlArg::F_GETFL)?;
+        assert_eq!(status & OFlag::O_ACCMODE.bits(), OFlag::O_RDONLY.bits());
+        let seals = fcntl(&payload.file, FcntlArg::F_GET_SEALS)?;
+        let required = SealFlag::F_SEAL_WRITE
+            | SealFlag::F_SEAL_GROW
+            | SealFlag::F_SEAL_SHRINK
+            | SealFlag::F_SEAL_SEAL;
+        assert_eq!(seals & required.bits(), required.bits());
+
+        let mut reader = payload.file.try_clone()?;
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        assert_eq!(bytes, b"verified authority");
+        assert!(payload.file.set_len(0).is_err());
+        let mut writer = payload.file.try_clone()?;
+        assert!(writer.write_all(b"attacker").is_err());
+        Ok(())
     }
 
     #[test]
@@ -4771,6 +5186,10 @@ mod tests {
         let observation = PayloadObservation {
             file: FileObservation::capture(path.clone())?,
             role: ParserPackPayloadRole::Worker,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            bytes: 7,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            sha256: encode_sha256(Sha256::digest(b"trusted")),
         };
         require_test(observation.is_current()?, "initial payload was rejected")?;
 
@@ -4827,6 +5246,10 @@ mod tests {
         let observation = |role| PayloadObservation {
             file: FileObservation::unavailable(PathBuf::new()),
             role,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            bytes: 0,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            sha256: String::new(),
         };
 
         assert!(observation(ParserPackPayloadRole::Worker).contributes_to_launch("rust"));

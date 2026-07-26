@@ -1,25 +1,31 @@
 //! Fail-closed Linux containment for the optional parser worker.
 //!
-//! The worker observes its exact protocol descriptors, eager system-runtime
-//! mappings, and single-threaded starting state before applying irreversible
-//! restrictions. Call [`observe_parser_worker_preconditions`] followed by
-//! [`enforce_parser_worker_containment`] before reading `SessionOpen`; after any
-//! error, terminate the partially restricted worker without reading input.
+//! The worker consumes and closes its small sealed launch documents, then
+//! observes the exact protocol descriptors, selected grammar descriptor, eager
+//! system-runtime mappings, and single-threaded starting state before applying
+//! irreversible restrictions. Call [`observe_parser_worker_preconditions`]
+//! followed by [`enforce_parser_worker_containment`] before reading
+//! `SessionOpen`; after any error, terminate the partially restricted worker
+//! without reading input.
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use landlock::{
-    ABI, Access, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
-    RulesetAttr, RulesetCreatedAttr, RulesetStatus,
+    ABI, Access, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, Ruleset, RulesetAttr,
+    RulesetCreatedAttr, RulesetStatus,
 };
 use nix::errno::Errno;
+use nix::fcntl::{FcntlArg, SealFlag, fcntl};
 use nix::libc;
 use nix::sys::prctl::{get_no_new_privs, set_no_new_privs};
 use nix::sys::resource::{Resource, getrlimit, rlim_t, setrlimit};
+use nix::sys::stat::{major, minor};
 use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, TargetArch, apply_filter};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read as _};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process;
 use thiserror::Error;
@@ -217,8 +223,8 @@ const PERSISTENT_IPC_SYSCALLS: &[i64] = &[];
 pub(crate) enum ParserWorkerContainmentStage {
     /// Caller-owned process admission has not completed.
     Preconditions,
-    /// The immutable pack root cannot be resolved or opened.
-    PackRoot,
+    /// The selected immutable grammar descriptor cannot be admitted.
+    Grammar,
     /// The worker inherited a privileged identity or capability set.
     ProcessIdentity,
     /// A hard process resource limit could not be applied or verified.
@@ -234,6 +240,23 @@ pub(crate) enum ParserWorkerContainmentStage {
 /// Failure to establish the complete Linux parser-worker boundary.
 #[derive(Debug, Error)]
 pub(crate) enum ParserWorkerContainmentError {
+    /// Inspecting one inherited sealed launch descriptor failed.
+    #[error("could not inspect inherited parser worker {role} descriptor: {source}")]
+    InspectAuthorityDescriptor {
+        /// Stable launch-payload responsibility.
+        role: &'static str,
+        /// Kernel descriptor-inspection failure.
+        #[source]
+        source: io::Error,
+    },
+    /// One inherited launch descriptor was not the required sealed read-only memfd.
+    #[error("inherited parser worker {role} descriptor admission failed: {reason}")]
+    InvalidAuthorityDescriptor {
+        /// Stable launch-payload responsibility.
+        role: &'static str,
+        /// Stable content-free rejection reason.
+        reason: &'static str,
+    },
     /// Inspecting the inherited protocol descriptors failed.
     #[error("could not inspect parser worker protocol descriptors: {source}")]
     InspectProtocolDescriptors {
@@ -244,6 +267,19 @@ pub(crate) enum ParserWorkerContainmentError {
     /// The inherited descriptor set or access modes were not exact.
     #[error("parser worker protocol descriptor admission failed: {reason}")]
     InvalidProtocolDescriptors {
+        /// Stable content-free rejection reason.
+        reason: &'static str,
+    },
+    /// Inspecting the running sealed worker executable failed.
+    #[error("could not inspect sealed parser worker executable: {source}")]
+    InspectWorkerExecutable {
+        /// Kernel executable-inspection failure.
+        #[source]
+        source: io::Error,
+    },
+    /// The running executable was not the required sealed read-only memfd.
+    #[error("parser worker executable admission failed: {reason}")]
+    InvalidWorkerExecutable {
         /// Stable content-free rejection reason.
         reason: &'static str,
     },
@@ -279,27 +315,12 @@ pub(crate) enum ParserWorkerContainmentError {
         /// Architecture reported by the Rust target.
         architecture: &'static str,
     },
-    /// Canonicalizing the immutable pack root failed.
-    #[error("could not canonicalize parser pack root {path}: {source}")]
-    CanonicalizePackRoot {
-        /// Requested immutable pack root.
-        path: PathBuf,
-        /// Filesystem failure.
+    /// Cloning the selected grammar descriptor for a Landlock rule failed.
+    #[error("could not clone selected parser grammar descriptor for Landlock: {source}")]
+    CloneGrammarDescriptor {
+        /// Descriptor-clone failure.
         #[source]
         source: io::Error,
-    },
-    /// The resolved pack root is not a directory.
-    #[error("parser pack root is not a directory: {path}")]
-    PackRootNotDirectory {
-        /// Resolved invalid pack root.
-        path: PathBuf,
-    },
-    /// Opening the pack root for a Landlock rule failed.
-    #[error("could not open parser pack root for Landlock: {source}")]
-    OpenPackRoot {
-        /// Landlock path-descriptor failure.
-        #[source]
-        source: landlock::PathFdError,
     },
     /// Reading the bounded kernel process-identity record failed.
     #[error("could not read parser worker process identity: {source}")]
@@ -405,16 +426,18 @@ impl ParserWorkerContainmentError {
     /// Return the closed stage at which containment failed.
     pub(crate) const fn stage(&self) -> ParserWorkerContainmentStage {
         match self {
-            Self::InspectProtocolDescriptors { .. }
+            Self::InspectAuthorityDescriptor { .. }
+            | Self::InvalidAuthorityDescriptor { .. }
+            | Self::InspectProtocolDescriptors { .. }
             | Self::InvalidProtocolDescriptors { .. }
+            | Self::InspectWorkerExecutable { .. }
+            | Self::InvalidWorkerExecutable { .. }
             | Self::InspectRuntimeMappings { .. }
             | Self::InvalidRuntimeMappings { .. }
             | Self::InspectThreadState { .. }
             | Self::InvalidThreadState { .. }
             | Self::UnsupportedArchitecture { .. } => ParserWorkerContainmentStage::Preconditions,
-            Self::CanonicalizePackRoot { .. }
-            | Self::PackRootNotDirectory { .. }
-            | Self::OpenPackRoot { .. } => ParserWorkerContainmentStage::PackRoot,
+            Self::CloneGrammarDescriptor { .. } => ParserWorkerContainmentStage::Grammar,
             Self::ReadProcessIdentity { .. }
             | Self::InvalidProcessIdentity { .. }
             | Self::InconsistentProcessIdentity { .. }
@@ -442,6 +465,17 @@ impl ParserWorkerContainmentError {
 pub(crate) struct ParserWorkerContainmentPreconditions {
     /// Prevent construction without kernel-backed observation.
     _private: (),
+}
+
+/// Device and inode identity of one executable file-backed mapping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RuntimeObjectIdentity {
+    /// Linux device major number.
+    device_major: u64,
+    /// Linux device minor number.
+    device_minor: u64,
+    /// Filesystem or anonymous-file inode.
+    inode: u64,
 }
 
 /// One hard resource-limit rule.
@@ -491,9 +525,102 @@ fn resource_limit_policy() -> [ResourceLimitRule; 6] {
     ]
 }
 
-/// Return the only filesystem permissions granted beneath the immutable pack root.
-fn pack_read_access() -> BitFlags<AccessFs> {
-    AccessFs::ReadFile | AccessFs::ReadDir
+/// Return the only filesystem permission granted to the selected grammar object.
+fn grammar_read_access() -> BitFlags<AccessFs> {
+    AccessFs::ReadFile.into()
+}
+
+/// Return the complete immutable-file seal set required from every authority descriptor.
+fn required_memfd_seals() -> SealFlag {
+    SealFlag::F_SEAL_WRITE | SealFlag::F_SEAL_GROW | SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_SEAL
+}
+
+/// Return whether one procfs descriptor target identifies an anonymous memfd.
+fn is_memfd_target(target: &Path) -> bool {
+    target.to_str().is_some_and(|value| {
+        value.ends_with(" (deleted)")
+            && value
+                .strip_suffix(" (deleted)")
+                .is_some_and(|name| name.starts_with("/memfd:") || name.starts_with("memfd:"))
+    })
+}
+
+/// Take ownership of one inherited read-only, fully sealed, bounded memfd.
+///
+/// # Errors
+///
+/// Returns a typed precondition failure when the descriptor is absent, aliases
+/// a non-memfd object, is writable or incompletely sealed, or exceeds its role's
+/// byte ceiling.
+#[expect(
+    unsafe_code,
+    reason = "the closed Linux launch contract transfers ownership of these exact inherited descriptors to the worker"
+)]
+pub(crate) fn take_sealed_authority_descriptor(
+    descriptor: RawFd,
+    role: &'static str,
+    maximum_bytes: u64,
+) -> Result<File, ParserWorkerContainmentError> {
+    if descriptor <= 2 {
+        return Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
+            role,
+            reason: "descriptor overlaps the standard protocol streams",
+        });
+    }
+    let path = PathBuf::from(format!("/proc/self/fd/{descriptor}"));
+    let target = fs::read_link(&path).map_err(|source| {
+        ParserWorkerContainmentError::InspectAuthorityDescriptor { role, source }
+    })?;
+    // SAFETY: the single-threaded worker has just proved this inherited
+    // descriptor exists, and the closed invocation transfers its sole
+    // ownership from the supervisor to this process.
+    let file = unsafe { File::from_raw_fd(descriptor) };
+    if !is_memfd_target(&target) {
+        return Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
+            role,
+            reason: "descriptor is not an anonymous memfd",
+        });
+    }
+
+    let metadata = file.metadata().map_err(|source| {
+        ParserWorkerContainmentError::InspectAuthorityDescriptor { role, source }
+    })?;
+    if !metadata.is_file()
+        || metadata.nlink() != 0
+        || metadata.len() == 0
+        || metadata.len() > maximum_bytes
+    {
+        return Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
+            role,
+            reason: "memfd is not a non-empty bounded anonymous regular file",
+        });
+    }
+    let flags = fcntl(&file, FcntlArg::F_GETFL).map_err(|source| {
+        ParserWorkerContainmentError::InspectAuthorityDescriptor {
+            role,
+            source: io::Error::from_raw_os_error(source as i32),
+        }
+    })?;
+    if flags & libc::O_ACCMODE != libc::O_RDONLY {
+        return Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
+            role,
+            reason: "memfd descriptor is not read-only",
+        });
+    }
+    let seals = fcntl(&file, FcntlArg::F_GET_SEALS).map_err(|source| {
+        ParserWorkerContainmentError::InspectAuthorityDescriptor {
+            role,
+            source: io::Error::from_raw_os_error(source as i32),
+        }
+    })?;
+    let required = required_memfd_seals();
+    if seals & required.bits() != required.bits() {
+        return Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
+            role,
+            reason: "memfd does not carry the complete immutable seal set",
+        });
+    }
+    Ok(file)
 }
 
 /// Read one kernel-owned text record within an exact byte ceiling.
@@ -518,10 +645,11 @@ fn is_pipe_target(target: &Path) -> bool {
         .is_some_and(|value| value.starts_with("pipe:[") && value.ends_with(']'))
 }
 
-/// Validate exact, distinct protocol-pipe targets and the transient observer descriptor.
+/// Validate exact protocol pipes, one selected grammar memfd, and the transient observer.
 fn validate_protocol_descriptor_targets(
     descriptors: &mut BTreeMap<u32, PathBuf>,
     observer_target: &Path,
+    grammar_descriptor: u32,
 ) -> Result<(), ParserWorkerContainmentError> {
     let mut protocol_targets = BTreeSet::new();
     for descriptor in PROTOCOL_DESCRIPTORS {
@@ -541,9 +669,19 @@ fn validate_protocol_descriptor_targets(
             });
         }
     }
-    if descriptors.len() > 1 || descriptors.values().any(|target| target != observer_target) {
+    let grammar_target = descriptors.remove(&grammar_descriptor).ok_or(
+        ParserWorkerContainmentError::InvalidProtocolDescriptors {
+            reason: "the selected grammar descriptor is absent",
+        },
+    )?;
+    if !is_memfd_target(&grammar_target) {
         return Err(ParserWorkerContainmentError::InvalidProtocolDescriptors {
-            reason: "an inherited descriptor exists outside the protocol set",
+            reason: "the selected grammar descriptor is not an anonymous memfd",
+        });
+    }
+    if descriptors.len() != 1 || descriptors.values().any(|target| target != observer_target) {
+        return Err(ParserWorkerContainmentError::InvalidProtocolDescriptors {
+            reason: "descriptor set differs from the protocol, grammar, and observer set",
         });
     }
     Ok(())
@@ -569,8 +707,15 @@ fn descriptor_access_mode(descriptor: u32) -> Result<u32, ParserWorkerContainmen
     Ok(flags & u32::try_from(libc::O_ACCMODE).unwrap_or(3))
 }
 
-/// Require only stdin/stdout/stderr plus the transient procfs observer descriptor.
-fn observe_protocol_descriptors() -> Result<(), ParserWorkerContainmentError> {
+/// Require only stdin/stdout/stderr, the selected grammar, and the procfs observer.
+fn observe_protocol_descriptors(
+    grammar_descriptor: RawFd,
+) -> Result<(), ParserWorkerContainmentError> {
+    let grammar_descriptor = u32::try_from(grammar_descriptor).map_err(|_source| {
+        ParserWorkerContainmentError::InvalidProtocolDescriptors {
+            reason: "the selected grammar descriptor is invalid",
+        }
+    })?;
     let descriptor_root = Path::new("/proc/self/fd");
     let observer_target = PathBuf::from(format!("/proc/{}/fd", process::id()));
     let mut descriptors = BTreeMap::new();
@@ -595,23 +740,80 @@ fn observe_protocol_descriptors() -> Result<(), ParserWorkerContainmentError> {
     }
     drop(entries);
 
-    validate_protocol_descriptor_targets(&mut descriptors, &observer_target)?;
+    validate_protocol_descriptor_targets(&mut descriptors, &observer_target, grammar_descriptor)?;
     if descriptor_access_mode(0)? != u32::try_from(libc::O_RDONLY).unwrap_or(0)
         || descriptor_access_mode(1)? != u32::try_from(libc::O_WRONLY).unwrap_or(1)
         || descriptor_access_mode(2)? != u32::try_from(libc::O_WRONLY).unwrap_or(1)
+        || descriptor_access_mode(grammar_descriptor)? != u32::try_from(libc::O_RDONLY).unwrap_or(0)
     {
         return Err(ParserWorkerContainmentError::InvalidProtocolDescriptors {
-            reason: "protocol descriptor access modes are not exact",
+            reason: "protocol or grammar descriptor access modes are not exact",
         });
     }
     Ok(())
 }
 
+/// Prove that one opened executable is a non-empty, read-only, fully sealed memfd.
+fn validate_sealed_worker_executable(
+    executable: &File,
+    target: &Path,
+) -> Result<RuntimeObjectIdentity, ParserWorkerContainmentError> {
+    if !is_memfd_target(target) {
+        return Err(ParserWorkerContainmentError::InvalidWorkerExecutable {
+            reason: "running executable is not an anonymous memfd",
+        });
+    }
+    let metadata = executable
+        .metadata()
+        .map_err(|source| ParserWorkerContainmentError::InspectWorkerExecutable { source })?;
+    if !metadata.is_file() || metadata.nlink() != 0 || metadata.len() == 0 || metadata.ino() == 0 {
+        return Err(ParserWorkerContainmentError::InvalidWorkerExecutable {
+            reason: "running executable is not a non-empty anonymous regular file",
+        });
+    }
+    let flags = fcntl(executable, FcntlArg::F_GETFL).map_err(|source| {
+        ParserWorkerContainmentError::InspectWorkerExecutable {
+            source: io::Error::from_raw_os_error(source as i32),
+        }
+    })?;
+    if flags & libc::O_ACCMODE != libc::O_RDONLY {
+        return Err(ParserWorkerContainmentError::InvalidWorkerExecutable {
+            reason: "running executable is not open read-only",
+        });
+    }
+    let seals = fcntl(executable, FcntlArg::F_GET_SEALS).map_err(|source| {
+        ParserWorkerContainmentError::InspectWorkerExecutable {
+            source: io::Error::from_raw_os_error(source as i32),
+        }
+    })?;
+    let required = required_memfd_seals();
+    if seals & required.bits() != required.bits() {
+        return Err(ParserWorkerContainmentError::InvalidWorkerExecutable {
+            reason: "running executable does not carry the complete immutable seal set",
+        });
+    }
+    Ok(RuntimeObjectIdentity {
+        device_major: major(metadata.dev()),
+        device_minor: minor(metadata.dev()),
+        inode: metadata.ino(),
+    })
+}
+
+/// Observe the sealed worker executable before trusting its mapping identity.
+fn observe_sealed_worker_executable() -> Result<RuntimeObjectIdentity, ParserWorkerContainmentError>
+{
+    let executable_path = Path::new("/proc/self/exe");
+    let target = fs::read_link(executable_path)
+        .map_err(|source| ParserWorkerContainmentError::InspectWorkerExecutable { source })?;
+    let executable = File::open(executable_path)
+        .map_err(|source| ParserWorkerContainmentError::InspectWorkerExecutable { source })?;
+    validate_sealed_worker_executable(&executable, &target)
+}
+
 /// Validate the exact executable and policy-bound eager system-runtime mappings.
 fn validate_runtime_mappings(
     mappings: &str,
-    pack_root: &Path,
-    worker_executable: &Path,
+    worker_executable: RuntimeObjectIdentity,
     expected_runtime_libraries: &[String],
 ) -> Result<(), ParserWorkerContainmentError> {
     if expected_runtime_libraries.is_empty()
@@ -637,13 +839,31 @@ fn validate_runtime_mappings(
     let mut observed_runtime_libraries = BTreeSet::new();
     for line in mappings.lines() {
         let mut remaining = line;
-        for _field in 0..5 {
-            take_mapping_field(&mut remaining).ok_or(
-                ParserWorkerContainmentError::InvalidRuntimeMappings {
-                    reason: "a runtime mapping row is malformed",
-                },
-            )?;
-        }
+        take_mapping_field(&mut remaining).ok_or(
+            ParserWorkerContainmentError::InvalidRuntimeMappings {
+                reason: "a runtime mapping row is malformed",
+            },
+        )?;
+        take_mapping_field(&mut remaining).ok_or(
+            ParserWorkerContainmentError::InvalidRuntimeMappings {
+                reason: "a runtime mapping row is malformed",
+            },
+        )?;
+        take_mapping_field(&mut remaining).ok_or(
+            ParserWorkerContainmentError::InvalidRuntimeMappings {
+                reason: "a runtime mapping row is malformed",
+            },
+        )?;
+        let mapping_device = take_mapping_field(&mut remaining).ok_or(
+            ParserWorkerContainmentError::InvalidRuntimeMappings {
+                reason: "a runtime mapping row is malformed",
+            },
+        )?;
+        let mapping_inode = take_mapping_field(&mut remaining).ok_or(
+            ParserWorkerContainmentError::InvalidRuntimeMappings {
+                reason: "a runtime mapping row is malformed",
+            },
+        )?;
         let mapped =
             remaining.trim_start_matches(|character: char| character.is_ascii_whitespace());
         if mapped.is_empty() {
@@ -662,9 +882,14 @@ fn validate_runtime_mappings(
         if mapped.starts_with('[') && mapped.ends_with(']') {
             continue;
         }
+        let mapping_identity = parse_runtime_object_identity(mapping_device, mapping_inode)?;
+        if mapping_identity == worker_executable {
+            observed_worker = true;
+            continue;
+        }
         if mapped.ends_with(" (deleted)") {
             return Err(ParserWorkerContainmentError::InvalidRuntimeMappings {
-                reason: "a mapped runtime object is deleted",
+                reason: "a deleted mapping does not match the running worker",
             });
         }
         let mapped = Path::new(mapped);
@@ -673,13 +898,7 @@ fn validate_runtime_mappings(
                 reason: "a mapped runtime object is not absolute",
             });
         }
-        if mapped == worker_executable {
-            observed_worker = true;
-        } else if mapped.starts_with(pack_root) {
-            return Err(ParserWorkerContainmentError::InvalidRuntimeMappings {
-                reason: "a pack object other than the trusted worker was mapped before admission",
-            });
-        } else if system_roots.iter().any(|root| mapped.starts_with(root)) {
+        if system_roots.iter().any(|root| mapped.starts_with(root)) {
             let library = mapped.file_name().and_then(|name| name.to_str()).ok_or(
                 ParserWorkerContainmentError::InvalidRuntimeMappings {
                     reason: "a system runtime mapping has no UTF-8 basename",
@@ -718,6 +937,44 @@ fn validate_runtime_mappings(
     Ok(())
 }
 
+/// Parse one procfs `major:minor` plus inode mapping identity.
+fn parse_runtime_object_identity(
+    device: &str,
+    inode: &str,
+) -> Result<RuntimeObjectIdentity, ParserWorkerContainmentError> {
+    let (device_major, device_minor) =
+        device
+            .split_once(':')
+            .ok_or(ParserWorkerContainmentError::InvalidRuntimeMappings {
+                reason: "a runtime mapping device identity is malformed",
+            })?;
+    let device_major = u64::from_str_radix(device_major, 16).map_err(|_source| {
+        ParserWorkerContainmentError::InvalidRuntimeMappings {
+            reason: "a runtime mapping device identity is malformed",
+        }
+    })?;
+    let device_minor = u64::from_str_radix(device_minor, 16).map_err(|_source| {
+        ParserWorkerContainmentError::InvalidRuntimeMappings {
+            reason: "a runtime mapping device identity is malformed",
+        }
+    })?;
+    let inode = inode.parse::<u64>().map_err(|_source| {
+        ParserWorkerContainmentError::InvalidRuntimeMappings {
+            reason: "a runtime mapping inode is malformed",
+        }
+    })?;
+    if inode == 0 {
+        return Err(ParserWorkerContainmentError::InvalidRuntimeMappings {
+            reason: "a file-backed runtime mapping has no inode",
+        });
+    }
+    Ok(RuntimeObjectIdentity {
+        device_major,
+        device_minor,
+        inode,
+    })
+}
+
 /// Consume one fixed whitespace-delimited procfs mapping column.
 fn take_mapping_field<'a>(remaining: &mut &'a str) -> Option<&'a str> {
     *remaining = remaining.trim_start_matches(|character: char| character.is_ascii_whitespace());
@@ -737,20 +994,13 @@ fn take_mapping_field<'a>(remaining: &mut &'a str) -> Option<&'a str> {
 
 /// Observe eager file-backed runtime mappings before Landlock closes the filesystem.
 fn observe_runtime_mappings(
-    pack_root: &Path,
+    worker_executable: RuntimeObjectIdentity,
     expected_runtime_libraries: &[String],
 ) -> Result<(), ParserWorkerContainmentError> {
     let mappings =
         read_bounded_kernel_text(Path::new("/proc/self/maps"), PROCESS_MAPPINGS_MAX_BYTES)
             .map_err(|source| ParserWorkerContainmentError::InspectRuntimeMappings { source })?;
-    let worker_executable = fs::canonicalize("/proc/self/exe")
-        .map_err(|source| ParserWorkerContainmentError::InspectRuntimeMappings { source })?;
-    validate_runtime_mappings(
-        &mappings,
-        pack_root,
-        &worker_executable,
-        expected_runtime_libraries,
-    )
+    validate_runtime_mappings(&mappings, worker_executable, expected_runtime_libraries)
 }
 
 /// Require exactly the process main thread before installing seccomp.
@@ -784,23 +1034,13 @@ fn observe_single_thread() -> Result<(), ParserWorkerContainmentError> {
 /// Returns a typed precondition failure for extra or misdirected descriptors,
 /// non-eager runtime mappings, or any additional starting thread.
 pub(crate) fn observe_parser_worker_preconditions(
-    pack_root: &Path,
+    grammar: &File,
     expected_runtime_libraries: &[String],
 ) -> Result<ParserWorkerContainmentPreconditions, ParserWorkerContainmentError> {
     accepted_target_architecture()?;
-    let canonical_pack_root = pack_root.canonicalize().map_err(|source| {
-        ParserWorkerContainmentError::CanonicalizePackRoot {
-            path: pack_root.to_path_buf(),
-            source,
-        }
-    })?;
-    if !canonical_pack_root.is_dir() {
-        return Err(ParserWorkerContainmentError::PackRootNotDirectory {
-            path: canonical_pack_root,
-        });
-    }
-    observe_protocol_descriptors()?;
-    observe_runtime_mappings(&canonical_pack_root, expected_runtime_libraries)?;
+    observe_protocol_descriptors(grammar.as_raw_fd())?;
+    let worker_executable = observe_sealed_worker_executable()?;
+    observe_runtime_mappings(worker_executable, expected_runtime_libraries)?;
     observe_single_thread()?;
     Ok(ParserWorkerContainmentPreconditions { _private: () })
 }
@@ -975,8 +1215,11 @@ fn enforce_no_new_privileges() -> Result<(), ParserWorkerContainmentError> {
     Ok(())
 }
 
-/// Restrict filesystem access to read-only pack descendants without execute grants.
-fn enforce_landlock(pack_root: PathFd) -> Result<(), ParserWorkerContainmentError> {
+/// Restrict filesystem access to the exact selected grammar object.
+fn enforce_landlock(grammar: &File) -> Result<(), ParserWorkerContainmentError> {
+    let grammar = grammar
+        .try_clone()
+        .map_err(|source| ParserWorkerContainmentError::CloneGrammarDescriptor { source })?;
     let status = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(AccessFs::from_all(ABI::V3))
@@ -984,7 +1227,7 @@ fn enforce_landlock(pack_root: PathFd) -> Result<(), ParserWorkerContainmentErro
         .create()
         .map_err(|source| ParserWorkerContainmentError::Landlock { source })?
         .set_compatibility(CompatLevel::HardRequirement)
-        .add_rule(PathBeneath::new(pack_root, pack_read_access()))
+        .add_rule(PathBeneath::new(grammar, grammar_read_access()))
         .map_err(|source| ParserWorkerContainmentError::Landlock { source })?
         .restrict_self()
         .map_err(|source| ParserWorkerContainmentError::Landlock { source })?;
@@ -1012,47 +1255,161 @@ fn enforce_seccomp() -> Result<(), ParserWorkerContainmentError> {
 
 /// Establish the complete Linux parser-worker self-containment boundary.
 ///
-/// The returned path is the canonical immutable pack root admitted by Landlock.
-/// The caller may read the first bounded `SessionOpen` only after this function
-/// succeeds.
+/// The caller may read the first bounded `SessionOpen` only after this function succeeds.
 ///
 /// # Errors
 ///
-/// Returns a typed stage failure when the accepted architecture, pack root,
-/// resource limits, `no_new_privs`, Landlock, or seccomp cannot be proven.
+/// Returns a typed stage failure when the accepted architecture, selected
+/// grammar, resource limits, `no_new_privs`, Landlock, or seccomp cannot be
+/// proven.
 /// Any error may follow irreversible partial restriction; the caller must exit.
 pub(crate) fn enforce_parser_worker_containment(
-    pack_root: &Path,
+    grammar: &File,
     _preconditions: ParserWorkerContainmentPreconditions,
-) -> Result<PathBuf, ParserWorkerContainmentError> {
+) -> Result<(), ParserWorkerContainmentError> {
     accepted_target_architecture()?;
-    let canonical_pack_root = pack_root.canonicalize().map_err(|source| {
-        ParserWorkerContainmentError::CanonicalizePackRoot {
-            path: pack_root.to_path_buf(),
-            source,
-        }
-    })?;
-    if !canonical_pack_root.is_dir() {
-        return Err(ParserWorkerContainmentError::PackRootNotDirectory {
-            path: canonical_pack_root,
-        });
-    }
-    let landlock_pack_root = PathFd::new(&canonical_pack_root)
-        .map_err(|source| ParserWorkerContainmentError::OpenPackRoot { source })?;
-
     enforce_unprivileged_process_identity()?;
     enforce_resource_limits()?;
     enforce_no_new_privileges()?;
-    enforce_landlock(landlock_pack_root)?;
+    enforce_landlock(grammar)?;
     enforce_seccomp()?;
-    Ok(canonical_pack_root)
+    Ok(())
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
 
-    /// Keep the inherited descriptor contract limited to three distinct anonymous pipes.
+    /// Accept only read-only memfds carrying the complete immutable seal set.
+    #[test]
+    fn sealed_authority_descriptor_is_exact() -> Result<(), Box<dyn std::error::Error>> {
+        use nix::sys::memfd::{MFdFlags, memfd_create};
+        use std::io::{Seek as _, Write as _};
+        use std::os::fd::IntoRawFd as _;
+
+        let descriptor = memfd_create(
+            "projectatlas-worker-authority-test",
+            MFdFlags::MFD_ALLOW_SEALING,
+        )?;
+        let mut writable = File::from(descriptor);
+        writable.write_all(b"authority")?;
+        writable.rewind()?;
+        fcntl(&writable, FcntlArg::F_ADD_SEALS(required_memfd_seals()))?;
+        let read_only = File::open(format!("/proc/self/fd/{}", writable.as_raw_fd()))?;
+        drop(writable);
+        let admitted =
+            take_sealed_authority_descriptor(read_only.into_raw_fd(), "test authority", 64)?;
+        assert_eq!(admitted.metadata()?.len(), 9);
+
+        let unsealed = memfd_create(
+            "projectatlas-worker-unsealed-test",
+            MFdFlags::MFD_ALLOW_SEALING,
+        )?;
+        let mut writable = File::from(unsealed);
+        writable.write_all(b"authority")?;
+        let read_only = File::open(format!("/proc/self/fd/{}", writable.as_raw_fd()))?;
+        drop(writable);
+        assert!(matches!(
+            take_sealed_authority_descriptor(read_only.into_raw_fd(), "test authority", 64,),
+            Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
+                reason: "memfd does not carry the complete immutable seal set",
+                ..
+            })
+        ));
+
+        let writable_descriptor = memfd_create(
+            "projectatlas-worker-writable-test",
+            MFdFlags::MFD_ALLOW_SEALING,
+        )?;
+        let mut writable = File::from(writable_descriptor);
+        writable.write_all(b"authority")?;
+        fcntl(&writable, FcntlArg::F_ADD_SEALS(required_memfd_seals()))?;
+        assert!(matches!(
+            take_sealed_authority_descriptor(writable.into_raw_fd(), "test authority", 64,),
+            Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
+                reason: "memfd descriptor is not read-only",
+                ..
+            })
+        ));
+
+        let oversized_descriptor = memfd_create(
+            "projectatlas-worker-oversized-test",
+            MFdFlags::MFD_ALLOW_SEALING,
+        )?;
+        let mut writable = File::from(oversized_descriptor);
+        writable.write_all(b"authority")?;
+        fcntl(&writable, FcntlArg::F_ADD_SEALS(required_memfd_seals()))?;
+        let read_only = File::open(format!("/proc/self/fd/{}", writable.as_raw_fd()))?;
+        drop(writable);
+        assert!(matches!(
+            take_sealed_authority_descriptor(read_only.into_raw_fd(), "test authority", 8,),
+            Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
+                reason: "memfd is not a non-empty bounded anonymous regular file",
+                ..
+            })
+        ));
+
+        let mut ordinary = tempfile::tempfile()?;
+        ordinary.write_all(b"authority")?;
+        assert!(matches!(
+            take_sealed_authority_descriptor(ordinary.into_raw_fd(), "test authority", 64,),
+            Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
+                reason: "descriptor is not an anonymous memfd",
+                ..
+            })
+        ));
+        assert!(matches!(
+            take_sealed_authority_descriptor(999_999, "test authority", 64),
+            Err(ParserWorkerContainmentError::InspectAuthorityDescriptor { .. })
+        ));
+        Ok(())
+    }
+
+    /// Bind runtime mapping identity only to a proven sealed worker memfd.
+    #[test]
+    fn sealed_worker_executable_is_exact() -> Result<(), Box<dyn std::error::Error>> {
+        use nix::sys::memfd::{MFdFlags, memfd_create};
+        use std::io::Write as _;
+
+        let descriptor = memfd_create(
+            "projectatlas-worker-executable-test",
+            MFdFlags::MFD_ALLOW_SEALING,
+        )?;
+        let mut writable = File::from(descriptor);
+        writable.write_all(b"worker")?;
+        fcntl(&writable, FcntlArg::F_ADD_SEALS(required_memfd_seals()))?;
+        let read_only = File::open(format!("/proc/self/fd/{}", writable.as_raw_fd()))?;
+        let target = fs::read_link(format!("/proc/self/fd/{}", read_only.as_raw_fd()))?;
+        drop(writable);
+
+        let identity = validate_sealed_worker_executable(&read_only, &target)?;
+        assert_eq!(identity.inode, read_only.metadata()?.ino());
+        assert!(matches!(
+            validate_sealed_worker_executable(&read_only, Path::new("/tmp/worker")),
+            Err(ParserWorkerContainmentError::InvalidWorkerExecutable {
+                reason: "running executable is not an anonymous memfd"
+            })
+        ));
+
+        let unsealed = memfd_create(
+            "projectatlas-worker-unsealed-executable-test",
+            MFdFlags::MFD_ALLOW_SEALING,
+        )?;
+        let mut writable = File::from(unsealed);
+        writable.write_all(b"worker")?;
+        let read_only = File::open(format!("/proc/self/fd/{}", writable.as_raw_fd()))?;
+        let target = fs::read_link(format!("/proc/self/fd/{}", read_only.as_raw_fd()))?;
+        drop(writable);
+        assert!(matches!(
+            validate_sealed_worker_executable(&read_only, &target),
+            Err(ParserWorkerContainmentError::InvalidWorkerExecutable {
+                reason: "running executable does not carry the complete immutable seal set"
+            })
+        ));
+        Ok(())
+    }
+
+    /// Keep inherited descriptors limited to three pipes and one selected grammar memfd.
     #[test]
     fn protocol_descriptor_targets_are_exact() {
         assert!(is_pipe_target(Path::new("pipe:[123]")));
@@ -1064,18 +1421,33 @@ mod tests {
             (0, PathBuf::from("pipe:[100]")),
             (1, PathBuf::from("pipe:[101]")),
             (2, PathBuf::from("pipe:[102]")),
-            (3, observer_target.to_path_buf()),
+            (3, PathBuf::from("/memfd:selected-grammar (deleted)")),
+            (4, observer_target.to_path_buf()),
         ]);
-        assert!(validate_protocol_descriptor_targets(&mut accepted, observer_target).is_ok());
+        assert!(validate_protocol_descriptor_targets(&mut accepted, observer_target, 3).is_ok());
+
+        let mut missing_observer = BTreeMap::from([
+            (0, PathBuf::from("pipe:[100]")),
+            (1, PathBuf::from("pipe:[101]")),
+            (2, PathBuf::from("pipe:[102]")),
+            (3, PathBuf::from("/memfd:selected-grammar (deleted)")),
+        ]);
+        assert!(matches!(
+            validate_protocol_descriptor_targets(&mut missing_observer, observer_target, 3),
+            Err(ParserWorkerContainmentError::InvalidProtocolDescriptors {
+                reason: "descriptor set differs from the protocol, grammar, and observer set"
+            })
+        ));
 
         let mut aliased = BTreeMap::from([
             (0, PathBuf::from("pipe:[100]")),
             (1, PathBuf::from("pipe:[101]")),
             (2, PathBuf::from("pipe:[101]")),
-            (3, observer_target.to_path_buf()),
+            (3, PathBuf::from("/memfd:selected-grammar (deleted)")),
+            (4, observer_target.to_path_buf()),
         ]);
         assert!(matches!(
-            validate_protocol_descriptor_targets(&mut aliased, observer_target),
+            validate_protocol_descriptor_targets(&mut aliased, observer_target, 3),
             Err(ParserWorkerContainmentError::InvalidProtocolDescriptors {
                 reason: "protocol descriptors do not use distinct pipes"
             })
@@ -1100,37 +1472,40 @@ mod tests {
             "libm.so.6".to_owned(),
             "libstdc++.so.6".to_owned(),
         ];
-        assert!(
-            validate_runtime_mappings(
-                accepted,
-                Path::new("/opt/pack"),
-                Path::new("/opt/pack/projectatlas-parser-worker"),
-                &expected,
-            )
-            .is_ok()
+        let worker = RuntimeObjectIdentity {
+            device_major: 0,
+            device_minor: 0,
+            inode: 1,
+        };
+        assert!(validate_runtime_mappings(accepted, worker, &expected,).is_ok());
+        let deleted_worker = accepted.replace(
+            "/opt/pack/projectatlas-parser-worker",
+            "/memfd:projectatlas-parser-worker (deleted)",
         );
+        assert!(
+            validate_runtime_mappings(&deleted_worker, worker, &expected).is_ok(),
+            "the deleted executable memfd was not admitted by device and inode"
+        );
+        let unrelated_deleted = deleted_worker.replacen(
+            "00400000-00401000 r-xp 00000000 00:00 1",
+            "00400000-00401000 r-xp 00000000 00:00 9",
+            1,
+        );
+        assert!(matches!(
+            validate_runtime_mappings(&unrelated_deleted, worker, &expected),
+            Err(ParserWorkerContainmentError::InvalidRuntimeMappings {
+                reason: "a deleted mapping does not match the running worker"
+            })
+        ));
 
         let versioned_system_runtime =
             accepted.replace("/usr/lib/libstdc++.so.6", "/usr/lib/libstdc++.so.6.0.33");
-        assert!(
-            validate_runtime_mappings(
-                &versioned_system_runtime,
-                Path::new("/opt/pack"),
-                Path::new("/opt/pack/projectatlas-parser-worker"),
-                &expected,
-            )
-            .is_ok()
-        );
+        assert!(validate_runtime_mappings(&versioned_system_runtime, worker, &expected,).is_ok());
 
         let unbound_system_runtime =
             accepted.replace("/usr/lib/libstdc++.so.6", "/usr/lib/libstdc++.so.6.backup");
         assert!(matches!(
-            validate_runtime_mappings(
-                &unbound_system_runtime,
-                Path::new("/opt/pack"),
-                Path::new("/opt/pack/projectatlas-parser-worker"),
-                &expected,
-            ),
+            validate_runtime_mappings(&unbound_system_runtime, worker, &expected,),
             Err(ParserWorkerContainmentError::InvalidRuntimeMappings { .. })
         ));
 
@@ -1138,38 +1513,20 @@ mod tests {
             "/opt/pack/projectatlas-parser-worker",
             "/opt/Project Atlas/pack/projectatlas-parser-worker",
         );
-        assert!(
-            validate_runtime_mappings(
-                &spaced_pack,
-                Path::new("/opt/Project Atlas/pack"),
-                Path::new("/opt/Project Atlas/pack/projectatlas-parser-worker"),
-                &expected,
-            )
-            .is_ok()
-        );
+        assert!(validate_runtime_mappings(&spaced_pack, worker, &expected,).is_ok());
 
         let repository_mapping = format!(
             "{accepted}7f002000-7f003000 r--p 00000000 00:00 3 /workspace/repository/input\n"
         );
         assert!(matches!(
-            validate_runtime_mappings(
-                &repository_mapping,
-                Path::new("/opt/pack"),
-                Path::new("/opt/pack/projectatlas-parser-worker"),
-                &expected,
-            ),
+            validate_runtime_mappings(&repository_mapping, worker, &expected,),
             Err(ParserWorkerContainmentError::InvalidRuntimeMappings { .. })
         ));
 
         let deleted_mapping =
             accepted.replace("/usr/lib/libc.so.6", "/usr/lib/libc.so.6 (deleted)");
         assert!(matches!(
-            validate_runtime_mappings(
-                &deleted_mapping,
-                Path::new("/opt/pack"),
-                Path::new("/opt/pack/projectatlas-parser-worker"),
-                &expected,
-            ),
+            validate_runtime_mappings(&deleted_mapping, worker, &expected,),
             Err(ParserWorkerContainmentError::InvalidRuntimeMappings { .. })
         ));
 
@@ -1178,12 +1535,7 @@ mod tests {
             "7f003000-7f004000 r-xp 00000000 00:00 4 /usr/lib/libinjected.so\n7f001000-7f002000 rw-p",
         );
         assert!(matches!(
-            validate_runtime_mappings(
-                &injected,
-                Path::new("/opt/pack"),
-                Path::new("/opt/pack/projectatlas-parser-worker"),
-                &expected,
-            ),
+            validate_runtime_mappings(&injected, worker, &expected,),
             Err(ParserWorkerContainmentError::InvalidRuntimeMappings { .. })
         ));
 
@@ -1193,12 +1545,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(matches!(
-            validate_runtime_mappings(
-                &missing_loader,
-                Path::new("/opt/pack"),
-                Path::new("/opt/pack/projectatlas-parser-worker"),
-                &expected,
-            ),
+            validate_runtime_mappings(&missing_loader, worker, &expected,),
             Err(ParserWorkerContainmentError::InvalidRuntimeMappings { .. })
         ));
 
@@ -1208,12 +1555,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(matches!(
-            validate_runtime_mappings(
-                &missing_vdso,
-                Path::new("/opt/pack"),
-                Path::new("/opt/pack/projectatlas-parser-worker"),
-                &expected,
-            ),
+            validate_runtime_mappings(&missing_vdso, worker, &expected,),
             Err(ParserWorkerContainmentError::InvalidRuntimeMappings { .. })
         ));
     }
@@ -1293,12 +1635,12 @@ mod tests {
         ));
     }
 
-    /// Grant pack reads without granting execution or mutation.
+    /// Grant only exact grammar reads without directory, execution, or mutation access.
     #[test]
-    fn pack_policy_is_read_only_and_non_executable() {
-        let access = pack_read_access();
+    fn grammar_policy_is_read_only_and_non_executable() {
+        let access = grammar_read_access();
         assert!(access.contains(AccessFs::ReadFile));
-        assert!(access.contains(AccessFs::ReadDir));
+        assert!(!access.contains(AccessFs::ReadDir));
         assert!(!access.contains(AccessFs::Execute));
         assert!((access & AccessFs::from_write(ABI::V3)).is_empty());
     }
