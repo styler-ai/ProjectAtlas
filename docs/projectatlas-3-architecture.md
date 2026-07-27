@@ -1831,9 +1831,15 @@ retain the caller or start another filesystem worker. Only a proven-current resu
 permits resident reuse: uncertainty shuts down the resident without a reload, while
 an observed change shuts it down and enters the existing bounded digest reload
 before any replacement is accepted. One no-progress epoch begins at parse admission
-and remains fixed through currentness, digest reload, Linux sealing, platform
-admission, `SessionOpen`, and identity-validated READY. Only validated READY or
-advancing session-bound parser progress starts a later no-progress interval.
+and remains fixed through currentness, digest reload, Linux sealing, bounded process
+creation, platform admission, `SessionOpen`, and identity-validated READY. Process
+creation has one process-wide capacity-one owner. The caller polls the same absolute,
+no-progress, and cancellation bounds before spawn and after process/thread setup; if
+spawn returns only after the caller stops, the owner retains its lease and the exact
+late child until that child is killed and reaped. A late cleanup failure becomes
+sticky fail-closed launch state instead of disappearing after the caller returns.
+Only validated READY or advancing session-bound parser progress starts a later
+no-progress interval.
 
 This is one concrete `projectatlas-cli` supervisor, not separate runtime and release
 implementations. Normal staging and a CLI-owned fresh-artifact verifier reuse its
@@ -2204,11 +2210,13 @@ flowchart TB
     Reload --> Resident
     Resident -->|no| Platform{Accepted optional-pack target}
     Platform -->|Linux| LinuxSeal[Rehash worker plus selected grammar; seal executable worker plus grammar and non-executable documents]
-    LinuxSeal --> LinuxBoot[Execute sealed worker; exact pipes plus four authority descriptors]
+    LinuxSeal --> Spawn[One bounded process-wide spawn owner]
+    Platform -->|Windows| Spawn
+    Spawn -->|Linux| LinuxBoot[Execute sealed worker; exact pipes plus four authority descriptors]
     LinuxBoot --> LinuxAuthority[Validate descriptors and seals; read and close documents; validate digests, relations, and selected grammar]
     LinuxAuthority --> LinuxVerify[Validate executable mapping, eager runtime DSOs, and one-thread state]
     LinuxVerify --> LinuxContain[Hard limits plus no_new_privs plus grammar-only Landlock v3 plus seccomp]
-    Platform -->|Windows| Broker[Artifact-bound containment broker]
+    Spawn -->|Windows| Broker[Artifact-bound containment broker]
     Broker --> WindowsContain[Suspended LPAC worker; exact handles plus no-breakaway Job and completion port]
     WindowsContain --> Admission[Resume then fixed admission record]
     Admission --> AdmissionGate[Rust validates adapter admission]
@@ -2227,7 +2235,10 @@ flowchart TB
     Prepared --> Publish[Atomic SQLite generation publication]
     Currentness -. blocked, timed out, or canceled .-> FailureCleanup[Terminate and reap resident]
     Reload -. read or identity failure .-> Preserve
-    Platform -. launch, authority, containment, or admission failure .-> Preserve[Fail closed; terminate, reap, and join if started; preserve MCP and previous generation]
+    Platform -. authority or containment preparation failure .-> Preserve[Fail closed; terminate, reap, and join if started; preserve MCP and previous generation]
+    Spawn -. spawn failure .-> Preserve
+    Spawn -. caller stopped before handoff .-> LateSpawnCleanup[Retain lease; kill and reap any late child; poison launch if cleanup fails]
+    LateSpawnCleanup --> Preserve
     Open -. write, timeout, or cancellation .-> FailureCleanup
     Ready -. stalled or invalid READY .-> FailureCleanup
     Gate -. identity mismatch .-> FailureCleanup

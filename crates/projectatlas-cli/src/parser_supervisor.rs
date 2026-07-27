@@ -115,12 +115,27 @@ impl ParserMemoryLimits {
 const ARTIFACT_READ_CHUNK_BYTES: usize = 64 * 1024;
 /// Request phase used while reading parser-pack launch authority.
 const ARTIFACT_IO_PHASE: &str = "artifact authority";
+/// Request phase covering process creation and synchronous supervisor setup.
+const PROCESS_LAUNCH_PHASE: &str = "process launch";
 /// Only one potentially blocked artifact reader may exist per process.
 /// ponytail: use a killable helper process if stuck kernel reads become an observed problem.
 static ARTIFACT_IO_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Process-wide lease that caps potentially blocked child creation at one.
+static PROCESS_SPAWN_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Sticky fail-closed ownership for cleanup that completed after its caller returned.
+static PROCESS_SPAWN_CLEANUP_FAILURE: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
 /// One-shot deterministic handoff used only by debug-build Linux race tests.
 #[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64"))]
 static LINUX_LAUNCH_TEST_HOOK: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+/// One-shot debug-test delay at the real currentness boundary.
+#[cfg(debug_assertions)]
+static CURRENTNESS_TEST_HOOK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
+    std::sync::Mutex::new(None);
+/// One-shot debug-test delay immediately before the cumulative process-launch bound check.
+#[cfg(debug_assertions)]
+static PRE_SPAWN_TEST_HOOK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
+    std::sync::Mutex::new(None);
 /// Maximum bytes read from one kernel-owned Linux accounting record.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const LINUX_MEMORY_RECORD_MAX_BYTES: u64 = 64 * 1024;
@@ -421,6 +436,84 @@ fn invoke_linux_launch_test_hook() -> Result<(), ParserSupervisorError> {
     Ok(())
 }
 
+/// Install one debug-build hook at the first launch-input currentness observation.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn install_currentness_test_hook(
+    hook: impl FnOnce() + Send + 'static,
+) -> Result<(), ParserSupervisorError> {
+    let mut slot =
+        CURRENTNESS_TEST_HOOK
+            .lock()
+            .map_err(|_poisoned| ParserSupervisorError::IoThread {
+                phase: ARTIFACT_IO_PHASE,
+                message: "currentness test hook lock is poisoned".to_owned(),
+            })?;
+    if slot.is_some() {
+        return Err(ParserSupervisorError::IoThread {
+            phase: ARTIFACT_IO_PHASE,
+            message: "another currentness test hook is already installed".to_owned(),
+        });
+    }
+    *slot = Some(Box::new(hook));
+    Ok(())
+}
+
+/// Invoke and remove the installed currentness test hook.
+#[cfg(debug_assertions)]
+fn invoke_currentness_test_hook() -> Result<(), ParserSupervisorError> {
+    let hook = CURRENTNESS_TEST_HOOK
+        .lock()
+        .map_err(|_poisoned| ParserSupervisorError::IoThread {
+            phase: ARTIFACT_IO_PHASE,
+            message: "currentness test hook lock is poisoned".to_owned(),
+        })?
+        .take();
+    if let Some(hook) = hook {
+        hook();
+    }
+    Ok(())
+}
+
+/// Install one debug-build delay before the final pre-spawn bound check.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn install_pre_spawn_test_hook(
+    hook: impl FnOnce() + Send + 'static,
+) -> Result<(), ParserSupervisorError> {
+    let mut slot =
+        PRE_SPAWN_TEST_HOOK
+            .lock()
+            .map_err(|_poisoned| ParserSupervisorError::IoThread {
+                phase: PROCESS_LAUNCH_PHASE,
+                message: "pre-spawn test hook lock is poisoned".to_owned(),
+            })?;
+    if slot.is_some() {
+        return Err(ParserSupervisorError::IoThread {
+            phase: PROCESS_LAUNCH_PHASE,
+            message: "another pre-spawn test hook is already installed".to_owned(),
+        });
+    }
+    *slot = Some(Box::new(hook));
+    Ok(())
+}
+
+/// Invoke and remove the installed pre-spawn test hook.
+#[cfg(debug_assertions)]
+fn invoke_pre_spawn_test_hook() -> Result<(), ParserSupervisorError> {
+    let hook = PRE_SPAWN_TEST_HOOK
+        .lock()
+        .map_err(|_poisoned| ParserSupervisorError::IoThread {
+            phase: PROCESS_LAUNCH_PHASE,
+            message: "pre-spawn test hook lock is poisoned".to_owned(),
+        })?
+        .take();
+    if let Some(hook) = hook {
+        hook();
+    }
+    Ok(())
+}
+
 impl ParserSupervisorError {
     /// Return whether the caller stopped an otherwise live protocol operation.
     const fn is_caller_stop(&self) -> bool {
@@ -606,6 +699,8 @@ impl MetadataProbeBlocker {
 impl FileCurrentnessProbe {
     /// Observe the path and compare it with the verified change epoch.
     fn is_current(&self) -> Result<bool, ParserSupervisorError> {
+        #[cfg(debug_assertions)]
+        invoke_currentness_test_hook()?;
         #[cfg(test)]
         if let Some(blocker) = &self.blocker {
             blocker.wait()?;
@@ -944,6 +1039,182 @@ where
     }
 }
 
+/// Process-wide lease retained until a blocked spawn returns and any late child is reaped.
+struct ProcessSpawnLease;
+
+impl ProcessSpawnLease {
+    /// Acquire the only potentially blocked process-creation slot.
+    fn acquire() -> Result<Self, ParserSupervisorError> {
+        PROCESS_SPAWN_ACTIVE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_inactive| Self)
+            .map_err(|_active| ParserSupervisorError::IoThread {
+                phase: PROCESS_LAUNCH_PHASE,
+                message: "another optional-parser process creation is still active".to_owned(),
+            })
+    }
+}
+
+impl Drop for ProcessSpawnLease {
+    fn drop(&mut self) {
+        PROCESS_SPAWN_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+/// Child that must be reaped unless the caller explicitly accepts ownership.
+struct UnadmittedChild {
+    /// Direct worker or broker child.
+    child: Option<Child>,
+    /// Process-creation slot retained until admission or mandatory cleanup.
+    _lease: ProcessSpawnLease,
+}
+
+impl UnadmittedChild {
+    /// Retain cleanup ownership across a bounded caller handoff.
+    const fn new(child: Child, lease: ProcessSpawnLease) -> Self {
+        Self {
+            child: Some(child),
+            _lease: lease,
+        }
+    }
+
+    /// Transfer the child to the normal resident-session owner.
+    fn admit(mut self) -> Result<Child, ParserSupervisorError> {
+        self.child
+            .take()
+            .ok_or_else(|| ParserSupervisorError::IoThread {
+                phase: PROCESS_LAUNCH_PHASE,
+                message: "process-spawn worker returned no child".to_owned(),
+            })
+    }
+}
+
+impl Drop for UnadmittedChild {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if let Err(error) = cleanup_partial_launch(&mut child, Vec::new(), None, None, None) {
+            record_process_spawn_cleanup_failure(&error);
+        }
+    }
+}
+
+/// Preserve the first late cleanup failure for every later launch attempt.
+fn record_process_spawn_cleanup_failure(error: &ParserSupervisorError) {
+    if let Ok(mut slot) = PROCESS_SPAWN_CLEANUP_FAILURE.lock()
+        && slot.is_none()
+    {
+        *slot = Some(bounded_message(format!(
+            "late optional-parser process cleanup failed: {error}"
+        )));
+    }
+}
+
+/// Reject new launches after a late cleanup failure has made process ownership uncertain.
+fn require_process_spawn_cleanup_health() -> Result<(), ParserSupervisorError> {
+    let slot = PROCESS_SPAWN_CLEANUP_FAILURE.lock().map_err(|_poisoned| {
+        ParserSupervisorError::IoThread {
+            phase: PROCESS_LAUNCH_PHASE,
+            message: "process-spawn cleanup state is poisoned".to_owned(),
+        }
+    })?;
+    if let Some(message) = slot.as_ref() {
+        return Err(ParserSupervisorError::Cleanup {
+            message: message.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Run one potentially blocking `Command::spawn` without retaining the bounded caller.
+fn run_bounded_process_spawn(
+    command: Command,
+    absolute_deadline: Instant,
+    last_progress: Instant,
+    no_progress_timeout: Duration,
+    cancellation: &IndexCancellation,
+) -> Result<Child, ParserSupervisorError> {
+    run_bounded_process_spawn_with(
+        command,
+        absolute_deadline,
+        last_progress,
+        no_progress_timeout,
+        cancellation,
+        |mut command| command.spawn(),
+    )
+}
+
+/// Execute the concrete spawn operation behind one owned cleanup handoff.
+fn run_bounded_process_spawn_with(
+    command: Command,
+    absolute_deadline: Instant,
+    last_progress: Instant,
+    no_progress_timeout: Duration,
+    cancellation: &IndexCancellation,
+    spawn: impl FnOnce(Command) -> io::Result<Child> + Send + 'static,
+) -> Result<Child, ParserSupervisorError> {
+    poll_stop(
+        PROCESS_LAUNCH_PHASE,
+        absolute_deadline,
+        last_progress,
+        no_progress_timeout,
+        cancellation,
+    )?;
+    require_process_spawn_cleanup_health()?;
+    let lease = ProcessSpawnLease::acquire()?;
+    let program = PathBuf::from(command.get_program());
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let worker = thread::Builder::new()
+        .name("projectatlas-process-spawn".to_owned())
+        .spawn(move || {
+            let result = spawn(command)
+                .map(|child| UnadmittedChild::new(child, lease))
+                .map_err(|source| ParserSupervisorError::Spawn { program, source });
+            if let Err(undelivered) = sender.send(result) {
+                drop(undelivered);
+            }
+        })
+        .map_err(|source| ParserSupervisorError::IoThread {
+            phase: PROCESS_LAUNCH_PHASE,
+            message: bounded_message(source.to_string()),
+        })?;
+    drop(worker);
+
+    loop {
+        poll_stop(
+            PROCESS_LAUNCH_PHASE,
+            absolute_deadline,
+            last_progress,
+            no_progress_timeout,
+            cancellation,
+        )?;
+        match receiver.recv_timeout(next_poll_wait(
+            absolute_deadline,
+            last_progress,
+            no_progress_timeout,
+        )) {
+            Ok(result) => {
+                poll_stop(
+                    PROCESS_LAUNCH_PHASE,
+                    absolute_deadline,
+                    last_progress,
+                    no_progress_timeout,
+                    cancellation,
+                )?;
+                return result.and_then(UnadmittedChild::admit);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(ParserSupervisorError::IoThread {
+                    phase: PROCESS_LAUNCH_PHASE,
+                    message: "process-spawn worker disconnected".to_owned(),
+                });
+            }
+        }
+    }
+}
+
 /// Bytes and digest produced together by one bounded artifact-file pass.
 struct BoundedArtifactRead {
     /// Exact bounded file bytes.
@@ -996,9 +1267,25 @@ impl SealedLinuxPayload {
         executable: bool,
         control: &ArtifactIoControl<'_>,
     ) -> Result<Self, ParserSupervisorError> {
+        use nix::sys::memfd::memfd_create;
+
+        Self::from_verified_bytes_with_create(role, name, bytes, executable, control, |flags| {
+            memfd_create(name, flags)
+        })
+    }
+
+    /// Copy verified bytes through an injected memfd creator for fallback-path proof.
+    fn from_verified_bytes_with_create(
+        role: &'static str,
+        name: &str,
+        bytes: &[u8],
+        executable: bool,
+        control: &ArtifactIoControl<'_>,
+        create: impl FnMut(nix::sys::memfd::MFdFlags) -> Result<std::os::fd::OwnedFd, nix::errno::Errno>,
+    ) -> Result<Self, ParserSupervisorError> {
         use nix::fcntl::{FcntlArg, SealFlag, fcntl};
         use nix::libc;
-        use nix::sys::memfd::{MFdFlags, memfd_create};
+        use nix::sys::memfd::MFdFlags;
         use nix::sys::stat::{Mode, fchmod};
 
         let authority_error =
@@ -1012,10 +1299,8 @@ impl SealedLinuxPayload {
         } else {
             libc::MFD_NOEXEC_SEAL
         };
-        let descriptor = create_memfd_with_legacy_fallback(flags, mode_flag, |attempt_flags| {
-            memfd_create(name, attempt_flags)
-        })
-        .map_err(authority_error)?;
+        let descriptor =
+            create_memfd_with_legacy_fallback(flags, mode_flag, create).map_err(authority_error)?;
         let mut file = File::from(descriptor);
         let mode = if executable {
             Mode::S_IRUSR | Mode::S_IXUSR
@@ -2704,6 +2989,13 @@ impl ResidentParserSession {
         mut command: Command,
     ) -> Result<Self, ParserSupervisorError> {
         let _ = memory_limits;
+        poll_stop(
+            PROCESS_LAUNCH_PHASE,
+            absolute_deadline,
+            last_progress,
+            no_progress_timeout,
+            cancellation,
+        )?;
         let session = fresh_session_identity()?;
         let containment = containment_for_platform(launch.platform);
         let diagnostic_fence = fresh_diagnostic_fence()?;
@@ -2719,11 +3011,27 @@ impl ResidentParserSession {
             }
         })?;
         command.stderr(Stdio::from(child_diagnostic_writer));
-        let program = PathBuf::from(command.get_program());
-        let mut child = command
-            .spawn()
-            .map_err(|source| ParserSupervisorError::Spawn { program, source })?;
-        drop(command);
+        #[cfg(debug_assertions)]
+        invoke_pre_spawn_test_hook()?;
+        let mut child = run_bounded_process_spawn(
+            command,
+            absolute_deadline,
+            last_progress,
+            no_progress_timeout,
+            cancellation,
+        )?;
+        if let Err(operation) = poll_stop(
+            PROCESS_LAUNCH_PHASE,
+            absolute_deadline,
+            last_progress,
+            no_progress_timeout,
+            cancellation,
+        ) {
+            return Err(attach_cleanup(
+                operation,
+                cleanup_partial_launch(&mut child, Vec::new(), None, None, None),
+            ));
+        }
         let stdin = child
             .stdin
             .take()
@@ -2741,7 +3049,7 @@ impl ResidentParserSession {
                     .unwrap_or(ParserSupervisorError::MissingPipe { stream: "unknown" });
                 return Err(attach_cleanup(
                     operation,
-                    cleanup_partial_launch(&mut child, Vec::new()),
+                    cleanup_partial_launch(&mut child, Vec::new(), None, None, None),
                 ));
             }
         };
@@ -2759,7 +3067,7 @@ impl ResidentParserSession {
             Err(error) => {
                 return Err(attach_cleanup(
                     error,
-                    cleanup_partial_launch(&mut child, Vec::new()),
+                    cleanup_partial_launch(&mut child, Vec::new(), None, None, None),
                 ));
             }
         };
@@ -2784,7 +3092,7 @@ impl ResidentParserSession {
                 drop(writer_sender);
                 return Err(attach_cleanup(
                     error,
-                    cleanup_partial_launch(&mut child, vec![writer_handle]),
+                    cleanup_partial_launch(&mut child, vec![writer_handle], None, None, None),
                 ));
             }
         };
@@ -2810,10 +3118,35 @@ impl ResidentParserSession {
                 drop(writer_sender);
                 return Err(attach_cleanup(
                     error,
-                    cleanup_partial_launch(&mut child, vec![writer_handle, frame_handle]),
+                    cleanup_partial_launch(
+                        &mut child,
+                        vec![writer_handle, frame_handle],
+                        None,
+                        Some(frame_events),
+                        None,
+                    ),
                 ));
             }
         };
+        if let Err(operation) = poll_stop(
+            PROCESS_LAUNCH_PHASE,
+            absolute_deadline,
+            last_progress,
+            no_progress_timeout,
+            cancellation,
+        ) {
+            drop(writer_sender);
+            return Err(attach_cleanup(
+                operation,
+                cleanup_partial_launch(
+                    &mut child,
+                    vec![writer_handle, frame_handle],
+                    Some(diagnostic_handle),
+                    Some(frame_events),
+                    Some(diagnostic_events),
+                ),
+            ));
+        }
 
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         let (memory_observer, memory_attachment_error) =
@@ -4158,7 +4491,12 @@ fn kill_direct_child(child: &mut Child) -> Result<(), ParserSupervisorError> {
 fn cleanup_partial_launch(
     child: &mut Child,
     handles: Vec<JoinHandle<()>>,
+    diagnostic_handle: Option<JoinHandle<Result<Vec<u8>, ParserIoThreadError>>>,
+    frame_events: Option<Receiver<FrameReaderEvent>>,
+    diagnostic_events: Option<Receiver<DiagnosticReaderEvent>>,
 ) -> Result<(), ParserSupervisorError> {
+    drop(frame_events);
+    drop(diagnostic_events);
     let mut failures = Vec::new();
     if let Err(error) = kill_direct_child(child) {
         failures.push(error.to_string());
@@ -4176,7 +4514,10 @@ fn cleanup_partial_launch(
                 break;
             }
         }
-        if reaped && handles.iter().all(JoinHandle::is_finished) {
+        if reaped
+            && handles.iter().all(JoinHandle::is_finished)
+            && thread_finished(diagnostic_handle.as_ref())
+        {
             break;
         }
         thread::sleep(SUPERVISOR_POLL_INTERVAL);
@@ -4190,6 +4531,13 @@ fn cleanup_partial_launch(
         } else if handle.join().is_err() {
             failures.push("incomplete launch thread panicked".to_owned());
         }
+    }
+    if thread_finished(diagnostic_handle.as_ref()) {
+        if let Err(error) = join_diagnostic_thread(diagnostic_handle) {
+            failures.push(error.to_string());
+        }
+    } else if diagnostic_handle.is_some() {
+        failures.push("incomplete diagnostic thread did not terminate".to_owned());
     }
     if failures.is_empty() {
         Ok(())
@@ -4731,7 +5079,6 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         cancellation_after: Option<Duration>,
         deadline: Duration,
         no_progress: Duration,
-        pre_launch_elapsed: Duration,
         limits: ParserRequestLimits,
     }
 
@@ -4749,7 +5096,6 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             cancellation_after: None,
             deadline: Duration::from_secs(2),
             no_progress: Duration::from_millis(500),
-            pre_launch_elapsed: Duration::ZERO,
             limits: default_limits()?,
         })
     }
@@ -5080,13 +5426,12 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             })
         });
         let now = Instant::now();
-        let last_progress = now.checked_sub(case.pre_launch_elapsed).unwrap_or(now);
         let deadline = now.checked_add(case.deadline).unwrap_or(now);
         let resident = ResidentParserSession::launch_command(
             &launch,
             grammar,
             ParserMemoryLimits::PRODUCTION,
-            last_progress,
+            now,
             deadline,
             case.no_progress,
             &cancellation,
@@ -5169,11 +5514,6 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             let mut opening_cancel = case("opening-cancel", ExpectedFailure::Cancelled)?;
             opening_cancel.cancel_before_launch = true;
             opening_cancel
-        },
-        {
-            let mut shared_epoch = case("pre-ready-shared-epoch", ExpectedFailure::NoProgress)?;
-            shared_epoch.pre_launch_elapsed = shared_epoch.no_progress + Duration::from_millis(1);
-            shared_epoch
         },
         case("pre-ready-stall", ExpectedFailure::NoProgress)?,
         case("ready-session", ExpectedFailure::Ready("session"))?,
@@ -5268,6 +5608,7 @@ mod tests {
     //! Protect bounded framing, backpressure, stop polling, and response identity.
 
     use std::io::Cursor;
+    use std::sync::Arc;
 
     use projectatlas_core::optional_parser_protocol::{
         PARSER_MAX_SOURCE_BYTES, PARSER_PROTOCOL_VERSION, PARSER_WINDOWS_BROKER_ADMISSION_RECORD,
@@ -5278,6 +5619,34 @@ mod tests {
 
     /// Serializes tests that deliberately hold the process-wide artifact-I/O lease.
     static ARTIFACT_IO_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Serializes the one test that deliberately blocks process creation.
+    static PROCESS_SPAWN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Marks the subprocess branch of the blocked-spawn ownership test.
+    const PROCESS_SPAWN_CHILD_ENV: &str = "PROJECTATLAS_PROCESS_SPAWN_CHILD";
+    /// File written only if an abandoned child survives its mandatory cleanup.
+    const PROCESS_SPAWN_CHILD_COMPLETED_ENV: &str = "PROJECTATLAS_PROCESS_SPAWN_CHILD_COMPLETED";
+
+    /// Restores process-wide spawn health after an injected sticky-failure test.
+    struct ProcessSpawnCleanupFailureReset;
+
+    impl Drop for ProcessSpawnCleanupFailureReset {
+        fn drop(&mut self) {
+            if let Ok(mut slot) = PROCESS_SPAWN_CLEANUP_FAILURE.lock() {
+                *slot = None;
+            }
+        }
+    }
+
+    #[test]
+    fn blocked_process_spawn_child_fixture() {
+        if std::env::var_os(PROCESS_SPAWN_CHILD_ENV).is_none() {
+            return;
+        }
+        thread::sleep(Duration::from_secs(30));
+        if let Some(path) = std::env::var_os(PROCESS_SPAWN_CHILD_COMPLETED_ENV) {
+            let _write = fs::write(path, b"survived");
+        }
+    }
 
     /// Reader that injects one transient interrupted read.
     struct InterruptOnceReader {
@@ -5644,6 +6013,231 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn stopped_process_launch_never_invokes_spawn() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PROCESS_SPAWN_TEST_LOCK
+            .lock()
+            .map_err(|_poisoned| io::Error::other("process-spawn test lock is poisoned"))?;
+        require_process_spawn_cleanup_health()?;
+        let cancellation = IndexCancellation::new();
+        cancellation.cancel();
+        let invoked = Arc::new(AtomicBool::new(false));
+        let spawn_invoked = Arc::clone(&invoked);
+        let started = Instant::now();
+        let result = run_bounded_process_spawn_with(
+            Command::new(std::env::current_exe()?),
+            started + Duration::from_secs(1),
+            started,
+            Duration::from_secs(1),
+            &cancellation,
+            move |_command| {
+                spawn_invoked.store(true, Ordering::Release);
+                Err(io::Error::other("stopped launch invoked spawn"))
+            },
+        );
+        if !matches!(
+            result,
+            Err(ParserSupervisorError::Cancelled {
+                phase: PROCESS_LAUNCH_PHASE
+            })
+        ) {
+            return Err(io::Error::other(format!(
+                "stopped process launch returned the wrong result: {result:?}"
+            ))
+            .into());
+        }
+        if invoked.load(Ordering::Acquire) {
+            return Err(io::Error::other("stopped process launch invoked spawn").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sticky_late_cleanup_failure_refuses_future_spawn() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let _guard = PROCESS_SPAWN_TEST_LOCK
+            .lock()
+            .map_err(|_poisoned| io::Error::other("process-spawn test lock is poisoned"))?;
+        require_process_spawn_cleanup_health()?;
+        let _reset = ProcessSpawnCleanupFailureReset;
+        record_process_spawn_cleanup_failure(&ParserSupervisorError::Cleanup {
+            message: "injected cleanup failure".to_owned(),
+        });
+        let invoked = Arc::new(AtomicBool::new(false));
+        let spawn_invoked = Arc::clone(&invoked);
+        let cancellation = IndexCancellation::new();
+        let started = Instant::now();
+        let result = run_bounded_process_spawn_with(
+            Command::new(std::env::current_exe()?),
+            started + Duration::from_secs(1),
+            started,
+            Duration::from_secs(1),
+            &cancellation,
+            move |_command| {
+                spawn_invoked.store(true, Ordering::Release);
+                Err(io::Error::other("unhealthy launch invoked spawn"))
+            },
+        );
+        let message = match result {
+            Err(ParserSupervisorError::Cleanup { message }) => message,
+            other => {
+                return Err(io::Error::other(format!(
+                    "sticky cleanup failure returned the wrong result: {other:?}"
+                ))
+                .into());
+            }
+        };
+        if !message.contains("injected cleanup failure") {
+            return Err(io::Error::other("sticky cleanup failure lost its diagnostic").into());
+        }
+        if invoked.load(Ordering::Acquire) {
+            return Err(io::Error::other("unhealthy process launch invoked spawn").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn blocked_process_spawn_releases_caller_and_reaps_late_child()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PROCESS_SPAWN_TEST_LOCK
+            .lock()
+            .map_err(|_poisoned| io::Error::other("process-spawn test lock is poisoned"))?;
+        require_process_spawn_cleanup_health()?;
+        let temp = tempfile::tempdir()?;
+        let completed = temp.path().join("child-completed");
+        let mut command = Command::new(std::env::current_exe()?);
+        command
+            .arg("--exact")
+            .arg("parser_supervisor::tests::blocked_process_spawn_child_fixture")
+            .arg("--nocapture")
+            .env(PROCESS_SPAWN_CHILD_ENV, "1")
+            .env(PROCESS_SPAWN_CHILD_COMPLETED_ENV, &completed)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let (entered_sender, entered_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let (pid_sender, pid_receiver) = mpsc::sync_channel(1);
+        let cancellation = IndexCancellation::new();
+        let caller_cancellation = cancellation.clone();
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        let started = Instant::now();
+        let caller = thread::spawn(move || {
+            let result = run_bounded_process_spawn_with(
+                command,
+                started + Duration::from_secs(5),
+                started,
+                Duration::from_secs(5),
+                &caller_cancellation,
+                move |mut command| {
+                    entered_sender
+                        .send(())
+                        .map_err(|_closed| io::Error::other("spawn blocker receiver closed"))?;
+                    release_receiver
+                        .recv()
+                        .map_err(|_closed| io::Error::other("spawn release sender closed"))?;
+                    let child = command.spawn()?;
+                    pid_sender
+                        .send(child.id())
+                        .map_err(|_closed| io::Error::other("spawn PID receiver closed"))?;
+                    Ok(child)
+                },
+            );
+            let _send = result_sender.send(result);
+        });
+
+        entered_receiver.recv_timeout(Duration::from_secs(1))?;
+        cancellation.cancel();
+        let result = result_receiver.recv_timeout(Duration::from_secs(1))?;
+        match result {
+            Err(ParserSupervisorError::Cancelled {
+                phase: PROCESS_LAUNCH_PHASE,
+            }) => {}
+            other => {
+                return Err(io::Error::other(format!(
+                    "blocked process spawn returned the wrong result: {other:?}"
+                ))
+                .into());
+            }
+        }
+        if ProcessSpawnLease::acquire().is_ok() {
+            return Err(io::Error::other(
+                "blocked process spawn released its process-wide lease early",
+            )
+            .into());
+        }
+        release_sender.send(())?;
+        let _late_child_pid = pid_receiver.recv_timeout(Duration::from_secs(1))?;
+        caller
+            .join()
+            .map_err(|_panic| io::Error::other("blocked-spawn caller panicked"))?;
+
+        let cleanup_deadline = Instant::now() + SUPERVISOR_CLEANUP_TIMEOUT;
+        while PROCESS_SPAWN_ACTIVE.load(Ordering::Acquire) && Instant::now() < cleanup_deadline {
+            thread::yield_now();
+        }
+        if PROCESS_SPAWN_ACTIVE.load(Ordering::Acquire) {
+            return Err(io::Error::other(
+                "late process spawn did not release its process-wide lease",
+            )
+            .into());
+        }
+        require_process_spawn_cleanup_health()?;
+        if completed.exists() {
+            return Err(io::Error::other("late child survived mandatory cleanup").into());
+        }
+        drop(ProcessSpawnLease::acquire()?);
+        Ok(())
+    }
+
+    #[test]
+    fn partial_launch_cleanup_releases_full_reader_channels()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let completed = temp.path().join("partial-launch-child-completed");
+        let mut child = Command::new(std::env::current_exe()?)
+            .arg("--exact")
+            .arg("parser_supervisor::tests::blocked_process_spawn_child_fixture")
+            .arg("--nocapture")
+            .env(PROCESS_SPAWN_CHILD_ENV, "1")
+            .env(PROCESS_SPAWN_CHILD_COMPLETED_ENV, &completed)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        let (frame_sender, frame_events) = mpsc::sync_channel(1);
+        let (frame_entered_sender, frame_entered_receiver) = mpsc::sync_channel(1);
+        let frame_handle = thread::spawn(move || {
+            let _first = frame_sender.send(FrameReaderEvent::Frame(vec![1]));
+            let _entered = frame_entered_sender.send(());
+            let _second = frame_sender.send(FrameReaderEvent::Frame(vec![2]));
+        });
+        let (diagnostic_sender, diagnostic_events) = mpsc::sync_channel(1);
+        let (diagnostic_entered_sender, diagnostic_entered_receiver) = mpsc::sync_channel(1);
+        let diagnostic_handle = thread::spawn(move || {
+            let _first = diagnostic_sender.send(DiagnosticReaderEvent::AdmissionAccepted);
+            let _entered = diagnostic_entered_sender.send(());
+            let _second = diagnostic_sender.send(DiagnosticReaderEvent::AdmissionAccepted);
+            Ok(Vec::new())
+        });
+        frame_entered_receiver.recv_timeout(Duration::from_secs(1))?;
+        diagnostic_entered_receiver.recv_timeout(Duration::from_secs(1))?;
+
+        cleanup_partial_launch(
+            &mut child,
+            vec![frame_handle],
+            Some(diagnostic_handle),
+            Some(frame_events),
+            Some(diagnostic_events),
+        )?;
+        if completed.exists() {
+            return Err(io::Error::other("partial-launch child survived cleanup").into());
+        }
+        Ok(())
+    }
+
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn memfd_creation_retries_only_unsupported_modern_flags() {
@@ -5725,11 +6319,70 @@ mod tests {
             true,
             &control,
         )?;
-        assert_ne!(
-            executable.file.metadata()?.permissions().mode() & 0o100,
-            0,
-            "sealed worker authority is not executable"
+        assert_eq!(
+            executable.file.metadata()?.permissions().mode() & 0o777,
+            0o500,
+            "sealed executable authority retained writable or unexpected mode bits"
         );
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn sealed_linux_payload_legacy_fallback_preserves_exact_modes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        use nix::errno::Errno;
+        use nix::libc;
+        use nix::sys::memfd::{MFdFlags, memfd_create};
+
+        let cancellation = IndexCancellation::new();
+        let control = ArtifactIoControl {
+            absolute_deadline: Instant::now() + Duration::from_secs(1),
+            last_progress: Instant::now(),
+            no_progress_timeout: Duration::from_secs(1),
+            cancellation: &cancellation,
+        };
+        let base = MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING;
+        for (name, executable, expected_mode) in [
+            ("projectatlas-legacy-document-test", false, 0o400),
+            ("projectatlas-legacy-executable-test", true, 0o500),
+        ] {
+            let mode_flag = if executable {
+                libc::MFD_EXEC
+            } else {
+                libc::MFD_NOEXEC_SEAL
+            };
+            let mut attempts = Vec::new();
+            let payload = SealedLinuxPayload::from_verified_bytes_with_create(
+                "legacy payload",
+                name,
+                b"verified authority",
+                executable,
+                &control,
+                |flags| {
+                    attempts.push(flags);
+                    if attempts.len() == 1 {
+                        Err(Errno::EINVAL)
+                    } else {
+                        // A modern test kernel may make base-only memfds non-executable;
+                        // model the legacy kernel's executable-by-default fallback inode.
+                        memfd_create(name, flags | MFdFlags::from_bits_retain(libc::MFD_EXEC))
+                    }
+                },
+            )?;
+            assert_eq!(
+                attempts,
+                vec![base | MFdFlags::from_bits_retain(mode_flag), base],
+                "legacy fallback did not retry exactly once with base flags"
+            );
+            assert_eq!(
+                payload.file.metadata()?.permissions().mode() & 0o777,
+                expected_mode,
+                "legacy fallback retained an unexpected payload mode"
+            );
+        }
         Ok(())
     }
 
