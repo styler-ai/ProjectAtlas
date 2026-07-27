@@ -6444,21 +6444,24 @@ mod tests {
     }
 
     #[test]
-    fn completed_process_spawn_final_check_commits_handoff_and_releases_lease()
+    fn launch_command_cancellation_after_process_spawn_commit_returns_after_child_cleanup()
     -> Result<(), Box<dyn std::error::Error>> {
         let _guard = PROCESS_SPAWN_TEST_LOCK
             .lock()
             .map_err(|_poisoned| io::Error::other("process-spawn test lock is poisoned"))?;
         require_process_spawn_cleanup_health()?;
         let _hook_reset = ProcessSpawnTestHookReset;
+        let temp = tempfile::tempdir()?;
+        let completed = temp.path().join("post-commit-child-completed");
         let mut command = Command::new(std::env::current_exe()?);
         command
             .arg("--exact")
             .arg("parser_supervisor::tests::blocked_process_spawn_child_fixture")
             .arg("--nocapture")
             .env(PROCESS_SPAWN_CHILD_ENV, "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .env(PROCESS_SPAWN_CHILD_COMPLETED_ENV, &completed)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null());
 
         let started = Instant::now();
@@ -6468,22 +6471,45 @@ mod tests {
             .lock()
             .map_err(|_poisoned| io::Error::other("final-check test hook lock is poisoned"))? =
             Some(Box::new(move || hook_cancellation.cancel()));
-        let mut child = run_bounded_process_spawn(
-            command,
-            started + Duration::from_secs(5),
+        let result = ResidentParserSession::launch_command(
+            &metadata_only_launch(),
+            ParserLanguageIdentity::new("alpha")?,
+            ParserMemoryLimits::PRODUCTION,
             started,
+            started + Duration::from_secs(5),
             Duration::from_secs(5),
             &cancellation,
-        )?;
+            command,
+        );
         if !cancellation.is_cancelled() {
             return Err(io::Error::other(
                 "final-check test did not cancel after ownership commitment",
             )
             .into());
         }
+        match result {
+            Err(ParserSupervisorError::Cancelled {
+                phase: PROCESS_LAUNCH_PHASE,
+            }) => {}
+            Err(other) => {
+                return Err(io::Error::other(format!(
+                    "post-commit launch cancellation returned the wrong error: {other:?}"
+                ))
+                .into());
+            }
+            Ok(resident) => {
+                resident.shutdown()?;
+                return Err(io::Error::other(
+                    "post-commit launch cancellation returned a resident session",
+                )
+                .into());
+            }
+        }
         drop(ProcessSpawnLease::acquire()?);
-        cleanup_partial_launch(&mut child, Vec::new(), None, None, None)?;
         require_process_spawn_cleanup_health()?;
+        if completed.exists() {
+            return Err(io::Error::other("post-commit child survived launch cleanup").into());
+        }
         Ok(())
     }
 
