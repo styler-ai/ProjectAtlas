@@ -45,7 +45,7 @@ const PROCESS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum time for the supervisor or broker to prove process cleanup.
 const PROCESS_CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
-/// Maximum time granted to one hosted Windows process observation.
+/// Maximum time granted to one hosted Windows process-liveness query.
 #[cfg(target_os = "windows")]
 const PROCESS_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Maximum time granted to one test-owned process-control helper.
@@ -65,6 +65,12 @@ const CAPTURED_SCAN_STREAM_MAX_BYTES: usize = 1024 * 1024;
 /// Maximum Linux process rows admitted into one descendant snapshot.
 #[cfg(target_os = "linux")]
 const LINUX_PROCESS_SNAPSHOT_MAX_ENTRIES: usize = 65_536;
+/// Exact kernel executable identity for the sealed Linux worker.
+#[cfg(target_os = "linux")]
+const LINUX_SEALED_WORKER_EXECUTABLE: &str = "/memfd:projectatlas-parser-worker";
+/// Kernel executable identity after the sealed worker memfd is unlinked.
+#[cfg(target_os = "linux")]
+const LINUX_SEALED_WORKER_DELETED_EXECUTABLE: &str = "/memfd:projectatlas-parser-worker (deleted)";
 /// Test-only Windows scan-PID input for the fixed process query.
 #[cfg(target_os = "windows")]
 const WINDOWS_SCAN_PID_ENV: &str = "PROJECTATLAS_TEST_SCAN_PID";
@@ -379,7 +385,7 @@ impl Drop for ScanProcess {
         let scan_pid = self.child.as_ref().map(Child::id);
         let mut tracked = self.tracked_runtime.clone();
         if let Some(scan_pid) = scan_pid
-            && let Ok(descendants) = runtime_descendants(scan_pid)
+            && let Ok(descendants) = runtime_descendants(scan_pid, PROCESS_HELPER_TIMEOUT)
         {
             for process in descendants {
                 if !tracked
@@ -1390,7 +1396,14 @@ fn wait_for_runtime_processes(
         .checked_add(timeout)
         .ok_or_else(|| io::Error::other("process discovery deadline overflowed"))?;
     loop {
-        let descendants = runtime_descendants(scan_pid)?;
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(io::Error::other(format!(
+                "contained worker was not observed within {timeout:?}"
+            ))
+            .into());
+        }
+        let descendants = runtime_descendants(scan_pid, deadline.saturating_duration_since(now))?;
         if let Some(runtime) = classify_runtime_processes(scan_pid, &descendants)? {
             scan.track_runtime(&runtime);
             return Ok(runtime);
@@ -1399,12 +1412,6 @@ fn wait_for_runtime_processes(
             return Err(io::Error::other(
                 "normal scan exited before its contained worker became observable",
             )
-            .into());
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::other(format!(
-                "contained worker was not observed within {timeout:?}"
-            ))
             .into());
         }
         thread::sleep(PROCESS_POLL_INTERVAL);
@@ -1421,7 +1428,14 @@ fn wait_for_mcp_runtime_processes(
         .checked_add(timeout)
         .ok_or_else(|| io::Error::other("MCP process discovery deadline overflowed"))?;
     loop {
-        let descendants = runtime_descendants(mcp_pid)?;
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(io::Error::other(format!(
+                "contained MCP worker was not observed within {timeout:?}"
+            ))
+            .into());
+        }
+        let descendants = runtime_descendants(mcp_pid, deadline.saturating_duration_since(now))?;
         if let Some(runtime) = classify_runtime_processes(mcp_pid, &descendants)? {
             return Ok(runtime);
         }
@@ -1429,12 +1443,6 @@ fn wait_for_mcp_runtime_processes(
             return Err(io::Error::other(
                 "MCP server exited before its contained worker became observable",
             )
-            .into());
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::other(format!(
-                "contained MCP worker was not observed within {timeout:?}"
-            ))
             .into());
         }
         thread::sleep(PROCESS_POLL_INTERVAL);
@@ -1599,7 +1607,10 @@ const fn host_pack_platform() -> PackPlatform {
 
 /// Enumerate exact optional runtime descendants of one Linux scan.
 #[cfg(target_os = "linux")]
-fn runtime_descendants(scan_pid: u32) -> Result<Vec<ProcessIdentity>, Box<dyn Error>> {
+fn runtime_descendants(
+    scan_pid: u32,
+    _timeout: Duration,
+) -> Result<Vec<ProcessIdentity>, Box<dyn Error>> {
     let mut processes = BTreeMap::new();
     for entry in fs::read_dir("/proc")? {
         let Ok(entry) = entry else {
@@ -1693,17 +1704,48 @@ fn linux_process_identity(pid: u32) -> Result<Option<ProcessIdentity>, Box<dyn E
         }
         Err(error) => return Err(error.into()),
     };
-    let name = executable
-        .file_name()
-        .ok_or_else(|| io::Error::other("Linux process executable has no file name"))?
-        .to_string_lossy()
-        .into_owned();
+    let name = linux_process_executable_identity(&executable);
     Ok(Some(ProcessIdentity {
         pid,
         parent_pid,
         name,
         started,
     }))
+}
+
+/// Map only the exact sealed memfd path to the packaged worker identity.
+#[cfg(target_os = "linux")]
+fn linux_process_executable_identity(executable: &Path) -> String {
+    if executable == Path::new(LINUX_SEALED_WORKER_EXECUTABLE)
+        || executable == Path::new(LINUX_SEALED_WORKER_DELETED_EXECUTABLE)
+    {
+        return host_pack_platform().worker_file_name().to_owned();
+    }
+    executable.to_string_lossy().into_owned()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sealed_linux_worker_executable_maps_to_pack_worker_identity() {
+    let expected = host_pack_platform().worker_file_name();
+    for executable in [
+        LINUX_SEALED_WORKER_EXECUTABLE,
+        LINUX_SEALED_WORKER_DELETED_EXECUTABLE,
+    ] {
+        assert_eq!(
+            linux_process_executable_identity(Path::new(executable)),
+            expected
+        );
+    }
+    for executable in [
+        "/tmp/projectatlas-parser-worker",
+        "/tmp/memfd:projectatlas-parser-worker (deleted)",
+    ] {
+        assert_ne!(
+            linux_process_executable_identity(Path::new(executable)),
+            expected
+        );
+    }
 }
 
 /// Read the still-live subset of exact tracked Linux identities.
@@ -1785,22 +1827,26 @@ fn is_optional_runtime_name(name: &str) -> bool {
             .is_some_and(|expected| process_name_eq(name, expected))
 }
 
-/// `PowerShell` process-tree query restricted to one exact scan PID.
+/// `PowerShell` process-tree query restricted to one exact scan PID and one CIM snapshot.
 #[cfg(target_os = "windows")]
-const WINDOWS_DESCENDANT_QUERY: &str = r#"
+const WINDOWS_DESCENDANT_QUERY: &str = r"
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $scanPid = [uint32][Environment]::GetEnvironmentVariable('PROJECTATLAS_TEST_SCAN_PID')
 $rows = @()
-$children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $scanPid")
+$processes = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,Name,CreationDate)
+$children = @($processes | Where-Object { [uint32]$_.ParentProcessId -eq $scanPid })
+$childPids = @{}
 foreach ($child in $children) {
+  $childPids[[uint32]$child.ProcessId] = $true
   $rows += [pscustomobject]@{
     pid = [uint32]$child.ProcessId
     parent_pid = [uint32]$child.ParentProcessId
     name = [string]$child.Name
     started = ([DateTime]$child.CreationDate).ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
   }
-  $childPid = [uint32]$child.ProcessId
-  foreach ($grandchild in @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $childPid")) {
+}
+foreach ($grandchild in $processes) {
+  if ($childPids.ContainsKey([uint32]$grandchild.ParentProcessId)) {
     $rows += [pscustomobject]@{
       pid = [uint32]$grandchild.ProcessId
       parent_pid = [uint32]$grandchild.ParentProcessId
@@ -1810,7 +1856,7 @@ foreach ($child in $children) {
   }
 }
 ConvertTo-Json -InputObject $rows -Compress
-"#;
+";
 
 /// `PowerShell` exact-PID identity query used after the scan exits.
 #[cfg(target_os = "windows")]
@@ -1898,10 +1944,14 @@ try {
 
 /// Enumerate exact optional runtime descendants of one Windows scan.
 #[cfg(target_os = "windows")]
-fn runtime_descendants(scan_pid: u32) -> Result<Vec<ProcessIdentity>, Box<dyn Error>> {
+fn runtime_descendants(
+    scan_pid: u32,
+    timeout: Duration,
+) -> Result<Vec<ProcessIdentity>, Box<dyn Error>> {
     let rows = powershell_processes(
         WINDOWS_DESCENDANT_QUERY,
         &[(WINDOWS_SCAN_PID_ENV, scan_pid.to_string())],
+        timeout,
         "Windows process discovery query",
     )?;
     Ok(rows
@@ -1920,6 +1970,7 @@ fn current_processes(tracked: &[ProcessIdentity]) -> Result<Vec<ProcessIdentity>
     powershell_processes(
         WINDOWS_IDENTITY_QUERY,
         &[(WINDOWS_PROCESS_PIDS_ENV, arguments.join(","))],
+        PROCESS_QUERY_TIMEOUT,
         "Windows process liveness query",
     )
 }
@@ -2001,13 +2052,14 @@ fn control_windows_process(
 fn powershell_processes(
     script: &str,
     environment: &[(&str, String)],
+    timeout: Duration,
     operation: &'static str,
 ) -> Result<Vec<ProcessIdentity>, Box<dyn Error>> {
     let mut command = windows_powershell(script);
     for (name, value) in environment {
         command.env(name, value);
     }
-    let output = run_bounded_command(&mut command, PROCESS_QUERY_TIMEOUT, operation)?;
+    let output = run_bounded_command(&mut command, timeout, operation)?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "{operation} failed: status={} stderr={}",

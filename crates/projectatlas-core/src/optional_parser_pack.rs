@@ -78,6 +78,8 @@ pub const OPTIONAL_PARSER_PACK_MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 pub const OPTIONAL_PARSER_PACK_MAX_EXPANDED_BYTES: u64 = 512 * 1024 * 1024;
 /// Byte ceiling for one payload file.
 pub const OPTIONAL_PARSER_PACK_MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
+/// Byte ceiling for the immutable native-import policy consumed before containment.
+pub const OPTIONAL_PARSER_PACK_NATIVE_IMPORT_POLICY_MAX_BYTES: u64 = 1024 * 1024;
 /// UTF-8 byte ceiling for one artifact-relative path.
 pub const OPTIONAL_PARSER_PACK_MAX_PATH_BYTES: usize = 256;
 /// File-entry ceiling for one platform pack artifact.
@@ -2061,6 +2063,13 @@ fn validate_payload_files(
                 "LICENSE".to_string()
             }
             ParserPackPayloadRole::NativeImportPolicy => {
+                if file.bytes > OPTIONAL_PARSER_PACK_NATIVE_IMPORT_POLICY_MAX_BYTES {
+                    return Err(invalid_field(
+                        file.path.as_str(),
+                        "bytes",
+                        "native-import policy exceeds its pre-containment byte ceiling",
+                    ));
+                }
                 fixed_roles.insert("native-import-policy");
                 validate_binding(
                     "artifact.native_audit.policy_sha256",
@@ -3402,6 +3411,23 @@ mod tests {
         require(
             detached_audit_report.validate(&logical).is_err(),
             "artifact audit claim was allowed to detach from its packaged report",
+        )?;
+
+        let mut oversized_policy = artifact.clone();
+        let policy = oversized_policy
+            .files
+            .iter_mut()
+            .find(|file| matches!(&file.role, ParserPackPayloadRole::NativeImportPolicy))
+            .ok_or_else(|| io::Error::other("native-import policy payload missing"))?;
+        policy.bytes = OPTIONAL_PARSER_PACK_NATIVE_IMPORT_POLICY_MAX_BYTES + 1;
+        oversized_policy.measurements =
+            ParserPackPayloadMeasurements::from_files(&oversized_policy.files)?;
+        require(
+            matches!(
+                oversized_policy.validate(&logical),
+                Err(OptionalParserPackManifestError::InvalidField { field: "bytes", .. })
+            ),
+            "oversized native-import policy was accepted",
         )?;
 
         let mut network_available = artifact;

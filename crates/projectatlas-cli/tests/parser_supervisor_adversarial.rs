@@ -18,6 +18,11 @@ use projectatlas_core::optional_parser_protocol::{
 };
 
 #[allow(dead_code, unused_imports)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[path = "../src/parser_linux_authority.rs"]
+mod parser_linux_authority;
+
+#[allow(dead_code, unused_imports)]
 #[path = "../src/parser_supervisor.rs"]
 mod parser_supervisor;
 
@@ -163,7 +168,13 @@ fn hostile_peer(scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let request_bytes = read_frame(&mut input)?;
+    let request_bytes = match read_frame(&mut input) {
+        Ok(bytes) => bytes,
+        Err(error) if scenario == "idle-close" && error.kind() == io::ErrorKind::UnexpectedEof => {
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
     let request = decode_parser_request_for_session(
         ParserFrame::decode_exact(&request_bytes)?,
         opening.session(),
@@ -273,7 +284,7 @@ fn hostile_peer(scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
             1,
             "source_file_with_a_deliberately_long_but_valid_name",
         )?,
-        "healthy" => write_completion(
+        "healthy" | "idle-close" => write_completion(
             &mut output,
             &request,
             request.source().byte_len(),
@@ -283,7 +294,7 @@ fn hostile_peer(scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
         )?,
         _ => {}
     }
-    if scenario == "healthy" {
+    if matches!(scenario, "healthy" | "idle-close") {
         io::copy(&mut input, &mut io::sink())?;
     }
     Ok(())

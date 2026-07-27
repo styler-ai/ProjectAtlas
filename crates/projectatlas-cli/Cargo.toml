@@ -79,8 +79,10 @@ optional-parser-supervisor = [
 optional-parser-worker = [
     "optional-parser-supervisor",
     "dep:landlock",
+    "dep:libloading",
     "dep:seccompiler",
     "dep:tree-sitter",
+    "dep:tree-sitter-language",
     "dep:tree-sitter-language-pack",
 ]
 
@@ -121,8 +123,10 @@ zstd = { workspace = true, optional = true }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 landlock = { workspace = true, optional = true }
+libloading = { workspace = true, optional = true }
 nix = { workspace = true, optional = true }
 seccompiler = { workspace = true, optional = true }
+tree-sitter-language = { workspace = true, optional = true }
 
 [dev-dependencies]
 assert_cmd.workspace = true

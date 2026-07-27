@@ -4,6 +4,14 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 #[cfg(feature = "optional-parser-supervisor")]
 use projectatlas_cli::optional_parser_lifecycle::OPTIONAL_PARSER_PACK_SELECTION_POLICY_PATH;
+#[cfg(all(debug_assertions, feature = "optional-parser-supervisor"))]
+use projectatlas_cli::optional_parser_lifecycle::OptionalParserPackLifecycle;
+#[cfg(all(debug_assertions, feature = "optional-parser-supervisor"))]
+use projectatlas_cli::parser_supervisor::{
+    ParserSupervisorError, install_currentness_test_hook, install_pre_spawn_test_hook,
+};
+#[cfg(all(debug_assertions, feature = "optional-parser-supervisor"))]
+use projectatlas_core::IndexCancellation;
 use projectatlas_core::PurposeSource;
 use projectatlas_core::graph::{
     Completeness, ConfidenceClass, CoverageRecord, CoverageScope, CoverageState, EntitySelector,
@@ -12,12 +20,20 @@ use projectatlas_core::graph::{
     RepositoryNodePath,
 };
 use projectatlas_core::language::{BROAD_SOURCE_EXTENSIONS, detect_language_for_path};
+#[cfg(all(
+    debug_assertions,
+    feature = "optional-parser-supervisor",
+    target_os = "linux"
+))]
+use projectatlas_core::optional_parser_pack::OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION;
 #[cfg(feature = "optional-parser-supervisor")]
 use projectatlas_core::optional_parser_pack::{
     OPTIONAL_PARSER_PACK_ID, OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES,
     OPTIONAL_PARSER_PACK_MAX_ARCHIVE_BYTES, OPTIONAL_PARSER_PACK_MAX_EXPANDED_BYTES,
     OPTIONAL_PARSER_PACK_MAX_FILE_BYTES, OPTIONAL_PARSER_PACK_MAX_FILE_ENTRIES, PackRelativePath,
 };
+#[cfg(all(debug_assertions, feature = "optional-parser-supervisor"))]
+use projectatlas_core::optional_parser_protocol::{PARSER_MAX_OUTPUT_BYTES, ParserRequestLimits};
 use projectatlas_core::relation_capabilities::{RELATION_FAMILY_CAPABILITIES, RelationFamilyState};
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
@@ -45,6 +61,11 @@ use std::io::{self, BufRead, BufReader, Read as IoRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command as StdCommand, Stdio};
 use std::sync::mpsc::{self, Receiver};
+#[cfg(all(debug_assertions, feature = "optional-parser-supervisor"))]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 use yaml_rust2::{Yaml, YamlLoader};
@@ -66,6 +87,7 @@ const PARENT_CANARY_FILE_NAME: &str = "parent-canary.txt";
 const ATLAS_DIR_NAME: &str = ".projectatlas";
 const GITHOOKS_DIR_NAME: &str = ".githooks";
 const ISSUE_TEMPLATE_DIR_NAME: &str = "ISSUE_TEMPLATE";
+const VERSIONS_DIR_NAME: &str = "versions";
 const PRE_PUSH_HOOK_FILE_NAME: &str = "pre-push";
 const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
@@ -1061,6 +1083,110 @@ fn optional_parser_pack_real_archive_normal_runtime_lifecycle() -> Result<(), Bo
         return Err(io::Error::other("parser-pack enable did not persist selection").into());
     }
 
+    #[cfg(debug_assertions)]
+    {
+        const CURRENTNESS_DELAY: Duration = Duration::from_secs(2);
+        const PRE_SPAWN_DELAY: Duration = Duration::from_secs(14);
+        const PRE_READY_NO_PROGRESS: Duration = Duration::from_secs(15);
+
+        let lifecycle = OptionalParserPackLifecycle::new(&repo, Some(storage))?;
+        let mut runtime_selection = lifecycle
+            .resolve_selected_pack()?
+            .ok_or_else(|| io::Error::other("enabled parser pack did not resolve"))?;
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+            let artifact_manifest = logical_pack_root
+                .join(VERSIONS_DIR_NAME)
+                .join(OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION)
+                .join(&artifact)
+                .join("artifact-manifest.json");
+            let before = fs::metadata(&artifact_manifest)?;
+            let original = before.permissions();
+            let epoch = |metadata: &fs::Metadata| {
+                (
+                    metadata.len(),
+                    metadata.modified().ok(),
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            };
+            let before_epoch = epoch(&before);
+            let drift_deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let mut changed = original.clone();
+                changed.set_mode(original.mode() ^ 0o200);
+                fs::set_permissions(&artifact_manifest, changed)?;
+                fs::set_permissions(&artifact_manifest, original.clone())?;
+                if epoch(&fs::metadata(&artifact_manifest)?) != before_epoch {
+                    break;
+                }
+                if Instant::now() >= drift_deadline {
+                    return Err(io::Error::other(
+                        "parser-pack manifest did not enter a new Unix change epoch",
+                    )
+                    .into());
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        let currentness_seen = Arc::new(AtomicBool::new(false));
+        let currentness_hook_seen = Arc::clone(&currentness_seen);
+        install_currentness_test_hook(move || {
+            currentness_hook_seen.store(true, Ordering::Release);
+            thread::sleep(CURRENTNESS_DELAY);
+        })?;
+        let pre_spawn_seen = Arc::new(AtomicBool::new(false));
+        let pre_spawn_hook_seen = Arc::clone(&pre_spawn_seen);
+        install_pre_spawn_test_hook(move || {
+            pre_spawn_hook_seen.store(true, Ordering::Release);
+            thread::sleep(PRE_SPAWN_DELAY);
+        })?;
+
+        let parser_source = fs::read(&optional_source)?;
+        let request_limits = ParserRequestLimits::new(PARSER_MAX_OUTPUT_BYTES, 100_000, 512)?;
+        let cumulative_result = runtime_selection.supervisor_mut().parse(
+            "awk",
+            &parser_source,
+            request_limits,
+            Instant::now() + Duration::from_secs(60),
+            PRE_READY_NO_PROGRESS,
+            &IndexCancellation::new(),
+        );
+        if !currentness_seen.load(Ordering::Acquire) || !pre_spawn_seen.load(Ordering::Acquire) {
+            return Err(io::Error::other(
+                "real parser-pack cumulative epoch did not traverse both bounded phases",
+            )
+            .into());
+        }
+        match cumulative_result {
+            Err(ParserSupervisorError::NoProgress {
+                phase: "process launch",
+            }) => {}
+            other => {
+                return Err(io::Error::other(format!(
+                    "real parser-pack cumulative epoch returned the wrong result: {other:?}"
+                ))
+                .into());
+            }
+        }
+        runtime_selection.supervisor_mut().shutdown()?;
+        runtime_selection.supervisor_mut().parse(
+            "awk",
+            &parser_source,
+            request_limits,
+            Instant::now() + Duration::from_secs(30),
+            Duration::from_secs(10),
+            &IndexCancellation::new(),
+        )?;
+        runtime_selection.supervisor_mut().shutdown()?;
+        drop(runtime_selection);
+    }
+
     projectatlas_json(&repo, &host_state, &[OsStr::new("scan")])?;
     let store = AtlasStore::open_read_only(&db)?;
     let selected_node = store
@@ -1191,7 +1317,9 @@ fn optional_parser_pack_real_archive_normal_runtime_lifecycle() -> Result<(), Bo
     require_json_string(&updated, &["selected", "artifact"], &replacement_artifact)?;
     require_json_string(&updated, &["rollback", "artifact"], &artifact)?;
     let release_version = json_string_at(&updated, &["selected", "projectatlas_version"])?;
-    let versions_root = logical_pack_root.join("versions").join(release_version);
+    let versions_root = logical_pack_root
+        .join(VERSIONS_DIR_NAME)
+        .join(release_version);
     if !versions_root.join(&artifact).is_dir()
         || !versions_root.join(&replacement_artifact).is_dir()
     {
