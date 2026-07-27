@@ -5845,7 +5845,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let artifact_path = temp.path().join(ARTIFACT_MANIFEST_FILE_NAME);
-        let policy_path = temp.path().join(NATIVE_IMPORT_POLICY_FILE_NAME);
+        let policy_path = temp.path().join("native-policy");
         fs::write(&artifact_path, b"artifact")?;
         fs::write(&policy_path, b"trusted")?;
         let modified = fs::metadata(&policy_path)?.modified()?;
