@@ -14,6 +14,7 @@
     "enforce-rust-test-quality-gates": 309,
     "expose-mcp-capabilities-settings": 293,
     "gate-codex-pr-review-threads": 299,
+    "harden-parser-runtime-and-graph-invalidation": 356,
     "harden-project-path-types": 294,
     "enhance-projectatlas-init-first-run": 305,
     "fix-token-tui-reference-visual-regression": 304,
