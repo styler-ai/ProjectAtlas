@@ -1762,23 +1762,34 @@ impl AtlasStore {
                     control,
                     IndexWorkStage::RepositoryTraversal,
                     || {
-                        let mut statement = self.connection.prepare_cached(
-                            "SELECT relation_key, project_instance_id, canonical_identity,
-                                source_entity_key, relation_scope, relation_kind,
-                                resolution_status, target_entity_key, reference_text,
-                                candidate_count, confidence, completeness
-                           FROM graph_relations
-                          WHERE project_instance_id = ?1
-                            AND relation_scope = ?2 AND relation_kind = ?3
-                          ORDER BY relation_key
-                          LIMIT ?4",
-                        )?;
-                        collect_relation_rows(statement.query(params![
-                            &project.as_bytes()[..],
-                            scope,
-                            kind,
-                            limit_plus_one
-                        ])?)
+                        #[cfg(feature = "sqlite-progress-test-observer")]
+                        crate::sqlite_progress_test_observer::notify(
+                            crate::sqlite_progress_test_observer::SqliteReadProgressEvent::RepositoryRelationFamilyQueryEntered,
+                        );
+                        let result = (|| {
+                            let mut statement = self.connection.prepare_cached(
+                                "SELECT relation_key, project_instance_id, canonical_identity,
+                                    source_entity_key, relation_scope, relation_kind,
+                                    resolution_status, target_entity_key, reference_text,
+                                    candidate_count, confidence, completeness
+                               FROM graph_relations
+                              WHERE project_instance_id = ?1
+                                AND relation_scope = ?2 AND relation_kind = ?3
+                              ORDER BY relation_key
+                              LIMIT ?4",
+                            )?;
+                            collect_relation_rows(statement.query(params![
+                                &project.as_bytes()[..],
+                                scope,
+                                kind,
+                                limit_plus_one
+                            ])?)
+                        })();
+                        #[cfg(feature = "sqlite-progress-test-observer")]
+                        crate::sqlite_progress_test_observer::notify(
+                            crate::sqlite_progress_test_observer::SqliteReadProgressEvent::RepositoryRelationFamilyQueryExited,
+                        );
+                        result
                     },
                 )?;
                 (project, raw)

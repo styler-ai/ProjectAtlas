@@ -2260,7 +2260,7 @@ fn relation_database_budget(
 }
 
 /// Measure deterministic serialized-equivalent bytes without retaining an encoding.
-fn serialized_equivalent_bytes<T>(value: &T) -> ServiceResult<u64>
+pub(super) fn serialized_equivalent_bytes<T>(value: &T) -> ServiceResult<u64>
 where
     T: Serialize + ?Sized,
 {
@@ -2350,7 +2350,7 @@ fn relation_work_overflow() -> ServiceError {
 }
 
 /// Bind every database call to the earlier caller or service deadline.
-fn relation_request_control(
+pub(super) fn relation_request_control(
     caller: Option<&IndexWorkControl>,
     service_deadline: Instant,
 ) -> IndexWorkControl {

@@ -1,6 +1,6 @@
 ## Context
 
-Issue #308 and its feature proof are closed, #340 and #341 are merged and closed, and the first #311 reconciliation reached `dev`. Fresh Codex review of the exact promotion head then found three blockers: `02-Release` did not publish the supported optional-parser archives, federated rendezvous discovery reapplied trust filters without preserving the primary anchor and direction, and the published MCP composition evaluation named a stale raw-input digest. The affected candidate and proof tasks must be reopened rather than inferred from the older green head.
+Issue #308 and its feature proof are closed, #340 and #341 are merged and closed, and the first #311 reconciliation reached `dev`. Fresh Codex review of successive exact promotion heads then found five blockers: `02-Release` did not publish the supported optional-parser archives, federated rendezvous discovery reapplied trust filters without preserving the primary anchor and direction, the published MCP composition evaluation named a stale raw-input digest, rendezvous database reads lacked the service-owned deadline, and exact federation byte accounting allocated avoidable duplicate encodings. The affected candidate and proof tasks must be reopened rather than inferred from older green heads.
 
 The existing release path already has the required mechanics:
 
@@ -21,6 +21,7 @@ The user also requires branch, worktree, and external ProjectAtlas checkout clea
 - Fix and prove every fresh exact-head Codex finding before candidate reconciliation.
 - Publish both supported optional-parser archives only after binding them to one clean all-platform run and the exact release tree.
 - Keep federated rendezvous evidence inside the primary anchor/direction result without changing SQLite schema or query ownership.
+- Carry the same caller-or-service deadline into rendezvous SQLite reads and measure retained federation state without an additional encoded buffer.
 - Keep `main`, tags, and GitHub releases untouched until all prepublication evidence is green.
 - Prepare an exact `dev`-to-`main` promotion that can pass the existing milestone gate.
 - Preserve a durable post-release owner for independent publication verification and safe workspace consolidation.
@@ -45,6 +46,8 @@ A new release driver was rejected because the current workflows already own the 
 The primary project remains the only anchor and direction authority. Its already bounded detailed traversal yields the exact typed external identities eligible for cross-root rendezvous. Secondary projects may contribute evidence only for that bounded identity set. Analysis retains the same derived set from its existing detailed traversal so it does not repeat the database read. An empty set returns immediately.
 
 The existing indexed relation-family read remains the storage boundary. A bounded ordered set membership check fixes the correctness defect in `O(primary rows log primary rows + bounded secondary rows log primary rows)` time and bounded memory. A new SQLite query shape or index was rejected because this finding does not establish a schema or plan deficit; that change would require separate query-plan and representative-scale evidence.
+
+The existing relation request control remains the cancellation and deadline owner. Rendezvous derives one control whose deadline is the earlier of the caller deadline and the federation service deadline, then passes it through every family read so the existing SQLite progress handler can stop late work. Exact serialized-equivalent byte counts reuse the service's streaming counter instead of allocating a second JSON buffer. This preserves query shape, indexes, read-only snapshot ownership, transaction behavior, output compatibility, and `O(serialized bytes)` counting work while removing the duplicate `O(serialized bytes)` allocation.
 
 ### Bind published benchmark metadata to its raw input
 
@@ -86,6 +89,8 @@ Until readiness is complete, `main`, tags, and releases remain untouched. If any
 - **A green older run is mistaken for final evidence** → Compare every required run's `headSha` with the locked candidate before closure.
 - **Supported optional-parser archives exist only as expiring workflow artifacts** → Require one explicit clean handoff, verify it against the exact release tree, and stage both supported archives plus aggregate proof as versioned release assets.
 - **Secondary federation rows escape the requested anchor or direction** → Derive the eligible typed external identities from the bounded primary traversal and reject every other secondary row.
+- **A rendezvous family query runs past the service deadline** → Bind every database call to the existing caller-or-service request control.
+- **Exact federation accounting doubles retained memory while measuring it** → Stream serialized-equivalent bytes into the existing counter without retaining another encoding.
 - **Published MCP composition metadata names stale input** → Compute its raw input SHA-256 and compare both published representations in the release gate.
 - **The milestone gate becomes circular around post-release cleanup** → Keep #311 prepublication-only and create the non-milestone post-release owner before closure.
 - **A prepublish run is mistaken for publication** → Require `prepublish_only=true`, verify no tag or release was created, and leave publication to the existing main-triggered workflow.
@@ -97,7 +102,7 @@ Until readiness is complete, `main`, tags, and releases remain untouched. If any
 1. Land the bounded installer trust fix and reconcile all live review feedback.
 2. Add this change to `openspec/issue-map.json` and replace #311's obsolete body with the exact local checklist.
 3. Complete and close #341 after its Linux and Windows empty-cache proof and land its reconciled checklist state.
-4. Land the supported optional-parser release handoff, anchored federation filtering, benchmark digest correction, focused tests, specs, and architecture diagram.
+4. Land the supported optional-parser release handoff, anchored and deadline-bound federation filtering with allocation-free byte accounting, benchmark digest correction, focused tests, specs, and architecture diagram.
 5. Merge all remaining readiness artifacts into `dev`, then lock the corrected release-content head.
 6. Run the complete local gates, exact-head `01-CI`, clean optional-parser proof, and `02-Release` with `prepublish_only=true` and the exact clean handoff on that head.
 7. Reconcile #311 in one task-state-only commit and mirror the GitHub checklist; its resulting `dev` SHA is the exact promotion head.

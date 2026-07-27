@@ -4,6 +4,7 @@ use super::analysis::{RelationAnalysisDraft, RelationAnalysisQuery, RelationAnal
 use super::relations::{
     DetailedRelationBudget, DetailedRelationPageDraft, DetailedRelationQuery,
     DetailedRelationReport, ExternalRelationIdentity, external_relation_identities,
+    relation_request_control, serialized_equivalent_bytes,
 };
 use super::{ServiceError, ServiceResult, selected_project_binding};
 use projectatlas_core::graph::{
@@ -19,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Minimum number of explicit roots that constitutes a federated call.
 const MIN_FEDERATED_ROOTS: usize = 2;
@@ -529,12 +530,7 @@ pub fn load_federated_detailed_relations(
         )?;
         let candidate = primary.report_for_prefix(primary.candidate_rows())?;
         let rendezvous_identities = external_relation_identities(&candidate);
-        let rendezvous_identity_bytes = u64::try_from(
-            serde_json::to_vec(&rendezvous_identities)?.len(),
-        )
-        .map_err(|_overflow| {
-            ServiceError::InvalidInput("federated identity byte count overflowed".to_string())
-        })?;
+        let rendezvous_identity_bytes = serialized_equivalent_bytes(&rendezvous_identities)?;
         let primary_edges = u64::from(candidate.work.inspected_edges);
         let primary_rows = u64::from(candidate.work.database_returned_rows);
         let remaining_edges = u64::from(budget.edges()).saturating_sub(primary_edges);
@@ -745,6 +741,11 @@ fn load_rendezvous(
             reached_limits: Vec::new(),
         });
     }
+    let deadline = started
+        .checked_add(Duration::from_millis(query.budget.deadline_ms()))
+        .unwrap_or(started);
+    let request_control = relation_request_control(control, deadline);
+    let control = Some(&request_control);
     let families = query.relation.map_or_else(
         || FEDERATED_RENDEZVOUS_RELATIONS.to_vec(),
         |relation| vec![relation],
@@ -802,13 +803,7 @@ fn load_rendezvous(
                 push_limit(&mut reached_limits, GraphLimitKind::Edges);
             }
             for row in page.rows {
-                let encoded_bytes =
-                    u64::try_from(serde_json::to_vec(&(&row.source, &row.relation))?.len())
-                        .map_err(|_overflow| {
-                            ServiceError::InvalidInput(
-                                "federated decoded-byte count overflowed".to_string(),
-                            )
-                        })?;
+                let encoded_bytes = serialized_equivalent_bytes(&(&row.source, &row.relation))?;
                 if encoded_bytes > remaining_intermediate_bytes {
                     push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
                     break 'queries;
@@ -1084,14 +1079,14 @@ fn federated_intermediate_bytes(
     cursor: Option<&str>,
     budget: DetailedRelationBudget,
 ) -> ServiceResult<u64> {
-    let federation_bytes = u64::try_from(
-        serde_json::to_vec(&(participants, rendezvous))?
-            .len()
-            .saturating_add(cursor.map_or(0, str::len)),
-    )
-    .map_err(|_overflow| {
-        ServiceError::InvalidInput("federated intermediate-byte count overflowed".to_string())
+    let cursor_bytes = u64::try_from(cursor.map_or(0, str::len)).map_err(|_overflow| {
+        ServiceError::InvalidInput("federated cursor byte count overflowed".to_string())
     })?;
+    let federation_bytes = checked_sum(
+        serialized_equivalent_bytes(&(participants, rendezvous))?,
+        cursor_bytes,
+        "federated intermediate bytes",
+    )?;
     let total = checked_sum(
         primary_bytes,
         federation_bytes,
@@ -1160,9 +1155,14 @@ mod tests {
     };
     use projectatlas_core::symbols::RelationKind;
     use projectatlas_core::{IndexCancellation, Node, NodeKind};
+    use projectatlas_db::sqlite_progress_test_observer::{
+        SqliteReadProgressEvent, observe_sqlite_read_progress,
+    };
+    use std::cell::Cell;
     use std::error::Error;
     use std::io;
     use std::path::Path;
+    use std::rc::Rc;
 
     #[test]
     fn federation_is_project_qualified_fresh_bounded_and_handle_free() -> Result<(), Box<dyn Error>>
@@ -1172,7 +1172,7 @@ mod tests {
         for index in 0..4 {
             let root = temp.path().join(format!("project-{index}"));
             let database = root.join("projectatlas.db");
-            publish_fixture(&root, &database, IndexGeneration::new(1))?;
+            publish_fixture(&root, &database, IndexGeneration::new(1), 1)?;
             participants.push((root, database));
         }
         let before = participants
@@ -1219,6 +1219,14 @@ mod tests {
             encoded.len() <= query.budget.output_bytes() as usize
                 && report.work.intermediate_bytes <= query.budget.intermediate_bytes(),
             "federated output escaped its aggregate byte budgets",
+        )?;
+        let rendezvous_identities = external_relation_identities(&report.primary);
+        let encoded_identity_bytes =
+            u64::try_from(serde_json::to_vec(&rendezvous_identities)?.len())?;
+        require(
+            !rendezvous_identities.is_empty()
+                && serialized_equivalent_bytes(&rendezvous_identities)? == encoded_identity_bytes,
+            "streamed federation identity accounting diverged from exact JSON bytes",
         )?;
         let after = participants
             .iter()
@@ -1329,6 +1337,7 @@ mod tests {
             &participants[3].0,
             &participants[3].1,
             IndexGeneration::new(2),
+            1,
         )?;
         let stale = load_federated_detailed_relations(
             open_participants(&participants)?,
@@ -1369,11 +1378,119 @@ mod tests {
         Ok(())
     }
 
-    /// Publish three anchored imports plus one unrelated same-family import.
+    #[test]
+    fn federation_deadline_interrupts_active_rendezvous_and_releases_snapshots()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let primary_root = temp.path().join("primary");
+        let primary_database = primary_root.join("projectatlas.db");
+        publish_fixture(&primary_root, &primary_database, IndexGeneration::new(1), 1)?;
+        let secondary_root = temp.path().join("secondary");
+        let secondary_database = secondary_root.join("projectatlas.db");
+        publish_fixture(
+            &secondary_root,
+            &secondary_database,
+            IndexGeneration::new(1),
+            usize::try_from(GraphLimits::MAX_ROWS)?,
+        )?;
+        let participants = vec![
+            (primary_root, primary_database),
+            (secondary_root, secondary_database),
+        ];
+        let mut query = relation_query(
+            None,
+            RelationResolutionFilter::External,
+            RelationDirection::Outbound,
+        )?;
+        query.budget = query.budget.with_aggregate_limits(
+            Some(GraphLimits::MAX_ROWS),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )?;
+        let control = IndexWorkControl::with_deadline(
+            IndexCancellation::new(),
+            Instant::now() + Duration::from_secs(1),
+        );
+        let family_query_active = Rc::new(Cell::new(false));
+        let family_query_entered_live = Rc::new(Cell::new(false));
+        let callback_entered_live = Rc::new(Cell::new(false));
+        let callback_interrupted = Rc::new(Cell::new(false));
+        let stores = open_participants(&participants)?;
+        let deadline = observe_sqlite_read_progress(
+            {
+                let observer_control = control.clone();
+                let family_query_active = Rc::clone(&family_query_active);
+                let family_query_entered_live = Rc::clone(&family_query_entered_live);
+                let callback_entered_live = Rc::clone(&callback_entered_live);
+                let callback_interrupted = Rc::clone(&callback_interrupted);
+                move |event| match event {
+                    SqliteReadProgressEvent::RepositoryRelationFamilyQueryEntered => {
+                        family_query_active.set(true);
+                        if observer_control
+                            .check(IndexWorkStage::RepositoryTraversal)
+                            .is_ok()
+                        {
+                            family_query_entered_live.set(true);
+                        }
+                    }
+                    SqliteReadProgressEvent::RepositoryRelationFamilyQueryExited => {
+                        family_query_active.set(false);
+                    }
+                    SqliteReadProgressEvent::CallbackEntered { stage }
+                        if family_query_active.get() && !callback_entered_live.get() =>
+                    {
+                        if observer_control.check(stage).is_ok() {
+                            callback_entered_live.set(true);
+                            while observer_control.check(stage).is_ok() {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                        }
+                    }
+                    SqliteReadProgressEvent::CallbackEvaluated {
+                        interrupted: true, ..
+                    } if family_query_active.get() && callback_entered_live.get() => {
+                        callback_interrupted.set(true);
+                    }
+                    _ => {}
+                }
+            },
+            || load_federated_detailed_relations(stores, &query, Some(&control)),
+        );
+        require(
+            matches!(
+                deadline,
+                Err(ServiceError::Db(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::DeadlineExceeded {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    }
+                )))
+            ),
+            "active rendezvous query was not interrupted with its typed deadline",
+        )?;
+        require(
+            family_query_entered_live.get()
+                && callback_entered_live.get()
+                && callback_interrupted.get()
+                && !family_query_active.get(),
+            "rendezvous deadline did not enter a live family query and interrupt it through SQLite",
+        )?;
+        for (index, (_, database)) in participants.iter().enumerate() {
+            let moved = database.with_extension(format!("deadline-closed-{index}"));
+            fs::rename(database, &moved)?;
+            fs::rename(moved, database)?;
+        }
+        Ok(())
+    }
+
+    /// Publish three anchored imports plus the requested unrelated same-family imports.
     fn publish_fixture(
         root: &Path,
         database: &Path,
         generation: IndexGeneration,
+        unrelated_relations: usize,
     ) -> Result<(), Box<dyn Error>> {
         fs::create_dir_all(root.join("src"))?;
         fs::write(root.join("src/same.rs"), "pub fn same() {}\n")?;
@@ -1419,25 +1536,32 @@ mod tests {
             )?);
             entities.push(external);
         }
-        let unrelated_external = GraphEntity::new(
-            project,
-            EntitySelector::External {
-                external: ExternalSelector {
-                    system: GraphIdentityText::new("registry.example")?,
-                    identity: GraphIdentityText::new("package/unrelated")?,
+        for index in 0..unrelated_relations {
+            let identity = if unrelated_relations == 1 {
+                "package/unrelated".to_string()
+            } else {
+                format!("package/unrelated/{index:05}")
+            };
+            let unrelated_external = GraphEntity::new(
+                project,
+                EntitySelector::External {
+                    external: ExternalSelector {
+                        system: GraphIdentityText::new("registry.example")?,
+                        identity: GraphIdentityText::new(identity)?,
+                    },
                 },
-            },
-            generation,
-        )?;
-        relations.push(LogicalRelation::new(
-            &unrelated_source,
-            GraphRelationKind::Legacy(RelationKind::Imports),
-            RelationResolution::external(&unrelated_external)?,
-            projectatlas_core::graph::ConfidenceClass::Exact,
-            Completeness::Complete,
-            generation,
-        )?);
-        entities.push(unrelated_external);
+                generation,
+            )?;
+            relations.push(LogicalRelation::new(
+                &unrelated_source,
+                GraphRelationKind::Legacy(RelationKind::Imports),
+                RelationResolution::external(&unrelated_external)?,
+                projectatlas_core::graph::ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?);
+            entities.push(unrelated_external);
+        }
         let mut publication = store.begin_index_publication("federation-fixture")?;
         publication.begin_scan_replacement()?;
         publication.upsert_scan_node_batch(&[
