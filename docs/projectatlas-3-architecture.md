@@ -1929,8 +1929,9 @@ bounded document descriptors while validating their digests, manifest relationsh
 and selected grammar; then validates its sealed executable mapping, eager runtime
 DSOs, and one-thread state with only the grammar descriptor retained. It installs hard
 resource/address-space limits and `no_new_privs`, hard-requires fully enforced Landlock
-ABI v3 with read access only to the selected sealed grammar object, and installs
-seccomp process/exec/socket denial before reading `SessionOpen`. The first
+ABI v3 with no allow rules so every ABI v3-handled access to user-visible filesystem
+paths is denied while the selected sealed anonymous grammar descriptor remains usable,
+and installs seccomp process/exec/socket denial before reading `SessionOpen`. The first
 authenticated grammar request must match that descriptor-bound grammar and is loaded
 directly from the retained descriptor. A validated READY is the first
 acknowledgement that binds the fresh session, artifact, and containment; the
