@@ -663,7 +663,8 @@ fn load_relation_analysis_with_closure_deadline(
                 relations
                     .work
                     .intermediate_bytes
-                    .saturating_add(closure.decoded_bytes),
+                    .saturating_add(closure.decoded_bytes)
+                    .saturating_add(external_relation_identity_bytes),
             ),
             deadline,
             control,

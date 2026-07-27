@@ -86,7 +86,7 @@ Until readiness is complete, `main`, tags, and releases remain untouched. If any
 - **A green older run is mistaken for final evidence** → Compare every required run's `headSha` with the locked candidate before closure.
 - **Supported optional-parser archives exist only as expiring workflow artifacts** → Require one explicit clean handoff, verify it against the exact release tree, and stage both supported archives plus aggregate proof as versioned release assets.
 - **Secondary federation rows escape the requested anchor or direction** → Derive the eligible typed external identities from the bounded primary traversal and reject every other secondary row.
-- **Published benchmark metadata names stale input** → Compute the raw input SHA-256 and compare both published representations in the release gate.
+- **Published MCP composition metadata names stale input** → Compute its raw input SHA-256 and compare both published representations in the release gate.
 - **The milestone gate becomes circular around post-release cleanup** → Keep #311 prepublication-only and create the non-milestone post-release owner before closure.
 - **A prepublish run is mistaken for publication** → Require `prepublish_only=true`, verify no tag or release was created, and leave publication to the existing main-triggered workflow.
 - **Installer or plugin state passes in source but fails when packaged** → Require real package/installer smoke and installed CLI/MCP behavior from the release workflow.

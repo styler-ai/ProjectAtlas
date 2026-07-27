@@ -1,11 +1,11 @@
 ## ADDED Requirements
 
-### Requirement: Published Evaluation Digests Match Their Named Inputs
+### Requirement: Published MCP Composition Digests Match Their Named Input
 
-Every human-readable and machine-readable benchmark evaluation that names a raw input SHA-256 SHALL match the bytes of that exact repository file. The release gate SHALL compare all published representations with the computed digest.
+The human-readable and machine-readable MCP composition evaluations SHALL name the SHA-256 of their exact raw input file. The release gate SHALL compare both MCP composition representations with the computed digest.
 
-#### Scenario: Evaluation metadata is current
-- **WHEN** release readiness validates a published benchmark evaluation
+#### Scenario: MCP composition metadata is current
+- **WHEN** release readiness validates the published MCP composition evaluation
 - **THEN** the Markdown and JSON digest fields equal the SHA-256 of the named raw input
 
 #### Scenario: One representation drifts
