@@ -6561,27 +6561,41 @@ mod tests {
             false,
             &control,
         )?;
-        assert_eq!(
-            payload.file.metadata()?.permissions().mode() & 0o777,
-            0o400,
-            "sealed document authority retained executable or writable mode bits"
-        );
+        require_test(
+            payload.file.metadata()?.permissions().mode() & 0o777 == 0o400,
+            "sealed document authority retained executable or writable mode bits",
+        )?;
         let status = fcntl(&payload.file, FcntlArg::F_GETFL)?;
-        assert_eq!(status & OFlag::O_ACCMODE.bits(), OFlag::O_RDONLY.bits());
+        require_test(
+            status & OFlag::O_ACCMODE.bits() == OFlag::O_RDONLY.bits(),
+            "sealed document authority was not reopened read-only",
+        )?;
         let seals = fcntl(&payload.file, FcntlArg::F_GET_SEALS)?;
         let required = SealFlag::F_SEAL_WRITE
             | SealFlag::F_SEAL_GROW
             | SealFlag::F_SEAL_SHRINK
             | SealFlag::F_SEAL_SEAL;
-        assert_eq!(seals & required.bits(), required.bits());
+        require_test(
+            seals & required.bits() == required.bits(),
+            "sealed document authority omitted a required seal",
+        )?;
 
         let mut reader = payload.file.try_clone()?;
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes)?;
-        assert_eq!(bytes, b"verified authority");
-        assert!(payload.file.set_len(0).is_err());
+        require_test(
+            bytes == b"verified authority",
+            "sealed document authority changed after reopening",
+        )?;
+        require_test(
+            payload.file.set_len(0).is_err(),
+            "sealed document authority allowed truncation",
+        )?;
         let mut writer = payload.file.try_clone()?;
-        assert!(writer.write_all(b"attacker").is_err());
+        require_test(
+            writer.write_all(b"attacker").is_err(),
+            "sealed document authority allowed mutation",
+        )?;
 
         let executable = SealedLinuxPayload::from_verified_bytes(
             "test worker",
@@ -6590,11 +6604,10 @@ mod tests {
             true,
             &control,
         )?;
-        assert_eq!(
-            executable.file.metadata()?.permissions().mode() & 0o777,
-            0o500,
-            "sealed executable authority retained writable or unexpected mode bits"
-        );
+        require_test(
+            executable.file.metadata()?.permissions().mode() & 0o777 == 0o500,
+            "sealed executable authority retained writable or unexpected mode bits",
+        )?;
         Ok(())
     }
 
@@ -6643,16 +6656,14 @@ mod tests {
                     }
                 },
             )?;
-            assert_eq!(
-                attempts,
-                vec![base | MFdFlags::from_bits_retain(mode_flag), base],
-                "legacy fallback did not retry exactly once with base flags"
-            );
-            assert_eq!(
-                payload.file.metadata()?.permissions().mode() & 0o777,
-                expected_mode,
-                "legacy fallback retained an unexpected payload mode"
-            );
+            require_test(
+                attempts == vec![base | MFdFlags::from_bits_retain(mode_flag), base],
+                "legacy fallback did not retry exactly once with base flags",
+            )?;
+            require_test(
+                payload.file.metadata()?.permissions().mode() & 0o777 == expected_mode,
+                "legacy fallback retained an unexpected payload mode",
+            )?;
         }
         Ok(())
     }
@@ -6784,16 +6795,28 @@ mod tests {
             sha256: encode_sha256(Sha256::digest(b"trusted")),
         }];
         let probe = launch.currentness_probe("alpha");
-        assert!(probe.is_current(None)?);
+        require_test(
+            probe.is_current(None)?,
+            "initial native policy currentness probe failed",
+        )?;
 
         fs::write(&policy_path, b"changed")?;
         File::options()
             .write(true)
             .open(&policy_path)?
             .set_times(fs::FileTimes::new().set_modified(modified))?;
-        assert_eq!(fs::metadata(&policy_path)?.len(), 7);
-        assert_eq!(fs::metadata(&policy_path)?.modified()?, modified);
-        assert!(!probe.is_current(None)?);
+        require_test(
+            fs::metadata(&policy_path)?.len() == 7,
+            "native policy mutation did not preserve size",
+        )?;
+        require_test(
+            fs::metadata(&policy_path)?.modified()? == modified,
+            "native policy mutation did not preserve modification time",
+        )?;
+        require_test(
+            !probe.is_current(None)?,
+            "same-size same-mtime native policy drift retained launch authority",
+        )?;
         Ok(())
     }
 
