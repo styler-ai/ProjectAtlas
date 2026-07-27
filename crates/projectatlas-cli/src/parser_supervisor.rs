@@ -834,6 +834,7 @@ impl PayloadObservation {
     fn linux_spec(&self) -> VerifiedLinuxPayloadSpec {
         VerifiedLinuxPayloadSpec {
             path: self.file.path.clone(),
+            epoch: self.file.epoch,
             bytes: self.bytes,
             sha256: self.sha256.clone(),
         }
@@ -1330,6 +1331,8 @@ struct BoundedArtifactRead {
 struct VerifiedLinuxPayloadSpec {
     /// Canonical path already constrained to the parser-pack root.
     path: PathBuf,
+    /// File identity captured before the artifact digest was accepted.
+    epoch: FileChangeEpoch,
     /// Exact declared byte count.
     bytes: u64,
     /// Exact lowercase SHA-256 digest.
@@ -1583,18 +1586,21 @@ impl VerifiedParserPackLaunch {
         let pack_root = canonical_directory(pack_root)?;
         let accepted_path = canonical_direct_file(&pack_root, ACCEPTED_MANIFEST_FILE_NAME)?;
         let artifact_path = canonical_direct_file(&pack_root, ARTIFACT_MANIFEST_FILE_NAME)?;
-        let mut accepted_manifest = Some(FileObservation::capture(accepted_path.clone())?);
+        let accepted_manifest_file = FileObservation::capture(accepted_path.clone())?;
         let artifact_manifest_file = FileObservation::capture(artifact_path.clone())?;
         let accepted_read = read_bounded_file(
             &accepted_path,
+            accepted_manifest_file.epoch,
             u64::try_from(OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES).unwrap_or(u64::MAX),
             control,
         )?;
         let artifact_read = read_bounded_file(
             &artifact_path,
+            artifact_manifest_file.epoch,
             u64::try_from(OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES).unwrap_or(u64::MAX),
             control,
         )?;
+        let mut accepted_manifest = Some(accepted_manifest_file);
         let logical = OptionalParserPackManifest::from_json(&accepted_read.bytes)?;
         let artifact_manifest: OptionalParserPackArtifactManifest =
             serde_json::from_slice(&artifact_read.bytes)
@@ -1631,7 +1637,7 @@ impl VerifiedParserPackLaunch {
             } else {
                 FileObservation::capture(path.clone())?
             };
-            let payload_read = read_bounded_file(&path, payload.bytes, control)?;
+            let payload_read = read_bounded_file(&path, file.epoch, payload.bytes, control)?;
             if u64::try_from(payload_read.bytes.len()).ok() != Some(payload.bytes) {
                 return Err(ParserSupervisorError::PayloadMismatch {
                     path,
@@ -1903,7 +1909,7 @@ fn read_verified_linux_payload(
     spec: &VerifiedLinuxPayloadSpec,
     control: &ArtifactIoControl<'_>,
 ) -> Result<Vec<u8>, ParserSupervisorError> {
-    let read = read_bounded_file(&spec.path, spec.bytes, Some(control))?;
+    let read = read_bounded_file(&spec.path, spec.epoch, spec.bytes, Some(control))?;
     if u64::try_from(read.bytes.len()).ok() != Some(spec.bytes) {
         return Err(ParserSupervisorError::PayloadMismatch {
             path: spec.path.clone(),
@@ -2040,6 +2046,7 @@ fn file_metadata(path: &Path) -> Result<Metadata, ParserSupervisorError> {
 /// Read and hash one exact regular file without permitting growth beyond its bound.
 fn read_bounded_file(
     path: &Path,
+    expected_epoch: FileChangeEpoch,
     maximum: u64,
     control: Option<&ArtifactIoControl<'_>>,
 ) -> Result<BoundedArtifactRead, ParserSupervisorError> {
@@ -2057,6 +2064,12 @@ fn read_bounded_file(
         return Err(ParserSupervisorError::InvalidPackPath {
             path: path.to_path_buf(),
             reason: "expected a regular artifact file",
+        });
+    }
+    if FileChangeEpoch::from_metadata(&metadata) != expected_epoch {
+        return Err(ParserSupervisorError::PayloadMismatch {
+            path: path.to_path_buf(),
+            reason: "artifact read handle does not match the captured file identity",
         });
     }
     if metadata.len() > maximum {
@@ -6707,6 +6720,48 @@ mod tests {
         require_test(
             !observation.is_current()?,
             "same-size same-mtime payload mutation retained launch authority",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_artifact_read_rejects_mismatched_captured_epoch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("worker");
+        fs::write(&path, b"trusted")?;
+        let observation = FileObservation::capture(path.clone())?;
+
+        #[cfg(unix)]
+        let expected_epoch = {
+            let replacement = temp.path().join("replacement");
+            let retained = temp.path().join("retained");
+            fs::write(&replacement, b"mutated")?;
+            fs::rename(&path, retained)?;
+            fs::rename(replacement, &path)?;
+            observation.epoch
+        };
+        #[cfg(not(unix))]
+        let expected_epoch = {
+            let _write_guard = &observation;
+            FileChangeEpoch::default()
+        };
+
+        let Err(error) = read_bounded_file(&path, expected_epoch, 7, None) else {
+            return Err(io::Error::other(
+                "replacement bytes were accepted under the captured epoch",
+            )
+            .into());
+        };
+        require_test(
+            matches!(
+                error,
+                ParserSupervisorError::PayloadMismatch {
+                    reason: "artifact read handle does not match the captured file identity",
+                    ..
+                }
+            ),
+            "replacement read did not fail on the captured file epoch",
         )?;
         Ok(())
     }

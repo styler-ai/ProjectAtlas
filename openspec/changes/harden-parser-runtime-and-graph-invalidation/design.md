@@ -2,7 +2,7 @@
 
 The v0.4.0 candidate already contains the #308 optional-parser and repository-graph architecture. Exact-head review found narrower correctness gaps after #308 closed: diagnostic bytes could coexist with an accepted completion, launch currentness and pre-READY timing could drift, process ownership could cross cancellation bounds, Linux sealed authority needed exact fallback and residue handling, and graph invalidation performed per-entity adjacency reads while holding the publication savepoint.
 
-The corrective work stays inside the accepted seven-crate architecture. `projectatlas-cli` owns parser process lifecycle and containment admission. `projectatlas-db` owns the embedded SQLite graph query and publication savepoint. No schema, migration, protocol, dependency, or crate boundary changes.
+The corrective work stays inside the accepted seven-crate architecture. `projectatlas-cli` owns parser process lifecycle and containment admission. `projectatlas-db` owns the embedded SQLite graph query and publication savepoint. No schema, migration, protocol, package-version, or crate boundary changes. The worker feature adds direct optional `libloading` and `tree-sitter-language` dependencies from the already locked workspace packages.
 
 ## Goals / Non-Goals
 
@@ -16,7 +16,7 @@ The corrective work stays inside the accepted seven-crate architecture. `project
 
 **Non-Goals:**
 
-- No parser protocol redesign, generic process actor, extra scheduler, new crate, or dependency.
+- No parser protocol redesign, generic process actor, extra scheduler, new crate, package, or dependency version.
 - No graph schema, index, migration, transaction, WAL, checkpoint, or recovery change.
 - No reopening the completed #308 task lifecycle.
 
@@ -38,7 +38,7 @@ This uses the existing concrete process owner, RAII child wrapper, lease, and bo
 
 ### 3. Currentness and Linux authority remain one bounded launch contract
 
-Every parse revalidates the fixed artifact roles before launch or resident reuse. One lazy metadata worker and artifact-I/O lease perform constant-size epoch probing; filesystem uncertainty cannot silently bless resident authority. Observed drift destroys the resident and enters the existing bounded digest reload. The original caller-owned pre-READY no-progress epoch continues through probing, reload, Linux sealing, process creation, platform admission, `SessionOpen`, and identity-validated READY.
+Every parse revalidates the fixed artifact roles before launch or resident reuse. One lazy metadata worker and artifact-I/O lease perform constant-size epoch probing; every digest read requires the opened read handle to match the previously captured file epoch before accepting bytes, so a path swap cannot combine one file's identity with another file's contents. Filesystem uncertainty cannot silently bless resident authority. Observed drift destroys the resident and enters the existing bounded digest reload. The original caller-owned pre-READY no-progress epoch continues through probing, reload, Linux sealing, process creation, platform admission, `SessionOpen`, and identity-validated READY.
 
 Linux executes only the sealed verified worker, loads the selected sealed grammar through the canonical `O_PATH` alias used by Landlock, preserves exact executable and document modes on modern and `EINVAL` fallback paths, and identifies sealed-worker residue from `/proc/<pid>/exe`. Required primitive or cleanup uncertainty fails closed.
 

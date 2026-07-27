@@ -8,11 +8,11 @@ The optional-parser supervisor SHALL reject any response attempt that emits post
 - **THEN** the supervisor rejects the response, destroys the resident session, and publishes no parser result
 
 ### Requirement: Launch authority is current within one pre-READY epoch
-Before every parse, the supervisor SHALL revalidate the fixed-role active manifest, worker, platform authority, accepted manifest, and selected grammar before new launch or resident reuse. Filesystem uncertainty SHALL destroy resident authority without accepting stale bytes; observed drift SHALL destroy the resident and use the existing bounded digest reload with exact artifact-identity enforcement. The caller SHALL retain one unchanged no-progress epoch from parse admission through currentness probing, reload, Linux sealing, bounded process creation, platform admission, `SessionOpen`, and identity-validated READY.
+Before every parse, the supervisor SHALL revalidate the fixed-role active manifest, worker, platform authority, accepted manifest, and selected grammar before new launch or resident reuse. Every digest read SHALL require the opened read handle to match the previously captured file epoch before accepting bytes. Filesystem uncertainty SHALL destroy resident authority without accepting stale bytes; observed drift SHALL destroy the resident and use the existing bounded digest reload with exact artifact-identity enforcement. The caller SHALL retain one unchanged no-progress epoch from parse admission through currentness probing, reload, Linux sealing, bounded process creation, platform admission, `SessionOpen`, and identity-validated READY.
 
 #### Scenario: Same-size and same-mtime launch input changes
 - **WHEN** a fixed-role launch input is replaced without changing its size or displayed modification time
-- **THEN** the production epoch and identity checks detect drift before launch or resident reuse and require exact bounded reload
+- **THEN** the production epoch and read-handle identity checks detect drift before accepting bytes, launch, or resident reuse and require exact bounded reload
 
 #### Scenario: Currentness cannot be proven
 - **WHEN** currentness probing is blocked, canceled, timed out, or exceeds the unchanged no-progress epoch
