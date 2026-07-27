@@ -1284,13 +1284,22 @@ mod tests {
     /// Existing path that must remain outside the grammar-only Landlock rule.
     const LANDLOCK_UNRELATED_PATH_ENV: &str = "PROJECTATLAS_LANDLOCK_UNRELATED_PATH";
 
+    fn require_test(condition: bool, message: &'static str) -> io::Result<()> {
+        if condition {
+            Ok(())
+        } else {
+            Err(io::Error::other(message))
+        }
+    }
+
     #[test]
     fn landlock_grammar_rule_child_fixture() -> Result<(), Box<dyn std::error::Error>> {
+        use nix::sys::memfd::{MFdFlags, memfd_create};
+        use std::io::{Seek as _, Write as _};
+
         if std::env::var_os(LANDLOCK_CHILD_ENV).is_none() {
             return Ok(());
         }
-        use nix::sys::memfd::{MFdFlags, memfd_create};
-        use std::io::{Seek as _, Write as _};
 
         let descriptor = memfd_create(
             "projectatlas-landlock-grammar-test",
@@ -1309,13 +1318,20 @@ mod tests {
         let mut reopened = File::open(format!("/proc/self/fd/{}", grammar.as_raw_fd()))?;
         let mut bytes = Vec::new();
         reopened.read_to_end(&mut bytes)?;
-        assert_eq!(bytes, b"grammar");
+        require_test(bytes == b"grammar", "sealed grammar bytes changed")?;
 
         let unrelated = std::env::var_os(LANDLOCK_UNRELATED_PATH_ENV)
             .ok_or_else(|| io::Error::other("unrelated Landlock test path is missing"))?;
-        let error = File::open(unrelated)
-            .expect_err("Landlock unexpectedly allowed an unrelated filesystem path");
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let Err(error) = File::open(unrelated) else {
+            return Err(io::Error::other(
+                "Landlock unexpectedly allowed an unrelated filesystem path",
+            )
+            .into());
+        };
+        require_test(
+            error.kind() == io::ErrorKind::PermissionDenied,
+            "Landlock returned an unexpected unrelated-path error",
+        )?;
         Ok(())
     }
 
@@ -1362,7 +1378,10 @@ mod tests {
         drop(writable);
         let admitted =
             take_sealed_authority_descriptor(read_only.into_raw_fd(), "test authority", 64)?;
-        assert_eq!(admitted.metadata()?.len(), 9);
+        require_test(
+            admitted.metadata()?.len() == 9,
+            "sealed authority length changed",
+        )?;
 
         let unsealed = memfd_create(
             "projectatlas-worker-unsealed-test",
@@ -1372,13 +1391,16 @@ mod tests {
         writable.write_all(b"authority")?;
         let read_only = File::open(format!("/proc/self/fd/{}", writable.as_raw_fd()))?;
         drop(writable);
-        assert!(matches!(
-            take_sealed_authority_descriptor(read_only.into_raw_fd(), "test authority", 64,),
-            Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
-                reason: "memfd does not carry the complete immutable seal set",
-                ..
-            })
-        ));
+        require_test(
+            matches!(
+                take_sealed_authority_descriptor(read_only.into_raw_fd(), "test authority", 64,),
+                Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
+                    reason: "memfd does not carry the complete immutable seal set",
+                    ..
+                })
+            ),
+            "unsealed authority descriptor was accepted",
+        )?;
 
         let writable_descriptor = memfd_create(
             "projectatlas-worker-writable-test",
@@ -1387,13 +1409,16 @@ mod tests {
         let mut writable = File::from(writable_descriptor);
         writable.write_all(b"authority")?;
         fcntl(&writable, FcntlArg::F_ADD_SEALS(required_memfd_seals()))?;
-        assert!(matches!(
-            take_sealed_authority_descriptor(writable.into_raw_fd(), "test authority", 64,),
-            Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
-                reason: "memfd descriptor is not read-only",
-                ..
-            })
-        ));
+        require_test(
+            matches!(
+                take_sealed_authority_descriptor(writable.into_raw_fd(), "test authority", 64,),
+                Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
+                    reason: "memfd descriptor is not read-only",
+                    ..
+                })
+            ),
+            "writable authority descriptor was accepted",
+        )?;
 
         let oversized_descriptor = memfd_create(
             "projectatlas-worker-oversized-test",
@@ -1404,27 +1429,36 @@ mod tests {
         fcntl(&writable, FcntlArg::F_ADD_SEALS(required_memfd_seals()))?;
         let read_only = File::open(format!("/proc/self/fd/{}", writable.as_raw_fd()))?;
         drop(writable);
-        assert!(matches!(
-            take_sealed_authority_descriptor(read_only.into_raw_fd(), "test authority", 8,),
-            Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
-                reason: "memfd is not a non-empty bounded anonymous regular file",
-                ..
-            })
-        ));
+        require_test(
+            matches!(
+                take_sealed_authority_descriptor(read_only.into_raw_fd(), "test authority", 8,),
+                Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
+                    reason: "memfd is not a non-empty bounded anonymous regular file",
+                    ..
+                })
+            ),
+            "oversized authority descriptor was accepted",
+        )?;
 
         let mut ordinary = tempfile::tempfile()?;
         ordinary.write_all(b"authority")?;
-        assert!(matches!(
-            take_sealed_authority_descriptor(ordinary.into_raw_fd(), "test authority", 64,),
-            Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
-                reason: "descriptor is not an anonymous memfd",
-                ..
-            })
-        ));
-        assert!(matches!(
-            take_sealed_authority_descriptor(999_999, "test authority", 64),
-            Err(ParserWorkerContainmentError::InspectAuthorityDescriptor { .. })
-        ));
+        require_test(
+            matches!(
+                take_sealed_authority_descriptor(ordinary.into_raw_fd(), "test authority", 64,),
+                Err(ParserWorkerContainmentError::InvalidAuthorityDescriptor {
+                    reason: "descriptor is not an anonymous memfd",
+                    ..
+                })
+            ),
+            "ordinary file descriptor was accepted as authority",
+        )?;
+        require_test(
+            matches!(
+                take_sealed_authority_descriptor(999_999, "test authority", 64),
+                Err(ParserWorkerContainmentError::InspectAuthorityDescriptor { .. })
+            ),
+            "invalid authority descriptor was accepted",
+        )?;
         Ok(())
     }
 
@@ -1446,13 +1480,19 @@ mod tests {
         drop(writable);
 
         let identity = validate_sealed_worker_executable(&read_only, &target)?;
-        assert_eq!(identity.inode, read_only.metadata()?.ino());
-        assert!(matches!(
-            validate_sealed_worker_executable(&read_only, Path::new("/tmp/worker")),
-            Err(ParserWorkerContainmentError::InvalidWorkerExecutable {
-                reason: "running executable is not an anonymous memfd"
-            })
-        ));
+        require_test(
+            identity.inode == read_only.metadata()?.ino(),
+            "sealed worker inode identity changed",
+        )?;
+        require_test(
+            matches!(
+                validate_sealed_worker_executable(&read_only, Path::new("/tmp/worker")),
+                Err(ParserWorkerContainmentError::InvalidWorkerExecutable {
+                    reason: "running executable is not an anonymous memfd"
+                })
+            ),
+            "ordinary worker path was accepted as sealed authority",
+        )?;
 
         let unsealed = memfd_create(
             "projectatlas-worker-unsealed-executable-test",
@@ -1463,12 +1503,15 @@ mod tests {
         let read_only = File::open(format!("/proc/self/fd/{}", writable.as_raw_fd()))?;
         let target = fs::read_link(format!("/proc/self/fd/{}", read_only.as_raw_fd()))?;
         drop(writable);
-        assert!(matches!(
-            validate_sealed_worker_executable(&read_only, &target),
-            Err(ParserWorkerContainmentError::InvalidWorkerExecutable {
-                reason: "running executable does not carry the complete immutable seal set"
-            })
-        ));
+        require_test(
+            matches!(
+                validate_sealed_worker_executable(&read_only, &target),
+                Err(ParserWorkerContainmentError::InvalidWorkerExecutable {
+                    reason: "running executable does not carry the complete immutable seal set"
+                })
+            ),
+            "unsealed worker executable was accepted",
+        )?;
         Ok(())
     }
 

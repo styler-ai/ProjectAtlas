@@ -41,6 +41,7 @@ use projectatlas_core::optional_parser_pack::{
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use projectatlas_core::optional_parser_pack::{
     OPTIONAL_PARSER_PACK_LINUX_RUNTIME_LOADER_BASENAME, OPTIONAL_PARSER_PACK_MAX_FILE_BYTES,
+    OPTIONAL_PARSER_PACK_NATIVE_IMPORT_POLICY_MAX_BYTES,
     OPTIONAL_PARSER_PACK_NATIVE_IMPORT_POLICY_SCHEMA_VERSION, OptionalParserPackArtifactManifest,
     PackPlatform, ParserPackPayloadRole,
 };
@@ -63,9 +64,6 @@ const ACCEPTED_MANIFEST_FILE_NAME: &str = "accepted-capabilities.json";
 /// Immutable artifact manifest whose exact bytes identify the running pack.
 #[cfg(any(test, not(all(target_os = "linux", target_arch = "x86_64"))))]
 const ARTIFACT_MANIFEST_FILE_NAME: &str = "artifact-manifest.json";
-/// Maximum immutable native-import policy bytes admitted before containment.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const NATIVE_IMPORT_POLICY_MAX_BYTES: usize = 1024 * 1024;
 /// Required offline build flag for the optional grammar dependency.
 const OFFLINE_BUILD_VARIABLE: &str = "TSLP_OFFLINE";
 /// Required dynamic-link build flag for the optional grammar dependency.
@@ -877,7 +875,7 @@ fn load_linux_worker_authority(
     let policy_file = take_sealed_authority_descriptor(
         descriptors.policy,
         "native-import policy",
-        u64::try_from(NATIVE_IMPORT_POLICY_MAX_BYTES).unwrap_or(u64::MAX),
+        OPTIONAL_PARSER_PACK_NATIVE_IMPORT_POLICY_MAX_BYTES,
     )
     .map_err(|source| WorkerStartupError::LinuxContainment {
         stage: source.stage(),
@@ -906,7 +904,7 @@ fn load_linux_worker_authority(
     let policy_bytes = read_sealed_document(
         policy_file,
         "native-import policy",
-        NATIVE_IMPORT_POLICY_MAX_BYTES,
+        usize::try_from(OPTIONAL_PARSER_PACK_NATIVE_IMPORT_POLICY_MAX_BYTES).unwrap_or(usize::MAX),
     )?;
     let logical = OptionalParserPackManifest::from_json(&accepted_bytes)
         .map_err(|error| WorkerStartupError::InvalidManifest(error.to_string()))?;
@@ -1369,7 +1367,7 @@ fn run() -> Result<(), WorkerStartupError> {
         } => {
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {
-                return serve_worker(descriptors);
+                serve_worker(descriptors)
             }
             #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
             {

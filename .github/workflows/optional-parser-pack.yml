@@ -939,6 +939,21 @@ jobs:
             --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Exercise Windows fixed-epoch sharing guards
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "parser-pack-runtime-e2e-target"
+          cargo test `
+            -p projectatlas-cli `
+            --lib `
+            --all-features `
+            --locked `
+            -- `
+            --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Exercise packaged archive through the normal runtime lifecycle
         shell: pwsh
         run: |

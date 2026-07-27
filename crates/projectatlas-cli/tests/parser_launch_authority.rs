@@ -130,8 +130,8 @@ fn sealed_worker_and_grammar_survive_concurrent_path_replacement() -> Result<(),
     let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
     let (release_sender, release_receiver) = mpsc::sync_channel(1);
     install_linux_launch_test_hook(move || {
-        let _ = ready_sender.send(());
-        let _ = release_receiver.recv_timeout(TEST_TIMEOUT);
+        let _ready_send_result = ready_sender.send(());
+        let _release_receive_result = release_receiver.recv_timeout(TEST_TIMEOUT);
     })?;
 
     let mut selection = lifecycle
@@ -161,7 +161,7 @@ fn sealed_worker_and_grammar_survive_concurrent_path_replacement() -> Result<(),
     ready_receiver.recv_timeout(TEST_TIMEOUT)?;
     let worker_replacement = replace_with_invalid_bytes(&worker_path);
     let grammar_replacement = replace_with_invalid_bytes(&grammar_path);
-    let _ = release_sender.send(());
+    let _release_send_result = release_sender.send(());
     let (worker_original, worker_attacker) = worker_replacement?;
     let (grammar_original, grammar_attacker) = grammar_replacement?;
     let parse_result = parse

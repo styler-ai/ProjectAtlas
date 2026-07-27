@@ -1830,7 +1830,9 @@ accepted manifest, and selected grammar. A stalled pathname lookup therefore can
 retain the caller or start another filesystem worker. Only a proven-current result
 permits resident reuse: uncertainty shuts down the resident without a reload, while
 an observed change shuts it down and enters the existing bounded digest reload
-before any replacement is accepted. One no-progress epoch begins at parse admission
+before any replacement is accepted. The shared artifact contract rejects a declared
+native-import policy above the worker's 1 MiB pre-containment ceiling before the
+supervisor reads or retains policy bytes. One no-progress epoch begins at parse admission
 and remains fixed through currentness, digest reload, Linux sealing, bounded process
 creation, platform admission, `SessionOpen`, and identity-validated READY. Process
 creation has one process-wide capacity-one owner. The caller polls the same absolute,

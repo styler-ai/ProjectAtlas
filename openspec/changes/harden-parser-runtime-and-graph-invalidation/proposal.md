@@ -7,7 +7,7 @@ Exact-head review of the v0.4.0 candidate found correctness gaps in the already 
 - Fail closed on parser diagnostics even when a valid completion frame follows.
 - Revalidate fixed-role parser-pack inputs before launch and resident reuse under one caller-owned pre-READY no-progress epoch.
 - Make the process-spawn owner retain the child and launch lease until the caller's final bounded check commits ownership, with owner-side kill/reap and sticky cleanup failure before that point.
-- Preserve exact Linux sealed worker, grammar, document, Landlock, memfd fallback, and residue-detection authority.
+- Reject oversized native-import policy declarations before supervisor reads or retention, and preserve exact Linux sealed worker, grammar, document, Landlock, memfd fallback, and residue-detection authority.
 - Discover incremental graph external endpoints with bounded set-oriented indexed queries.
 - Require focused fault, ordering, platform, query-shape, diagram, local-gate, exact-head hosted, and live-review proof before closure and promotion.
 

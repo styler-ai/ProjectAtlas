@@ -10,7 +10,7 @@ The corrective work stays inside the accepted seven-crate architecture. `project
 
 - Preserve one fail-closed parser authority from currentness probing through identity-validated READY and resident reuse.
 - Make process-child ownership and launch-lease release linearizable against caller cancellation, deadline, and no-progress bounds.
-- Preserve exact Linux sealed worker, grammar, document, containment, fallback, and lifecycle-residue authority.
+- Enforce the native-import policy's role-specific pre-containment byte ceiling before supervisor reads or retention, and preserve exact Linux sealed worker, grammar, document, containment, fallback, and lifecycle-residue authority.
 - Replace per-entity external-endpoint adjacency reads with bounded set-oriented indexed SQLite queries without changing graph identity, orphan cleanup, or transaction ownership.
 - Require focused, release-grade, exact-head, and live-review proof before #356 closes.
 
@@ -40,7 +40,7 @@ This uses the existing concrete process owner, RAII child wrapper, lease, and bo
 
 Every parse revalidates the fixed artifact roles before launch or resident reuse. One lazy metadata worker and artifact-I/O lease perform constant-size epoch probing; every digest read requires the opened read handle to match the previously captured file epoch before accepting bytes, so a path swap cannot combine one file's identity with another file's contents. Filesystem uncertainty cannot silently bless resident authority. Observed drift destroys the resident and enters the existing bounded digest reload. The original caller-owned pre-READY no-progress epoch continues through probing, reload, Linux sealing, process creation, platform admission, `SessionOpen`, and identity-validated READY.
 
-Linux executes only the sealed verified worker, loads the selected sealed grammar through the canonical `O_PATH` alias used by Landlock, preserves exact executable and document modes on modern and `EINVAL` fallback paths, and identifies sealed-worker residue from `/proc/<pid>/exe`. Required primitive or cleanup uncertainty fails closed.
+The shared artifact contract rejects native-import policy declarations above the worker's 1 MiB pre-containment ceiling before the supervisor reads or retains that payload. Linux executes only the sealed verified worker, loads the selected sealed grammar through the canonical `O_PATH` alias used by Landlock, preserves exact executable and document modes on modern and `EINVAL` fallback paths, and identifies sealed-worker residue from `/proc/<pid>/exe`. Required primitive or cleanup uncertainty fails closed.
 
 **Alternative considered:** use pathname spelling or restart timing as authority. Mutable names and resettable phase timers cannot prove the bytes or caller bound.
 
@@ -54,7 +54,7 @@ This reduces adjacency work from two statements per affected local entity to a b
 
 ### 5. Proof follows the behavior boundaries
 
-Focused parser tests own positive, cancellation, timeout, rendezvous, sticky-failure, exact-mode, fallback, and cleanup ordering. Real optional-parser lifecycle coverage owns packaged Linux/Windows containment and residue behavior. Real SQLite graph tests own candidate correctness, orphan cleanup, query count, index selection, rollback, and compatibility. The architecture Mermaid must render and remain semantically truthful. The exact PR head must pass the complete local gate, hosted `01-CI`, optional-parser Linux/Windows construction, and a fresh Codex/Dependabot thread audit.
+Focused parser tests own positive, cancellation, timeout, rendezvous, sticky-failure, role-specific payload ceilings, exact-mode, fallback, and cleanup ordering. Hosted Windows library tests own fixed-epoch sharing guards. Real optional-parser lifecycle coverage owns packaged Linux/Windows containment and residue behavior. Real SQLite graph tests own candidate correctness, orphan cleanup, query count, index selection, rollback, and compatibility. The architecture Mermaid must render and remain semantically truthful. The exact PR head must pass the complete local gate, hosted `01-CI`, optional-parser Linux/Windows construction, and a fresh Codex/Dependabot thread audit.
 
 ## Risks / Trade-offs
 

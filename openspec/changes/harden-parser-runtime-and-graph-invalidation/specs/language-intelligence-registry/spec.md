@@ -38,7 +38,11 @@ Process creation SHALL run behind one process-wide capacity-one owner that retai
 - **THEN** the spawn lease remains unavailable until cleanup completes and later launch attempts fail closed on sticky cleanup state
 
 ### Requirement: Linux optional-parser authority remains sealed and exact
-Linux optional-parser residents SHALL execute only the sealed verified worker and load only the retained sealed selected grammar. The grammar-only Landlock rule SHALL bind the canonical `O_PATH` alias of that exact descriptor while unrelated paths remain denied. Executable worker and grammar objects SHALL retain exact executable modes and document objects exact read-only non-executable modes across modern creation and `EINVAL`-only legacy fallback. Hosted lifecycle residue detection SHALL identify sealed workers by kernel-reported executable identity.
+The artifact contract SHALL reject a native-import policy declaration above the worker's 1 MiB pre-containment ceiling before the supervisor reads or retains that payload. Linux optional-parser residents SHALL execute only the sealed verified worker and load only the retained sealed selected grammar. The grammar-only Landlock rule SHALL bind the canonical `O_PATH` alias of that exact descriptor while unrelated paths remain denied. Executable worker and grammar objects SHALL retain exact executable modes and document objects exact read-only non-executable modes across modern creation and `EINVAL`-only legacy fallback. Hosted lifecycle residue detection SHALL identify sealed workers by kernel-reported executable identity.
+
+#### Scenario: Native-import policy exceeds its role ceiling
+- **WHEN** an artifact manifest declares a native-import policy larger than 1 MiB
+- **THEN** artifact validation rejects it before the supervisor reads, retains, clones, or seals policy bytes
 
 #### Scenario: Grammar containment is descriptor bound
 - **WHEN** the contained worker installs Landlock and later loads the selected grammar
