@@ -136,10 +136,16 @@ static CURRENTNESS_TEST_HOOK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>
 #[cfg(debug_assertions)]
 static PRE_SPAWN_TEST_HOOK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
     std::sync::Mutex::new(None);
-/// One-shot unit-test delay after acceptance and before owner-side child transfer.
+/// One-shot unit-test delay after an owner-retained rendezvous and before final bounds.
 #[cfg(test)]
-static PROCESS_SPAWN_BEFORE_TRANSFER_TEST_HOOK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
-    std::sync::Mutex::new(None);
+static PROCESS_SPAWN_AFTER_RENDEZVOUS_TEST_HOOK: std::sync::Mutex<
+    Option<Box<dyn FnOnce() + Send>>,
+> = std::sync::Mutex::new(None);
+/// One-shot unit-test delay after the final bounds decision and before owner notification.
+#[cfg(test)]
+static PROCESS_SPAWN_AFTER_FINAL_CHECK_TEST_HOOK: std::sync::Mutex<
+    Option<Box<dyn FnOnce() + Send>>,
+> = std::sync::Mutex::new(None);
 /// One-shot unit-test delay before owner-side unadmitted-child cleanup.
 #[cfg(test)]
 static PROCESS_SPAWN_BEFORE_CLEANUP_TEST_HOOK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
@@ -1179,7 +1185,8 @@ fn run_bounded_process_spawn_with(
     let lease = ProcessSpawnLease::acquire()?;
     let program = PathBuf::from(command.get_program());
     let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
-    let (accept_sender, accept_receiver) = mpsc::channel();
+    let (rendezvous_sender, rendezvous_receiver) = mpsc::sync_channel(0);
+    let (handoff_commit_sender, handoff_commit_receiver) = mpsc::sync_channel(1);
     let (child_sender, child_receiver) = mpsc::sync_channel(0);
     let worker = thread::Builder::new()
         .name("projectatlas-process-spawn".to_owned())
@@ -1195,14 +1202,11 @@ fn run_bounded_process_spawn_with(
             if ready_sender.send(Ok(())).is_err() {
                 return;
             }
-            if accept_receiver.recv().is_err() {
+            if rendezvous_sender.send(()).is_err() {
                 return;
             }
-            #[cfg(test)]
-            if let Ok(mut slot) = PROCESS_SPAWN_BEFORE_TRANSFER_TEST_HOOK.lock()
-                && let Some(hook) = slot.take()
-            {
-                hook();
+            if handoff_commit_receiver.recv().is_err() {
+                return;
             }
             if let Err(undelivered) = child_sender.send(child) {
                 drop(undelivered);
@@ -1236,12 +1240,6 @@ fn run_bounded_process_spawn_with(
                     no_progress_timeout,
                     cancellation,
                 )?;
-                accept_sender
-                    .send(())
-                    .map_err(|_closed| ParserSupervisorError::IoThread {
-                        phase: PROCESS_LAUNCH_PHASE,
-                        message: "process-spawn owner disconnected before admission".to_owned(),
-                    })?;
                 loop {
                     poll_stop(
                         PROCESS_LAUNCH_PHASE,
@@ -1250,17 +1248,57 @@ fn run_bounded_process_spawn_with(
                         no_progress_timeout,
                         cancellation,
                     )?;
-                    match child_receiver.recv_timeout(next_poll_wait(
+                    match rendezvous_receiver.recv_timeout(next_poll_wait(
                         absolute_deadline,
                         last_progress,
                         no_progress_timeout,
                     )) {
-                        Ok(child) => return child.admit(),
+                        Ok(()) => {
+                            #[cfg(test)]
+                            if let Ok(mut slot) = PROCESS_SPAWN_AFTER_RENDEZVOUS_TEST_HOOK.lock()
+                                && let Some(hook) = slot.take()
+                            {
+                                hook();
+                            }
+                            poll_stop(
+                                PROCESS_LAUNCH_PHASE,
+                                absolute_deadline,
+                                last_progress,
+                                no_progress_timeout,
+                                cancellation,
+                            )?;
+                            // The successful final check commits ownership. This bounded
+                            // acknowledgement only notifies the owner; later stops belong
+                            // to the normal resident-session owner.
+                            #[cfg(test)]
+                            if let Ok(mut slot) = PROCESS_SPAWN_AFTER_FINAL_CHECK_TEST_HOOK.lock()
+                                && let Some(hook) = slot.take()
+                            {
+                                hook();
+                            }
+                            handoff_commit_sender.send(()).map_err(|_closed| {
+                                ParserSupervisorError::IoThread {
+                                    phase: PROCESS_LAUNCH_PHASE,
+                                    message:
+                                        "process-spawn owner disconnected before handoff commit"
+                                            .to_owned(),
+                                }
+                            })?;
+                            return child_receiver
+                                .recv()
+                                .map_err(|_closed| ParserSupervisorError::IoThread {
+                                    phase: PROCESS_LAUNCH_PHASE,
+                                    message:
+                                        "process-spawn owner disconnected during committed handoff"
+                                            .to_owned(),
+                                })?
+                                .admit();
+                        }
                         Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => {
                             return Err(ParserSupervisorError::IoThread {
                                 phase: PROCESS_LAUNCH_PHASE,
-                                message: "process-spawn owner disconnected during admission"
+                                message: "process-spawn owner disconnected during rendezvous"
                                     .to_owned(),
                             });
                         }
@@ -3083,18 +3121,6 @@ impl ResidentParserSession {
             no_progress_timeout,
             cancellation,
         )?;
-        if let Err(operation) = poll_stop(
-            PROCESS_LAUNCH_PHASE,
-            absolute_deadline,
-            last_progress,
-            no_progress_timeout,
-            cancellation,
-        ) {
-            return Err(attach_cleanup(
-                operation,
-                cleanup_partial_launch(&mut child, Vec::new(), None, None, None),
-            ));
-        }
         let stdin = child
             .stdin
             .take()
@@ -5706,7 +5732,8 @@ mod tests {
     impl Drop for ProcessSpawnTestHookReset {
         fn drop(&mut self) {
             for slot in [
-                &PROCESS_SPAWN_BEFORE_TRANSFER_TEST_HOOK,
+                &PROCESS_SPAWN_AFTER_RENDEZVOUS_TEST_HOOK,
+                &PROCESS_SPAWN_AFTER_FINAL_CHECK_TEST_HOOK,
                 &PROCESS_SPAWN_BEFORE_CLEANUP_TEST_HOOK,
             ] {
                 if let Ok(mut hook) = slot.lock() {
@@ -6271,7 +6298,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_process_spawn_cancellation_detaches_during_handoff()
+    fn completed_process_spawn_cancellation_detaches_after_rendezvous()
     -> Result<(), Box<dyn std::error::Error>> {
         let _guard = PROCESS_SPAWN_TEST_LOCK
             .lock()
@@ -6291,14 +6318,14 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
-        let (transfer_entered_sender, transfer_entered_receiver) = mpsc::sync_channel(1);
-        let (release_transfer_sender, release_transfer_receiver) = mpsc::sync_channel(1);
-        *PROCESS_SPAWN_BEFORE_TRANSFER_TEST_HOOK
+        let (rendezvous_entered_sender, rendezvous_entered_receiver) = mpsc::sync_channel(1);
+        let (release_rendezvous_sender, release_rendezvous_receiver) = mpsc::sync_channel(1);
+        *PROCESS_SPAWN_AFTER_RENDEZVOUS_TEST_HOOK
             .lock()
-            .map_err(|_poisoned| io::Error::other("transfer test hook lock is poisoned"))? =
+            .map_err(|_poisoned| io::Error::other("rendezvous test hook lock is poisoned"))? =
             Some(Box::new(move || {
-                let _entered = transfer_entered_sender.send(());
-                let _release = release_transfer_receiver.recv();
+                let _entered = rendezvous_entered_sender.send(());
+                let _release = release_rendezvous_receiver.recv();
             }));
 
         let (cleanup_entered_sender, cleanup_entered_receiver) = mpsc::sync_channel(1);
@@ -6335,9 +6362,10 @@ mod tests {
             let _send = result_sender.send(result);
         });
 
-        transfer_entered_receiver.recv_timeout(Duration::from_secs(1))?;
+        rendezvous_entered_receiver.recv_timeout(Duration::from_secs(1))?;
         let _child_pid = pid_receiver.recv_timeout(Duration::from_secs(1))?;
         cancellation.cancel();
+        release_rendezvous_sender.send(())?;
         let result = result_receiver.recv_timeout(Duration::from_secs(1))?;
         match result {
             Err(ParserSupervisorError::Cancelled {
@@ -6354,7 +6382,6 @@ mod tests {
             .join()
             .map_err(|_panic| io::Error::other("completed-spawn caller panicked"))?;
 
-        release_transfer_sender.send(())?;
         let cleanup_thread = cleanup_entered_receiver.recv_timeout(Duration::from_secs(1))?;
         if cleanup_thread != "projectatlas-process-spawn" {
             return Err(io::Error::other(format!(
@@ -6388,6 +6415,50 @@ mod tests {
             return Err(io::Error::other("unadmitted child survived mandatory cleanup").into());
         }
         drop(ProcessSpawnLease::acquire()?);
+        Ok(())
+    }
+
+    #[test]
+    fn completed_process_spawn_final_check_commits_handoff_and_releases_lease()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PROCESS_SPAWN_TEST_LOCK
+            .lock()
+            .map_err(|_poisoned| io::Error::other("process-spawn test lock is poisoned"))?;
+        require_process_spawn_cleanup_health()?;
+        let _hook_reset = ProcessSpawnTestHookReset;
+        let mut command = Command::new(std::env::current_exe()?);
+        command
+            .arg("--exact")
+            .arg("parser_supervisor::tests::blocked_process_spawn_child_fixture")
+            .arg("--nocapture")
+            .env(PROCESS_SPAWN_CHILD_ENV, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let started = Instant::now();
+        let cancellation = IndexCancellation::new();
+        let hook_cancellation = cancellation.clone();
+        *PROCESS_SPAWN_AFTER_FINAL_CHECK_TEST_HOOK
+            .lock()
+            .map_err(|_poisoned| io::Error::other("final-check test hook lock is poisoned"))? =
+            Some(Box::new(move || hook_cancellation.cancel()));
+        let mut child = run_bounded_process_spawn(
+            command,
+            started + Duration::from_secs(5),
+            started,
+            Duration::from_secs(5),
+            &cancellation,
+        )?;
+        if !cancellation.is_cancelled() {
+            return Err(io::Error::other(
+                "final-check test did not cancel after ownership commitment",
+            )
+            .into());
+        }
+        drop(ProcessSpawnLease::acquire()?);
+        cleanup_partial_launch(&mut child, Vec::new(), None, None, None)?;
+        require_process_spawn_cleanup_health()?;
         Ok(())
     }
 

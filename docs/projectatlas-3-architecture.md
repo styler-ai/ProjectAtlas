@@ -1835,11 +1835,16 @@ and remains fixed through currentness, digest reload, Linux sealing, bounded pro
 creation, platform admission, `SessionOpen`, and identity-validated READY. Process
 creation has one process-wide capacity-one owner. The caller polls the same absolute,
 no-progress, and cancellation bounds before spawn and after the owner reports
-readiness, then requests ownership through a zero-capacity rendezvous. The caller
-keeps polling those bounds until the transfer completes. The owner retains its lease
-and any untransferred child, so a caller that stops during the handoff only detaches;
-the owner kills and reaps the child. A late cleanup failure becomes sticky fail-closed
-launch state instead of disappearing after the caller returns.
+process-created readiness, then receives an owner-retained zero-capacity rendezvous
+offered by the owner.
+Receiving that rendezvous transfers no ownership: the caller rechecks its bounds
+before notifying the owner. A successful final bounds check is the ownership
+linearization point; the bounded handoff acknowledgement only reports that committed
+decision, after which the owner transfers the child. A later stop belongs to normal
+caller/resident cleanup. The owner retains its lease and child until the
+acknowledgement, so a caller that stops before or at the final check only detaches;
+the owner kills and reaps the child. A late cleanup failure becomes sticky
+fail-closed launch state instead of disappearing after the caller returns.
 Only validated READY or advancing session-bound parser progress starts a later
 no-progress interval.
 
@@ -2214,13 +2219,17 @@ flowchart TB
     Platform -->|Linux| LinuxSeal[Rehash worker plus selected grammar; seal executable worker plus grammar and non-executable documents]
     LinuxSeal --> Spawn[One bounded process-wide spawn owner]
     Platform -->|Windows| Spawn
-    Spawn --> SpawnReady[Owner reports ready; caller rechecks bounds and requests zero-capacity transfer]
-    SpawnReady -->|Linux| LinuxBoot[Execute sealed worker; exact pipes plus four authority descriptors]
-    LinuxBoot --> LinuxAuthority[Validate descriptors and seals; read and close documents; validate digests, relations, and selected grammar]
+    Spawn -->|Linux| LinuxBoot[Execute sealed worker; exact pipes plus four authority descriptors]
+    Spawn -->|Windows| Broker[Create artifact-bound containment broker]
+    LinuxBoot --> SpawnReady[Owner reports process-created readiness while retaining child and lease]
+    Broker --> SpawnReady
+    SpawnReady --> Rendezvous[Owner offers zero-capacity rendezvous while retaining child and lease]
+    Rendezvous --> FinalLaunchCheck[Caller rechecks bounds after rendezvous]
+    FinalLaunchCheck -->|successful check commits ownership; bounded ACK notifies owner| Handoff[Owner transfers child to caller]
+    Handoff -->|Linux| LinuxAuthority[Validate descriptors and seals; read and close documents; validate digests, relations, and selected grammar]
     LinuxAuthority --> LinuxVerify[Validate executable mapping, eager runtime DSOs, and one-thread state]
     LinuxVerify --> LinuxContain[Hard limits plus no_new_privs plus grammar-only Landlock v3 plus seccomp]
-    SpawnReady -->|Windows| Broker[Artifact-bound containment broker]
-    Broker --> WindowsContain[Suspended LPAC worker; exact handles plus no-breakaway Job and completion port]
+    Handoff -->|Windows| WindowsContain[Suspended LPAC worker; exact handles plus no-breakaway Job and completion port]
     WindowsContain --> Admission[Resume then fixed admission record]
     Admission --> AdmissionGate[Rust validates adapter admission]
     LinuxContain --> Open[Contained worker reads SessionOpen: protocol plus fresh session only]
@@ -2240,8 +2249,8 @@ flowchart TB
     Reload -. read or identity failure .-> Preserve
     Platform -. authority or containment preparation failure .-> Preserve[Fail closed; terminate, reap, and join if started; preserve MCP and previous generation]
     Spawn -. spawn failure .-> Preserve
-    Spawn -. caller stopped before transfer .-> LateSpawnCleanup[Retain lease; kill and reap any untransferred child; poison launch if cleanup fails]
-    SpawnReady -. caller stopped during transfer .-> LateSpawnCleanup
+    Spawn -. caller stopped before rendezvous .-> LateSpawnCleanup[Retain lease; kill and reap any untransferred child; poison launch if cleanup fails]
+    FinalLaunchCheck -. caller stopped before admission .-> LateSpawnCleanup
     LateSpawnCleanup --> Preserve
     Open -. write, timeout, or cancellation .-> FailureCleanup
     Ready -. stalled or invalid READY .-> FailureCleanup
