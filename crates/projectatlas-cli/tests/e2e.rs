@@ -33,7 +33,7 @@ use projectatlas_core::optional_parser_pack::{
     OPTIONAL_PARSER_PACK_MAX_FILE_BYTES, OPTIONAL_PARSER_PACK_MAX_FILE_ENTRIES, PackRelativePath,
 };
 #[cfg(all(debug_assertions, feature = "optional-parser-supervisor"))]
-use projectatlas_core::optional_parser_protocol::ParserRequestLimits;
+use projectatlas_core::optional_parser_protocol::{PARSER_MAX_OUTPUT_BYTES, ParserRequestLimits};
 use projectatlas_core::relation_capabilities::{RELATION_FAMILY_CAPABILITIES, RelationFamilyState};
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
@@ -1147,7 +1147,7 @@ fn optional_parser_pack_real_archive_normal_runtime_lifecycle() -> Result<(), Bo
         })?;
 
         let parser_source = fs::read(&optional_source)?;
-        let request_limits = ParserRequestLimits::new(1_048_576, 100_000, 512)?;
+        let request_limits = ParserRequestLimits::new(PARSER_MAX_OUTPUT_BYTES, 100_000, 512)?;
         let cumulative_result = runtime_selection.supervisor_mut().parse(
             "awk",
             &parser_source,

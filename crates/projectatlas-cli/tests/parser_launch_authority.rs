@@ -14,7 +14,7 @@ use projectatlas_core::optional_parser_pack::{
     OPTIONAL_PARSER_PACK_ID, OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION,
     OptionalParserPackArtifactManifest, OptionalParserPackManifest, ParserPackPayloadRole,
 };
-use projectatlas_core::optional_parser_protocol::ParserRequestLimits;
+use projectatlas_core::optional_parser_protocol::{PARSER_MAX_OUTPUT_BYTES, ParserRequestLimits};
 use std::error::Error;
 use std::fs;
 use std::io;
@@ -140,7 +140,7 @@ fn sealed_worker_and_grammar_survive_concurrent_path_replacement() -> Result<(),
     let language_id = grammar.language_id.clone();
     let source = grammar.fixtures.positive.source.into_bytes();
     let parse = thread::spawn(move || {
-        let limits = ParserRequestLimits::new(1024 * 1024, 100_000, 512)?;
+        let limits = ParserRequestLimits::new(PARSER_MAX_OUTPUT_BYTES, 100_000, 512)?;
         let deadline = Instant::now()
             .checked_add(TEST_TIMEOUT)
             .ok_or_else(|| io::Error::other("parse deadline overflow"))?;

@@ -7005,30 +7005,43 @@ mod tests {
     #[test]
     fn windows_job_memory_exit_code_is_reserved_and_typed() -> Result<(), Box<dyn std::error::Error>>
     {
-        let mut memory_command = Command::new("powershell.exe");
+        let mut memory_command = Command::new("cmd.exe");
         memory_command
-            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+            .args(["/D", "/Q", "/C"])
             .arg(format!(
-                "Start-Sleep -Milliseconds 250; exit {PARSER_WINDOWS_BROKER_MEMORY_LIMIT_EXIT_CODE}"
-            ));
+                "set /p _= & exit /B {PARSER_WINDOWS_BROKER_MEMORY_LIMIT_EXIT_CODE}"
+            ))
+            .stdin(Stdio::piped());
         let mut memory_exit = memory_command.spawn()?;
+        let mut memory_input = memory_exit
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("delayed broker memory-limit stdin is absent"))?;
         require_test(
             memory_exit.try_wait()?.is_none(),
             "delayed broker memory-limit process exited before observation",
         )?;
+        let release_memory_exit = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            memory_input.write_all(b"\n")
+        });
         let diagnostic = ParserIoThreadError::UnexpectedDiagnostic {
             diagnostic: "tree-sitter failed to allocate 8".to_owned(),
         };
+        let observation_timeout = Duration::from_secs(5);
         let started = Instant::now();
         let memory_diagnostic_result = diagnostic_failure_after_exit_observation(
             &mut memory_exit,
             "request response",
             &diagnostic,
-            started + Duration::from_secs(2),
+            started + observation_timeout,
             started,
-            Duration::from_secs(2),
+            observation_timeout,
             &IndexCancellation::new(),
         );
+        release_memory_exit
+            .join()
+            .map_err(|_panic| io::Error::other("delayed broker memory-limit release panicked"))??;
         if !matches!(
             memory_diagnostic_result,
             ParserSupervisorError::WindowsJobMemoryLimitExceeded {
