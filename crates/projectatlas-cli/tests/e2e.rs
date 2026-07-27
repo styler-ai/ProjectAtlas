@@ -1085,8 +1085,9 @@ fn optional_parser_pack_real_archive_normal_runtime_lifecycle() -> Result<(), Bo
 
     #[cfg(debug_assertions)]
     {
-        const PHASE_DELAY: Duration = Duration::from_millis(2_250);
-        const PRE_READY_NO_PROGRESS: Duration = Duration::from_secs(4);
+        const CURRENTNESS_DELAY: Duration = Duration::from_secs(2);
+        const PRE_SPAWN_DELAY: Duration = Duration::from_secs(14);
+        const PRE_READY_NO_PROGRESS: Duration = Duration::from_secs(15);
 
         let lifecycle = OptionalParserPackLifecycle::new(&repo, Some(storage))?;
         let mut runtime_selection = lifecycle
@@ -1137,13 +1138,13 @@ fn optional_parser_pack_real_archive_normal_runtime_lifecycle() -> Result<(), Bo
         let currentness_hook_seen = Arc::clone(&currentness_seen);
         install_currentness_test_hook(move || {
             currentness_hook_seen.store(true, Ordering::Release);
-            thread::sleep(PHASE_DELAY);
+            thread::sleep(CURRENTNESS_DELAY);
         })?;
         let pre_spawn_seen = Arc::new(AtomicBool::new(false));
         let pre_spawn_hook_seen = Arc::clone(&pre_spawn_seen);
         install_pre_spawn_test_hook(move || {
             pre_spawn_hook_seen.store(true, Ordering::Release);
-            thread::sleep(PHASE_DELAY);
+            thread::sleep(PRE_SPAWN_DELAY);
         })?;
 
         let parser_source = fs::read(&optional_source)?;
@@ -1152,7 +1153,7 @@ fn optional_parser_pack_real_archive_normal_runtime_lifecycle() -> Result<(), Bo
             "awk",
             &parser_source,
             request_limits,
-            Instant::now() + Duration::from_secs(30),
+            Instant::now() + Duration::from_secs(60),
             PRE_READY_NO_PROGRESS,
             &IndexCancellation::new(),
         );
