@@ -18,6 +18,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+projectatlas-db = { workspace = true, features = ["sqlite-progress-test-observer"] }
 tempfile.workspace = true
 
 [lints]

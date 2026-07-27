@@ -1155,9 +1155,14 @@ mod tests {
     };
     use projectatlas_core::symbols::RelationKind;
     use projectatlas_core::{IndexCancellation, Node, NodeKind};
+    use projectatlas_db::sqlite_progress_test_observer::{
+        SqliteReadProgressEvent, observe_sqlite_read_progress,
+    };
+    use std::cell::Cell;
     use std::error::Error;
     use std::io;
     use std::path::Path;
+    use std::rc::Rc;
 
     #[test]
     fn federation_is_project_qualified_fresh_bounded_and_handle_free() -> Result<(), Box<dyn Error>>
@@ -1402,12 +1407,58 @@ mod tests {
             None,
             None,
             None,
-            Some(DetailedRelationBudget::MAX_INTERMEDIATE_BYTES),
-            Some(50),
+            None,
+            None,
         )?;
-
-        let deadline =
-            load_federated_detailed_relations(open_participants(&participants)?, &query, None);
+        let control = IndexWorkControl::with_deadline(
+            IndexCancellation::new(),
+            Instant::now() + Duration::from_secs(1),
+        );
+        let family_query_active = Rc::new(Cell::new(false));
+        let family_query_entered_live = Rc::new(Cell::new(false));
+        let callback_entered_live = Rc::new(Cell::new(false));
+        let callback_interrupted = Rc::new(Cell::new(false));
+        let stores = open_participants(&participants)?;
+        let deadline = observe_sqlite_read_progress(
+            {
+                let observer_control = control.clone();
+                let family_query_active = Rc::clone(&family_query_active);
+                let family_query_entered_live = Rc::clone(&family_query_entered_live);
+                let callback_entered_live = Rc::clone(&callback_entered_live);
+                let callback_interrupted = Rc::clone(&callback_interrupted);
+                move |event| match event {
+                    SqliteReadProgressEvent::RepositoryRelationFamilyQueryEntered => {
+                        family_query_active.set(true);
+                        if observer_control
+                            .check(IndexWorkStage::RepositoryTraversal)
+                            .is_ok()
+                        {
+                            family_query_entered_live.set(true);
+                        }
+                    }
+                    SqliteReadProgressEvent::RepositoryRelationFamilyQueryExited => {
+                        family_query_active.set(false);
+                    }
+                    SqliteReadProgressEvent::CallbackEntered { stage }
+                        if family_query_active.get() && !callback_entered_live.get() =>
+                    {
+                        if observer_control.check(stage).is_ok() {
+                            callback_entered_live.set(true);
+                            while observer_control.check(stage).is_ok() {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                        }
+                    }
+                    SqliteReadProgressEvent::CallbackEvaluated {
+                        interrupted: true, ..
+                    } if family_query_active.get() && callback_entered_live.get() => {
+                        callback_interrupted.set(true);
+                    }
+                    _ => {}
+                }
+            },
+            || load_federated_detailed_relations(stores, &query, Some(&control)),
+        );
         require(
             matches!(
                 deadline,
@@ -1418,6 +1469,13 @@ mod tests {
                 )))
             ),
             "active rendezvous query was not interrupted with its typed deadline",
+        )?;
+        require(
+            family_query_entered_live.get()
+                && callback_entered_live.get()
+                && callback_interrupted.get()
+                && !family_query_active.get(),
+            "rendezvous deadline did not enter a live family query and interrupt it through SQLite",
         )?;
         for (index, (_, database)) in participants.iter().enumerate() {
             let moved = database.with_extension(format!("deadline-closed-{index}"));
@@ -1482,7 +1540,7 @@ mod tests {
             let identity = if unrelated_relations == 1 {
                 "package/unrelated".to_string()
             } else {
-                format!("package/unrelated/{index:05}/{}", "x".repeat(4_000))
+                format!("package/unrelated/{index:05}")
             };
             let unrelated_external = GraphEntity::new(
                 project,
