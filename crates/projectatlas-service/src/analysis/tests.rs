@@ -414,6 +414,7 @@ fn analysis_modes_are_closed_and_partial_evidence_stays_inconclusive() -> Result
         &analysis_query(RelationAnalysisMode::Architecture)?,
         None,
         Some(Instant::now()),
+        false,
     )?;
     let (deadline_limited, _) = deadline_limited.fit_output::<_, ServiceError, _>(|report| {
         serde_json::to_vec(report).map_err(ServiceError::from)

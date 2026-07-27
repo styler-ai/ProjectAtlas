@@ -3663,6 +3663,8 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     let workflow_dir = workspace_root.join(".github").join("workflows");
     let release_workflow = fs::read_to_string(workflow_dir.join("release.yml"))?;
     let auto_release_workflow = fs::read_to_string(workflow_dir.join("03-auto-release.yml"))?;
+    let optional_parser_workflow =
+        fs::read_to_string(workflow_dir.join("optional-parser-pack.yml"))?;
     let ci_workflow = fs::read_to_string(workflow_dir.join("ci.yml"))?;
     let dependabot = fs::read_to_string(workspace_root.join(".github").join("dependabot.yml"))?;
     let deny = fs::read_to_string(workspace_root.join("deny.toml"))?;
@@ -4043,6 +4045,49 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
             .into());
         }
     }
+    for required in [
+        "parser_pack_run_id:",
+        "parser-pack-assets:",
+        "optional-parser-pack-release-assets",
+        "github-token: ${{ github.token }}",
+        "run-id: ${{ inputs.parser_pack_run_id }}",
+        "verify-optional-parser-release-assets.py",
+        "projectatlas-parser-packs",
+        "MCP composition integrity",
+    ] {
+        if !release_workflow.contains(required) {
+            return Err(io::Error::other(format!(
+                "release workflow is missing optional-parser handoff guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all'",
+        "optional-parser-pack-release-assets",
+        "cargo-layer-$target.json",
+        "projectatlas-broad-parser-$target.tar.zst",
+    ] {
+        if !optional_parser_workflow.contains(required) {
+            return Err(io::Error::other(format!(
+                "optional-parser workflow is missing clean release handoff guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "git rev-parse HEAD^2",
+        "optional-parser-pack-release-assets",
+        "head_sha=$promotion_sha",
+        "--field parser_pack_run_id=",
+    ] {
+        if !auto_release_workflow.contains(required) {
+            return Err(io::Error::other(format!(
+                "auto-release workflow is missing exact optional-parser handoff guard {required:?}"
+            ))
+            .into());
+        }
+    }
     if !auto_release_workflow.contains("permissions:\n  contents: read\n  actions: write") {
         return Err(io::Error::other(
             "auto-release workflow must narrow permissions to contents read and actions write",
@@ -4275,7 +4320,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "packaged-contract-runner-${{ matrix.suffix }}",
         "packaged-contract-runner-x86_64-pc-windows-msvc",
         "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE",
-        "needs: [prepublish-installer-smoke-unix, prepublish-installer-smoke-windows]",
+        "[prepublish-installer-smoke-unix, prepublish-installer-smoke-windows, parser-pack-assets]",
         "pattern: projectatlas-*",
     ] {
         if !release.contains(required) {
@@ -4293,7 +4338,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let windows_prepublish = release
         .split("  prepublish-installer-smoke-windows:")
         .nth(1)
-        .and_then(|tail| tail.split("  publish:").next())
+        .and_then(|tail| tail.split("  parser-pack-assets:").next())
         .ok_or_else(|| io::Error::other("release omitted the Windows prepublish job"))?;
     for (job, body) in [("Unix", unix_prepublish), ("Windows", windows_prepublish)] {
         for contract in [

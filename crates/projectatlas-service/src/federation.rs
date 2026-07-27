@@ -3,7 +3,7 @@
 use super::analysis::{RelationAnalysisDraft, RelationAnalysisQuery, RelationAnalysisReport};
 use super::relations::{
     DetailedRelationBudget, DetailedRelationPageDraft, DetailedRelationQuery,
-    DetailedRelationReport,
+    DetailedRelationReport, ExternalRelationIdentity, external_relation_identities,
 };
 use super::{ServiceError, ServiceResult, selected_project_binding};
 use projectatlas_core::graph::{
@@ -358,6 +358,8 @@ struct FederatedContext {
     rendezvous_limits: Vec<GraphLimitKind>,
     /// Work completed before adapter output fitting.
     base_work: FederatedRelationWork,
+    /// Temporary exact identity-set bytes retained during rendezvous discovery.
+    rendezvous_identity_bytes: u64,
     /// Existing aggregate relation and output budget.
     budget: DetailedRelationBudget,
 }
@@ -380,7 +382,10 @@ impl FederatedContext {
         let mut work = self.base_work.clone();
         work.rendered_output_bytes = primary.work.rendered_output_bytes;
         work.intermediate_bytes = federated_intermediate_bytes(
-            primary.work.intermediate_bytes,
+            primary
+                .work
+                .intermediate_bytes
+                .saturating_add(self.rendezvous_identity_bytes),
             &self.participants,
             &self.rendezvous,
             primary.continuation.as_deref(),
@@ -413,7 +418,10 @@ impl FederatedContext {
         let mut work = self.base_work.clone();
         work.rendered_output_bytes = primary.work.rendered_output_bytes;
         work.intermediate_bytes = federated_intermediate_bytes(
-            primary.work.peak_intermediate_bytes,
+            primary
+                .work
+                .peak_intermediate_bytes
+                .saturating_add(self.rendezvous_identity_bytes),
             &self.participants,
             &self.rendezvous,
             primary.continuation.as_deref(),
@@ -512,7 +520,7 @@ pub fn load_federated_detailed_relations(
         &captured.cursor_participants,
         budget,
     )?;
-    let operation: ServiceResult<(DetailedRelationPageDraft, RendezvousLoad)> = (|| {
+    let operation: ServiceResult<(DetailedRelationPageDraft, RendezvousLoad, u64)> = (|| {
         check_control(control)?;
         let primary = super::relations::load_detailed_relation_page(
             stores[0].store(),
@@ -520,24 +528,33 @@ pub fn load_federated_detailed_relations(
             control,
         )?;
         let candidate = primary.report_for_prefix(primary.candidate_rows())?;
+        let rendezvous_identities = external_relation_identities(&candidate);
+        let rendezvous_identity_bytes = u64::try_from(
+            serde_json::to_vec(&rendezvous_identities)?.len(),
+        )
+        .map_err(|_overflow| {
+            ServiceError::InvalidInput("federated identity byte count overflowed".to_string())
+        })?;
         let primary_edges = u64::from(candidate.work.inspected_edges);
         let primary_rows = u64::from(candidate.work.database_returned_rows);
         let remaining_edges = u64::from(budget.edges()).saturating_sub(primary_edges);
         let rendezvous = load_rendezvous(
             &stores,
             query,
+            &rendezvous_identities,
             remaining_edges,
             aggregate_row_limit(budget).saturating_sub(primary_rows),
             budget
                 .intermediate_bytes()
-                .saturating_sub(candidate.work.intermediate_bytes),
+                .saturating_sub(candidate.work.intermediate_bytes)
+                .saturating_sub(rendezvous_identity_bytes),
             started,
             control,
         )?;
-        Ok((primary, rendezvous))
+        Ok((primary, rendezvous, rendezvous_identity_bytes))
     })();
     let (closed, close_ms, close_error) = close_participants(stores);
-    let (primary, rendezvous) = operation?;
+    let (primary, rendezvous, rendezvous_identity_bytes) = operation?;
     if let Some(error) = close_error {
         return Err(error);
     }
@@ -551,6 +568,7 @@ pub fn load_federated_detailed_relations(
             rendezvous: rendezvous.rows,
             rendezvous_limits: rendezvous.reached_limits,
             base_work,
+            rendezvous_identity_bytes,
             budget,
         },
     })
@@ -578,8 +596,12 @@ pub fn load_federated_relation_analysis(
     )?;
     let operation: ServiceResult<(RelationAnalysisDraft, RendezvousLoad)> = (|| {
         check_control(control)?;
-        let primary =
-            super::analysis::load_relation_analysis(stores[0].store(), &primary_query, control)?;
+        let mut primary = super::analysis::load_relation_analysis_for_federation(
+            stores[0].store(),
+            &primary_query,
+            control,
+        )?;
+        let rendezvous_identities = primary.take_external_relation_identities();
         let candidate = primary.candidate_report();
         let primary_edges = u64::from(candidate.work.relations.inspected_edges)
             .saturating_add(u64::from(candidate.work.closure_inspected_edges));
@@ -589,6 +611,7 @@ pub fn load_federated_relation_analysis(
         let rendezvous = load_rendezvous(
             &stores,
             &query.relations,
+            &rendezvous_identities,
             remaining_edges,
             aggregate_row_limit(budget).saturating_sub(primary_rows),
             budget
@@ -614,6 +637,7 @@ pub fn load_federated_relation_analysis(
             rendezvous: rendezvous.rows,
             rendezvous_limits: rendezvous.reached_limits,
             base_work,
+            rendezvous_identity_bytes: 0,
             budget,
         },
     })
@@ -699,17 +723,20 @@ fn capture_federation(
 fn load_rendezvous(
     stores: &[FederatedStore],
     query: &DetailedRelationQuery,
+    identities: &BTreeSet<ExternalRelationIdentity>,
     mut remaining_edges: u64,
     mut remaining_rows: u64,
     mut remaining_intermediate_bytes: u64,
     started: Instant,
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<RendezvousLoad> {
-    if !matches!(
-        query.resolution,
-        super::relations::RelationResolutionFilter::Any
-            | super::relations::RelationResolutionFilter::External
-    ) {
+    if identities.is_empty()
+        || !matches!(
+            query.resolution,
+            super::relations::RelationResolutionFilter::Any
+                | super::relations::RelationResolutionFilter::External
+        )
+    {
         return Ok(RendezvousLoad {
             rows: Vec::new(),
             database_rows: 0,
@@ -802,6 +829,9 @@ fn load_rendezvous(
                     external.system.as_str().to_string(),
                     external.identity.as_str().to_string(),
                 );
+                if !identities.contains(&key) {
+                    continue;
+                }
                 let project = row.relation.key().project();
                 let generation = row.relation.generation();
                 let group = groups.entry(key).or_insert_with(|| FederatedRendezvous {
@@ -1149,7 +1179,11 @@ mod tests {
             .iter()
             .map(|(_, database)| fs::read(database))
             .collect::<Result<Vec<_>, _>>()?;
-        let query = relation_query(None, RelationResolutionFilter::External)?;
+        let query = relation_query(
+            None,
+            RelationResolutionFilter::External,
+            RelationDirection::Outbound,
+        )?;
         let draft =
             load_federated_detailed_relations(open_participants(&participants)?, &query, None)?;
         let (report, encoded) = draft.fit_output(None, |report| {
@@ -1195,9 +1229,88 @@ mod tests {
             "read-only federation changed database bytes",
         )?;
 
+        let mut analysis = load_federated_relation_analysis(
+            open_participants(&participants)?,
+            &RelationAnalysisQuery {
+                relations: query,
+                mode: crate::analysis::RelationAnalysisMode::Architecture,
+                trace_target: None,
+                vcs: None,
+                include_communities: false,
+                include_cycles: false,
+                include_dead_code: false,
+            },
+            None,
+        )?;
+        require(
+            analysis
+                .primary
+                .take_external_relation_identities()
+                .is_empty(),
+            "federated analysis retained temporary rendezvous identities through output fitting",
+        )?;
+        let (analysis, _) =
+            analysis.fit_output(|report| serde_json::to_vec(report).map_err(ServiceError::from))?;
+        require(
+            analysis.rendezvous.len() == 2
+                && analysis
+                    .rendezvous
+                    .iter()
+                    .flat_map(|row| &row.evidence)
+                    .all(|evidence| {
+                        matches!(
+                            evidence.source.selector(),
+                            EntitySelector::File { path } if path.as_str() == "src/same.rs"
+                        )
+                    }),
+            "analysis rendezvous escaped the primary anchored traversal",
+        )?;
+
+        let inbound_query = relation_query(
+            None,
+            RelationResolutionFilter::External,
+            RelationDirection::Inbound,
+        )?;
+        let inbound = load_federated_detailed_relations(
+            open_participants(&participants)?,
+            &inbound_query,
+            None,
+        )?;
+        let (inbound, _) = inbound.fit_output(None, |report| {
+            serde_json::to_string(report).map_err(ServiceError::from)
+        })?;
+        require(
+            inbound.rendezvous.is_empty() && inbound.work.rendezvous_database_rows == 0,
+            "inbound traversal scanned or returned unrelated external rendezvous",
+        )?;
+        let inbound_analysis = load_federated_relation_analysis(
+            open_participants(&participants)?,
+            &RelationAnalysisQuery {
+                relations: inbound_query,
+                mode: crate::analysis::RelationAnalysisMode::Architecture,
+                trace_target: None,
+                vcs: None,
+                include_communities: false,
+                include_cycles: false,
+                include_dead_code: false,
+            },
+            None,
+        )?;
+        let (inbound_analysis, _) = inbound_analysis
+            .fit_output(|report| serde_json::to_vec(report).map_err(ServiceError::from))?;
+        require(
+            inbound_analysis.rendezvous.is_empty()
+                && inbound_analysis.work.rendezvous_database_rows == 0,
+            "inbound analysis scanned or returned unrelated external rendezvous",
+        )?;
+
         let resolved = load_federated_detailed_relations(
             open_participants(&participants)?,
-            &relation_query(None, RelationResolutionFilter::Resolved)?,
+            &relation_query(
+                None,
+                RelationResolutionFilter::Resolved,
+                RelationDirection::Outbound,
+            )?,
             None,
         )?;
         let (resolved, _) = resolved.fit_output(None, |report| {
@@ -1219,7 +1332,11 @@ mod tests {
         )?;
         let stale = load_federated_detailed_relations(
             open_participants(&participants)?,
-            &relation_query(Some(cursor), RelationResolutionFilter::External)?,
+            &relation_query(
+                Some(cursor),
+                RelationResolutionFilter::External,
+                RelationDirection::Outbound,
+            )?,
             None,
         );
         require(
@@ -1236,7 +1353,11 @@ mod tests {
         control.cancel();
         let canceled = load_federated_detailed_relations(
             open_participants(&participants)?,
-            &relation_query(None, RelationResolutionFilter::External)?,
+            &relation_query(
+                None,
+                RelationResolutionFilter::External,
+                RelationDirection::Outbound,
+            )?,
             Some(&control),
         );
         require(canceled.is_err(), "pre-canceled federation returned rows")?;
@@ -1248,7 +1369,7 @@ mod tests {
         Ok(())
     }
 
-    /// Publish two exact external imports for one same-named local source.
+    /// Publish three anchored imports plus one unrelated same-family import.
     fn publish_fixture(
         root: &Path,
         database: &Path,
@@ -1256,6 +1377,7 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         fs::create_dir_all(root.join("src"))?;
         fs::write(root.join("src/same.rs"), "pub fn same() {}\n")?;
+        fs::write(root.join("src/unrelated.rs"), "pub fn unrelated() {}\n")?;
         let mut store = AtlasStore::open_for_project(database, root)?;
         let project = store
             .project_instance_id()?
@@ -1267,9 +1389,16 @@ mod tests {
             },
             generation,
         )?;
-        let mut entities = vec![source.clone()];
+        let unrelated_source = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("src/unrelated.rs"))?,
+            },
+            generation,
+        )?;
+        let mut entities = vec![source.clone(), unrelated_source.clone()];
         let mut relations = Vec::new();
-        for identity in ["package/a", "package/b"] {
+        for identity in ["package/a", "package/b", "package/c"] {
             let external = GraphEntity::new(
                 project,
                 EntitySelector::External {
@@ -1290,11 +1419,31 @@ mod tests {
             )?);
             entities.push(external);
         }
+        let unrelated_external = GraphEntity::new(
+            project,
+            EntitySelector::External {
+                external: ExternalSelector {
+                    system: GraphIdentityText::new("registry.example")?,
+                    identity: GraphIdentityText::new("package/unrelated")?,
+                },
+            },
+            generation,
+        )?;
+        relations.push(LogicalRelation::new(
+            &unrelated_source,
+            GraphRelationKind::Legacy(RelationKind::Imports),
+            RelationResolution::external(&unrelated_external)?,
+            projectatlas_core::graph::ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )?);
+        entities.push(unrelated_external);
         let mut publication = store.begin_index_publication("federation-fixture")?;
         publication.begin_scan_replacement()?;
         publication.upsert_scan_node_batch(&[
             fixture_folder_node("src"),
             fixture_file_node("src/same.rs"),
+            fixture_file_node("src/unrelated.rs"),
         ])?;
         publication.finish_scan_replacement()?;
         publication.replace_repository_graph(project, &entities, &relations, &[], &[])?;
@@ -1323,18 +1472,19 @@ mod tests {
     fn relation_query(
         cursor: Option<String>,
         resolution: RelationResolutionFilter,
+        direction: RelationDirection,
     ) -> Result<DetailedRelationQuery, Box<dyn Error>> {
         Ok(DetailedRelationQuery {
             anchor: RelationAnchor::File {
                 file: RepositoryFilePath::new(Path::new("src/same.rs"))?,
             },
-            direction: RelationDirection::Outbound,
+            direction,
             relation: Some(GraphRelationKind::Legacy(RelationKind::Imports)),
             minimum_confidence: projectatlas_core::graph::ConfidenceClass::Low,
             resolution,
             include_occurrences: false,
             budget: DetailedRelationBudget::from_graph_limits(GraphLimits::new(
-                1,
+                2,
                 1,
                 1,
                 512 * 1_024,

@@ -536,6 +536,9 @@ pub struct DetailedRelationReport {
     pub rows: Vec<DetailedRelationRow>,
 }
 
+/// Exact typed external identity eligible for call-scoped rendezvous.
+pub(super) type ExternalRelationIdentity = (String, String, String);
+
 /// Cursor algorithm responsible for traversal-state interpretation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1719,6 +1722,26 @@ pub(super) fn relation_matches(relation: &LogicalRelation, query: &DetailedRelat
                 matches!(relation.resolution(), RelationResolution::External { .. })
             }
         }
+}
+
+/// Retain exact external identities reached by one bounded traversal page.
+pub(super) fn external_relation_identities(
+    report: &DetailedRelationReport,
+) -> BTreeSet<ExternalRelationIdentity> {
+    report
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let RelationResolution::External { external, .. } = row.relation.resolution() else {
+                return None;
+            };
+            Some((
+                row.relation.kind().as_str().to_string(),
+                external.system.as_str().to_string(),
+                external.identity.as_str().to_string(),
+            ))
+        })
+        .collect()
 }
 
 /// Convert confidence classes to their stable descending rank.
