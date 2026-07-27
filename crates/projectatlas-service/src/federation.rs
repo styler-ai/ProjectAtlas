@@ -1167,7 +1167,7 @@ mod tests {
         for index in 0..4 {
             let root = temp.path().join(format!("project-{index}"));
             let database = root.join("projectatlas.db");
-            publish_fixture(&root, &database, IndexGeneration::new(1))?;
+            publish_fixture(&root, &database, IndexGeneration::new(1), 1)?;
             participants.push((root, database));
         }
         let before = participants
@@ -1332,6 +1332,7 @@ mod tests {
             &participants[3].0,
             &participants[3].1,
             IndexGeneration::new(2),
+            1,
         )?;
         let stale = load_federated_detailed_relations(
             open_participants(&participants)?,
@@ -1372,11 +1373,66 @@ mod tests {
         Ok(())
     }
 
-    /// Publish three anchored imports plus one unrelated same-family import.
+    #[test]
+    fn federation_deadline_interrupts_active_rendezvous_and_releases_snapshots()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let primary_root = temp.path().join("primary");
+        let primary_database = primary_root.join("projectatlas.db");
+        publish_fixture(&primary_root, &primary_database, IndexGeneration::new(1), 1)?;
+        let secondary_root = temp.path().join("secondary");
+        let secondary_database = secondary_root.join("projectatlas.db");
+        publish_fixture(
+            &secondary_root,
+            &secondary_database,
+            IndexGeneration::new(1),
+            usize::try_from(GraphLimits::MAX_ROWS)?,
+        )?;
+        let participants = vec![
+            (primary_root, primary_database),
+            (secondary_root, secondary_database),
+        ];
+        let mut query = relation_query(
+            None,
+            RelationResolutionFilter::External,
+            RelationDirection::Outbound,
+        )?;
+        query.budget = query.budget.with_aggregate_limits(
+            Some(GraphLimits::MAX_ROWS),
+            None,
+            None,
+            None,
+            Some(DetailedRelationBudget::MAX_INTERMEDIATE_BYTES),
+            Some(50),
+        )?;
+
+        let deadline =
+            load_federated_detailed_relations(open_participants(&participants)?, &query, None);
+        require(
+            matches!(
+                deadline,
+                Err(ServiceError::Db(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::DeadlineExceeded {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    }
+                )))
+            ),
+            "active rendezvous query was not interrupted with its typed deadline",
+        )?;
+        for (index, (_, database)) in participants.iter().enumerate() {
+            let moved = database.with_extension(format!("deadline-closed-{index}"));
+            fs::rename(database, &moved)?;
+            fs::rename(moved, database)?;
+        }
+        Ok(())
+    }
+
+    /// Publish three anchored imports plus the requested unrelated same-family imports.
     fn publish_fixture(
         root: &Path,
         database: &Path,
         generation: IndexGeneration,
+        unrelated_relations: usize,
     ) -> Result<(), Box<dyn Error>> {
         fs::create_dir_all(root.join("src"))?;
         fs::write(root.join("src/same.rs"), "pub fn same() {}\n")?;
@@ -1422,25 +1478,32 @@ mod tests {
             )?);
             entities.push(external);
         }
-        let unrelated_external = GraphEntity::new(
-            project,
-            EntitySelector::External {
-                external: ExternalSelector {
-                    system: GraphIdentityText::new("registry.example")?,
-                    identity: GraphIdentityText::new("package/unrelated")?,
+        for index in 0..unrelated_relations {
+            let identity = if unrelated_relations == 1 {
+                "package/unrelated".to_string()
+            } else {
+                format!("package/unrelated/{index:05}/{}", "x".repeat(4_000))
+            };
+            let unrelated_external = GraphEntity::new(
+                project,
+                EntitySelector::External {
+                    external: ExternalSelector {
+                        system: GraphIdentityText::new("registry.example")?,
+                        identity: GraphIdentityText::new(identity)?,
+                    },
                 },
-            },
-            generation,
-        )?;
-        relations.push(LogicalRelation::new(
-            &unrelated_source,
-            GraphRelationKind::Legacy(RelationKind::Imports),
-            RelationResolution::external(&unrelated_external)?,
-            projectatlas_core::graph::ConfidenceClass::Exact,
-            Completeness::Complete,
-            generation,
-        )?);
-        entities.push(unrelated_external);
+                generation,
+            )?;
+            relations.push(LogicalRelation::new(
+                &unrelated_source,
+                GraphRelationKind::Legacy(RelationKind::Imports),
+                RelationResolution::external(&unrelated_external)?,
+                projectatlas_core::graph::ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?);
+            entities.push(unrelated_external);
+        }
         let mut publication = store.begin_index_publication("federation-fixture")?;
         publication.begin_scan_replacement()?;
         publication.upsert_scan_node_batch(&[
