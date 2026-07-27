@@ -31,15 +31,30 @@ ProjectAtlas SHALL first prove one locked release-content head after every v0.4.
 - **THEN** release readiness remains incomplete
 
 ### Requirement: Existing workflows prove the real release boundary
-Release readiness SHALL use the existing `01-CI`, `optional-parser-pack`, and `02-Release` workflows. It SHALL require cross-platform source-built CLI/MCP E2E, explicit empty-cache Linux and Windows optional-parser construction, and `02-Release` package and installer proof with `prepublish_only=true`.
+Release readiness SHALL use the existing `01-CI`, `optional-parser-pack`, and `02-Release` workflows. It SHALL require cross-platform source-built CLI/MCP E2E, explicit empty-cache Linux and Windows optional-parser construction, and `02-Release` package, optional-parser release-asset, and installer proof with `prepublish_only=true`.
 
 #### Scenario: Clean optional-parser proof succeeds
 - **WHEN** the exact release-content head is dispatched with `clean_construction=true` and `target=all`
 - **THEN** Linux and Windows bypass cache restore and save, complete construction plus fresh-runner and runtime proof, and produce the complete aggregate result
 
 #### Scenario: Prepublish release proof succeeds
-- **WHEN** `02-Release` runs on the exact release-content head with version `v0.4.0` and `prepublish_only=true`
-- **THEN** every required package and installer smoke job succeeds without creating a tag or GitHub release
+- **WHEN** `02-Release` runs on the exact release-content head with version `v0.4.0`, `prepublish_only=true`, and the exact clean optional-parser handoff
+- **THEN** every required package, optional-parser release-asset, and installer smoke job succeeds without creating a tag or GitHub release
+
+#### Scenario: Optional-parser handoff is stale or incomplete
+- **WHEN** the referenced run, repository, workflow, event, candidate tree, aggregate proof, clean receipt, archive size, archive digest, version, or supported target set differs
+- **THEN** `02-Release` fails before publication and does not stage the optional-parser archives
+
+### Requirement: Fresh review findings reopen affected release proof
+Any exact-head review finding that changes release content SHALL reopen the affected candidate, local, hosted, review, prepublish, and reconciliation tasks. Older success SHALL NOT be treated as proof of the corrected head.
+
+#### Scenario: Review finds a release blocker after reconciliation
+- **WHEN** an actionable finding requires a workflow, runtime, spec, test, or published documentation change
+- **THEN** #311 remains open, the finding receives an explicit local task owner, and all proof affected by the changed tree is rerun
+
+#### Scenario: Corrected head is ready to reconcile
+- **WHEN** every actionable Codex and Dependabot finding is fixed or explicitly dispositioned and the corrected exact head passes its required local and hosted gates
+- **THEN** the finite task-state-only reconciliation may begin
 
 #### Scenario: Ordinary candidate behavior succeeds
 - **WHEN** exact-head `01-CI` completes

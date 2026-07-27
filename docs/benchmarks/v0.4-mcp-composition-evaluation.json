@@ -14,7 +14,7 @@
     "requests": "docs/benchmarks/v0.4-mcp-composition-requests.json",
     "harness": "docs/benchmarks/harness/mcp_composition.py",
     "raw": "docs/benchmarks/v0.4-mcp-composition-raw.json",
-    "raw_sha256": "c033b1bea2446836699eeebf1f5fcfd2c1a2895e81fb563f993b5ae5122e46f7",
+    "raw_sha256": "d3e2eb5c6a4185f16e1be49a99aad1062562f1ddb3cb5623fb61b20acc16887f",
     "excluded_runs": "docs/benchmarks/v0.4-mcp-composition-excluded-runs.json",
     "agent_trials": "docs/benchmarks/v0.4-mcp-agent-trials.json"
   },

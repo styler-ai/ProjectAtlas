@@ -1225,3 +1225,49 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+
+      - name: Download clean release construction archives
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: parser-pack-*-construction
+          path: ${{ runner.temp }}/parser-pack-release-source/construction
+          merge-multiple: true
+
+      - name: Download clean release construction receipts
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: parser-pack-*-cargo-layer-receipt
+          path: ${{ runner.temp }}/parser-pack-release-source/receipts
+          merge-multiple: true
+
+      - name: Assemble clean release handoff
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$RUNNER_TEMP/parser-pack-release-source"
+          output="$RUNNER_TEMP/parser-pack-release-output"
+          mkdir -p "$output"
+          install -m 0644 \
+            "$RUNNER_TEMP/parser-pack-aggregate-output/optional-parser-pack-proof-aggregate.json" \
+            "$output/optional-parser-pack-proof-aggregate.json"
+          for target in x86_64-unknown-linux-gnu x86_64-pc-windows-msvc; do
+            install -m 0644 \
+              "$source/construction/projectatlas-broad-parser-$target.tar.zst" \
+              "$output/projectatlas-broad-parser-$target.tar.zst"
+            install -m 0644 \
+              "$source/receipts/cargo-layer-$target.json" \
+              "$output/cargo-layer-$target.json"
+          done
+
+      - name: Upload clean release handoff
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: optional-parser-pack-release-assets
+          path: ${{ runner.temp }}/parser-pack-release-output/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

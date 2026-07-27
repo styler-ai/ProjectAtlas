@@ -2,11 +2,14 @@
 
 mod impact;
 
+use super::relations::{
+    ExternalRelationIdentity, external_relation_identities, load_detailed_relations,
+};
 use super::{
     DetailedRelationBudget, DetailedRelationNode, DetailedRelationQuery, DetailedRelationReport,
     DetailedRelationWork, RelationAnchor, RelationDirection, RelationNextCall, RelationPurpose,
     RelationResolutionFilter, RelationTotalState, ServiceError, ServiceResult,
-    load_detailed_relations, selected_project_binding,
+    selected_project_binding,
 };
 use impact::{LoadedVcs, digest_vcs_paths, impact_findings, load_vcs_paths};
 use projectatlas_core::graph::{
@@ -277,6 +280,8 @@ pub struct RelationAnalysisDraft {
     finding_offset: u32,
     /// Optional normalized VCS evidence identity.
     vcs_digest: Option<[u8; 32]>,
+    /// Exact external identities reached by the bounded detailed traversal.
+    external_relation_identities: BTreeSet<ExternalRelationIdentity>,
     /// Shared request cancellation and deadline retained through rendering.
     control: IndexWorkControl,
 }
@@ -286,6 +291,11 @@ impl RelationAnalysisDraft {
     #[must_use]
     pub const fn candidate_report(&self) -> &RelationAnalysisReport {
         &self.report
+    }
+
+    /// Exact external identities eligible for call-scoped rendezvous.
+    pub(super) const fn external_relation_identities(&self) -> &BTreeSet<ExternalRelationIdentity> {
+        &self.external_relation_identities
     }
 
     /// Fit one complete adapter envelope by retaining the largest finding prefix.
@@ -555,7 +565,16 @@ pub fn load_relation_analysis(
     query: &RelationAnalysisQuery,
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<RelationAnalysisDraft> {
-    load_relation_analysis_with_closure_deadline(store, query, control, None)
+    load_relation_analysis_with_closure_deadline(store, query, control, None, false)
+}
+
+/// Load analysis while retaining its bounded external traversal identities.
+pub(super) fn load_relation_analysis_for_federation(
+    store: &AtlasStore,
+    query: &RelationAnalysisQuery,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<RelationAnalysisDraft> {
+    load_relation_analysis_with_closure_deadline(store, query, control, None, true)
 }
 
 /// Load analysis with an optional earlier closure-stage deadline ceiling.
@@ -564,6 +583,7 @@ fn load_relation_analysis_with_closure_deadline(
     query: &RelationAnalysisQuery,
     control: Option<&IndexWorkControl>,
     closure_deadline_ceiling: Option<Instant>,
+    retain_external_relation_identities: bool,
 ) -> ServiceResult<RelationAnalysisDraft> {
     validate_analysis_query(query)?;
     let started = Instant::now();
@@ -599,6 +619,12 @@ fn load_relation_analysis_with_closure_deadline(
         .as_ref()
         .map_or(0, |cursor| cursor.finding_offset);
     let relations = load_detailed_relations(store, &relation_query, control)?;
+    let external_relation_identities = if retain_external_relation_identities {
+        external_relation_identities(&relations)
+    } else {
+        BTreeSet::new()
+    };
+    let external_relation_identity_bytes = serialized_bytes(&external_relation_identities)?;
     let cursor_snapshot = AnalysisCursorSnapshot {
         project: relations.anchor.entity.key().project(),
         generation: relations.generation,
@@ -665,7 +691,8 @@ fn load_relation_analysis_with_closure_deadline(
         relations
             .work
             .intermediate_bytes
-            .saturating_add(closure.decoded_bytes),
+            .saturating_add(closure.decoded_bytes)
+            .saturating_add(external_relation_identity_bytes),
     );
     let projection_allowance = analysis_allowance.saturating_sub(vcs_load.retained_bytes);
     let mut topology_bytes =
@@ -772,12 +799,14 @@ fn load_relation_analysis_with_closure_deadline(
         .saturating_add(vcs_load.retained_bytes)
         .saturating_add(topology_bytes)
         .saturating_add(initial_finding_bytes)
+        .saturating_add(external_relation_identity_bytes)
         .saturating_add(supplemental_work.hydrated_symbol_peak_bytes);
     let final_peak = relations
         .work
         .intermediate_bytes
         .saturating_add(closure.decoded_bytes)
-        .saturating_add(supplemental_work.retained_composition_bytes);
+        .saturating_add(supplemental_work.retained_composition_bytes)
+        .saturating_add(external_relation_identity_bytes);
     let peak_intermediate_bytes = hydration_peak.max(final_peak);
     let full_finding_count = u32::try_from(findings.len()).map_err(|_overflow| {
         ServiceError::InvalidInput("analysis finding count overflowed".to_string())
@@ -869,6 +898,7 @@ fn load_relation_analysis_with_closure_deadline(
         replay_relation_cursor,
         finding_offset,
         vcs_digest,
+        external_relation_identities,
         control: analysis_control,
     })
 }

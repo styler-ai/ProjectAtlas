@@ -31,6 +31,8 @@ FIXTURES = ROOT / "docs/benchmarks/fixtures/mcp-composition"
 REQUESTS = ROOT / "docs/benchmarks/v0.4-mcp-composition-requests.json"
 DEFAULT_WORK = ROOT / "target/benchmarks/mcp-composition/current"
 DEFAULT_OUTPUT = ROOT / "docs/benchmarks/v0.4-mcp-composition-raw.json"
+PUBLISHED_EVALUATION = ROOT / "docs/benchmarks/v0.4-mcp-composition-evaluation.json"
+PUBLISHED_EVALUATION_MARKDOWN = ROOT / "docs/benchmarks/v0.4-mcp-composition-evaluation.md"
 CONTINUATION = re.compile(r'^\s+(?:continuation|cursor): "(.*)"$', re.MULTILINE)
 PURPOSES = {
     "clean": {
@@ -587,6 +589,26 @@ def self_test_git_environment_isolation() -> None:
             raise RuntimeError("Git fixture isolation changed the sentinel repository")
 
 
+def validate_published_raw_digest() -> None:
+    evaluation = json.loads(PUBLISHED_EVALUATION.read_text(encoding="utf-8"))
+    provenance = evaluation.get("inputs")
+    if not isinstance(provenance, dict):
+        raise RuntimeError("MCP composition evaluation provenance is missing")
+    expected_path = str(DEFAULT_OUTPUT.relative_to(ROOT)).replace("\\", "/")
+    if provenance.get("raw") != expected_path:
+        raise RuntimeError("MCP composition evaluation names a different raw input")
+    expected_digest = hashlib.sha256(DEFAULT_OUTPUT.read_bytes()).hexdigest()
+    if provenance.get("raw_sha256") != expected_digest:
+        raise RuntimeError("MCP composition JSON raw-input digest is stale")
+    markdown = PUBLISHED_EVALUATION_MARKDOWN.read_text(encoding="utf-8")
+    match = re.search(
+        r"The raw formal result SHA-256 is\s*`([0-9a-f]{64})`\.",
+        markdown,
+    )
+    if match is None or match.group(1) != expected_digest:
+        raise RuntimeError("MCP composition Markdown raw-input digest is stale")
+
+
 def remove_tree(path: Path, *, allowed_parent: Path) -> None:
     absolute = Path(os.path.abspath(path))
     allowed = Path(os.path.abspath(allowed_parent))
@@ -1091,6 +1113,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.self_test:
         self_test_git_environment_isolation()
+        validate_published_raw_digest()
         print("MCP composition harness self-test passed")
         return
     if args.runtime is None:

@@ -2093,14 +2093,31 @@ flowchart TB
     CleanBefore --> Build[Contained offline candidate build<br/>batched owned targets]
     Build --> Assemble[Two concurrent independent<br/>audit, assembly, and archive lanes]
     Assemble --> Verify[Digest, license, native, containment, lifecycle, package, and fresh-runner proof]
-    Verify --> Publish[Immutable construction artifact]
+    Verify --> Publish[Immutable construction artifact<br/>and platform proof]
     Verify --> CleanAfter[Remove owned outputs and Windows broker]
     Publish --> Receipt[Bounded target disposition receipt<br/>including disabled]
+    Publish --> Aggregate[Exact Linux and Windows<br/>aggregate proof]
+    Aggregate --> CleanHandoff{Explicit clean all-platform dispatch?}
+    CleanHandoff -->|no| NoHandoff[No release handoff]
+    CleanHandoff -->|yes| Handoff[Supported archives, aggregate proof,<br/>and clean receipts]
+    Handoff --> Release[02-Release binds successful run<br/>and identical candidate tree]
+    Release --> Assets[Versioned Linux and Windows archives,<br/>proof, and SHA256SUMS]
     CleanAfter --> Receipt
     Receipt --> Trust{Cache-save eligible?<br/>trusted, non-clean, reuse-enabled}
     Trust -->|no| NoSave[Do not save cache state]
     Trust -->|yes| Save[Save exact dependency layer]
 ```
+
+Only an explicit `clean_construction=true`, `target=all` dispatch emits the
+release handoff. `02-Release` verifies the referenced run belongs to the same
+repository and workflow, completed successfully, and has a Git tree identical
+to the release checkout. It then checks the aggregate target set, candidate
+revision and version, clean no-restore receipts, Cargo lock digest, archive
+names, sizes, SHA-256 digests, fresh-host isolation, network denial, grammar
+probes, and memory/process cleanup before staging versioned Linux and Windows
+pack archives plus the aggregate proof. `03-Auto-Release` selects that handoff
+from the exact identical-tree `dev` promotion parent; stale, partial, reused,
+expired, or altered handoffs fail before publication.
 
 The retained policy is measurement-owned, not platform folklore:
 

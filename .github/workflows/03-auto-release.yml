@@ -19,6 +19,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
 
       - name: Read version
         id: version
@@ -55,6 +57,41 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Resolve clean optional-parser handoff
+        id: parser_pack
+        if: steps.release.outputs.eligible == 'true' && steps.tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          promotion_sha="$(git rev-parse HEAD^2)"
+          if [[ "$(git rev-parse 'HEAD^{tree}')" != "$(git rev-parse "$promotion_sha^{tree}")" ]]; then
+            echo "Main promotion tree differs from its verified dev parent" >&2
+            exit 1
+          fi
+          mapfile -t run_ids < <(
+            gh api \
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/optional-parser-pack.yml/runs?event=workflow_dispatch&status=success&head_sha=$promotion_sha&per_page=100" \
+              --jq '.workflow_runs | sort_by(.run_number) | reverse | .[].id'
+          )
+          parser_pack_run_id=""
+          for run_id in "${run_ids[@]}"; do
+            mapfile -t artifacts < <(
+              gh api \
+                "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" \
+                --jq '.artifacts[] | select(.name == "optional-parser-pack-release-assets" and (.expired | not)) | .id'
+            )
+            if [[ ${#artifacts[@]} -gt 0 ]]; then
+              parser_pack_run_id="$run_id"
+              break
+            fi
+          done
+          if [[ -z "$parser_pack_run_id" ]]; then
+            echo "No unexpired clean optional-parser handoff matches promotion $promotion_sha" >&2
+            exit 1
+          fi
+          echo "run_id=$parser_pack_run_id" >> "$GITHUB_OUTPUT"
+
       - name: Dispatch release workflow
         if: steps.release.outputs.eligible == 'true' && steps.tag.outputs.exists == 'false'
         env:
@@ -62,4 +99,5 @@ jobs:
         run: |
           gh workflow run release.yml \
             --ref main \
-            --field version="v${{ steps.version.outputs.version }}"
+            --field version="v${{ steps.version.outputs.version }}" \
+            --field parser_pack_run_id="${{ steps.parser_pack.outputs.run_id }}"
