@@ -293,9 +293,11 @@ impl RelationAnalysisDraft {
         &self.report
     }
 
-    /// Exact external identities eligible for call-scoped rendezvous.
-    pub(super) const fn external_relation_identities(&self) -> &BTreeSet<ExternalRelationIdentity> {
-        &self.external_relation_identities
+    /// Move the call-scoped rendezvous identities out before output fitting.
+    pub(super) fn take_external_relation_identities(
+        &mut self,
+    ) -> BTreeSet<ExternalRelationIdentity> {
+        std::mem::take(&mut self.external_relation_identities)
     }
 
     /// Fit one complete adapter envelope by retaining the largest finding prefix.

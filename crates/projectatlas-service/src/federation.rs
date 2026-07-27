@@ -596,13 +596,13 @@ pub fn load_federated_relation_analysis(
     )?;
     let operation: ServiceResult<(RelationAnalysisDraft, RendezvousLoad)> = (|| {
         check_control(control)?;
-        let primary = super::analysis::load_relation_analysis_for_federation(
+        let mut primary = super::analysis::load_relation_analysis_for_federation(
             stores[0].store(),
             &primary_query,
             control,
         )?;
+        let rendezvous_identities = primary.take_external_relation_identities();
         let candidate = primary.candidate_report();
-        let rendezvous_identities = primary.external_relation_identities();
         let primary_edges = u64::from(candidate.work.relations.inspected_edges)
             .saturating_add(u64::from(candidate.work.closure_inspected_edges));
         let primary_rows = u64::from(candidate.work.relations.database_returned_rows)
@@ -611,7 +611,7 @@ pub fn load_federated_relation_analysis(
         let rendezvous = load_rendezvous(
             &stores,
             &query.relations,
-            rendezvous_identities,
+            &rendezvous_identities,
             remaining_edges,
             aggregate_row_limit(budget).saturating_sub(primary_rows),
             budget
@@ -1229,7 +1229,7 @@ mod tests {
             "read-only federation changed database bytes",
         )?;
 
-        let analysis = load_federated_relation_analysis(
+        let mut analysis = load_federated_relation_analysis(
             open_participants(&participants)?,
             &RelationAnalysisQuery {
                 relations: query,
@@ -1241,6 +1241,13 @@ mod tests {
                 include_dead_code: false,
             },
             None,
+        )?;
+        require(
+            analysis
+                .primary
+                .take_external_relation_identities()
+                .is_empty(),
+            "federated analysis retained temporary rendezvous identities through output fitting",
         )?;
         let (analysis, _) =
             analysis.fit_output(|report| serde_json::to_vec(report).map_err(ServiceError::from))?;
