@@ -11,8 +11,7 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use landlock::{
-    ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreatedAttr,
-    RulesetStatus,
+    ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetStatus,
 };
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, SealFlag, fcntl};
