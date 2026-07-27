@@ -2253,7 +2253,8 @@ flowchart TB
     Platform -. authority or containment preparation failure .-> Preserve[Fail closed; terminate, reap, and join if started; preserve MCP and previous generation]
     Spawn -. spawn failure .-> Preserve
     Spawn -. caller stopped before rendezvous .-> LateSpawnCleanup[Retain lease; kill and reap any untransferred child; poison launch if cleanup fails]
-    FinalLaunchCheck -. caller stopped before admission .-> LateSpawnCleanup
+    FinalLaunchCheck -. caller stopped before successful final check .-> LateSpawnCleanup
+    Handoff -. caller stopped after commit .-> FailureCleanup
     LateSpawnCleanup --> Preserve
     Open -. write, timeout, or cancellation .-> FailureCleanup
     Ready -. stalled or invalid READY .-> FailureCleanup
