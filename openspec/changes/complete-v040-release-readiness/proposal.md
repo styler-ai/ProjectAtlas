@@ -1,6 +1,6 @@
 ## Why
 
-ProjectAtlas v0.4.0 has completed its feature program, but exact-head review of the promotion candidate found three release blockers after the first readiness reconciliation: supported optional-parser archives were not published, federated rendezvous evidence could escape the anchored traversal, and a published benchmark digest was stale. Release issue #311 must remain the truthful owner while those findings are fixed, the candidate is reproved, and publication verification plus workspace cleanup remain with the deliberately post-release owner.
+ProjectAtlas v0.4.0 has completed its feature program, but exact-head review of the promotion candidate found release blockers after the first readiness reconciliation: supported optional-parser archives were not published, federated rendezvous evidence could escape the anchored traversal, a published benchmark digest was stale, rendezvous database reads lacked the service deadline, and exact byte accounting allocated avoidable duplicate encodings. Release issue #311 must remain the truthful owner while those findings are fixed, the candidate is reproved, and publication verification plus workspace cleanup remain with the deliberately post-release owner.
 
 ## What Changes
 
@@ -11,6 +11,7 @@ ProjectAtlas v0.4.0 has completed its feature program, but exact-head review of 
 - Run `02-Release` in `prepublish_only` mode so the real package and installer paths are proven without creating a tag or GitHub release.
 - Carry only an explicit clean, all-platform optional-parser handoff into `02-Release`, bind its run, candidate tree, aggregate proof, clean receipts, archive sizes, and archive digests, and publish both supported pack archives with the release.
 - Restrict cross-root rendezvous evidence to exact external identities reached by the primary anchored traversal in the requested direction.
+- Bind every rendezvous database read to the earlier caller or service deadline and count serialized-equivalent federation state without retaining another encoded copy.
 - Correct the MCP composition evaluation's raw-input digest in both published representations and verify the binding directly.
 - Prepare the exact `dev`-to-`main` promotion while keeping `main` and publication untouched until readiness is complete.
 - Create a separate non-milestone post-release issue that owns published-release verification and the user-requested safe branch, worktree, and external ProjectAtlas checkout cleanup.
@@ -23,13 +24,13 @@ ProjectAtlas v0.4.0 has completed its feature program, but exact-head review of 
 
 ### Modified Capabilities
 
-- `cross-repository-intelligence`: Require federated rendezvous evidence to remain inside the primary anchored and directed traversal.
+- `cross-repository-intelligence`: Require federated rendezvous evidence to remain inside the primary anchored and directed traversal, the request deadline, and the aggregate intermediate-state ceiling.
 - `language-intelligence-registry`: Require supported optional-parser archives to ship only through an exact clean-run release handoff.
 - `repository-intelligence-benchmarks`: Require published evaluation digests to match their named raw input.
 
 ## Impact
 
-This change affects OpenSpec release artifacts, GitHub issue #311, federated service filtering and focused tests, the MCP composition evaluation metadata, the optional-parser architecture diagram, the final `dev` candidate proof, and the existing `optional-parser-pack`, `02-Release`, and `03-Auto-Release` workflows. It adds no crate, dependency, SQLite schema or migration, SQLite write path, CLI/MCP schema, or second release workflow.
+This change affects OpenSpec release artifacts, GitHub issue #311, federated service filtering, deadline propagation, byte accounting and focused tests, the MCP composition evaluation metadata, the optional-parser architecture diagram, the final `dev` candidate proof, and the existing `optional-parser-pack`, `02-Release`, and `03-Auto-Release` workflows. It adds no crate, dependency, SQLite schema or migration, SQLite write path, CLI/MCP schema, or second release workflow.
 
 ## Non-Goals
 

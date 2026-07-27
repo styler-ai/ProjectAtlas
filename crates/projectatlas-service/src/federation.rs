@@ -4,6 +4,7 @@ use super::analysis::{RelationAnalysisDraft, RelationAnalysisQuery, RelationAnal
 use super::relations::{
     DetailedRelationBudget, DetailedRelationPageDraft, DetailedRelationQuery,
     DetailedRelationReport, ExternalRelationIdentity, external_relation_identities,
+    relation_request_control, serialized_equivalent_bytes,
 };
 use super::{ServiceError, ServiceResult, selected_project_binding};
 use projectatlas_core::graph::{
@@ -19,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Minimum number of explicit roots that constitutes a federated call.
 const MIN_FEDERATED_ROOTS: usize = 2;
@@ -529,12 +530,7 @@ pub fn load_federated_detailed_relations(
         )?;
         let candidate = primary.report_for_prefix(primary.candidate_rows())?;
         let rendezvous_identities = external_relation_identities(&candidate);
-        let rendezvous_identity_bytes = u64::try_from(
-            serde_json::to_vec(&rendezvous_identities)?.len(),
-        )
-        .map_err(|_overflow| {
-            ServiceError::InvalidInput("federated identity byte count overflowed".to_string())
-        })?;
+        let rendezvous_identity_bytes = serialized_equivalent_bytes(&rendezvous_identities)?;
         let primary_edges = u64::from(candidate.work.inspected_edges);
         let primary_rows = u64::from(candidate.work.database_returned_rows);
         let remaining_edges = u64::from(budget.edges()).saturating_sub(primary_edges);
@@ -745,6 +741,11 @@ fn load_rendezvous(
             reached_limits: Vec::new(),
         });
     }
+    let deadline = started
+        .checked_add(Duration::from_millis(query.budget.deadline_ms()))
+        .unwrap_or(started);
+    let request_control = relation_request_control(control, deadline);
+    let control = Some(&request_control);
     let families = query.relation.map_or_else(
         || FEDERATED_RENDEZVOUS_RELATIONS.to_vec(),
         |relation| vec![relation],
@@ -802,13 +803,7 @@ fn load_rendezvous(
                 push_limit(&mut reached_limits, GraphLimitKind::Edges);
             }
             for row in page.rows {
-                let encoded_bytes =
-                    u64::try_from(serde_json::to_vec(&(&row.source, &row.relation))?.len())
-                        .map_err(|_overflow| {
-                            ServiceError::InvalidInput(
-                                "federated decoded-byte count overflowed".to_string(),
-                            )
-                        })?;
+                let encoded_bytes = serialized_equivalent_bytes(&(&row.source, &row.relation))?;
                 if encoded_bytes > remaining_intermediate_bytes {
                     push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
                     break 'queries;
@@ -1084,14 +1079,14 @@ fn federated_intermediate_bytes(
     cursor: Option<&str>,
     budget: DetailedRelationBudget,
 ) -> ServiceResult<u64> {
-    let federation_bytes = u64::try_from(
-        serde_json::to_vec(&(participants, rendezvous))?
-            .len()
-            .saturating_add(cursor.map_or(0, str::len)),
-    )
-    .map_err(|_overflow| {
-        ServiceError::InvalidInput("federated intermediate-byte count overflowed".to_string())
+    let cursor_bytes = u64::try_from(cursor.map_or(0, str::len)).map_err(|_overflow| {
+        ServiceError::InvalidInput("federated cursor byte count overflowed".to_string())
     })?;
+    let federation_bytes = checked_sum(
+        serialized_equivalent_bytes(&(participants, rendezvous))?,
+        cursor_bytes,
+        "federated intermediate bytes",
+    )?;
     let total = checked_sum(
         primary_bytes,
         federation_bytes,
@@ -1219,6 +1214,14 @@ mod tests {
             encoded.len() <= query.budget.output_bytes() as usize
                 && report.work.intermediate_bytes <= query.budget.intermediate_bytes(),
             "federated output escaped its aggregate byte budgets",
+        )?;
+        let rendezvous_identities = external_relation_identities(&report.primary);
+        let encoded_identity_bytes =
+            u64::try_from(serde_json::to_vec(&rendezvous_identities)?.len())?;
+        require(
+            !rendezvous_identities.is_empty()
+                && serialized_equivalent_bytes(&rendezvous_identities)? == encoded_identity_bytes,
+            "streamed federation identity accounting diverged from exact JSON bytes",
         )?;
         let after = participants
             .iter()
