@@ -5178,8 +5178,9 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         expected: ExpectedFailure,
         source_bytes: usize,
         cancel_before_launch: bool,
-        cancellation_after: Option<Duration>,
+        cancellation_after_launch: Option<Duration>,
         deadline: Duration,
+        deadline_after_launch: Option<Duration>,
         no_progress: Duration,
         limits: ParserRequestLimits,
     }
@@ -5195,8 +5196,9 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             expected,
             source_bytes: 32,
             cancel_before_launch: false,
-            cancellation_after: None,
+            cancellation_after_launch: None,
             deadline: Duration::from_secs(2),
+            deadline_after_launch: None,
             no_progress: Duration::from_millis(500),
             limits: default_limits()?,
         })
@@ -5345,7 +5347,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             ParserMemoryLimits::PRODUCTION,
             Instant::now(),
             deadline,
-            Duration::from_millis(150),
+            Duration::from_secs(1),
             &cancellation,
             command_for(peer, "idle-close")?,
         )
@@ -5443,7 +5445,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
                 ParserMemoryLimits::PRODUCTION,
                 Instant::now(),
                 deadline,
-                Duration::from_millis(150),
+                Duration::from_secs(1),
                 &cancellation,
                 command_for(peer, "idle-close")?,
             )
@@ -5520,13 +5522,6 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         if case.cancel_before_launch {
             cancellation.cancel();
         }
-        let cancellation_thread = case.cancellation_after.map(|delay| {
-            let cancellation = cancellation.clone();
-            thread::spawn(move || {
-                thread::sleep(delay);
-                cancellation.cancel();
-            })
-        });
         let now = Instant::now();
         let deadline = now.checked_add(case.deadline).unwrap_or(now);
         let resident = ResidentParserSession::launch_command(
@@ -5542,15 +5537,29 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
                 message: source.to_string(),
             })?,
         );
+        let cancellation_thread;
         let result = match resident {
             Ok(mut resident) => {
                 let source = vec![b'x'; case.source_bytes];
+                let source_identity = ParserSourceIdentity::for_bytes(&source)?;
+                let operation_started = Instant::now();
+                let operation_deadline = case
+                    .deadline_after_launch
+                    .and_then(|duration| operation_started.checked_add(duration))
+                    .unwrap_or(deadline);
+                cancellation_thread = case.cancellation_after_launch.map(|delay| {
+                    let cancellation = cancellation.clone();
+                    thread::spawn(move || {
+                        thread::sleep(delay);
+                        cancellation.cancel();
+                    })
+                });
                 let operation = resident.parse(
                     &source,
-                    ParserSourceIdentity::for_bytes(&source)?,
+                    source_identity,
                     case.limits,
-                    Instant::now(),
-                    deadline,
+                    operation_started,
+                    operation_deadline,
                     case.no_progress,
                     &cancellation,
                 );
@@ -5564,7 +5573,10 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
                     }
                 }
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                cancellation_thread = None;
+                Err(error)
+            }
         };
         if let Some(handle) = cancellation_thread {
             handle
@@ -5668,12 +5680,12 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
     ];
     let mut blocked_cancel = case("blocked-write", ExpectedFailure::Cancelled)?;
     blocked_cancel.source_bytes = 4 * 1024 * 1024;
-    blocked_cancel.cancellation_after = Some(Duration::from_millis(75));
+    blocked_cancel.cancellation_after_launch = Some(Duration::from_millis(75));
     blocked_cancel.no_progress = Duration::from_secs(1);
     cases.push(blocked_cancel);
     let mut blocked_deadline = case("blocked-write", ExpectedFailure::Deadline)?;
     blocked_deadline.source_bytes = 4 * 1024 * 1024;
-    blocked_deadline.deadline = Duration::from_millis(125);
+    blocked_deadline.deadline_after_launch = Some(Duration::from_millis(125));
     blocked_deadline.no_progress = Duration::from_secs(1);
     cases.push(blocked_deadline);
     if let Some(progress_endless) = cases

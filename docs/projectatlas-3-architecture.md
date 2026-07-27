@@ -2230,7 +2230,7 @@ flowchart TB
     FinalLaunchCheck -->|successful check commits ownership; bounded ACK notifies owner| Handoff[Owner transfers child to caller]
     Handoff -->|Linux| LinuxAuthority[Validate descriptors and seals; read and close documents; validate digests, relations, and selected grammar]
     LinuxAuthority --> LinuxVerify[Validate executable mapping, eager runtime DSOs, and one-thread state]
-    LinuxVerify --> LinuxContain[Hard limits plus no_new_privs plus grammar-only Landlock v3 plus seccomp]
+    LinuxVerify --> LinuxContain[Hard limits plus no_new_privs plus Landlock v3 handled-path denial plus seccomp]
     Handoff -->|Windows| WindowsContain[Suspended LPAC worker; exact handles plus no-breakaway Job and completion port]
     WindowsContain --> Admission[Resume then fixed admission record]
     Admission --> AdmissionGate[Rust validates adapter admission]

@@ -1318,7 +1318,7 @@ fn serve_worker(descriptors: LinuxAuthorityDescriptors) -> Result<(), WorkerStar
                 stage: source.stage(),
                 source,
             })?;
-    enforce_parser_worker_containment(runtime.grammar_file(), preconditions).map_err(|source| {
+    enforce_parser_worker_containment(preconditions).map_err(|source| {
         WorkerStartupError::LinuxContainment {
             stage: source.stage(),
             source,

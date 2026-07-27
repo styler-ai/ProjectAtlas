@@ -11,8 +11,8 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use landlock::{
-    ABI, Access, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
-    RulesetAttr, RulesetCreatedAttr, RulesetStatus,
+    ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreatedAttr,
+    RulesetStatus,
 };
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, SealFlag, fcntl};
@@ -223,8 +223,6 @@ const PERSISTENT_IPC_SYSCALLS: &[i64] = &[];
 pub(crate) enum ParserWorkerContainmentStage {
     /// Caller-owned process admission has not completed.
     Preconditions,
-    /// The selected immutable grammar descriptor cannot be admitted.
-    Grammar,
     /// The worker inherited a privileged identity or capability set.
     ProcessIdentity,
     /// A hard process resource limit could not be applied or verified.
@@ -314,13 +312,6 @@ pub(crate) enum ParserWorkerContainmentError {
     UnsupportedArchitecture {
         /// Architecture reported by the Rust target.
         architecture: &'static str,
-    },
-    /// Opening the selected grammar descriptor as a Landlock path failed.
-    #[error("could not open selected parser grammar descriptor for Landlock: {source}")]
-    OpenGrammarDescriptor {
-        /// Landlock path-descriptor failure.
-        #[source]
-        source: landlock::PathFdError,
     },
     /// Reading the bounded kernel process-identity record failed.
     #[error("could not read parser worker process identity: {source}")]
@@ -437,7 +428,6 @@ impl ParserWorkerContainmentError {
             | Self::InspectThreadState { .. }
             | Self::InvalidThreadState { .. }
             | Self::UnsupportedArchitecture { .. } => ParserWorkerContainmentStage::Preconditions,
-            Self::OpenGrammarDescriptor { .. } => ParserWorkerContainmentStage::Grammar,
             Self::ReadProcessIdentity { .. }
             | Self::InvalidProcessIdentity { .. }
             | Self::InconsistentProcessIdentity { .. }
@@ -523,11 +513,6 @@ fn resource_limit_policy() -> [ResourceLimitRule; 6] {
             value: CORE_DUMP_BYTES,
         },
     ]
-}
-
-/// Return the only filesystem permission granted to the selected grammar object.
-fn grammar_read_access() -> BitFlags<AccessFs> {
-    AccessFs::ReadFile.into()
 }
 
 /// Return the complete immutable-file seal set required from every authority descriptor.
@@ -1215,10 +1200,8 @@ fn enforce_no_new_privileges() -> Result<(), ParserWorkerContainmentError> {
     Ok(())
 }
 
-/// Restrict filesystem access to the exact selected grammar object.
-fn enforce_landlock(grammar: &File) -> Result<(), ParserWorkerContainmentError> {
-    let grammar = PathFd::new(format!("/proc/self/fd/{}", grammar.as_raw_fd()))
-        .map_err(|source| ParserWorkerContainmentError::OpenGrammarDescriptor { source })?;
+/// Deny every Landlock v3-handled filesystem access.
+fn enforce_landlock() -> Result<(), ParserWorkerContainmentError> {
     let status = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(AccessFs::from_all(ABI::V3))
@@ -1226,8 +1209,6 @@ fn enforce_landlock(grammar: &File) -> Result<(), ParserWorkerContainmentError> 
         .create()
         .map_err(|source| ParserWorkerContainmentError::Landlock { source })?
         .set_compatibility(CompatLevel::HardRequirement)
-        .add_rule(PathBeneath::new(grammar, grammar_read_access()))
-        .map_err(|source| ParserWorkerContainmentError::Landlock { source })?
         .restrict_self()
         .map_err(|source| ParserWorkerContainmentError::Landlock { source })?;
     if status.ruleset != RulesetStatus::FullyEnforced || !status.no_new_privs {
@@ -1263,14 +1244,13 @@ fn enforce_seccomp() -> Result<(), ParserWorkerContainmentError> {
 /// proven.
 /// Any error may follow irreversible partial restriction; the caller must exit.
 pub(crate) fn enforce_parser_worker_containment(
-    grammar: &File,
     _preconditions: ParserWorkerContainmentPreconditions,
 ) -> Result<(), ParserWorkerContainmentError> {
     accepted_target_architecture()?;
     enforce_unprivileged_process_identity()?;
     enforce_resource_limits()?;
     enforce_no_new_privileges()?;
-    enforce_landlock(grammar)?;
+    enforce_landlock()?;
     enforce_seccomp()?;
     Ok(())
 }
@@ -1281,7 +1261,7 @@ mod tests {
 
     /// Marks the isolated child that applies irreversible Landlock restrictions.
     const LANDLOCK_CHILD_ENV: &str = "PROJECTATLAS_LANDLOCK_CHILD";
-    /// Existing path that must remain outside the grammar-only Landlock rule.
+    /// Existing path that must remain unavailable after Landlock is enforced.
     const LANDLOCK_UNRELATED_PATH_ENV: &str = "PROJECTATLAS_LANDLOCK_UNRELATED_PATH";
 
     fn require_test(condition: bool, message: &'static str) -> io::Result<()> {
@@ -1293,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn landlock_grammar_rule_child_fixture() -> Result<(), Box<dyn std::error::Error>> {
+    fn landlock_path_denial_child_fixture() -> Result<(), Box<dyn std::error::Error>> {
         use nix::sys::memfd::{MFdFlags, memfd_create};
         use std::io::{Seek as _, Write as _};
 
@@ -1313,7 +1293,7 @@ mod tests {
         drop(writable);
 
         enforce_no_new_privileges()?;
-        enforce_landlock(&grammar)?;
+        enforce_landlock()?;
 
         let mut reopened = File::open(format!("/proc/self/fd/{}", grammar.as_raw_fd()))?;
         let mut bytes = Vec::new();
@@ -1336,21 +1316,21 @@ mod tests {
     }
 
     #[test]
-    fn landlock_grammar_rule_is_fully_enforced_in_subprocess()
+    fn landlock_denies_paths_and_retains_sealed_authority_in_subprocess()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let unrelated = temp.path().join("unrelated");
         fs::write(&unrelated, b"not grammar authority")?;
         let output = std::process::Command::new(std::env::current_exe()?)
             .arg("--exact")
-            .arg("parser_worker_containment::tests::landlock_grammar_rule_child_fixture")
+            .arg("parser_worker_containment::tests::landlock_path_denial_child_fixture")
             .arg("--nocapture")
             .env(LANDLOCK_CHILD_ENV, "1")
             .env(LANDLOCK_UNRELATED_PATH_ENV, &unrelated)
             .output()?;
         if !output.status.success() {
             return Err(io::Error::other(format!(
-                "isolated Landlock grammar rule failed: stdout={:?}; stderr={:?}",
+                "isolated Landlock path denial failed: stdout={:?}; stderr={:?}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
             ))
@@ -1739,16 +1719,6 @@ mod tests {
             )),
             Err(ParserWorkerContainmentError::InvalidProcessIdentity { .. })
         ));
-    }
-
-    /// Grant only exact grammar reads without directory, execution, or mutation access.
-    #[test]
-    fn grammar_policy_is_read_only_and_non_executable() {
-        let access = grammar_read_access();
-        assert!(access.contains(AccessFs::ReadFile));
-        assert!(!access.contains(AccessFs::ReadDir));
-        assert!(!access.contains(AccessFs::Execute));
-        assert!((access & AccessFs::from_write(ABI::V3)).is_empty());
     }
 
     /// Keep each denied syscall in one closed family and compile the fixed filter.
