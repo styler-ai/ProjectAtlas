@@ -11,8 +11,8 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use landlock::{
-    ABI, Access, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, RulesetStatus,
+    ABI, Access, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
+    RulesetAttr, RulesetCreatedAttr, RulesetStatus,
 };
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, SealFlag, fcntl};
@@ -315,12 +315,12 @@ pub(crate) enum ParserWorkerContainmentError {
         /// Architecture reported by the Rust target.
         architecture: &'static str,
     },
-    /// Cloning the selected grammar descriptor for a Landlock rule failed.
-    #[error("could not clone selected parser grammar descriptor for Landlock: {source}")]
-    CloneGrammarDescriptor {
-        /// Descriptor-clone failure.
+    /// Opening the selected grammar descriptor as a Landlock path failed.
+    #[error("could not open selected parser grammar descriptor for Landlock: {source}")]
+    OpenGrammarDescriptor {
+        /// Landlock path-descriptor failure.
         #[source]
-        source: io::Error,
+        source: landlock::PathFdError,
     },
     /// Reading the bounded kernel process-identity record failed.
     #[error("could not read parser worker process identity: {source}")]
@@ -437,7 +437,7 @@ impl ParserWorkerContainmentError {
             | Self::InspectThreadState { .. }
             | Self::InvalidThreadState { .. }
             | Self::UnsupportedArchitecture { .. } => ParserWorkerContainmentStage::Preconditions,
-            Self::CloneGrammarDescriptor { .. } => ParserWorkerContainmentStage::Grammar,
+            Self::OpenGrammarDescriptor { .. } => ParserWorkerContainmentStage::Grammar,
             Self::ReadProcessIdentity { .. }
             | Self::InvalidProcessIdentity { .. }
             | Self::InconsistentProcessIdentity { .. }
@@ -1217,9 +1217,8 @@ fn enforce_no_new_privileges() -> Result<(), ParserWorkerContainmentError> {
 
 /// Restrict filesystem access to the exact selected grammar object.
 fn enforce_landlock(grammar: &File) -> Result<(), ParserWorkerContainmentError> {
-    let grammar = grammar
-        .try_clone()
-        .map_err(|source| ParserWorkerContainmentError::CloneGrammarDescriptor { source })?;
+    let grammar = PathFd::new(format!("/proc/self/fd/{}", grammar.as_raw_fd()))
+        .map_err(|source| ParserWorkerContainmentError::OpenGrammarDescriptor { source })?;
     let status = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(AccessFs::from_all(ABI::V3))
@@ -1279,6 +1278,70 @@ pub(crate) fn enforce_parser_worker_containment(
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
+
+    /// Marks the isolated child that applies irreversible Landlock restrictions.
+    const LANDLOCK_CHILD_ENV: &str = "PROJECTATLAS_LANDLOCK_CHILD";
+    /// Existing path that must remain outside the grammar-only Landlock rule.
+    const LANDLOCK_UNRELATED_PATH_ENV: &str = "PROJECTATLAS_LANDLOCK_UNRELATED_PATH";
+
+    #[test]
+    fn landlock_grammar_rule_child_fixture() -> Result<(), Box<dyn std::error::Error>> {
+        if std::env::var_os(LANDLOCK_CHILD_ENV).is_none() {
+            return Ok(());
+        }
+        use nix::sys::memfd::{MFdFlags, memfd_create};
+        use std::io::{Seek as _, Write as _};
+
+        let descriptor = memfd_create(
+            "projectatlas-landlock-grammar-test",
+            MFdFlags::MFD_ALLOW_SEALING,
+        )?;
+        let mut writable = File::from(descriptor);
+        writable.write_all(b"grammar")?;
+        writable.rewind()?;
+        fcntl(&writable, FcntlArg::F_ADD_SEALS(required_memfd_seals()))?;
+        let grammar = File::open(format!("/proc/self/fd/{}", writable.as_raw_fd()))?;
+        drop(writable);
+
+        enforce_no_new_privileges()?;
+        enforce_landlock(&grammar)?;
+
+        let mut reopened = File::open(format!("/proc/self/fd/{}", grammar.as_raw_fd()))?;
+        let mut bytes = Vec::new();
+        reopened.read_to_end(&mut bytes)?;
+        assert_eq!(bytes, b"grammar");
+
+        let unrelated = std::env::var_os(LANDLOCK_UNRELATED_PATH_ENV)
+            .ok_or_else(|| io::Error::other("unrelated Landlock test path is missing"))?;
+        let error = File::open(unrelated)
+            .expect_err("Landlock unexpectedly allowed an unrelated filesystem path");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        Ok(())
+    }
+
+    #[test]
+    fn landlock_grammar_rule_is_fully_enforced_in_subprocess()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let unrelated = temp.path().join("unrelated");
+        fs::write(&unrelated, b"not grammar authority")?;
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .arg("--exact")
+            .arg("parser_worker_containment::tests::landlock_grammar_rule_child_fixture")
+            .arg("--nocapture")
+            .env(LANDLOCK_CHILD_ENV, "1")
+            .env(LANDLOCK_UNRELATED_PATH_ENV, &unrelated)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "isolated Landlock grammar rule failed: stdout={:?}; stderr={:?}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ))
+            .into());
+        }
+        Ok(())
+    }
 
     /// Accept only read-only memfds carrying the complete immutable seal set.
     #[test]

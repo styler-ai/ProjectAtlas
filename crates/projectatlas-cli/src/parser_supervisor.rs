@@ -136,6 +136,14 @@ static CURRENTNESS_TEST_HOOK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>
 #[cfg(debug_assertions)]
 static PRE_SPAWN_TEST_HOOK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
     std::sync::Mutex::new(None);
+/// One-shot unit-test delay after acceptance and before owner-side child transfer.
+#[cfg(test)]
+static PROCESS_SPAWN_BEFORE_TRANSFER_TEST_HOOK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
+    std::sync::Mutex::new(None);
+/// One-shot unit-test delay before owner-side unadmitted-child cleanup.
+#[cfg(test)]
+static PROCESS_SPAWN_BEFORE_CLEANUP_TEST_HOOK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
+    std::sync::Mutex::new(None);
 /// Maximum bytes read from one kernel-owned Linux accounting record.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const LINUX_MEMORY_RECORD_MAX_BYTES: u64 = 64 * 1024;
@@ -1094,6 +1102,12 @@ impl Drop for UnadmittedChild {
         let Some(mut child) = self.child.take() else {
             return;
         };
+        #[cfg(test)]
+        if let Ok(mut slot) = PROCESS_SPAWN_BEFORE_CLEANUP_TEST_HOOK.lock()
+            && let Some(hook) = slot.take()
+        {
+            hook();
+        }
         if let Err(error) = cleanup_partial_launch(&mut child, Vec::new(), None, None, None) {
             record_process_spawn_cleanup_failure(&error);
         }
@@ -1145,7 +1159,7 @@ fn run_bounded_process_spawn(
     )
 }
 
-/// Execute the concrete spawn operation behind one owned cleanup handoff.
+/// Execute the concrete spawn operation behind one owner-side admission handshake.
 fn run_bounded_process_spawn_with(
     command: Command,
     absolute_deadline: Instant,
@@ -1164,14 +1178,33 @@ fn run_bounded_process_spawn_with(
     require_process_spawn_cleanup_health()?;
     let lease = ProcessSpawnLease::acquire()?;
     let program = PathBuf::from(command.get_program());
-    let (sender, receiver) = mpsc::sync_channel(1);
+    let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+    let (accept_sender, accept_receiver) = mpsc::channel();
+    let (child_sender, child_receiver) = mpsc::sync_channel(0);
     let worker = thread::Builder::new()
         .name("projectatlas-process-spawn".to_owned())
         .spawn(move || {
-            let result = spawn(command)
-                .map(|child| UnadmittedChild::new(child, lease))
-                .map_err(|source| ParserSupervisorError::Spawn { program, source });
-            if let Err(undelivered) = sender.send(result) {
+            let child = match spawn(command) {
+                Ok(child) => UnadmittedChild::new(child, lease),
+                Err(source) => {
+                    let _undelivered =
+                        ready_sender.send(Err(ParserSupervisorError::Spawn { program, source }));
+                    return;
+                }
+            };
+            if ready_sender.send(Ok(())).is_err() {
+                return;
+            }
+            if accept_receiver.recv().is_err() {
+                return;
+            }
+            #[cfg(test)]
+            if let Ok(mut slot) = PROCESS_SPAWN_BEFORE_TRANSFER_TEST_HOOK.lock()
+                && let Some(hook) = slot.take()
+            {
+                hook();
+            }
+            if let Err(undelivered) = child_sender.send(child) {
                 drop(undelivered);
             }
         })
@@ -1189,12 +1222,13 @@ fn run_bounded_process_spawn_with(
             no_progress_timeout,
             cancellation,
         )?;
-        match receiver.recv_timeout(next_poll_wait(
+        match ready_receiver.recv_timeout(next_poll_wait(
             absolute_deadline,
             last_progress,
             no_progress_timeout,
         )) {
-            Ok(result) => {
+            Ok(ready) => {
+                ready?;
                 poll_stop(
                     PROCESS_LAUNCH_PHASE,
                     absolute_deadline,
@@ -1202,7 +1236,36 @@ fn run_bounded_process_spawn_with(
                     no_progress_timeout,
                     cancellation,
                 )?;
-                return result.and_then(UnadmittedChild::admit);
+                accept_sender
+                    .send(())
+                    .map_err(|_closed| ParserSupervisorError::IoThread {
+                        phase: PROCESS_LAUNCH_PHASE,
+                        message: "process-spawn owner disconnected before admission".to_owned(),
+                    })?;
+                loop {
+                    poll_stop(
+                        PROCESS_LAUNCH_PHASE,
+                        absolute_deadline,
+                        last_progress,
+                        no_progress_timeout,
+                        cancellation,
+                    )?;
+                    match child_receiver.recv_timeout(next_poll_wait(
+                        absolute_deadline,
+                        last_progress,
+                        no_progress_timeout,
+                    )) {
+                        Ok(child) => return child.admit(),
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => {
+                            return Err(ParserSupervisorError::IoThread {
+                                phase: PROCESS_LAUNCH_PHASE,
+                                message: "process-spawn owner disconnected during admission"
+                                    .to_owned(),
+                            });
+                        }
+                    }
+                }
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
@@ -5637,6 +5700,22 @@ mod tests {
         }
     }
 
+    /// Clear any one-shot process-spawn race hooks left by an early test return.
+    struct ProcessSpawnTestHookReset;
+
+    impl Drop for ProcessSpawnTestHookReset {
+        fn drop(&mut self) {
+            for slot in [
+                &PROCESS_SPAWN_BEFORE_TRANSFER_TEST_HOOK,
+                &PROCESS_SPAWN_BEFORE_CLEANUP_TEST_HOOK,
+            ] {
+                if let Ok(mut hook) = slot.lock() {
+                    *hook = None;
+                }
+            }
+        }
+    }
+
     #[test]
     fn blocked_process_spawn_child_fixture() {
         if std::env::var_os(PROCESS_SPAWN_CHILD_ENV).is_none() {
@@ -6131,16 +6210,16 @@ mod tests {
                 Duration::from_secs(5),
                 &caller_cancellation,
                 move |mut command| {
+                    let child = command.spawn()?;
+                    pid_sender
+                        .send(child.id())
+                        .map_err(|_closed| io::Error::other("spawn PID receiver closed"))?;
                     entered_sender
                         .send(())
                         .map_err(|_closed| io::Error::other("spawn blocker receiver closed"))?;
                     release_receiver
                         .recv()
                         .map_err(|_closed| io::Error::other("spawn release sender closed"))?;
-                    let child = command.spawn()?;
-                    pid_sender
-                        .send(child.id())
-                        .map_err(|_closed| io::Error::other("spawn PID receiver closed"))?;
                     Ok(child)
                 },
             );
@@ -6148,6 +6227,7 @@ mod tests {
         });
 
         entered_receiver.recv_timeout(Duration::from_secs(1))?;
+        let _late_child_pid = pid_receiver.recv_timeout(Duration::from_secs(1))?;
         cancellation.cancel();
         let result = result_receiver.recv_timeout(Duration::from_secs(1))?;
         match result {
@@ -6168,7 +6248,6 @@ mod tests {
             .into());
         }
         release_sender.send(())?;
-        let _late_child_pid = pid_receiver.recv_timeout(Duration::from_secs(1))?;
         caller
             .join()
             .map_err(|_panic| io::Error::other("blocked-spawn caller panicked"))?;
@@ -6186,6 +6265,127 @@ mod tests {
         require_process_spawn_cleanup_health()?;
         if completed.exists() {
             return Err(io::Error::other("late child survived mandatory cleanup").into());
+        }
+        drop(ProcessSpawnLease::acquire()?);
+        Ok(())
+    }
+
+    #[test]
+    fn completed_process_spawn_cancellation_detaches_during_handoff()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PROCESS_SPAWN_TEST_LOCK
+            .lock()
+            .map_err(|_poisoned| io::Error::other("process-spawn test lock is poisoned"))?;
+        require_process_spawn_cleanup_health()?;
+        let _hook_reset = ProcessSpawnTestHookReset;
+        let temp = tempfile::tempdir()?;
+        let completed = temp.path().join("completed-spawn-child-completed");
+        let mut command = Command::new(std::env::current_exe()?);
+        command
+            .arg("--exact")
+            .arg("parser_supervisor::tests::blocked_process_spawn_child_fixture")
+            .arg("--nocapture")
+            .env(PROCESS_SPAWN_CHILD_ENV, "1")
+            .env(PROCESS_SPAWN_CHILD_COMPLETED_ENV, &completed)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let (transfer_entered_sender, transfer_entered_receiver) = mpsc::sync_channel(1);
+        let (release_transfer_sender, release_transfer_receiver) = mpsc::sync_channel(1);
+        *PROCESS_SPAWN_BEFORE_TRANSFER_TEST_HOOK
+            .lock()
+            .map_err(|_poisoned| io::Error::other("transfer test hook lock is poisoned"))? =
+            Some(Box::new(move || {
+                let _entered = transfer_entered_sender.send(());
+                let _release = release_transfer_receiver.recv();
+            }));
+
+        let (cleanup_entered_sender, cleanup_entered_receiver) = mpsc::sync_channel(1);
+        let (release_cleanup_sender, release_cleanup_receiver) = mpsc::sync_channel(1);
+        *PROCESS_SPAWN_BEFORE_CLEANUP_TEST_HOOK
+            .lock()
+            .map_err(|_poisoned| io::Error::other("cleanup test hook lock is poisoned"))? =
+            Some(Box::new(move || {
+                let thread_name = thread::current().name().unwrap_or("unnamed").to_owned();
+                let _entered = cleanup_entered_sender.send(thread_name);
+                let _release = release_cleanup_receiver.recv();
+            }));
+
+        let (pid_sender, pid_receiver) = mpsc::sync_channel(1);
+        let cancellation = IndexCancellation::new();
+        let caller_cancellation = cancellation.clone();
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        let started = Instant::now();
+        let caller = thread::spawn(move || {
+            let result = run_bounded_process_spawn_with(
+                command,
+                started + Duration::from_secs(5),
+                started,
+                Duration::from_secs(5),
+                &caller_cancellation,
+                move |mut command| {
+                    let child = command.spawn()?;
+                    pid_sender
+                        .send(child.id())
+                        .map_err(|_closed| io::Error::other("spawn PID receiver closed"))?;
+                    Ok(child)
+                },
+            );
+            let _send = result_sender.send(result);
+        });
+
+        transfer_entered_receiver.recv_timeout(Duration::from_secs(1))?;
+        let _child_pid = pid_receiver.recv_timeout(Duration::from_secs(1))?;
+        cancellation.cancel();
+        let result = result_receiver.recv_timeout(Duration::from_secs(1))?;
+        match result {
+            Err(ParserSupervisorError::Cancelled {
+                phase: PROCESS_LAUNCH_PHASE,
+            }) => {}
+            other => {
+                return Err(io::Error::other(format!(
+                    "completed process spawn returned the wrong result: {other:?}"
+                ))
+                .into());
+            }
+        }
+        caller
+            .join()
+            .map_err(|_panic| io::Error::other("completed-spawn caller panicked"))?;
+
+        release_transfer_sender.send(())?;
+        let cleanup_thread = cleanup_entered_receiver.recv_timeout(Duration::from_secs(1))?;
+        if cleanup_thread != "projectatlas-process-spawn" {
+            return Err(io::Error::other(format!(
+                "unadmitted child cleanup ran on {cleanup_thread:?}"
+            ))
+            .into());
+        }
+        if !PROCESS_SPAWN_ACTIVE.load(Ordering::Acquire) || ProcessSpawnLease::acquire().is_ok() {
+            return Err(io::Error::other(
+                "unadmitted child cleanup released its process-wide lease early",
+            )
+            .into());
+        }
+        if completed.exists() {
+            return Err(io::Error::other("unadmitted child survived before cleanup").into());
+        }
+
+        release_cleanup_sender.send(())?;
+        let cleanup_deadline = Instant::now() + SUPERVISOR_CLEANUP_TIMEOUT;
+        while PROCESS_SPAWN_ACTIVE.load(Ordering::Acquire) && Instant::now() < cleanup_deadline {
+            thread::yield_now();
+        }
+        if PROCESS_SPAWN_ACTIVE.load(Ordering::Acquire) {
+            return Err(io::Error::other(
+                "unadmitted child cleanup did not release its process-wide lease",
+            )
+            .into());
+        }
+        require_process_spawn_cleanup_health()?;
+        if completed.exists() {
+            return Err(io::Error::other("unadmitted child survived mandatory cleanup").into());
         }
         drop(ProcessSpawnLease::acquire()?);
         Ok(())
