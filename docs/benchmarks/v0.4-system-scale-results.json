@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "preregistration": "{REPO_ROOT}\\docs\\benchmarks\\v0.4-system-scale-preregistration.json",
+  "preregistration": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\docs\\benchmarks\\v0.4-system-scale-preregistration.json",
   "effective_preregistration": {
     "schema_version": 1,
     "benchmark": "projectatlas-v0.4-system-scale",
@@ -44,8 +44,8 @@
     ],
     "candidate": {
       "required_version": "0.4.0",
-      "functional_git_head": "0ffeffb21818f8d648d9149204b00deee26bbabd",
-      "runtime_sha256": "4c4ecfa629b797c790b4b439494509e32f0d58f612e5898a18300faa17202169",
+      "functional_git_head": "f2d788392e96c1caf6b01cc4ecae1825d3ceaedc",
+      "runtime_sha256": "ce9ef5de6bcf647f407ff761e913b2fcf079415c85c991e811272d2a27ff473f",
       "mcp_tools_sha256": "0c21ea673bdb9cdff48203a274db04fbaccb888bd362407d46fc1bcc0e506b28",
       "telemetry": "disabled",
       "build_profile": "release-default-features"
@@ -197,19 +197,19 @@
   "publication_eligible": true,
   "candidate": {
     "version": "projectatlas 0.4.0",
-    "runtime": "{REPO_ROOT}\\target\\release\\projectatlas.exe",
-    "runtime_sha256": "4c4ecfa629b797c790b4b439494509e32f0d58f612e5898a18300faa17202169",
-    "runtime_bytes": 51986432,
-    "git_head": "0ffeffb21818f8d648d9149204b00deee26bbabd",
+    "runtime": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\release\\projectatlas.exe",
+    "runtime_sha256": "ce9ef5de6bcf647f407ff761e913b2fcf079415c85c991e811272d2a27ff473f",
+    "runtime_bytes": 51981312,
+    "git_head": "f2d788392e96c1caf6b01cc4ecae1825d3ceaedc",
     "publication_identity": {
-      "git_head": "0ffeffb21818f8d648d9149204b00deee26bbabd",
-      "runtime_sha256": "4c4ecfa629b797c790b4b439494509e32f0d58f612e5898a18300faa17202169",
+      "git_head": "f2d788392e96c1caf6b01cc4ecae1825d3ceaedc",
+      "runtime_sha256": "ce9ef5de6bcf647f407ff761e913b2fcf079415c85c991e811272d2a27ff473f",
       "mcp_tools_sha256": "0c21ea673bdb9cdff48203a274db04fbaccb888bd362407d46fc1bcc0e506b28",
       "runtime_info": {
         "project": "ProjectAtlas",
         "major_version": 3,
         "version": "0.4.0",
-        "executable": "{REPO_ROOT}/target/release/projectatlas.exe",
+        "executable": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/release/projectatlas.exe",
         "repository": "https://github.com/styler-ai/ProjectAtlas",
         "capabilities": [
           "cli",
@@ -286,7 +286,7 @@
     {
       "scale": "small",
       "variant": "clean",
-      "root": "{REPO_ROOT}\\target\\benchmarks\\system-scale\\release-candidate-0ffeffb\\small-clean",
+      "root": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\small-clean",
       "corpus": {
         "files": 7,
         "bytes": 1503,
@@ -306,16 +306,16 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 11280384,
+          "peak_rss_bytes": 11231232,
           "peak_processes": 1,
           "peak_worker_processes": 0,
-          "peak_threads": 9,
-          "cpu_seconds": 0.046875,
+          "peak_threads": 4,
+          "cpu_seconds": 0.171875,
           "observed_pids": [
-            18480
+            43064
           ],
           "peak_storage": {
-            "database_bytes": 552960,
+            "database_bytes": 4096,
             "wal_bytes": 461472,
             "shm_bytes": 32768,
             "staging_bytes": 0,
@@ -347,9 +347,9 @@
           ],
           "returncode": 0,
           "timed_out": false,
-          "wall_seconds": 0.265139,
-          "one_core_cpu_percent": 17.679,
-          "host_cpu_percent": 1.105,
+          "wall_seconds": 0.272333,
+          "one_core_cpu_percent": 63.112,
+          "host_cpu_percent": 3.944,
           "stdout_bytes": 893,
           "stderr_bytes": 0,
           "process_read_transfer_bytes": 568475,
@@ -413,13 +413,13 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 8675328,
+          "peak_rss_bytes": 8466432,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 4,
-          "cpu_seconds": 0.09375,
+          "cpu_seconds": 0.109375,
           "observed_pids": [
-            29364
+            3300
           ],
           "peak_storage": {
             "database_bytes": 552960,
@@ -453,10 +453,10 @@
           ],
           "returncode": 0,
           "timed_out": false,
-          "wall_seconds": 0.254569,
-          "one_core_cpu_percent": 36.827,
-          "host_cpu_percent": 2.302,
-          "stdout_bytes": 8330,
+          "wall_seconds": 0.330956,
+          "one_core_cpu_percent": 33.048,
+          "host_cpu_percent": 2.066,
+          "stdout_bytes": 8150,
           "stderr_bytes": 0,
           "process_read_transfer_bytes": 500618,
           "process_write_transfer_bytes": 0,
@@ -464,42 +464,42 @@
         },
         "report": {
           "cache_dir": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-clean/.projectatlas",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean/.projectatlas",
             "exists": true,
             "size_bytes": null
           },
           "db": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-clean/.projectatlas/projectatlas.db",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.db",
             "exists": true,
             "size_bytes": 552960
           },
           "db_wal": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-clean/.projectatlas/projectatlas.db-wal",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.db-wal",
             "exists": true,
             "size_bytes": 0
           },
           "db_shm": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-clean/.projectatlas/projectatlas.db-shm",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.db-shm",
             "exists": true,
             "size_bytes": 32768
           },
           "db_journal": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-clean/.projectatlas/projectatlas.db-journal",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.db-journal",
             "exists": false,
             "size_bytes": null
           },
           "mcp_config": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-clean/.projectatlas/projectatlas.mcp.json",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.mcp.json",
             "exists": false,
             "size_bytes": null
           },
           "config_path": null,
-          "repo_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-clean",
+          "repo_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean",
           "root_detection_source": "db",
           "root_verified": true,
           "root_mismatches": [],
-          "map_path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-clean/.projectatlas/projectatlas.toon",
-          "nonsource_files_path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-clean/.projectatlas/projectatlas-nonsource-files.toon",
+          "map_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.toon",
+          "nonsource_files_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas-nonsource-files.toon",
           "default_format": "json",
           "default_search_case_sensitive": false,
           "search_source": "sqlite-file-text",
@@ -512,7 +512,7 @@
             "recommendation": "Run `projectatlas watch --once` for one refresh or `projectatlas watch` for event-backed refresh with portable polling fallback."
           },
           "index": {
-            "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-clean",
+            "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean",
             "files": 7,
             "folders": 2,
             "missing_purposes": 3,
@@ -720,13 +720,13 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 4743168,
+          "peak_rss_bytes": 8093696,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 4,
           "cpu_seconds": 0.0625,
           "observed_pids": [
-            41564
+            32940
           ],
           "peak_storage": {
             "database_bytes": 552960,
@@ -762,9 +762,9 @@
           ],
           "returncode": 0,
           "timed_out": false,
-          "wall_seconds": 0.294026,
-          "one_core_cpu_percent": 21.257,
-          "host_cpu_percent": 1.329,
+          "wall_seconds": 0.24551,
+          "one_core_cpu_percent": 25.457,
+          "host_cpu_percent": 1.591,
           "stdout_bytes": 693,
           "stderr_bytes": 0,
           "process_read_transfer_bytes": 269028,
@@ -825,23 +825,23 @@
         "freelist_ratio": 0.0,
         "quick_check": "ok",
         "sqlite_stat1_present": false,
-        "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-clean"
+        "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean"
       },
       "queries": {
-        "startup_ms": 32.3,
-        "rss_before_repeated_bytes": 13144064,
-        "rss_after_repeated_bytes": 15568896,
-        "retained_rss_growth_bytes": 2424832,
+        "startup_ms": 38.598,
+        "rss_before_repeated_bytes": 13238272,
+        "rss_after_repeated_bytes": 15409152,
+        "retained_rss_growth_bytes": 2170880,
         "state_before_repeated": {
           "pids": [
-            29312
+            5648
           ],
           "processes": 1,
           "threads": 23
         },
         "state_after_repeated": {
           "pids": [
-            29312
+            5648
           ],
           "processes": 1,
           "threads": 23
@@ -864,8 +864,8 @@
           },
           "stable": true
         },
-        "repeated_query_median_ms": 32.708,
-        "repeated_query_p95_ms": 66.996,
+        "repeated_query_median_ms": 46.248,
+        "repeated_query_p95_ms": 82.0,
         "maximum_output_bytes": 1666,
         "process": {
           "sampler": "psutil-7.0.0",
@@ -876,7 +876,7 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 15618048,
+          "peak_rss_bytes": 15409152,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 24,
@@ -884,7 +884,7 @@
           "read_bytes": 0,
           "write_bytes": 0,
           "observed_pids": [
-            29312
+            5648
           ],
           "peak_storage": {
             "database_bytes": 552960,
@@ -899,7 +899,7 @@
             "tool": "atlas_overview",
             "phase": "first_exact_verification",
             "arguments": {},
-            "elapsed_ms": 55.795,
+            "elapsed_ms": 59.33,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 151,
@@ -927,7 +927,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_1",
             "arguments": {},
-            "elapsed_ms": 61.34,
+            "elapsed_ms": 26.538,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 74,
@@ -958,7 +958,7 @@
               "file": "src/storage.rs",
               "limit": 25
             },
-            "elapsed_ms": 26.418,
+            "elapsed_ms": 26.517,
             "output_bytes": 1666,
             "process_io": {
               "read_operations": 89,
@@ -993,7 +993,7 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 32.019,
+            "elapsed_ms": 49.556,
             "output_bytes": 905,
             "process_io": {
               "read_operations": 84,
@@ -1026,7 +1026,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 27.73,
+            "elapsed_ms": 51.226,
             "output_bytes": 671,
             "process_io": {
               "read_operations": 74,
@@ -1060,7 +1060,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 27.154,
+            "elapsed_ms": 26.79,
             "output_bytes": 1023,
             "process_io": {
               "read_operations": 74,
@@ -1088,7 +1088,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_2",
             "arguments": {},
-            "elapsed_ms": 33.244,
+            "elapsed_ms": 27.08,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 74,
@@ -1119,7 +1119,7 @@
               "file": "src/storage.rs",
               "limit": 25
             },
-            "elapsed_ms": 97.47,
+            "elapsed_ms": 27.38,
             "output_bytes": 1666,
             "process_io": {
               "read_operations": 89,
@@ -1154,7 +1154,7 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 27.039,
+            "elapsed_ms": 33.541,
             "output_bytes": 905,
             "process_io": {
               "read_operations": 84,
@@ -1187,7 +1187,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 27.872,
+            "elapsed_ms": 49.886,
             "output_bytes": 671,
             "process_io": {
               "read_operations": 74,
@@ -1221,7 +1221,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 32.708,
+            "elapsed_ms": 70.679,
             "output_bytes": 1023,
             "process_io": {
               "read_operations": 74,
@@ -1249,7 +1249,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_3",
             "arguments": {},
-            "elapsed_ms": 37.448,
+            "elapsed_ms": 32.088,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 74,
@@ -1280,7 +1280,7 @@
               "file": "src/storage.rs",
               "limit": 25
             },
-            "elapsed_ms": 51.451,
+            "elapsed_ms": 27.827,
             "output_bytes": 1666,
             "process_io": {
               "read_operations": 89,
@@ -1315,7 +1315,7 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 47.987,
+            "elapsed_ms": 82.0,
             "output_bytes": 905,
             "process_io": {
               "read_operations": 84,
@@ -1348,7 +1348,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 49.702,
+            "elapsed_ms": 49.023,
             "output_bytes": 671,
             "process_io": {
               "read_operations": 74,
@@ -1382,7 +1382,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 55.89,
+            "elapsed_ms": 46.742,
             "output_bytes": 1023,
             "process_io": {
               "read_operations": 74,
@@ -1410,7 +1410,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_4",
             "arguments": {},
-            "elapsed_ms": 27.002,
+            "elapsed_ms": 46.248,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 74,
@@ -1441,7 +1441,7 @@
               "file": "src/storage.rs",
               "limit": 25
             },
-            "elapsed_ms": 31.725,
+            "elapsed_ms": 83.642,
             "output_bytes": 1666,
             "process_io": {
               "read_operations": 89,
@@ -1476,7 +1476,7 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 31.401,
+            "elapsed_ms": 32.609,
             "output_bytes": 905,
             "process_io": {
               "read_operations": 84,
@@ -1509,7 +1509,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 26.596,
+            "elapsed_ms": 50.578,
             "output_bytes": 671,
             "process_io": {
               "read_operations": 74,
@@ -1543,7 +1543,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 27.293,
+            "elapsed_ms": 48.416,
             "output_bytes": 1023,
             "process_io": {
               "read_operations": 74,
@@ -1571,7 +1571,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_5",
             "arguments": {},
-            "elapsed_ms": 27.595,
+            "elapsed_ms": 32.31,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 74,
@@ -1602,7 +1602,7 @@
               "file": "src/storage.rs",
               "limit": 25
             },
-            "elapsed_ms": 40.105,
+            "elapsed_ms": 48.17,
             "output_bytes": 1666,
             "process_io": {
               "read_operations": 89,
@@ -1637,7 +1637,7 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 48.064,
+            "elapsed_ms": 45.147,
             "output_bytes": 905,
             "process_io": {
               "read_operations": 84,
@@ -1670,7 +1670,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 50.003,
+            "elapsed_ms": 47.565,
             "output_bytes": 671,
             "process_io": {
               "read_operations": 74,
@@ -1704,7 +1704,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 66.996,
+            "elapsed_ms": 45.499,
             "output_bytes": 1023,
             "process_io": {
               "read_operations": 74,
@@ -1740,21 +1740,21 @@
         },
         {
           "name": "full scan wall seconds",
-          "observed": 0.265139,
+          "observed": 0.272333,
           "operator": "<=",
           "threshold": 30,
           "passed": true
         },
         {
           "name": "MCP startup milliseconds",
-          "observed": 32.3,
+          "observed": 38.598,
           "operator": "<=",
           "threshold": 250,
           "passed": true
         },
         {
           "name": "full scan peak RSS bytes",
-          "observed": 11280384,
+          "observed": 11231232,
           "operator": "<=",
           "threshold": 268435456,
           "passed": true
@@ -1775,21 +1775,21 @@
         },
         {
           "name": "process-tree threads",
-          "observed": 9,
+          "observed": 4,
           "operator": "<=",
           "threshold": 20,
           "passed": true
         },
         {
           "name": "unchanged refresh wall seconds",
-          "observed": 0.294026,
+          "observed": 0.24551,
           "operator": "<=",
           "threshold": 10,
           "passed": true
         },
         {
           "name": "repeated query p95 milliseconds",
-          "observed": 66.996,
+          "observed": 82.0,
           "operator": "<=",
           "threshold": 250,
           "passed": true
@@ -1803,7 +1803,7 @@
         },
         {
           "name": "retained RSS growth bytes",
-          "observed": 2424832,
+          "observed": 2170880,
           "operator": "<=",
           "threshold": 134217728,
           "passed": true
@@ -2128,7 +2128,7 @@
         },
         {
           "name": "fallback search seconds",
-          "observed": 0.066996,
+          "observed": 0.070679,
           "operator": "<=",
           "threshold": 10,
           "passed": true
@@ -2180,7 +2180,7 @@
     {
       "scale": "small",
       "variant": "dirty",
-      "root": "{REPO_ROOT}\\target\\benchmarks\\system-scale\\release-candidate-0ffeffb\\small-dirty",
+      "root": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\small-dirty",
       "corpus": {
         "files": 6,
         "bytes": 1179,
@@ -2199,18 +2199,18 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 11419648,
+          "peak_rss_bytes": 13524992,
           "peak_processes": 1,
           "peak_worker_processes": 0,
-          "peak_threads": 5,
-          "cpu_seconds": 0.078125,
+          "peak_threads": 4,
+          "cpu_seconds": 0.046875,
           "observed_pids": [
-            43692
+            18656
           ],
           "peak_storage": {
-            "database_bytes": 4096,
-            "wal_bytes": 461472,
-            "shm_bytes": 32768,
+            "database_bytes": 532480,
+            "wal_bytes": 0,
+            "shm_bytes": 0,
             "staging_bytes": 0,
             "stage_directories": 0
           },
@@ -2240,9 +2240,9 @@
           ],
           "returncode": 0,
           "timed_out": false,
-          "wall_seconds": 0.253301,
-          "one_core_cpu_percent": 30.843,
-          "host_cpu_percent": 1.928,
+          "wall_seconds": 0.212494,
+          "one_core_cpu_percent": 22.059,
+          "host_cpu_percent": 1.379,
           "stdout_bytes": 893,
           "stderr_bytes": 0,
           "process_read_transfer_bytes": 546699,
@@ -2306,13 +2306,13 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 8126464,
+          "peak_rss_bytes": 8495104,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 4,
-          "cpu_seconds": 0.0625,
+          "cpu_seconds": 0.109375,
           "observed_pids": [
-            37292
+            27372
           ],
           "peak_storage": {
             "database_bytes": 532480,
@@ -2346,10 +2346,10 @@
           ],
           "returncode": 0,
           "timed_out": false,
-          "wall_seconds": 0.385562,
-          "one_core_cpu_percent": 16.21,
-          "host_cpu_percent": 1.013,
-          "stdout_bytes": 8330,
+          "wall_seconds": 0.248723,
+          "one_core_cpu_percent": 43.975,
+          "host_cpu_percent": 2.748,
+          "stdout_bytes": 8150,
           "stderr_bytes": 0,
           "process_read_transfer_bytes": 500618,
           "process_write_transfer_bytes": 0,
@@ -2357,42 +2357,42 @@
         },
         "report": {
           "cache_dir": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-dirty/.projectatlas",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty/.projectatlas",
             "exists": true,
             "size_bytes": null
           },
           "db": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-dirty/.projectatlas/projectatlas.db",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.db",
             "exists": true,
             "size_bytes": 532480
           },
           "db_wal": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-dirty/.projectatlas/projectatlas.db-wal",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.db-wal",
             "exists": true,
             "size_bytes": 0
           },
           "db_shm": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-dirty/.projectatlas/projectatlas.db-shm",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.db-shm",
             "exists": true,
             "size_bytes": 32768
           },
           "db_journal": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-dirty/.projectatlas/projectatlas.db-journal",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.db-journal",
             "exists": false,
             "size_bytes": null
           },
           "mcp_config": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-dirty/.projectatlas/projectatlas.mcp.json",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.mcp.json",
             "exists": false,
             "size_bytes": null
           },
           "config_path": null,
-          "repo_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-dirty",
+          "repo_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty",
           "root_detection_source": "db",
           "root_verified": true,
           "root_mismatches": [],
-          "map_path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-dirty/.projectatlas/projectatlas.toon",
-          "nonsource_files_path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-dirty/.projectatlas/projectatlas-nonsource-files.toon",
+          "map_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.toon",
+          "nonsource_files_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas-nonsource-files.toon",
           "default_format": "json",
           "default_search_case_sensitive": false,
           "search_source": "sqlite-file-text",
@@ -2405,7 +2405,7 @@
             "recommendation": "Run `projectatlas watch --once` for one refresh or `projectatlas watch` for event-backed refresh with portable polling fallback."
           },
           "index": {
-            "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-dirty",
+            "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty",
             "files": 6,
             "folders": 2,
             "missing_purposes": 3,
@@ -2613,13 +2613,13 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 7995392,
+          "peak_rss_bytes": 8081408,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 4,
-          "cpu_seconds": 0.140625,
+          "cpu_seconds": 0.0625,
           "observed_pids": [
-            11252
+            35176
           ],
           "peak_storage": {
             "database_bytes": 532480,
@@ -2655,9 +2655,9 @@
           ],
           "returncode": 0,
           "timed_out": false,
-          "wall_seconds": 0.453341,
-          "one_core_cpu_percent": 31.02,
-          "host_cpu_percent": 1.939,
+          "wall_seconds": 0.244891,
+          "one_core_cpu_percent": 25.522,
+          "host_cpu_percent": 1.595,
           "stdout_bytes": 693,
           "stderr_bytes": 0,
           "process_read_transfer_bytes": 268704,
@@ -2718,23 +2718,23 @@
         "freelist_ratio": 0.0,
         "quick_check": "ok",
         "sqlite_stat1_present": false,
-        "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-dirty"
+        "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty"
       },
       "queries": {
-        "startup_ms": 39.067,
-        "rss_before_repeated_bytes": 12984320,
-        "rss_after_repeated_bytes": 15400960,
-        "retained_rss_growth_bytes": 2416640,
+        "startup_ms": 37.896,
+        "rss_before_repeated_bytes": 13324288,
+        "rss_after_repeated_bytes": 15441920,
+        "retained_rss_growth_bytes": 2117632,
         "state_before_repeated": {
           "pids": [
-            9896
+            39884
           ],
           "processes": 1,
           "threads": 23
         },
         "state_after_repeated": {
           "pids": [
-            9896
+            39884
           ],
           "processes": 1,
           "threads": 23
@@ -2757,8 +2757,8 @@
           },
           "stable": true
         },
-        "repeated_query_median_ms": 46.933,
-        "repeated_query_p95_ms": 79.742,
+        "repeated_query_median_ms": 27.718,
+        "repeated_query_p95_ms": 62.515,
         "maximum_output_bytes": 2378,
         "process": {
           "sampler": "psutil-7.0.0",
@@ -2769,7 +2769,7 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 15515648,
+          "peak_rss_bytes": 15634432,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 24,
@@ -2777,7 +2777,7 @@
           "read_bytes": 0,
           "write_bytes": 0,
           "observed_pids": [
-            9896
+            39884
           ],
           "peak_storage": {
             "database_bytes": 532480,
@@ -2792,7 +2792,7 @@
             "tool": "atlas_overview",
             "phase": "first_exact_verification",
             "arguments": {},
-            "elapsed_ms": 67.104,
+            "elapsed_ms": 65.751,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 149,
@@ -2820,7 +2820,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_1",
             "arguments": {},
-            "elapsed_ms": 46.023,
+            "elapsed_ms": 27.537,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 74,
@@ -2851,7 +2851,7 @@
               "file": "src/pricing.rs",
               "limit": 25
             },
-            "elapsed_ms": 32.591,
+            "elapsed_ms": 27.933,
             "output_bytes": 2378,
             "process_io": {
               "read_operations": 89,
@@ -2886,7 +2886,7 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 93.216,
+            "elapsed_ms": 51.44,
             "output_bytes": 905,
             "process_io": {
               "read_operations": 84,
@@ -2919,7 +2919,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 55.944,
+            "elapsed_ms": 50.893,
             "output_bytes": 672,
             "process_io": {
               "read_operations": 74,
@@ -2953,7 +2953,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 46.933,
+            "elapsed_ms": 74.325,
             "output_bytes": 967,
             "process_io": {
               "read_operations": 74,
@@ -2981,7 +2981,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_2",
             "arguments": {},
-            "elapsed_ms": 47.799,
+            "elapsed_ms": 27.718,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 74,
@@ -3012,7 +3012,7 @@
               "file": "src/pricing.rs",
               "limit": 25
             },
-            "elapsed_ms": 26.936,
+            "elapsed_ms": 31.247,
             "output_bytes": 2378,
             "process_io": {
               "read_operations": 89,
@@ -3047,7 +3047,7 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 26.568,
+            "elapsed_ms": 26.074,
             "output_bytes": 905,
             "process_io": {
               "read_operations": 84,
@@ -3080,7 +3080,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 79.742,
+            "elapsed_ms": 25.842,
             "output_bytes": 672,
             "process_io": {
               "read_operations": 74,
@@ -3114,7 +3114,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 59.264,
+            "elapsed_ms": 25.855,
             "output_bytes": 967,
             "process_io": {
               "read_operations": 74,
@@ -3142,7 +3142,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_3",
             "arguments": {},
-            "elapsed_ms": 58.085,
+            "elapsed_ms": 27.344,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 74,
@@ -3173,7 +3173,7 @@
               "file": "src/pricing.rs",
               "limit": 25
             },
-            "elapsed_ms": 59.721,
+            "elapsed_ms": 26.804,
             "output_bytes": 2378,
             "process_io": {
               "read_operations": 89,
@@ -3208,7 +3208,7 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 32.935,
+            "elapsed_ms": 31.835,
             "output_bytes": 905,
             "process_io": {
               "read_operations": 84,
@@ -3241,7 +3241,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 27.806,
+            "elapsed_ms": 27.837,
             "output_bytes": 672,
             "process_io": {
               "read_operations": 74,
@@ -3275,7 +3275,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 32.787,
+            "elapsed_ms": 27.21,
             "output_bytes": 967,
             "process_io": {
               "read_operations": 74,
@@ -3303,7 +3303,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_4",
             "arguments": {},
-            "elapsed_ms": 47.944,
+            "elapsed_ms": 27.681,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 74,
@@ -3334,7 +3334,7 @@
               "file": "src/pricing.rs",
               "limit": 25
             },
-            "elapsed_ms": 45.829,
+            "elapsed_ms": 33.147,
             "output_bytes": 2378,
             "process_io": {
               "read_operations": 89,
@@ -3369,7 +3369,7 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 48.998,
+            "elapsed_ms": 27.258,
             "output_bytes": 905,
             "process_io": {
               "read_operations": 84,
@@ -3402,7 +3402,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 63.588,
+            "elapsed_ms": 36.98,
             "output_bytes": 672,
             "process_io": {
               "read_operations": 74,
@@ -3436,7 +3436,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 53.486,
+            "elapsed_ms": 26.875,
             "output_bytes": 967,
             "process_io": {
               "read_operations": 74,
@@ -3464,7 +3464,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_5",
             "arguments": {},
-            "elapsed_ms": 27.762,
+            "elapsed_ms": 26.826,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 74,
@@ -3495,7 +3495,7 @@
               "file": "src/pricing.rs",
               "limit": 25
             },
-            "elapsed_ms": 32.596,
+            "elapsed_ms": 51.601,
             "output_bytes": 2378,
             "process_io": {
               "read_operations": 89,
@@ -3530,7 +3530,7 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 27.828,
+            "elapsed_ms": 62.515,
             "output_bytes": 905,
             "process_io": {
               "read_operations": 84,
@@ -3563,7 +3563,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 37.924,
+            "elapsed_ms": 26.887,
             "output_bytes": 672,
             "process_io": {
               "read_operations": 74,
@@ -3597,7 +3597,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 54.372,
+            "elapsed_ms": 33.07,
             "output_bytes": 967,
             "process_io": {
               "read_operations": 74,
@@ -3633,21 +3633,21 @@
         },
         {
           "name": "full scan wall seconds",
-          "observed": 0.253301,
+          "observed": 0.212494,
           "operator": "<=",
           "threshold": 30,
           "passed": true
         },
         {
           "name": "MCP startup milliseconds",
-          "observed": 39.067,
+          "observed": 37.896,
           "operator": "<=",
           "threshold": 250,
           "passed": true
         },
         {
           "name": "full scan peak RSS bytes",
-          "observed": 11419648,
+          "observed": 13524992,
           "operator": "<=",
           "threshold": 268435456,
           "passed": true
@@ -3668,21 +3668,21 @@
         },
         {
           "name": "process-tree threads",
-          "observed": 5,
+          "observed": 4,
           "operator": "<=",
           "threshold": 20,
           "passed": true
         },
         {
           "name": "unchanged refresh wall seconds",
-          "observed": 0.453341,
+          "observed": 0.244891,
           "operator": "<=",
           "threshold": 10,
           "passed": true
         },
         {
           "name": "repeated query p95 milliseconds",
-          "observed": 79.742,
+          "observed": 62.515,
           "operator": "<=",
           "threshold": 250,
           "passed": true
@@ -3696,7 +3696,7 @@
         },
         {
           "name": "retained RSS growth bytes",
-          "observed": 2416640,
+          "observed": 2117632,
           "operator": "<=",
           "threshold": 134217728,
           "passed": true
@@ -3808,7 +3808,7 @@
         },
         {
           "name": "peak WAL bytes versus scale database cap",
-          "observed": 461472,
+          "observed": 0,
           "operator": "<=",
           "threshold": 67108864,
           "passed": true
@@ -4021,7 +4021,7 @@
         },
         {
           "name": "fallback search seconds",
-          "observed": 0.059264,
+          "observed": 0.074325,
           "operator": "<=",
           "threshold": 10,
           "passed": true
@@ -4073,7 +4073,7 @@
     {
       "scale": "small",
       "variant": "non-git",
-      "root": "{REPO_ROOT}\\target\\benchmarks\\system-scale\\release-candidate-0ffeffb\\small-non-git",
+      "root": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\small-non-git",
       "corpus": {
         "files": 6,
         "bytes": 896,
@@ -4092,16 +4092,16 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 9084928,
+          "peak_rss_bytes": 2052096,
           "peak_processes": 1,
           "peak_worker_processes": 0,
-          "peak_threads": 7,
-          "cpu_seconds": 0.125,
+          "peak_threads": 10,
+          "cpu_seconds": 0.0625,
           "observed_pids": [
-            11432
+            33104
           ],
           "peak_storage": {
-            "database_bytes": 4096,
+            "database_bytes": 495616,
             "wal_bytes": 461472,
             "shm_bytes": 32768,
             "staging_bytes": 0,
@@ -4133,9 +4133,9 @@
           ],
           "returncode": 0,
           "timed_out": false,
-          "wall_seconds": 0.216094,
-          "one_core_cpu_percent": 57.845,
-          "host_cpu_percent": 3.615,
+          "wall_seconds": 0.218132,
+          "one_core_cpu_percent": 28.652,
+          "host_cpu_percent": 1.791,
           "stdout_bytes": 892,
           "stderr_bytes": 0,
           "process_read_transfer_bytes": 508200,
@@ -4199,13 +4199,13 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 8249344,
+          "peak_rss_bytes": 8282112,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 4,
-          "cpu_seconds": 0.0625,
+          "cpu_seconds": 0.078125,
           "observed_pids": [
-            17992
+            20304
           ],
           "peak_storage": {
             "database_bytes": 495616,
@@ -4239,10 +4239,10 @@
           ],
           "returncode": 0,
           "timed_out": false,
-          "wall_seconds": 0.221822,
-          "one_core_cpu_percent": 28.176,
-          "host_cpu_percent": 1.761,
-          "stdout_bytes": 8349,
+          "wall_seconds": 0.247416,
+          "one_core_cpu_percent": 31.576,
+          "host_cpu_percent": 1.974,
+          "stdout_bytes": 8169,
           "stderr_bytes": 0,
           "process_read_transfer_bytes": 504714,
           "process_write_transfer_bytes": 0,
@@ -4250,42 +4250,42 @@
         },
         "report": {
           "cache_dir": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-non-git/.projectatlas",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git/.projectatlas",
             "exists": true,
             "size_bytes": null
           },
           "db": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-non-git/.projectatlas/projectatlas.db",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.db",
             "exists": true,
             "size_bytes": 495616
           },
           "db_wal": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-non-git/.projectatlas/projectatlas.db-wal",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.db-wal",
             "exists": true,
             "size_bytes": 0
           },
           "db_shm": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-non-git/.projectatlas/projectatlas.db-shm",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.db-shm",
             "exists": true,
             "size_bytes": 32768
           },
           "db_journal": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-non-git/.projectatlas/projectatlas.db-journal",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.db-journal",
             "exists": false,
             "size_bytes": null
           },
           "mcp_config": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-non-git/.projectatlas/projectatlas.mcp.json",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.mcp.json",
             "exists": false,
             "size_bytes": null
           },
           "config_path": null,
-          "repo_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-non-git",
+          "repo_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git",
           "root_detection_source": "db",
           "root_verified": true,
           "root_mismatches": [],
-          "map_path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-non-git/.projectatlas/projectatlas.toon",
-          "nonsource_files_path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-non-git/.projectatlas/projectatlas-nonsource-files.toon",
+          "map_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.toon",
+          "nonsource_files_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas-nonsource-files.toon",
           "default_format": "json",
           "default_search_case_sensitive": false,
           "search_source": "sqlite-file-text",
@@ -4298,7 +4298,7 @@
             "recommendation": "Run `projectatlas watch --once` for one refresh or `projectatlas watch` for event-backed refresh with portable polling fallback."
           },
           "index": {
-            "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-non-git",
+            "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git",
             "files": 6,
             "folders": 3,
             "missing_purposes": 2,
@@ -4506,13 +4506,13 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 8224768,
+          "peak_rss_bytes": 8351744,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 4,
-          "cpu_seconds": 0.03125,
+          "cpu_seconds": 0.078125,
           "observed_pids": [
-            22388
+            22172
           ],
           "peak_storage": {
             "database_bytes": 495616,
@@ -4548,9 +4548,9 @@
           ],
           "returncode": 0,
           "timed_out": false,
-          "wall_seconds": 0.181507,
-          "one_core_cpu_percent": 17.217,
-          "host_cpu_percent": 1.076,
+          "wall_seconds": 0.225135,
+          "one_core_cpu_percent": 34.701,
+          "host_cpu_percent": 2.169,
           "stdout_bytes": 693,
           "stderr_bytes": 0,
           "process_read_transfer_bytes": 268158,
@@ -4611,23 +4611,23 @@
         "freelist_ratio": 0.0,
         "quick_check": "ok",
         "sqlite_stat1_present": false,
-        "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/small-non-git"
+        "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git"
       },
       "queries": {
-        "startup_ms": 31.089,
-        "rss_before_repeated_bytes": 13357056,
-        "rss_after_repeated_bytes": 15679488,
-        "retained_rss_growth_bytes": 2322432,
+        "startup_ms": 37.827,
+        "rss_before_repeated_bytes": 13189120,
+        "rss_after_repeated_bytes": 15552512,
+        "retained_rss_growth_bytes": 2363392,
         "state_before_repeated": {
           "pids": [
-            24584
+            10892
           ],
           "processes": 1,
           "threads": 23
         },
         "state_after_repeated": {
           "pids": [
-            24584
+            10892
           ],
           "processes": 1,
           "threads": 23
@@ -4650,8 +4650,8 @@
           },
           "stable": true
         },
-        "repeated_query_median_ms": 47.754,
-        "repeated_query_p95_ms": 74.801,
+        "repeated_query_median_ms": 49.214,
+        "repeated_query_p95_ms": 75.932,
         "maximum_output_bytes": 2253,
         "process": {
           "sampler": "psutil-7.0.0",
@@ -4662,7 +4662,7 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 15659008,
+          "peak_rss_bytes": 15589376,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 24,
@@ -4670,7 +4670,7 @@
           "read_bytes": 0,
           "write_bytes": 0,
           "observed_pids": [
-            24584
+            10892
           ],
           "peak_storage": {
             "database_bytes": 495616,
@@ -4685,7 +4685,7 @@
             "tool": "atlas_overview",
             "phase": "first_exact_verification",
             "arguments": {},
-            "elapsed_ms": 65.021,
+            "elapsed_ms": 57.192,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 129,
@@ -4713,7 +4713,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_1",
             "arguments": {},
-            "elapsed_ms": 27.004,
+            "elapsed_ms": 57.929,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 66,
@@ -4744,7 +4744,7 @@
               "file": "src/config.rs",
               "limit": 25
             },
-            "elapsed_ms": 48.235,
+            "elapsed_ms": 51.918,
             "output_bytes": 1506,
             "process_io": {
               "read_operations": 81,
@@ -4779,12 +4779,12 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 47.754,
+            "elapsed_ms": 50.955,
             "output_bytes": 2253,
             "process_io": {
-              "read_operations": 79,
+              "read_operations": 80,
               "write_operations": 1,
-              "read_transfer_bytes": 157525,
+              "read_transfer_bytes": 161621,
               "write_transfer_bytes": 2441
             },
             "work": {
@@ -4812,7 +4812,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 68.415,
+            "elapsed_ms": 49.214,
             "output_bytes": 672,
             "process_io": {
               "read_operations": 66,
@@ -4846,7 +4846,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 27.434,
+            "elapsed_ms": 47.0,
             "output_bytes": 930,
             "process_io": {
               "read_operations": 66,
@@ -4874,7 +4874,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_2",
             "arguments": {},
-            "elapsed_ms": 63.424,
+            "elapsed_ms": 53.246,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 66,
@@ -4905,7 +4905,7 @@
               "file": "src/config.rs",
               "limit": 25
             },
-            "elapsed_ms": 46.111,
+            "elapsed_ms": 26.963,
             "output_bytes": 1506,
             "process_io": {
               "read_operations": 81,
@@ -4940,12 +4940,12 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 67.8,
+            "elapsed_ms": 46.485,
             "output_bytes": 2253,
             "process_io": {
-              "read_operations": 79,
+              "read_operations": 80,
               "write_operations": 1,
-              "read_transfer_bytes": 157526,
+              "read_transfer_bytes": 161622,
               "write_transfer_bytes": 2442
             },
             "work": {
@@ -4973,7 +4973,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 27.211,
+            "elapsed_ms": 50.441,
             "output_bytes": 672,
             "process_io": {
               "read_operations": 66,
@@ -5007,7 +5007,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 50.182,
+            "elapsed_ms": 96.038,
             "output_bytes": 930,
             "process_io": {
               "read_operations": 66,
@@ -5035,7 +5035,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_3",
             "arguments": {},
-            "elapsed_ms": 87.374,
+            "elapsed_ms": 72.288,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 66,
@@ -5066,7 +5066,7 @@
               "file": "src/config.rs",
               "limit": 25
             },
-            "elapsed_ms": 27.914,
+            "elapsed_ms": 56.145,
             "output_bytes": 1506,
             "process_io": {
               "read_operations": 81,
@@ -5101,12 +5101,12 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 26.987,
+            "elapsed_ms": 26.272,
             "output_bytes": 2253,
             "process_io": {
-              "read_operations": 79,
+              "read_operations": 80,
               "write_operations": 1,
-              "read_transfer_bytes": 157526,
+              "read_transfer_bytes": 161622,
               "write_transfer_bytes": 2442
             },
             "work": {
@@ -5134,7 +5134,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 26.908,
+            "elapsed_ms": 28.735,
             "output_bytes": 672,
             "process_io": {
               "read_operations": 66,
@@ -5168,7 +5168,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 26.834,
+            "elapsed_ms": 26.741,
             "output_bytes": 930,
             "process_io": {
               "read_operations": 66,
@@ -5196,7 +5196,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_4",
             "arguments": {},
-            "elapsed_ms": 31.685,
+            "elapsed_ms": 47.815,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 66,
@@ -5227,7 +5227,7 @@
               "file": "src/config.rs",
               "limit": 25
             },
-            "elapsed_ms": 26.649,
+            "elapsed_ms": 73.278,
             "output_bytes": 1506,
             "process_io": {
               "read_operations": 81,
@@ -5262,12 +5262,12 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 57.383,
+            "elapsed_ms": 32.47,
             "output_bytes": 2253,
             "process_io": {
-              "read_operations": 79,
+              "read_operations": 80,
               "write_operations": 1,
-              "read_transfer_bytes": 157526,
+              "read_transfer_bytes": 161622,
               "write_transfer_bytes": 2442
             },
             "work": {
@@ -5295,7 +5295,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 73.773,
+            "elapsed_ms": 58.058,
             "output_bytes": 672,
             "process_io": {
               "read_operations": 66,
@@ -5329,7 +5329,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 53.657,
+            "elapsed_ms": 51.807,
             "output_bytes": 930,
             "process_io": {
               "read_operations": 66,
@@ -5357,7 +5357,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_5",
             "arguments": {},
-            "elapsed_ms": 74.801,
+            "elapsed_ms": 46.284,
             "output_bytes": 123,
             "process_io": {
               "read_operations": 66,
@@ -5388,7 +5388,7 @@
               "file": "src/config.rs",
               "limit": 25
             },
-            "elapsed_ms": 51.026,
+            "elapsed_ms": 75.932,
             "output_bytes": 1506,
             "process_io": {
               "read_operations": 81,
@@ -5423,12 +5423,12 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 59.014,
+            "elapsed_ms": 26.767,
             "output_bytes": 2253,
             "process_io": {
-              "read_operations": 79,
+              "read_operations": 80,
               "write_operations": 1,
-              "read_transfer_bytes": 157526,
+              "read_transfer_bytes": 161622,
               "write_transfer_bytes": 2442
             },
             "work": {
@@ -5456,7 +5456,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 27.744,
+            "elapsed_ms": 32.231,
             "output_bytes": 672,
             "process_io": {
               "read_operations": 66,
@@ -5490,7 +5490,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 33.915,
+            "elapsed_ms": 35.479,
             "output_bytes": 930,
             "process_io": {
               "read_operations": 66,
@@ -5526,21 +5526,21 @@
         },
         {
           "name": "full scan wall seconds",
-          "observed": 0.216094,
+          "observed": 0.218132,
           "operator": "<=",
           "threshold": 30,
           "passed": true
         },
         {
           "name": "MCP startup milliseconds",
-          "observed": 31.089,
+          "observed": 37.827,
           "operator": "<=",
           "threshold": 250,
           "passed": true
         },
         {
           "name": "full scan peak RSS bytes",
-          "observed": 9084928,
+          "observed": 2052096,
           "operator": "<=",
           "threshold": 268435456,
           "passed": true
@@ -5561,21 +5561,21 @@
         },
         {
           "name": "process-tree threads",
-          "observed": 7,
+          "observed": 10,
           "operator": "<=",
           "threshold": 20,
           "passed": true
         },
         {
           "name": "unchanged refresh wall seconds",
-          "observed": 0.181507,
+          "observed": 0.225135,
           "operator": "<=",
           "threshold": 10,
           "passed": true
         },
         {
           "name": "repeated query p95 milliseconds",
-          "observed": 74.801,
+          "observed": 75.932,
           "operator": "<=",
           "threshold": 250,
           "passed": true
@@ -5589,7 +5589,7 @@
         },
         {
           "name": "retained RSS growth bytes",
-          "observed": 2322432,
+          "observed": 2363392,
           "operator": "<=",
           "threshold": 134217728,
           "passed": true
@@ -5872,7 +5872,7 @@
         },
         {
           "name": "bounded query process read bytes",
-          "observed": 157533,
+          "observed": 161622,
           "operator": "<=",
           "threshold": 67108864,
           "passed": true
@@ -5914,7 +5914,7 @@
         },
         {
           "name": "fallback search seconds",
-          "observed": 0.053657,
+          "observed": 0.096038,
           "operator": "<=",
           "threshold": 10,
           "passed": true
@@ -5966,7 +5966,7 @@
     {
       "scale": "medium",
       "variant": "high-degree",
-      "root": "{REPO_ROOT}\\target\\benchmarks\\system-scale\\release-candidate-0ffeffb\\medium",
+      "root": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\medium",
       "corpus": {
         "files": 1028,
         "bytes": 101548,
@@ -5976,7 +5976,7 @@
       },
       "scan": {
         "pre_run_database_bytes": 0,
-        "post_run_database_bytes": 16019456,
+        "post_run_database_bytes": 16007168,
         "process": {
           "sampler": "psutil-7.0.0",
           "interval_seconds": 0.02,
@@ -5986,23 +5986,23 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 35528704,
+          "peak_rss_bytes": 35176448,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 20,
-          "cpu_seconds": 2.234375,
+          "cpu_seconds": 2.265625,
           "observed_pids": [
-            14960
+            42484
           ],
           "peak_storage": {
-            "database_bytes": 16019456,
-            "wal_bytes": 16393512,
+            "database_bytes": 16007168,
+            "wal_bytes": 16381152,
             "shm_bytes": 32768,
             "staging_bytes": 0,
             "stage_directories": 0
           },
-          "read_count": 27762,
-          "write_count": 188376,
+          "read_count": 28281,
+          "write_count": 187609,
           "exact_total_processes": 1,
           "exact_terminal_active_processes": 0,
           "worker_process_bound": 0,
@@ -6027,13 +6027,13 @@
           ],
           "returncode": 0,
           "timed_out": false,
-          "wall_seconds": 2.260589,
-          "one_core_cpu_percent": 98.84,
-          "host_cpu_percent": 6.178,
+          "wall_seconds": 2.896993,
+          "one_core_cpu_percent": 78.206,
+          "host_cpu_percent": 4.888,
           "stdout_bytes": 924,
           "stderr_bytes": 0,
-          "process_read_transfer_bytes": 80388696,
-          "process_write_transfer_bytes": 387130412,
+          "process_read_transfer_bytes": 82514448,
+          "process_write_transfer_bytes": 385588632,
           "stderr": ""
         },
         "report": {
@@ -6093,16 +6093,16 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 8617984,
+          "peak_rss_bytes": 9887744,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 4,
           "cpu_seconds": 0.09375,
           "observed_pids": [
-            36272
+            17756
           ],
           "peak_storage": {
-            "database_bytes": 16019456,
+            "database_bytes": 16007168,
             "wal_bytes": 0,
             "shm_bytes": 32768,
             "staging_bytes": 0,
@@ -6133,10 +6133,10 @@
           ],
           "returncode": 0,
           "timed_out": false,
-          "wall_seconds": 0.257687,
-          "one_core_cpu_percent": 36.381,
-          "host_cpu_percent": 2.274,
-          "stdout_bytes": 8301,
+          "wall_seconds": 0.261361,
+          "one_core_cpu_percent": 35.87,
+          "host_cpu_percent": 2.242,
+          "stdout_bytes": 8121,
           "stderr_bytes": 0,
           "process_read_transfer_bytes": 1237898,
           "process_write_transfer_bytes": 0,
@@ -6144,42 +6144,42 @@
         },
         "report": {
           "cache_dir": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/medium/.projectatlas",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium/.projectatlas",
             "exists": true,
             "size_bytes": null
           },
           "db": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/medium/.projectatlas/projectatlas.db",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.db",
             "exists": true,
-            "size_bytes": 16019456
+            "size_bytes": 16007168
           },
           "db_wal": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/medium/.projectatlas/projectatlas.db-wal",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.db-wal",
             "exists": true,
             "size_bytes": 0
           },
           "db_shm": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/medium/.projectatlas/projectatlas.db-shm",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.db-shm",
             "exists": true,
             "size_bytes": 32768
           },
           "db_journal": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/medium/.projectatlas/projectatlas.db-journal",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.db-journal",
             "exists": false,
             "size_bytes": null
           },
           "mcp_config": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/medium/.projectatlas/projectatlas.mcp.json",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.mcp.json",
             "exists": false,
             "size_bytes": null
           },
           "config_path": null,
-          "repo_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/medium",
+          "repo_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium",
           "root_detection_source": "db",
           "root_verified": true,
           "root_mismatches": [],
-          "map_path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/medium/.projectatlas/projectatlas.toon",
-          "nonsource_files_path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/medium/.projectatlas/projectatlas-nonsource-files.toon",
+          "map_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.toon",
+          "nonsource_files_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas-nonsource-files.toon",
           "default_format": "json",
           "default_search_case_sensitive": false,
           "search_source": "sqlite-file-text",
@@ -6192,7 +6192,7 @@
             "recommendation": "Run `projectatlas watch --once` for one refresh or `projectatlas watch` for event-backed refresh with portable polling fallback."
           },
           "index": {
-            "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/medium",
+            "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium",
             "files": 1028,
             "folders": 2,
             "missing_purposes": 3,
@@ -6247,7 +6247,7 @@
             "checkpoint_state": "not_due",
             "wal_autocheckpoint_pages": 1000,
             "freelist_pages": 0,
-            "page_count": 3911,
+            "page_count": 3908,
             "page_size": 4096,
             "journal_mode": "wal",
             "synchronous_mode": "full",
@@ -6400,16 +6400,16 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 8212480,
+          "peak_rss_bytes": 11526144,
           "peak_processes": 1,
           "peak_worker_processes": 0,
-          "peak_threads": 20,
-          "cpu_seconds": 0.203125,
+          "peak_threads": 4,
+          "cpu_seconds": 0.25,
           "observed_pids": [
-            32052
+            16656
           ],
           "peak_storage": {
-            "database_bytes": 16019456,
+            "database_bytes": 16007168,
             "wal_bytes": 0,
             "shm_bytes": 32768,
             "staging_bytes": 0,
@@ -6442,9 +6442,9 @@
           ],
           "returncode": 0,
           "timed_out": false,
-          "wall_seconds": 0.231299,
-          "one_core_cpu_percent": 87.819,
-          "host_cpu_percent": 5.489,
+          "wall_seconds": 0.22171,
+          "one_core_cpu_percent": 112.76,
+          "host_cpu_percent": 7.047,
           "stdout_bytes": 693,
           "stderr_bytes": 0,
           "process_read_transfer_bytes": 872874,
@@ -6514,17 +6514,17 @@
               "threads",
               "storage"
             ],
-            "peak_rss_bytes": 18956288,
+            "peak_rss_bytes": 19587072,
             "peak_processes": 1,
             "peak_worker_processes": 0,
-            "peak_threads": 8,
-            "cpu_seconds": 0.234375,
+            "peak_threads": 5,
+            "cpu_seconds": 0.1875,
             "observed_pids": [
-              22388
+              5016
             ],
             "peak_storage": {
-              "database_bytes": 16453632,
-              "wal_bytes": 14638392,
+              "database_bytes": 16441344,
+              "wal_bytes": 14630152,
               "shm_bytes": 32768,
               "staging_bytes": 0,
               "stage_directories": 0
@@ -6533,13 +6533,13 @@
               "method": "timeout-zero-begin-immediate-sampled-bound",
               "intrusive": true,
               "interval_seconds": 0.005,
-              "attempts": 36,
-              "busy_observations": 0,
-              "maximum_probe_gap_seconds": 0.048216,
-              "maximum_busy_upper_bound_seconds": 0.048216
+              "attempts": 39,
+              "busy_observations": 1,
+              "maximum_probe_gap_seconds": 0.063568,
+              "maximum_busy_upper_bound_seconds": 0.064389
             },
-            "read_count": 3031,
-            "write_count": 434,
+            "read_count": 3158,
+            "write_count": 548,
             "exact_total_processes": 1,
             "exact_terminal_active_processes": 0,
             "worker_process_bound": 0,
@@ -6568,18 +6568,18 @@
             ],
             "returncode": 0,
             "timed_out": false,
-            "wall_seconds": 1.14771,
-            "one_core_cpu_percent": 20.421,
-            "host_cpu_percent": 1.276,
+            "wall_seconds": 1.191142,
+            "one_core_cpu_percent": 15.741,
+            "host_cpu_percent": 0.984,
             "stdout_bytes": 687,
             "stderr_bytes": 0,
-            "process_read_transfer_bytes": 3999918,
-            "process_write_transfer_bytes": 949412,
+            "process_read_transfer_bytes": 4520110,
+            "process_write_transfer_bytes": 1416356,
             "stderr": "",
-            "readiness_seconds": 1.630847,
+            "readiness_seconds": 1.766849,
             "readiness_path": "src/caller_0001.rs",
             "readiness_generation": 2,
-            "edit_to_complete_seconds": 1.14771
+            "edit_to_complete_seconds": 1.191142
           },
           "report": {
             "mode": "notify",
@@ -6644,17 +6644,17 @@
                 "threads",
                 "storage"
               ],
-              "peak_rss_bytes": 19406848,
+              "peak_rss_bytes": 19095552,
               "peak_processes": 1,
               "peak_worker_processes": 0,
               "peak_threads": 5,
-              "cpu_seconds": 0.59375,
+              "cpu_seconds": 0.609375,
               "observed_pids": [
-                39740
+                28836
               ],
               "peak_storage": {
-                "database_bytes": 16797696,
-                "wal_bytes": 14766112,
+                "database_bytes": 16785408,
+                "wal_bytes": 14753752,
                 "shm_bytes": 32768,
                 "staging_bytes": 0,
                 "stage_directories": 0
@@ -6663,12 +6663,12 @@
                 "method": "timeout-zero-begin-immediate-sampled-bound",
                 "intrusive": true,
                 "interval_seconds": 0.005,
-                "attempts": 54,
+                "attempts": 49,
                 "busy_observations": 0,
-                "maximum_probe_gap_seconds": 0.079461,
-                "maximum_busy_upper_bound_seconds": 0.079461
+                "maximum_probe_gap_seconds": 0.102116,
+                "maximum_busy_upper_bound_seconds": 0.102116
               },
-              "read_count": 4182,
+              "read_count": 4200,
               "write_count": 1,
               "exact_total_processes": 1,
               "exact_terminal_active_processes": 0,
@@ -6698,20 +6698,20 @@
               ],
               "returncode": 1,
               "timed_out": false,
-              "wall_seconds": 1.650804,
-              "one_core_cpu_percent": 35.967,
-              "host_cpu_percent": 2.248,
+              "wall_seconds": 1.688952,
+              "one_core_cpu_percent": 36.08,
+              "host_cpu_percent": 2.255,
               "stdout_bytes": 0,
-              "stderr_bytes": 1101,
-              "process_read_transfer_bytes": 17072342,
+              "stderr_bytes": 1065,
+              "process_read_transfer_bytes": 17146070,
               "process_write_transfer_bytes": 0,
-              "readiness_seconds": 1.762667,
+              "readiness_seconds": 1.622183,
               "readiness_path": "src/caller_0002.rs",
               "readiness_generation": 4,
-              "edit_to_complete_seconds": 1.650804
+              "edit_to_complete_seconds": 1.688952
             },
             "report": {
-              "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/medium",
+              "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium",
               "status": "refresh_required",
               "reason": "dependency_closure_limit",
               "scope": "full",
@@ -6747,7 +6747,7 @@
             }
           },
           "rebuild": {
-            "pre_run_database_bytes": 16797696,
+            "pre_run_database_bytes": 16785408,
             "process": {
               "sampler": "psutil-7.0.0",
               "interval_seconds": 0.02,
@@ -6757,23 +6757,23 @@
                 "threads",
                 "storage"
               ],
-              "peak_rss_bytes": 35917824,
+              "peak_rss_bytes": 41037824,
               "peak_processes": 1,
               "peak_worker_processes": 0,
               "peak_threads": 20,
-              "cpu_seconds": 2.5625,
+              "cpu_seconds": 2.34375,
               "observed_pids": [
-                42320
+                19392
               ],
               "peak_storage": {
-                "database_bytes": 17215488,
-                "wal_bytes": 16352312,
+                "database_bytes": 17203200,
+                "wal_bytes": 16372912,
                 "shm_bytes": 32768,
                 "staging_bytes": 0,
                 "stage_directories": 0
               },
-              "read_count": 36564,
-              "write_count": 210043,
+              "read_count": 36880,
+              "write_count": 209233,
               "exact_total_processes": 1,
               "exact_terminal_active_processes": 0,
               "worker_process_bound": 0,
@@ -6798,13 +6798,13 @@
               ],
               "returncode": 0,
               "timed_out": false,
-              "wall_seconds": 2.114284,
-              "one_core_cpu_percent": 121.199,
-              "host_cpu_percent": 7.575,
+              "wall_seconds": 2.259172,
+              "one_core_cpu_percent": 103.744,
+              "host_cpu_percent": 6.484,
               "stdout_bytes": 924,
               "stderr_bytes": 0,
-              "process_read_transfer_bytes": 116447466,
-              "process_write_transfer_bytes": 438647020,
+              "process_read_transfer_bytes": 117741706,
+              "process_write_transfer_bytes": 436765392,
               "stderr": ""
             },
             "report": {
@@ -6873,38 +6873,38 @@
         }
       },
       "persistent": {
-        "database_bytes": 17215488,
+        "database_bytes": 17203200,
         "wal_bytes": 0,
         "shm_bytes": 0,
         "staging_bytes": 0,
         "stage_directories": 0,
-        "total_bytes": 17215488
+        "total_bytes": 17203200
       },
       "database_profile": {
         "page_size": 4096,
-        "page_count": 4203,
-        "page_bytes": 17215488,
-        "freelist_pages": 100,
-        "freelist_ratio": 0.023793,
+        "page_count": 4200,
+        "page_bytes": 17203200,
+        "freelist_pages": 95,
+        "freelist_ratio": 0.022619,
         "quick_check": "ok",
         "sqlite_stat1_present": false,
-        "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/medium"
+        "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium"
       },
       "queries": {
-        "startup_ms": 39.571,
-        "rss_before_repeated_bytes": 13213696,
-        "rss_after_repeated_bytes": 16502784,
-        "retained_rss_growth_bytes": 3289088,
+        "startup_ms": 33.036,
+        "rss_before_repeated_bytes": 13623296,
+        "rss_after_repeated_bytes": 16728064,
+        "retained_rss_growth_bytes": 3104768,
         "state_before_repeated": {
           "pids": [
-            21920
+            1268
           ],
           "processes": 1,
           "threads": 23
         },
         "state_after_repeated": {
           "pids": [
-            21920
+            1268
           ],
           "processes": 1,
           "threads": 23
@@ -6927,9 +6927,9 @@
           },
           "stable": true
         },
-        "repeated_query_median_ms": 48.022,
-        "repeated_query_p95_ms": 78.999,
-        "maximum_output_bytes": 36009,
+        "repeated_query_median_ms": 48.799,
+        "repeated_query_p95_ms": 76.348,
+        "maximum_output_bytes": 35984,
         "process": {
           "sampler": "psutil-7.0.0",
           "interval_seconds": 0.02,
@@ -6939,7 +6939,7 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 16592896,
+          "peak_rss_bytes": 16961536,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 24,
@@ -6947,10 +6947,10 @@
           "read_bytes": 0,
           "write_bytes": 0,
           "observed_pids": [
-            21920
+            1268
           ],
           "peak_storage": {
-            "database_bytes": 17215488,
+            "database_bytes": 17203200,
             "wal_bytes": 0,
             "shm_bytes": 32768,
             "staging_bytes": 0,
@@ -6962,7 +6962,7 @@
             "tool": "atlas_overview",
             "phase": "first_exact_verification",
             "arguments": {},
-            "elapsed_ms": 74.236,
+            "elapsed_ms": 66.898,
             "output_bytes": 129,
             "process_io": {
               "read_operations": 2318,
@@ -6990,7 +6990,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_1",
             "arguments": {},
-            "elapsed_ms": 49.004,
+            "elapsed_ms": 26.798,
             "output_bytes": 129,
             "process_io": {
               "read_operations": 148,
@@ -7021,7 +7021,7 @@
               "file": "src/hub.rs",
               "limit": 25
             },
-            "elapsed_ms": 45.832,
+            "elapsed_ms": 39.415,
             "output_bytes": 1394,
             "process_io": {
               "read_operations": 114,
@@ -7056,13 +7056,13 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 58.39,
-            "output_bytes": 36009,
+            "elapsed_ms": 80.767,
+            "output_bytes": 35984,
             "process_io": {
               "read_operations": 160,
               "write_operations": 1,
               "read_transfer_bytes": 457042,
-              "write_transfer_bytes": 37923
+              "write_transfer_bytes": 37898
             },
             "work": {
               "returned_rows": 20,
@@ -7077,7 +7077,7 @@
               "searched_files": null,
               "searched_bytes": null,
               "retained_bytes": null,
-              "rendered_output_bytes": 36009
+              "rendered_output_bytes": 35984
             }
           },
           {
@@ -7089,7 +7089,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 54.722,
+            "elapsed_ms": 32.099,
             "output_bytes": 3336,
             "process_io": {
               "read_operations": 173,
@@ -7123,7 +7123,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 27.345,
+            "elapsed_ms": 52.579,
             "output_bytes": 3625,
             "process_io": {
               "read_operations": 134,
@@ -7151,7 +7151,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_2",
             "arguments": {},
-            "elapsed_ms": 31.129,
+            "elapsed_ms": 44.36,
             "output_bytes": 129,
             "process_io": {
               "read_operations": 148,
@@ -7182,7 +7182,7 @@
               "file": "src/hub.rs",
               "limit": 25
             },
-            "elapsed_ms": 32.484,
+            "elapsed_ms": 56.571,
             "output_bytes": 1394,
             "process_io": {
               "read_operations": 114,
@@ -7217,13 +7217,13 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 32.37,
-            "output_bytes": 36009,
+            "elapsed_ms": 63.439,
+            "output_bytes": 35984,
             "process_io": {
               "read_operations": 160,
               "write_operations": 1,
               "read_transfer_bytes": 457043,
-              "write_transfer_bytes": 37924
+              "write_transfer_bytes": 37899
             },
             "work": {
               "returned_rows": 20,
@@ -7238,7 +7238,7 @@
               "searched_files": null,
               "searched_bytes": null,
               "retained_bytes": null,
-              "rendered_output_bytes": 36009
+              "rendered_output_bytes": 35984
             }
           },
           {
@@ -7250,7 +7250,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 45.068,
+            "elapsed_ms": 31.393,
             "output_bytes": 3336,
             "process_io": {
               "read_operations": 173,
@@ -7284,7 +7284,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 50.272,
+            "elapsed_ms": 27.08,
             "output_bytes": 3625,
             "process_io": {
               "read_operations": 134,
@@ -7312,7 +7312,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_3",
             "arguments": {},
-            "elapsed_ms": 44.722,
+            "elapsed_ms": 26.984,
             "output_bytes": 129,
             "process_io": {
               "read_operations": 148,
@@ -7343,7 +7343,7 @@
               "file": "src/hub.rs",
               "limit": 25
             },
-            "elapsed_ms": 53.584,
+            "elapsed_ms": 76.348,
             "output_bytes": 1394,
             "process_io": {
               "read_operations": 114,
@@ -7378,13 +7378,13 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 96.738,
-            "output_bytes": 36009,
+            "elapsed_ms": 52.546,
+            "output_bytes": 35984,
             "process_io": {
               "read_operations": 160,
               "write_operations": 1,
               "read_transfer_bytes": 457043,
-              "write_transfer_bytes": 37924
+              "write_transfer_bytes": 37899
             },
             "work": {
               "returned_rows": 20,
@@ -7399,7 +7399,7 @@
               "searched_files": null,
               "searched_bytes": null,
               "retained_bytes": null,
-              "rendered_output_bytes": 36009
+              "rendered_output_bytes": 35984
             }
           },
           {
@@ -7411,7 +7411,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 44.944,
+            "elapsed_ms": 53.287,
             "output_bytes": 3336,
             "process_io": {
               "read_operations": 173,
@@ -7445,7 +7445,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 59.589,
+            "elapsed_ms": 47.631,
             "output_bytes": 3625,
             "process_io": {
               "read_operations": 134,
@@ -7473,7 +7473,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_4",
             "arguments": {},
-            "elapsed_ms": 32.367,
+            "elapsed_ms": 45.503,
             "output_bytes": 129,
             "process_io": {
               "read_operations": 148,
@@ -7504,7 +7504,7 @@
               "file": "src/hub.rs",
               "limit": 25
             },
-            "elapsed_ms": 32.342,
+            "elapsed_ms": 48.799,
             "output_bytes": 1394,
             "process_io": {
               "read_operations": 114,
@@ -7539,13 +7539,13 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 38.002,
-            "output_bytes": 36009,
+            "elapsed_ms": 47.321,
+            "output_bytes": 35984,
             "process_io": {
               "read_operations": 160,
               "write_operations": 1,
               "read_transfer_bytes": 457043,
-              "write_transfer_bytes": 37924
+              "write_transfer_bytes": 37899
             },
             "work": {
               "returned_rows": 20,
@@ -7560,7 +7560,7 @@
               "searched_files": null,
               "searched_bytes": null,
               "retained_bytes": null,
-              "rendered_output_bytes": 36009
+              "rendered_output_bytes": 35984
             }
           },
           {
@@ -7572,7 +7572,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 31.829,
+            "elapsed_ms": 51.408,
             "output_bytes": 3336,
             "process_io": {
               "read_operations": 173,
@@ -7606,7 +7606,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 50.084,
+            "elapsed_ms": 62.645,
             "output_bytes": 3625,
             "process_io": {
               "read_operations": 134,
@@ -7634,7 +7634,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_5",
             "arguments": {},
-            "elapsed_ms": 53.126,
+            "elapsed_ms": 51.663,
             "output_bytes": 129,
             "process_io": {
               "read_operations": 148,
@@ -7665,7 +7665,7 @@
               "file": "src/hub.rs",
               "limit": 25
             },
-            "elapsed_ms": 48.286,
+            "elapsed_ms": 67.617,
             "output_bytes": 1394,
             "process_io": {
               "read_operations": 114,
@@ -7700,13 +7700,13 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 78.999,
-            "output_bytes": 36009,
+            "elapsed_ms": 48.402,
+            "output_bytes": 35984,
             "process_io": {
               "read_operations": 160,
               "write_operations": 1,
               "read_transfer_bytes": 457043,
-              "write_transfer_bytes": 37924
+              "write_transfer_bytes": 37899
             },
             "work": {
               "returned_rows": 20,
@@ -7721,7 +7721,7 @@
               "searched_files": null,
               "searched_bytes": null,
               "retained_bytes": null,
-              "rendered_output_bytes": 36009
+              "rendered_output_bytes": 35984
             }
           },
           {
@@ -7733,7 +7733,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 55.662,
+            "elapsed_ms": 61.158,
             "output_bytes": 3336,
             "process_io": {
               "read_operations": 173,
@@ -7767,7 +7767,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 48.022,
+            "elapsed_ms": 47.288,
             "output_bytes": 3625,
             "process_io": {
               "read_operations": 134,
@@ -7803,21 +7803,21 @@
         },
         {
           "name": "full scan wall seconds",
-          "observed": 2.260589,
+          "observed": 2.896993,
           "operator": "<=",
           "threshold": 180,
           "passed": true
         },
         {
           "name": "MCP startup milliseconds",
-          "observed": 39.571,
+          "observed": 33.036,
           "operator": "<=",
           "threshold": 250,
           "passed": true
         },
         {
           "name": "full scan peak RSS bytes",
-          "observed": 35528704,
+          "observed": 35176448,
           "operator": "<=",
           "threshold": 268435456,
           "passed": true
@@ -7845,28 +7845,28 @@
         },
         {
           "name": "unchanged refresh wall seconds",
-          "observed": 0.231299,
+          "observed": 0.22171,
           "operator": "<=",
           "threshold": 30,
           "passed": true
         },
         {
           "name": "repeated query p95 milliseconds",
-          "observed": 78.999,
+          "observed": 76.348,
           "operator": "<=",
           "threshold": 500,
           "passed": true
         },
         {
           "name": "bounded output bytes",
-          "observed": 36009,
+          "observed": 35984,
           "operator": "<=",
           "threshold": 262144,
           "passed": true
         },
         {
           "name": "retained RSS growth bytes",
-          "observed": 3289088,
+          "observed": 3104768,
           "operator": "<=",
           "threshold": 134217728,
           "passed": true
@@ -7887,21 +7887,21 @@
         },
         {
           "name": "persistent bytes",
-          "observed": 17215488,
+          "observed": 17203200,
           "operator": "<=",
           "threshold": 536870912,
           "passed": true
         },
         {
           "name": "post-scan database bytes",
-          "observed": 16019456,
+          "observed": 16007168,
           "operator": "<=",
           "threshold": 536870912,
           "passed": true
         },
         {
           "name": "final database bytes",
-          "observed": 17215488,
+          "observed": 17203200,
           "operator": "<=",
           "threshold": 536870912,
           "passed": true
@@ -7922,42 +7922,42 @@
         },
         {
           "name": "full scan source/input read-transfer amplification ratio (reported)",
-          "observed": 791.632489,
+          "observed": 812.565959,
           "operator": "reported",
           "threshold": null,
           "passed": true
         },
         {
           "name": "full scan output-efficiency read-transfer ratio",
-          "observed": 4.986581,
+          "observed": 5.122348,
           "operator": "<=",
           "threshold": 40,
           "passed": true
         },
         {
           "name": "full scan process read-transfer bytes",
-          "observed": 80388696,
+          "observed": 82514448,
           "operator": "<=",
           "threshold": 134217728,
           "passed": true
         },
         {
           "name": "full scan source/input write-transfer amplification ratio (reported)",
-          "observed": 3812.289873,
+          "observed": 3797.107102,
           "operator": "reported",
           "threshold": null,
           "passed": true
         },
         {
           "name": "full scan output-efficiency write-transfer ratio",
-          "observed": 24.014039,
+          "observed": 23.936646,
           "operator": "<=",
           "threshold": 32,
           "passed": true
         },
         {
           "name": "full scan process write-transfer bytes",
-          "observed": 387130412,
+          "observed": 385588632,
           "operator": "<=",
           "threshold": 536870912,
           "passed": true
@@ -7978,7 +7978,7 @@
         },
         {
           "name": "peak WAL bytes versus scale database cap",
-          "observed": 16393512,
+          "observed": 16381152,
           "operator": "<=",
           "threshold": 536870912,
           "passed": true
@@ -8099,21 +8099,21 @@
         },
         {
           "name": "database page bytes",
-          "observed": 17215488,
+          "observed": 17203200,
           "operator": "==",
-          "threshold": 17215488,
+          "threshold": 17203200,
           "passed": true
         },
         {
           "name": "database freelist ratio",
-          "observed": 0.023793,
+          "observed": 0.022619,
           "operator": "<=",
           "threshold": 0.05,
           "passed": true
         },
         {
           "name": "scan one-core CPU percent",
-          "observed": 98.84,
+          "observed": 78.206,
           "operator": ">=",
           "threshold": 60,
           "passed": true
@@ -8191,7 +8191,7 @@
         },
         {
           "name": "fallback search seconds",
-          "observed": 0.059589,
+          "observed": 0.062645,
           "operator": "<=",
           "threshold": 10,
           "passed": true
@@ -8293,35 +8293,35 @@
         },
         {
           "name": "narrow edit-to-refresh seconds",
-          "observed": 1.14771,
+          "observed": 1.191142,
           "operator": "<=",
           "threshold": 30,
           "passed": true
         },
         {
           "name": "narrow refresh process read-transfer bytes",
-          "observed": 3999918,
+          "observed": 4520110,
           "operator": "<=",
           "threshold": 8388608,
           "passed": true
         },
         {
           "name": "narrow refresh process write-transfer bytes",
-          "observed": 949412,
+          "observed": 1416356,
           "operator": "<=",
           "threshold": 2097152,
           "passed": true
         },
         {
           "name": "publication writer probe attempts",
-          "observed": 36,
+          "observed": 39,
           "operator": ">",
           "threshold": 0,
           "passed": true
         },
         {
           "name": "publication writer-unavailable upper bound seconds",
-          "observed": 0.048216,
+          "observed": 0.064389,
           "operator": "<=",
           "threshold": 1,
           "passed": true
@@ -8421,14 +8421,14 @@
         },
         {
           "name": "expanded guidance wall seconds",
-          "observed": 1.650804,
+          "observed": 1.688952,
           "operator": "<=",
           "threshold": 180,
           "passed": true
         },
         {
           "name": "expanded guidance process read-transfer bytes",
-          "observed": 17072342,
+          "observed": 17146070,
           "operator": "<=",
           "threshold": 67108864,
           "passed": true
@@ -8442,14 +8442,14 @@
         },
         {
           "name": "expanded guidance writer probe attempts",
-          "observed": 54,
+          "observed": 49,
           "operator": ">",
           "threshold": 0,
           "passed": true
         },
         {
           "name": "expanded guidance writer-unavailable seconds",
-          "observed": 0.079461,
+          "observed": 0.102116,
           "operator": "<=",
           "threshold": 1,
           "passed": true
@@ -8484,35 +8484,35 @@
         },
         {
           "name": "explicit rebuild wall seconds",
-          "observed": 2.114284,
+          "observed": 2.259172,
           "operator": "<=",
           "threshold": 180,
           "passed": true
         },
         {
           "name": "explicit rebuild input-efficiency read-transfer ratio",
-          "observed": 6.890644,
+          "observed": 6.972299,
           "operator": "<=",
           "threshold": 40,
           "passed": true
         },
         {
           "name": "explicit rebuild process read-transfer bytes",
-          "observed": 116447466,
+          "observed": 117741706,
           "operator": "<=",
           "threshold": 134217728,
           "passed": true
         },
         {
           "name": "explicit rebuild input-efficiency write-transfer ratio",
-          "observed": 25.956431,
+          "observed": 25.863894,
           "operator": "<=",
           "threshold": 32,
           "passed": true
         },
         {
           "name": "explicit rebuild process write-transfer bytes",
-          "observed": 438647020,
+          "observed": 436765392,
           "operator": "<=",
           "threshold": 536870912,
           "passed": true
@@ -8529,7 +8529,7 @@
     {
       "scale": "huge",
       "variant": "vscode-1.130.0",
-      "root": "{REPO_ROOT}\\target\\benchmarks\\system-scale\\release-candidate-0ffeffb\\huge-vscode",
+      "root": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\huge-vscode",
       "corpus": {
         "files": 16646,
         "bytes": 235792515,
@@ -8539,7 +8539,7 @@
       },
       "scan": {
         "pre_run_database_bytes": 0,
-        "post_run_database_bytes": 3994869760,
+        "post_run_database_bytes": 3994451968,
         "process": {
           "sampler": "psutil-7.0.0",
           "interval_seconds": 0.02,
@@ -8549,23 +8549,23 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 2477170688,
+          "peak_rss_bytes": 2475106304,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 20,
-          "cpu_seconds": 813.171875,
+          "cpu_seconds": 806.9375,
           "observed_pids": [
-            42832
+            33168
           ],
           "peak_storage": {
-            "database_bytes": 3994869760,
-            "wal_bytes": 4018577992,
+            "database_bytes": 3994451968,
+            "wal_bytes": 4018157752,
             "shm_bytes": 7831552,
-            "staging_bytes": 3464763144,
+            "staging_bytes": 3463925112,
             "stage_directories": 1
           },
-          "read_count": 30404439,
-          "write_count": 40670130,
+          "read_count": 30403243,
+          "write_count": 40421068,
           "exact_total_processes": 1,
           "exact_terminal_active_processes": 0,
           "worker_process_bound": 0,
@@ -8590,13 +8590,13 @@
           ],
           "returncode": 0,
           "timed_out": false,
-          "wall_seconds": 764.090252,
-          "one_core_cpu_percent": 106.424,
-          "host_cpu_percent": 6.651,
+          "wall_seconds": 758.061627,
+          "one_core_cpu_percent": 106.447,
+          "host_cpu_percent": 6.653,
           "stdout_bytes": 962,
           "stderr_bytes": 0,
-          "process_read_transfer_bytes": 124557950264,
-          "process_write_transfer_bytes": 104862022551,
+          "process_read_transfer_bytes": 124553041850,
+          "process_write_transfer_bytes": 104353098813,
           "stderr": ""
         },
         "report": {
@@ -8656,16 +8656,16 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 11362304,
+          "peak_rss_bytes": 11239424,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 4,
-          "cpu_seconds": 0.515625,
+          "cpu_seconds": 0.5625,
           "observed_pids": [
-            26308
+            31016
           ],
           "peak_storage": {
-            "database_bytes": 3994869760,
+            "database_bytes": 3994451968,
             "wal_bytes": 0,
             "shm_bytes": 32768,
             "staging_bytes": 0,
@@ -8696,53 +8696,53 @@
           ],
           "returncode": 0,
           "timed_out": false,
-          "wall_seconds": 0.975215,
-          "one_core_cpu_percent": 52.873,
-          "host_cpu_percent": 3.305,
-          "stdout_bytes": 11497,
+          "wall_seconds": 0.898499,
+          "one_core_cpu_percent": 62.604,
+          "host_cpu_percent": 3.913,
+          "stdout_bytes": 11317,
           "stderr_bytes": 0,
-          "process_read_transfer_bytes": 250362931,
+          "process_read_transfer_bytes": 250386406,
           "process_write_transfer_bytes": 0,
           "stderr": ""
         },
         "report": {
           "cache_dir": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/huge-vscode/.projectatlas",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode/.projectatlas",
             "exists": true,
             "size_bytes": null
           },
           "db": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/huge-vscode/.projectatlas/projectatlas.db",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.db",
             "exists": true,
-            "size_bytes": 3994869760
+            "size_bytes": 3994451968
           },
           "db_wal": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/huge-vscode/.projectatlas/projectatlas.db-wal",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.db-wal",
             "exists": true,
             "size_bytes": 0
           },
           "db_shm": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/huge-vscode/.projectatlas/projectatlas.db-shm",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.db-shm",
             "exists": true,
             "size_bytes": 32768
           },
           "db_journal": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/huge-vscode/.projectatlas/projectatlas.db-journal",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.db-journal",
             "exists": false,
             "size_bytes": null
           },
           "mcp_config": {
-            "path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/huge-vscode/.projectatlas/projectatlas.mcp.json",
+            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.mcp.json",
             "exists": false,
             "size_bytes": null
           },
           "config_path": null,
-          "repo_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/huge-vscode",
+          "repo_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode",
           "root_detection_source": "db",
           "root_verified": true,
           "root_mismatches": [],
-          "map_path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/huge-vscode/.projectatlas/projectatlas.toon",
-          "nonsource_files_path": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/huge-vscode/.projectatlas/projectatlas-nonsource-files.toon",
+          "map_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.toon",
+          "nonsource_files_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas-nonsource-files.toon",
           "default_format": "json",
           "default_search_case_sensitive": false,
           "search_source": "sqlite-file-text",
@@ -8755,7 +8755,7 @@
             "recommendation": "Run `projectatlas watch --once` for one refresh or `projectatlas watch` for event-backed refresh with portable polling fallback."
           },
           "index": {
-            "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/huge-vscode",
+            "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode",
             "files": 16117,
             "folders": 4124,
             "missing_purposes": 5967,
@@ -8810,7 +8810,7 @@
             "checkpoint_state": "not_due",
             "wal_autocheckpoint_pages": 1000,
             "freelist_pages": 0,
-            "page_count": 975310,
+            "page_count": 975208,
             "page_size": 4096,
             "journal_mode": "wal",
             "synchronous_mode": "full",
@@ -9068,16 +9068,16 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 39329792,
+          "peak_rss_bytes": 40140800,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 20,
-          "cpu_seconds": 4.8125,
+          "cpu_seconds": 4.578125,
           "observed_pids": [
-            5504
+            32840
           ],
           "peak_storage": {
-            "database_bytes": 3994869760,
+            "database_bytes": 3994451968,
             "wal_bytes": 0,
             "shm_bytes": 32768,
             "staging_bytes": 0,
@@ -9110,9 +9110,9 @@
           ],
           "returncode": 0,
           "timed_out": false,
-          "wall_seconds": 0.781697,
-          "one_core_cpu_percent": 615.648,
-          "host_cpu_percent": 38.478,
+          "wall_seconds": 0.924761,
+          "one_core_cpu_percent": 495.06,
+          "host_cpu_percent": 30.941,
           "stdout_bytes": 693,
           "stderr_bytes": 0,
           "process_read_transfer_bytes": 241135385,
@@ -9158,38 +9158,38 @@
       },
       "incremental": null,
       "persistent": {
-        "database_bytes": 3994869760,
+        "database_bytes": 3994451968,
         "wal_bytes": 0,
         "shm_bytes": 0,
         "staging_bytes": 0,
         "stage_directories": 0,
-        "total_bytes": 3994869760
+        "total_bytes": 3994451968
       },
       "database_profile": {
         "page_size": 4096,
-        "page_count": 975310,
-        "page_bytes": 3994869760,
+        "page_count": 975208,
+        "page_bytes": 3994451968,
         "freelist_pages": 0,
         "freelist_ratio": 0.0,
         "quick_check": "ok",
         "sqlite_stat1_present": false,
-        "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/huge-vscode"
+        "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode"
       },
       "queries": {
-        "startup_ms": 32.738,
-        "rss_before_repeated_bytes": 16924672,
-        "rss_after_repeated_bytes": 19648512,
-        "retained_rss_growth_bytes": 2723840,
+        "startup_ms": 38.059,
+        "rss_before_repeated_bytes": 16707584,
+        "rss_after_repeated_bytes": 19357696,
+        "retained_rss_growth_bytes": 2650112,
         "state_before_repeated": {
           "pids": [
-            42888
+            12692
           ],
           "processes": 1,
           "threads": 23
         },
         "state_after_repeated": {
           "pids": [
-            42888
+            12692
           ],
           "processes": 1,
           "threads": 23
@@ -9212,9 +9212,9 @@
           },
           "stable": true
         },
-        "repeated_query_median_ms": 70.866,
-        "repeated_query_p95_ms": 484.977,
-        "maximum_output_bytes": 44329,
+        "repeated_query_median_ms": 63.994,
+        "repeated_query_p95_ms": 502.045,
+        "maximum_output_bytes": 44120,
         "process": {
           "sampler": "psutil-7.0.0",
           "interval_seconds": 0.02,
@@ -9224,7 +9224,7 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 31592448,
+          "peak_rss_bytes": 40169472,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 39,
@@ -9232,10 +9232,10 @@
           "read_bytes": 0,
           "write_bytes": 0,
           "observed_pids": [
-            42888
+            12692
           ],
           "peak_storage": {
-            "database_bytes": 3994869760,
+            "database_bytes": 3994451968,
             "wal_bytes": 0,
             "shm_bytes": 32768,
             "staging_bytes": 0,
@@ -9247,7 +9247,7 @@
             "tool": "atlas_overview",
             "phase": "first_exact_verification",
             "arguments": {},
-            "elapsed_ms": 501.72,
+            "elapsed_ms": 510.394,
             "output_bytes": 137,
             "process_io": {
               "read_operations": 59801,
@@ -9275,7 +9275,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_1",
             "arguments": {},
-            "elapsed_ms": 75.182,
+            "elapsed_ms": 55.927,
             "output_bytes": 137,
             "process_io": {
               "read_operations": 2040,
@@ -9306,7 +9306,7 @@
               "file": "src/vs/platform/instantiation/common/instantiation.ts",
               "limit": 25
             },
-            "elapsed_ms": 471.917,
+            "elapsed_ms": 506.389,
             "output_bytes": 5786,
             "process_io": {
               "read_operations": 13796,
@@ -9341,13 +9341,13 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 90.763,
-            "output_bytes": 44329,
+            "elapsed_ms": 49.713,
+            "output_bytes": 44120,
             "process_io": {
-              "read_operations": 297,
+              "read_operations": 299,
               "write_operations": 1,
-              "read_transfer_bytes": 1020617,
-              "write_transfer_bytes": 46259
+              "read_transfer_bytes": 1028809,
+              "write_transfer_bytes": 46042
             },
             "work": {
               "returned_rows": 20,
@@ -9356,13 +9356,13 @@
               "visited_nodes": 21,
               "database_requested_rows": 44,
               "database_returned_rows": 63,
-              "database_decoded_bytes": 37078,
+              "database_decoded_bytes": 36600,
               "hydrated_entities": 45,
               "hydrated_purpose_paths": 66,
               "searched_files": null,
               "searched_bytes": null,
               "retained_bytes": null,
-              "rendered_output_bytes": 44329
+              "rendered_output_bytes": 44120
             }
           },
           {
@@ -9374,7 +9374,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 69.998,
+            "elapsed_ms": 73.258,
             "output_bytes": 5113,
             "process_io": {
               "read_operations": 2631,
@@ -9408,7 +9408,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 75.993,
+            "elapsed_ms": 89.086,
             "output_bytes": 3755,
             "process_io": {
               "read_operations": 5741,
@@ -9436,7 +9436,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_2",
             "arguments": {},
-            "elapsed_ms": 50.644,
+            "elapsed_ms": 61.434,
             "output_bytes": 137,
             "process_io": {
               "read_operations": 2040,
@@ -9467,7 +9467,7 @@
               "file": "src/vs/platform/instantiation/common/instantiation.ts",
               "limit": 25
             },
-            "elapsed_ms": 465.4,
+            "elapsed_ms": 480.71,
             "output_bytes": 5786,
             "process_io": {
               "read_operations": 13796,
@@ -9502,13 +9502,13 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 61.003,
-            "output_bytes": 44329,
+            "elapsed_ms": 54.769,
+            "output_bytes": 44120,
             "process_io": {
-              "read_operations": 297,
+              "read_operations": 299,
               "write_operations": 1,
-              "read_transfer_bytes": 1020618,
-              "write_transfer_bytes": 46260
+              "read_transfer_bytes": 1028810,
+              "write_transfer_bytes": 46043
             },
             "work": {
               "returned_rows": 20,
@@ -9517,13 +9517,13 @@
               "visited_nodes": 21,
               "database_requested_rows": 44,
               "database_returned_rows": 63,
-              "database_decoded_bytes": 37078,
+              "database_decoded_bytes": 36600,
               "hydrated_entities": 45,
               "hydrated_purpose_paths": 66,
               "searched_files": null,
               "searched_bytes": null,
               "retained_bytes": null,
-              "rendered_output_bytes": 44329
+              "rendered_output_bytes": 44120
             }
           },
           {
@@ -9535,7 +9535,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 70.866,
+            "elapsed_ms": 58.123,
             "output_bytes": 5113,
             "process_io": {
               "read_operations": 2631,
@@ -9569,7 +9569,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 101.701,
+            "elapsed_ms": 73.693,
             "output_bytes": 3755,
             "process_io": {
               "read_operations": 5741,
@@ -9597,7 +9597,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_3",
             "arguments": {},
-            "elapsed_ms": 55.5,
+            "elapsed_ms": 42.106,
             "output_bytes": 137,
             "process_io": {
               "read_operations": 2040,
@@ -9628,7 +9628,7 @@
               "file": "src/vs/platform/instantiation/common/instantiation.ts",
               "limit": 25
             },
-            "elapsed_ms": 537.622,
+            "elapsed_ms": 502.045,
             "output_bytes": 5786,
             "process_io": {
               "read_operations": 13796,
@@ -9663,13 +9663,13 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 54.065,
-            "output_bytes": 44329,
+            "elapsed_ms": 56.967,
+            "output_bytes": 44120,
             "process_io": {
-              "read_operations": 297,
+              "read_operations": 299,
               "write_operations": 1,
-              "read_transfer_bytes": 1020618,
-              "write_transfer_bytes": 46260
+              "read_transfer_bytes": 1028810,
+              "write_transfer_bytes": 46043
             },
             "work": {
               "returned_rows": 20,
@@ -9678,13 +9678,13 @@
               "visited_nodes": 21,
               "database_requested_rows": 44,
               "database_returned_rows": 63,
-              "database_decoded_bytes": 37078,
+              "database_decoded_bytes": 36600,
               "hydrated_entities": 45,
               "hydrated_purpose_paths": 66,
               "searched_files": null,
               "searched_bytes": null,
               "retained_bytes": null,
-              "rendered_output_bytes": 44329
+              "rendered_output_bytes": 44120
             }
           },
           {
@@ -9696,7 +9696,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 63.547,
+            "elapsed_ms": 82.371,
             "output_bytes": 5113,
             "process_io": {
               "read_operations": 2631,
@@ -9730,7 +9730,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 137.417,
+            "elapsed_ms": 109.501,
             "output_bytes": 3755,
             "process_io": {
               "read_operations": 5741,
@@ -9758,7 +9758,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_4",
             "arguments": {},
-            "elapsed_ms": 49.731,
+            "elapsed_ms": 54.52,
             "output_bytes": 137,
             "process_io": {
               "read_operations": 2040,
@@ -9789,7 +9789,7 @@
               "file": "src/vs/platform/instantiation/common/instantiation.ts",
               "limit": 25
             },
-            "elapsed_ms": 447.359,
+            "elapsed_ms": 482.042,
             "output_bytes": 5786,
             "process_io": {
               "read_operations": 13796,
@@ -9824,13 +9824,13 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 37.737,
-            "output_bytes": 44329,
+            "elapsed_ms": 93.296,
+            "output_bytes": 44120,
             "process_io": {
-              "read_operations": 297,
+              "read_operations": 299,
               "write_operations": 1,
-              "read_transfer_bytes": 1020618,
-              "write_transfer_bytes": 46260
+              "read_transfer_bytes": 1028810,
+              "write_transfer_bytes": 46043
             },
             "work": {
               "returned_rows": 20,
@@ -9839,13 +9839,13 @@
               "visited_nodes": 21,
               "database_requested_rows": 44,
               "database_returned_rows": 63,
-              "database_decoded_bytes": 37078,
+              "database_decoded_bytes": 36600,
               "hydrated_entities": 45,
               "hydrated_purpose_paths": 66,
               "searched_files": null,
               "searched_bytes": null,
               "retained_bytes": null,
-              "rendered_output_bytes": 44329
+              "rendered_output_bytes": 44120
             }
           },
           {
@@ -9857,7 +9857,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 57.583,
+            "elapsed_ms": 57.553,
             "output_bytes": 5113,
             "process_io": {
               "read_operations": 2631,
@@ -9891,7 +9891,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 69.531,
+            "elapsed_ms": 63.994,
             "output_bytes": 3755,
             "process_io": {
               "read_operations": 5741,
@@ -9919,7 +9919,7 @@
             "tool": "atlas_overview",
             "phase": "repeated_query_5",
             "arguments": {},
-            "elapsed_ms": 84.845,
+            "elapsed_ms": 63.112,
             "output_bytes": 137,
             "process_io": {
               "read_operations": 2040,
@@ -9950,7 +9950,7 @@
               "file": "src/vs/platform/instantiation/common/instantiation.ts",
               "limit": 25
             },
-            "elapsed_ms": 484.977,
+            "elapsed_ms": 440.467,
             "output_bytes": 5786,
             "process_io": {
               "read_operations": 13796,
@@ -9985,13 +9985,13 @@
               "limit": 20,
               "output_bytes": 65536
             },
-            "elapsed_ms": 58.265,
-            "output_bytes": 44329,
+            "elapsed_ms": 37.911,
+            "output_bytes": 44120,
             "process_io": {
-              "read_operations": 297,
+              "read_operations": 299,
               "write_operations": 1,
-              "read_transfer_bytes": 1020618,
-              "write_transfer_bytes": 46260
+              "read_transfer_bytes": 1028810,
+              "write_transfer_bytes": 46043
             },
             "work": {
               "returned_rows": 20,
@@ -10000,13 +10000,13 @@
               "visited_nodes": 21,
               "database_requested_rows": 44,
               "database_returned_rows": 63,
-              "database_decoded_bytes": 37078,
+              "database_decoded_bytes": 36600,
               "hydrated_entities": 45,
               "hydrated_purpose_paths": 66,
               "searched_files": null,
               "searched_bytes": null,
               "retained_bytes": null,
-              "rendered_output_bytes": 44329
+              "rendered_output_bytes": 44120
             }
           },
           {
@@ -10018,7 +10018,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 55.147,
+            "elapsed_ms": 61.398,
             "output_bytes": 5113,
             "process_io": {
               "read_operations": 2631,
@@ -10052,7 +10052,7 @@
               "context_lines": 0,
               "limit": 20
             },
-            "elapsed_ms": 74.254,
+            "elapsed_ms": 80.086,
             "output_bytes": 3755,
             "process_io": {
               "read_operations": 5741,
@@ -10088,21 +10088,21 @@
         },
         {
           "name": "full scan wall seconds",
-          "observed": 764.090252,
+          "observed": 758.061627,
           "operator": "<=",
           "threshold": 900,
           "passed": true
         },
         {
           "name": "MCP startup milliseconds",
-          "observed": 32.738,
+          "observed": 38.059,
           "operator": "<=",
           "threshold": 250,
           "passed": true
         },
         {
           "name": "full scan peak RSS bytes",
-          "observed": 2477170688,
+          "observed": 2475106304,
           "operator": "<=",
           "threshold": 3221225472,
           "passed": true
@@ -10130,28 +10130,28 @@
         },
         {
           "name": "unchanged refresh wall seconds",
-          "observed": 0.781697,
+          "observed": 0.924761,
           "operator": "<=",
           "threshold": 120,
           "passed": true
         },
         {
           "name": "repeated query p95 milliseconds",
-          "observed": 484.977,
+          "observed": 502.045,
           "operator": "<=",
           "threshold": 2000,
           "passed": true
         },
         {
           "name": "bounded output bytes",
-          "observed": 44329,
+          "observed": 44120,
           "operator": "<=",
           "threshold": 262144,
           "passed": true
         },
         {
           "name": "retained RSS growth bytes",
-          "observed": 2723840,
+          "observed": 2650112,
           "operator": "<=",
           "threshold": 134217728,
           "passed": true
@@ -10172,21 +10172,21 @@
         },
         {
           "name": "persistent bytes",
-          "observed": 3994869760,
+          "observed": 3994451968,
           "operator": "<=",
           "threshold": 4294967296,
           "passed": true
         },
         {
           "name": "post-scan database bytes",
-          "observed": 3994869760,
+          "observed": 3994451968,
           "operator": "<=",
           "threshold": 4294967296,
           "passed": true
         },
         {
           "name": "final database bytes",
-          "observed": 3994869760,
+          "observed": 3994451968,
           "operator": "<=",
           "threshold": 4294967296,
           "passed": true
@@ -10207,42 +10207,42 @@
         },
         {
           "name": "full scan source/input read-transfer amplification ratio (reported)",
-          "observed": 671.234519,
+          "observed": 671.208067,
           "operator": "reported",
           "threshold": null,
           "passed": true
         },
         {
           "name": "full scan output-efficiency read-transfer ratio",
-          "observed": 29.79545,
+          "observed": 29.797254,
           "operator": "<=",
           "threshold": 40,
           "passed": true
         },
         {
           "name": "full scan process read-transfer bytes",
-          "observed": 124557950264,
+          "observed": 124553041850,
           "operator": "<=",
           "threshold": 137438953472,
           "passed": true
         },
         {
           "name": "full scan source/input write-transfer amplification ratio (reported)",
-          "observed": 565.094473,
+          "observed": 562.351916,
           "operator": "reported",
           "threshold": null,
           "passed": true
         },
         {
           "name": "full scan output-efficiency write-transfer ratio",
-          "observed": 25.083996,
+          "observed": 24.964752,
           "operator": "<=",
           "threshold": 32,
           "passed": true
         },
         {
           "name": "full scan process write-transfer bytes",
-          "observed": 104862022551,
+          "observed": 104353098813,
           "operator": "<=",
           "threshold": 137438953472,
           "passed": true
@@ -10263,14 +10263,14 @@
         },
         {
           "name": "peak WAL bytes versus scale database cap",
-          "observed": 4018577992,
+          "observed": 4018157752,
           "operator": "<=",
           "threshold": 4294967296,
           "passed": true
         },
         {
           "name": "peak staging bytes versus scale database cap",
-          "observed": 3464763144,
+          "observed": 3463925112,
           "operator": "<=",
           "threshold": 4294967296,
           "passed": true
@@ -10384,9 +10384,9 @@
         },
         {
           "name": "database page bytes",
-          "observed": 3994869760,
+          "observed": 3994451968,
           "operator": "==",
-          "threshold": 3994869760,
+          "threshold": 3994451968,
           "passed": true
         },
         {
@@ -10398,7 +10398,7 @@
         },
         {
           "name": "scan one-core CPU percent",
-          "observed": 106.424,
+          "observed": 106.447,
           "operator": ">=",
           "threshold": 80,
           "passed": true
@@ -10483,7 +10483,7 @@
         },
         {
           "name": "fallback search seconds",
-          "observed": 0.137417,
+          "observed": 0.109501,
           "operator": "<=",
           "threshold": 10,
           "passed": true
@@ -10511,7 +10511,7 @@
         },
         {
           "name": "relation decoded bytes",
-          "observed": 37078,
+          "observed": 36600,
           "operator": "<=",
           "threshold": 262144,
           "passed": true
@@ -10534,10 +10534,10 @@
     }
   ],
   "concurrent_isolation": {
-    "wall_seconds": 4.379398,
+    "wall_seconds": 4.467889,
     "roots": [
-      "{REPO_ROOT}\\target\\benchmarks\\system-scale\\release-candidate-0ffeffb\\concurrent-a",
-      "{REPO_ROOT}\\target\\benchmarks\\system-scale\\release-candidate-0ffeffb\\concurrent-b"
+      "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\concurrent-a",
+      "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\concurrent-b"
     ],
     "runs": [
       {
@@ -10549,23 +10549,23 @@
           "threads",
           "storage"
         ],
-        "peak_rss_bytes": 32497664,
+        "peak_rss_bytes": 32894976,
         "peak_processes": 1,
         "peak_worker_processes": 0,
         "peak_threads": 12,
-        "cpu_seconds": 2.25,
+        "cpu_seconds": 2.265625,
         "observed_pids": [
-          12856
+          43088
         ],
         "peak_storage": {
-          "database_bytes": 16449536,
-          "wal_bytes": 14613672,
+          "database_bytes": 16474112,
+          "wal_bytes": 14663112,
           "shm_bytes": 32768,
           "staging_bytes": 0,
           "stage_directories": 0
         },
-        "read_count": 35717,
-        "write_count": 157204,
+        "read_count": 35440,
+        "write_count": 157152,
         "exact_total_processes": 1,
         "exact_terminal_active_processes": 0,
         "worker_process_bound": 0,
@@ -10593,13 +10593,13 @@
         ],
         "returncode": 0,
         "timed_out": false,
-        "wall_seconds": 2.175873,
-        "one_core_cpu_percent": 103.407,
-        "host_cpu_percent": 6.463,
+        "wall_seconds": 2.26093,
+        "one_core_cpu_percent": 100.208,
+        "host_cpu_percent": 6.263,
         "stdout_bytes": 710,
         "stderr_bytes": 0,
-        "process_read_transfer_bytes": 112904717,
-        "process_write_transfer_bytes": 330099092,
+        "process_read_transfer_bytes": 111770413,
+        "process_write_transfer_bytes": 330033892,
         "stdout": "{\n  \"mode\": \"single-refresh\",\n  \"cycles\": 1,\n  \"once\": true,\n  \"text_index\": {\n    \"candidates\": 1028,\n    \"indexed\": 1028,\n    \"binary_or_non_utf8\": 0,\n    \"too_large\": 0,\n    \"skipped\": 0,\n    \"max_bytes\": 2000000,\n    \"bytes\": 101569\n  },\n  \"structural_summaries\": {\n    \"candidates\": 2,\n    \"summarized\": 0,\n    \"cleared\": 1,\n    \"too_large\": 0,\n    \"binary_or_non_utf8\": 0,\n    \"purpose_suggestions\": 0\n  },\n  \"last_symbols\": {\n    \"candidates\": 1027,\n    \"parsed\": 1,\n    \"unchanged\": 1026,\n    \"too_large\": 0,\n    \"binary_or_non_utf8\": 0,\n    \"timed_out\": 0,\n    \"max_workers\": 1,\n    \"timeout_seconds\": null,\n    \"symbols\": 2,\n    \"relations\": 2,\n    \"summaries\": 1,\n    \"purpose_suggestions\": 1\n  }\n}\n",
         "stderr": ""
       },
@@ -10612,23 +10612,23 @@
           "threads",
           "storage"
         ],
-        "peak_rss_bytes": 38293504,
+        "peak_rss_bytes": 40480768,
         "peak_processes": 1,
         "peak_worker_processes": 0,
         "peak_threads": 12,
-        "cpu_seconds": 2.21875,
+        "cpu_seconds": 2.234375,
         "observed_pids": [
-          27916
+          2656
         ],
         "peak_storage": {
-          "database_bytes": 16510976,
-          "wal_bytes": 14716672,
+          "database_bytes": 16465920,
+          "wal_bytes": 14642512,
           "shm_bytes": 32768,
           "staging_bytes": 0,
           "stage_directories": 0
         },
-        "read_count": 35894,
-        "write_count": 158380,
+        "read_count": 35738,
+        "write_count": 157692,
         "exact_total_processes": 1,
         "exact_terminal_active_processes": 0,
         "worker_process_bound": 0,
@@ -10656,31 +10656,31 @@
         ],
         "returncode": 0,
         "timed_out": false,
-        "wall_seconds": 2.157642,
-        "one_core_cpu_percent": 102.832,
-        "host_cpu_percent": 6.427,
+        "wall_seconds": 2.203565,
+        "one_core_cpu_percent": 101.398,
+        "host_cpu_percent": 6.337,
         "stdout_bytes": 710,
         "stderr_bytes": 0,
-        "process_read_transfer_bytes": 113630309,
-        "process_write_transfer_bytes": 332801424,
+        "process_read_transfer_bytes": 112990901,
+        "process_write_transfer_bytes": 331308464,
         "stdout": "{\n  \"mode\": \"single-refresh\",\n  \"cycles\": 1,\n  \"once\": true,\n  \"text_index\": {\n    \"candidates\": 1028,\n    \"indexed\": 1028,\n    \"binary_or_non_utf8\": 0,\n    \"too_large\": 0,\n    \"skipped\": 0,\n    \"max_bytes\": 2000000,\n    \"bytes\": 101569\n  },\n  \"structural_summaries\": {\n    \"candidates\": 2,\n    \"summarized\": 0,\n    \"cleared\": 1,\n    \"too_large\": 0,\n    \"binary_or_non_utf8\": 0,\n    \"purpose_suggestions\": 0\n  },\n  \"last_symbols\": {\n    \"candidates\": 1027,\n    \"parsed\": 1,\n    \"unchanged\": 1026,\n    \"too_large\": 0,\n    \"binary_or_non_utf8\": 0,\n    \"timed_out\": 0,\n    \"max_workers\": 1,\n    \"timeout_seconds\": null,\n    \"symbols\": 2,\n    \"relations\": 2,\n    \"summaries\": 1,\n    \"purpose_suggestions\": 1\n  }\n}\n",
         "stderr": ""
       }
     ],
     "cross_root_resources": {
       "method": "sum-of-per-process-peaks-conservative-upper-bound",
-      "peak_rss_bytes": 70791168,
+      "peak_rss_bytes": 73375744,
       "peak_worker_processes": 0,
       "worker_process_bound": 0,
       "peak_threads": 24,
-      "cpu_seconds": 4.46875,
-      "process_read_transfer_bytes": 226535026,
-      "process_write_transfer_bytes": 662900516,
+      "cpu_seconds": 4.5,
+      "process_read_transfer_bytes": 224761314,
+      "process_write_transfer_bytes": 661342356,
       "terminal_io_complete": true
     },
     "cross_root": [
       {
-        "root": "{REPO_ROOT}\\target\\benchmarks\\system-scale\\release-candidate-0ffeffb\\concurrent-a",
+        "root": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\concurrent-a",
         "before": {
           "nodes": 1030,
           "symbols": 3075,
@@ -10713,13 +10713,13 @@
         },
         "profile": {
           "page_size": 4096,
-          "page_count": 4016,
-          "page_bytes": 16449536,
+          "page_count": 4022,
+          "page_bytes": 16474112,
           "freelist_pages": 48,
-          "freelist_ratio": 0.011952,
+          "freelist_ratio": 0.011934,
           "quick_check": "ok",
           "sqlite_stat1_present": false,
-          "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/concurrent-a"
+          "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/concurrent-a"
         },
         "own_marker_present": true,
         "foreign_marker_absent": true,
@@ -10727,7 +10727,7 @@
         "stage_directories": 0
       },
       {
-        "root": "{REPO_ROOT}\\target\\benchmarks\\system-scale\\release-candidate-0ffeffb\\concurrent-b",
+        "root": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\concurrent-b",
         "before": {
           "nodes": 1030,
           "symbols": 3075,
@@ -10760,13 +10760,13 @@
         },
         "profile": {
           "page_size": 4096,
-          "page_count": 4031,
-          "page_bytes": 16510976,
+          "page_count": 4020,
+          "page_bytes": 16465920,
           "freelist_pages": 48,
-          "freelist_ratio": 0.011908,
+          "freelist_ratio": 0.01194,
           "quick_check": "ok",
           "sqlite_stat1_present": false,
-          "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/concurrent-b"
+          "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/concurrent-b"
         },
         "own_marker_present": true,
         "foreign_marker_absent": true,
@@ -10815,16 +10815,16 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 39968768,
+          "peak_rss_bytes": 38326272,
           "peak_processes": 1,
           "peak_worker_processes": 0,
-          "peak_threads": 12,
-          "cpu_seconds": 0.734375,
+          "peak_threads": 4,
+          "cpu_seconds": 0.59375,
           "observed_pids": [
-            34644
+            34256
           ],
           "peak_storage": {
-            "database_bytes": 16449536,
+            "database_bytes": 16474112,
             "wal_bytes": 0,
             "shm_bytes": 32768,
             "staging_bytes": 0,
@@ -10859,9 +10859,9 @@
           ],
           "returncode": 1,
           "timed_out": false,
-          "wall_seconds": 0.604522,
-          "one_core_cpu_percent": 121.48,
-          "host_cpu_percent": 7.593,
+          "wall_seconds": 0.710781,
+          "one_core_cpu_percent": 83.535,
+          "host_cpu_percent": 5.221,
           "stdout_bytes": 0,
           "stderr_bytes": 40,
           "process_read_transfer_bytes": 2186690,
@@ -10878,23 +10878,23 @@
             "threads",
             "storage"
           ],
-          "peak_rss_bytes": 32698368,
+          "peak_rss_bytes": 37363712,
           "peak_processes": 1,
           "peak_worker_processes": 0,
           "peak_threads": 4,
-          "cpu_seconds": 2.125,
+          "cpu_seconds": 2.078125,
           "observed_pids": [
-            34132
+            41340
           ],
           "peak_storage": {
-            "database_bytes": 16797696,
-            "wal_bytes": 14753752,
+            "database_bytes": 16822272,
+            "wal_bytes": 14778472,
             "shm_bytes": 32768,
             "staging_bytes": 0,
             "stage_directories": 0
           },
-          "read_count": 35660,
-          "write_count": 157606,
+          "read_count": 35508,
+          "write_count": 157524,
           "exact_total_processes": 1,
           "exact_terminal_active_processes": 0,
           "worker_process_bound": 0,
@@ -10922,26 +10922,26 @@
           ],
           "returncode": 0,
           "timed_out": false,
-          "wall_seconds": 2.044208,
-          "one_core_cpu_percent": 103.952,
-          "host_cpu_percent": 6.497,
+          "wall_seconds": 2.051209,
+          "one_core_cpu_percent": 101.312,
+          "host_cpu_percent": 6.332,
           "stdout_bytes": 710,
           "stderr_bytes": 0,
-          "process_read_transfer_bytes": 112672130,
-          "process_write_transfer_bytes": 331010484,
+          "process_read_transfer_bytes": 112049682,
+          "process_write_transfer_bytes": 330846716,
           "stdout": "{\n  \"mode\": \"single-refresh\",\n  \"cycles\": 1,\n  \"once\": true,\n  \"text_index\": {\n    \"candidates\": 1028,\n    \"indexed\": 1028,\n    \"binary_or_non_utf8\": 0,\n    \"too_large\": 0,\n    \"skipped\": 0,\n    \"max_bytes\": 2000000,\n    \"bytes\": 101587\n  },\n  \"structural_summaries\": {\n    \"candidates\": 2,\n    \"summarized\": 0,\n    \"cleared\": 1,\n    \"too_large\": 0,\n    \"binary_or_non_utf8\": 0,\n    \"purpose_suggestions\": 0\n  },\n  \"last_symbols\": {\n    \"candidates\": 1027,\n    \"parsed\": 1,\n    \"unchanged\": 1026,\n    \"too_large\": 0,\n    \"binary_or_non_utf8\": 0,\n    \"timed_out\": 0,\n    \"max_workers\": 1,\n    \"timeout_seconds\": null,\n    \"symbols\": 2,\n    \"relations\": 2,\n    \"summaries\": 1,\n    \"purpose_suggestions\": 1\n  }\n}\n",
           "stderr": ""
         }
       ],
       "resources": {
         "method": "sum-of-per-process-peaks-conservative-upper-bound",
-        "peak_rss_bytes": 72667136,
+        "peak_rss_bytes": 75689984,
         "peak_worker_processes": 0,
         "worker_process_bound": 0,
-        "peak_threads": 16,
-        "cpu_seconds": 2.859375,
-        "process_read_transfer_bytes": 114858820,
-        "process_write_transfer_bytes": 331010484,
+        "peak_threads": 8,
+        "cpu_seconds": 2.671875,
+        "process_read_transfer_bytes": 114236372,
+        "process_write_transfer_bytes": 330846716,
         "terminal_io_complete": true
       },
       "passed": true
@@ -10984,16 +10984,16 @@
         "threads",
         "storage"
       ],
-      "peak_rss_bytes": 31305728,
+      "peak_rss_bytes": 38064128,
       "peak_processes": 1,
       "peak_worker_processes": 0,
       "peak_threads": 4,
-      "cpu_seconds": 0.5625,
+      "cpu_seconds": 0.609375,
       "observed_pids": [
-        33324
+        5268
       ],
       "peak_storage": {
-        "database_bytes": 16510976,
+        "database_bytes": 16465920,
         "wal_bytes": 0,
         "shm_bytes": 32768,
         "staging_bytes": 0,
@@ -11026,9 +11026,9 @@
       ],
       "returncode": 1,
       "timed_out": false,
-      "wall_seconds": 0.580173,
-      "one_core_cpu_percent": 96.954,
-      "host_cpu_percent": 6.06,
+      "wall_seconds": 0.645378,
+      "one_core_cpu_percent": 94.421,
+      "host_cpu_percent": 5.901,
       "stdout_bytes": 0,
       "stderr_bytes": 40,
       "process_read_transfer_bytes": 2186730,
@@ -11061,23 +11061,23 @@
         "threads",
         "storage"
       ],
-      "peak_rss_bytes": 38301696,
+      "peak_rss_bytes": 34435072,
       "peak_processes": 1,
       "peak_worker_processes": 0,
-      "peak_threads": 20,
-      "cpu_seconds": 2.140625,
+      "peak_threads": 14,
+      "cpu_seconds": 1.984375,
       "observed_pids": [
-        8248
+        43032
       ],
       "peak_storage": {
-        "database_bytes": 16859136,
-        "wal_bytes": 14827912,
+        "database_bytes": 16814080,
+        "wal_bytes": 14778472,
         "shm_bytes": 32768,
         "staging_bytes": 0,
         "stage_directories": 0
       },
-      "read_count": 35836,
-      "write_count": 158784,
+      "read_count": 35813,
+      "write_count": 158091,
       "exact_total_processes": 1,
       "exact_terminal_active_processes": 0,
       "worker_process_bound": 0,
@@ -11103,13 +11103,13 @@
       ],
       "returncode": 0,
       "timed_out": false,
-      "wall_seconds": 2.241116,
-      "one_core_cpu_percent": 95.516,
-      "host_cpu_percent": 5.97,
+      "wall_seconds": 1.864192,
+      "one_core_cpu_percent": 106.447,
+      "host_cpu_percent": 6.653,
       "stdout_bytes": 710,
       "stderr_bytes": 0,
-      "process_read_transfer_bytes": 113393498,
-      "process_write_transfer_bytes": 333724820,
+      "process_read_transfer_bytes": 113299002,
+      "process_write_transfer_bytes": 332166608,
       "stdout": "{\n  \"mode\": \"single-refresh\",\n  \"cycles\": 1,\n  \"once\": true,\n  \"text_index\": {\n    \"candidates\": 1028,\n    \"indexed\": 1028,\n    \"binary_or_non_utf8\": 0,\n    \"too_large\": 0,\n    \"skipped\": 0,\n    \"max_bytes\": 2000000,\n    \"bytes\": 101595\n  },\n  \"structural_summaries\": {\n    \"candidates\": 2,\n    \"summarized\": 0,\n    \"cleared\": 1,\n    \"too_large\": 0,\n    \"binary_or_non_utf8\": 0,\n    \"purpose_suggestions\": 0\n  },\n  \"last_symbols\": {\n    \"candidates\": 1027,\n    \"parsed\": 1,\n    \"unchanged\": 1026,\n    \"too_large\": 0,\n    \"binary_or_non_utf8\": 0,\n    \"timed_out\": 0,\n    \"max_workers\": 1,\n    \"timeout_seconds\": null,\n    \"symbols\": 2,\n    \"relations\": 2,\n    \"summaries\": 1,\n    \"purpose_suggestions\": 1\n  }\n}\n",
       "stderr": ""
     },
@@ -11132,11 +11132,11 @@
   },
   "cooperative_cancellation": {
     "task_start": "task_start:\n  task_id: \"index-1\"\n  operation: scan\n  state: pending\n  status_tool: atlas_task_status\n  cancel_tool: atlas_task_cancel\n",
-    "last_status": "task_status:\n  task_id: \"index-1\"\n  lookup: found\n  states[5]: pending,running,complete,failed,canceled\n  operations[5]: contract,scan,watch_once,symbols_build,search\n  registry_capacity: 32\n  task:\n    task_id: \"index-1\"\n    operation: scan\n    state: canceled\n    created_at_ms: 1785198028424\n    updated_at_ms: 1785198028456\n    progress:\n      current: null\n      total: null\n      message: canceled\n    error: index work was canceled during repository_traversal\n    result_ref: null\n    cancelable: false\n",
-    "cancel": "task_cancel:\n  task_id: \"index-1\"\n  result: cancellation_requested\n  registry_capacity: 32\n  task:\n    task_id: \"index-1\"\n    operation: scan\n    state: running\n    created_at_ms: 1785198028424\n    updated_at_ms: 1785198028439\n    progress:\n      current: null\n      total: null\n      message: cancellation_requested\n    error: null\n    result_ref: null\n    cancelable: false\n",
+    "last_status": "task_status:\n  task_id: \"index-1\"\n  lookup: found\n  states[5]: pending,running,complete,failed,canceled\n  operations[5]: contract,scan,watch_once,symbols_build,search\n  registry_capacity: 32\n  task:\n    task_id: \"index-1\"\n    operation: scan\n    state: canceled\n    created_at_ms: 1785224655884\n    updated_at_ms: 1785224655916\n    progress:\n      current: null\n      total: null\n      message: canceled\n    error: index work was canceled during repository_traversal\n    result_ref: null\n    cancelable: false\n",
+    "cancel": "task_cancel:\n  task_id: \"index-1\"\n  result: cancellation_requested\n  registry_capacity: 32\n  task:\n    task_id: \"index-1\"\n    operation: scan\n    state: running\n    created_at_ms: 1785224655884\n    updated_at_ms: 1785224655899\n    progress:\n      current: null\n      total: null\n      message: cancellation_requested\n    error: null\n    result_ref: null\n    cancelable: false\n",
     "active_work_observed": true,
     "terminal_state": "canceled",
-    "cancellation_seconds": 0.063799,
+    "cancellation_seconds": 0.054501,
     "before": {
       "nodes": 20241,
       "symbols": 538047,
@@ -11175,19 +11175,19 @@
     },
     "state_before": {
       "pids": [
-        17572
+        29792
       ],
       "processes": 1,
       "threads": 21
     },
     "state_after_cancel": {
       "pids": [
-        17572
+        29792
       ],
       "processes": 1,
       "threads": 22
     },
-    "same_client_read": "error:\n  kind: refresh_required\n  message: \"refresh_required: 513 indexed path(s) differ from current local source; run `projectatlas watch --once` or `atlas_watch_once` before retrying\"\n  refresh_required:\n    project_root: \"{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/huge-vscode\"\n    status: refresh_required\n    reason: paths_changed\n    scope: full\n    changed: 513\n    added: 513\n    removed: 0\n    modified: 0\n    sample_paths[8]: \"pending-cancellation\",\"pending-cancellation/work-0000.rs\",\"pending-cancellation/work-0001.rs\",\"pending-cancellation/work-0002.rs\",\"pending-cancellation/work-0003.rs\",\"pending-cancellation/work-0004.rs\",\"pending-cancellation/work-0005.rs\",\"pending-cancellation/work-0006.rs\"\n  next:\n    tool: atlas_watch_once\n    project_path: \"{REPO_ROOT}/target/benchmarks/system-scale/release-candidate-0ffeffb/huge-vscode\"\n",
+    "same_client_read": "error:\n  kind: refresh_required\n  message: \"refresh_required: 513 indexed path(s) differ from current local source; run `projectatlas watch --once` or `atlas_watch_once` before retrying\"\n  refresh_required:\n    project_root: \"F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode\"\n    status: refresh_required\n    reason: paths_changed\n    scope: full\n    changed: 513\n    added: 513\n    removed: 0\n    modified: 0\n    sample_paths[8]: \"pending-cancellation\",\"pending-cancellation/work-0000.rs\",\"pending-cancellation/work-0001.rs\",\"pending-cancellation/work-0002.rs\",\"pending-cancellation/work-0003.rs\",\"pending-cancellation/work-0004.rs\",\"pending-cancellation/work-0005.rs\",\"pending-cancellation/work-0006.rs\"\n  next:\n    tool: atlas_watch_once\n    project_path: \"F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode\"\n",
     "writer_released_before_server_close": true,
     "final": {
       "nodes": 20241,
@@ -11213,7 +11213,7 @@
   "default_core_parent_termination": {
     "scope": "default-core in-process scan parent",
     "passed": true,
-    "quiescence_seconds": 0.029565,
+    "quiescence_seconds": 0.040577,
     "known_processes": 1,
     "survivors": [],
     "reason": null
