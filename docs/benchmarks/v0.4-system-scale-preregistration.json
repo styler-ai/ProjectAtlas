@@ -5,7 +5,6 @@
   "measurement_amendments": [
     {
       "prior_result": "docs/benchmarks/v0.4-system-scale-failed-runs.json",
-      "prior_candidate_head": "f86b460c1c366f47b6e233331e1e83ac592ca9d2",
       "disposition": "retained failed run; no failed cell is excluded",
       "changes": [
         "Cap peak WAL and private staging bytes by the existing per-scale database-size limit instead of unvalidated global limits that were smaller than the accepted huge persistent footprint.",
@@ -16,7 +15,6 @@
     },
     {
       "prior_result": "docs/benchmarks/v0.4-system-scale-failed-e624475.json",
-      "prior_candidate_head": "e6244751c54a94ebc925afa57dad679ed13dc6d8",
       "disposition": "retained failed run; all corpus, contention, cancellation, recovery, storage, and query gates passed; the concurrent resource proxy is corrected before repetition",
       "changes": [
         "Divide the existing host worker budget equally across concurrent CLI processes through the public --max-workers control, which already owns repository traversal and parser work.",
@@ -25,8 +23,7 @@
     },
     {
       "prior_result": "docs/benchmarks/v0.4-system-scale-results.json",
-      "prior_candidate_head": "c0814b989338177f9960646e79c82ced8c83a3bf",
-      "disposition": "superseded publication retained in Git history; exact promotion review found that it predates release-affecting runtime, MCP, relation-service, and repository-graph changes",
+      "disposition": "superseded publication retained in Git history; promotion review found that it predates release-affecting runtime, MCP, relation-service, and repository-graph changes",
       "changes": [
         "Relock the runtime and MCP inventory identities and repeat the complete small, medium, huge, concurrency, contention, cancellation, and termination matrix against the corrected functional release candidate."
       ]
@@ -35,7 +32,6 @@
   "preflight_failures": [
     {
       "result": "docs/benchmarks/v0.4-system-scale-failed-f30cb0c-preflight.json",
-      "candidate_head": "f30cb0c3d671c03c70b0d6216536f6f528eb55a8",
       "disposition": "no measurement executed; restored the unchanged single-process thread thresholds still used by per-case gates after removing only their misleading concurrent use"
     }
   ],

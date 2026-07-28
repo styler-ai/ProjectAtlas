@@ -2536,13 +2536,15 @@ produce a bounded `failed` comparison without exposing partial decoded values.
 
 The supported contract validates schema version 1; exact v0.4 and frozen
 v0.3.26 semantic identities and runtime/skill digests; a plain control with
-ProjectAtlas disabled; candidate source heads; the complete five-workload,
-three-arm, repeated schedule; a one-to-one retained schedule/run inventory;
-zero excluded trials; completed and failed run accounting; bounded group,
-comparison, distribution, and MCP-call collections; finite nonnegative values
-whose medians and observed maxima reconcile; descriptive-only provider
-counters; and reconciled capability call/byte rows. The comparison preserves
-failed trials outside matched denominators rather than turning them into zero.
+ProjectAtlas disabled; the complete five-workload, three-arm, repeated schedule;
+a one-to-one retained schedule/run inventory; zero excluded trials; completed
+and failed run accounting; bounded group, comparison, distribution, and
+MCP-call collections; finite nonnegative values whose medians and observed
+maxima reconcile; descriptive-only provider counters; and reconciled capability
+call/byte rows. The exact measured runtime digest is the binary authority; the
+report does not infer source provenance from the checkout commit. The comparison
+preserves failed trials outside matched denominators rather than turning them
+into zero.
 
 The closed states have one meaning across all adapters:
 

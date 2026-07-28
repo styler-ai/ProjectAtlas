@@ -234,18 +234,12 @@ class SystemScaleHarnessTests(unittest.TestCase):
                 "docs/benchmarks/v0.4-system-scale-preregistration.json",
                 "docs/benchmarks/harness/system_scale.py",
             ],
-            preregistration_path=(
-                "docs/benchmarks/v0.4-system-scale-preregistration.json"
-            ),
         )
         self.assertEqual(len(errors), 9)
 
-    def test_publication_identity_allows_content_bound_preregistration_edit(
+    def test_publication_identity_allows_clean_content_bound_preregistration(
         self,
     ) -> None:
-        preregistration_path = (
-            "docs/benchmarks/v0.4-system-scale-preregistration.json"
-        )
         preregistration = {
             "status": "locked_for_final_measurement",
             "candidate": {
@@ -265,8 +259,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
                 "text_format": "TOON",
                 "mcp_tools": [f"tool-{index}" for index in range(40)],
             },
-            dirty_paths=[preregistration_path],
-            preregistration_path=preregistration_path,
+            dirty_paths=[],
         )
         self.assertEqual(errors, [])
 
@@ -927,9 +920,21 @@ time.sleep(60)
             output = Path(temporary) / "result.json"
             with self.assertRaisesRegex(SystemExit, "1"):
                 system_scale.write_result(
-                    {"passed": False, "publication_eligible": False}, output
+                    {
+                        "passed": False,
+                        "publication_eligible": False,
+                        "path": str(system_scale.ROOT / "private"),
+                    },
+                    output,
                 )
-            self.assertFalse(json.loads(output.read_text(encoding="utf-8"))["passed"])
+            result = json.loads(output.read_text(encoding="utf-8"))
+            self.assertFalse(result["passed"])
+            self.assertEqual(
+                result["path"], str(Path("{REPO_ROOT}") / "private")
+            )
+            self.assertNotIn(
+                str(system_scale.ROOT), output.read_text(encoding="utf-8")
+            )
 
     def test_main_persists_stalled_mcp_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

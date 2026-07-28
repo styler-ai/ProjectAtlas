@@ -4,7 +4,6 @@
   "measurement_amendments": [
     {
       "prior_result": "docs/benchmarks/v0.4-agent-navigation-failed-mcp-approval-9ec0331.jsonl",
-      "prior_candidate_head": "9ec0331d2e559bc264bcb7c6ffd49e4b7eee11fa",
       "disposition": "privacy-sanitized retained failed attempt; the completed row did not prove required ProjectAtlas MCP navigation",
       "changes": [
         "Approve only the locked read-only ProjectAtlas MCP tool inventory while unlisted tools retain prompt approval.",
@@ -13,7 +12,6 @@
     },
     {
       "prior_result": "docs/benchmarks/v0.4-agent-navigation-failed-path-expansion-b33164f.json",
-      "prior_candidate_head": "b33164f9f314a48d829f3a748ab3f7b3a7af35db",
       "disposition": "privacy-sanitized retained failed 45-row attempt; all scheduled rows remain failed",
       "changes": [
         "Resolve preregistered environment-variable paths before invoking the Codex and ProjectAtlas executables."
@@ -21,7 +19,6 @@
     },
     {
       "prior_result": "docs/benchmarks/v0.4-agent-navigation-failed-skill-path-e81d929.jsonl",
-      "prior_candidate_head": "e81d9296cce649f69370f2ee11c0dd91e78a45b9",
       "disposition": "privacy-sanitized retained failed three-row attempt; the frozen v0.3.26 row remains failed",
       "changes": [
         "Resolve the preregistered packaged-skill path before accounting its bytes."
@@ -29,7 +26,6 @@
     },
     {
       "prior_result": "docs/benchmarks/v0.4-agent-navigation-failed-storage-sampler-aa7ee10.jsonl",
-      "prior_candidate_head": "aa7ee10035b9a594dfafb87b4c17c3809710c787",
       "disposition": "privacy-sanitized retained failed six-row attempt; both affected frozen v0.3.26 rows remain failed",
       "changes": [
         "Treat a transiently disappearing SQLite WAL, SHM, or staging sidecar as zero bytes during sampling instead of failing the process sampler."
@@ -37,7 +33,6 @@
     },
     {
       "prior_result": "docs/benchmarks/v0.4-agent-navigation-failed-binary-init-29a4863.jsonl",
-      "prior_candidate_head": "29a48636b606be1f15b3acb445ea9acd29b372ae",
       "disposition": "privacy-sanitized retained failed 15-row attempt; all rows, setup failures, answer misses, and cleanup failures remain disclosed",
       "changes": [
         "Treat definite non-UTF-8 ordinary source headers as purpose-free in v0.4 while keeping authored purpose inputs strict; the frozen v0.3.26 runtime is unchanged.",
@@ -47,8 +42,7 @@
     },
     {
       "prior_result": "docs/benchmarks/v0.4-agent-navigation-results.json",
-      "prior_candidate_head": "2d6319d3a153ed0ad6595c3fe9db905b9ed86c18",
-      "disposition": "superseded publication retained in Git history; exact promotion review found that it predates release-affecting runtime, packaged-skill, MCP, relation-service, and repository-graph changes",
+      "disposition": "superseded publication retained in Git history; promotion review found that it predates release-affecting runtime, packaged-skill, MCP, relation-service, and repository-graph changes",
       "changes": [
         "Relock every v0.4 candidate identity and repeat all 45 scheduled trials against the corrected functional release candidate without changing the frozen v0.3.26 or plain controls."
       ]
@@ -57,14 +51,12 @@
   "aborted_attempts": [
     {
       "run_id": "r02-small-clean-v0.3.26",
-      "candidate_head": "29a48636b606be1f15b3acb445ea9acd29b372ae",
       "disposition": "hard-stopped before a checkpoint existed; no measurement row or result is claimed, and the corrected campaign starts from fresh output and work roots"
     }
   ],
   "preflight_failures": [
     {
-      "candidate_head": "2fc64ae964ff65fd83971967ddb7a6c1f8f40d8c",
-      "disposition": "no measurement executed; candidate validation rejected the stale checklist head before fixture preparation, so the campaign was relocked to the final task-state commit"
+      "disposition": "no measurement executed; candidate validation rejected a preregistration that differed from its committed lock"
     }
   ],
   "protocol": {

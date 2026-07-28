@@ -465,8 +465,6 @@ fn validate_and_project(
                 .runtime_sha256
                 .clone()
                 .ok_or_else(|| "candidate runtime digest is missing".to_string())?,
-            candidate_functional_head: artifact.candidate_source_identity.functional_head,
-            candidate_checklist_head: artifact.candidate_source_identity.checklist_head,
             frozen_version: frozen
                 .version
                 .clone()
@@ -527,11 +525,6 @@ fn validate_identity(artifact: &BenchmarkArtifact) -> Result<(), String> {
     require(
         !plain.projectatlas,
         "plain control unexpectedly enables ProjectAtlas",
-    )?;
-    require(
-        is_lower_hex(&artifact.candidate_source_identity.functional_head, 40)
-            && is_lower_hex(&artifact.candidate_source_identity.checklist_head, 40),
-        "candidate source identity is malformed",
     )?;
     Ok(())
 }
@@ -1447,8 +1440,6 @@ struct BenchmarkArtifact {
     schedule: Vec<BenchmarkSchedule>,
     /// Runtime and skill identity for each benchmark arm.
     candidate_identities: BTreeMap<String, BenchmarkCandidateIdentity>,
-    /// Candidate source commits used by the campaign.
-    candidate_source_identity: BenchmarkSourceIdentity,
     /// Every retained benchmark run.
     runs: Vec<BenchmarkRun>,
     /// Published aggregate groups and comparisons.
@@ -1472,15 +1463,6 @@ struct BenchmarkCandidateIdentity {
     skill_bytes: Option<u64>,
     /// Tool-discovery bytes charged to the arm.
     tool_discovery_bytes: Option<u64>,
-}
-
-/// Candidate source commits retained by the benchmark.
-#[derive(Deserialize)]
-struct BenchmarkSourceIdentity {
-    /// Functional release-candidate source commit.
-    functional_head: String,
-    /// Checklist reconciliation source commit.
-    checklist_head: String,
 }
 
 /// One preregistered workload/arm/repeat cell.

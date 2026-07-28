@@ -380,10 +380,6 @@ pub struct AgentEfficiencyArtifactIdentity {
     pub candidate_version: String,
     /// Candidate runtime SHA-256 identity.
     pub candidate_runtime_sha256: String,
-    /// Candidate functional source commit.
-    pub candidate_functional_head: String,
-    /// Candidate checklist source commit.
-    pub candidate_checklist_head: String,
     /// Frozen `ProjectAtlas` runtime semantic version.
     pub frozen_version: String,
     /// Frozen `ProjectAtlas` runtime `SHA-256` identity.

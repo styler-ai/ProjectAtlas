@@ -29,8 +29,12 @@ pub const MAX_DERIVED_SNAPSHOT_JSON_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_DERIVED_SNAPSHOT_ROWS: u64 = 1_000_000;
 /// Maximum decoded row payload retained while constructing a snapshot.
 const MAX_DERIVED_SNAPSHOT_RETAINED_BYTES: u64 = 256 * 1024 * 1024;
-/// Conservative retained-memory admission charged for each JSON container or value.
-const DERIVED_SNAPSHOT_DECODE_SLOT_BYTES: u64 = 256;
+/// Conservative retained allocation charged for each decoded object.
+const DERIVED_SNAPSHOT_DECODE_OBJECT_BYTES: u64 = 128;
+/// Retained allocation charged for each decoded sequence or string header.
+const DERIVED_SNAPSHOT_DECODE_HEADER_BYTES: u64 = 24;
+/// Retained allocation charged for one primitive value.
+const DERIVED_SNAPSHOT_DECODE_PRIMITIVE_BYTES: u64 = 16;
 /// Maximum raw bytes admitted for one JSON string before serde may allocate it.
 const MAX_DERIVED_SNAPSHOT_JSON_STRING_BYTES: usize = 256 * 1024;
 /// Maximum private `SQLite` capture size.
@@ -1131,18 +1135,25 @@ fn require_decode_budget(encoded: &[u8]) -> DbResult<()> {
                 in_string = true;
                 escaped = false;
                 in_primitive = false;
-                admit_decode_bytes(&mut retained_bytes, DERIVED_SNAPSHOT_DECODE_SLOT_BYTES)?;
+                admit_decode_bytes(&mut retained_bytes, DERIVED_SNAPSHOT_DECODE_HEADER_BYTES)?;
             }
-            b'{' | b'[' | b',' | b':' => {
+            b'{' => {
                 in_primitive = false;
-                admit_decode_bytes(&mut retained_bytes, DERIVED_SNAPSHOT_DECODE_SLOT_BYTES)?;
+                admit_decode_bytes(&mut retained_bytes, DERIVED_SNAPSHOT_DECODE_OBJECT_BYTES)?;
+            }
+            b'[' => {
+                in_primitive = false;
+                admit_decode_bytes(&mut retained_bytes, DERIVED_SNAPSHOT_DECODE_HEADER_BYTES)?;
+            }
+            b',' | b':' => {
+                in_primitive = false;
             }
             b'}' | b']' | b' ' | b'\t' | b'\r' | b'\n' => {
                 in_primitive = false;
             }
             _ if !in_primitive => {
                 in_primitive = true;
-                admit_decode_bytes(&mut retained_bytes, DERIVED_SNAPSHOT_DECODE_SLOT_BYTES)?;
+                admit_decode_bytes(&mut retained_bytes, DERIVED_SNAPSHOT_DECODE_PRIMITIVE_BYTES)?;
             }
             _ => {}
         }
@@ -1216,7 +1227,8 @@ fn invalid<T>(reason: &'static str) -> DbResult<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DerivedGraphSnapshot, MAX_DERIVED_SNAPSHOT_JSON_STRING_BYTES, invalid, snapshot_digest,
+        DerivedGraphSnapshot, MAX_DERIVED_SNAPSHOT_JSON_STRING_BYTES, expected_content, invalid,
+        snapshot_digest,
     };
     use crate::{AtlasStore, DbError};
     use projectatlas_core::graph::{
@@ -1410,11 +1422,11 @@ mod tests {
     #[test]
     fn snapshot_json_decode_budget_rejects_large_shapes_before_deserialization() {
         let mut wide = String::from("[");
-        for index in 0..600_000 {
+        for index in 0..2_100_000 {
             if index != 0 {
                 wide.push(',');
             }
-            wide.push_str("null");
+            wide.push_str("{}");
         }
         wide.push(']');
         assert!(matches!(
@@ -1436,6 +1448,29 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn large_valid_snapshot_round_trips_without_charging_json_delimiters()
+    -> Result<(), Box<dyn Error>> {
+        let source_root = tempfile::tempdir()?;
+        let mut source = open_store(source_root.path())?;
+        publish_fixture(&mut source, "large-round-trip", true)?;
+        let mut snapshot = source.export_derived_graph_snapshot()?;
+        let coverage = snapshot
+            .graph
+            .coverage
+            .first()
+            .ok_or("fixture coverage is missing")?
+            .clone();
+        snapshot.graph.coverage = vec![coverage; 40_000];
+        snapshot.content = expected_content(&snapshot.graph)?;
+        snapshot.digest = snapshot_digest(&snapshot.metadata, &snapshot.content, &snapshot.graph)?;
+
+        let encoded = snapshot.to_json()?;
+        let decoded = DerivedGraphSnapshot::from_json(&encoded)?;
+        assert_eq!(decoded, snapshot);
+        Ok(())
     }
 
     #[test]

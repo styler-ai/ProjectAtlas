@@ -31,6 +31,28 @@ MITIGATION_RE = re.compile(
     r"\(OpenSpec tasks:\s*(\d+(?:\.\d+)*(?:\s*,\s*\d+(?:\.\d+)*)*)\)\s*$"
 )
 EXACT_HEAD_PROOF_RE = re.compile(r"(?i)\bexact[- ]head\b")
+EXACT_HEAD_REQUIREMENT_RE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:must|requir\w*|enforc\w*|bind\w*|verif\w*|evidence|proof|gate)\b"
+    r"[^.\n!?]{0,120}\bexact[- ]head\b"
+    r"|"
+    r"\bexact[- ]head\b[^.\n!?]{0,120}"
+    r"\b(?:must|requir\w*|enforc\w*|bind\w*|verif\w*|evidence|proof|gate)\b"
+    r")"
+)
+EXACT_HEAD_NEGATION_RE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:do not|don't|no longer)\s+(?:require|use|bind|demand|enforce)\b"
+    r"[^.\n!?]{0,120}\bexact[- ]head\b"
+    r"|"
+    r"\b(?:remove|removing|removed|reject|rejecting|rejected|avoid|avoiding|"
+    r"drop|dropping|dropped|retire|retiring|retired|without)\b"
+    r"[^.\n!?]{0,120}\bexact[- ]head\b"
+    r"|"
+    r"\bexact[- ]head\b[^.\n!?]{0,120}"
+    r"\b(?:is|are)?\s*(?:not|no longer)\s+(?:required|used|needed|accepted)\b"
+    r")"
+)
 REQUIRED_OPEN_ISSUE_HEADINGS = (
     "why",
     "what changes",
@@ -110,6 +132,22 @@ def visible_markdown(text: str) -> str:
             continue
         visible.append(line)
     return "".join(visible)
+
+
+def requires_exact_head_proof(text: str) -> bool:
+    """Return whether visible prose affirmatively requires commit-head proof."""
+
+    without_link_targets = MARKDOWN_LINK_RE.sub(
+        lambda match: match.group(0).replace(match.group(1), ""), text
+    )
+    for sentence in re.split(r"[.\n!?]+", without_link_targets):
+        if not EXACT_HEAD_PROOF_RE.search(sentence):
+            continue
+        if EXACT_HEAD_NEGATION_RE.search(sentence):
+            continue
+        if EXACT_HEAD_REQUIREMENT_RE.search(sentence):
+            return True
+    return False
 
 
 def github_heading_slug(heading: str) -> str:
@@ -447,7 +485,7 @@ def issue_contract_failures(
     if not isinstance(body, str):
         return ["body is not text"]
     visible_body = visible_markdown(body)
-    if EXACT_HEAD_PROOF_RE.search(visible_body):
+    if requires_exact_head_proof(visible_body):
         return [
             "must bind proof to behavior-relevant inputs instead of exact-head commit identity"
         ]
@@ -824,6 +862,18 @@ Mitigations:
         for failure in contract_failures(
             {"state": "OPEN", "body": exact_head_contract}, expected
         )
+    )
+    no_exact_head_contract = issue_contract.replace(
+        "Explain the need.", "Do not require exact-head proof."
+    )
+    assert (
+        contract_failures(
+            {"state": "OPEN", "body": no_exact_head_contract}, expected
+        )
+        == []
+    )
+    assert not requires_exact_head_proof(
+        "[Architecture](https://example.invalid/design#exact-head-proof)"
     )
     punctuation_heading_contract = issue_contract.replace(
         "#architecture-views", "#sqlite-wal-durability-and-checkpoint-flow"

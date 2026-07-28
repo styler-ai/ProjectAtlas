@@ -45,6 +45,32 @@ WATCH_BASELINE_TIMEOUT_SECONDS = 5.0
 TOON_INTEGER = r"^\s+{key}: (\d+)$"
 TOON_SCALAR = r"^\s+{key}: (.+)$"
 GRAPH_STAGE_PREFIX = "graph-stage-"
+POWERSHELL = shutil.which("pwsh")
+PATH_PLACEHOLDERS = {
+    "{REPO_ROOT}": "candidate repository root",
+    "{USER_HOME}": "current operating-system user home",
+    "{POWERSHELL}": "PowerShell executable",
+}
+
+
+def redact_local_paths(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: redact_local_paths(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_local_paths(item) for item in value]
+    if not isinstance(value, str):
+        return value
+    replacements = [(ROOT, "{REPO_ROOT}"), (Path.home(), "{USER_HOME}")]
+    if POWERSHELL:
+        replacements.append((Path(POWERSHELL), "{POWERSHELL}"))
+    redacted = value
+    for path, placeholder in sorted(
+        replacements, key=lambda item: len(str(item[0])), reverse=True
+    ):
+        parts = re.split(r"[\\/]+", str(path))
+        pattern = r"[\\/]+".join(re.escape(part) for part in parts)
+        redacted = re.sub(pattern, placeholder, redacted, flags=re.IGNORECASE)
+    return redacted
 
 
 def command(*args: str, cwd: Path, env: dict[str, str] | None = None) -> None:
@@ -3166,7 +3192,6 @@ def publication_identity_errors(
     mcp_tools_sha256: str,
     runtime_info: dict[str, Any],
     dirty_paths: list[str],
-    preregistration_path: str,
 ) -> list[str]:
     candidate = preregistration["candidate"]
     errors = []
@@ -3187,13 +3212,9 @@ def publication_identity_errors(
         errors.append("runtime text format is not TOON")
     if len(runtime_info.get("mcp_tools", [])) != 40:
         errors.append("runtime does not advertise the frozen 40-tool MCP surface")
-    unexpected_dirty = [
-        path for path in dirty_paths if path.replace("\\", "/") != preregistration_path
-    ]
-    if unexpected_dirty:
+    if dirty_paths:
         errors.append(
-            "tracked benchmark source is dirty outside the preregistration: "
-            + ", ".join(unexpected_dirty)
+            "tracked benchmark source is dirty: " + ", ".join(dirty_paths)
         )
     return errors
 
@@ -3203,9 +3224,6 @@ def validate_publication_identity(
     preregistration: dict[str, Any],
     preregistration_path: Path,
 ) -> dict[str, Any]:
-    git_head = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-    ).strip()
     runtime_sha256 = hashlib.sha256(runtime.read_bytes()).hexdigest()
     runtime_process = subprocess.run(
         [
@@ -3257,14 +3275,12 @@ def validate_publication_identity(
         for row in status_rows
         if len(row) > 3
     ]
-    preregistration_relative = preregistration_path.resolve().relative_to(ROOT).as_posix()
     errors = publication_identity_errors(
         preregistration,
         runtime_sha256=runtime_sha256,
         mcp_tools_sha256=mcp_tools_sha256,
         runtime_info=runtime_info,
         dirty_paths=dirty_paths,
-        preregistration_path=preregistration_relative,
     )
     if errors:
         raise RuntimeError(
@@ -3272,12 +3288,9 @@ def validate_publication_identity(
             + "; ".join(errors)
         )
     return {
-        "git_head": git_head,
         "runtime_sha256": runtime_sha256,
         "mcp_tools_sha256": mcp_tools_sha256,
         "runtime_info": runtime_info,
-        "dirty_tracked_paths": dirty_paths,
-        "allowed_dirty_path": preregistration_relative,
     }
 
 
@@ -3285,7 +3298,7 @@ def write_result(result: dict[str, Any], output: Path) -> None:
     """Persist every result, then fail the command when any gate rejected it."""
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
-        json.dumps(result, indent=2, ensure_ascii=False) + "\n",
+        json.dumps(redact_local_paths(result), indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -3506,11 +3519,9 @@ def run_benchmark(args: argparse.Namespace) -> None:
             "runtime": str(runtime),
             "runtime_sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
             "runtime_bytes": runtime.stat().st_size,
-            "git_head": subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-            ).strip(),
             "publication_identity": publication_identity,
         },
+        "path_placeholders": PATH_PLACEHOLDERS,
         "environment": {
             "platform": platform.platform(),
             "python": platform.python_version(),

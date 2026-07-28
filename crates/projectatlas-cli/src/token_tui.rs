@@ -981,12 +981,11 @@ fn agent_efficiency_identity_line(
             )
         } else {
             format!(
-                " | artifact {} schema {} | candidate {} | runtime {} | source {}",
+                " | artifact {} schema {} | candidate {} | runtime {}",
                 short_identity(&artifact.artifact_digest),
                 artifact.schema_version,
                 bounded_dashboard_text(&artifact.candidate_version, 28),
-                short_identity(&artifact.candidate_runtime_sha256),
-                short_identity(&artifact.candidate_functional_head)
+                short_identity(&artifact.candidate_runtime_sha256)
             )
         };
         spans.push(Span::styled(identity, body_style().bg(THEME_PANEL)));
@@ -3228,8 +3227,6 @@ mod tests {
                 candidate_version: "projectatlas 0.4.0".to_string(),
                 candidate_runtime_sha256:
                     "2222222222222222222222222222222222222222222222222222222222222222".to_string(),
-                candidate_functional_head: "3333333333333333333333333333333333333333".to_string(),
-                candidate_checklist_head: "4444444444444444444444444444444444444444".to_string(),
                 frozen_version: "projectatlas 0.3.26".to_string(),
                 frozen_runtime_sha256:
                     "5555555555555555555555555555555555555555555555555555555555555555".to_string(),

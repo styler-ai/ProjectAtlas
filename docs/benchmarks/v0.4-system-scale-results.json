@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "preregistration": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\docs\\benchmarks\\v0.4-system-scale-preregistration.json",
+  "preregistration": "{REPO_ROOT}\\docs\\benchmarks\\v0.4-system-scale-preregistration.json",
   "effective_preregistration": {
     "schema_version": 1,
     "benchmark": "projectatlas-v0.4-system-scale",
@@ -8,7 +8,6 @@
     "measurement_amendments": [
       {
         "prior_result": "docs/benchmarks/v0.4-system-scale-failed-runs.json",
-        "prior_candidate_head": "f86b460c1c366f47b6e233331e1e83ac592ca9d2",
         "disposition": "retained failed run; no failed cell is excluded",
         "changes": [
           "Cap peak WAL and private staging bytes by the existing per-scale database-size limit instead of unvalidated global limits that were smaller than the accepted huge persistent footprint.",
@@ -19,7 +18,6 @@
       },
       {
         "prior_result": "docs/benchmarks/v0.4-system-scale-failed-e624475.json",
-        "prior_candidate_head": "e6244751c54a94ebc925afa57dad679ed13dc6d8",
         "disposition": "retained failed run; all corpus, contention, cancellation, recovery, storage, and query gates passed; the concurrent resource proxy is corrected before repetition",
         "changes": [
           "Divide the existing host worker budget equally across concurrent CLI processes through the public --max-workers control, which already owns repository traversal and parser work.",
@@ -28,8 +26,7 @@
       },
       {
         "prior_result": "docs/benchmarks/v0.4-system-scale-results.json",
-        "prior_candidate_head": "c0814b989338177f9960646e79c82ced8c83a3bf",
-        "disposition": "superseded publication retained in Git history; exact promotion review found that it predates release-affecting runtime, MCP, relation-service, and repository-graph changes",
+        "disposition": "superseded publication retained in Git history; promotion review found that it predates release-affecting runtime, MCP, relation-service, and repository-graph changes",
         "changes": [
           "Relock the runtime and MCP inventory identities and repeat the complete small, medium, huge, concurrency, contention, cancellation, and termination matrix against the corrected functional release candidate."
         ]
@@ -38,13 +35,11 @@
     "preflight_failures": [
       {
         "result": "docs/benchmarks/v0.4-system-scale-failed-f30cb0c-preflight.json",
-        "candidate_head": "f30cb0c3d671c03c70b0d6216536f6f528eb55a8",
         "disposition": "no measurement executed; restored the unchanged single-process thread thresholds still used by per-case gates after removing only their misleading concurrent use"
       }
     ],
     "candidate": {
       "required_version": "0.4.0",
-      "functional_git_head": "f2d788392e96c1caf6b01cc4ecae1825d3ceaedc",
       "runtime_sha256": "ce9ef5de6bcf647f407ff761e913b2fcf079415c85c991e811272d2a27ff473f",
       "mcp_tools_sha256": "0c21ea673bdb9cdff48203a274db04fbaccb888bd362407d46fc1bcc0e506b28",
       "telemetry": "disabled",
@@ -197,19 +192,17 @@
   "publication_eligible": true,
   "candidate": {
     "version": "projectatlas 0.4.0",
-    "runtime": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\release\\projectatlas.exe",
+    "runtime": "{REPO_ROOT}\\target\\release\\projectatlas.exe",
     "runtime_sha256": "ce9ef5de6bcf647f407ff761e913b2fcf079415c85c991e811272d2a27ff473f",
     "runtime_bytes": 51981312,
-    "git_head": "f2d788392e96c1caf6b01cc4ecae1825d3ceaedc",
     "publication_identity": {
-      "git_head": "f2d788392e96c1caf6b01cc4ecae1825d3ceaedc",
       "runtime_sha256": "ce9ef5de6bcf647f407ff761e913b2fcf079415c85c991e811272d2a27ff473f",
       "mcp_tools_sha256": "0c21ea673bdb9cdff48203a274db04fbaccb888bd362407d46fc1bcc0e506b28",
       "runtime_info": {
         "project": "ProjectAtlas",
         "major_version": 3,
         "version": "0.4.0",
-        "executable": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/release/projectatlas.exe",
+        "executable": "{REPO_ROOT}/target/release/projectatlas.exe",
         "repository": "https://github.com/styler-ai/ProjectAtlas",
         "capabilities": [
           "cli",
@@ -268,11 +261,7 @@
           "atlas_purpose_set",
           "atlas_purpose_review"
         ]
-      },
-      "dirty_tracked_paths": [
-        "docs/benchmarks/v0.4-system-scale-preregistration.json"
-      ],
-      "allowed_dirty_path": "docs/benchmarks/v0.4-system-scale-preregistration.json"
+      }
     }
   },
   "environment": {
@@ -286,7 +275,7 @@
     {
       "scale": "small",
       "variant": "clean",
-      "root": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\small-clean",
+      "root": "{REPO_ROOT}\\target\\benchmarks\\system-scale\\current\\small-clean",
       "corpus": {
         "files": 7,
         "bytes": 1503,
@@ -464,42 +453,42 @@
         },
         "report": {
           "cache_dir": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean/.projectatlas",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-clean/.projectatlas",
             "exists": true,
             "size_bytes": null
           },
           "db": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.db",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.db",
             "exists": true,
             "size_bytes": 552960
           },
           "db_wal": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.db-wal",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.db-wal",
             "exists": true,
             "size_bytes": 0
           },
           "db_shm": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.db-shm",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.db-shm",
             "exists": true,
             "size_bytes": 32768
           },
           "db_journal": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.db-journal",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.db-journal",
             "exists": false,
             "size_bytes": null
           },
           "mcp_config": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.mcp.json",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.mcp.json",
             "exists": false,
             "size_bytes": null
           },
           "config_path": null,
-          "repo_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean",
+          "repo_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-clean",
           "root_detection_source": "db",
           "root_verified": true,
           "root_mismatches": [],
-          "map_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.toon",
-          "nonsource_files_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas-nonsource-files.toon",
+          "map_path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas.toon",
+          "nonsource_files_path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-clean/.projectatlas/projectatlas-nonsource-files.toon",
           "default_format": "json",
           "default_search_case_sensitive": false,
           "search_source": "sqlite-file-text",
@@ -512,7 +501,7 @@
             "recommendation": "Run `projectatlas watch --once` for one refresh or `projectatlas watch` for event-backed refresh with portable polling fallback."
           },
           "index": {
-            "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean",
+            "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-clean",
             "files": 7,
             "folders": 2,
             "missing_purposes": 3,
@@ -825,7 +814,7 @@
         "freelist_ratio": 0.0,
         "quick_check": "ok",
         "sqlite_stat1_present": false,
-        "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-clean"
+        "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-clean"
       },
       "queries": {
         "startup_ms": 38.598,
@@ -2180,7 +2169,7 @@
     {
       "scale": "small",
       "variant": "dirty",
-      "root": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\small-dirty",
+      "root": "{REPO_ROOT}\\target\\benchmarks\\system-scale\\current\\small-dirty",
       "corpus": {
         "files": 6,
         "bytes": 1179,
@@ -2357,42 +2346,42 @@
         },
         "report": {
           "cache_dir": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty/.projectatlas",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-dirty/.projectatlas",
             "exists": true,
             "size_bytes": null
           },
           "db": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.db",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.db",
             "exists": true,
             "size_bytes": 532480
           },
           "db_wal": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.db-wal",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.db-wal",
             "exists": true,
             "size_bytes": 0
           },
           "db_shm": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.db-shm",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.db-shm",
             "exists": true,
             "size_bytes": 32768
           },
           "db_journal": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.db-journal",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.db-journal",
             "exists": false,
             "size_bytes": null
           },
           "mcp_config": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.mcp.json",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.mcp.json",
             "exists": false,
             "size_bytes": null
           },
           "config_path": null,
-          "repo_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty",
+          "repo_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-dirty",
           "root_detection_source": "db",
           "root_verified": true,
           "root_mismatches": [],
-          "map_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.toon",
-          "nonsource_files_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas-nonsource-files.toon",
+          "map_path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas.toon",
+          "nonsource_files_path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-dirty/.projectatlas/projectatlas-nonsource-files.toon",
           "default_format": "json",
           "default_search_case_sensitive": false,
           "search_source": "sqlite-file-text",
@@ -2405,7 +2394,7 @@
             "recommendation": "Run `projectatlas watch --once` for one refresh or `projectatlas watch` for event-backed refresh with portable polling fallback."
           },
           "index": {
-            "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty",
+            "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-dirty",
             "files": 6,
             "folders": 2,
             "missing_purposes": 3,
@@ -2718,7 +2707,7 @@
         "freelist_ratio": 0.0,
         "quick_check": "ok",
         "sqlite_stat1_present": false,
-        "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-dirty"
+        "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-dirty"
       },
       "queries": {
         "startup_ms": 37.896,
@@ -4073,7 +4062,7 @@
     {
       "scale": "small",
       "variant": "non-git",
-      "root": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\small-non-git",
+      "root": "{REPO_ROOT}\\target\\benchmarks\\system-scale\\current\\small-non-git",
       "corpus": {
         "files": 6,
         "bytes": 896,
@@ -4250,42 +4239,42 @@
         },
         "report": {
           "cache_dir": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git/.projectatlas",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-non-git/.projectatlas",
             "exists": true,
             "size_bytes": null
           },
           "db": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.db",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.db",
             "exists": true,
             "size_bytes": 495616
           },
           "db_wal": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.db-wal",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.db-wal",
             "exists": true,
             "size_bytes": 0
           },
           "db_shm": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.db-shm",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.db-shm",
             "exists": true,
             "size_bytes": 32768
           },
           "db_journal": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.db-journal",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.db-journal",
             "exists": false,
             "size_bytes": null
           },
           "mcp_config": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.mcp.json",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.mcp.json",
             "exists": false,
             "size_bytes": null
           },
           "config_path": null,
-          "repo_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git",
+          "repo_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-non-git",
           "root_detection_source": "db",
           "root_verified": true,
           "root_mismatches": [],
-          "map_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.toon",
-          "nonsource_files_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas-nonsource-files.toon",
+          "map_path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas.toon",
+          "nonsource_files_path": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-non-git/.projectatlas/projectatlas-nonsource-files.toon",
           "default_format": "json",
           "default_search_case_sensitive": false,
           "search_source": "sqlite-file-text",
@@ -4298,7 +4287,7 @@
             "recommendation": "Run `projectatlas watch --once` for one refresh or `projectatlas watch` for event-backed refresh with portable polling fallback."
           },
           "index": {
-            "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git",
+            "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-non-git",
             "files": 6,
             "folders": 3,
             "missing_purposes": 2,
@@ -4611,7 +4600,7 @@
         "freelist_ratio": 0.0,
         "quick_check": "ok",
         "sqlite_stat1_present": false,
-        "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/small-non-git"
+        "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/small-non-git"
       },
       "queries": {
         "startup_ms": 37.827,
@@ -5966,7 +5955,7 @@
     {
       "scale": "medium",
       "variant": "high-degree",
-      "root": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\medium",
+      "root": "{REPO_ROOT}\\target\\benchmarks\\system-scale\\current\\medium",
       "corpus": {
         "files": 1028,
         "bytes": 101548,
@@ -6144,42 +6133,42 @@
         },
         "report": {
           "cache_dir": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium/.projectatlas",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/medium/.projectatlas",
             "exists": true,
             "size_bytes": null
           },
           "db": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.db",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.db",
             "exists": true,
             "size_bytes": 16007168
           },
           "db_wal": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.db-wal",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.db-wal",
             "exists": true,
             "size_bytes": 0
           },
           "db_shm": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.db-shm",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.db-shm",
             "exists": true,
             "size_bytes": 32768
           },
           "db_journal": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.db-journal",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.db-journal",
             "exists": false,
             "size_bytes": null
           },
           "mcp_config": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.mcp.json",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.mcp.json",
             "exists": false,
             "size_bytes": null
           },
           "config_path": null,
-          "repo_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium",
+          "repo_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/medium",
           "root_detection_source": "db",
           "root_verified": true,
           "root_mismatches": [],
-          "map_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.toon",
-          "nonsource_files_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas-nonsource-files.toon",
+          "map_path": "{REPO_ROOT}/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas.toon",
+          "nonsource_files_path": "{REPO_ROOT}/target/benchmarks/system-scale/current/medium/.projectatlas/projectatlas-nonsource-files.toon",
           "default_format": "json",
           "default_search_case_sensitive": false,
           "search_source": "sqlite-file-text",
@@ -6192,7 +6181,7 @@
             "recommendation": "Run `projectatlas watch --once` for one refresh or `projectatlas watch` for event-backed refresh with portable polling fallback."
           },
           "index": {
-            "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium",
+            "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/medium",
             "files": 1028,
             "folders": 2,
             "missing_purposes": 3,
@@ -6711,7 +6700,7 @@
               "edit_to_complete_seconds": 1.688952
             },
             "report": {
-              "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium",
+              "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/medium",
               "status": "refresh_required",
               "reason": "dependency_closure_limit",
               "scope": "full",
@@ -6888,7 +6877,7 @@
         "freelist_ratio": 0.022619,
         "quick_check": "ok",
         "sqlite_stat1_present": false,
-        "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/medium"
+        "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/medium"
       },
       "queries": {
         "startup_ms": 33.036,
@@ -8529,7 +8518,7 @@
     {
       "scale": "huge",
       "variant": "vscode-1.130.0",
-      "root": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\huge-vscode",
+      "root": "{REPO_ROOT}\\target\\benchmarks\\system-scale\\current\\huge-vscode",
       "corpus": {
         "files": 16646,
         "bytes": 235792515,
@@ -8707,42 +8696,42 @@
         },
         "report": {
           "cache_dir": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode/.projectatlas",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/huge-vscode/.projectatlas",
             "exists": true,
             "size_bytes": null
           },
           "db": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.db",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.db",
             "exists": true,
             "size_bytes": 3994451968
           },
           "db_wal": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.db-wal",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.db-wal",
             "exists": true,
             "size_bytes": 0
           },
           "db_shm": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.db-shm",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.db-shm",
             "exists": true,
             "size_bytes": 32768
           },
           "db_journal": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.db-journal",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.db-journal",
             "exists": false,
             "size_bytes": null
           },
           "mcp_config": {
-            "path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.mcp.json",
+            "path": "{REPO_ROOT}/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.mcp.json",
             "exists": false,
             "size_bytes": null
           },
           "config_path": null,
-          "repo_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode",
+          "repo_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/huge-vscode",
           "root_detection_source": "db",
           "root_verified": true,
           "root_mismatches": [],
-          "map_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.toon",
-          "nonsource_files_path": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas-nonsource-files.toon",
+          "map_path": "{REPO_ROOT}/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas.toon",
+          "nonsource_files_path": "{REPO_ROOT}/target/benchmarks/system-scale/current/huge-vscode/.projectatlas/projectatlas-nonsource-files.toon",
           "default_format": "json",
           "default_search_case_sensitive": false,
           "search_source": "sqlite-file-text",
@@ -8755,7 +8744,7 @@
             "recommendation": "Run `projectatlas watch --once` for one refresh or `projectatlas watch` for event-backed refresh with portable polling fallback."
           },
           "index": {
-            "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode",
+            "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/huge-vscode",
             "files": 16117,
             "folders": 4124,
             "missing_purposes": 5967,
@@ -9173,7 +9162,7 @@
         "freelist_ratio": 0.0,
         "quick_check": "ok",
         "sqlite_stat1_present": false,
-        "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode"
+        "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/huge-vscode"
       },
       "queries": {
         "startup_ms": 38.059,
@@ -10536,8 +10525,8 @@
   "concurrent_isolation": {
     "wall_seconds": 4.467889,
     "roots": [
-      "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\concurrent-a",
-      "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\concurrent-b"
+      "{REPO_ROOT}\\target\\benchmarks\\system-scale\\current\\concurrent-a",
+      "{REPO_ROOT}\\target\\benchmarks\\system-scale\\current\\concurrent-b"
     ],
     "runs": [
       {
@@ -10680,7 +10669,7 @@
     },
     "cross_root": [
       {
-        "root": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\concurrent-a",
+        "root": "{REPO_ROOT}\\target\\benchmarks\\system-scale\\current\\concurrent-a",
         "before": {
           "nodes": 1030,
           "symbols": 3075,
@@ -10719,7 +10708,7 @@
           "freelist_ratio": 0.011934,
           "quick_check": "ok",
           "sqlite_stat1_present": false,
-          "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/concurrent-a"
+          "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/concurrent-a"
         },
         "own_marker_present": true,
         "foreign_marker_absent": true,
@@ -10727,7 +10716,7 @@
         "stage_directories": 0
       },
       {
-        "root": "F:\\media\\projects\\ProjectAtlas\\.worktrees\\issue-0311-release-readiness\\target\\benchmarks\\system-scale\\current\\concurrent-b",
+        "root": "{REPO_ROOT}\\target\\benchmarks\\system-scale\\current\\concurrent-b",
         "before": {
           "nodes": 1030,
           "symbols": 3075,
@@ -10766,7 +10755,7 @@
           "freelist_ratio": 0.01194,
           "quick_check": "ok",
           "sqlite_stat1_present": false,
-          "project_root": "F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/concurrent-b"
+          "project_root": "{REPO_ROOT}/target/benchmarks/system-scale/current/concurrent-b"
         },
         "own_marker_present": true,
         "foreign_marker_absent": true,
@@ -11187,7 +11176,7 @@
       "processes": 1,
       "threads": 22
     },
-    "same_client_read": "error:\n  kind: refresh_required\n  message: \"refresh_required: 513 indexed path(s) differ from current local source; run `projectatlas watch --once` or `atlas_watch_once` before retrying\"\n  refresh_required:\n    project_root: \"F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode\"\n    status: refresh_required\n    reason: paths_changed\n    scope: full\n    changed: 513\n    added: 513\n    removed: 0\n    modified: 0\n    sample_paths[8]: \"pending-cancellation\",\"pending-cancellation/work-0000.rs\",\"pending-cancellation/work-0001.rs\",\"pending-cancellation/work-0002.rs\",\"pending-cancellation/work-0003.rs\",\"pending-cancellation/work-0004.rs\",\"pending-cancellation/work-0005.rs\",\"pending-cancellation/work-0006.rs\"\n  next:\n    tool: atlas_watch_once\n    project_path: \"F:/media/projects/ProjectAtlas/.worktrees/issue-0311-release-readiness/target/benchmarks/system-scale/current/huge-vscode\"\n",
+    "same_client_read": "error:\n  kind: refresh_required\n  message: \"refresh_required: 513 indexed path(s) differ from current local source; run `projectatlas watch --once` or `atlas_watch_once` before retrying\"\n  refresh_required:\n    project_root: \"{REPO_ROOT}/target/benchmarks/system-scale/current/huge-vscode\"\n    status: refresh_required\n    reason: paths_changed\n    scope: full\n    changed: 513\n    added: 513\n    removed: 0\n    modified: 0\n    sample_paths[8]: \"pending-cancellation\",\"pending-cancellation/work-0000.rs\",\"pending-cancellation/work-0001.rs\",\"pending-cancellation/work-0002.rs\",\"pending-cancellation/work-0003.rs\",\"pending-cancellation/work-0004.rs\",\"pending-cancellation/work-0005.rs\",\"pending-cancellation/work-0006.rs\"\n  next:\n    tool: atlas_watch_once\n    project_path: \"{REPO_ROOT}/target/benchmarks/system-scale/current/huge-vscode\"\n",
     "writer_released_before_server_close": true,
     "final": {
       "nodes": 20241,
@@ -11218,5 +11207,10 @@
     "survivors": [],
     "reason": null
   },
-  "passed": true
+  "passed": true,
+  "path_placeholders": {
+    "{REPO_ROOT}": "candidate repository root",
+    "{USER_HOME}": "current operating-system user home",
+    "{POWERSHELL}": "PowerShell executable"
+  }
 }

@@ -19,7 +19,7 @@ from agent_navigation import (
     parse_trace,
     projectatlas_mcp_contract,
     schedule,
-    validate_candidate_source,
+    validate_candidate_checkout,
     write_result,
 )
 
@@ -356,7 +356,7 @@ class AgentNavigationHarnessTests(unittest.TestCase):
             )
             self.assertFalse((root / "result.json.tmp").exists())
 
-    def test_candidate_source_uses_commit_only_as_provenance(self) -> None:
+    def test_candidate_checkout_requires_a_committed_lock_and_clean_tree(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             subprocess.run(["git", "init", "-q"], cwd=root, check=True)
@@ -389,8 +389,7 @@ class AgentNavigationHarnessTests(unittest.TestCase):
                 check=True,
             )
             with patch("agent_navigation.ROOT", root):
-                identity = validate_candidate_source(preregistered, preregistration)
-                first_head = identity["functional_head"]
+                validate_candidate_checkout(preregistered, preregistration)
                 metadata = root / "openspec/changes/release/tasks.md"
                 metadata.parent.mkdir(parents=True)
                 metadata.write_text("- [x] release\n", encoding="utf-8")
@@ -400,18 +399,14 @@ class AgentNavigationHarnessTests(unittest.TestCase):
                     cwd=root,
                     check=True,
                 )
-                identity = validate_candidate_source(preregistered, preregistration)
-                self.assertNotEqual(identity["functional_head"], first_head)
-                self.assertEqual(
-                    identity["functional_head"], identity["checklist_head"]
-                )
+                validate_candidate_checkout(preregistered, preregistration)
                 preregistered["rubric"]["small-clean"] = ["changed"]
                 with self.assertRaisesRegex(ValueError, "changed after"):
-                    validate_candidate_source(preregistered, preregistration)
+                    validate_candidate_checkout(preregistered, preregistration)
                 preregistered["rubric"]["small-clean"] = ["locked"]
                 (root / "unexpected.txt").write_text("dirty\n", encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "dirty"):
-                    validate_candidate_source(preregistered, preregistration)
+                    validate_candidate_checkout(preregistered, preregistration)
 
     def test_main_refuses_a_retained_journal_without_creating_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
