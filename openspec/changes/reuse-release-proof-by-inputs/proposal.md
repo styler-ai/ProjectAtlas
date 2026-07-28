@@ -7,7 +7,9 @@ ProjectAtlas currently reruns expensive release proof when only the commit SHA o
 - Keep every existing unit, integration, E2E, platform, security, installer, packaging, and release test.
 - Reuse passed proof when its behavior-relevant inputs, platform, toolchain, workflow contract, and immutable artifact digests are unchanged.
 - Treat source, lockfile, toolchain, workflow, packaging, configuration, and parser-pack input changes as invalidating; unknown changes fail closed.
+- Search every page of successful reusable-artifact runs before declaring that no matching proof exists.
 - Rerun cheap OpenSpec, IssueOps, review-thread, topology, and release-policy checks after metadata-only changes.
+- Let IssueOps distinguish ordinary negative-modal prohibitions from affirmative exact-head requirements.
 - Retain commit SHAs as provenance without using commit equality as a test or artifact-reuse requirement.
 
 ## Capabilities

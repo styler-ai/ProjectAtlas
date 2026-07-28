@@ -239,7 +239,7 @@ For a human token dashboard:
 projectatlas token --view tui
 ```
 
-That renders a Ratatui token-impact snapshot: a readable reconciled `Without ProjectAtlas - With ProjectAtlas = Saved by ProjectAtlas` equation, likely file-read calls avoided, observed summaries/slices, modeled narrowing, source rows, and calibration notes. A wide terminal adds a bounded, non-interactive atlas map drawn only from resolved relations in the active project database; narrower terminals keep the proven overview without crowding it. The default theme is dark; use `--theme light` for light terminals or `--theme terminal` to preserve the terminal background. Rerun the command to refresh the snapshot. Ani remains the ProjectAtlas mascot in the design assets, but the token TUI defers mascot rendering until a future focused pass.
+That renders a Ratatui token-impact snapshot: a readable reconciled `Without ProjectAtlas - With ProjectAtlas = Saved by ProjectAtlas` equation, source-reconciled file reads avoided with their observed and modeled split, persisted modeled folder-walk steps, source rows, and calibration notes. A wide terminal adds a bounded, non-interactive atlas map drawn only from resolved relations in the active project database; narrower terminals keep the proven overview without crowding it. The default theme is dark; use `--theme light` for light terminals or `--theme terminal` to preserve the terminal background. Rerun the command to refresh the snapshot. Ani remains the ProjectAtlas mascot in the design assets, but the token TUI defers mascot rendering until a future focused pass.
 
 For a local tokenizer calibration of indexed UTF-8 files, add `--tokenizer o200k_base` or `--tokenizer cl100k_base`.
 

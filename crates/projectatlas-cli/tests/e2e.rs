@@ -4078,6 +4078,7 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     }
     for required in [
         "git rev-parse HEAD^2",
+        "--paginate",
         "optional-parser-pack-release-assets",
         "optional-parser-proof-inputs.py",
         "--field parser_pack_run_id=",
@@ -7287,10 +7288,12 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .stdout(predicate::str::contains("With ProjectAtlas"))
         .stdout(predicate::str::contains("Saved by ProjectAtlas"))
         .stdout(predicate::str::contains(
-            "L I K E L Y   F I L E - R E A D   C A L L S   A V O I D E D",
+            "F I L E   &   F O L D E R   W O R K   A V O I D E D",
         ))
-        .stdout(predicate::str::contains("Observed"))
-        .stdout(predicate::str::contains("Modeled narrowing"))
+        .stdout(predicate::str::contains("File reads avoided"))
+        .stdout(predicate::str::contains("Observed:"))
+        .stdout(predicate::str::contains("Modeled:"))
+        .stdout(predicate::str::contains("Folder walks avoided"))
         .stdout(predicate::str::contains("S A V I N G S"))
         .stdout(predicate::str::contains("S I G N A L"))
         .stdout(predicate::str::contains(
@@ -10342,7 +10345,11 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains("ProjectAtlas")
         || !stdout.contains("Token Impact")
         || !stdout.contains("T O T A L   T O K E N S   A V O I D E D")
-        || !stdout.contains("L I K E L Y   F I L E - R E A D   C A L L S   A V O I D E D")
+        || (!stdout.contains(
+            "F I L E   R E A D S   A V O I D E D   •   F O L D E R   W A L K S   A V O I D E D",
+        ) && !stdout.contains("F I L E   &   F O L D E R   W O R K   A V O I D E D"))
+        || !stdout.to_ascii_lowercase().contains("file reads avoided")
+        || !stdout.contains("Folder walks avoided")
         || !stdout.contains("S I G N A L")
         || !stdout.contains("purpose_review:")
         || !stdout.contains("failed: 0")

@@ -71,6 +71,7 @@ jobs:
           fi
           mapfile -t runs < <(
             gh api \
+              --paginate \
               "/repos/$GITHUB_REPOSITORY/actions/workflows/optional-parser-pack.yml/runs?event=workflow_dispatch&status=success&per_page=100" \
               --jq '.workflow_runs | sort_by(.run_number) | reverse | .[] | [.id, .head_sha] | @tsv'
           )

@@ -546,7 +546,7 @@ fn render_overview_main(
 
     render_token_header(frame, sections[0], overview, session);
     render_token_hero(frame, sections[1], overview);
-    render_file_reads_card(frame, sections[2], overview);
+    render_avoided_navigation_card(frame, sections[2], overview);
     render_composition_and_signal(frame, sections[3], overview);
     render_savings_breakdown_table(frame, sections[4], overview);
     render_calibration_notes(frame, sections[5], overview);
@@ -810,8 +810,8 @@ fn center_symbol(symbol: &'static str) -> Paragraph<'static> {
     )
 }
 
-/// Draw the reference-style file-read strip.
-fn render_file_reads_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
+/// Draw the reference-style avoided navigation-work strip.
+fn render_avoided_navigation_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
     let block = panel("");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -820,37 +820,78 @@ fn render_file_reads_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOve
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(3)])
         .split(inner);
+    let title = if compact {
+        "FILE & FOLDER WORK AVOIDED"
+    } else {
+        "FILE READS AVOIDED • FOLDER WALKS AVOIDED"
+    };
     frame.render_widget(
-        Paragraph::new(reference_title("LIKELY FILE-READ CALLS AVOIDED"))
-            .style(section_title_style().bg(THEME_PANEL)),
+        Paragraph::new(reference_title(title)).style(section_title_style().bg(THEME_PANEL)),
         rows[0],
     );
+
+    let total_reads = overview.likely_file_reads_avoided;
+    let folder_walks = modeled_folder_walks_avoided(overview);
+    if compact {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled("File reads avoided: ", body_style().bg(THEME_PANEL)),
+                    Span::styled(
+                        grouped_count(total_reads),
+                        Style::default()
+                            .fg(THEME_INK_WHITE)
+                            .bg(THEME_PANEL)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("Observed: ", body_style().bg(THEME_PANEL)),
+                    Span::styled(
+                        grouped_count(overview.observed_file_read_replacements),
+                        Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL),
+                    ),
+                    Span::styled("  •  Modeled: ", body_style().bg(THEME_PANEL)),
+                    Span::styled(
+                        grouped_count(overview.modeled_file_reads_avoided),
+                        Style::default().fg(THEME_YELLOW).bg(THEME_PANEL),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("Folder walks avoided: ", body_style().bg(THEME_PANEL)),
+                    Span::styled(
+                        grouped_count(folder_walks),
+                        Style::default().fg(THEME_YELLOW).bg(THEME_PANEL),
+                    ),
+                    Span::styled("  •  Confidence: ", body_style().bg(THEME_PANEL)),
+                    Span::styled(
+                        overview.read_avoidance_confidence.clone(),
+                        Style::default().fg(THEME_YELLOW).bg(THEME_PANEL),
+                    ),
+                ]),
+            ])
+            .style(body_style().bg(THEME_PANEL)),
+            rows[1],
+        );
+        return;
+    }
 
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(24),
+            Constraint::Percentage(20),
             Constraint::Length(1),
-            Constraint::Percentage(29),
+            Constraint::Percentage(25),
             Constraint::Length(1),
-            Constraint::Percentage(29),
+            Constraint::Percentage(25),
             Constraint::Length(1),
-            Constraint::Percentage(16),
+            Constraint::Percentage(18),
+            Constraint::Length(1),
+            Constraint::Percentage(8),
         ])
         .split(rows[1]);
-    let total_reads = overview.likely_file_reads_avoided;
     let observed_ratio = ratio(overview.observed_file_read_replacements, total_reads);
     let modeled_ratio = ratio(overview.modeled_file_reads_avoided, total_reads);
-    let observed_title = if compact {
-        "Observed"
-    } else {
-        "Observed (summaries/slices)"
-    };
-    let modeled_title = if compact {
-        "Modeled narrowing"
-    } else {
-        "Search-modeled narrowing"
-    };
 
     render_file_read_total(frame, columns[0], total_reads);
     render_vertical_separator(frame, columns[1]);
@@ -858,7 +899,7 @@ fn render_file_reads_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOve
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled(
-                observed_title,
+                "Observed (summaries/slices)",
                 Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL),
             )),
             Line::from(vec![
@@ -889,7 +930,7 @@ fn render_file_reads_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOve
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled(
-                modeled_title,
+                "Search-modeled narrowing",
                 Style::default().fg(THEME_YELLOW).bg(THEME_PANEL),
             )),
             Line::from(vec![
@@ -919,6 +960,33 @@ fn render_file_reads_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOve
 
     frame.render_widget(
         Paragraph::new(vec![
+            Line::from(Span::styled(
+                "Folder walks avoided",
+                Style::default().fg(THEME_YELLOW).bg(THEME_PANEL),
+            )),
+            Line::from(vec![
+                Span::styled(
+                    grouped_count(folder_walks),
+                    Style::default()
+                        .fg(THEME_YELLOW)
+                        .bg(THEME_PANEL)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled("modeled", muted_style().bg(THEME_PANEL)),
+            ]),
+            Line::from(Span::styled(
+                "persisted modeled steps",
+                muted_style().bg(THEME_PANEL),
+            )),
+        ])
+        .style(body_style().bg(THEME_PANEL)),
+        columns[6],
+    );
+
+    render_vertical_separator(frame, columns[7]);
+    frame.render_widget(
+        Paragraph::new(vec![
             Line::from(Span::styled("Confidence", muted_style().bg(THEME_PANEL))),
             Line::from(Span::styled(
                 overview.read_avoidance_confidence.clone(),
@@ -930,7 +998,7 @@ fn render_file_reads_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOve
         ])
         .style(body_style().bg(THEME_PANEL))
         .alignment(Alignment::Center),
-        columns[6],
+        columns[8],
     );
 }
 
@@ -960,7 +1028,7 @@ fn render_file_read_total(frame: &mut Frame<'_>, area: Rect, total_reads: usize)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
-                "file-read calls avoided",
+                "file reads avoided",
                 muted_style().bg(THEME_PANEL),
             )),
         ])
@@ -1101,7 +1169,7 @@ fn render_signal_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOvervie
                 Span::styled("▣  ", Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL)),
                 Span::styled("Impact scope: ", body_style().bg(THEME_PANEL)),
                 Span::styled(
-                    "tokens + file-read calls",
+                    "tokens + file reads + folder walks",
                     Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL),
                 ),
             ]),
@@ -1567,12 +1635,16 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect) {
         .split(area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("ProjectAtlas v", Style::default().fg(THEME_INK_WHITE)),
+            Span::styled(
+                "ProjectAtlas v",
+                Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL),
+            ),
             Span::styled(
                 env!("CARGO_PKG_VERSION"),
-                Style::default().fg(THEME_INK_WHITE),
+                Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL),
             ),
-        ])),
+        ]))
+        .style(Style::default().bg(THEME_PANEL)),
         columns[0],
     );
     let clock = current_clock_label();
@@ -1585,7 +1657,9 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect) {
         format!("Snapshot {clock} • rerun command to refresh")
     };
     frame.render_widget(
-        Paragraph::new(Span::styled(status, body_style())).alignment(Alignment::Right),
+        Paragraph::new(Span::styled(status, body_style().bg(THEME_PANEL)))
+            .style(Style::default().bg(THEME_PANEL))
+            .alignment(Alignment::Right),
         columns[1],
     );
 }
@@ -1833,6 +1907,19 @@ fn observed_source_steps(overview: &TokenOverview) -> usize {
     } else {
         bucket_steps
     }
+}
+
+/// Return persisted modeled steps that replaced broad directory walks.
+fn modeled_folder_walks_avoided(overview: &TokenOverview) -> usize {
+    overview
+        .buckets
+        .iter()
+        .filter(|bucket| {
+            !is_observed_source_bucket(bucket)
+                && bucket.baseline_kind == TOKEN_BASELINE_DIRECTORY_WALK
+                && bucket.denominator_kind == TOKEN_BASELINE_DIRECTORY_WALK
+        })
+        .fold(0usize, |total, bucket| total.saturating_add(bucket.calls))
 }
 
 /// Return modeled source rows backed by actual telemetry buckets.
@@ -2450,9 +2537,9 @@ mod tests {
         ATLAS_PREVIEW_MAX_NODE_DEGREE, ATLAS_PREVIEW_MAX_NODES, DASHBOARD_HEIGHT, THEME_BAR_EMPTY,
         THEME_BG, THEME_BLUE, THEME_GREEN, THEME_INK_WHITE, THEME_YELLOW,
         TOKEN_IMPACT_COLUMN_WIDTH, TokenAtlasPreview, TokenDashboardTheme, atlas_layout, block_bar,
-        buffer_to_string, dashboard_width, grouped_count, reconciled_without_projectatlas,
-        reference_title, render_dashboard_to_string, render_overview_frame,
-        render_overview_frame_with_atlas, render_token_dashboard,
+        buffer_to_string, dashboard_width, grouped_count, modeled_folder_walks_avoided,
+        reconciled_without_projectatlas, reference_title, render_dashboard_to_string,
+        render_overview_frame, render_overview_frame_with_atlas, render_token_dashboard,
         render_token_dashboard_with_theme, render_token_trend_dashboard,
         render_token_trend_dashboard_with_theme, resolve_dashboard_width,
         savings_source_rows_for_width, signed_count, signed_trend_points, signed_y_bounds,
@@ -2496,14 +2583,16 @@ mod tests {
             "Without ProjectAtlas",
             "With ProjectAtlas",
             "Saved by ProjectAtlas",
-            "file-read calls avoided",
+            "file reads avoided",
+            "Folder walks avoided",
+            "persisted modeled steps",
             "Observed (summaries/slices)",
             "Search-modeled narrowing",
             "Confidence",
             "Measured from summaries/slices",
             "Navigation narrowing",
             "Impact scope:",
-            "tokens + file-read calls",
+            "tokens + file reads + folder walks",
             "Estimate type: local model",
             "Tokenizer audit:",
             "Source",
@@ -2524,7 +2613,7 @@ mod tests {
         }
         for title in [
             "TOTAL TOKENS AVOIDED",
-            "LIKELY FILE-READ CALLS AVOIDED",
+            "FILE READS AVOIDED • FOLDER WALKS AVOIDED",
             "SAVINGS COMPOSITION",
             "SIGNAL",
             "WHERE THE SAVINGS CAME FROM",
@@ -2553,7 +2642,7 @@ mod tests {
             &[
                 "ProjectAtlas",
                 &reference_title("TOTAL TOKENS AVOIDED"),
-                &reference_title("LIKELY FILE-READ CALLS AVOIDED"),
+                &reference_title("FILE READS AVOIDED • FOLDER WALKS AVOIDED"),
                 &reference_title("SAVINGS COMPOSITION"),
                 &reference_title("WHERE THE SAVINGS CAME FROM"),
                 &reference_title("CALIBRATION & NOTES"),
@@ -2848,7 +2937,7 @@ mod tests {
         assert!(dashboard.contains("ProjectAtlas"));
         assert!(dashboard.contains("Token Impact"));
         assert!(dashboard.contains(&reference_title("TOTAL TOKENS AVOIDED")));
-        assert!(dashboard.contains(&reference_title("LIKELY FILE-READ CALLS AVOIDED")));
+        assert!(dashboard.contains(&reference_title("FILE & FOLDER WORK AVOIDED")));
         assert!(dashboard.contains(&reference_title("WHERE THE SAVINGS CAME FROM")));
         assert!(dashboard.contains("Fewer candidates"));
         assert!(dashboard.contains(&reference_title("CALIBRATION & NOTES")));
@@ -2875,6 +2964,7 @@ mod tests {
             overview.observed_file_read_replacements + overview.modeled_file_reads_avoided,
             overview.likely_file_reads_avoided
         );
+        assert_eq!(modeled_folder_walks_avoided(&overview), 1);
 
         let dashboard = strip_ansi(&render_token_dashboard(&overview, Some("s")));
         let source_rows = savings_source_rows_for_width(&overview, false);

@@ -28,6 +28,8 @@ Commit equality was rejected because metadata-only commits change provenance wit
 
 The optional-parser handoff compares only its source, dependency, toolchain, packaging, workflow, and construction-script inputs. Benchmark preregistration validates the runtime, MCP inventory, and packaged-skill identities it actually measures without requiring the current Git commit. Unknown changed inputs invalidate proof.
 
+Reusable handoff discovery scans every page of successful workflow runs before concluding that no matching unexpired artifact exists. IssueOps evaluates exact-head wording by clause and recognizes ordinary negative modals so prohibitions are not mistaken for requirements.
+
 A generalized dependency graph was rejected because the existing proof boundaries are few and already have explicit owners.
 
 ### Keep cheap current-state gates current

@@ -5190,12 +5190,22 @@ mod tests {
         assert!(dashboard.contains("Without ProjectAtlas"));
         assert!(dashboard.contains("With ProjectAtlas"));
         assert!(dashboard.contains("Saved by ProjectAtlas"));
-        assert!(dashboard.contains("L I K E L Y   F I L E - R E A D   C A L L S   A V O I D E D"));
+        assert!(
+            dashboard.contains(
+                "F I L E   R E A D S   A V O I D E D   •   F O L D E R   W A L K S   A V O I D E D"
+            ) || dashboard.contains("F I L E   &   F O L D E R   W O R K   A V O I D E D")
+        );
+        assert!(
+            dashboard
+                .to_ascii_lowercase()
+                .contains("file reads avoided")
+        );
+        assert!(dashboard.contains("Folder walks avoided"));
         assert!(dashboard.contains("S A V I N G S   C O M P O S I T I O N"));
         assert!(dashboard.contains("S I G N A L"));
         assert!(dashboard.contains("W H E R E   T H E   S A V I N G S   C A M E   F R O M"));
         assert!(dashboard.contains("C A L I B R A T I O N   &   N O T E S"));
-        assert!(dashboard.contains("not_recorded"));
+        assert!(dashboard.contains("Confidence"));
         assert!(dashboard.contains("Tokenizer audit"));
         assert!(
             dashboard

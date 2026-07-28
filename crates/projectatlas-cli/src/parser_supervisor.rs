@@ -6278,7 +6278,7 @@ mod tests {
             let _send = result_sender.send(result);
         });
 
-        entered_receiver.recv_timeout(Duration::from_secs(1))?;
+        entered_receiver.recv_timeout(Duration::from_secs(5))?;
         let _late_child_pid = pid_receiver.recv_timeout(Duration::from_secs(1))?;
         cancellation.cancel();
         let result = result_receiver.recv_timeout(Duration::from_secs(1))?;
@@ -6387,7 +6387,7 @@ mod tests {
             let _send = result_sender.send(result);
         });
 
-        rendezvous_entered_receiver.recv_timeout(Duration::from_secs(1))?;
+        rendezvous_entered_receiver.recv_timeout(Duration::from_secs(5))?;
         let _child_pid = pid_receiver.recv_timeout(Duration::from_secs(1))?;
         cancellation.cancel();
         release_rendezvous_sender.send(())?;

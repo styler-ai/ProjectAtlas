@@ -72,11 +72,11 @@ The normal v0.4.0 database-open path SHALL preserve all compatible cumulative to
 - **THEN** the migration rolls back atomically and the last-valid predecessor database remains retryable without lost history
 
 ### Requirement: The token dashboard is truthful and focused
-The human token-impact dashboard SHALL derive every numeric field from the active project's persisted token report. It SHALL focus on tokens, lookups performed, and likely file-read calls avoided without release-version, frozen-baseline, plain-control, or repeated-work benchmark comparisons. At wide terminal sizes it MAY show a bounded connected, clustered, and depth-cued non-interactive constellation drawn only from resolved logical relations in the active project database; it SHALL NOT invent graph rows or imply complete graph analysis.
+The human token-impact dashboard SHALL derive every numeric field from the active project's persisted token report. It SHALL focus on tokens, lookups performed, source-reconciled file reads avoided with their observed and modeled split, and modeled folder walks avoided without release-version, frozen-baseline, plain-control, or repeated-work benchmark comparisons. At wide terminal sizes it MAY show a bounded connected, clustered, and depth-cued non-interactive constellation drawn only from resolved logical relations in the active project database; it SHALL NOT invent graph rows or imply complete graph analysis.
 
 #### Scenario: Persisted impact is rendered
 - **WHEN** the dashboard renders an overview
-- **THEN** its lookups, token equation, avoided-call totals, source rows, and composition reconcile exactly with that overview
+- **THEN** its lookups, token equation, file-read total and split, persisted directory-walk steps, source rows, and composition reconcile exactly with that overview
 
 #### Scenario: A wide project graph is available
 - **WHEN** the active database returns resolved logical relations within the preview bounds

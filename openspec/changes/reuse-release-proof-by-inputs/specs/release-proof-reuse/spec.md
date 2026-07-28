@@ -29,6 +29,10 @@ Reusable release artifacts SHALL be validated by their existing version, content
 - **WHEN** a successful unexpired artifact has matching relevant inputs and all immutable identity checks pass
 - **THEN** the artifact may be promoted from its original provenance commit
 
+#### Scenario: Matching artifact predates the first workflow-run page
+- **WHEN** newer successful runs fill one or more API pages before an otherwise valid unexpired artifact
+- **THEN** discovery searches every page before reporting that no reusable proof exists
+
 #### Scenario: Artifact content is tampered
 - **WHEN** any required digest, receipt, archive inventory, version, or size check fails
 - **THEN** promotion fails
@@ -39,6 +43,10 @@ Mapped issues and OpenSpec tasks SHALL describe the owning behavior, test layers
 #### Scenario: Checklist-only reconciliation is committed
 - **WHEN** a task-state-only commit follows passed behavior proof
 - **THEN** IssueOps, review, topology, and policy checks rerun while unaffected expensive proof remains valid
+
+#### Scenario: Issue text prohibits exact-head proof with a negative modal
+- **WHEN** a mapped issue states that proof must not require, should not require, cannot require, or does not require exact-head identity
+- **THEN** IssueOps accepts the prohibition while continuing to reject affirmative exact-head requirements
 
 #### Scenario: Implemented behavior changes
 - **WHEN** a task transition includes an owning implementation or test change
