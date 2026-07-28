@@ -1145,10 +1145,7 @@ fn require_decode_budget(encoded: &[u8]) -> DbResult<()> {
                 in_primitive = false;
                 admit_decode_bytes(&mut retained_bytes, DERIVED_SNAPSHOT_DECODE_HEADER_BYTES)?;
             }
-            b',' | b':' => {
-                in_primitive = false;
-            }
-            b'}' | b']' | b' ' | b'\t' | b'\r' | b'\n' => {
+            b',' | b':' | b'}' | b']' | b' ' | b'\t' | b'\r' | b'\n' => {
                 in_primitive = false;
             }
             _ if !in_primitive => {
@@ -1469,7 +1466,9 @@ mod tests {
 
         let encoded = snapshot.to_json()?;
         let decoded = DerivedGraphSnapshot::from_json(&encoded)?;
-        assert_eq!(decoded, snapshot);
+        if decoded != snapshot {
+            return Err("large valid snapshot changed during round trip".into());
+        }
         Ok(())
     }
 

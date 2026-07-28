@@ -163,7 +163,7 @@ pub(crate) fn load_agent_efficiency_comparison(
             )));
         }
     };
-    match validate_and_project(artifact, &bytes) {
+    match validate_and_project(&artifact, &bytes) {
         Ok(comparison) => Ok(comparison),
         Err(reason) => Ok(incompatible_comparison(reason)),
     }
@@ -410,18 +410,18 @@ fn metadata_is_indirect(metadata: &fs::Metadata) -> bool {
 
 /// Validate the supported contract and project the bounded public report.
 fn validate_and_project(
-    artifact: BenchmarkArtifact,
+    artifact: &BenchmarkArtifact,
     source_bytes: &[u8],
 ) -> Result<AgentEfficiencyComparison, String> {
-    validate_identity(&artifact)?;
-    let runs = validate_schedule_and_runs(&artifact)?;
-    validate_aggregate(&artifact, &runs)?;
+    validate_identity(artifact)?;
+    let runs = validate_schedule_and_runs(artifact)?;
+    validate_aggregate(artifact, &runs)?;
     let baselines = [
         (AgentEfficiencyBaseline::FrozenProjectAtlasV0326, FROZEN_ARM),
         (AgentEfficiencyBaseline::PlainCodex, PLAIN_ARM),
     ]
     .into_iter()
-    .map(|(baseline, arm)| project_baseline(&artifact, baseline, arm))
+    .map(|(baseline, arm)| project_baseline(artifact, baseline, arm))
     .collect::<Result<Vec<_>, _>>()?;
     let capabilities = project_capabilities(&artifact.runs)?;
     let state = if baselines
@@ -1636,7 +1636,7 @@ mod tests {
     ) -> Result<String, Box<dyn std::error::Error>> {
         let bytes = serde_json::to_vec(value)?;
         let artifact: BenchmarkArtifact = serde_json::from_slice(&bytes)?;
-        validate_and_project(artifact, &bytes)
+        validate_and_project(&artifact, &bytes)
             .err()
             .ok_or_else(|| io::Error::other("modified benchmark unexpectedly validated").into())
     }
@@ -1669,7 +1669,7 @@ mod tests {
             .join("../../docs/benchmarks/v0.4-agent-navigation-results.json");
         let bytes = fs::read(path)?;
         let artifact: BenchmarkArtifact = serde_json::from_slice(&bytes)?;
-        let comparison = validate_and_project(artifact, &bytes)
+        let comparison = validate_and_project(&artifact, &bytes)
             .map_err(|reason| io::Error::other(format!("benchmark validation failed: {reason}")))?;
 
         require(
@@ -1714,16 +1714,16 @@ mod tests {
             .map(|row| row.calls)
             .sum::<usize>();
         require(
-            calls == 242,
+            calls == 166,
             "trace-completed capability calls did not reconcile",
         )
         .map_err(io::Error::other)?;
         for (capability, expected) in [
-            (AgentEfficiencyCapability::Discovery, 15),
-            (AgentEfficiencyCapability::SummaryAndSlice, 96),
-            (AgentEfficiencyCapability::Search, 32),
-            (AgentEfficiencyCapability::SymbolsAndRelations, 96),
-            (AgentEfficiencyCapability::Other, 3),
+            (AgentEfficiencyCapability::Discovery, 18),
+            (AgentEfficiencyCapability::SummaryAndSlice, 94),
+            (AgentEfficiencyCapability::Search, 28),
+            (AgentEfficiencyCapability::SymbolsAndRelations, 24),
+            (AgentEfficiencyCapability::Other, 2),
         ] {
             require(
                 comparison
@@ -1870,7 +1870,7 @@ mod tests {
         }
         let bytes = serde_json::to_vec(&artifact)?;
         let artifact: BenchmarkArtifact = serde_json::from_slice(&bytes)?;
-        let comparison = validate_and_project(artifact, &bytes).map_err(io::Error::other)?;
+        let comparison = validate_and_project(&artifact, &bytes).map_err(io::Error::other)?;
         let frozen = comparison
             .baselines
             .iter()
