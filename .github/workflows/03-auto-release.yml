@@ -69,13 +69,24 @@ jobs:
             echo "Main promotion tree differs from its verified dev parent" >&2
             exit 1
           fi
-          mapfile -t run_ids < <(
+          mapfile -t runs < <(
             gh api \
-              "/repos/$GITHUB_REPOSITORY/actions/workflows/optional-parser-pack.yml/runs?event=workflow_dispatch&status=success&head_sha=$promotion_sha&per_page=100" \
-              --jq '.workflow_runs | sort_by(.run_number) | reverse | .[].id'
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/optional-parser-pack.yml/runs?event=workflow_dispatch&status=success&per_page=100" \
+              --jq '.workflow_runs | sort_by(.run_number) | reverse | .[] | [.id, .head_sha] | @tsv'
           )
           parser_pack_run_id=""
-          for run_id in "${run_ids[@]}"; do
+          for run in "${runs[@]}"; do
+            IFS=$'\t' read -r run_id run_sha <<< "$run"
+            if ! git fetch --no-tags origin "$run_sha"; then
+              continue
+            fi
+            if ! python3 .github/scripts/optional-parser-proof-inputs.py \
+              --base "$run_sha" \
+              --head "$promotion_sha" \
+              > /dev/null
+            then
+              continue
+            fi
             mapfile -t artifacts < <(
               gh api \
                 "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" \
@@ -87,7 +98,7 @@ jobs:
             fi
           done
           if [[ -z "$parser_pack_run_id" ]]; then
-            echo "No unexpired clean optional-parser handoff matches promotion $promotion_sha" >&2
+            echo "No unexpired clean optional-parser handoff matches the release inputs" >&2
             exit 1
           fi
           echo "run_id=$parser_pack_run_id" >> "$GITHUB_OUTPUT"

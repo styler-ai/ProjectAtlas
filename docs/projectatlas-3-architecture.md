@@ -2074,7 +2074,7 @@ publishes a `disabled` disposition, and cannot restore or save cache state.
 
 ```mermaid
 flowchart TB
-    Candidate[Exact clean candidate] --> Key[Exact dependency-layer key]
+    Candidate[Clean candidate inputs] --> Key[Dependency-layer content key]
     Dispatch{Explicit clean construction?}
     Key --> Dispatch
     Dispatch -->|yes| Empty[Empty Cargo target]
@@ -2100,7 +2100,7 @@ flowchart TB
     Aggregate --> CleanHandoff{Explicit clean all-platform dispatch?}
     CleanHandoff -->|no| NoHandoff[No release handoff]
     CleanHandoff -->|yes| Handoff[Supported archives, aggregate proof,<br/>and clean receipts]
-    Handoff --> Release[02-Release binds successful run<br/>and identical candidate tree]
+    Handoff --> Release[02-Release binds successful run<br/>to matching release inputs]
     Release --> Assets[Versioned Linux and Windows archives,<br/>proof, and SHA256SUMS]
     CleanAfter --> Receipt
     Receipt --> Trust{Cache-save eligible?<br/>trusted, non-clean, reuse-enabled}
@@ -2110,14 +2110,18 @@ flowchart TB
 
 Only an explicit `clean_construction=true`, `target=all` dispatch emits the
 release handoff. `02-Release` verifies the referenced run belongs to the same
-repository and workflow, completed successfully, and has a Git tree identical
-to the release checkout. It then checks the aggregate target set, candidate
-revision and version, clean no-restore receipts, Cargo lock digest, archive
-names, sizes, SHA-256 digests, fresh-host isolation, network denial, grammar
-probes, and memory/process cleanup before staging versioned Linux and Windows
-pack archives plus the aggregate proof. `03-Auto-Release` selects that handoff
-from the exact identical-tree `dev` promotion parent; stale, partial, reused,
-expired, or altered handoffs fail before publication.
+repository and workflow, completed successfully, and has unchanged
+behavior-relevant source, dependency, lockfile, toolchain, workflow, packaging,
+configuration, and parser-pack inputs. Unknown changes fail closed. It then
+checks the aggregate target set, provenance revision and version, clean
+no-restore receipts, Cargo lock digest, archive names, sizes, SHA-256 digests,
+fresh-host isolation, network denial, grammar probes, and memory/process cleanup
+before staging versioned Linux and Windows pack archives plus the aggregate
+proof. `03-Auto-Release` selects the newest successful unexpired handoff whose
+release inputs match the promoted candidate; stale, partial, incompatible,
+expired, or altered handoffs fail before publication. Checklist-only and other
+behavior-neutral commits rerun cheap policy gates without rebuilding these
+archives.
 
 The retained policy is measurement-owned, not platform folklore:
 

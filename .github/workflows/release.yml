@@ -83,6 +83,9 @@ jobs:
       - name: Issue checklist self-test
         run: python3 .github/scripts/issue-checklists.py --self-test
 
+      - name: Optional-parser proof-input unit test
+        run: python3 .github/scripts/test-optional-parser-proof-inputs.py
+
       - name: Optional-parser release-asset self-test
         run: python3 .github/scripts/verify-optional-parser-release-assets.py --self-test
 
@@ -467,7 +470,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Bind clean handoff to this release tree
+      - name: Bind clean handoff to these release inputs
         shell: bash
         run: |
           set -euo pipefail
@@ -493,10 +496,9 @@ jobs:
             > /dev/null
           run_sha="$(jq -r '.head_sha' "$run_json")"
           git fetch --no-tags origin "$run_sha"
-          if [[ "$(git rev-parse "$run_sha^{tree}")" != "$(git rev-parse 'HEAD^{tree}')" ]]; then
-            echo "Optional-parser handoff tree differs from the release tree" >&2
-            exit 1
-          fi
+          python3 .github/scripts/optional-parser-proof-inputs.py \
+            --base "$run_sha" \
+            --head HEAD
           echo "PARSER_PACK_RUN_SHA=$run_sha" >> "$GITHUB_ENV"
 
       - name: Download clean optional-parser handoff

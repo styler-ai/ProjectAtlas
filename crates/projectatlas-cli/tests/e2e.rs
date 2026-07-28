@@ -4049,6 +4049,7 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         "parser_pack_run_id:",
         "parser-pack-assets:",
         "optional-parser-pack-release-assets",
+        "optional-parser-proof-inputs.py",
         "github-token: ${{ github.token }}",
         "run-id: ${{ inputs.parser_pack_run_id }}",
         "verify-optional-parser-release-assets.py",
@@ -4078,12 +4079,23 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     for required in [
         "git rev-parse HEAD^2",
         "optional-parser-pack-release-assets",
-        "head_sha=$promotion_sha",
+        "optional-parser-proof-inputs.py",
         "--field parser_pack_run_id=",
     ] {
         if !auto_release_workflow.contains(required) {
             return Err(io::Error::other(format!(
-                "auto-release workflow is missing exact optional-parser handoff guard {required:?}"
+                "auto-release workflow is missing input-bound optional-parser handoff guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for rejected in [
+        "head_sha=$promotion_sha",
+        "Optional-parser handoff tree differs from the release tree",
+    ] {
+        if auto_release_workflow.contains(rejected) || release_workflow.contains(rejected) {
+            return Err(io::Error::other(format!(
+                "release workflows retain SHA-only optional-parser proof {rejected:?}"
             ))
             .into());
         }
@@ -4209,6 +4221,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --no-deps --all-features --locked",
         "cargo deny --locked --all-features check -D warnings",
         "issue-checklists.py --self-test",
+        "test-optional-parser-proof-inputs.py",
     ] {
         if !hook.contains(required) || !workflow_docs.contains(required) {
             return Err(io::Error::other(format!(
@@ -4225,6 +4238,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled",
         "cargo test --doc --workspace --all-features --locked",
         "cargo deny --locked --all-features check -D warnings",
+        "test-optional-parser-proof-inputs.py",
         "--issue-map openspec/issue-map.json",
     ] {
         if !ci.contains(required) {
@@ -4250,6 +4264,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         || !release.contains(
             "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled",
         )
+        || !release.contains("test-optional-parser-proof-inputs.py")
     {
         return Err(io::Error::other(
             "release must retain milestone completion, ordinary gates, and a non-publishing package-proof mode",

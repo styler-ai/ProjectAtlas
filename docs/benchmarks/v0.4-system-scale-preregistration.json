@@ -41,7 +41,6 @@
   ],
   "candidate": {
     "required_version": "0.4.0",
-    "functional_git_head": "f2d788392e96c1caf6b01cc4ecae1825d3ceaedc",
     "runtime_sha256": "ce9ef5de6bcf647f407ff761e913b2fcf079415c85c991e811272d2a27ff473f",
     "mcp_tools_sha256": "0c21ea673bdb9cdff48203a274db04fbaccb888bd362407d46fc1bcc0e506b28",
     "telemetry": "disabled",

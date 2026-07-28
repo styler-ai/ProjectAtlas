@@ -3162,7 +3162,6 @@ def forced_termination_quiescence(
 def publication_identity_errors(
     preregistration: dict[str, Any],
     *,
-    git_head: str,
     runtime_sha256: str,
     mcp_tools_sha256: str,
     runtime_info: dict[str, Any],
@@ -3173,8 +3172,6 @@ def publication_identity_errors(
     errors = []
     if preregistration.get("status") != "locked_for_final_measurement":
         errors.append("preregistration is not locked for final measurement")
-    if candidate.get("functional_git_head") != git_head:
-        errors.append("functional Git head does not match the preregistered candidate")
     if candidate.get("runtime_sha256") != runtime_sha256:
         errors.append("runtime SHA-256 does not match the preregistered candidate")
     if candidate.get("mcp_tools_sha256") != mcp_tools_sha256:
@@ -3263,7 +3260,6 @@ def validate_publication_identity(
     preregistration_relative = preregistration_path.resolve().relative_to(ROOT).as_posix()
     errors = publication_identity_errors(
         preregistration,
-        git_head=git_head,
         runtime_sha256=runtime_sha256,
         mcp_tools_sha256=mcp_tools_sha256,
         runtime_info=runtime_info,

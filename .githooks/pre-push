@@ -18,6 +18,7 @@ cargo test --workspace --all-features --locked
 cargo test --doc --workspace --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 python3 .github/scripts/issue-checklists.py --self-test
+python3 .github/scripts/test-optional-parser-proof-inputs.py
 command -v gh >/dev/null 2>&1
 repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
 python3 .github/scripts/issue-checklists.py \

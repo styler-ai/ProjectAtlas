@@ -215,14 +215,12 @@ class SystemScaleHarnessTests(unittest.TestCase):
             "status": "draft",
             "candidate": {
                 "required_version": "0.4.0",
-                "functional_git_head": "expected",
                 "runtime_sha256": "expected-runtime",
                 "mcp_tools_sha256": "expected-tools",
             },
         }
         errors = system_scale.publication_identity_errors(
             preregistration,
-            git_head="other",
             runtime_sha256="other-runtime",
             mcp_tools_sha256="other-tools",
             runtime_info={
@@ -240,9 +238,9 @@ class SystemScaleHarnessTests(unittest.TestCase):
                 "docs/benchmarks/v0.4-system-scale-preregistration.json"
             ),
         )
-        self.assertEqual(len(errors), 10)
+        self.assertEqual(len(errors), 9)
 
-    def test_publication_identity_allows_only_the_self_referential_lock_edit(
+    def test_publication_identity_allows_content_bound_preregistration_edit(
         self,
     ) -> None:
         preregistration_path = (
@@ -252,14 +250,12 @@ class SystemScaleHarnessTests(unittest.TestCase):
             "status": "locked_for_final_measurement",
             "candidate": {
                 "required_version": "0.4.0",
-                "functional_git_head": "head",
                 "runtime_sha256": "runtime",
                 "mcp_tools_sha256": "tools",
             },
         }
         errors = system_scale.publication_identity_errors(
             preregistration,
-            git_head="head",
             runtime_sha256="runtime",
             mcp_tools_sha256="tools",
             runtime_info={

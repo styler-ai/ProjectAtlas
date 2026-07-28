@@ -11,20 +11,20 @@ Issue #311 SHALL mirror the local `complete-v040-release-readiness` tasks exactl
 - **WHEN** any mapped readiness task is unchecked or any other v0.4.0 milestone issue remains open
 - **THEN** #311 remains open and milestone completion is not claimed
 
-### Requirement: One exact promotion head owns all prepublication proof
-ProjectAtlas SHALL first prove one locked release-content head after every v0.4.0 implementation, readiness artifact, and other milestone issue is reconciled. It SHALL then permit exactly one commit that changes only #311 OpenSpec task checkbox state and mirror that state to the GitHub issue. The protected `dev` landing SHALL use a merge commit that contains the task-state commit as a parent with an identical Git tree, and the resulting `dev` merge SHA SHALL be the exact promotion head. Clean optional-parser and prepublish evidence MAY carry forward only across that verified non-release-impacting tree change. Ordinary exact-head CI, strict OpenSpec, IssueOps, ProjectAtlas low lint, and review checks SHALL run as post-commit closure gates on the resulting `dev` SHA outside the reconciled checklist, #311 SHALL remain open until they pass, and any other tree change SHALL invalidate the affected evidence.
+### Requirement: Prepublication proof follows behavior-relevant inputs
+ProjectAtlas SHALL prove one clean release candidate after every v0.4.0 implementation, readiness artifact, and other milestone issue is reconciled. Commit SHAs SHALL remain provenance only. After checklist or other behavior-neutral metadata changes, strict OpenSpec, IssueOps, ProjectAtlas low lint, review, topology, and release-policy checks SHALL rerun while unaffected expensive proof remains valid. Source, dependency, lockfile, toolchain, workflow, packaging, configuration, parser-pack, platform, artifact-identity, and unknown changes SHALL invalidate the affected proof.
 
 #### Scenario: Release-content proof is ready to reconcile
 - **WHEN** all required local gates and hosted runs complete successfully
-- **THEN** their identity matches the locked release-content head and one task-state-only reconciliation commit may be prepared
+- **THEN** their owning behavior-relevant inputs and execution context match the locked release candidate and checklist reconciliation may begin
 
 #### Scenario: Checklist state is reconciled
-- **WHEN** the bounded reconciliation commit and mirrored issue state contain no change beyond completed #311 task checkboxes and the protected `dev` merge preserves that exact tree
-- **THEN** the resulting `dev` merge SHA becomes the exact promotion head, unaffected clean-construction and prepublish proof remains valid, and #311 remains open while ordinary exact-head closure gates run
+- **WHEN** the reconciliation commit and mirrored issue state change only behavior-neutral task metadata and the protected `dev` merge preserves the candidate tree
+- **THEN** unaffected clean-construction and prepublish proof remains valid while cheap current-state closure gates rerun
 
 #### Scenario: Promotion head changes after proof
-- **WHEN** reconciliation changes any other path or a later commit changes the exact promotion tree
-- **THEN** readiness returns to the release-content lock and affected proof is rerun before completion
+- **WHEN** reconciliation or a later commit changes an owning behavior-relevant input or an unknown path
+- **THEN** the affected proof is rerun before completion
 
 #### Scenario: A required gate fails or is skipped
 - **WHEN** a required local check, hosted job, platform row, review thread, or release preflight is failed, cancelled, skipped, stale, or unresolved
@@ -34,30 +34,30 @@ ProjectAtlas SHALL first prove one locked release-content head after every v0.4.
 Release readiness SHALL use the existing `01-CI`, `optional-parser-pack`, and `02-Release` workflows. It SHALL require cross-platform source-built CLI/MCP E2E, explicit empty-cache Linux and Windows optional-parser construction, and `02-Release` package, optional-parser release-asset, and installer proof with `prepublish_only=true`.
 
 #### Scenario: Clean optional-parser proof succeeds
-- **WHEN** the exact release-content head is dispatched with `clean_construction=true` and `target=all`
+- **WHEN** the release candidate's optional-parser inputs require a fresh dispatch with `clean_construction=true` and `target=all`
 - **THEN** Linux and Windows bypass cache restore and save, complete construction plus fresh-runner and runtime proof, and produce the complete aggregate result
 
 #### Scenario: Prepublish release proof succeeds
-- **WHEN** `02-Release` runs on the exact release-content head with version `v0.4.0`, `prepublish_only=true`, and the exact clean optional-parser handoff
+- **WHEN** `02-Release` runs for version `v0.4.0` with `prepublish_only=true` and an input-compatible clean optional-parser handoff
 - **THEN** every required package, optional-parser release-asset, and installer smoke job succeeds without creating a tag or GitHub release
 
 #### Scenario: Optional-parser handoff is stale or incomplete
-- **WHEN** the referenced run, repository, workflow, event, candidate tree, aggregate proof, clean receipt, archive size, archive digest, version, or supported target set differs
+- **WHEN** the referenced run, repository, workflow, event, behavior-relevant inputs, aggregate proof, clean receipt, archive size, archive digest, version, or supported target set differs
 - **THEN** `02-Release` fails before publication and does not stage the optional-parser archives
 
 ### Requirement: Fresh review findings reopen affected release proof
-Any exact-head review finding that changes release content SHALL reopen the affected candidate, local, hosted, review, prepublish, and reconciliation tasks. Older success SHALL NOT be treated as proof of the corrected head.
+Any review finding that changes release behavior or another proof input SHALL reopen the affected candidate, local, hosted, review, prepublish, and reconciliation tasks. Unaffected success SHALL remain reusable.
 
 #### Scenario: Review finds a release blocker after reconciliation
 - **WHEN** an actionable finding requires a workflow, runtime, spec, test, or published documentation change
-- **THEN** #311 remains open, the finding receives an explicit local task owner, and all proof affected by the changed tree is rerun
+- **THEN** #311 remains open, the finding receives an explicit local task owner, and all proof affected by the changed inputs is rerun
 
 #### Scenario: Corrected head is ready to reconcile
-- **WHEN** every actionable Codex and Dependabot finding is fixed or explicitly dispositioned and the corrected exact head passes its required local and hosted gates
+- **WHEN** every actionable Codex and Dependabot finding is fixed or explicitly dispositioned and the corrected candidate passes its required local and hosted gates
 - **THEN** the finite task-state-only reconciliation may begin
 
 #### Scenario: Ordinary candidate behavior succeeds
-- **WHEN** exact-head `01-CI` completes
+- **WHEN** required `01-CI` completes
 - **THEN** Rust verification and source-built CLI/MCP E2E smoke succeed on Linux, Windows, macOS x64, and macOS arm64
 
 ### Requirement: Promotion remains reversible until readiness is complete
@@ -68,7 +68,7 @@ The release process SHALL leave `main`, version tags, and GitHub releases untouc
 - **THEN** `main`, tags, and published releases remain unchanged
 
 #### Scenario: Readiness is complete
-- **WHEN** every v0.4.0 milestone issue is checked and closed and the exact promotion is ready
+- **WHEN** every v0.4.0 milestone issue is checked and closed and the promotion is ready
 - **THEN** milestone IssueOps passes and the existing main-triggered release path may publish the candidate
 
 #### Scenario: Promotion preserves verified content

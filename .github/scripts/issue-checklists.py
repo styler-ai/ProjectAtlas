@@ -30,6 +30,7 @@ MITIGATION_RE = re.compile(
     rf"(?mi)^[ ]{{0,3}}{UNORDERED_LIST_MARKER_RE}\s+\[([ xX])\]\s+(.+?)\s+"
     r"\(OpenSpec tasks:\s*(\d+(?:\.\d+)*(?:\s*,\s*\d+(?:\.\d+)*)*)\)\s*$"
 )
+EXACT_HEAD_PROOF_RE = re.compile(r"(?i)\bexact[- ]head\b")
 REQUIRED_OPEN_ISSUE_HEADINGS = (
     "why",
     "what changes",
@@ -446,6 +447,10 @@ def issue_contract_failures(
     if not isinstance(body, str):
         return ["body is not text"]
     visible_body = visible_markdown(body)
+    if EXACT_HEAD_PROOF_RE.search(visible_body):
+        return [
+            "must bind proof to behavior-relevant inputs instead of exact-head commit identity"
+        ]
     headings = list(HEADING_RE.finditer(visible_body))
     normalized = [clean(heading.group(2)).lower() for heading in headings]
     failures: list[str] = []
@@ -811,6 +816,15 @@ Mitigations:
         return issue_contract_failures(issue, tasks, "owner/repo", self_test_root)
 
     assert contract_failures({"state": "OPEN", "body": issue_contract}, expected) == []
+    exact_head_contract = issue_contract.replace(
+        "Explain the need.", "Require exact-head proof."
+    )
+    assert any(
+        "behavior-relevant inputs" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": exact_head_contract}, expected
+        )
+    )
     punctuation_heading_contract = issue_contract.replace(
         "#architecture-views", "#sqlite-wal-durability-and-checkpoint-flow"
     )

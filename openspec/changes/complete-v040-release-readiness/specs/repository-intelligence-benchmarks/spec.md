@@ -12,14 +12,18 @@ The human-readable and machine-readable MCP composition evaluations SHALL name t
 - **WHEN** either published digest differs from the raw input or from the other representation
 - **THEN** release readiness fails before promotion
 
-### Requirement: Published Campaigns Match The Functional Release Candidate
+### Requirement: Published Campaigns Match Their Measured Behavior And Artifacts
 
-The published v0.4 system-scale and final agent-navigation results SHALL measure a functional head containing every release-affecting runtime, packaged-skill, MCP inventory/schema, relation-service, and repository-graph behavior change. Their recorded source, runtime, skill, and tool identities SHALL match the measured artifacts. Later commits MAY change only benchmark locks, raw results, evaluations, landing copy, or finite release checklist state; any later product-behavior change SHALL invalidate the affected publication.
+The published v0.4 system-scale and final agent-navigation results SHALL measure the behavior each campaign claims. Their recorded runtime, skill, tool, platform, environment, and artifact identities SHALL match the measured artifacts; commit SHAs SHALL remain provenance only. A later change SHALL invalidate only a campaign whose owning behavior-relevant input or measured artifact identity changed.
 
-#### Scenario: The final functional candidate is measured
+#### Scenario: The release benchmark behavior is measured
 - **WHEN** release readiness validates the system-scale and agent-navigation publications
-- **THEN** both campaigns identify and measure the current functional release candidate and its exact runtime, skill, and MCP surface
+- **THEN** both campaigns identify their measured runtime, skill, MCP surface, platform, environment, and behavior-relevant inputs
 
 #### Scenario: Release behavior changes after measurement
-- **WHEN** a later commit changes runtime, packaged-skill, MCP, relation-service, or repository-graph behavior
+- **WHEN** a later commit changes behavior or an artifact identity owned by a campaign
 - **THEN** the affected campaign is relocked and rerun before promotion
+
+#### Scenario: Unrelated metadata or behavior changes
+- **WHEN** a later commit changes no input or artifact identity owned by a campaign
+- **THEN** the passed publication remains valid without a rerun

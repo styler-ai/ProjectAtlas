@@ -68,6 +68,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 .github/scripts/issue-checklists.py --self-test
+          python3 .github/scripts/test-optional-parser-proof-inputs.py
           python3 .github/scripts/issue-checklists.py \
             --repo "$GITHUB_REPOSITORY" \
             --root . \

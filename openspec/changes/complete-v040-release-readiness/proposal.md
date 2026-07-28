@@ -1,27 +1,27 @@
 ## Why
 
-ProjectAtlas v0.4.0 has completed its feature program, but exact-head review of the promotion candidate found release blockers after the first readiness reconciliation: supported optional-parser archives were not published, federated rendezvous evidence could escape the anchored traversal, a published benchmark digest was stale, rendezvous database reads lacked the service deadline, and exact byte accounting allocated avoidable duplicate encodings. A later exact-head review also found that the published system-scale and agent-navigation results still measured older functional heads rather than the corrected release candidate. Release issue #311 must remain the truthful owner while those findings are fixed, the candidate is reproved, and publication verification plus workspace cleanup remain with the deliberately post-release owner.
+ProjectAtlas v0.4.0 has completed its feature program, but review of the promotion candidate found release blockers after the first readiness reconciliation: supported optional-parser archives were not published, federated rendezvous evidence could escape the anchored traversal, a published benchmark digest was stale, rendezvous database reads lacked the service deadline, and exact byte accounting allocated avoidable duplicate encodings. Later review also found that published benchmark identities predated release-affecting runtime, packaged-skill, MCP, relation-service, and repository-graph changes. Release issue #311 must remain the truthful owner while those findings are fixed, affected proof is refreshed, and publication verification plus workspace cleanup remain with the deliberately post-release owner.
 
 ## What Changes
 
 - Replace #311's stale initiative checklist with a mapped release-readiness checklist whose state can be verified by IssueOps.
 - Make milestone IssueOps reject open issues before publication.
-- Land the remaining installer trust-boundary correction and close every other v0.4.0 milestone issue against exact-head local, hosted, and review evidence.
-- Prove one exact release-content head, carry that proof only across one verified task-state-only reconciliation commit, and require ordinary exact-head gates on the resulting promotion head.
+- Land the remaining installer trust-boundary correction and close every other v0.4.0 milestone issue against affected local, hosted, and review evidence.
+- Prove one clean release candidate, carry passed proof across commit-only or behavior-neutral metadata changes, and rerun only gates whose behavior-relevant inputs changed.
 - Run `02-Release` in `prepublish_only` mode so the real package and installer paths are proven without creating a tag or GitHub release.
 - Carry only an explicit clean, all-platform optional-parser handoff into `02-Release`, bind its run, candidate tree, aggregate proof, clean receipts, archive sizes, and archive digests, and publish both supported pack archives with the release.
 - Restrict cross-root rendezvous evidence to exact external identities reached by the primary anchored traversal in the requested direction.
 - Bind every rendezvous database read to the earlier caller or service deadline and count serialized-equivalent federation state without retaining another encoded copy.
 - Correct the MCP composition evaluation's raw-input digest in both published representations and verify the binding directly.
 - Relock and rerun the system-scale and agent-navigation publications whenever later runtime, packaged-skill, MCP, relation-service, or repository-graph behavior invalidates their recorded candidate identities.
-- Prepare the exact `dev`-to-`main` promotion while keeping `main` and publication untouched until readiness is complete.
+- Prepare the `dev`-to-`main` promotion while keeping `main` and publication untouched until readiness is complete.
 - Create a separate non-milestone post-release issue that owns published-release verification and the user-requested safe branch, worktree, and external ProjectAtlas checkout cleanup.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `v040-release-readiness`: Define the exact-candidate, prepublication, milestone-reconciliation, promotion, and post-release-handoff requirements for ProjectAtlas v0.4.0.
+- `v040-release-readiness`: Define the candidate, prepublication, milestone-reconciliation, promotion, and post-release-handoff requirements for ProjectAtlas v0.4.0.
 
 ### Modified Capabilities
 
