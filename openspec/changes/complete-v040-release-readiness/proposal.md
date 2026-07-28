@@ -15,7 +15,7 @@ ProjectAtlas v0.4.0 has completed its feature program, but review of the promoti
 - Correct the MCP composition evaluation's raw-input digest in both published representations and verify the binding directly.
 - Relock and rerun the system-scale and agent-navigation publications whenever later runtime, packaged-skill, MCP, relation-service, or repository-graph behavior invalidates their recorded candidate identities.
 - Preserve cumulative token-impact history through the released v0.3.26-to-v0.4.0 database upgrade and every later compatible migration.
-- Keep the human token-impact TUI truthful and focused on persisted impact data, with a bounded static preview of real resolved repository-graph relations in wide terminals.
+- Keep the human token-impact TUI truthful and focused on persisted impact data, with a bounded connected and clustered static preview of real resolved repository-graph relations in wide terminals.
 - Prepare the `dev`-to-`main` promotion while keeping `main` and publication untouched until readiness is complete.
 - Create a separate non-milestone post-release issue that owns published-release verification and the user-requested safe branch, worktree, and external ProjectAtlas checkout cleanup.
 
@@ -31,7 +31,7 @@ ProjectAtlas v0.4.0 has completed its feature program, but review of the promoti
 - `language-intelligence-registry`: Require supported optional-parser archives to ship only through an exact clean-run release handoff.
 - `repository-intelligence-benchmarks`: Require published evaluation digests to match their named raw input and published system-scale and agent-navigation results to measure the final functional release candidate.
 - `token-telemetry`: Preserve cumulative usage history across compatible upgrades and require every human-dashboard value to derive from persisted telemetry or be explicitly unavailable.
-- `token-tui-dashboard`: Remove release/control comparisons and add a bounded non-interactive wide-layout atlas drawn only from resolved relations in the active project database.
+- `token-tui-dashboard`: Remove release/control comparisons and add a bounded connected, clustered, non-interactive wide-layout atlas drawn only from resolved relations in the active project database.
 
 ## Impact
 
@@ -39,7 +39,8 @@ This change affects OpenSpec release artifacts, GitHub issue #311, federated ser
 
 ## Non-Goals
 
-- Do not add another release workflow, installer architecture, generic evidence framework, runtime feature, crate, dependency, database migration, or MCP tool.
+- Do not add another release workflow, installer architecture, generic evidence framework, runtime feature, crate, dependency, graph application, database migration, or MCP tool.
+- Do not copy or link GPL `graf-rs` code.
 - Do not add an identity-specific database query or index without measured evidence that the existing bounded family reads plus anchored identity filtering are insufficient.
 - Do not weaken the milestone checklist gate or mark publication, verification, or cleanup complete before it happens.
 - Do not reopen completed #308 feature work or move #314 into v0.4.0.

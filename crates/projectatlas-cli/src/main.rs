@@ -24,6 +24,7 @@ use projectatlas_core::graph::{
 };
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
+use projectatlas_core::symbols::RelationKind;
 use projectatlas_core::telemetry::{
     TokenCalibrationOverview, TokenTrendWindow as CoreTokenTrendWindow, UsageInstanceOwner,
 };
@@ -37,8 +38,8 @@ use projectatlas_core::{
 };
 use projectatlas_db::{
     AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, ProjectRootTransition,
-    ProjectRootTransitionResult, RepositoryCoverageQuery, RepositoryGraphRelationQuery,
-    verify_project_database,
+    ProjectRootTransitionResult, RepositoryCoverageQuery, RepositoryGraphDirection,
+    RepositoryGraphRelationQuery, verify_project_database,
 };
 use projectatlas_service::{
     COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CodeSliceBudget, CodeSliceDraft, CoverageDiscoveryReport,
@@ -4111,14 +4112,19 @@ fn build_token_calibration(
 /// Load the tiny optional atlas preview through existing indexed relation-family reads.
 fn load_token_atlas_preview(store: &AtlasStore) -> TokenAtlasPreview {
     const RELATIONS_PER_FAMILY: u32 = 128;
-    const NEIGHBORHOOD_SEEDS: usize = 5;
-    const RELATIONS_PER_SEED_DIRECTION: u32 = 64;
+    const ADJACENCY_ROWS_PER_ROUND: usize = 512;
+    const ADJACENCY_ROUNDS: usize = 2;
+    const ADJACENCY_FRONTIER_MAX: usize = 128;
+    const SEEDS_PER_RELATION_FAMILY: usize = 4;
 
     let mut relations = Vec::with_capacity(
         GraphRelationKind::ALL.len() * usize::try_from(RELATIONS_PER_FAMILY).unwrap_or_default(),
     );
     let mut truncated = false;
     for relation in GraphRelationKind::ALL {
+        if !token_atlas_network_relation(relation) {
+            continue;
+        }
         let Ok(page) = store.repository_graph_relations(
             RepositoryGraphRelationQuery::Family { relation },
             RELATIONS_PER_FAMILY,
@@ -4139,38 +4145,70 @@ fn load_token_atlas_preview(store: &AtlasStore) -> TokenAtlasPreview {
         for endpoint in [relation.source(), target] {
             let entry = degrees
                 .entry(endpoint.digest().to_string())
-                .or_insert_with(|| (endpoint.clone(), 0_usize));
+                .or_insert_with(|| (endpoint.clone(), 0));
             entry.1 += 1;
         }
     }
-    let mut seeds = degrees_by_kind
-        .into_values()
-        .filter_map(|degrees| degrees.into_values().max_by_key(|(_, degree)| *degree))
-        .collect::<Vec<_>>();
-    seeds.sort_by(|left, right| right.1.cmp(&left.1));
-    let mut seen_seeds = BTreeSet::new();
-    seeds.retain(|(seed, _)| seen_seeds.insert(seed.digest().to_string()));
-    let mut neighborhood_relations = Vec::new();
-    for (seed, _) in seeds.into_iter().take(NEIGHBORHOOD_SEEDS) {
-        for query in [
-            RepositoryGraphRelationQuery::Outbound {
-                source: seed.clone(),
-            },
-            RepositoryGraphRelationQuery::Inbound { target: seed },
+    let mut seeds = BTreeMap::new();
+    for degrees in degrees_by_kind.into_values() {
+        let mut ranked = degrees.into_values().collect::<Vec<_>>();
+        ranked.sort_by(|left, right| {
+            right
+                .1
+                .cmp(&left.1)
+                .then_with(|| left.0.digest().cmp(right.0.digest()))
+        });
+        for (seed, _) in ranked.into_iter().take(SEEDS_PER_RELATION_FAMILY) {
+            seeds.insert(seed.digest().to_string(), seed);
+        }
+    }
+    let mut frontier = seeds.into_values().collect::<Vec<_>>();
+    let mut seen = frontier
+        .iter()
+        .map(|seed| seed.digest().to_string())
+        .collect::<BTreeSet<_>>();
+    for _ in 0..ADJACENCY_ROUNDS {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut next = BTreeMap::new();
+        for direction in [
+            RepositoryGraphDirection::Outbound,
+            RepositoryGraphDirection::Inbound,
         ] {
-            let Ok(page) = store.repository_graph_relations(query, RELATIONS_PER_SEED_DIRECTION)
-            else {
+            let page_limit = ((GraphLimits::MAX_ROWS as usize + 1) / frontier.len())
+                .saturating_sub(1)
+                .clamp(1, ADJACENCY_ROWS_PER_ROUND);
+            let Ok(page) = store.repository_graph_adjacency_page(
+                &frontier,
+                direction,
+                None,
+                u32::try_from(page_limit).unwrap_or(1),
+                None,
+            ) else {
                 return TokenAtlasPreview::unavailable();
             };
             truncated |= page.truncated;
-            neighborhood_relations.extend(page.rows);
+            for row in page.rows {
+                let relation = row.detail.relation;
+                if let Some(target) = relation.resolution().resolved_target() {
+                    for endpoint in [relation.source(), target] {
+                        if seen.insert(endpoint.digest().to_string()) {
+                            next.insert(endpoint.digest().to_string(), endpoint.clone());
+                        }
+                    }
+                }
+                relations.push(relation);
+            }
         }
+        frontier = next.into_values().take(ADJACENCY_FRONTIER_MAX).collect();
     }
-    if neighborhood_relations.is_empty() {
-        TokenAtlasPreview::from_relations(&relations, truncated)
-    } else {
-        TokenAtlasPreview::from_relations(&neighborhood_relations, truncated)
-    }
+    TokenAtlasPreview::from_relations(&relations, truncated)
+}
+
+/// Return whether a relation describes a cross-entity network link rather than containment.
+const fn token_atlas_network_relation(kind: GraphRelationKind) -> bool {
+    !matches!(kind, GraphRelationKind::Legacy(RelationKind::Contains))
 }
 
 /// Render root diagnostics as compact TOON.

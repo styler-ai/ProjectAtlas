@@ -72,7 +72,7 @@ The normal v0.4.0 database-open path SHALL preserve all compatible cumulative to
 - **THEN** the migration rolls back atomically and the last-valid predecessor database remains retryable without lost history
 
 ### Requirement: The token dashboard is truthful and focused
-The human token-impact dashboard SHALL derive every numeric field from the active project's persisted token report. It SHALL focus on tokens, lookups performed, and likely file-read calls avoided without release-version, frozen-baseline, plain-control, or repeated-work benchmark comparisons. At wide terminal sizes it MAY show a bounded non-interactive constellation drawn only from resolved logical relations in the active project database; it SHALL NOT invent graph rows or imply complete graph analysis.
+The human token-impact dashboard SHALL derive every numeric field from the active project's persisted token report. It SHALL focus on tokens, lookups performed, and likely file-read calls avoided without release-version, frozen-baseline, plain-control, or repeated-work benchmark comparisons. At wide terminal sizes it MAY show a bounded connected, clustered, and depth-cued non-interactive constellation drawn only from resolved logical relations in the active project database; it SHALL NOT invent graph rows or imply complete graph analysis.
 
 #### Scenario: Persisted impact is rendered
 - **WHEN** the dashboard renders an overview
@@ -80,7 +80,7 @@ The human token-impact dashboard SHALL derive every numeric field from the activ
 
 #### Scenario: A wide project graph is available
 - **WHEN** the active database returns resolved logical relations within the preview bounds
-- **THEN** the right panel renders a deterministic static atlas from only those rows and labels it as a bounded live snapshot
+- **THEN** the right panel renders one deterministic connected static atlas from only those rows, gives graph-derived cluster and depth cues, keeps every node and edge inside the panel, and labels it as a bounded live snapshot
 
 #### Scenario: The graph is empty, unavailable, or the terminal is narrow
 - **WHEN** no resolved preview rows are available, the optional preview read fails, or the terminal cannot fit both columns

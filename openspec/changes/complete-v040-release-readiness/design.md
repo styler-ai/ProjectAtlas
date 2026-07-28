@@ -24,14 +24,15 @@ The user also requires branch, worktree, and external ProjectAtlas checkout clea
 - Carry the same caller-or-service deadline into rendezvous SQLite reads and measure retained federation state without an additional encoded buffer.
 - Retain published system-scale and agent-navigation campaigns when their behavior-relevant inputs and measured artifact identities remain valid, and rerun only affected campaigns.
 - Preserve cumulative token-impact history when a released v0.3.26 database is upgraded to v0.4.0 and through later compatible migrations.
-- Keep the token-impact TUI focused on reconciled persisted impact data and use only real resolved SQLite relations for its bounded static wide-layout atlas.
+- Keep the token-impact TUI focused on reconciled persisted impact data and use only real resolved SQLite relations for its bounded connected, clustered, depth-cued static wide-layout atlas.
 - Keep `main`, tags, and GitHub releases untouched until all prepublication evidence is green.
 - Prepare a merge-commit `dev`-to-`main` promotion that can pass the existing milestone gate.
 - Preserve a durable post-release owner for independent publication verification and safe workspace consolidation.
 
 **Non-Goals:**
 
-- Add a crate, dependency, SQLite schema, migration, write path, identity-specific database query, CLI/MCP schema, or second release path.
+- Add a crate, dependency, SQLite schema, migration, write path, identity-specific database query, CLI/MCP schema, second graph authority, or second release path.
+- Copy or link the GPL `graf-rs` application.
 - Create a second release workflow, test framework, evidence ledger, or task-specific receipt scheme.
 - Reopen completed #308 work, absorb #314 into v0.4.0, or claim hosted success from local tests.
 - Delete any branch, worktree, or checkout before publication verification and unique-work inventory.
@@ -90,9 +91,11 @@ OpenSpec and GitHub tasks state the behavior and gate to complete. Existing Acti
 
 The existing append-only SQLite migration owner remains responsible for compatible upgrades. A released v0.3.26 schema fixture is opened through the normal v0.4.0 path, and the test compares cumulative overview and trend results before migration, after migration, and after reopen. A malformed-row case must roll back atomically. No replacement database, reset, export/import detour, schema addition, or new telemetry authority is introduced unless this compatibility proof exposes a concrete defect.
 
-The TUI consumes the same `TokenOverview` used by structured output, so all numeric fields remain derived rather than independently recalculated or fabricated. Wide terminals may additionally load a small, hard-bounded set of resolved logical relations through the existing indexed repository-graph family reader. The renderer stores only the sampled visual nodes and edges, draws a deterministic non-interactive constellation, labels it as a bounded live snapshot, and hides it at narrower widths. Unresolved or unavailable graph data is shown as empty or unavailable rather than replaced with demo content.
+The TUI consumes the same `TokenOverview` used by structured output, so all numeric fields remain derived rather than independently recalculated or fabricated. Wide terminals additionally seed from bounded resolved non-containment relation-family reads, expand through two rounds of the existing indexed inbound and outbound adjacency API, retain one connected component under 48-node, 64-edge, and per-node degree ceilings, and fail closed when the optional graph read is unavailable. The renderer stores only those sampled visual nodes and edges, labels the result as a bounded live snapshot, and hides it at narrower widths. Unresolved or unavailable graph data is shown as empty or unavailable rather than replaced with demo content.
 
-A new graph query, schema, index, dependency, interactive state model, or full graph explorer was rejected. The existing bounded reader and Ratatui Canvas already cover the release requirement; the separate interactive explorer remains post-v0.4.0 issue #357.
+One small in-file deterministic Fruchterman-Reingold layout settles the already bounded projection from graph-derived starting positions. Its quadratic pairwise force work is capped at 48 nodes and 120 iterations; rendering remains a Ratatui `Canvas` concern with graph-distance draw order, cluster colors, and muted edges. The published MIT `fdg-sim` crate was evaluated first, but its only release introduces an old duplicate `hashlink` line rejected by the repository dependency policy. Keeping the standard bounded calculation locally is smaller than weakening that gate or importing the GPL `graf-rs` interactive application.
+
+A new graph query, schema, index, dependency, write path, interactive state model, second graph authority, or full graph explorer was rejected. The existing indexed relation readers own SQLite access, the token TUI owns only the bounded in-memory one-shot layout, and Ratatui owns drawing. The separate interactive explorer remains post-v0.4.0 issue #357.
 
 ### Preserve the promotion rollback boundary
 
@@ -113,6 +116,7 @@ Until readiness is complete, `main`, tags, and releases remain untouched. If any
 - **A compatible upgrade resets cumulative token history** → Compare released v0.3.26 overview and trend totals before migration, after migration, and after reopen; require atomic rollback on invalid predecessor rows.
 - **The dashboard shows plausible but non-authoritative values** → Render numeric fields from the persisted report object, assert arithmetic and labels against it, and show unavailable state instead of fallback values.
 - **The miniature atlas implies complete graph analysis or consumes unbounded state** → Read only resolved rows through existing indexed bounded queries, cap nodes and edges, label the static preview, and keep the full explorer in #357.
+- **The miniature layout regresses into a clipped or unstable drawing** → Keep deterministic starting positions, force steps, and bounds covered by focused tests plus real wide, narrow, dark, light, and terminal-background review.
 - **The milestone gate becomes circular around post-release cleanup** → Keep #311 prepublication-only and create the non-milestone post-release owner before closure.
 - **A prepublish run is mistaken for publication** → Require `prepublish_only=true`, verify no tag or release was created, and leave publication to the existing main-triggered workflow.
 - **Installer or plugin state passes in source but fails when packaged** → Require real package/installer smoke and installed CLI/MCP behavior from the release workflow.

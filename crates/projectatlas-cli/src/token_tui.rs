@@ -1,6 +1,6 @@
 //! Purpose: Render token telemetry as package-backed terminal dashboards.
 
-use projectatlas_core::graph::{ExtendedRelationKind, GraphRelationKind, LogicalRelation};
+use projectatlas_core::graph::{GraphRelationKind, LogicalRelation};
 use projectatlas_core::symbols::RelationKind;
 use projectatlas_core::telemetry::{
     TOKEN_ACCOUNTING_OBSERVED_DELTA, TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_FULL_FILE,
@@ -18,7 +18,6 @@ use ratatui::widgets::{Axis, Block, Cell, Chart, Dataset, GraphType, Paragraph, 
 use ratatui::{Frame, Terminal};
 use std::cell::Cell as StdCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::f64::consts::TAU;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Fixed terminal height for the token overview dashboard snapshot.
@@ -35,12 +34,18 @@ const ATLAS_PREVIEW_MAX_NODES: usize = 48;
 const ATLAS_PREVIEW_MAX_EDGES: usize = 64;
 /// Maximum links one visual hub may consume in the decorative preview.
 const ATLAS_PREVIEW_MAX_NODE_DEGREE: usize = 12;
-/// Maximum links one relation family may consume in the decorative preview.
-const ATLAS_PREVIEW_MAX_EDGES_PER_KIND: usize = 16;
 /// Horizontal Canvas bound retaining a margin inside the atlas panel.
 const ATLAS_CANVAS_X_BOUND: f64 = 33.0;
 /// Vertical Canvas bound retaining a margin above the atlas footer.
 const ATLAS_CANVAS_Y_BOUND: f64 = 21.0;
+/// Fixed force steps keep the bounded static preview deterministic and fast.
+const ATLAS_LAYOUT_ITERATIONS: usize = 120;
+/// Ideal graph-space edge length for the bounded force layout.
+const ATLAS_LAYOUT_IDEAL_DISTANCE: f64 = 18.0;
+/// Maximum per-step node movement before deterministic cooling.
+const ATLAS_LAYOUT_INITIAL_TEMPERATURE: f64 = 8.0;
+/// Degree at which a node receives a small depth halo instead of a single point.
+const ATLAS_NODE_HALO_DEGREE: usize = 4;
 /// Fixed terminal height for the token trend dashboard snapshot.
 const TREND_DASHBOARD_HEIGHT: u16 = 30;
 /// Reserved terminal-canvas color; overview frames leave the shell background visible.
@@ -115,6 +120,8 @@ struct ThemePalette {
     bar_empty: Color,
     /// Negative/loss red.
     red: Color,
+    /// Repository graph accent.
+    purple: Color,
 }
 
 /// One real resolved relation retained by the bounded atlas preview.
@@ -184,6 +191,9 @@ impl TokenAtlasPreview {
     ) -> Self {
         let mut candidates = BTreeMap::new();
         for (source, target, kind) in relations {
+            if source == target {
+                continue;
+            }
             candidates
                 .entry((source.clone(), target.clone(), kind.as_str()))
                 .or_insert(AtlasPreviewEdge {
@@ -193,9 +203,23 @@ impl TokenAtlasPreview {
                 });
         }
         let mut degrees = BTreeMap::<String, usize>::new();
+        let mut network_degrees = BTreeMap::<String, usize>::new();
+        let mut adjacency = BTreeMap::<String, BTreeSet<String>>::new();
         for edge in candidates.values() {
             *degrees.entry(edge.source.clone()).or_default() += 1;
             *degrees.entry(edge.target.clone()).or_default() += 1;
+            if !matches!(edge.kind, GraphRelationKind::Legacy(RelationKind::Contains)) {
+                *network_degrees.entry(edge.source.clone()).or_default() += 1;
+                *network_degrees.entry(edge.target.clone()).or_default() += 1;
+            }
+            adjacency
+                .entry(edge.source.clone())
+                .or_default()
+                .insert(edge.target.clone());
+            adjacency
+                .entry(edge.target.clone())
+                .or_default()
+                .insert(edge.source.clone());
         }
         let mut candidates = candidates.into_values().collect::<Vec<_>>();
         candidates.sort_by(|left, right| {
@@ -210,53 +234,91 @@ impl TokenAtlasPreview {
                 .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
         });
 
-        let candidate_count = candidates.len();
-        let mut nodes = BTreeSet::new();
+        let mut remaining = adjacency.keys().cloned().collect::<BTreeSet<_>>();
+        let mut largest_component = BTreeSet::new();
+        while let Some(start) = remaining.first().cloned() {
+            remaining.remove(&start);
+            let mut component = BTreeSet::from([start.clone()]);
+            let mut frontier = VecDeque::from([start]);
+            while let Some(node) = frontier.pop_front() {
+                if let Some(neighbors) = adjacency.get(&node) {
+                    for neighbor in neighbors {
+                        if remaining.remove(neighbor) {
+                            component.insert(neighbor.clone());
+                            frontier.push_back(neighbor.clone());
+                        }
+                    }
+                }
+            }
+            let replace = component.len() > largest_component.len()
+                || (component.len() == largest_component.len()
+                    && component.first() < largest_component.first());
+            if replace {
+                largest_component = component;
+            }
+        }
+        let Some(hub) = largest_component
+            .iter()
+            .max_by(|left, right| {
+                network_degrees
+                    .get(*left)
+                    .cmp(&network_degrees.get(*right))
+                    .then_with(|| degrees.get(*left).cmp(&degrees.get(*right)))
+                    .then_with(|| right.cmp(left))
+            })
+            .cloned()
+        else {
+            return Self {
+                edges: Vec::new(),
+                truncated: source_truncated,
+                available: true,
+            };
+        };
+        let mut nodes = BTreeSet::from([hub]);
         let mut edges = Vec::new();
         let mut selected_degrees = BTreeMap::<String, usize>::new();
-        let mut selected_kinds = BTreeMap::<String, usize>::new();
-        let mut truncated = source_truncated || candidate_count > ATLAS_PREVIEW_MAX_EDGES;
-        for edge in candidates {
-            if selected_degrees
-                .get(&edge.source)
-                .copied()
-                .unwrap_or_default()
-                == ATLAS_PREVIEW_MAX_NODE_DEGREE
-                || selected_degrees
-                    .get(&edge.target)
+        while edges.len() < ATLAS_PREVIEW_MAX_EDGES {
+            let can_admit = |edge: &AtlasPreviewEdge| {
+                selected_degrees
+                    .get(&edge.source)
                     .copied()
                     .unwrap_or_default()
-                    == ATLAS_PREVIEW_MAX_NODE_DEGREE
-                || selected_kinds
-                    .get(edge.kind.as_str())
-                    .copied()
-                    .unwrap_or_default()
-                    == ATLAS_PREVIEW_MAX_EDGES_PER_KIND
-            {
-                truncated = true;
-                continue;
-            }
-            let additional_nodes = usize::from(!nodes.contains(&edge.source))
-                + usize::from(!nodes.contains(&edge.target));
-            if nodes.len() + additional_nodes > ATLAS_PREVIEW_MAX_NODES {
-                truncated = true;
-                continue;
-            }
+                    < ATLAS_PREVIEW_MAX_NODE_DEGREE
+                    && selected_degrees
+                        .get(&edge.target)
+                        .copied()
+                        .unwrap_or_default()
+                        < ATLAS_PREVIEW_MAX_NODE_DEGREE
+            };
+            let next_index = candidates
+                .iter()
+                .position(|edge| {
+                    let source_selected = nodes.contains(&edge.source);
+                    let target_selected = nodes.contains(&edge.target);
+                    source_selected != target_selected
+                        && nodes.len() < ATLAS_PREVIEW_MAX_NODES
+                        && can_admit(edge)
+                })
+                .or_else(|| {
+                    candidates.iter().position(|edge| {
+                        nodes.contains(&edge.source)
+                            && nodes.contains(&edge.target)
+                            && can_admit(edge)
+                    })
+                });
+            let Some(next_index) = next_index else {
+                break;
+            };
+            let edge = candidates.remove(next_index);
             nodes.insert(edge.source.clone());
             nodes.insert(edge.target.clone());
             *selected_degrees.entry(edge.source.clone()).or_default() += 1;
             *selected_degrees.entry(edge.target.clone()).or_default() += 1;
-            *selected_kinds
-                .entry(edge.kind.as_str().to_string())
-                .or_default() += 1;
             edges.push(edge);
-            if edges.len() == ATLAS_PREVIEW_MAX_EDGES {
-                break;
-            }
         }
         Self {
             edges,
-            truncated,
+            truncated: source_truncated || !candidates.is_empty(),
             available: true,
         }
     }
@@ -284,6 +346,7 @@ const LIGHT_THEME: ThemePalette = ThemePalette {
     border: Color::Rgb(175, 151, 111),
     bar_empty: Color::Rgb(218, 210, 196),
     red: Color::Rgb(190, 52, 52),
+    purple: Color::Rgb(126, 70, 180),
 };
 
 thread_local! {
@@ -1151,12 +1214,14 @@ fn render_atlas_map(frame: &mut Frame<'_>, area: Rect, atlas: &TokenAtlasPreview
     }
 
     let layout = atlas_layout(&atlas.edges);
-    let mut node_colors = BTreeMap::new();
-    for edge in &atlas.edges {
-        let color = atlas_relation_color(edge.kind);
-        node_colors.entry(edge.source.as_str()).or_insert(color);
-        node_colors.entry(edge.target.as_str()).or_insert(color);
-    }
+    let mut node_order = layout.nodes.iter().collect::<Vec<_>>();
+    node_order.sort_by(|left, right| {
+        right
+            .1
+            .distance
+            .cmp(&left.1.distance)
+            .then_with(|| left.0.cmp(right.0))
+    });
     let canvas = Canvas::default()
         .background_color(THEME_PANEL)
         .marker(symbols::Marker::Braille)
@@ -1165,35 +1230,36 @@ fn render_atlas_map(frame: &mut Frame<'_>, area: Rect, atlas: &TokenAtlasPreview
         .paint(|context| {
             for edge in &atlas.edges {
                 let (Some(source), Some(target)) = (
-                    layout.positions.get(&edge.source),
-                    layout.positions.get(&edge.target),
+                    layout.nodes.get(&edge.source),
+                    layout.nodes.get(&edge.target),
                 ) else {
                     continue;
                 };
                 context.draw(&CanvasLine::new(
-                    source.0,
-                    source.1,
-                    target.0,
-                    target.1,
-                    atlas_relation_color(edge.kind),
+                    source.x,
+                    source.y,
+                    target.x,
+                    target.y,
+                    THEME_BAR_EMPTY,
                 ));
             }
             context.layer();
-            for (node, (x, y)) in &layout.positions {
-                let color = if *node == layout.hub {
+            for (node, placement) in &node_order {
+                let color = if node.as_str() == layout.hub {
                     THEME_INK_WHITE
                 } else {
-                    node_colors
-                        .get(node.as_str())
-                        .copied()
-                        .unwrap_or(THEME_MUTED)
+                    atlas_cluster_color(placement.cluster)
                 };
-                if *node == layout.hub {
-                    context.draw(&Circle::new(*x, *y, 1.45, THEME_YELLOW));
-                    let center = [(*x, *y)];
+                if node.as_str() == layout.hub {
+                    context.draw(&Circle::new(placement.x, placement.y, 0.9, THEME_YELLOW));
+                    let center = [(placement.x, placement.y)];
                     context.draw(&Points::new(&center, THEME_INK_WHITE));
                 } else {
-                    context.draw(&Circle::new(*x, *y, 0.72, color));
+                    if placement.degree >= ATLAS_NODE_HALO_DEGREE {
+                        context.draw(&Circle::new(placement.x, placement.y, 0.5, color));
+                    }
+                    let point = [(placement.x, placement.y)];
+                    context.draw(&Points::new(&point, color));
                 }
             }
         });
@@ -1251,15 +1317,30 @@ fn render_atlas_message(frame: &mut Frame<'_>, area: Rect, title: &str, detail: 
     );
 }
 
+/// One force-settled node placement with graph-derived depth and cluster cues.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AtlasNodePlacement {
+    /// Horizontal Canvas coordinate.
+    x: f64,
+    /// Vertical Canvas coordinate.
+    y: f64,
+    /// Undirected degree within the bounded preview.
+    degree: usize,
+    /// Shortest graph distance from the central hub.
+    distance: usize,
+    /// Stable first-hop branch used for cluster coloring.
+    cluster: usize,
+}
+
 /// Deterministic centered layout for the small resolved-relation projection.
 struct AtlasLayout {
     /// Stable node positions inside the fixed Canvas safety margin.
-    positions: BTreeMap<String, (f64, f64)>,
+    nodes: BTreeMap<String, AtlasNodePlacement>,
     /// Highest-connectivity node anchored at the geometric center.
     hub: String,
 }
 
-/// Place the strongest connected component at center and distribute satellites radially.
+/// Settle one connected graph with the reusable force engine and center its strongest hub.
 fn atlas_layout(edges: &[AtlasPreviewEdge]) -> AtlasLayout {
     let mut adjacency = BTreeMap::<String, BTreeSet<String>>::new();
     for edge in edges {
@@ -1282,103 +1363,163 @@ fn atlas_layout(edges: &[AtlasPreviewEdge]) -> AtlasLayout {
         })
         .map(|(node, _)| node.clone())
         .unwrap_or_default();
-    let mut remaining = adjacency.keys().cloned().collect::<BTreeSet<_>>();
-    let mut components = Vec::<Vec<String>>::new();
-    while let Some(start) = remaining.first().cloned() {
-        remaining.remove(&start);
-        let mut frontier = VecDeque::from([start]);
-        let mut component = Vec::new();
-        while let Some(node) = frontier.pop_front() {
-            component.push(node.clone());
-            if let Some(neighbors) = adjacency.get(&node) {
-                for neighbor in neighbors {
-                    if remaining.remove(neighbor) {
-                        frontier.push_back(neighbor.clone());
-                    }
+    if hub.is_empty() {
+        return AtlasLayout {
+            nodes: BTreeMap::new(),
+            hub,
+        };
+    }
+
+    let mut branch_and_distance = BTreeMap::<String, (usize, usize)>::new();
+    branch_and_distance.insert(hub.clone(), (0, 0));
+    let hub_neighbors = adjacency.get(&hub).cloned().unwrap_or_default();
+    let mut frontier = VecDeque::new();
+    for (cluster, neighbor) in hub_neighbors.iter().enumerate() {
+        branch_and_distance.insert(neighbor.clone(), (cluster, 1));
+        frontier.push_back(neighbor.clone());
+    }
+    while let Some(node) = frontier.pop_front() {
+        let Some((cluster, distance)) = branch_and_distance.get(&node).copied() else {
+            continue;
+        };
+        if let Some(neighbors) = adjacency.get(&node) {
+            for neighbor in neighbors {
+                if !branch_and_distance.contains_key(neighbor) {
+                    branch_and_distance.insert(neighbor.clone(), (cluster, distance + 1));
+                    frontier.push_back(neighbor.clone());
                 }
             }
         }
-        component.sort();
-        components.push(component);
     }
-    components.sort_by(|left, right| {
-        let left_has_hub = left.contains(&hub);
-        let right_has_hub = right.contains(&hub);
-        right_has_hub
-            .cmp(&left_has_hub)
-            .then_with(|| right.len().cmp(&left.len()))
-            .then_with(|| left.first().cmp(&right.first()))
-    });
 
-    let satellite_count = components.len().saturating_sub(1).max(1);
-    let mut positions = BTreeMap::new();
-    for (component_index, component) in components.iter().enumerate() {
-        let (center_x, center_y) = if component_index == 0 {
+    let branch_count = hub_neighbors.len().max(1);
+    let mut branch_ordinals = BTreeMap::<usize, usize>::new();
+    let node_names = adjacency.keys().cloned().collect::<Vec<_>>();
+    let node_indexes = node_names
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut positions = Vec::with_capacity(node_names.len());
+    for node in &node_names {
+        let (cluster, distance) = branch_and_distance.get(node).copied().unwrap_or_default();
+        let location = if *node == hub {
             (0.0, 0.0)
         } else {
-            let angle = TAU * (component_index - 1) as f64 / satellite_count as f64;
-            (24.0 * angle.cos(), 15.0 * angle.sin())
+            let ordinal = branch_ordinals.entry(cluster).or_default();
+            let offset = (*ordinal % 5) as f64 - 2.0;
+            let ring = (*ordinal / 5) as f64;
+            *ordinal += 1;
+            let angle =
+                std::f64::consts::TAU * cluster as f64 / branch_count as f64 + offset * 0.22;
+            let radius = 22.0 + distance as f64 * 16.0 + ring * 6.0;
+            (radius * angle.cos(), radius * angle.sin())
         };
-        let component_hub = if component_index == 0 {
-            hub.as_str()
-        } else {
-            component
-                .iter()
-                .max_by(|left, right| {
-                    adjacency
-                        .get(*left)
-                        .map_or(0, BTreeSet::len)
-                        .cmp(&adjacency.get(*right).map_or(0, BTreeSet::len))
-                        .then_with(|| right.cmp(left))
-                })
-                .map_or("", String::as_str)
-        };
-        positions.insert(component_hub.to_string(), (center_x, center_y));
-        let others = component
-            .iter()
-            .filter(|node| node.as_str() != component_hub)
-            .collect::<Vec<_>>();
-        for (node_index, node) in others.iter().enumerate() {
-            let ring = node_index / 12;
-            let ring_start = ring * 12;
-            let ring_members = (others.len() - ring_start).min(12);
-            let angle = TAU * (node_index - ring_start) as f64 / ring_members.max(1) as f64;
-            let radius = if component_index == 0 {
-                4.8 + ring as f64 * 4.0
-            } else {
-                3.2 + ring as f64 * 1.2
-            };
-            positions.insert(
-                (*node).clone(),
-                (
-                    (center_x + radius * 1.35 * angle.cos())
-                        .clamp(-ATLAS_CANVAS_X_BOUND + 1.5, ATLAS_CANVAS_X_BOUND - 1.5),
-                    (center_y + radius * angle.sin())
-                        .clamp(-ATLAS_CANVAS_Y_BOUND + 1.5, ATLAS_CANVAS_Y_BOUND - 1.5),
-                ),
-            );
-        }
+        positions.push(location);
     }
-    AtlasLayout { positions, hub }
+    let indexed_edges = edges
+        .iter()
+        .filter_map(|edge| {
+            Some((
+                *node_indexes.get(&edge.source)?,
+                *node_indexes.get(&edge.target)?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    settle_atlas_layout(&mut positions, &indexed_edges);
+
+    let hub_location = node_indexes
+        .get(&hub)
+        .and_then(|index| positions.get(*index))
+        .copied()
+        .unwrap_or_default();
+    let (max_x, max_y) = positions.iter().fold((0.0_f64, 0.0_f64), |(x, y), node| {
+        (
+            x.max((node.0 - hub_location.0).abs()),
+            y.max((node.1 - hub_location.1).abs()),
+        )
+    });
+    let x_scale = if max_x > f64::EPSILON {
+        (ATLAS_CANVAS_X_BOUND - 3.0) / max_x
+    } else {
+        1.0
+    };
+    let y_scale = if max_y > f64::EPSILON {
+        (ATLAS_CANVAS_Y_BOUND - 3.0) / max_y
+    } else {
+        1.0
+    };
+    let mut nodes = BTreeMap::new();
+    for (node, location) in node_names.into_iter().zip(positions) {
+        let (cluster, distance) = branch_and_distance.get(&node).copied().unwrap_or_default();
+        nodes.insert(
+            node.clone(),
+            AtlasNodePlacement {
+                x: (location.0 - hub_location.0) * x_scale,
+                y: (location.1 - hub_location.1) * y_scale,
+                degree: adjacency.get(&node).map_or(0, BTreeSet::len),
+                distance,
+                cluster,
+            },
+        );
+    }
+    AtlasLayout { nodes, hub }
 }
 
-/// Map typed relation families to stable semantic constellation colors.
-const fn atlas_relation_color(kind: GraphRelationKind) -> Color {
-    match kind {
-        GraphRelationKind::Legacy(RelationKind::Contains) => THEME_YELLOW,
-        GraphRelationKind::Legacy(RelationKind::Imports | RelationKind::DependsOn) => THEME_BLUE,
-        GraphRelationKind::Legacy(RelationKind::Calls)
-        | GraphRelationKind::Extended(
-            ExtendedRelationKind::References
-            | ExtendedRelationKind::Reads
-            | ExtendedRelationKind::Writes,
-        ) => THEME_GREEN,
-        GraphRelationKind::Extended(
-            ExtendedRelationKind::Tests
-            | ExtendedRelationKind::RoutesTo
-            | ExtendedRelationKind::Configures
-            | ExtendedRelationKind::Deploys,
-        ) => THEME_PURPLE,
+/// Settle the tiny deterministic preview with bounded Fruchterman-Reingold steps.
+fn settle_atlas_layout(positions: &mut [(f64, f64)], edges: &[(usize, usize)]) {
+    let mut displacement = vec![(0.0, 0.0); positions.len()];
+    for iteration in 0..ATLAS_LAYOUT_ITERATIONS {
+        displacement.fill((0.0, 0.0));
+        for left in 0..positions.len() {
+            for right in left + 1..positions.len() {
+                let delta = (
+                    positions[left].0 - positions[right].0,
+                    positions[left].1 - positions[right].1,
+                );
+                let distance = delta.0.hypot(delta.1).max(0.01);
+                let force = ATLAS_LAYOUT_IDEAL_DISTANCE.powi(2) / distance;
+                let unit = (delta.0 / distance, delta.1 / distance);
+                displacement[left].0 += unit.0 * force;
+                displacement[left].1 += unit.1 * force;
+                displacement[right].0 -= unit.0 * force;
+                displacement[right].1 -= unit.1 * force;
+            }
+        }
+        for &(source, target) in edges {
+            let delta = (
+                positions[source].0 - positions[target].0,
+                positions[source].1 - positions[target].1,
+            );
+            let distance = delta.0.hypot(delta.1).max(0.01);
+            let force = distance.powi(2) / ATLAS_LAYOUT_IDEAL_DISTANCE;
+            let unit = (delta.0 / distance, delta.1 / distance);
+            displacement[source].0 -= unit.0 * force;
+            displacement[source].1 -= unit.1 * force;
+            displacement[target].0 += unit.0 * force;
+            displacement[target].1 += unit.1 * force;
+        }
+        let temperature = (ATLAS_LAYOUT_INITIAL_TEMPERATURE
+            * (1.0 - iteration as f64 / ATLAS_LAYOUT_ITERATIONS as f64))
+            .max(0.1);
+        for (position, delta) in positions.iter_mut().zip(&displacement) {
+            let distance = delta.0.hypot(delta.1);
+            if distance > f64::EPSILON {
+                let step = distance.min(temperature) / distance;
+                position.0 += delta.0 * step;
+                position.1 += delta.1 * step;
+            }
+        }
+    }
+}
+
+/// Map graph-derived first-hop branches to the stable dashboard accent palette.
+const fn atlas_cluster_color(cluster: usize) -> Color {
+    match cluster % 4 {
+        0 => THEME_BLUE,
+        1 => THEME_GREEN,
+        2 => THEME_YELLOW,
+        _ => THEME_PURPLE,
     }
 }
 
@@ -2221,6 +2362,7 @@ fn remap_to_light_theme(color: Color) -> Color {
         THEME_BORDER => LIGHT_THEME.border,
         THEME_BAR_EMPTY => LIGHT_THEME.bar_empty,
         THEME_RED => LIGHT_THEME.red,
+        THEME_PURPLE => LIGHT_THEME.purple,
         _ => color,
     }
 }
@@ -2329,7 +2471,7 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::style::{Color, Modifier};
     use ratatui::text::Line;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
     #[test]
     fn dashboard_width_prefers_override_then_terminal_then_fallback() {
@@ -2819,7 +2961,7 @@ mod tests {
     }
 
     #[test]
-    fn atlas_preview_is_bounded_and_centers_the_strongest_hub() {
+    fn atlas_preview_is_bounded_connected_and_centers_the_strongest_hub() {
         let kinds = [
             GraphRelationKind::Legacy(RelationKind::Contains),
             GraphRelationKind::Legacy(RelationKind::Imports),
@@ -2827,42 +2969,90 @@ mod tests {
             GraphRelationKind::Legacy(RelationKind::DependsOn),
         ];
         let mut relations = Vec::new();
-        for (kind_index, kind) in kinds.into_iter().enumerate() {
-            let base = kind_index * 12;
-            for source in 0..12 {
-                for distance in 1..=3 {
-                    relations.push((
-                        format!("node-{:02}", base + source),
-                        format!("node-{:02}", base + (source + distance) % 12),
-                        kind,
-                    ));
-                }
+        for branch in 0..12 {
+            let branch_length = if branch < 11 { 4 } else { 3 };
+            let root = format!("branch-{branch:02}-00");
+            relations.push(("hub".to_string(), root.clone(), kinds[branch % kinds.len()]));
+            let mut previous = root.clone();
+            for depth in 1..branch_length {
+                let node = format!("branch-{branch:02}-{depth:02}");
+                relations.push((
+                    previous,
+                    node.clone(),
+                    kinds[(branch + depth) % kinds.len()],
+                ));
+                previous = node;
             }
+            relations.push((root, previous, kinds[(branch + 1) % kinds.len()]));
         }
+        for branch in 0..5 {
+            relations.push((
+                format!("branch-{branch:02}-02"),
+                format!("branch-{:02}-02", branch + 1),
+                kinds[(branch + 2) % kinds.len()],
+            ));
+        }
+        relations.extend([
+            ("island-a".to_string(), "island-b".to_string(), kinds[0]),
+            ("island-b".to_string(), "island-c".to_string(), kinds[1]),
+        ]);
 
         let atlas = TokenAtlasPreview::from_resolved_edges(relations, false);
         let layout = atlas_layout(&atlas.edges);
+        let repeated_layout = atlas_layout(&atlas.edges);
 
         assert!(atlas.available);
         assert!(atlas.truncated);
-        assert!(atlas.node_count() <= ATLAS_PREVIEW_MAX_NODES);
+        assert_eq!(atlas.node_count(), ATLAS_PREVIEW_MAX_NODES);
         assert_eq!(atlas.edges.len(), ATLAS_PREVIEW_MAX_EDGES);
-        assert_eq!(layout.positions.get(&layout.hub), Some(&(0.0, 0.0)));
+        assert_eq!(layout.hub, "hub");
+        let Some(hub) = layout.nodes.get(&layout.hub) else {
+            unreachable!("connected atlas should retain its hub placement");
+        };
+        assert_eq!((hub.x, hub.y), (0.0, 0.0));
+        assert_eq!(layout.nodes, repeated_layout.nodes);
+        assert!(
+            atlas.edges.iter().all(
+                |edge| !edge.source.starts_with("island") && !edge.target.starts_with("island")
+            )
+        );
         let mut selected_degrees = BTreeMap::<&str, usize>::new();
+        let mut adjacency = BTreeMap::<&str, BTreeSet<&str>>::new();
         for edge in &atlas.edges {
             *selected_degrees.entry(&edge.source).or_default() += 1;
             *selected_degrees.entry(&edge.target).or_default() += 1;
+            adjacency
+                .entry(&edge.source)
+                .or_default()
+                .insert(&edge.target);
+            adjacency
+                .entry(&edge.target)
+                .or_default()
+                .insert(&edge.source);
         }
         assert!(
             selected_degrees
                 .values()
                 .all(|degree| *degree <= ATLAS_PREVIEW_MAX_NODE_DEGREE)
         );
+        let mut visited = BTreeSet::from([layout.hub.as_str()]);
+        let mut frontier = VecDeque::from([layout.hub.as_str()]);
+        while let Some(node) = frontier.pop_front() {
+            if let Some(neighbors) = adjacency.get(node) {
+                for neighbor in neighbors {
+                    if visited.insert(*neighbor) {
+                        frontier.push_back(*neighbor);
+                    }
+                }
+            }
+        }
+        assert_eq!(visited.len(), atlas.node_count());
         assert!(
             layout
-                .positions
+                .nodes
                 .values()
-                .all(|(x, y)| x.abs() < ATLAS_CANVAS_X_BOUND && y.abs() < ATLAS_CANVAS_Y_BOUND)
+                .all(|node| node.x.abs() < ATLAS_CANVAS_X_BOUND
+                    && node.y.abs() < ATLAS_CANVAS_Y_BOUND)
         );
     }
 
@@ -2873,8 +3063,8 @@ mod tests {
             .map(|index| ("hub".to_string(), format!("node-{index}"), kind))
             .collect::<Vec<_>>();
         relations.extend([
+            ("node-0".to_string(), "satellite-a".to_string(), kind),
             ("satellite-a".to_string(), "satellite-b".to_string(), kind),
-            ("satellite-b".to_string(), "satellite-c".to_string(), kind),
         ]);
         let atlas = TokenAtlasPreview::from_resolved_edges(relations, false);
         let buffer =
@@ -2882,7 +3072,7 @@ mod tests {
         let dashboard = buffer_to_string(&buffer);
 
         assert!(dashboard.contains(&reference_title("ATLAS MAP")));
-        assert!(dashboard.contains("10 nodes • 8 links"));
+        assert!(dashboard.contains("9 nodes • 8 links"));
         assert!(dashboard.contains("bounded live graph • static snapshot"));
         assert!(buffer_contains_braille(
             &buffer,
