@@ -1,6 +1,6 @@
 ## Context
 
-Issue #308 and its feature proof are closed, #340 and #341 are merged and closed, and the first #311 reconciliation reached `dev`. Fresh Codex review of successive exact promotion heads then found five blockers: `02-Release` did not publish the supported optional-parser archives, federated rendezvous discovery reapplied trust filters without preserving the primary anchor and direction, the published MCP composition evaluation named a stale raw-input digest, rendezvous database reads lacked the service-owned deadline, and exact federation byte accounting allocated avoidable duplicate encodings. The affected candidate and proof tasks must be reopened rather than inferred from older green heads.
+Issue #308 and its feature proof are closed, #340 and #341 are merged and closed, and the first #311 reconciliation reached `dev`. Fresh Codex review of successive exact promotion heads then found five blockers: `02-Release` did not publish the supported optional-parser archives, federated rendezvous discovery reapplied trust filters without preserving the primary anchor and direction, the published MCP composition evaluation named a stale raw-input digest, rendezvous database reads lacked the service-owned deadline, and exact federation byte accounting allocated avoidable duplicate encodings. A later exact-head review found two more stale-proof blockers: the published system-scale and agent-navigation campaigns were still bound to functional heads predating release-affecting runtime, packaged-skill, MCP, relation-service, and repository-graph changes. The affected candidate and proof tasks must be reopened rather than inferred from older green heads.
 
 The existing release path already has the required mechanics:
 
@@ -22,6 +22,7 @@ The user also requires branch, worktree, and external ProjectAtlas checkout clea
 - Publish both supported optional-parser archives only after binding them to one clean all-platform run and the exact release tree.
 - Keep federated rendezvous evidence inside the primary anchor/direction result without changing SQLite schema or query ownership.
 - Carry the same caller-or-service deadline into rendezvous SQLite reads and measure retained federation state without an additional encoded buffer.
+- Reproduce the published system-scale and agent-navigation campaigns against the final functional release candidate and refresh every owning candidate identity and result.
 - Keep `main`, tags, and GitHub releases untouched until all prepublication evidence is green.
 - Prepare an exact `dev`-to-`main` promotion that can pass the existing milestone gate.
 - Preserve a durable post-release owner for independent publication verification and safe workspace consolidation.
@@ -52,6 +53,12 @@ The existing relation request control remains the cancellation and deadline owne
 ### Bind published benchmark metadata to its raw input
 
 Both the human-readable and machine-readable MCP composition evaluations name the SHA-256 of the same raw JSON input. The existing release gate computes and compares that digest directly; no benchmark receipt framework or task-specific identifier is added.
+
+### Bind published campaigns to the functional release candidate
+
+The system-scale and agent-navigation preregistrations must identify a functional head that contains every release-affecting runtime, packaged-skill, MCP inventory/schema, relation-service, and repository-graph behavior change. Their existing runtime, skill, tool-inventory, and source-state validation remains the authority. Benchmark lock, raw-result, evaluation, landing-copy, and finite checklist commits may follow the functional head only when they do not change product behavior.
+
+Any later release-affecting behavior change invalidates the affected publication and requires a fresh lock and rerun. Reusing the existing harnesses and publication formats was selected over a new release benchmark framework because the missing control is candidate currentness, not orchestration capability.
 
 ### Bind readiness to one exact promotion head
 
@@ -92,6 +99,7 @@ Until readiness is complete, `main`, tags, and releases remain untouched. If any
 - **A rendezvous family query runs past the service deadline** → Bind every database call to the existing caller-or-service request control.
 - **Exact federation accounting doubles retained memory while measuring it** → Stream serialized-equivalent bytes into the existing counter without retaining another encoding.
 - **Published MCP composition metadata names stale input** → Compute its raw input SHA-256 and compare both published representations in the release gate.
+- **Published system-scale or agent-navigation results measure pre-candidate behavior** → Bind both campaigns to the final functional head and current runtime, skill, and tool identities; invalidate and rerun after any later release-affecting behavior change.
 - **The milestone gate becomes circular around post-release cleanup** → Keep #311 prepublication-only and create the non-milestone post-release owner before closure.
 - **A prepublish run is mistaken for publication** → Require `prepublish_only=true`, verify no tag or release was created, and leave publication to the existing main-triggered workflow.
 - **Installer or plugin state passes in source but fails when packaged** → Require real package/installer smoke and installed CLI/MCP behavior from the release workflow.
@@ -103,7 +111,7 @@ Until readiness is complete, `main`, tags, and releases remain untouched. If any
 2. Add this change to `openspec/issue-map.json` and replace #311's obsolete body with the exact local checklist.
 3. Complete and close #341 after its Linux and Windows empty-cache proof and land its reconciled checklist state.
 4. Land the supported optional-parser release handoff, anchored and deadline-bound federation filtering with allocation-free byte accounting, benchmark digest correction, focused tests, specs, and architecture diagram.
-5. Merge all remaining readiness artifacts into `dev`, then lock the corrected release-content head.
+5. Merge all remaining readiness artifacts into `dev`, relock and rerun the system-scale and agent-navigation publications on that final functional candidate, then lock the corrected release-content head.
 6. Run the complete local gates, exact-head `01-CI`, clean optional-parser proof, and `02-Release` with `prepublish_only=true` and the exact clean handoff on that head.
 7. Reconcile #311 in one task-state-only commit and mirror the GitHub checklist; its resulting `dev` SHA is the exact promotion head.
 8. Run ordinary exact-head CI, strict OpenSpec, IssueOps, ProjectAtlas low lint, review checks, and a clean optional-parser handoff on the promotion head, close #311, and then pass milestone IssueOps.

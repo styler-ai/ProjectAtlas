@@ -10,7 +10,7 @@ analysis views are current v0.4 behavior. The representative task-7.3 forward
 test passes its clean, saved-dirty, and non-Git compatibility boundaries. The
 final task-7.6 campaign retained all 45 preregistered v0.4, frozen-v0.3.26, and
 plain trials: v0.4 completed all 15, frozen v0.3.26 failed its three pinned
-VS Code setups, and final manual review passed 41 of 42 completed answers. The
+VS Code setups, and final manual review passed 35 of 42 completed answers. The
 [agent evaluation](benchmarks/v0.4-agent-navigation-evaluation.md)
 reports the measured strengths, medium-context regression, huge indexing cost,
 plain-control advantage, and limitations without claiming universal savings.
@@ -337,10 +337,10 @@ ProjectAtlas 0.4 preserves the complete 0.3.26 MCP inventory, names, request sch
 
 Issue #308 does not classify, hide, consolidate, or remove public tools. It records the packaged v0.4 inventory and discovery measurements as the baseline for issue #310, which separately owns any post-v0.4 compact/default selection or breaking rationalization.
 
-The frozen post-composition v0.4 candidate advertises the same 40 tool names.
-Its compact serialized `tools/list` tool array is 37,299 bytes, or 9,325
+The exact final v0.4 candidate advertises the same 40 tool names. Its compact
+serialized `tools/list` tool array is 37,426 bytes, or 9,357
 heuristic four-byte tokens, compared with 28,933 bytes and 7,234 heuristic
-tokens for the frozen v0.3.26 array. That 28.9% discovery growth is retained as
+tokens for the frozen v0.3.26 array. That 29.4% discovery growth is retained as
 the honest post-v0.4 #310 baseline. The compatibility E2E compares every name
 and description plus the complete recursive legacy request-schema tree; v0.4
 fields remain additive. The task-7.3.1 composition evaluation selected only an
@@ -439,10 +439,10 @@ backtracks from two to zero, broad content calls from three to zero, and emitted
 MCP evidence from 19,094 to 15,295 bytes. Each fixture is non-regressing:
 clean falls 23.4%, dirty 27.9%, and non-Git 6.3%.
 
-The complete compatible discovery array remains larger: 37,299 bytes versus
-28,933. Discovery plus response therefore increases 20.1%. The matching v0.4
-skill is 15,860 bytes versus 33,977 for v0.3.26, so independent cold-session
-context falls 15.9% overall. The
+That historical task-7.3 candidate's complete compatible discovery array was
+37,299 bytes versus 28,933. Discovery plus response therefore increased 20.1%.
+Its matching v0.4 skill was 15,860 bytes versus 33,977 for v0.3.26, so that
+independent cold-session context fell 15.9% overall. The
 [agent report](benchmarks/v0.4-agent-navigation-evaluation.md) and
 [machine-readable trials](benchmarks/v0.4-mcp-agent-trials.json) preserve both
 boundaries, exact call sequences, candidate identities, raw usage metadata, and
@@ -453,17 +453,18 @@ limitations.
 After tasks 7.4 and 7.5 stabilized the candidate, the final campaign ran three
 repeats of five corpora across v0.4, frozen v0.3.26, and no ProjectAtlas. All
 45 rows remain in the
-[raw result](benchmarks/v0.4-agent-navigation-results.json); none was excluded.
+[published result](benchmarks/v0.4-agent-navigation-results.json); none was excluded.
 V0.4 and plain completed 15/15. Frozen v0.3.26 completed 12/15 and failed every
 pinned VS Code setup on a tracked non-UTF-8 source file.
 
-Manual review found all 42 produced answers substantively correct. One v0.4
-answer had invalid temporary-root citation targets, leaving a 41/42 final
-manual result. V0.4 reduced median net navigation context 28–30%
-against v0.3.26 on the small tasks and reduced several call/read counts, but
-regressed medium net context by 47% and could not be compared with v0.3.26 on
-huge source. Plain navigation used the least context on every corpus. V0.4's
-huge setup cost a median 618 seconds, 2.31 GiB peak RSS, and 3.72 GiB
+Manual review found all 42 produced answers substantively correct. Seven
+answers had invalid temporary-root citation targets, leaving a 35/42 final
+manual result: 12/15 for v0.4, 11/12 for frozen v0.3.26, and 12/15 for plain.
+V0.4 reduced median net navigation context 18.5–19.6% against v0.3.26 on the
+small tasks and reduced several call/read counts, but used 2,356.8% more medium
+net context and 11.1% more median calls. It could not be compared with v0.3.26
+on huge source. Plain navigation used the least context on every corpus. V0.4's
+huge setup cost a median 763.1 seconds, 2.31 GiB peak RSS, and 3.72 GiB
 persistent storage before the agent task.
 
 The reviewed report publishes absolute values, median and observed-maximum

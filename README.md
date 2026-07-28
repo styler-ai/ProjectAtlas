@@ -74,14 +74,14 @@ For active sessions, the agent can run the watcher so file edits continuously re
 The final v0.4 navigation campaign retained all 45 preregistered trials:
 ProjectAtlas v0.4 completed 15/15, frozen v0.3.26 completed 12/15 and failed all
 three pinned VS Code setups, and the plain control completed 15/15. The final
-manual result was 41/42 completed answers; the one remaining v0.4 answer was
-technically correct but linked to invalid temporary paths. Against v0.3.26,
-v0.4 cut median net navigation context by 28–30% on the
-three small tasks, but used 47% more on the medium task. Plain navigation used
-the least context at every measured scale, while v0.4 avoided several broad and
-full reads at the cost of indexing, discovery, and skill context. See the
+manual result was 35/42 completed answers: all 42 were substantively correct,
+but seven used invalid temporary-root citation targets. Against v0.3.26, v0.4
+cut median net navigation context by 18.5–19.6% on the three small tasks, but
+used 2,356.8% more on the medium task. Plain navigation used the least context
+at every measured scale, while v0.4 avoided several broad and full reads at the
+cost of indexing, discovery, and skill context. See the
 [reviewed report](docs/benchmarks/v0.4-agent-navigation-evaluation.md) and
-[raw 45-trial result](docs/benchmarks/v0.4-agent-navigation-results.json).
+[published 45-trial result](docs/benchmarks/v0.4-agent-navigation-results.json).
 
 The token-overview record below is intentionally a separate representative
 large-application audit, not a marketing constant or the controlled
