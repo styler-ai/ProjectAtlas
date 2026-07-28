@@ -89,8 +89,8 @@
     }
   },
   "candidate": {
-    "functional_head": "0ffeffb21818f8d648d9149204b00deee26bbabd",
-    "checklist_head": "0f0f8f84c2519977f53103c5767b49fb3074ea76",
+    "functional_head": "accefcd7edc54ce6a784cba14e162178df9f78c4",
+    "checklist_head": "accefcd7edc54ce6a784cba14e162178df9f78c4",
     "setup_timeout_seconds": 1800,
     "codex": {
       "executable": "${APPDATA}/npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
@@ -138,7 +138,7 @@
     "arms": {
       "v0.4": {
         "runtime": "target/release/projectatlas.exe",
-        "runtime_sha256": "4c4ecfa629b797c790b4b439494509e32f0d58f612e5898a18300faa17202169",
+        "runtime_sha256": "ce9ef5de6bcf647f407ff761e913b2fcf079415c85c991e811272d2a27ff473f",
         "version": "projectatlas 0.4.0",
         "require_version": "0.4.0",
         "skill_path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
