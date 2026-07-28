@@ -44,6 +44,14 @@
         "Use one bounded long-path-aware cleanup helper that tolerates disappearing entries, rejects linked roots, retries only transient nonempty-directory failures, and propagates unrelated errors.",
         "Bind the run to the exact committed candidate and locked preregistration, permit only the self-referential candidate.functional_head update, refuse retained output or journals, and recursively redact local paths."
       ]
+    },
+    {
+      "prior_result": "docs/benchmarks/v0.4-agent-navigation-results.json",
+      "prior_candidate_head": "2d6319d3a153ed0ad6595c3fe9db905b9ed86c18",
+      "disposition": "superseded publication retained in Git history; exact promotion review found that it predates release-affecting runtime, packaged-skill, MCP, relation-service, and repository-graph changes",
+      "changes": [
+        "Relock every v0.4 candidate identity and repeat all 45 scheduled trials against the corrected functional release candidate without changing the frozen v0.3.26 or plain controls."
+      ]
     }
   ],
   "aborted_attempts": [
@@ -53,8 +61,14 @@
       "disposition": "hard-stopped before a checkpoint existed; no measurement row or result is claimed, and the corrected campaign starts from fresh output and work roots"
     }
   ],
+  "preflight_failures": [
+    {
+      "candidate_head": "2fc64ae964ff65fd83971967ddb7a6c1f8f40d8c",
+      "disposition": "no measurement executed; candidate validation rejected the stale checklist head before fixture preparation, so the campaign was relocked to the final task-state commit"
+    }
+  ],
   "protocol": {
-    "date": "2026-07-25",
+    "date": "2026-07-27",
     "repeats": 3,
     "tail_statistic": "observed_maximum",
     "execution": "45 sequential trials with arm order rotated once per repeat",
@@ -75,8 +89,8 @@
     }
   },
   "candidate": {
-    "functional_head": "2d6319d3a153ed0ad6595c3fe9db905b9ed86c18",
-    "checklist_head": "7bcf12094c30fabd5d9b9cb165646744ce7c845f",
+    "functional_head": "0ffeffb21818f8d648d9149204b00deee26bbabd",
+    "checklist_head": "0f0f8f84c2519977f53103c5767b49fb3074ea76",
     "setup_timeout_seconds": 1800,
     "codex": {
       "executable": "${APPDATA}/npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
@@ -124,12 +138,12 @@
     "arms": {
       "v0.4": {
         "runtime": "target/release/projectatlas.exe",
-        "runtime_sha256": "2aba0fbaf00dd3b21baaefe2de7f4f18347e81f9e61ee4ddd633ccbacc3f8d1f",
+        "runtime_sha256": "4c4ecfa629b797c790b4b439494509e32f0d58f612e5898a18300faa17202169",
         "version": "projectatlas 0.4.0",
         "require_version": "0.4.0",
         "skill_path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
-        "skill_sha256": "be0c2b0baa1aa9768d602ce33dcb3c81c8edf6e1a23f8cb1a4768dd922bb80f3",
-        "tool_discovery_bytes": 37299,
+        "skill_sha256": "208af75344199e1ad70ebf8e00f1f07e3879ece043e5f3ce79b8723de00d5547",
+        "tool_discovery_bytes": 37426,
         "mcp_args": [
           "--require-version",
           "0.4.0",

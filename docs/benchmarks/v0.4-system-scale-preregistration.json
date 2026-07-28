@@ -22,6 +22,14 @@
         "Divide the existing host worker budget equally across concurrent CLI processes through the public --max-workers control, which already owns repository traversal and parser work.",
         "Retain raw OS-thread peaks as diagnostics but remove their hard gate because summed per-process peaks conflate controlled workers with fixed orchestration threads and are not an observed concurrent worker peak; hard-gate the exact configured aggregate worker budget, child-process bounds, terminal accounting, RSS, behavior, and retained-thread growth instead."
       ]
+    },
+    {
+      "prior_result": "docs/benchmarks/v0.4-system-scale-results.json",
+      "prior_candidate_head": "c0814b989338177f9960646e79c82ced8c83a3bf",
+      "disposition": "superseded publication retained in Git history; exact promotion review found that it predates release-affecting runtime, MCP, relation-service, and repository-graph changes",
+      "changes": [
+        "Relock the runtime and MCP inventory identities and repeat the complete small, medium, huge, concurrency, contention, cancellation, and termination matrix against the corrected functional release candidate."
+      ]
     }
   ],
   "preflight_failures": [
@@ -33,9 +41,9 @@
   ],
   "candidate": {
     "required_version": "0.4.0",
-    "functional_git_head": "c0814b989338177f9960646e79c82ced8c83a3bf",
-    "runtime_sha256": "6c819a272e7d4c258f2f97357b691706b5c2aafca1e5ea5cbbc598d4b7e4e3d3",
-    "mcp_tools_sha256": "68e8af9502420a3a51d8094096c3ed0d9f0badea9d0b4762ece56635b652ea09",
+    "functional_git_head": "0ffeffb21818f8d648d9149204b00deee26bbabd",
+    "runtime_sha256": "4c4ecfa629b797c790b4b439494509e32f0d58f612e5898a18300faa17202169",
+    "mcp_tools_sha256": "0c21ea673bdb9cdff48203a274db04fbaccb888bd362407d46fc1bcc0e506b28",
     "telemetry": "disabled",
     "build_profile": "release-default-features"
   },
