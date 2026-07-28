@@ -3663,6 +3663,12 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     let workflow_dir = workspace_root.join(".github").join("workflows");
     let release_workflow = fs::read_to_string(workflow_dir.join("release.yml"))?;
     let auto_release_workflow = fs::read_to_string(workflow_dir.join("03-auto-release.yml"))?;
+    let optional_parser_handoff_resolver = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("scripts")
+            .join("resolve-optional-parser-handoff.py"),
+    )?;
     let optional_parser_workflow =
         fs::read_to_string(workflow_dir.join("optional-parser-pack.yml"))?;
     let ci_workflow = fs::read_to_string(workflow_dir.join("ci.yml"))?;
@@ -4078,14 +4084,25 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     }
     for required in [
         "git rev-parse HEAD^2",
-        "--paginate",
-        "optional-parser-pack-release-assets",
-        "optional-parser-proof-inputs.py",
+        "resolve-optional-parser-handoff.py",
         "--field parser_pack_run_id=",
     ] {
         if !auto_release_workflow.contains(required) {
             return Err(io::Error::other(format!(
                 "auto-release workflow is missing input-bound optional-parser handoff guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "--paginate",
+        "--slurp",
+        "optional-parser-pack-release-assets",
+        "optional-parser-proof-inputs.py",
+    ] {
+        if !optional_parser_handoff_resolver.contains(required) {
+            return Err(io::Error::other(format!(
+                "optional-parser handoff resolver is missing pagination or eligibility guard {required:?}"
             ))
             .into());
         }

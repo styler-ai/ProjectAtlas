@@ -20,6 +20,7 @@ from typing import Any
 
 from mcp_composition import PURPOSES, clear_git_repository_environment, remove_tree
 from system_scale import (
+    measurement_input_errors,
     persistent_sizes,
     prepare_huge,
     prepare_medium,
@@ -76,6 +77,12 @@ PATH_PLACEHOLDERS = {
     "{POWERSHELL}": "PowerShell executable",
 }
 POWERSHELL = shutil.which("pwsh")
+AGENT_NAVIGATION_MEASUREMENT_INPUTS = (
+    "docs/benchmarks/harness/agent_navigation.py",
+    "docs/benchmarks/harness/system_scale.py",
+    "docs/benchmarks/harness/mcp_composition.py",
+    "docs/benchmarks/harness/requirements.txt",
+)
 
 
 def file_sha256(path: Path) -> str:
@@ -970,6 +977,13 @@ def validate_candidate_checkout(
         raise ValueError("committed preregistration must be a JSON object")
     if preregistration != committed_preregistration:
         raise ValueError("preregistration changed after its committed lock")
+    input_errors = measurement_input_errors(
+        preregistration,
+        AGENT_NAVIGATION_MEASUREMENT_INPUTS,
+        root=ROOT,
+    )
+    if input_errors:
+        raise ValueError("; ".join(input_errors))
     return {
         "checkout_head": head,
         "preregistration_path": preregistration_relative,

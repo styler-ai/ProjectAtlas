@@ -2476,7 +2476,9 @@ the existing token overview with CLI `--benchmark-results <path>` or MCP
 `benchmark_results`. The selected project's SQLite database remains
 authoritative only for observed and modeled live usage; ProjectAtlas never
 copies the benchmark into SQLite or creates a cache, sidecar, telemetry event,
-or background loader for it.
+or background loader for it. The normal no-artifact Ratatui dashboard omits the
+comparison completely; an explicit benchmark path adds one bounded panel without
+changing any live token-impact total.
 
 ```mermaid
 sequenceDiagram

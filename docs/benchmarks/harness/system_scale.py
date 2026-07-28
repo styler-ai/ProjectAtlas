@@ -51,6 +51,48 @@ PATH_PLACEHOLDERS = {
     "{USER_HOME}": "current operating-system user home",
     "{POWERSHELL}": "PowerShell executable",
 }
+SYSTEM_SCALE_MEASUREMENT_INPUTS = (
+    "docs/benchmarks/harness/system_scale.py",
+    "docs/benchmarks/harness/mcp_composition.py",
+    "docs/benchmarks/harness/requirements.txt",
+)
+
+
+def measurement_input_errors(
+    preregistration: dict[str, Any],
+    required_paths: tuple[str, ...],
+    *,
+    root: Path | None = None,
+) -> list[str]:
+    """Validate one closed content lock over measurement-owning harness inputs."""
+
+    root = ROOT if root is None else root
+    locked = preregistration.get("measurement_inputs")
+    if not isinstance(locked, dict) or set(locked) != set(required_paths):
+        return ["measurement input lock does not match the required path set"]
+    errors = []
+    for relative in required_paths:
+        expected = locked.get(relative)
+        if (
+            not isinstance(expected, str)
+            or len(expected) != 64
+            or any(character not in "0123456789abcdef" for character in expected)
+        ):
+            errors.append(f"measurement input digest is malformed: {relative}")
+            continue
+        path = (root / relative).resolve()
+        try:
+            path.relative_to(root.resolve())
+        except ValueError:
+            errors.append(f"measurement input escapes the repository: {relative}")
+            continue
+        if not path.is_file():
+            errors.append(f"measurement input is missing: {relative}")
+            continue
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != expected:
+            errors.append(f"measurement input changed after lock: {relative}")
+    return errors
 
 
 def redact_local_paths(value: Any) -> Any:
@@ -3192,6 +3234,7 @@ def publication_identity_errors(
     mcp_tools_sha256: str,
     runtime_info: dict[str, Any],
     dirty_paths: list[str],
+    measurement_errors: list[str],
 ) -> list[str]:
     candidate = preregistration["candidate"]
     errors = []
@@ -3216,6 +3259,7 @@ def publication_identity_errors(
         errors.append(
             "tracked benchmark source is dirty: " + ", ".join(dirty_paths)
         )
+    errors.extend(measurement_errors)
     return errors
 
 
@@ -3298,6 +3342,10 @@ def validate_publication_identity(
         mcp_tools_sha256=mcp_tools_sha256,
         runtime_info=runtime_info,
         dirty_paths=dirty_paths,
+        measurement_errors=measurement_input_errors(
+            preregistration,
+            SYSTEM_SCALE_MEASUREMENT_INPUTS,
+        ),
     )
     if errors:
         raise RuntimeError(

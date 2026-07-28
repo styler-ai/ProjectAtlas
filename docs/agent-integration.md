@@ -352,6 +352,9 @@ The equivalent MCP request adds:
 ```
 
 The path is optional and applies only to token overviews, not trend reports.
+Without it, the human TUI remains the focused live token-impact dashboard and
+does not reserve space for release or plain-control comparisons. Supplying it
+explicitly adds one bounded, visually separate benchmark-evidence panel.
 ProjectAtlas accepts only a direct regular file below the selected project root
 and reads at most 8 MiB. No path yields `unavailable`; safe read/decode failures
 yield `failed`; a decoded but unsupported contract yields `incompatible`;
@@ -360,8 +363,9 @@ retained unmatched failures yield `partial`; and fully matched evidence yields
 paths are rejected at the request boundary.
 
 The comparison is read-only publication evidence. It is attached once as
-`TokenOverview.agent_efficiency` and rendered identically by CLI JSON/TOON,
-`atlas_token_report`, and the Ratatui overview. The benchmark is never written
+`TokenOverview.agent_efficiency` and rendered identically by CLI JSON/TOON and
+`atlas_token_report`; the Ratatui overview renders it only for an explicit
+benchmark request. The benchmark is never written
 to SQLite, added to live `tokens_avoided` or file-read estimates, or cached.
 Provider token counters remain descriptive-only; capability rows report calls
 and emitted bytes without claiming per-tool token causality.

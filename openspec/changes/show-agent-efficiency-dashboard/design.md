@@ -57,9 +57,9 @@ Capability rows classify trace-completed v0.4 MCP calls into the existing durabl
 
 Rows report calls and emitted bytes and reconcile to the classified trace-completed MCP-call total. A completed trace status is not relabeled as semantic success, and the rows do not attribute token savings to individual tools because the artifact does not establish that causal split.
 
-### Keep comparison rendering subordinate to the accepted token dashboard
+### Keep opt-in comparison rendering subordinate to the accepted token dashboard
 
-The conservative token headline, file-read strip, observed/modeled composition, source table, calibration notes, and footer stay unchanged. A bounded agent-efficiency panel follows the existing accounting sections and shows comparison state plus two compact baseline rows. Normal width shows the principal call/read/navigation/context/runtime fields; compact width uses shorter labels and fewer columns without hiding state or failed trials. Provider counters remain in the typed payload under a descriptive-only label and are not added to the causal savings panel.
+The conservative token headline, file-read strip, observed/modeled composition, source table, calibration notes, and footer stay unchanged. With no benchmark path, the normal human dashboard hides comparison content and reserves no empty panel. When a caller explicitly supplies benchmark evidence, one bounded agent-efficiency panel follows the existing accounting sections and shows comparison state plus two compact baseline rows. Normal width shows total calls, broad/full reads, net navigation context, runtime, and workload break-even; compact width keeps calls, reads, and net context with shorter labels without hiding state or failed trials. The remaining typed comparison metrics stay available to structured consumers instead of expanding the human snapshot. Provider counters remain in the typed payload under a descriptive-only label and are not added to the causal savings panel.
 
 ## Risks / Trade-offs
 

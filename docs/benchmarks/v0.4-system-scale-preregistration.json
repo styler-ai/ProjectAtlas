@@ -2,6 +2,12 @@
   "schema_version": 1,
   "benchmark": "projectatlas-v0.4-system-scale",
   "status": "locked_for_final_measurement",
+  "measurement_input_lock_basis": "Content digests from the recorded measurement checkout; a later run must relock after any listed input changes.",
+  "measurement_inputs": {
+    "docs/benchmarks/harness/system_scale.py": "71d70226ef79242cbdaa4cd224e640c7bbb93754ad86e6b7d15371c128281e42",
+    "docs/benchmarks/harness/mcp_composition.py": "04dd5bf8bac306d1ac5faf8c92bd75cf63e6284f39e53dfcef80ac3c3ac17832",
+    "docs/benchmarks/harness/requirements.txt": "b6c8d86768d07e1dae4fb734c2e93997445a318d43290b307bfc1c800a0b1e52"
+  },
   "measurement_amendments": [
     {
       "prior_result": "docs/benchmarks/v0.4-system-scale-failed-runs.json",

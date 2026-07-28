@@ -147,12 +147,20 @@ def requires_exact_head_proof(text: str) -> bool:
             sentence,
             flags=re.IGNORECASE,
         ):
-            if not EXACT_HEAD_PROOF_RE.search(clause):
-                continue
-            if EXACT_HEAD_NEGATION_RE.search(clause):
-                continue
-            if EXACT_HEAD_REQUIREMENT_RE.search(clause):
-                return True
+            assertions = [clause]
+            if len(EXACT_HEAD_PROOF_RE.findall(clause)) > 1:
+                assertions = re.split(
+                    r"\s+\b(?:and|or)\b\s+",
+                    clause,
+                    flags=re.IGNORECASE,
+                )
+            for assertion in assertions:
+                if not EXACT_HEAD_PROOF_RE.search(assertion):
+                    continue
+                if EXACT_HEAD_NEGATION_RE.search(assertion):
+                    continue
+                if EXACT_HEAD_REQUIREMENT_RE.search(assertion):
+                    return True
     return False
 
 
@@ -890,6 +898,10 @@ Mitigations:
     )
     assert requires_exact_head_proof(
         "Do not use stale proof; require exact-head proof."
+    )
+    assert requires_exact_head_proof(
+        "Proof does not require exact-head identity and exact-head evidence "
+        "is required before release."
     )
     punctuation_heading_contract = issue_contract.replace(
         "#architecture-views", "#sqlite-wal-durability-and-checkpoint-flow"

@@ -26,7 +26,7 @@ Commit equality was rejected because metadata-only commits change provenance wit
 
 ### Keep classification local to the owning proof
 
-The optional-parser handoff compares only its source, dependency, toolchain, packaging, workflow, and construction-script inputs. Benchmark preregistration validates the runtime, MCP inventory, and packaged-skill identities it actually measures without requiring the current Git commit. Unknown changed inputs invalidate proof.
+The optional-parser handoff compares only its source, dependency, toolchain, packaging, workflow, and construction-script inputs. Benchmark preregistration validates the runtime, MCP inventory, packaged-skill identities, and a closed set of measurement-owning harness files by content digest without requiring the current Git commit. A missing, extra, or changed required harness input invalidates the campaign. Unknown changed inputs invalidate proof.
 
 Reusable handoff discovery scans every page of successful workflow runs before concluding that no matching unexpired artifact exists. IssueOps evaluates exact-head wording by clause and recognizes ordinary negative modals so prohibitions are not mistaken for requirements.
 
@@ -39,6 +39,7 @@ OpenSpec, IssueOps, live review threads, branch topology, version policy, and re
 ## Risks / Trade-offs
 
 - [A relevant path is omitted] → Use conservative owned path sets and treat unknown changes as invalidating.
+- [A benchmark method changes behind unchanged runtime metadata] → Bind the closed measurement-owner file set by content digest and reject set or digest drift.
 - [An artifact is substituted] → Keep version, digest, receipt, archive-size, platform, toolchain, and workflow validation.
 - [Issue and workflow rules drift] → Cover both safe reuse and required invalidation in the existing workflow-policy and IssueOps tests.
 - [Historical provenance becomes unclear] → Record source SHAs as descriptive provenance without using equality as the reuse decision.

@@ -11,9 +11,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_navigation import (
+    AGENT_NAVIGATION_MEASUREMENT_INPUTS,
     aggregate_runs,
     append_checkpoint,
     build_command,
+    file_sha256,
     main as agent_navigation_main,
     navigation_context,
     parse_trace,
@@ -370,10 +372,17 @@ class AgentNavigationHarnessTests(unittest.TestCase):
                 cwd=root,
                 check=True,
             )
-            (root / "harness.py").write_text("candidate = True\n", encoding="utf-8")
+            for index, relative in enumerate(AGENT_NAVIGATION_MEASUREMENT_INPUTS):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"measurement input {index}\n", encoding="utf-8")
             preregistration = root / "preregistration.json"
             preregistered = {
                 "candidate": {"runtime_sha256": "locked"},
+                "measurement_inputs": {
+                    relative: file_sha256(root / relative)
+                    for relative in AGENT_NAVIGATION_MEASUREMENT_INPUTS
+                },
                 "protocol": {"repeats": 3},
                 "rubric": {"small-clean": ["locked"]},
             }
@@ -405,6 +414,16 @@ class AgentNavigationHarnessTests(unittest.TestCase):
                 )
                 identity = validate_candidate_checkout(preregistered, preregistration)
                 self.assertNotEqual(identity["checkout_head"], first_head)
+                changed_input = root / AGENT_NAVIGATION_MEASUREMENT_INPUTS[0]
+                changed_input.write_text("changed methodology\n", encoding="utf-8")
+                subprocess.run(["git", "add", "."], cwd=root, check=True)
+                subprocess.run(
+                    ["git", "commit", "-q", "-m", "change measurement input"],
+                    cwd=root,
+                    check=True,
+                )
+                with self.assertRaisesRegex(ValueError, "measurement input changed"):
+                    validate_candidate_checkout(preregistered, preregistration)
                 preregistered["rubric"]["small-clean"] = ["changed"]
                 with self.assertRaisesRegex(ValueError, "changed after"):
                     validate_candidate_checkout(preregistered, preregistration)

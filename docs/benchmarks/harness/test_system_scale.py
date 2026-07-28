@@ -234,8 +234,9 @@ class SystemScaleHarnessTests(unittest.TestCase):
                 "docs/benchmarks/v0.4-system-scale-preregistration.json",
                 "docs/benchmarks/harness/system_scale.py",
             ],
+            measurement_errors=["measurement input lock is invalid"],
         )
-        self.assertEqual(len(errors), 9)
+        self.assertEqual(len(errors), 10)
 
     def test_publication_identity_allows_clean_content_bound_preregistration(
         self,
@@ -260,8 +261,38 @@ class SystemScaleHarnessTests(unittest.TestCase):
                 "mcp_tools": [f"tool-{index}" for index in range(40)],
             },
             dirty_paths=[],
+            measurement_errors=[],
         )
         self.assertEqual(errors, [])
+
+    def test_measurement_input_lock_fails_closed_on_path_or_digest_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            required = ("docs/benchmarks/harness/measure.py",)
+            path = root / required[0]
+            path.parent.mkdir(parents=True)
+            path.write_text("locked\n", encoding="utf-8")
+            digest = system_scale.hashlib.sha256(path.read_bytes()).hexdigest()
+            preregistration = {"measurement_inputs": {required[0]: digest}}
+            self.assertEqual(
+                system_scale.measurement_input_errors(
+                    preregistration, required, root=root
+                ),
+                [],
+            )
+            path.write_text("changed\n", encoding="utf-8")
+            self.assertEqual(
+                system_scale.measurement_input_errors(
+                    preregistration, required, root=root
+                ),
+                [f"measurement input changed after lock: {required[0]}"],
+            )
+            self.assertEqual(
+                system_scale.measurement_input_errors(
+                    {"measurement_inputs": {}}, required, root=root
+                ),
+                ["measurement input lock does not match the required path set"],
+            )
 
     def test_candidate_source_identity_is_descriptive_checkout_provenance(
         self,

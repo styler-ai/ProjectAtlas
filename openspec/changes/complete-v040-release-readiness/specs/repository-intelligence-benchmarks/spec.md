@@ -14,11 +14,11 @@ The human-readable and machine-readable MCP composition evaluations SHALL name t
 
 ### Requirement: Published Campaigns Match Their Measured Behavior And Artifacts
 
-The published v0.4 system-scale and final agent-navigation results SHALL measure the behavior each campaign claims. Their recorded runtime, skill, tool, platform, environment, and artifact identities SHALL match the measured artifacts; commit SHAs SHALL remain provenance only. A later change SHALL invalidate only a campaign whose owning behavior-relevant input or measured artifact identity changed.
+The published v0.4 system-scale and final agent-navigation results SHALL measure the behavior each campaign claims. Their recorded runtime, skill, tool, platform, environment, artifact, and closed measurement-harness input identities SHALL match the measured artifacts; harness inputs SHALL be content-digested and commit SHAs SHALL remain provenance only. A later change SHALL invalidate only a campaign whose owning behavior-relevant input, measurement-harness digest, or measured artifact identity changed.
 
 #### Scenario: The release benchmark behavior is measured
 - **WHEN** release readiness validates the system-scale and agent-navigation publications
-- **THEN** both campaigns identify their measured runtime, skill, MCP surface, platform, environment, and behavior-relevant inputs
+- **THEN** both campaigns identify their measured runtime, skill, MCP surface, platform, environment, behavior-relevant inputs, and closed measurement-owner file set by content digest
 
 #### Scenario: Release behavior changes after measurement
 - **WHEN** a later commit changes behavior or an artifact identity owned by a campaign

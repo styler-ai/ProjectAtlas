@@ -12,7 +12,7 @@ ProjectAtlas SHALL retain its unit, integration, E2E, fault, concurrency, platfo
 - **THEN** every affected test or construction gate reruns before release
 
 ### Requirement: Reuse fails closed
-Each reusable proof owner SHALL classify its behavior-relevant inputs explicitly and SHALL invalidate proof for an unknown change, changed execution platform or toolchain, partial or failed run, expired artifact, or unverifiable identity.
+Each reusable proof owner SHALL classify its behavior-relevant inputs explicitly and SHALL invalidate proof for an unknown change, changed execution platform or toolchain, partial or failed run, expired artifact, or unverifiable identity. Published benchmark campaigns SHALL bind their closed measurement-owning harness file set by content digest so methodology drift invalidates reuse without requiring current-commit equality.
 
 #### Scenario: Unknown path changes
 - **WHEN** a changed path cannot be proven behavior-neutral for the owning proof
@@ -21,6 +21,10 @@ Each reusable proof owner SHALL classify its behavior-relevant inputs explicitly
 #### Scenario: Execution context changes
 - **WHEN** the platform, toolchain, workflow contract, or required feature set differs
 - **THEN** proof from the prior context is not reused
+
+#### Scenario: A benchmark measurement owner changes
+- **WHEN** a required harness input is missing, added, or has a different content digest
+- **THEN** the campaign fails closed and requires a deliberate relock and rerun
 
 ### Requirement: Immutable artifacts are content-bound
 Reusable release artifacts SHALL be validated by their existing version, content digest, receipt, size, platform, toolchain, workflow, and relevant-input contracts. Commit SHAs SHALL remain descriptive provenance but SHALL NOT be required to equal the current commit.

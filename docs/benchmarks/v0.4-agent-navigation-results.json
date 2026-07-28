@@ -1,10 +1,17 @@
 {
   "schema_version": 1,
   "preregistration": "{REPO_ROOT}\\docs\\benchmarks\\v0.4-agent-navigation-preregistration.json",
-  "preregistration_sha256": "33bc2a771f696d96e1a4472a8a2ed2e2f327dd434b4df3833a3aaba52e289983",
+  "preregistration_sha256": "3c234a9ffb14a6a2292f892bdf4ad43892883f8545744b5ad210e380f693336e",
   "effective_preregistration": {
     "schema_version": 1,
     "status": "locked_for_final_measurement",
+    "measurement_input_lock_basis": "Content digests from the recorded measurement checkout; a later run must relock after any listed input changes.",
+    "measurement_inputs": {
+      "docs/benchmarks/harness/agent_navigation.py": "7b2ef8b0a88e63b0b0cd83f31a16e3a03d0430f88628bd368a80cfa58b8005e0",
+      "docs/benchmarks/harness/system_scale.py": "53bbc95d0e7b84e77f325014f10c50a322ca9b98b33aa2edda11fea559ffac35",
+      "docs/benchmarks/harness/mcp_composition.py": "04dd5bf8bac306d1ac5faf8c92bd75cf63e6284f39e53dfcef80ac3c3ac17832",
+      "docs/benchmarks/harness/requirements.txt": "b6c8d86768d07e1dae4fb734c2e93997445a318d43290b307bfc1c800a0b1e52"
+    },
     "measurement_amendments": [
       {
         "prior_result": "docs/benchmarks/v0.4-agent-navigation-failed-mcp-approval-9ec0331.jsonl",
