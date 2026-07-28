@@ -29,6 +29,10 @@ pub const MAX_DERIVED_SNAPSHOT_JSON_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_DERIVED_SNAPSHOT_ROWS: u64 = 1_000_000;
 /// Maximum decoded row payload retained while constructing a snapshot.
 const MAX_DERIVED_SNAPSHOT_RETAINED_BYTES: u64 = 256 * 1024 * 1024;
+/// Conservative retained-memory admission charged for each JSON container or value.
+const DERIVED_SNAPSHOT_DECODE_SLOT_BYTES: u64 = 256;
+/// Maximum raw bytes admitted for one JSON string before serde may allocate it.
+const MAX_DERIVED_SNAPSHOT_JSON_STRING_BYTES: usize = 256 * 1024;
 /// Maximum private `SQLite` capture size.
 const MAX_PRIVATE_CAPTURE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 /// Maximum live node rows hashed into one source-state identity.
@@ -129,6 +133,7 @@ impl DerivedGraphSnapshot {
             usize_to_u64(encoded.len())?,
             MAX_DERIVED_SNAPSHOT_JSON_BYTES,
         )?;
+        require_decode_budget(encoded)?;
         let snapshot = serde_json::from_slice::<Self>(encoded)?;
         snapshot.validate()?;
         Ok(snapshot)
@@ -320,6 +325,15 @@ impl AtlasStore {
         &mut self,
         snapshot: &DerivedGraphSnapshot,
     ) -> DbResult<DerivedGraphSnapshotImport> {
+        self.import_derived_graph_snapshot_with_prepublication(snapshot, || Ok(()))
+    }
+
+    /// Import with one internal seam immediately before publication locking.
+    fn import_derived_graph_snapshot_with_prepublication(
+        &mut self,
+        snapshot: &DerivedGraphSnapshot,
+        before_publication: impl FnOnce() -> DbResult<()>,
+    ) -> DbResult<DerivedGraphSnapshotImport> {
         snapshot.validate()?;
         let publication = self
             .index_publication()?
@@ -344,10 +358,14 @@ impl AtlasStore {
             .checked_next()
             .ok_or(DbError::PublicationGenerationOverflow)?;
         let graph = snapshot.graph.bind(project, next_generation)?;
+        before_publication()?;
         let mut guard = self.begin_index_projection_refresh_from(
             &snapshot.metadata.capability_fingerprint,
             publication.generation,
         )?;
+        if source_state_digest(&guard.connection)? != snapshot.metadata.source_state_digest {
+            return invalid("destination source state does not match the snapshot");
+        }
         guard.replace_repository_graph_with_resolution_keys(
             project,
             &graph.entities,
@@ -1072,6 +1090,80 @@ fn require_vector_index(index: u32, length: usize, reason: &'static str) -> DbRe
     }
 }
 
+/// Reject JSON shapes whose decoded allocation estimate exceeds the snapshot ceiling.
+fn require_decode_budget(encoded: &[u8]) -> DbResult<()> {
+    let mut retained_bytes = 0_u64;
+    let mut string_bytes = 0_usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_primitive = false;
+
+    for byte in encoded {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+                in_primitive = true;
+                admit_decode_bytes(&mut retained_bytes, usize_to_u64(string_bytes)?)?;
+                string_bytes = 0;
+                continue;
+            }
+            string_bytes = string_bytes
+                .checked_add(1)
+                .ok_or(DbError::DerivedSnapshotInvalid {
+                    reason: "snapshot JSON string size overflowed",
+                })?;
+            if string_bytes > MAX_DERIVED_SNAPSHOT_JSON_STRING_BYTES {
+                return Err(DbError::DerivedSnapshotLimit {
+                    resource: "encoded JSON string bytes",
+                    found: usize_to_u64(string_bytes)?,
+                    maximum: usize_to_u64(MAX_DERIVED_SNAPSHOT_JSON_STRING_BYTES)?,
+                });
+            }
+            continue;
+        }
+
+        match *byte {
+            b'"' => {
+                in_string = true;
+                escaped = false;
+                in_primitive = false;
+                admit_decode_bytes(&mut retained_bytes, DERIVED_SNAPSHOT_DECODE_SLOT_BYTES)?;
+            }
+            b'{' | b'[' | b',' | b':' => {
+                in_primitive = false;
+                admit_decode_bytes(&mut retained_bytes, DERIVED_SNAPSHOT_DECODE_SLOT_BYTES)?;
+            }
+            b'}' | b']' | b' ' | b'\t' | b'\r' | b'\n' => {
+                in_primitive = false;
+            }
+            _ if !in_primitive => {
+                in_primitive = true;
+                admit_decode_bytes(&mut retained_bytes, DERIVED_SNAPSHOT_DECODE_SLOT_BYTES)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Admit one conservative decoded-allocation estimate.
+fn admit_decode_bytes(retained_bytes: &mut u64, bytes: u64) -> DbResult<()> {
+    *retained_bytes = retained_bytes
+        .checked_add(bytes)
+        .ok_or(DbError::DerivedSnapshotInvalid {
+            reason: "snapshot retained byte count overflowed",
+        })?;
+    require_limit(
+        "decoded retained bytes",
+        *retained_bytes,
+        MAX_DERIVED_SNAPSHOT_RETAINED_BYTES,
+    )
+}
+
 /// Return one vector item addressed by a validated portable index.
 fn indexed<'a, T>(values: &'a [T], index: u32, reason: &'static str) -> DbResult<&'a T> {
     values
@@ -1123,8 +1215,10 @@ fn invalid<T>(reason: &'static str) -> DbResult<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DerivedGraphSnapshot, invalid, snapshot_digest};
-    use crate::AtlasStore;
+    use super::{
+        DerivedGraphSnapshot, MAX_DERIVED_SNAPSHOT_JSON_STRING_BYTES, invalid, snapshot_digest,
+    };
+    use crate::{AtlasStore, DbError};
     use projectatlas_core::graph::{
         CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
         CoverageState, EntityResolutionKey, EntitySelector, GraphEntity, GraphIdentityText,
@@ -1314,6 +1408,37 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_json_decode_budget_rejects_large_shapes_before_deserialization() {
+        let mut wide = String::from("[");
+        for index in 0..600_000 {
+            if index != 0 {
+                wide.push(',');
+            }
+            wide.push_str("null");
+        }
+        wide.push(']');
+        assert!(matches!(
+            DerivedGraphSnapshot::from_json(wide.as_bytes()),
+            Err(DbError::DerivedSnapshotLimit {
+                resource: "decoded retained bytes",
+                ..
+            })
+        ));
+
+        let oversized_string = format!(
+            r#"{{"value":"{}"}}"#,
+            "x".repeat(MAX_DERIVED_SNAPSHOT_JSON_STRING_BYTES + 1)
+        );
+        assert!(matches!(
+            DerivedGraphSnapshot::from_json(oversized_string.as_bytes()),
+            Err(DbError::DerivedSnapshotLimit {
+                resource: "encoded JSON string bytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     #[allow(clippy::panic_in_result_fn)]
     fn derived_snapshot_excludes_private_state_and_rebinds_atomically() -> Result<(), Box<dyn Error>>
     {
@@ -1443,6 +1568,57 @@ mod tests {
         assert_eq!(
             destination.repository_graph_generation()?,
             Some(before.generation)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::panic_in_result_fn)]
+    fn derived_snapshot_rechecks_source_state_inside_publication_transaction()
+    -> Result<(), Box<dyn Error>> {
+        let source_root = tempfile::tempdir()?;
+        let destination_root = tempfile::tempdir()?;
+        let mut source = open_store(source_root.path())?;
+        let mut destination = open_store(destination_root.path())?;
+        publish_fixture(&mut source, "same-content", true)?;
+        publish_fixture(&mut destination, "same-content", false)?;
+        let mut concurrent = open_store(destination_root.path())?;
+        let snapshot = source.export_derived_graph_snapshot()?;
+        let before = destination
+            .index_publication()?
+            .ok_or("destination publication is missing")?;
+
+        let result =
+            destination.import_derived_graph_snapshot_with_prepublication(&snapshot, || {
+                concurrent.upsert_scan_nodes(&[node(
+                    "src/lib.rs",
+                    NodeKind::File,
+                    Some("src"),
+                    Some("concurrent-content"),
+                )])
+            });
+        assert!(matches!(
+            result,
+            Err(DbError::DerivedSnapshotInvalid {
+                reason: "destination source state does not match the snapshot"
+            })
+        ));
+        assert_eq!(
+            destination
+                .index_publication()?
+                .ok_or("destination publication is missing")?,
+            before
+        );
+        assert_eq!(
+            destination.repository_graph_generation()?,
+            Some(before.generation)
+        );
+        assert_eq!(
+            destination.load_nodes_by_paths(&["src/lib.rs".to_string()])?[0]
+                .node
+                .content_hash
+                .as_deref(),
+            Some("concurrent-content")
         );
         Ok(())
     }
