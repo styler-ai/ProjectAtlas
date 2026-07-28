@@ -24,7 +24,6 @@ use projectatlas_core::graph::{
 };
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
-use projectatlas_core::symbols::RelationKind;
 use projectatlas_core::telemetry::{
     TokenCalibrationOverview, TokenTrendWindow as CoreTokenTrendWindow, UsageInstanceOwner,
 };
@@ -87,7 +86,8 @@ use thiserror::Error;
 use token_tui::render_token_dashboard;
 use token_tui::{
     TokenAtlasPreview, TokenDashboardTheme, render_token_dashboard_with_atlas,
-    render_token_trend_dashboard_with_theme, token_dashboard_wants_atlas,
+    render_token_trend_dashboard_with_theme, token_atlas_network_relation,
+    token_dashboard_wants_atlas,
 };
 
 /// Default relative path for the `SQLite` index.
@@ -4191,6 +4191,9 @@ fn load_token_atlas_preview(store: &AtlasStore) -> TokenAtlasPreview {
             truncated |= page.truncated;
             for row in page.rows {
                 let relation = row.detail.relation;
+                if !token_atlas_network_relation(relation.kind()) {
+                    continue;
+                }
                 if let Some(target) = relation.resolution().resolved_target() {
                     for endpoint in [relation.source(), target] {
                         if seen.insert(endpoint.digest().to_string()) {
@@ -4204,11 +4207,6 @@ fn load_token_atlas_preview(store: &AtlasStore) -> TokenAtlasPreview {
         frontier = next.into_values().take(ADJACENCY_FRONTIER_MAX).collect();
     }
     TokenAtlasPreview::from_relations(&relations, truncated)
-}
-
-/// Return whether a relation describes a cross-entity network link rather than containment.
-const fn token_atlas_network_relation(kind: GraphRelationKind) -> bool {
-    !matches!(kind, GraphRelationKind::Legacy(RelationKind::Contains))
 }
 
 /// Render root diagnostics as compact TOON.
@@ -4421,9 +4419,9 @@ mod tests {
         watch_path_requires_full_scan, watcher_status_report,
     };
     use super::{
-        Cli, CliError, Command, OutputFormat, SearchRetrievalMode, SearchRetrievalModeArg,
-        ServiceError, build_runtime_info, render_cli_error, render_token_dashboard,
-        serialized_output, truthy_env,
+        Cli, CliError, Command, GraphRelationKind, OutputFormat, SearchRetrievalMode,
+        SearchRetrievalModeArg, ServiceError, build_runtime_info, render_cli_error,
+        render_token_dashboard, serialized_output, token_atlas_network_relation, truthy_env,
     };
     #[cfg(feature = "optional-parser-supervisor")]
     use super::{OptionalParserPackLifecycleError, ParserPackCommand};
@@ -5215,6 +5213,16 @@ mod tests {
         assert!(!dashboard.contains("Gross tokens: without vs with ProjectAtlas"));
         assert!(!dashboard.contains("How ProjectAtlas helped"));
         assert!(!dashboard.contains("Saved-token trends"));
+    }
+
+    #[test]
+    fn token_atlas_network_excludes_containment() {
+        assert!(!token_atlas_network_relation(GraphRelationKind::Legacy(
+            RelationKind::Contains,
+        )));
+        assert!(token_atlas_network_relation(GraphRelationKind::Legacy(
+            RelationKind::Imports,
+        )));
     }
 
     #[test]

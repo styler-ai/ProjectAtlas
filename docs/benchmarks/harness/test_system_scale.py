@@ -268,11 +268,36 @@ class SystemScaleHarnessTests(unittest.TestCase):
     def test_measurement_input_lock_fails_closed_on_path_or_digest_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "benchmark@example.invalid"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Benchmark Test"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "core.autocrlf", "false"], cwd=root, check=True
+            )
             required = ("docs/benchmarks/harness/measure.py",)
             path = root / required[0]
             path.parent.mkdir(parents=True)
-            path.write_text("locked\n", encoding="utf-8")
-            digest = system_scale.hashlib.sha256(path.read_bytes()).hexdigest()
+            path.write_bytes(b"locked\n")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "lock input"], cwd=root, check=True
+            )
+            locked_head = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True
+            ).strip()
+            digest = system_scale.hashlib.sha256(
+                subprocess.check_output(
+                    ["git", "cat-file", "blob", f"HEAD:{required[0]}"], cwd=root
+                )
+            ).hexdigest()
             preregistration = {"measurement_inputs": {required[0]: digest}}
             self.assertEqual(
                 system_scale.measurement_input_errors(
@@ -280,12 +305,29 @@ class SystemScaleHarnessTests(unittest.TestCase):
                 ),
                 [],
             )
-            path.write_text("changed\n", encoding="utf-8")
+            path.write_bytes(b"locked\r\n")
+            self.assertEqual(
+                system_scale.measurement_input_errors(
+                    preregistration, required, root=root
+                ),
+                [],
+            )
+            path.write_bytes(b"changed\n")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "change input"], cwd=root, check=True
+            )
             self.assertEqual(
                 system_scale.measurement_input_errors(
                     preregistration, required, root=root
                 ),
                 [f"measurement input changed after lock: {required[0]}"],
+            )
+            self.assertEqual(
+                system_scale.measurement_input_errors(
+                    preregistration, required, root=root, revision=locked_head
+                ),
+                [],
             )
             self.assertEqual(
                 system_scale.measurement_input_errors(

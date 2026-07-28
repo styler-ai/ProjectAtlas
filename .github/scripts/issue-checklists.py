@@ -54,6 +54,16 @@ EXACT_HEAD_NEGATION_RE = re.compile(
     r"\b(?:is|are)?\s*(?:not|no longer)\s+(?:required|used|needed|accepted)\b"
     r")"
 )
+EXACT_HEAD_SHARED_NEGATION_RE = re.compile(
+    r"(?i)\b(?:do not|don't|does not|doesn't|must not|should not|cannot|can't|no longer)"
+    r"\s+(?:require|use|bind|demand|enforce)\s*$"
+)
+EXACT_HEAD_BARE_ACTION_RE = re.compile(
+    r"(?i)^\s*(?:require|use|bind|demand|enforce)\b"
+)
+EXACT_HEAD_BARE_ACTION_ONLY_RE = re.compile(
+    r"(?i)^\s*(?:require|use|bind|demand|enforce)\s*$"
+)
 REQUIRED_OPEN_ISSUE_HEADINGS = (
     "why",
     "what changes",
@@ -147,20 +157,29 @@ def requires_exact_head_proof(text: str) -> bool:
             sentence,
             flags=re.IGNORECASE,
         ):
-            assertions = [clause]
-            if len(EXACT_HEAD_PROOF_RE.findall(clause)) > 1:
-                assertions = re.split(
-                    r"\s+\b(?:and|or)\b\s+",
-                    clause,
-                    flags=re.IGNORECASE,
+            assertion_parts = re.split(
+                r"\s+\b(?:and|or)\b\s+",
+                clause,
+                flags=re.IGNORECASE,
+            )
+            shared_negation = False
+            for assertion in assertion_parts:
+                inherits_negation = shared_negation and bool(
+                    EXACT_HEAD_BARE_ACTION_RE.match(assertion)
                 )
-            for assertion in assertions:
-                if not EXACT_HEAD_PROOF_RE.search(assertion):
-                    continue
-                if EXACT_HEAD_NEGATION_RE.search(assertion):
-                    continue
-                if EXACT_HEAD_REQUIREMENT_RE.search(assertion):
+                if (
+                    EXACT_HEAD_PROOF_RE.search(assertion)
+                    and not inherits_negation
+                    and not EXACT_HEAD_NEGATION_RE.search(assertion)
+                    and EXACT_HEAD_REQUIREMENT_RE.search(assertion)
+                ):
                     return True
+                shared_negation = bool(
+                    EXACT_HEAD_SHARED_NEGATION_RE.search(assertion)
+                ) or (
+                    shared_negation
+                    and bool(EXACT_HEAD_BARE_ACTION_ONLY_RE.match(assertion))
+                )
     return False
 
 
@@ -902,6 +921,19 @@ Mitigations:
     assert requires_exact_head_proof(
         "Proof does not require exact-head identity and exact-head evidence "
         "is required before release."
+    )
+    assert requires_exact_head_proof(
+        "Proof does not require and instead enforces exact-head identity."
+    )
+    assert not requires_exact_head_proof(
+        "Proof does not require or enforce exact-head identity."
+    )
+    assert not requires_exact_head_proof(
+        "Proof does not require and does not enforce exact-head identity."
+    )
+    assert requires_exact_head_proof(
+        "Proof does not require stale-SHA identity and the release gate "
+        "enforces exact-head identity."
     )
     punctuation_heading_contract = issue_contract.replace(
         "#architecture-views", "#sqlite-wal-durability-and-checkpoint-flow"

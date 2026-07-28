@@ -63,13 +63,16 @@ def measurement_input_errors(
     required_paths: tuple[str, ...],
     *,
     root: Path | None = None,
+    revision: str = "HEAD",
 ) -> list[str]:
-    """Validate one closed content lock over measurement-owning harness inputs."""
+    """Validate one closed content lock over canonical committed harness inputs."""
 
     root = ROOT if root is None else root
     locked = preregistration.get("measurement_inputs")
     if not isinstance(locked, dict) or set(locked) != set(required_paths):
         return ["measurement input lock does not match the required path set"]
+    if revision != "HEAD" and not re.fullmatch(r"[0-9a-f]{40}", revision):
+        return ["measurement input revision is malformed"]
     errors = []
     for relative in required_paths:
         expected = locked.get(relative)
@@ -86,10 +89,17 @@ def measurement_input_errors(
         except ValueError:
             errors.append(f"measurement input escapes the repository: {relative}")
             continue
-        if not path.is_file():
-            errors.append(f"measurement input is missing: {relative}")
+        process = subprocess.run(
+            ["git", "cat-file", "blob", f"{revision}:{relative}"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            timeout=120,
+        )
+        if process.returncode:
+            errors.append(f"measurement input is missing from {revision}: {relative}")
             continue
-        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        actual = hashlib.sha256(process.stdout).hexdigest()
         if actual != expected:
             errors.append(f"measurement input changed after lock: {relative}")
     return errors

@@ -15,6 +15,7 @@ class OptionalParserProofInputsTests(unittest.TestCase):
         self.assertEqual(
             classify(
                 [
+                    ".github/scripts/issue-checklists.py",
                     "openspec/changes/release/tasks.md",
                     "docs/workflow.md",
                     "AGENTS.md",
@@ -23,6 +24,7 @@ class OptionalParserProofInputsTests(unittest.TestCase):
             {
                 "reusable": True,
                 "metadata_only": [
+                    ".github/scripts/issue-checklists.py",
                     "AGENTS.md",
                     "docs/workflow.md",
                     "openspec/changes/release/tasks.md",
@@ -36,6 +38,7 @@ class OptionalParserProofInputsTests(unittest.TestCase):
             "crates/projectatlas-cli/src/parser_worker.rs",
             "packaging/parser-pack/manifest.json",
             ".github/workflows/optional-parser-pack.yml",
+            ".github/scripts/issue-checklists-helper.py",
             ".github/scripts/unknown-construction-step.py",
             "unknown-release-input",
             r"docs\workflow.md",

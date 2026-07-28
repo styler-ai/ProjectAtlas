@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import tempfile
@@ -15,7 +16,6 @@ from agent_navigation import (
     aggregate_runs,
     append_checkpoint,
     build_command,
-    file_sha256,
     main as agent_navigation_main,
     navigation_context,
     parse_trace,
@@ -372,15 +372,29 @@ class AgentNavigationHarnessTests(unittest.TestCase):
                 cwd=root,
                 check=True,
             )
+            subprocess.run(
+                ["git", "config", "core.autocrlf", "false"], cwd=root, check=True
+            )
             for index, relative in enumerate(AGENT_NAVIGATION_MEASUREMENT_INPUTS):
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(f"measurement input {index}\n", encoding="utf-8")
+                path.write_bytes(f"measurement input {index}\n".encode())
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "lock inputs"],
+                cwd=root,
+                check=True,
+            )
             preregistration = root / "preregistration.json"
             preregistered = {
                 "candidate": {"runtime_sha256": "locked"},
                 "measurement_inputs": {
-                    relative: file_sha256(root / relative)
+                    relative: hashlib.sha256(
+                        subprocess.check_output(
+                            ["git", "cat-file", "blob", f"HEAD:{relative}"],
+                            cwd=root,
+                        )
+                    ).hexdigest()
                     for relative in AGENT_NAVIGATION_MEASUREMENT_INPUTS
                 },
                 "protocol": {"repeats": 3},

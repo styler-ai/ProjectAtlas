@@ -150,6 +150,11 @@ pub(crate) struct TokenAtlasPreview {
     available: bool,
 }
 
+/// Return whether a relation belongs in the cross-entity atlas network.
+pub(crate) const fn token_atlas_network_relation(kind: GraphRelationKind) -> bool {
+    !matches!(kind, GraphRelationKind::Legacy(RelationKind::Contains))
+}
+
 impl TokenAtlasPreview {
     /// Build an empty but available graph snapshot.
     #[must_use]
@@ -195,7 +200,7 @@ impl TokenAtlasPreview {
     ) -> Self {
         let mut candidates = BTreeMap::new();
         for (source, target, kind) in relations {
-            if source == target {
+            if source == target || !token_atlas_network_relation(kind) {
                 continue;
             }
             candidates
@@ -207,15 +212,10 @@ impl TokenAtlasPreview {
                 });
         }
         let mut degrees = BTreeMap::<String, usize>::new();
-        let mut network_degrees = BTreeMap::<String, usize>::new();
         let mut adjacency = BTreeMap::<String, BTreeSet<String>>::new();
         for edge in candidates.values() {
             *degrees.entry(edge.source.clone()).or_default() += 1;
             *degrees.entry(edge.target.clone()).or_default() += 1;
-            if !matches!(edge.kind, GraphRelationKind::Legacy(RelationKind::Contains)) {
-                *network_degrees.entry(edge.source.clone()).or_default() += 1;
-                *network_degrees.entry(edge.target.clone()).or_default() += 1;
-            }
             adjacency
                 .entry(edge.source.clone())
                 .or_default()
@@ -264,10 +264,9 @@ impl TokenAtlasPreview {
         let Some(hub) = largest_component
             .iter()
             .max_by(|left, right| {
-                network_degrees
+                degrees
                     .get(*left)
-                    .cmp(&network_degrees.get(*right))
-                    .then_with(|| degrees.get(*left).cmp(&degrees.get(*right)))
+                    .cmp(&degrees.get(*right))
                     .then_with(|| right.cmp(left))
             })
             .cloned()
@@ -3487,7 +3486,6 @@ mod tests {
     #[test]
     fn atlas_preview_is_bounded_connected_and_centers_the_strongest_hub() {
         let kinds = [
-            GraphRelationKind::Legacy(RelationKind::Contains),
             GraphRelationKind::Legacy(RelationKind::Imports),
             GraphRelationKind::Legacy(RelationKind::Calls),
             GraphRelationKind::Legacy(RelationKind::DependsOn),
@@ -3578,6 +3576,40 @@ mod tests {
                 .all(|node| node.x.abs() < ATLAS_CANVAS_X_BOUND
                     && node.y.abs() < ATLAS_CANVAS_Y_BOUND)
         );
+    }
+
+    #[test]
+    fn atlas_preview_excludes_containment_before_applying_bounds() {
+        let mut relations = (0..80)
+            .map(|index| {
+                (
+                    "containment-root".to_string(),
+                    format!("contained-{index:02}"),
+                    GraphRelationKind::Legacy(RelationKind::Contains),
+                )
+            })
+            .collect::<Vec<_>>();
+        relations.extend([
+            (
+                "network-root".to_string(),
+                "network-a".to_string(),
+                GraphRelationKind::Legacy(RelationKind::Calls),
+            ),
+            (
+                "network-a".to_string(),
+                "network-b".to_string(),
+                GraphRelationKind::Legacy(RelationKind::Imports),
+            ),
+        ]);
+
+        let atlas = TokenAtlasPreview::from_resolved_edges(relations, false);
+
+        assert_eq!(atlas.edges.len(), 2);
+        assert!(atlas.edges.iter().all(|edge| {
+            !matches!(edge.kind, GraphRelationKind::Legacy(RelationKind::Contains))
+                && !edge.source.starts_with("contain")
+                && !edge.target.starts_with("contain")
+        }));
     }
 
     #[test]
