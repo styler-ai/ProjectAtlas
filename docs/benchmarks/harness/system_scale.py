@@ -3219,11 +3219,28 @@ def publication_identity_errors(
     return errors
 
 
+def candidate_source_identity(preregistration_path: Path) -> dict[str, str]:
+    try:
+        preregistration_relative = (
+            preregistration_path.resolve().relative_to(ROOT.resolve()).as_posix()
+        )
+    except ValueError as error:
+        raise ValueError(
+            "preregistration must be inside the candidate checkout"
+        ) from error
+    return {
+        "checkout_head": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ).strip(),
+        "preregistration_path": preregistration_relative,
+    }
+
+
 def validate_publication_identity(
     runtime: Path,
     preregistration: dict[str, Any],
     preregistration_path: Path,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, str]]:
     runtime_sha256 = hashlib.sha256(runtime.read_bytes()).hexdigest()
     runtime_process = subprocess.run(
         [
@@ -3287,11 +3304,14 @@ def validate_publication_identity(
             "publication candidate identity rejected before fixture preparation: "
             + "; ".join(errors)
         )
-    return {
-        "runtime_sha256": runtime_sha256,
-        "mcp_tools_sha256": mcp_tools_sha256,
-        "runtime_info": runtime_info,
-    }
+    return (
+        {
+            "runtime_sha256": runtime_sha256,
+            "mcp_tools_sha256": mcp_tools_sha256,
+            "runtime_info": runtime_info,
+        },
+        candidate_source_identity(preregistration_path),
+    )
 
 
 def write_result(result: dict[str, Any], output: Path) -> None:
@@ -3354,11 +3374,12 @@ def run_benchmark(args: argparse.Namespace) -> None:
         and not measurement_eligibility["final_platform_eligible"]
     ):
         raise RuntimeError(measurement_eligibility["ineligible_reason"])
-    publication_identity = (
-        validate_publication_identity(runtime, preregistration, preregistration_path)
-        if args.only == "all"
-        else None
-    )
+    if args.only == "all":
+        publication_identity, source_identity = validate_publication_identity(
+            runtime, preregistration, preregistration_path
+        )
+    else:
+        publication_identity, source_identity = None, None
     work_root = args.work_root.resolve()
     allowed = (ROOT / "target/benchmarks/system-scale").resolve()
     if work_root == allowed or allowed not in work_root.parents:
@@ -3521,6 +3542,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
             "runtime_bytes": runtime.stat().st_size,
             "publication_identity": publication_identity,
         },
+        "candidate_source_identity": source_identity,
         "path_placeholders": PATH_PLACEHOLDERS,
         "environment": {
             "platform": platform.platform(),

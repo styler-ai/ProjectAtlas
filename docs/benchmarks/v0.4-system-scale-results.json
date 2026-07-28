@@ -264,6 +264,10 @@
       }
     }
   },
+  "candidate_source_identity": {
+    "checkout_head": "f2d788392e96c1caf6b01cc4ecae1825d3ceaedc",
+    "preregistration_path": "docs/benchmarks/v0.4-system-scale-preregistration.json"
+  },
   "environment": {
     "platform": "Windows-10-10.0.26200-SP0",
     "python": "3.11.3",

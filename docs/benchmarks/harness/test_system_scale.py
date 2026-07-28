@@ -263,6 +263,32 @@ class SystemScaleHarnessTests(unittest.TestCase):
         )
         self.assertEqual(errors, [])
 
+    def test_candidate_source_identity_is_descriptive_checkout_provenance(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preregistration = root / "docs/benchmarks/preregistration.json"
+            with (
+                mock.patch.object(system_scale, "ROOT", root),
+                mock.patch.object(
+                    system_scale.subprocess,
+                    "check_output",
+                    return_value=("a" * 40) + "\n",
+                ) as check_output,
+            ):
+                identity = system_scale.candidate_source_identity(preregistration)
+        self.assertEqual(
+            identity,
+            {
+                "checkout_head": "a" * 40,
+                "preregistration_path": "docs/benchmarks/preregistration.json",
+            },
+        )
+        check_output.assert_called_once_with(
+            ["git", "rev-parse", "HEAD"], cwd=root, text=True
+        )
+
     def test_database_profile_uses_real_sqlite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = Path(temporary) / "projectatlas.db"

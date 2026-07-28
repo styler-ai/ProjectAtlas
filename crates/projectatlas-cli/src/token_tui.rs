@@ -2263,9 +2263,19 @@ fn ratio(part: usize, total: usize) -> f64 {
 
 /// Return the preferred dashboard width.
 fn dashboard_width() -> usize {
-    std::env::var("COLUMNS")
+    let columns = std::env::var("COLUMNS")
         .ok()
-        .and_then(|value| value.parse::<usize>().ok())
+        .and_then(|value| value.parse::<usize>().ok());
+    let terminal_width = ratatui::crossterm::terminal::size()
+        .ok()
+        .map(|(width, _)| width);
+    resolve_dashboard_width(columns, terminal_width)
+}
+
+/// Resolve an explicit dashboard width before using the detected terminal width.
+fn resolve_dashboard_width(columns: Option<usize>, terminal_width: Option<u16>) -> usize {
+    columns
+        .or_else(|| terminal_width.map(usize::from))
         .unwrap_or(140)
 }
 
@@ -2302,8 +2312,8 @@ mod tests {
         reference_title, render_dashboard_to_string, render_overview_frame,
         render_overview_frame_with_atlas, render_token_dashboard,
         render_token_dashboard_with_theme, render_token_trend_dashboard,
-        render_token_trend_dashboard_with_theme, savings_source_rows_for_width, signed_count,
-        signed_trend_points, signed_y_bounds,
+        render_token_trend_dashboard_with_theme, resolve_dashboard_width,
+        savings_source_rows_for_width, signed_count, signed_trend_points, signed_y_bounds,
     };
     use projectatlas_core::graph::GraphRelationKind;
     use projectatlas_core::symbols::RelationKind;
@@ -2320,6 +2330,13 @@ mod tests {
     use ratatui::style::{Color, Modifier};
     use ratatui::text::Line;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn dashboard_width_prefers_override_then_terminal_then_fallback() {
+        assert_eq!(resolve_dashboard_width(Some(200), Some(190)), 200);
+        assert_eq!(resolve_dashboard_width(None, Some(190)), 190);
+        assert_eq!(resolve_dashboard_width(None, None), 140);
+    }
 
     #[test]
     fn overview_dashboard_matches_reference_sections_and_order() {
