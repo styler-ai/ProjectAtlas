@@ -4,7 +4,7 @@
   "status": "locked_for_final_measurement",
   "measurement_input_lock_basis": "Content digests from the recorded measurement checkout; a later run must relock after any listed input changes.",
   "measurement_inputs": {
-    "docs/benchmarks/harness/system_scale.py": "71d70226ef79242cbdaa4cd224e640c7bbb93754ad86e6b7d15371c128281e42",
+    "docs/benchmarks/harness/system_scale.py": "d27016b3b526f505edad89ac16cb5fac45a57faa6250889bb111e5390ebc6dc9",
     "docs/benchmarks/harness/mcp_composition.py": "04dd5bf8bac306d1ac5faf8c92bd75cf63e6284f39e53dfcef80ac3c3ac17832",
     "docs/benchmarks/harness/requirements.txt": "b6c8d86768d07e1dae4fb734c2e93997445a318d43290b307bfc1c800a0b1e52"
   },
@@ -43,7 +43,7 @@
   ],
   "candidate": {
     "required_version": "0.4.0",
-    "runtime_sha256": "ce9ef5de6bcf647f407ff761e913b2fcf079415c85c991e811272d2a27ff473f",
+    "runtime_sha256": "e9fa5fbe6041c2f37cb55c7934240564c312d4d28554875ce11c525e549116b4",
     "mcp_tools_sha256": "0c21ea673bdb9cdff48203a274db04fbaccb888bd362407d46fc1bcc0e506b28",
     "telemetry": "disabled",
     "build_profile": "release-default-features"
