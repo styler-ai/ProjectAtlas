@@ -457,15 +457,15 @@ repeats of five corpora across v0.4, frozen v0.3.26, and no ProjectAtlas. All
 V0.4 and plain completed 15/15. Frozen v0.3.26 completed 12/15 and failed every
 pinned VS Code setup on a tracked non-UTF-8 source file.
 
-Manual review found all 42 produced answers substantively correct. Seven
-answers had invalid temporary-root citation targets, leaving a 35/42 final
-manual result: 12/15 for v0.4, 11/12 for frozen v0.3.26, and 12/15 for plain.
-V0.4 reduced median net navigation context 18.5–19.6% against v0.3.26 on the
-small tasks and reduced several call/read counts, but used 2,356.8% more medium
-net context and 11.1% more median calls. It could not be compared with v0.3.26
-on huge source. Plain navigation used the least context on every corpus. V0.4's
-huge setup cost a median 763.1 seconds, 2.31 GiB peak RSS, and 3.72 GiB
-persistent storage before the agent task.
+Manual review found all 42 produced answers substantively correct. Nine
+answers had invalid temporary-root citation targets, leaving a 33/42 final
+manual result: 11/15 for v0.4, 11/12 for frozen v0.3.26, and 11/15 for plain.
+V0.4 reduced median net navigation context 19.2–19.8% against v0.3.26 on the
+small tasks. On the medium task it used 5.3% less median net context, 47.1%
+more median calls, and took 29.5% longer including setup. It could not be
+compared with v0.3.26 on huge source. Plain navigation used the least context
+on every corpus. V0.4's huge setup cost a median 759.5 seconds, 2,361.8 MiB
+peak RSS, and 3,809.5 MiB persistent storage before the agent task.
 
 The reviewed report publishes absolute values, median and observed-maximum
 percentage comparisons, all tool calls and visits, gross versus fully charged

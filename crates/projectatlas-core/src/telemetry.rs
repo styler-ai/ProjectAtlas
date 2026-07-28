@@ -380,6 +380,8 @@ pub struct AgentEfficiencyArtifactIdentity {
     pub candidate_version: String,
     /// Candidate runtime SHA-256 identity.
     pub candidate_runtime_sha256: String,
+    /// Descriptive source checkout commit recorded by the benchmark.
+    pub candidate_source_head: String,
     /// Frozen `ProjectAtlas` runtime semantic version.
     pub frozen_version: String,
     /// Frozen `ProjectAtlas` runtime `SHA-256` identity.

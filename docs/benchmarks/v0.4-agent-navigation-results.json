@@ -615,6 +615,10 @@
       "projectatlas": false
     }
   },
+  "candidate_source_identity": {
+    "checkout_head": "36111e7be3913eed729a90f198f1102e4ddf5f35",
+    "preregistration_path": "docs/benchmarks/v0.4-agent-navigation-preregistration.json"
+  },
   "environment": {
     "platform": "Windows-10-10.0.26200-SP0",
     "python": "3.11.3",

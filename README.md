@@ -74,12 +74,13 @@ For active sessions, the agent can run the watcher so file edits continuously re
 The final v0.4 navigation campaign retained all 45 preregistered trials:
 ProjectAtlas v0.4 completed 15/15, frozen v0.3.26 completed 12/15 and failed all
 three pinned VS Code setups, and the plain control completed 15/15. The final
-manual result was 35/42 completed answers: all 42 were substantively correct,
-but seven used invalid temporary-root citation targets. Against v0.3.26, v0.4
-cut median net navigation context by 18.5–19.6% on the three small tasks, but
-used 2,356.8% more on the medium task. Plain navigation used the least context
-at every measured scale, while v0.4 avoided several broad and full reads at the
-cost of indexing, discovery, and skill context. See the
+manual result was 33/42 completed answers: all 42 were substantively correct,
+but nine used invalid temporary-root citation targets. Against v0.3.26, v0.4
+cut median net navigation context by 19.2–19.8% on the three small tasks and
+by 5.3% on the medium task, where it used 47.1% more calls and took 29.5%
+longer including setup. Plain navigation used the least context at every
+measured scale, while v0.4 avoided several broad and full reads at the cost of
+indexing, discovery, and skill context. See the
 [reviewed report](docs/benchmarks/v0.4-agent-navigation-evaluation.md) and
 [published 45-trial result](docs/benchmarks/v0.4-agent-navigation-results.json).
 
@@ -238,7 +239,7 @@ For a human token dashboard:
 projectatlas token --view tui
 ```
 
-That opens the Ratatui token impact dashboard: a readable reconciled `Without ProjectAtlas - With ProjectAtlas = Saved by ProjectAtlas` equation, file reads avoided, observed summaries/slices, modeled narrowing, source rows, calibration notes, and compact status hints. The default theme is dark; use `projectatlas token --view tui --theme light` for light terminal color schemes. Ani remains the ProjectAtlas mascot in the design assets, but the token TUI defers mascot rendering until a future focused pass.
+That renders a Ratatui token-impact snapshot: a readable reconciled `Without ProjectAtlas - With ProjectAtlas = Saved by ProjectAtlas` equation, likely file-read calls avoided, observed summaries/slices, modeled narrowing, source rows, and calibration notes. A wide terminal adds a bounded, non-interactive atlas map drawn only from resolved relations in the active project database; narrower terminals keep the proven overview without crowding it. The default theme is dark; use `--theme light` for light terminals or `--theme terminal` to preserve the terminal background. Rerun the command to refresh the snapshot. Ani remains the ProjectAtlas mascot in the design assets, but the token TUI defers mascot rendering until a future focused pass.
 
 For a local tokenizer calibration of indexed UTF-8 files, add `--tokenizer o200k_base` or `--tokenizer cl100k_base`.
 

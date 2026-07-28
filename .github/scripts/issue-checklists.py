@@ -141,12 +141,17 @@ def requires_exact_head_proof(text: str) -> bool:
         lambda match: match.group(0).replace(match.group(1), ""), text
     )
     for sentence in re.split(r"[.\n!?]+", without_link_targets):
-        if not EXACT_HEAD_PROOF_RE.search(sentence):
-            continue
-        if EXACT_HEAD_NEGATION_RE.search(sentence):
-            continue
-        if EXACT_HEAD_REQUIREMENT_RE.search(sentence):
-            return True
+        for clause in re.split(
+            r"\s*(?:[:;—]|\b(?:but|however|yet)\b)\s*",
+            sentence,
+            flags=re.IGNORECASE,
+        ):
+            if not EXACT_HEAD_PROOF_RE.search(clause):
+                continue
+            if EXACT_HEAD_NEGATION_RE.search(clause):
+                continue
+            if EXACT_HEAD_REQUIREMENT_RE.search(clause):
+                return True
     return False
 
 
@@ -874,6 +879,9 @@ Mitigations:
     )
     assert not requires_exact_head_proof(
         "[Architecture](https://example.invalid/design#exact-head-proof)"
+    )
+    assert requires_exact_head_proof(
+        "Do not use stale proof; require exact-head proof."
     )
     punctuation_heading_contract = issue_contract.replace(
         "#architecture-views", "#sqlite-wal-durability-and-checkpoint-flow"

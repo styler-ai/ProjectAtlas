@@ -927,10 +927,13 @@ def validate_preregistration(preregistration: dict[str, Any]) -> dict[str, Any]:
 
 def validate_candidate_checkout(
     preregistration: dict[str, Any], preregistration_path: Path
-) -> None:
+) -> dict[str, str]:
     candidate = preregistration.get("candidate")
     if not isinstance(candidate, dict):
         raise ValueError("preregistration candidate must be a JSON object")
+    head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+    ).strip()
     try:
         preregistration_relative = (
             preregistration_path.resolve().relative_to(ROOT.resolve()).as_posix()
@@ -967,6 +970,10 @@ def validate_candidate_checkout(
         raise ValueError("committed preregistration must be a JSON object")
     if preregistration != committed_preregistration:
         raise ValueError("preregistration changed after its committed lock")
+    return {
+        "checkout_head": head,
+        "preregistration_path": preregistration_relative,
+    }
 
 
 def trial_economics(
@@ -1159,7 +1166,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             f"--repeats {args.repeats} does not match preregistered {expected_repeats}"
         )
-    validate_candidate_checkout(preregistration, preregistration_path)
+    source_identity = validate_candidate_checkout(preregistration, preregistration_path)
     identities = validate_preregistration(preregistration)
     environment = actual_environment(preregistration["candidate"])
     expected_environment = preregistration["environment"]["expected"]
@@ -1232,6 +1239,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "repeat_count": args.repeats,
         "schedule": planned,
         "candidate_identities": identities,
+        "candidate_source_identity": source_identity,
         "environment": environment,
         "path_placeholders": PATH_PLACEHOLDERS,
         "rerun_command": [

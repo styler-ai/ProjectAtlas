@@ -19,7 +19,9 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use projectatlas_cli::optional_parser_lifecycle::{
     OptionalParserPackLifecycle, OptionalParserPackLifecycleError,
 };
-use projectatlas_core::graph::{ConfidenceClass, GraphLimits, RepositoryFilePath};
+use projectatlas_core::graph::{
+    ConfidenceClass, GraphEntityKey, GraphLimits, GraphRelationKind, RepositoryFilePath,
+};
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::telemetry::{
@@ -35,7 +37,8 @@ use projectatlas_core::{
 };
 use projectatlas_db::{
     AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, ProjectRootTransition,
-    ProjectRootTransitionResult, RepositoryCoverageQuery, verify_project_database,
+    ProjectRootTransitionResult, RepositoryCoverageQuery, RepositoryGraphRelationQuery,
+    verify_project_database,
 };
 use projectatlas_service::{
     COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CodeSliceBudget, CodeSliceDraft, CoverageDiscoveryReport,
@@ -73,7 +76,7 @@ use runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -82,7 +85,8 @@ use thiserror::Error;
 #[cfg(test)]
 use token_tui::render_token_dashboard;
 use token_tui::{
-    TokenDashboardTheme, render_token_dashboard_with_theme, render_token_trend_dashboard_with_theme,
+    TokenAtlasPreview, TokenDashboardTheme, render_token_dashboard_with_atlas,
+    render_token_trend_dashboard_with_theme, token_dashboard_wants_atlas,
 };
 
 /// Default relative path for the `SQLite` index.
@@ -587,6 +591,8 @@ enum TokenTheme {
     Dark,
     /// Light dashboard theme for light terminal backgrounds.
     Light,
+    /// Preserve the terminal background while retaining semantic accents.
+    Terminal,
 }
 
 impl From<TokenTheme> for TokenDashboardTheme {
@@ -594,6 +600,7 @@ impl From<TokenTheme> for TokenDashboardTheme {
         match theme {
             TokenTheme::Dark => Self::Dark,
             TokenTheme::Light => Self::Light,
+            TokenTheme::Terminal => Self::Terminal,
         }
     }
 }
@@ -2510,9 +2517,15 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         print_output(cli.format, &render_token_overview(&overview), &overview)?;
                     }
                     TokenView::Tui => {
-                        write_stdout(&render_token_dashboard_with_theme(
+                        let atlas = if token_dashboard_wants_atlas() {
+                            load_token_atlas_preview(&store)
+                        } else {
+                            TokenAtlasPreview::empty()
+                        };
+                        write_stdout(&render_token_dashboard_with_atlas(
                             &overview,
                             session.as_deref(),
+                            &atlas,
                             (*theme).into(),
                         ))?;
                     }
@@ -4095,6 +4108,71 @@ fn build_token_calibration(
     })
 }
 
+/// Load the tiny optional atlas preview through existing indexed relation-family reads.
+fn load_token_atlas_preview(store: &AtlasStore) -> TokenAtlasPreview {
+    const RELATIONS_PER_FAMILY: u32 = 128;
+    const NEIGHBORHOOD_SEEDS: usize = 5;
+    const RELATIONS_PER_SEED_DIRECTION: u32 = 64;
+
+    let mut relations = Vec::with_capacity(
+        GraphRelationKind::ALL.len() * usize::try_from(RELATIONS_PER_FAMILY).unwrap_or_default(),
+    );
+    let mut truncated = false;
+    for relation in GraphRelationKind::ALL {
+        let Ok(page) = store.repository_graph_relations(
+            RepositoryGraphRelationQuery::Family { relation },
+            RELATIONS_PER_FAMILY,
+        ) else {
+            return TokenAtlasPreview::unavailable();
+        };
+        truncated |= page.truncated;
+        relations.extend(page.rows);
+    }
+    let mut degrees_by_kind = BTreeMap::<String, BTreeMap<String, (GraphEntityKey, usize)>>::new();
+    for relation in &relations {
+        let Some(target) = relation.resolution().resolved_target() else {
+            continue;
+        };
+        let degrees = degrees_by_kind
+            .entry(relation.kind().as_str().to_string())
+            .or_default();
+        for endpoint in [relation.source(), target] {
+            let entry = degrees
+                .entry(endpoint.digest().to_string())
+                .or_insert_with(|| (endpoint.clone(), 0_usize));
+            entry.1 += 1;
+        }
+    }
+    let mut seeds = degrees_by_kind
+        .into_values()
+        .filter_map(|degrees| degrees.into_values().max_by_key(|(_, degree)| *degree))
+        .collect::<Vec<_>>();
+    seeds.sort_by(|left, right| right.1.cmp(&left.1));
+    let mut seen_seeds = BTreeSet::new();
+    seeds.retain(|(seed, _)| seen_seeds.insert(seed.digest().to_string()));
+    let mut neighborhood_relations = Vec::new();
+    for (seed, _) in seeds.into_iter().take(NEIGHBORHOOD_SEEDS) {
+        for query in [
+            RepositoryGraphRelationQuery::Outbound {
+                source: seed.clone(),
+            },
+            RepositoryGraphRelationQuery::Inbound { target: seed },
+        ] {
+            let Ok(page) = store.repository_graph_relations(query, RELATIONS_PER_SEED_DIRECTION)
+            else {
+                return TokenAtlasPreview::unavailable();
+            };
+            truncated |= page.truncated;
+            neighborhood_relations.extend(page.rows);
+        }
+    }
+    if neighborhood_relations.is_empty() {
+        TokenAtlasPreview::from_relations(&relations, truncated)
+    } else {
+        TokenAtlasPreview::from_relations(&neighborhood_relations, truncated)
+    }
+}
+
 /// Render root diagnostics as compact TOON.
 fn render_root_report(report: &RootReport) -> String {
     encode_agent_payload(&json!({ "root": report }))
@@ -5074,7 +5152,7 @@ mod tests {
         assert!(dashboard.contains("Without ProjectAtlas"));
         assert!(dashboard.contains("With ProjectAtlas"));
         assert!(dashboard.contains("Saved by ProjectAtlas"));
-        assert!(dashboard.contains("F I L E   R E A D S   A V O I D E D"));
+        assert!(dashboard.contains("L I K E L Y   F I L E - R E A D   C A L L S   A V O I D E D"));
         assert!(dashboard.contains("S A V I N G S   C O M P O S I T I O N"));
         assert!(dashboard.contains("S I G N A L"));
         assert!(dashboard.contains("W H E R E   T H E   S A V I N G S   C A M E   F R O M"));

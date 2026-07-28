@@ -389,7 +389,11 @@ class AgentNavigationHarnessTests(unittest.TestCase):
                 check=True,
             )
             with patch("agent_navigation.ROOT", root):
-                validate_candidate_checkout(preregistered, preregistration)
+                identity = validate_candidate_checkout(preregistered, preregistration)
+                first_head = identity["checkout_head"]
+                self.assertEqual(
+                    identity["preregistration_path"], "preregistration.json"
+                )
                 metadata = root / "openspec/changes/release/tasks.md"
                 metadata.parent.mkdir(parents=True)
                 metadata.write_text("- [x] release\n", encoding="utf-8")
@@ -399,7 +403,8 @@ class AgentNavigationHarnessTests(unittest.TestCase):
                     cwd=root,
                     check=True,
                 )
-                validate_candidate_checkout(preregistered, preregistration)
+                identity = validate_candidate_checkout(preregistered, preregistration)
+                self.assertNotEqual(identity["checkout_head"], first_head)
                 preregistered["rubric"]["small-clean"] = ["changed"]
                 with self.assertRaisesRegex(ValueError, "changed after"):
                     validate_candidate_checkout(preregistered, preregistration)

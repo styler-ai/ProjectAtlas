@@ -465,6 +465,7 @@ fn validate_and_project(
                 .runtime_sha256
                 .clone()
                 .ok_or_else(|| "candidate runtime digest is missing".to_string())?,
+            candidate_source_head: artifact.candidate_source_identity.checkout_head.clone(),
             frozen_version: frozen
                 .version
                 .clone()
@@ -525,6 +526,10 @@ fn validate_identity(artifact: &BenchmarkArtifact) -> Result<(), String> {
     require(
         !plain.projectatlas,
         "plain control unexpectedly enables ProjectAtlas",
+    )?;
+    require(
+        is_lower_hex(&artifact.candidate_source_identity.checkout_head, 40),
+        "candidate source identity is malformed",
     )?;
     Ok(())
 }
@@ -1440,6 +1445,8 @@ struct BenchmarkArtifact {
     schedule: Vec<BenchmarkSchedule>,
     /// Runtime and skill identity for each benchmark arm.
     candidate_identities: BTreeMap<String, BenchmarkCandidateIdentity>,
+    /// Descriptive source checkout identity recorded by the campaign.
+    candidate_source_identity: BenchmarkSourceIdentity,
     /// Every retained benchmark run.
     runs: Vec<BenchmarkRun>,
     /// Published aggregate groups and comparisons.
@@ -1463,6 +1470,13 @@ struct BenchmarkCandidateIdentity {
     skill_bytes: Option<u64>,
     /// Tool-discovery bytes charged to the arm.
     tool_discovery_bytes: Option<u64>,
+}
+
+/// Descriptive candidate source identity retained by the benchmark.
+#[derive(Deserialize)]
+struct BenchmarkSourceIdentity {
+    /// Source checkout commit at campaign start.
+    checkout_head: String,
 }
 
 /// One preregistered workload/arm/repeat cell.
@@ -1669,9 +1683,18 @@ mod tests {
             .join("../../docs/benchmarks/v0.4-agent-navigation-results.json");
         let bytes = fs::read(path)?;
         let artifact: BenchmarkArtifact = serde_json::from_slice(&bytes)?;
+        let source_head = artifact.candidate_source_identity.checkout_head.clone();
         let comparison = validate_and_project(&artifact, &bytes)
             .map_err(|reason| io::Error::other(format!("benchmark validation failed: {reason}")))?;
 
+        require(
+            comparison
+                .artifact
+                .as_ref()
+                .is_some_and(|identity| identity.candidate_source_head == source_head),
+            "published benchmark source provenance was not retained",
+        )
+        .map_err(io::Error::other)?;
         require(
             comparison.state == AgentEfficiencyEvidenceState::Partial,
             "published benchmark was not partial",
@@ -2076,6 +2099,15 @@ mod tests {
         require(
             rejected_benchmark_reason(&excessive_identity_bytes)?.contains("supported bound"),
             "excessive identity bytes did not fail numeric validation",
+        )
+        .map_err(io::Error::other)?;
+
+        let mut malformed_source = published.clone();
+        malformed_source["candidate_source_identity"]["checkout_head"] =
+            serde_json::Value::String("not-a-commit".to_string());
+        require(
+            rejected_benchmark_reason(&malformed_source)?.contains("source identity"),
+            "malformed source provenance did not fail validation",
         )
         .map_err(io::Error::other)?;
 

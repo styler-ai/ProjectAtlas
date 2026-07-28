@@ -60,6 +60,32 @@ Any review finding that changes release behavior or another proof input SHALL re
 - **WHEN** required `01-CI` completes
 - **THEN** Rust verification and source-built CLI/MCP E2E smoke succeed on Linux, Windows, macOS x64, and macOS arm64
 
+### Requirement: Compatible upgrades preserve cumulative token impact
+The normal v0.4.0 database-open path SHALL preserve all compatible cumulative token-usage events and derived overview and trend totals from a released v0.3.26 project database. Later supported migrations SHALL preserve the same authored telemetry authority. A migration SHALL either commit the complete compatible state or leave the last-valid database unchanged.
+
+#### Scenario: A released v0.3.26 project upgrades
+- **WHEN** v0.4.0 opens a released-schema database containing token-impact history
+- **THEN** the cumulative overview and every retained trend total match before migration, after migration, and after reopening the upgraded database
+
+#### Scenario: Compatible telemetry contains an invalid predecessor row
+- **WHEN** migration validation encounters malformed telemetry
+- **THEN** the migration rolls back atomically and the last-valid predecessor database remains retryable without lost history
+
+### Requirement: The token dashboard is truthful and focused
+The human token-impact dashboard SHALL derive every numeric field from the active project's persisted token report. It SHALL focus on tokens, lookups performed, and likely file-read calls avoided without release-version, frozen-baseline, plain-control, or repeated-work benchmark comparisons. At wide terminal sizes it MAY show a bounded non-interactive constellation drawn only from resolved logical relations in the active project database; it SHALL NOT invent graph rows or imply complete graph analysis.
+
+#### Scenario: Persisted impact is rendered
+- **WHEN** the dashboard renders an overview
+- **THEN** its lookups, token equation, avoided-call totals, source rows, and composition reconcile exactly with that overview
+
+#### Scenario: A wide project graph is available
+- **WHEN** the active database returns resolved logical relations within the preview bounds
+- **THEN** the right panel renders a deterministic static atlas from only those rows and labels it as a bounded live snapshot
+
+#### Scenario: The graph is empty, unavailable, or the terminal is narrow
+- **WHEN** no resolved preview rows are available, the optional preview read fails, or the terminal cannot fit both columns
+- **THEN** the dashboard remains usable, shows an explicit empty or unavailable state where applicable, and never substitutes demo data
+
 ### Requirement: Promotion remains reversible until readiness is complete
 The release process SHALL leave `main`, version tags, and GitHub releases untouched until every readiness task is complete. It SHALL prepare a merge-commit `dev`-to-`main` promotion only after review feedback, OpenSpec, IssueOps, ProjectAtlas, package, installer, and platform evidence is reconciled. `main` SHALL be an ancestor of the promotion head, squash and rebase SHALL be refused, and the resulting merge commit SHALL have the promotion head as a parent with an identical Git tree.
 

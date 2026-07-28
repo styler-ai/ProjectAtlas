@@ -23,6 +23,8 @@ The user also requires branch, worktree, and external ProjectAtlas checkout clea
 - Keep federated rendezvous evidence inside the primary anchor/direction result without changing SQLite schema or query ownership.
 - Carry the same caller-or-service deadline into rendezvous SQLite reads and measure retained federation state without an additional encoded buffer.
 - Retain published system-scale and agent-navigation campaigns when their behavior-relevant inputs and measured artifact identities remain valid, and rerun only affected campaigns.
+- Preserve cumulative token-impact history when a released v0.3.26 database is upgraded to v0.4.0 and through later compatible migrations.
+- Keep the token-impact TUI focused on reconciled persisted impact data and use only real resolved SQLite relations for its bounded static wide-layout atlas.
 - Keep `main`, tags, and GitHub releases untouched until all prepublication evidence is green.
 - Prepare a merge-commit `dev`-to-`main` promotion that can pass the existing milestone gate.
 - Preserve a durable post-release owner for independent publication verification and safe workspace consolidation.
@@ -84,6 +86,14 @@ Keeping that task unchecked inside #311 was rejected because `02-Release` correc
 
 OpenSpec and GitHub tasks state the behavior and gate to complete. Existing Actions runs, test definitions, workflow artifacts, release checksums, and review threads remain the evidence sources. The issue will not grow per-task SHA receipts, bespoke test identifiers, or duplicate status comments.
 
+### Preserve telemetry and keep the dashboard truthful
+
+The existing append-only SQLite migration owner remains responsible for compatible upgrades. A released v0.3.26 schema fixture is opened through the normal v0.4.0 path, and the test compares cumulative overview and trend results before migration, after migration, and after reopen. A malformed-row case must roll back atomically. No replacement database, reset, export/import detour, schema addition, or new telemetry authority is introduced unless this compatibility proof exposes a concrete defect.
+
+The TUI consumes the same `TokenOverview` used by structured output, so all numeric fields remain derived rather than independently recalculated or fabricated. Wide terminals may additionally load a small, hard-bounded set of resolved logical relations through the existing indexed repository-graph family reader. The renderer stores only the sampled visual nodes and edges, draws a deterministic non-interactive constellation, labels it as a bounded live snapshot, and hides it at narrower widths. Unresolved or unavailable graph data is shown as empty or unavailable rather than replaced with demo content.
+
+A new graph query, schema, index, dependency, interactive state model, or full graph explorer was rejected. The existing bounded reader and Ratatui Canvas already cover the release requirement; the separate interactive explorer remains post-v0.4.0 issue #357.
+
 ### Preserve the promotion rollback boundary
 
 Until readiness is complete, `main`, tags, and releases remain untouched. If any candidate gate fails, fix the owning branch and rerun affected proof. If the release workflow fails after `main` promotion, do not clean worktrees or delete branches; diagnose and retry the owning release path while the post-release issue remains open.
@@ -100,6 +110,9 @@ Until readiness is complete, `main`, tags, and releases remain untouched. If any
 - **Exact federation accounting doubles retained memory while measuring it** → Stream serialized-equivalent bytes into the existing counter without retaining another encoding.
 - **Published MCP composition metadata names stale input** → Compute its raw input SHA-256 and compare both published representations in the release gate.
 - **Published system-scale or agent-navigation results measure changed behavior** → Bind both campaigns to their owning behavior plus measured runtime, skill, tool, and platform identities; invalidate and rerun only the affected campaign.
+- **A compatible upgrade resets cumulative token history** → Compare released v0.3.26 overview and trend totals before migration, after migration, and after reopen; require atomic rollback on invalid predecessor rows.
+- **The dashboard shows plausible but non-authoritative values** → Render numeric fields from the persisted report object, assert arithmetic and labels against it, and show unavailable state instead of fallback values.
+- **The miniature atlas implies complete graph analysis or consumes unbounded state** → Read only resolved rows through existing indexed bounded queries, cap nodes and edges, label the static preview, and keep the full explorer in #357.
 - **The milestone gate becomes circular around post-release cleanup** → Keep #311 prepublication-only and create the non-milestone post-release owner before closure.
 - **A prepublish run is mistaken for publication** → Require `prepublish_only=true`, verify no tag or release was created, and leave publication to the existing main-triggered workflow.
 - **Installer or plugin state passes in source but fails when packaged** → Require real package/installer smoke and installed CLI/MCP behavior from the release workflow.
@@ -111,12 +124,13 @@ Until readiness is complete, `main`, tags, and releases remain untouched. If any
 2. Add this change to `openspec/issue-map.json` and replace #311's obsolete body with the exact local checklist.
 3. Complete and close #341 after its Linux and Windows empty-cache proof and land its reconciled checklist state.
 4. Land the supported optional-parser release handoff, anchored and deadline-bound federation filtering with allocation-free byte accounting, benchmark digest correction, focused tests, specs, and architecture diagram.
-5. Merge all remaining readiness artifacts into `dev`, retain or rerun each benchmark according to its behavior-relevant inputs and measured artifact identities, then lock the corrected release candidate.
-6. Run the complete local gates, `01-CI`, clean optional-parser proof when its inputs changed, and `02-Release` with `prepublish_only=true` and an input-compatible clean handoff.
-7. Reconcile #311 and mirror the GitHub checklist, then rerun cheap current-state gates.
-8. Close #311 after strict OpenSpec, IssueOps, ProjectAtlas low lint, review checks, applicable CI, and the reusable or refreshed clean optional-parser handoff pass; then pass milestone IssueOps.
-9. Promote with a merge commit after verifying `main` ancestry and identical promotion/main trees; let the existing release workflow consume the input-compatible handoff, verify the resulting `main` tree, and publish v0.4.0.
-10. Independently verify the published release and only then perform the post-release cleanup.
+5. Prove released-schema telemetry preservation and finish the truthful token-impact TUI plus its bounded live graph preview and visual review.
+6. Merge all remaining readiness artifacts into `dev`, retain or rerun each benchmark according to its behavior-relevant inputs and measured artifact identities, then lock the corrected release candidate.
+7. Run the complete local gates, `01-CI`, clean optional-parser proof when its inputs changed, and `02-Release` with `prepublish_only=true` and an input-compatible clean handoff.
+8. Reconcile #311 and mirror the GitHub checklist, then rerun cheap current-state gates.
+9. Close #311 after strict OpenSpec, IssueOps, ProjectAtlas low lint, review checks, applicable CI, and the reusable or refreshed clean optional-parser handoff pass; then pass milestone IssueOps.
+10. Promote with a merge commit after verifying `main` ancestry and identical promotion/main trees; let the existing release workflow consume the input-compatible handoff, verify the resulting `main` tree, and publish v0.4.0.
+11. Independently verify the published release and only then perform the post-release cleanup.
 
 Rollback before promotion is ordinary correction followed by a new release-content lock and reconciliation. After promotion, retain all source lanes and release artifacts until the publishing failure is understood; never use workspace cleanup as rollback.
 

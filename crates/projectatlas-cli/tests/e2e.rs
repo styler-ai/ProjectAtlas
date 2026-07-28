@@ -7287,7 +7287,7 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .stdout(predicate::str::contains("With ProjectAtlas"))
         .stdout(predicate::str::contains("Saved by ProjectAtlas"))
         .stdout(predicate::str::contains(
-            "F I L E   R E A D S   A V O I D E D",
+            "L I K E L Y   F I L E - R E A D   C A L L S   A V O I D E D",
         ))
         .stdout(predicate::str::contains("Observed"))
         .stdout(predicate::str::contains("Modeled narrowing"))
@@ -10342,7 +10342,7 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains("ProjectAtlas")
         || !stdout.contains("Token Impact")
         || !stdout.contains("T O T A L   T O K E N S   A V O I D E D")
-        || !stdout.contains("F I L E   R E A D S   A V O I D E D")
+        || !stdout.contains("L I K E L Y   F I L E - R E A D   C A L L S   A V O I D E D")
         || !stdout.contains("S I G N A L")
         || !stdout.contains("purpose_review:")
         || !stdout.contains("failed: 0")
