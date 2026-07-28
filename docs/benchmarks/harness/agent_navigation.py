@@ -20,6 +20,7 @@ from typing import Any
 
 from mcp_composition import PURPOSES, clear_git_repository_environment, remove_tree
 from system_scale import (
+    committed_file_sha256,
     measurement_input_errors,
     persistent_sizes,
     prepare_huge,
@@ -1245,10 +1246,17 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         runs.append(record)
         append_checkpoint(record, journal)
     journal_sha256 = file_sha256(journal)
+    preregistration_sha256 = committed_file_sha256(
+        source_identity["preregistration_path"],
+        root=ROOT,
+        revision=source_identity["checkout_head"],
+    )
+    if preregistration_sha256 is None:
+        raise ValueError("committed preregistration disappeared before result assembly")
     result = {
         "schema_version": 1,
         "preregistration": str(preregistration_path),
-        "preregistration_sha256": file_sha256(preregistration_path),
+        "preregistration_sha256": preregistration_sha256,
         "effective_preregistration": preregistration,
         "repeat_count": args.repeats,
         "schedule": planned,

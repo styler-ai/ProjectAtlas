@@ -58,6 +58,25 @@ SYSTEM_SCALE_MEASUREMENT_INPUTS = (
 )
 
 
+def committed_file_sha256(
+    relative: str,
+    *,
+    root: Path | None = None,
+    revision: str = "HEAD",
+) -> str | None:
+    """Return the SHA-256 of one canonical committed Git blob."""
+
+    root = ROOT if root is None else root
+    process = subprocess.run(
+        ["git", "cat-file", "blob", f"{revision}:{relative}"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        timeout=120,
+    )
+    return hashlib.sha256(process.stdout).hexdigest() if process.returncode == 0 else None
+
+
 def measurement_input_errors(
     preregistration: dict[str, Any],
     required_paths: tuple[str, ...],
@@ -89,17 +108,10 @@ def measurement_input_errors(
         except ValueError:
             errors.append(f"measurement input escapes the repository: {relative}")
             continue
-        process = subprocess.run(
-            ["git", "cat-file", "blob", f"{revision}:{relative}"],
-            cwd=root,
-            check=False,
-            capture_output=True,
-            timeout=120,
-        )
-        if process.returncode:
+        actual = committed_file_sha256(relative, root=root, revision=revision)
+        if actual is None:
             errors.append(f"measurement input is missing from {revision}: {relative}")
             continue
-        actual = hashlib.sha256(process.stdout).hexdigest()
         if actual != expected:
             errors.append(f"measurement input changed after lock: {relative}")
     return errors
