@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc" viewBox="0 0 660 340">
+  <title id="title">Representative ProjectAtlas candidate-context audit</title>
+  <desc id="desc">Donut chart showing that compact ProjectAtlas payloads omitted 99.8 percent of a modeled candidate-read baseline across 142 calls in a 679-file application.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2328; }
+    .title { font-size: 22px; font-weight: 700; }
+    .headline { font-size: 38px; font-weight: 750; fill: #0969da; }
+    .label { font-size: 18px; font-weight: 650; }
+    .muted { fill: #57606a; font-size: 14px; }
+    .track { fill: none; stroke: #d0d7de; stroke-width: 26; }
+    .avoided { fill: none; stroke: #0969da; stroke-width: 26; stroke-linecap: butt; }
+    .payload-segment { fill: none; stroke: #1a7f37; stroke-width: 26; stroke-linecap: butt; }
+    .payload { fill: #1a7f37; }
+    .avoided-key { fill: #0969da; }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #f0f6fc; }
+      .headline { fill: #58a6ff; }
+      .muted { fill: #8c959f; }
+      .track { stroke: #30363d; }
+      .avoided { stroke: #58a6ff; }
+      .payload-segment { stroke: #3fb950; }
+      .avoided-key { fill: #58a6ff; }
+      .payload { fill: #3fb950; }
+    }
+  </style>
+
+  <text x="24" y="34" class="title">Modeled candidate-context compression</text>
+  <text x="24" y="58" class="muted">Representative 679-file · 142-call large-application audit</text>
+
+  <g transform="translate(140 192) rotate(-90)">
+    <circle r="82" class="track" />
+    <circle r="82" class="avoided" pathLength="100" stroke-dasharray="99.8 0.2" />
+    <circle r="82" class="payload-segment" pathLength="100" stroke-dasharray="0.2 99.8" transform="rotate(359.28)" />
+  </g>
+
+  <text x="140" y="188" text-anchor="middle" class="headline">99.8%</text>
+  <text x="140" y="215" text-anchor="middle" class="label">not returned</text>
+
+  <rect x="270" y="120" width="18" height="18" rx="3" class="avoided-key" />
+  <text x="302" y="135" class="label">220.7M modeled tokens filtered</text>
+  <text x="302" y="160" class="muted">candidate baseline minus payloads</text>
+
+  <rect x="270" y="202" width="18" height="18" rx="3" class="payload" />
+  <text x="302" y="217" class="label">0.4M payload tokens</text>
+  <text x="302" y="242" class="muted">0.2% returned as compact guidance</text>
+
+  <text x="24" y="322" class="muted">Offline navigation model · not a plain-agent arm or billing counter</text>
+</svg>

@@ -13,8 +13,8 @@ nonsource_files[]:
   SECURITY.md,Security contact information for ProjectAtlas
   CODE_OF_CONDUCT.md,Community conduct expectations for ProjectAtlas
   docs/assets/projectatlas-mascot.png,ProjectAtlas README mascot image
-  docs/assets/agent-harness-funnel.svg,README diagram explaining the ProjectAtlas agent harness workflow from folder purpose to exact source slice
   docs/assets/token-savings-bar.svg,README bar chart visualizing ProjectAtlas token savings benchmark results
+  docs/assets/token-savings-donut.svg,README donut chart visualizing the scoped representative token savings model
   docs/design/ani-mascot-reference.png,Ani mascot reference bitmap used by the token impact TUI image widget
   docs/design/projectatlas-mascot-clean-transparent.svg,Ani mascot transparent SVG source/reference asset
   docs/design/token-impact-tui-reference.png,Approved token impact TUI visual reference screenshot
