@@ -1,3 +1,4 @@
+import hashlib
 import inspect
 import json
 import os
@@ -215,16 +216,18 @@ class SystemScaleHarnessTests(unittest.TestCase):
             "status": "draft",
             "candidate": {
                 "required_version": "0.4.0",
-                "functional_git_head": "expected",
                 "runtime_sha256": "expected-runtime",
                 "mcp_tools_sha256": "expected-tools",
+                "skill_sha256": "expected-skill",
+                "skill_bytes": 100,
             },
         }
         errors = system_scale.publication_identity_errors(
             preregistration,
-            git_head="other",
             runtime_sha256="other-runtime",
             mcp_tools_sha256="other-tools",
+            skill_sha256="other-skill",
+            skill_bytes=200,
             runtime_info={
                 "project": "Other",
                 "version": "0.3.26",
@@ -236,32 +239,58 @@ class SystemScaleHarnessTests(unittest.TestCase):
                 "docs/benchmarks/v0.4-system-scale-preregistration.json",
                 "docs/benchmarks/harness/system_scale.py",
             ],
-            preregistration_path=(
-                "docs/benchmarks/v0.4-system-scale-preregistration.json"
-            ),
+            measurement_errors=["measurement input lock is invalid"],
         )
-        self.assertEqual(len(errors), 10)
+        self.assertEqual(len(errors), 12)
 
-    def test_publication_identity_allows_only_the_self_referential_lock_edit(
+    def test_candidate_file_identity_rejects_escape_and_missing_artifacts(
         self,
     ) -> None:
-        preregistration_path = (
-            "docs/benchmarks/v0.4-system-scale-preregistration.json"
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = parent / "candidate"
+            skill = root / "plugins/projectatlas/skills/projectatlas/SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_bytes(b"skill\n")
+            self.assertEqual(
+                system_scale.candidate_file_identity(
+                    "plugins/projectatlas/skills/projectatlas/SKILL.md",
+                    root=root,
+                ),
+                {
+                    "path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
+                    "sha256": hashlib.sha256(b"skill\n").hexdigest(),
+                    "bytes": 6,
+                },
+            )
+            (parent / "outside.md").write_bytes(b"outside\n")
+            with self.assertRaisesRegex(ValueError, "escapes"):
+                system_scale.candidate_file_identity(
+                    "../outside.md",
+                    root=root,
+                )
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                system_scale.candidate_file_identity("missing.md", root=root)
+
+    def test_publication_identity_allows_clean_content_bound_preregistration(
+        self,
+    ) -> None:
         preregistration = {
             "status": "locked_for_final_measurement",
             "candidate": {
                 "required_version": "0.4.0",
-                "functional_git_head": "head",
                 "runtime_sha256": "runtime",
                 "mcp_tools_sha256": "tools",
+                "skill_sha256": "skill",
+                "skill_bytes": 100,
             },
         }
         errors = system_scale.publication_identity_errors(
             preregistration,
-            git_head="head",
             runtime_sha256="runtime",
             mcp_tools_sha256="tools",
+            skill_sha256="skill",
+            skill_bytes=100,
             runtime_info={
                 "project": "ProjectAtlas",
                 "version": "0.4.0",
@@ -269,10 +298,204 @@ class SystemScaleHarnessTests(unittest.TestCase):
                 "text_format": "TOON",
                 "mcp_tools": [f"tool-{index}" for index in range(40)],
             },
-            dirty_paths=[preregistration_path],
-            preregistration_path=preregistration_path,
+            dirty_paths=[],
+            measurement_errors=[],
         )
         self.assertEqual(errors, [])
+
+    def test_termination_recovery_requires_reopen_integrity_and_cleanup(
+        self,
+    ) -> None:
+        process = {"returncode": 0, "timed_out": False}
+        checkpoint = {"busy": 0}
+        profile = {"quick_check": "ok"}
+        storage = {"wal_bytes": 0, "staging_bytes": 0, "stage_directories": 0}
+        self.assertTrue(
+            system_scale.termination_recovery_is_complete(
+                process, checkpoint, profile, storage
+            )
+        )
+        failures = (
+            (
+                {"returncode": 1, "timed_out": False},
+                checkpoint,
+                profile,
+                storage,
+            ),
+            (
+                {"returncode": 0, "timed_out": True},
+                checkpoint,
+                profile,
+                storage,
+            ),
+            (process, {"busy": 1}, profile, storage),
+            (process, checkpoint, {"quick_check": "malformed"}, storage),
+            (process, checkpoint, profile, {**storage, "wal_bytes": 1}),
+            (process, checkpoint, profile, {**storage, "staging_bytes": 1}),
+            (process, checkpoint, profile, {**storage, "stage_directories": 1}),
+        )
+        for (
+            reopen_process,
+            recovery_checkpoint,
+            recovery_profile,
+            final_storage,
+        ) in failures:
+            with self.subTest(
+                reopen_process=reopen_process,
+                recovery_checkpoint=recovery_checkpoint,
+                recovery_profile=recovery_profile,
+                final_storage=final_storage,
+            ):
+                self.assertFalse(
+                    system_scale.termination_recovery_is_complete(
+                        reopen_process,
+                        recovery_checkpoint,
+                        recovery_profile,
+                        final_storage,
+                    )
+                )
+
+    def test_forced_termination_scans_the_explicit_source_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source_root = root / "source"
+            source_root.mkdir()
+            process = mock.Mock(pid=123, returncode=0)
+            process.poll.return_value = 0
+            with mock.patch.object(
+                system_scale.subprocess, "Popen", return_value=process
+            ) as popen:
+                result = system_scale.forced_termination_quiescence(
+                    Path("projectatlas"),
+                    source_root,
+                    root / "work",
+                    {},
+                    5,
+                )
+
+            self.assertEqual(popen.call_args.args[0][-2:], ["scan", str(source_root)])
+            self.assertEqual(result["returncode"], 0)
+
+    def test_measurement_input_lock_fails_closed_on_path_or_digest_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "benchmark@example.invalid"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Benchmark Test"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "core.autocrlf", "false"], cwd=root, check=True
+            )
+            required = (
+                "docs/benchmarks/harness/measure.py",
+                "docs/benchmarks/fixtures/mcp-composition",
+            )
+            path = root / required[0]
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"locked\n")
+            fixture = root / required[1] / "clean/src/lib.rs"
+            fixture.parent.mkdir(parents=True)
+            fixture.write_bytes(b"fixture\n")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "lock input"], cwd=root, check=True
+            )
+            locked_head = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True
+            ).strip()
+            preregistration = {
+                "measurement_inputs": {
+                    relative: system_scale.committed_git_object_sha256(
+                        relative, root=root
+                    )
+                    for relative in required
+                }
+            }
+            self.assertEqual(
+                system_scale.measurement_input_errors(
+                    preregistration, required, root=root
+                ),
+                [],
+            )
+            path.write_bytes(b"locked\r\n")
+            self.assertEqual(
+                system_scale.measurement_input_errors(
+                    preregistration, required, root=root
+                ),
+                [],
+            )
+            path.write_bytes(b"changed\n")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "change input"], cwd=root, check=True
+            )
+            self.assertEqual(
+                system_scale.measurement_input_errors(
+                    preregistration, required, root=root
+                ),
+                [f"measurement input changed after lock: {required[0]}"],
+            )
+            self.assertEqual(
+                system_scale.measurement_input_errors(
+                    preregistration, required, root=root, revision=locked_head
+                ),
+                [],
+            )
+            path.write_bytes(b"locked\n")
+            added_fixture = root / required[1] / "dirty/src/added.rs"
+            added_fixture.parent.mkdir(parents=True)
+            added_fixture.write_bytes(b"added\n")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "change fixture tree"],
+                cwd=root,
+                check=True,
+            )
+            self.assertEqual(
+                system_scale.measurement_input_errors(
+                    preregistration, required, root=root
+                ),
+                [f"measurement input changed after lock: {required[1]}"],
+            )
+            self.assertEqual(
+                system_scale.measurement_input_errors(
+                    {"measurement_inputs": {}}, required, root=root
+                ),
+                ["measurement input lock does not match the required path set"],
+            )
+
+    def test_candidate_source_identity_is_descriptive_checkout_provenance(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preregistration = root / "docs/benchmarks/preregistration.json"
+            with (
+                mock.patch.object(system_scale, "ROOT", root),
+                mock.patch.object(
+                    system_scale.subprocess,
+                    "check_output",
+                    return_value=("a" * 40) + "\n",
+                ) as check_output,
+            ):
+                identity = system_scale.candidate_source_identity(preregistration)
+        self.assertEqual(
+            identity,
+            {
+                "checkout_head": "a" * 40,
+                "preregistration_path": "docs/benchmarks/preregistration.json",
+            },
+        )
+        check_output.assert_called_once_with(
+            ["git", "rev-parse", "HEAD"], cwd=root, text=True
+        )
 
     def test_database_profile_uses_real_sqlite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -931,9 +1154,21 @@ time.sleep(60)
             output = Path(temporary) / "result.json"
             with self.assertRaisesRegex(SystemExit, "1"):
                 system_scale.write_result(
-                    {"passed": False, "publication_eligible": False}, output
+                    {
+                        "passed": False,
+                        "publication_eligible": False,
+                        "path": str(system_scale.ROOT / "private"),
+                    },
+                    output,
                 )
-            self.assertFalse(json.loads(output.read_text(encoding="utf-8"))["passed"])
+            result = json.loads(output.read_text(encoding="utf-8"))
+            self.assertFalse(result["passed"])
+            self.assertEqual(
+                result["path"], str(Path("{REPO_ROOT}") / "private")
+            )
+            self.assertNotIn(
+                str(system_scale.ROOT), output.read_text(encoding="utf-8")
+            )
 
     def test_main_persists_stalled_mcp_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

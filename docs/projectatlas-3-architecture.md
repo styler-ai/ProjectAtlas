@@ -2039,6 +2039,14 @@ reconsidered only if a measured package, installation, or platform ceiling fails
 
 #### CI Dependency-Layer Reuse And Clean Release Proof
 
+The full system-scale and agent-navigation campaigns sit outside automated
+validation and release orchestration. A routing-policy check keeps their
+entrypoints out of pre-push, standard CI, prepublication, merge, and release
+workflows. Those paths retain focused harness unit tests and artifact-integrity
+checks, but an input-incompatible campaign publication becomes historical or
+unavailable instead of triggering a run. Only an explicit user request starts a
+full campaign.
+
 The optional-pack workflow may reuse only sanitized Cargo dependency build state.
 An exact key binds the target, Rust and native toolchains, Cargo lockfile and
 manifests, and an explicit cache-policy ABI that changes only when reusable artifact
@@ -2074,7 +2082,7 @@ publishes a `disabled` disposition, and cannot restore or save cache state.
 
 ```mermaid
 flowchart TB
-    Candidate[Exact clean candidate] --> Key[Exact dependency-layer key]
+    Candidate[Clean candidate inputs] --> Key[Dependency-layer content key]
     Dispatch{Explicit clean construction?}
     Key --> Dispatch
     Dispatch -->|yes| Empty[Empty Cargo target]
@@ -2100,7 +2108,7 @@ flowchart TB
     Aggregate --> CleanHandoff{Explicit clean all-platform dispatch?}
     CleanHandoff -->|no| NoHandoff[No release handoff]
     CleanHandoff -->|yes| Handoff[Supported archives, aggregate proof,<br/>and clean receipts]
-    Handoff --> Release[02-Release binds successful run<br/>and identical candidate tree]
+    Handoff --> Release[02-Release binds successful run<br/>to matching release inputs]
     Release --> Assets[Versioned Linux and Windows archives,<br/>proof, and SHA256SUMS]
     CleanAfter --> Receipt
     Receipt --> Trust{Cache-save eligible?<br/>trusted, non-clean, reuse-enabled}
@@ -2110,14 +2118,18 @@ flowchart TB
 
 Only an explicit `clean_construction=true`, `target=all` dispatch emits the
 release handoff. `02-Release` verifies the referenced run belongs to the same
-repository and workflow, completed successfully, and has a Git tree identical
-to the release checkout. It then checks the aggregate target set, candidate
-revision and version, clean no-restore receipts, Cargo lock digest, archive
-names, sizes, SHA-256 digests, fresh-host isolation, network denial, grammar
-probes, and memory/process cleanup before staging versioned Linux and Windows
-pack archives plus the aggregate proof. `03-Auto-Release` selects that handoff
-from the exact identical-tree `dev` promotion parent; stale, partial, reused,
-expired, or altered handoffs fail before publication.
+repository and workflow, completed successfully, and has unchanged
+behavior-relevant source, dependency, lockfile, toolchain, workflow, packaging,
+configuration, and parser-pack inputs. Unknown changes fail closed. It then
+checks the aggregate target set, provenance revision and version, clean
+no-restore receipts, Cargo lock digest, archive names, sizes, SHA-256 digests,
+fresh-host isolation, network denial, grammar probes, and memory/process cleanup
+before staging versioned Linux and Windows pack archives plus the aggregate
+proof. `03-Auto-Release` selects the newest successful unexpired handoff whose
+release inputs match the promoted candidate; stale, partial, incompatible,
+expired, or altered handoffs fail before publication. Checklist-only and other
+behavior-neutral commits rerun cheap policy gates without rebuilding these
+archives.
 
 The retained policy is measurement-owned, not platform folklore:
 
@@ -2472,7 +2484,9 @@ the existing token overview with CLI `--benchmark-results <path>` or MCP
 `benchmark_results`. The selected project's SQLite database remains
 authoritative only for observed and modeled live usage; ProjectAtlas never
 copies the benchmark into SQLite or creates a cache, sidecar, telemetry event,
-or background loader for it.
+or background loader for it. The Ratatui dashboard always omits the comparison
+completely; an explicit benchmark path populates the structured CLI JSON/TOON
+and MCP report without changing the human layout or any live token-impact total.
 
 ```mermaid
 sequenceDiagram
@@ -2481,7 +2495,8 @@ sequenceDiagram
     participant DB as projectatlas.db
     participant Artifact as Benchmark JSON
     participant Report as projectatlas-core TokenOverview
-    participant Adapters as JSON, TOON, MCP, and Ratatui
+    participant Structured as JSON, TOON, and MCP
+    participant TUI as Ratatui live overview
 
     Request->>Service: Optional repository-relative benchmark path
     Service->>DB: Read bounded live telemetry snapshot
@@ -2512,10 +2527,12 @@ sequenceDiagram
     opt typed report completed
         Service->>DB: Revalidate captured project binding
         Service->>Report: Return one typed overview
-        Report-->>Adapters: Identical agent_efficiency values
+        Report-->>Structured: Typed overview including agent_efficiency
+        Report-->>TUI: Live token-impact fields only
     end
     Note over Artifact,DB: Benchmark evidence never enters SQLite
-    Note over Report,Adapters: Provider counters remain descriptive-only and non-causal
+    Note over Report,Structured: Provider counters remain descriptive-only and non-causal
+    Note over Report,TUI: Comparison state never changes TUI cells
 ```
 
 `projectatlas-service` owns the trust boundary. It resolves the requested path
@@ -2532,13 +2549,15 @@ produce a bounded `failed` comparison without exposing partial decoded values.
 
 The supported contract validates schema version 1; exact v0.4 and frozen
 v0.3.26 semantic identities and runtime/skill digests; a plain control with
-ProjectAtlas disabled; candidate source heads; the complete five-workload,
-three-arm, repeated schedule; a one-to-one retained schedule/run inventory;
-zero excluded trials; completed and failed run accounting; bounded group,
-comparison, distribution, and MCP-call collections; finite nonnegative values
-whose medians and observed maxima reconcile; descriptive-only provider
-counters; and reconciled capability call/byte rows. The comparison preserves
-failed trials outside matched denominators rather than turning them into zero.
+ProjectAtlas disabled; the complete five-workload, three-arm, repeated schedule;
+a one-to-one retained schedule/run inventory; zero excluded trials; completed
+and failed run accounting; bounded group, comparison, distribution, and
+MCP-call collections; finite nonnegative values whose medians and observed
+maxima reconcile; descriptive-only provider counters; and reconciled capability
+call/byte rows. The exact measured runtime digest is the binary authority; the
+report does not infer source provenance from the checkout commit. The comparison
+preserves failed trials outside matched denominators rather than turning them
+into zero.
 
 The closed states have one meaning across all adapters:
 
@@ -2558,8 +2577,9 @@ identities. It does not expose local paths, prompts, answers, or raw traces.
 
 `projectatlas-core` owns the closed comparison enums and the single
 backward-compatible defaulted `TokenOverview.agent_efficiency` field. CLI
-JSON/TOON, MCP, and Ratatui render that same typed overview and perform no
-independent parsing or arithmetic. Capability rows report trace-completed
+JSON/TOON and MCP serialize that field from the same typed overview; Ratatui
+selects only live token-impact fields and performs no comparison parsing or
+arithmetic. Capability rows report trace-completed
 ProjectAtlas MCP calls and emitted bytes by discovery, summary/slice, search,
 symbols/relations, or bounded `other` responsibility. Provider input,
 cached-input, output, and reasoning counters remain descriptive-only and never
@@ -2572,6 +2592,14 @@ collection capped before projection. There is no cache, worker pool, SQLite
 write, schema or migration, retention or WAL/checkpoint policy, query-plan
 change, or persistent-size growth. Omitting the path preserves the existing
 fast token overview.
+
+The live navigation section uses the same reconciled source rows as the source
+ledger below it. File reads retain their exact observed summary/slice and
+search-modeled split. Broad folder walks skipped and candidate files not opened
+each show an activity bar against all persisted source steps and a separate
+token-impact bar against reconciled `tokens_avoided`; therefore a rare but
+high-impact source can appear small in activity and dominant in avoided tokens
+without any bar being normalized to an uninformative 100%.
 
 Token accounting model:
 

@@ -48,7 +48,7 @@ The report SHALL distinguish unavailable, failed, incompatible, partial, and com
 - **AND** they SHALL NOT contribute to navigation savings or break-even arithmetic.
 
 ### Requirement: Matched Navigation Metrics Have One Typed Representation
-The token overview SHALL expose matched v0.4-versus-frozen-v0.3.26 and v0.4-versus-plain rows from the validated artifact, using the same typed values for CLI JSON/TOON, MCP, and TUI rendering.
+The token overview SHALL expose matched v0.4-versus-frozen-v0.3.26 and v0.4-versus-plain rows from the validated artifact, using the same typed values for structured CLI JSON/TOON and MCP consumers.
 
 #### Scenario: Matched groups contain navigation evidence
 - **WHEN** both arms completed the same workload trials

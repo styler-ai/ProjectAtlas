@@ -1,12 +1,11 @@
 //! Purpose: Render token telemetry as package-backed terminal dashboards.
 
+use projectatlas_core::graph::{GraphRelationKind, LogicalRelation};
+use projectatlas_core::symbols::RelationKind;
 use projectatlas_core::telemetry::{
-    AgentEfficiencyBaseline, AgentEfficiencyBaselineRow, AgentEfficiencyCapability,
-    AgentEfficiencyCapabilityContribution, AgentEfficiencyComparison, AgentEfficiencyEvidenceState,
-    AgentEfficiencyMetricComparison, AgentEfficiencyMetricKind, TOKEN_ACCOUNTING_OBSERVED_DELTA,
-    TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_FULL_FILE, TOKEN_BASELINE_SELECTED_CANDIDATES,
-    TOKEN_BUCKET_FULL_FILE_COMPRESSION, TokenBucketOverview, TokenOverview, TokenTrendPeriod,
-    TokenTrendReport,
+    TOKEN_ACCOUNTING_OBSERVED_DELTA, TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_FULL_FILE,
+    TOKEN_BASELINE_SELECTED_CANDIDATES, TOKEN_BUCKET_FULL_FILE_COMPRESSION, TokenBucketOverview,
+    TokenOverview, TokenTrendPeriod, TokenTrendReport,
 };
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -14,13 +13,39 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
+use ratatui::widgets::canvas::{Canvas, Circle, Line as CanvasLine, Points};
 use ratatui::widgets::{Axis, Block, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, Terminal};
 use std::cell::Cell as StdCell;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Fixed terminal height for the token overview dashboard snapshot.
-const DASHBOARD_HEIGHT: u16 = 60;
+const DASHBOARD_HEIGHT: u16 = 50;
+/// Width at which the human dashboard can show the atlas without crowding impact data.
+const ATLAS_DASHBOARD_MIN_WIDTH: usize = 190;
+/// Maximum human dashboard width.
+const DASHBOARD_MAX_WIDTH: usize = 200;
+/// Stable width reserved for the token-impact column in the wide dashboard.
+const TOKEN_IMPACT_COLUMN_WIDTH: u16 = 140;
+/// Maximum real resolved nodes retained by the decorative atlas preview.
+const ATLAS_PREVIEW_MAX_NODES: usize = 48;
+/// Maximum real resolved links retained by the decorative atlas preview.
+const ATLAS_PREVIEW_MAX_EDGES: usize = 64;
+/// Maximum links one visual hub may consume in the decorative preview.
+const ATLAS_PREVIEW_MAX_NODE_DEGREE: usize = 12;
+/// Horizontal Canvas bound retaining a margin inside the atlas panel.
+const ATLAS_CANVAS_X_BOUND: f64 = 33.0;
+/// Vertical Canvas bound retaining a margin above the atlas footer.
+const ATLAS_CANVAS_Y_BOUND: f64 = 21.0;
+/// Fixed force steps keep the bounded static preview deterministic and fast.
+const ATLAS_LAYOUT_ITERATIONS: usize = 120;
+/// Ideal graph-space edge length for the bounded force layout.
+const ATLAS_LAYOUT_IDEAL_DISTANCE: f64 = 18.0;
+/// Maximum per-step node movement before deterministic cooling.
+const ATLAS_LAYOUT_INITIAL_TEMPERATURE: f64 = 8.0;
+/// Degree at which a node receives a small depth halo instead of a single point.
+const ATLAS_NODE_HALO_DEGREE: usize = 4;
 /// Fixed terminal height for the token trend dashboard snapshot.
 const TREND_DASHBOARD_HEIGHT: u16 = 30;
 /// Reserved terminal-canvas color; overview frames leave the shell background visible.
@@ -43,10 +68,10 @@ const THEME_YELLOW: Color = Color::Rgb(230, 179, 55);
 const THEME_BORDER: Color = Color::Rgb(92, 74, 55);
 /// Token dashboard inactive bar cells.
 const THEME_BAR_EMPTY: Color = Color::Rgb(49, 56, 57);
-/// Token dashboard warm keycap background.
-const THEME_KEYCAP_BG: Color = Color::Rgb(36, 34, 31);
 /// Token dashboard loss red.
 const THEME_RED: Color = Color::Rgb(235, 95, 95);
+/// Repository-graph test and route accent.
+const THEME_PURPLE: Color = Color::Rgb(173, 127, 255);
 /// Human token dashboard color mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TokenDashboardTheme {
@@ -54,6 +79,8 @@ pub(crate) enum TokenDashboardTheme {
     Dark,
     /// Light dashboard theme for light terminal backgrounds.
     Light,
+    /// Preserve the terminal background and foreground while retaining semantic accents.
+    Terminal,
 }
 
 impl TokenDashboardTheme {
@@ -62,6 +89,7 @@ impl TokenDashboardTheme {
         match value {
             "dark" => Some(Self::Dark),
             "light" => Some(Self::Light),
+            "terminal" => Some(Self::Terminal),
             _ => None,
         }
     }
@@ -90,10 +118,218 @@ struct ThemePalette {
     border: Color,
     /// Empty bar fill.
     bar_empty: Color,
-    /// Footer keycap background.
-    keycap_bg: Color,
     /// Negative/loss red.
     red: Color,
+    /// Repository graph accent.
+    purple: Color,
+}
+
+/// One real resolved relation retained by the bounded atlas preview.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AtlasPreviewEdge {
+    /// Stable compact source identity.
+    source: String,
+    /// Stable compact target identity.
+    target: String,
+    /// Typed relation family used for semantic color.
+    kind: GraphRelationKind,
+}
+
+/// Bounded, non-interactive projection of resolved relations from the active project database.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TokenAtlasPreview {
+    /// Real resolved relations admitted within the node and edge ceilings.
+    edges: Vec<AtlasPreviewEdge>,
+    /// Whether a source page or a preview ceiling omitted additional relations.
+    truncated: bool,
+    /// Whether the optional graph read completed successfully.
+    available: bool,
+}
+
+/// Return whether a relation belongs in the cross-entity atlas network.
+pub(crate) const fn token_atlas_network_relation(kind: GraphRelationKind) -> bool {
+    !matches!(kind, GraphRelationKind::Legacy(RelationKind::Contains))
+}
+
+impl TokenAtlasPreview {
+    /// Build an empty but available graph snapshot.
+    #[must_use]
+    pub(crate) const fn empty() -> Self {
+        Self {
+            edges: Vec::new(),
+            truncated: false,
+            available: true,
+        }
+    }
+
+    /// Build the explicit state used when the optional graph read fails.
+    #[must_use]
+    pub(crate) const fn unavailable() -> Self {
+        Self {
+            edges: Vec::new(),
+            truncated: false,
+            available: false,
+        }
+    }
+
+    /// Retain only exact local resolutions from bounded database relation pages.
+    #[must_use]
+    pub(crate) fn from_relations(relations: &[LogicalRelation], source_truncated: bool) -> Self {
+        Self::from_resolved_edges(
+            relations.iter().filter_map(|relation| {
+                relation.resolution().resolved_target().map(|target| {
+                    (
+                        relation.source().digest().to_string(),
+                        target.digest().to_string(),
+                        relation.kind(),
+                    )
+                })
+            }),
+            source_truncated,
+        )
+    }
+
+    /// Build the bounded projection from already resolved stable identities.
+    fn from_resolved_edges(
+        relations: impl IntoIterator<Item = (String, String, GraphRelationKind)>,
+        source_truncated: bool,
+    ) -> Self {
+        let mut candidates = BTreeMap::new();
+        for (source, target, kind) in relations {
+            if source == target || !token_atlas_network_relation(kind) {
+                continue;
+            }
+            candidates
+                .entry((source.clone(), target.clone(), kind.as_str()))
+                .or_insert(AtlasPreviewEdge {
+                    source,
+                    target,
+                    kind,
+                });
+        }
+        let mut degrees = BTreeMap::<String, usize>::new();
+        let mut adjacency = BTreeMap::<String, BTreeSet<String>>::new();
+        for edge in candidates.values() {
+            *degrees.entry(edge.source.clone()).or_default() += 1;
+            *degrees.entry(edge.target.clone()).or_default() += 1;
+            adjacency
+                .entry(edge.source.clone())
+                .or_default()
+                .insert(edge.target.clone());
+            adjacency
+                .entry(edge.target.clone())
+                .or_default()
+                .insert(edge.source.clone());
+        }
+        let mut candidates = candidates.into_values().collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            let score = |edge: &AtlasPreviewEdge| {
+                degrees.get(&edge.source).copied().unwrap_or_default()
+                    + degrees.get(&edge.target).copied().unwrap_or_default()
+            };
+            score(right)
+                .cmp(&score(left))
+                .then_with(|| left.source.cmp(&right.source))
+                .then_with(|| left.target.cmp(&right.target))
+                .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
+        });
+
+        let mut remaining = adjacency.keys().cloned().collect::<BTreeSet<_>>();
+        let mut largest_component = BTreeSet::new();
+        while let Some(start) = remaining.first().cloned() {
+            remaining.remove(&start);
+            let mut component = BTreeSet::from([start.clone()]);
+            let mut frontier = VecDeque::from([start]);
+            while let Some(node) = frontier.pop_front() {
+                if let Some(neighbors) = adjacency.get(&node) {
+                    for neighbor in neighbors {
+                        if remaining.remove(neighbor) {
+                            component.insert(neighbor.clone());
+                            frontier.push_back(neighbor.clone());
+                        }
+                    }
+                }
+            }
+            let replace = component.len() > largest_component.len()
+                || (component.len() == largest_component.len()
+                    && component.first() < largest_component.first());
+            if replace {
+                largest_component = component;
+            }
+        }
+        let Some(hub) = largest_component
+            .iter()
+            .max_by(|left, right| {
+                degrees
+                    .get(*left)
+                    .cmp(&degrees.get(*right))
+                    .then_with(|| right.cmp(left))
+            })
+            .cloned()
+        else {
+            return Self {
+                edges: Vec::new(),
+                truncated: source_truncated,
+                available: true,
+            };
+        };
+        let mut nodes = BTreeSet::from([hub]);
+        let mut edges = Vec::new();
+        let mut selected_degrees = BTreeMap::<String, usize>::new();
+        while edges.len() < ATLAS_PREVIEW_MAX_EDGES {
+            let can_admit = |edge: &AtlasPreviewEdge| {
+                selected_degrees
+                    .get(&edge.source)
+                    .copied()
+                    .unwrap_or_default()
+                    < ATLAS_PREVIEW_MAX_NODE_DEGREE
+                    && selected_degrees
+                        .get(&edge.target)
+                        .copied()
+                        .unwrap_or_default()
+                        < ATLAS_PREVIEW_MAX_NODE_DEGREE
+            };
+            let next_index = candidates
+                .iter()
+                .position(|edge| {
+                    let source_selected = nodes.contains(&edge.source);
+                    let target_selected = nodes.contains(&edge.target);
+                    source_selected != target_selected
+                        && nodes.len() < ATLAS_PREVIEW_MAX_NODES
+                        && can_admit(edge)
+                })
+                .or_else(|| {
+                    candidates.iter().position(|edge| {
+                        nodes.contains(&edge.source)
+                            && nodes.contains(&edge.target)
+                            && can_admit(edge)
+                    })
+                });
+            let Some(next_index) = next_index else {
+                break;
+            };
+            let edge = candidates.remove(next_index);
+            nodes.insert(edge.source.clone());
+            nodes.insert(edge.target.clone());
+            *selected_degrees.entry(edge.source.clone()).or_default() += 1;
+            *selected_degrees.entry(edge.target.clone()).or_default() += 1;
+            edges.push(edge);
+        }
+        Self {
+            edges,
+            truncated: source_truncated || !candidates.is_empty(),
+            available: true,
+        }
+    }
+
+    /// Return the exact number of distinct nodes drawn by this preview.
+    fn node_count(&self) -> usize {
+        self.edges
+            .iter()
+            .flat_map(|edge| [&edge.source, &edge.target])
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
 }
 
 /// Light terminal palette preserving the same semantic color roles.
@@ -108,8 +344,8 @@ const LIGHT_THEME: ThemePalette = ThemePalette {
     yellow: Color::Rgb(178, 116, 0),
     border: Color::Rgb(175, 151, 111),
     bar_empty: Color::Rgb(218, 210, 196),
-    keycap_bg: Color::Rgb(224, 216, 203),
     red: Color::Rgb(190, 52, 52),
+    purple: Color::Rgb(126, 70, 180),
 };
 
 thread_local! {
@@ -124,6 +360,7 @@ pub(crate) fn render_token_dashboard(overview: &TokenOverview, session: Option<&
 }
 
 /// Render the token overview as a human terminal dashboard with the selected theme.
+#[cfg(test)]
 pub(crate) fn render_token_dashboard_with_theme(
     overview: &TokenOverview,
     session: Option<&str>,
@@ -135,6 +372,27 @@ pub(crate) fn render_token_dashboard_with_theme(
             render_overview_frame(frame, overview, session);
         })
     })
+}
+
+/// Render the human token dashboard with its optional bounded live atlas.
+pub(crate) fn render_token_dashboard_with_atlas(
+    overview: &TokenOverview,
+    session: Option<&str>,
+    atlas: &TokenAtlasPreview,
+    theme: TokenDashboardTheme,
+) -> String {
+    let width = dashboard_width().clamp(80, DASHBOARD_MAX_WIDTH) as u16;
+    with_token_theme(theme, || {
+        render_dashboard_to_ansi_string(width, DASHBOARD_HEIGHT, |frame| {
+            render_overview_frame_with_atlas(frame, overview, session, Some(atlas));
+        })
+    })
+}
+
+/// Return whether the current terminal is wide enough for the optional atlas read.
+#[must_use]
+pub(crate) fn token_dashboard_wants_atlas() -> bool {
+    dashboard_width() >= ATLAS_DASHBOARD_MIN_WIDTH
 }
 
 /// Render the token overview as a plain terminal chart for agent payloads.
@@ -228,44 +486,77 @@ where
 
 /// Draw the full overview dashboard frame.
 fn render_overview_frame(frame: &mut Frame<'_>, overview: &TokenOverview, session: Option<&str>) {
+    render_overview_frame_with_atlas(frame, overview, session, None);
+}
+
+/// Draw the overview and, when requested and wide enough, its static live atlas.
+fn render_overview_frame_with_atlas(
+    frame: &mut Frame<'_>,
+    overview: &TokenOverview,
+    session: Option<&str>,
+    atlas: Option<&TokenAtlasPreview>,
+) {
     let area = frame.area();
     let outer = Block::bordered()
         .border_set(symbols::border::ROUNDED)
-        .border_style(Style::default().fg(THEME_BORDER))
+        .border_style(Style::default().fg(THEME_TEXT))
         .style(Style::default().fg(THEME_TEXT));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
     render_window_title_bar(frame, area);
 
+    if area.width < u16::try_from(ATLAS_DASHBOARD_MIN_WIDTH).unwrap_or(u16::MAX) || atlas.is_none()
+    {
+        render_overview_main(frame, inner, overview, session);
+        return;
+    }
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(TOKEN_IMPACT_COLUMN_WIDTH),
+            Constraint::Min(48),
+        ])
+        .split(inner);
+    render_overview_main(frame, columns[0], overview, session);
+    if let Some(atlas) = atlas {
+        render_atlas_map(frame, columns[1], atlas);
+    }
+}
+
+/// Draw the proven one-screen savings overview.
+fn render_overview_main(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    overview: &TokenOverview,
+    session: Option<&str>,
+) {
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(7),
             Constraint::Length(13),
-            Constraint::Length(6),
+            Constraint::Length(8),
             Constraint::Length(6),
             Constraint::Min(8),
-            Constraint::Length(12),
             Constraint::Length(4),
             Constraint::Length(1),
         ])
-        .split(inner);
+        .split(area);
 
     render_token_header(frame, sections[0], overview, session);
     render_token_hero(frame, sections[1], overview);
-    render_file_reads_card(frame, sections[2], overview);
+    render_avoided_navigation_card(frame, sections[2], overview);
     render_composition_and_signal(frame, sections[3], overview);
     render_savings_breakdown_table(frame, sections[4], overview);
-    render_agent_efficiency(frame, sections[5], overview);
-    render_calibration_notes(frame, sections[6], overview);
-    render_status_bar(frame, sections[7]);
+    render_calibration_notes(frame, sections[5], overview);
+    render_status_bar(frame, sections[6]);
 }
 
 /// Return a screenshot-matched dashboard panel.
 fn panel(title: &'static str) -> Block<'static> {
     let block = Block::bordered()
         .border_set(symbols::border::ROUNDED)
-        .border_style(Style::default().fg(THEME_BORDER))
+        .border_style(Style::default().fg(THEME_TEXT))
         .style(Style::default().fg(THEME_TEXT).bg(THEME_PANEL));
     if title.is_empty() {
         block
@@ -319,6 +610,10 @@ fn render_token_header(
     overview: &TokenOverview,
     session: Option<&str>,
 ) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(THEME_PANEL)),
+        area,
+    );
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -340,6 +635,7 @@ fn render_token_header(
                 Span::styled("Real savings.", Style::default().fg(THEME_GREEN)),
             ]),
         ])
+        .style(Style::default().bg(THEME_PANEL))
         .wrap(Wrap { trim: true }),
         columns[0],
     );
@@ -359,6 +655,7 @@ fn render_token_header(
                 Span::styled("local", body_style()),
             ]),
         ])
+        .style(Style::default().bg(THEME_PANEL))
         .alignment(Alignment::Right)
         .wrap(Wrap { trim: true }),
         columns[1],
@@ -367,7 +664,7 @@ fn render_token_header(
 
 /// Draw the dominant saved-token hero panel.
 fn render_token_hero(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
-    let block = panel("").border_style(Style::default().fg(THEME_BORDER));
+    let block = panel("").border_style(Style::default().fg(THEME_TEXT));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -512,113 +809,126 @@ fn center_symbol(symbol: &'static str) -> Paragraph<'static> {
     )
 }
 
-/// Draw the reference-style file-read strip.
-fn render_file_reads_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
+/// Draw the reference-style avoided navigation-work strip.
+fn render_avoided_navigation_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
     let block = panel("");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let compact = inner.width < 100;
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(3)])
+        .constraints([Constraint::Length(1), Constraint::Min(4)])
         .split(inner);
     frame.render_widget(
-        Paragraph::new(reference_title("FILE READS AVOIDED"))
+        Paragraph::new(reference_title("NAVIGATION WORK AVOIDED"))
             .style(section_title_style().bg(THEME_PANEL)),
         rows[0],
     );
 
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(24),
-            Constraint::Length(1),
-            Constraint::Percentage(29),
-            Constraint::Length(1),
-            Constraint::Percentage(29),
-            Constraint::Length(1),
-            Constraint::Percentage(16),
-        ])
-        .split(rows[1]);
+    render_file_read_impact_row(frame, rows[1], overview, compact);
+}
+
+/// Draw the source-reconciled file-read total and its observed/modeled split.
+fn render_file_read_impact_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    overview: &TokenOverview,
+    compact: bool,
+) {
     let total_reads = overview.likely_file_reads_avoided;
     let observed_ratio = ratio(overview.observed_file_read_replacements, total_reads);
     let modeled_ratio = ratio(overview.modeled_file_reads_avoided, total_reads);
-    let observed_title = if compact {
-        "Observed"
-    } else {
-        "Observed (summaries/slices)"
-    };
-    let modeled_title = if compact {
-        "Modeled narrowing"
-    } else {
-        "Search-modeled narrowing"
-    };
+    if compact {
+        let bar_width = area.width.saturating_sub(34).min(24) as usize;
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled("⌁  File reads avoided: ", body_style().bg(THEME_PANEL)),
+                    Span::styled(
+                        grouped_count(total_reads),
+                        Style::default()
+                            .fg(THEME_INK_WHITE)
+                            .bg(THEME_PANEL)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("  •  confidence ", muted_style().bg(THEME_PANEL)),
+                    Span::styled(
+                        overview.read_avoidance_confidence.clone(),
+                        Style::default().fg(THEME_YELLOW).bg(THEME_PANEL),
+                    ),
+                ]),
+                impact_bar_line(
+                    "Observed",
+                    &format!(
+                        "{}/{}",
+                        grouped_count(overview.observed_file_read_replacements),
+                        grouped_count(total_reads)
+                    ),
+                    observed_ratio,
+                    THEME_INK_WHITE,
+                    bar_width,
+                ),
+                impact_bar_line(
+                    "Modeled",
+                    &format!(
+                        "{}/{}",
+                        grouped_count(overview.modeled_file_reads_avoided),
+                        grouped_count(total_reads)
+                    ),
+                    modeled_ratio,
+                    THEME_YELLOW,
+                    bar_width,
+                ),
+                Line::from(Span::styled(
+                    format!(
+                        "{} observed + {} modeled = {}",
+                        grouped_count(overview.observed_file_read_replacements),
+                        grouped_count(overview.modeled_file_reads_avoided),
+                        grouped_count(total_reads)
+                    ),
+                    muted_style().bg(THEME_PANEL),
+                )),
+            ])
+            .style(body_style().bg(THEME_PANEL)),
+            area,
+        );
+        return;
+    }
 
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(22),
+            Constraint::Length(1),
+            Constraint::Percentage(30),
+            Constraint::Length(1),
+            Constraint::Percentage(30),
+            Constraint::Length(1),
+            Constraint::Percentage(15),
+        ])
+        .split(area);
     render_file_read_total(frame, columns[0], total_reads);
     render_vertical_separator(frame, columns[1]);
-
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                observed_title,
-                Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL),
-            )),
-            Line::from(vec![
-                Span::styled(
-                    grouped_count(overview.observed_file_read_replacements),
-                    Style::default()
-                        .fg(THEME_INK_WHITE)
-                        .bg(THEME_PANEL)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    percentage_label(overview.observed_file_read_replacements, total_reads),
-                    muted_style().bg(THEME_PANEL),
-                ),
-            ]),
-            block_bar(
-                columns[2].width.saturating_sub(2).min(24) as usize,
-                observed_ratio,
-                THEME_INK_WHITE,
-            ),
-        ])
-        .style(body_style().bg(THEME_PANEL)),
+    render_impact_metric(
+        frame,
         columns[2],
+        "Observed (summaries/slices)",
+        overview.observed_file_read_replacements,
+        total_reads,
+        observed_ratio,
+        THEME_INK_WHITE,
     );
     render_vertical_separator(frame, columns[3]);
-
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                modeled_title,
-                Style::default().fg(THEME_YELLOW).bg(THEME_PANEL),
-            )),
-            Line::from(vec![
-                Span::styled(
-                    grouped_count(overview.modeled_file_reads_avoided),
-                    Style::default()
-                        .fg(THEME_YELLOW)
-                        .bg(THEME_PANEL)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    percentage_label(overview.modeled_file_reads_avoided, total_reads),
-                    muted_style().bg(THEME_PANEL),
-                ),
-            ]),
-            block_bar(
-                columns[4].width.saturating_sub(2).min(24) as usize,
-                modeled_ratio,
-                THEME_YELLOW,
-            ),
-        ])
-        .style(body_style().bg(THEME_PANEL)),
+    render_impact_metric(
+        frame,
         columns[4],
+        "Search-modeled narrowing",
+        overview.modeled_file_reads_avoided,
+        total_reads,
+        modeled_ratio,
+        THEME_YELLOW,
     );
     render_vertical_separator(frame, columns[5]);
-
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled("Confidence", muted_style().bg(THEME_PANEL))),
@@ -634,6 +944,66 @@ fn render_file_reads_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOve
         .alignment(Alignment::Center),
         columns[6],
     );
+}
+
+/// Draw one file-read component with its exact share of the reconciled total.
+fn render_impact_metric(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &'static str,
+    value: usize,
+    total: usize,
+    ratio_value: f64,
+    color: Color,
+) {
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                label,
+                Style::default().fg(color).bg(THEME_PANEL),
+            )),
+            Line::from(vec![
+                Span::styled(
+                    grouped_count(value),
+                    Style::default()
+                        .fg(color)
+                        .bg(THEME_PANEL)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    percentage_label(value, total),
+                    muted_style().bg(THEME_PANEL),
+                ),
+            ]),
+            block_bar(
+                area.width.saturating_sub(2).min(32) as usize,
+                ratio_value,
+                color,
+            ),
+        ])
+        .style(body_style().bg(THEME_PANEL)),
+        area,
+    );
+}
+
+/// Return one labeled, exact ratio and its proportional block bar.
+fn impact_bar_line(
+    label: &'static str,
+    exact: &str,
+    ratio_value: f64,
+    color: Color,
+    bar_width: usize,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!(
+            "{label}: {exact} • {}  ",
+            percentage_one_decimal(ratio_value)
+        ),
+        body_style().bg(THEME_PANEL),
+    )];
+    spans.extend(block_bar(bar_width, ratio_value, color).spans);
+    Line::from(spans)
 }
 
 /// Draw the left file-read total with the reference document-icon hierarchy.
@@ -687,7 +1057,11 @@ fn render_composition_and_signal(frame: &mut Frame<'_>, area: Rect, overview: &T
 
 /// Draw observed-vs-modeled token composition.
 fn render_savings_composition(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
-    let block = panel("SAVINGS COMPOSITION");
+    let block = panel(if area.width < 42 {
+        "SAVINGS MIX"
+    } else {
+        "SAVINGS COMPOSITION"
+    });
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let mix = file_handling_token_mix(overview);
@@ -801,16 +1175,10 @@ fn render_signal_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOvervie
         Paragraph::new(vec![
             Line::from(vec![
                 Span::styled("▣  ", Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL)),
+                Span::styled("Impact scope: ", body_style().bg(THEME_PANEL)),
                 Span::styled(
-                    "Repeated baselines collapsed: ",
-                    body_style().bg(THEME_PANEL),
-                ),
-                Span::styled(
-                    grouped_count(overview.repeated_baselines_deduped),
-                    Style::default()
-                        .fg(THEME_INK_WHITE)
-                        .bg(THEME_PANEL)
-                        .add_modifier(Modifier::BOLD),
+                    "tokens + reads + walks + candidates",
+                    Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL),
                 ),
             ]),
             Line::from(vec![
@@ -839,7 +1207,7 @@ fn render_savings_breakdown_table(frame: &mut Frame<'_>, area: Rect, overview: &
     let compact = area.width < 92;
     let constraints = if compact {
         [
-            Constraint::Length(20),
+            Constraint::Length(22),
             Constraint::Length(1),
             Constraint::Length(7),
             Constraint::Length(1),
@@ -892,472 +1260,343 @@ fn render_savings_breakdown_table(frame: &mut Frame<'_>, area: Rect, overview: &
     frame.render_widget(table, area);
 }
 
-/// Draw validated benchmark evidence without mixing it into live token accounting.
-fn render_agent_efficiency(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
-    let block = panel("AGENT EFFICIENCY");
+/// Draw the bounded live repository constellation in the wide dashboard column.
+fn render_atlas_map(frame: &mut Frame<'_>, area: Rect, atlas: &TokenAtlasPreview) {
+    let block = panel("ATLAS MAP");
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(8), Constraint::Length(2)])
+        .split(inner);
 
-    let comparison = &overview.agent_efficiency;
-    let compact = inner.width < 136;
-    let mut lines = Vec::with_capacity(10);
-    lines.push(agent_efficiency_identity_line(comparison, compact));
+    if !atlas.available {
+        render_atlas_message(
+            frame,
+            rows[0],
+            "Graph preview unavailable",
+            "Token-impact data remains available",
+        );
+        return;
+    }
+    if atlas.edges.is_empty() {
+        render_atlas_message(
+            frame,
+            rows[0],
+            "No resolved graph links",
+            "Run projectatlas scan to refresh",
+        );
+        return;
+    }
 
-    if matches!(
-        comparison.state,
-        AgentEfficiencyEvidenceState::Compatible | AgentEfficiencyEvidenceState::Partial
-    ) {
-        for baseline in [
-            AgentEfficiencyBaseline::FrozenProjectAtlasV0326,
-            AgentEfficiencyBaseline::PlainCodex,
-        ] {
-            if let Some(row) = comparison
-                .baselines
-                .iter()
-                .find(|row| row.baseline == baseline)
-            {
-                lines.extend(agent_efficiency_baseline_lines(
-                    row,
-                    compact,
-                    usize::from(inner.width),
+    let layout = atlas_layout(&atlas.edges);
+    let mut node_order = layout.nodes.iter().collect::<Vec<_>>();
+    node_order.sort_by(|left, right| {
+        right
+            .1
+            .distance
+            .cmp(&left.1.distance)
+            .then_with(|| left.0.cmp(right.0))
+    });
+    let canvas = Canvas::default()
+        .background_color(THEME_PANEL)
+        .marker(symbols::Marker::Braille)
+        .x_bounds([-ATLAS_CANVAS_X_BOUND, ATLAS_CANVAS_X_BOUND])
+        .y_bounds([-ATLAS_CANVAS_Y_BOUND, ATLAS_CANVAS_Y_BOUND])
+        .paint(|context| {
+            for edge in &atlas.edges {
+                let (Some(source), Some(target)) = (
+                    layout.nodes.get(&edge.source),
+                    layout.nodes.get(&edge.target),
+                ) else {
+                    continue;
+                };
+                context.draw(&CanvasLine::new(
+                    source.x,
+                    source.y,
+                    target.x,
+                    target.y,
+                    THEME_MUTED,
                 ));
             }
-        }
-        lines.extend(agent_efficiency_capability_lines(
-            &comparison.capabilities,
-            compact,
-        ));
-    }
+            context.layer();
+            for (node, placement) in &node_order {
+                let color = if node.as_str() == layout.hub {
+                    THEME_INK_WHITE
+                } else {
+                    atlas_cluster_color(placement.cluster)
+                };
+                if node.as_str() == layout.hub {
+                    context.draw(&Circle::new(placement.x, placement.y, 0.9, THEME_YELLOW));
+                    let center = [(placement.x, placement.y)];
+                    context.draw(&Points::new(&center, THEME_INK_WHITE));
+                } else {
+                    if placement.degree >= ATLAS_NODE_HALO_DEGREE {
+                        context.draw(&Circle::new(placement.x, placement.y, 0.5, color));
+                    }
+                    let point = [(placement.x, placement.y)];
+                    context.draw(&Points::new(&point, color));
+                }
+            }
+        });
+    frame.render_widget(canvas, rows[0]);
 
-    if let Some(reason) = comparison.reason.as_deref() {
-        let prefix = if comparison.state == AgentEfficiencyEvidenceState::Partial {
-            "Note: "
-        } else {
-            "Reason: "
-        };
-        let available = usize::from(inner.width).saturating_sub(prefix.len());
-        lines.push(Line::from(vec![
-            Span::styled(prefix, muted_bold_style().bg(THEME_PANEL)),
-            Span::styled(
-                bounded_dashboard_text(reason, available),
-                Style::default()
-                    .fg(agent_efficiency_state_color(comparison.state))
-                    .bg(THEME_PANEL),
-            ),
-        ]));
-    }
-
+    let state = if atlas.truncated {
+        "bounded live graph • sampled snapshot"
+    } else {
+        "bounded live graph • static snapshot"
+    };
     frame.render_widget(
-        Paragraph::new(lines)
-            .style(body_style().bg(THEME_PANEL))
-            .wrap(Wrap { trim: true }),
-        inner,
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                format!(
+                    "{} nodes • {} links",
+                    grouped_count(atlas.node_count()),
+                    grouped_count(atlas.edges.len())
+                ),
+                body_style().bg(THEME_PANEL),
+            )),
+            Line::from(Span::styled(state, muted_style().bg(THEME_PANEL))),
+        ])
+        .alignment(Alignment::Center),
+        rows[1],
     );
 }
 
-/// Return the evidence state and bounded artifact identity line.
-fn agent_efficiency_identity_line(
-    comparison: &AgentEfficiencyComparison,
-    compact: bool,
-) -> Line<'static> {
-    let state_label = if compact { "State " } else { "Evidence " };
-    let mut spans = vec![
-        Span::styled(state_label, muted_bold_style().bg(THEME_PANEL)),
-        Span::styled(
-            comparison.state.as_str(),
-            Style::default()
-                .fg(agent_efficiency_state_color(comparison.state))
-                .bg(THEME_PANEL)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
-    if let Some(artifact) = comparison.artifact.as_ref() {
-        let identity = if compact {
-            format!(
-                " | artifact s{} cand {} sha {}",
-                artifact.schema_version,
-                bounded_dashboard_text(&artifact.candidate_version, 22),
-                short_identity(&artifact.artifact_digest)
-            )
-        } else {
-            format!(
-                " | artifact {} schema {} | candidate {} | runtime {} | source {}",
-                short_identity(&artifact.artifact_digest),
-                artifact.schema_version,
-                bounded_dashboard_text(&artifact.candidate_version, 28),
-                short_identity(&artifact.candidate_runtime_sha256),
-                short_identity(&artifact.candidate_functional_head)
-            )
-        };
-        spans.push(Span::styled(identity, body_style().bg(THEME_PANEL)));
-    }
-    Line::from(spans)
-}
-
-/// Return the bounded normal or compact rows for one typed baseline.
-fn agent_efficiency_baseline_lines(
-    row: &AgentEfficiencyBaselineRow,
-    compact: bool,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let label = agent_efficiency_baseline_label(row.baseline);
-    let color = agent_efficiency_baseline_color(row.baseline);
-    let productive_files =
-        agent_efficiency_metric_pair(row, AgentEfficiencyMetricKind::ProductiveFiles);
-    let wrong_files = agent_efficiency_metric_pair(row, AgentEfficiencyMetricKind::WrongFiles);
-    let counts = if compact {
-        format!(
-            "{label} [{}] m={} f(c/b)={}/{} u={}",
-            row.state.as_str(),
-            grouped_count(row.matched_trials),
-            grouped_count(row.candidate_failed_trials),
-            grouped_count(row.baseline_failed_trials),
-            grouped_count(row.unmatched_trials)
-        )
-    } else {
-        format!(
-            "{label} [{}] | matched {} | failed candidate/baseline {}/{} | unmatched {} | file visits p/w c/b {productive_files} {wrong_files}",
-            row.state.as_str(),
-            grouped_count(row.matched_trials),
-            grouped_count(row.candidate_failed_trials),
-            grouped_count(row.baseline_failed_trials),
-            grouped_count(row.unmatched_trials)
-        )
+/// Draw an explicit centered atlas state without substituting decorative data.
+fn render_atlas_message(frame: &mut Frame<'_>, area: Rect, title: &str, detail: &str) {
+    let height = 2_u16.min(area.height);
+    let message_area = Rect {
+        x: area.x,
+        y: area
+            .y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        width: area.width,
+        height,
     };
-    let calls = agent_efficiency_metric_pair(row, AgentEfficiencyMetricKind::TotalToolCalls);
-    let broad_reads = agent_efficiency_metric_pair(row, AgentEfficiencyMetricKind::BroadReads);
-    let full_reads = agent_efficiency_metric_pair(row, AgentEfficiencyMetricKind::FullReads);
-    let backtracks = agent_efficiency_metric_pair(row, AgentEfficiencyMetricKind::Backtracks);
-    let context = agent_efficiency_metric_pair(row, AgentEfficiencyMetricKind::NetNavigationBytes);
-    let context_saving =
-        agent_efficiency_metric_saving_label(row, AgentEfficiencyMetricKind::NetNavigationBytes);
-    let metrics = if compact {
-        format!("c/b calls {calls} | reads {broad_reads} | net ctx {context} ({context_saving})")
-    } else {
-        format!(
-            "candidate/baseline calls {calls} | reads broad/full {broad_reads} {full_reads} | backtracks {backtracks} | net context {context} ({context_saving})"
-        )
-    };
-
-    let mut lines = vec![
-        Line::from(Span::styled(
-            counts,
-            Style::default()
-                .fg(color)
-                .bg(THEME_PANEL)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(metrics, body_style().bg(THEME_PANEL))),
-    ];
-    if !compact {
-        lines.push(agent_efficiency_runtime_line(row, color, width));
-    }
-    lines
-}
-
-/// Return runtime, clamped context-savings bar, and typed break-even truth.
-fn agent_efficiency_runtime_line(
-    row: &AgentEfficiencyBaselineRow,
-    color: Color,
-    width: usize,
-) -> Line<'static> {
-    let runtime = agent_efficiency_metric_pair(row, AgentEfficiencyMetricKind::RuntimeWallSeconds);
-    let context_saving =
-        agent_efficiency_metric_saving(row, AgentEfficiencyMetricKind::NetNavigationBytes);
-    let runtime_prefix = format!("runtime c/b {runtime} | context saved ");
-    let mut spans = vec![Span::styled(
-        runtime_prefix.clone(),
-        body_style().bg(THEME_PANEL),
-    )];
-    let saving_label = context_saving.map(bounded_percentage);
-    let saving_width = if let Some(label) = saving_label.as_ref() {
-        7usize.saturating_add(label.chars().count())
-    } else {
-        3
-    };
-    if let Some(percent) = context_saving {
-        spans.extend(block_bar(6, percent / 100.0, color).spans);
-        spans.push(Span::styled(
-            format!(" {}", saving_label.as_deref().unwrap_or("n/a")),
-            Style::default().fg(color).bg(THEME_PANEL),
-        ));
-    } else {
-        spans.push(Span::styled("n/a", muted_style().bg(THEME_PANEL)));
-    }
-    let break_even_prefix = " | break-even: ";
-    let break_even_width = width.saturating_sub(
-        runtime_prefix
-            .chars()
-            .count()
-            .saturating_add(saving_width)
-            .saturating_add(break_even_prefix.len()),
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                title.to_string(),
+                Style::default()
+                    .fg(THEME_INK_WHITE)
+                    .bg(THEME_PANEL)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                detail.to_string(),
+                muted_style().bg(THEME_PANEL),
+            )),
+        ])
+        .alignment(Alignment::Center),
+        message_area,
     );
-    spans.push(Span::styled(
-        format!(
-            "{break_even_prefix}{}",
-            bounded_dashboard_text(&agent_efficiency_break_even_label(row), break_even_width)
-        ),
-        body_style().bg(THEME_PANEL),
-    ));
-    Line::from(spans)
 }
 
-/// Return bounded capability call/byte rows without causal savings claims.
-fn agent_efficiency_capability_lines(
-    capabilities: &[AgentEfficiencyCapabilityContribution],
-    compact: bool,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled(
-        if compact {
-            "MCP capability calls/bytes only (no causal savings):"
-        } else {
-            "Capability calls/emitted bytes only; no causal savings attribution:"
-        },
-        muted_bold_style().bg(THEME_PANEL),
-    ))];
-    if capabilities.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "none recorded",
-            muted_style().bg(THEME_PANEL),
-        )));
-        return lines;
-    }
+/// One force-settled node placement with graph-derived depth and cluster cues.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AtlasNodePlacement {
+    /// Horizontal Canvas coordinate.
+    x: f64,
+    /// Vertical Canvas coordinate.
+    y: f64,
+    /// Undirected degree within the bounded preview.
+    degree: usize,
+    /// Shortest graph distance from the central hub.
+    distance: usize,
+    /// Stable first-hop branch used for cluster coloring.
+    cluster: usize,
+}
 
-    let entries = capabilities
+/// Deterministic centered layout for the small resolved-relation projection.
+struct AtlasLayout {
+    /// Stable node positions inside the fixed Canvas safety margin.
+    nodes: BTreeMap<String, AtlasNodePlacement>,
+    /// Highest-connectivity node anchored at the geometric center.
+    hub: String,
+}
+
+/// Settle one connected graph with the reusable force engine and center its strongest hub.
+fn atlas_layout(edges: &[AtlasPreviewEdge]) -> AtlasLayout {
+    let mut adjacency = BTreeMap::<String, BTreeSet<String>>::new();
+    for edge in edges {
+        adjacency
+            .entry(edge.source.clone())
+            .or_default()
+            .insert(edge.target.clone());
+        adjacency
+            .entry(edge.target.clone())
+            .or_default()
+            .insert(edge.source.clone());
+    }
+    let hub = adjacency
         .iter()
-        .map(|capability| {
-            format!(
-                "{} {}/{}",
-                agent_efficiency_capability_label(capability.capability, compact),
-                grouped_count(capability.calls),
-                compact_bytes(capability.emitted_bytes)
-            )
+        .max_by(|left, right| {
+            left.1
+                .len()
+                .cmp(&right.1.len())
+                .then_with(|| right.0.cmp(left.0))
+        })
+        .map(|(node, _)| node.clone())
+        .unwrap_or_default();
+    if hub.is_empty() {
+        return AtlasLayout {
+            nodes: BTreeMap::new(),
+            hub,
+        };
+    }
+
+    let mut branch_and_distance = BTreeMap::<String, (usize, usize)>::new();
+    branch_and_distance.insert(hub.clone(), (0, 0));
+    let hub_neighbors = adjacency.get(&hub).cloned().unwrap_or_default();
+    let mut frontier = VecDeque::new();
+    for (cluster, neighbor) in hub_neighbors.iter().enumerate() {
+        branch_and_distance.insert(neighbor.clone(), (cluster, 1));
+        frontier.push_back(neighbor.clone());
+    }
+    while let Some(node) = frontier.pop_front() {
+        let Some((cluster, distance)) = branch_and_distance.get(&node).copied() else {
+            continue;
+        };
+        if let Some(neighbors) = adjacency.get(&node) {
+            for neighbor in neighbors {
+                if !branch_and_distance.contains_key(neighbor) {
+                    branch_and_distance.insert(neighbor.clone(), (cluster, distance + 1));
+                    frontier.push_back(neighbor.clone());
+                }
+            }
+        }
+    }
+
+    let branch_count = hub_neighbors.len().max(1);
+    let mut branch_ordinals = BTreeMap::<usize, usize>::new();
+    let node_names = adjacency.keys().cloned().collect::<Vec<_>>();
+    let node_indexes = node_names
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut positions = Vec::with_capacity(node_names.len());
+    for node in &node_names {
+        let (cluster, distance) = branch_and_distance.get(node).copied().unwrap_or_default();
+        let location = if *node == hub {
+            (0.0, 0.0)
+        } else {
+            let ordinal = branch_ordinals.entry(cluster).or_default();
+            let offset = (*ordinal % 5) as f64 - 2.0;
+            let ring = (*ordinal / 5) as f64;
+            *ordinal += 1;
+            let angle =
+                std::f64::consts::TAU * cluster as f64 / branch_count as f64 + offset * 0.22;
+            let radius = 22.0 + distance as f64 * 16.0 + ring * 6.0;
+            (radius * angle.cos(), radius * angle.sin())
+        };
+        positions.push(location);
+    }
+    let indexed_edges = edges
+        .iter()
+        .filter_map(|edge| {
+            Some((
+                *node_indexes.get(&edge.source)?,
+                *node_indexes.get(&edge.target)?,
+            ))
         })
         .collect::<Vec<_>>();
-    let chunk_size = if compact { 3 } else { entries.len() };
-    for chunk in entries.chunks(chunk_size.max(1)) {
-        lines.push(Line::from(Span::styled(
-            chunk.join(" | "),
-            Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL),
-        )));
-    }
-    lines
-}
+    settle_atlas_layout(&mut positions, &indexed_edges);
 
-/// Return the display label for one closed baseline identity.
-fn agent_efficiency_baseline_label(baseline: AgentEfficiencyBaseline) -> &'static str {
-    match baseline {
-        AgentEfficiencyBaseline::FrozenProjectAtlasV0326 => "Frozen v0.3.26",
-        AgentEfficiencyBaseline::PlainCodex => "Plain Codex",
-    }
-}
-
-/// Return the semantic color for one baseline identity.
-fn agent_efficiency_baseline_color(baseline: AgentEfficiencyBaseline) -> Color {
-    match baseline {
-        AgentEfficiencyBaseline::FrozenProjectAtlasV0326 => THEME_BLUE,
-        AgentEfficiencyBaseline::PlainCodex => THEME_INK_WHITE,
-    }
-}
-
-/// Return the semantic color for one evidence state.
-fn agent_efficiency_state_color(state: AgentEfficiencyEvidenceState) -> Color {
-    match state {
-        AgentEfficiencyEvidenceState::Compatible => THEME_GREEN,
-        AgentEfficiencyEvidenceState::Partial => THEME_YELLOW,
-        AgentEfficiencyEvidenceState::Unavailable => THEME_MUTED,
-        AgentEfficiencyEvidenceState::Failed | AgentEfficiencyEvidenceState::Incompatible => {
-            THEME_RED
-        }
-    }
-}
-
-/// Find one metric row without copying comparison arithmetic into the adapter.
-fn agent_efficiency_metric(
-    row: &AgentEfficiencyBaselineRow,
-    metric: AgentEfficiencyMetricKind,
-) -> Option<&AgentEfficiencyMetricComparison> {
-    row.metrics.iter().find(|value| value.metric == metric)
-}
-
-/// Format the typed candidate/baseline medians for one metric.
-fn agent_efficiency_metric_pair(
-    row: &AgentEfficiencyBaselineRow,
-    metric: AgentEfficiencyMetricKind,
-) -> String {
-    let Some(value) = agent_efficiency_metric(row, metric) else {
-        return "n/a".to_string();
+    let hub_location = node_indexes
+        .get(&hub)
+        .and_then(|index| positions.get(*index))
+        .copied()
+        .unwrap_or_default();
+    let (max_x, max_y) = positions.iter().fold((0.0_f64, 0.0_f64), |(x, y), node| {
+        (
+            x.max((node.0 - hub_location.0).abs()),
+            y.max((node.1 - hub_location.1).abs()),
+        )
+    });
+    let x_scale = if max_x > f64::EPSILON {
+        (ATLAS_CANVAS_X_BOUND - 3.0) / max_x
+    } else {
+        1.0
     };
-    format!(
-        "{}/{}",
-        agent_efficiency_metric_value(metric, value.candidate_median),
-        agent_efficiency_metric_value(metric, value.baseline_median)
-    )
-}
-
-/// Return the typed savings percentage for one metric.
-fn agent_efficiency_metric_saving(
-    row: &AgentEfficiencyBaselineRow,
-    metric: AgentEfficiencyMetricKind,
-) -> Option<f64> {
-    agent_efficiency_metric(row, metric)?
-        .median_percent_saving
-        .filter(|value| value.is_finite())
-}
-
-/// Format a typed saving without substituting a zero denominator.
-fn agent_efficiency_metric_saving_label(
-    row: &AgentEfficiencyBaselineRow,
-    metric: AgentEfficiencyMetricKind,
-) -> String {
-    agent_efficiency_metric_saving(row, metric)
-        .map_or_else(|| "n/a".to_string(), bounded_percentage)
-}
-
-/// Format one benchmark metric with a compact durable unit.
-fn agent_efficiency_metric_value(metric: AgentEfficiencyMetricKind, value: f64) -> String {
-    match metric {
-        AgentEfficiencyMetricKind::GrossNavigationBytes
-        | AgentEfficiencyMetricKind::NetNavigationBytes
-        | AgentEfficiencyMetricKind::PersistentBytes => compact_byte_value(value),
-        AgentEfficiencyMetricKind::SetupWallSeconds
-        | AgentEfficiencyMetricKind::RuntimeWallSeconds => format!("{value:.1}s"),
-        _ => compact_numeric_value(value),
-    }
-}
-
-/// Format a finite percentage in a bounded dashboard field.
-fn bounded_percentage(value: f64) -> String {
-    if value.abs() >= 10_000.0 {
-        format!("{value:.1e}%")
+    let y_scale = if max_y > f64::EPSILON {
+        (ATLAS_CANVAS_Y_BOUND - 3.0) / max_y
     } else {
-        format!("{value:.1}%")
+        1.0
+    };
+    let mut nodes = BTreeMap::new();
+    for (node, location) in node_names.into_iter().zip(positions) {
+        let (cluster, distance) = branch_and_distance.get(&node).copied().unwrap_or_default();
+        nodes.insert(
+            node.clone(),
+            AtlasNodePlacement {
+                x: (location.0 - hub_location.0) * x_scale,
+                y: (location.1 - hub_location.1) * y_scale,
+                degree: adjacency.get(&node).map_or(0, BTreeSet::len),
+                distance,
+                cluster,
+            },
+        );
     }
+    AtlasLayout { nodes, hub }
 }
 
-/// Format a validated count or token value with bounded decimal units.
-fn compact_numeric_value(value: f64) -> String {
-    for (unit, suffix) in [
-        (1_000_000_000_000_000.0, "P"),
-        (1_000_000_000_000.0, "T"),
-        (1_000_000_000.0, "G"),
-        (1_000_000.0, "M"),
-        (1_000.0, "K"),
-    ] {
-        if value.abs() >= unit {
-            return format!("{:.1}{suffix}", value / unit);
+/// Settle the tiny deterministic preview with bounded Fruchterman-Reingold steps.
+fn settle_atlas_layout(positions: &mut [(f64, f64)], edges: &[(usize, usize)]) {
+    let mut displacement = vec![(0.0, 0.0); positions.len()];
+    for iteration in 0..ATLAS_LAYOUT_ITERATIONS {
+        displacement.fill((0.0, 0.0));
+        for left in 0..positions.len() {
+            for right in left + 1..positions.len() {
+                let delta = (
+                    positions[left].0 - positions[right].0,
+                    positions[left].1 - positions[right].1,
+                );
+                let distance = delta.0.hypot(delta.1).max(0.01);
+                let force = ATLAS_LAYOUT_IDEAL_DISTANCE.powi(2) / distance;
+                let unit = (delta.0 / distance, delta.1 / distance);
+                displacement[left].0 += unit.0 * force;
+                displacement[left].1 += unit.1 * force;
+                displacement[right].0 -= unit.0 * force;
+                displacement[right].1 -= unit.1 * force;
+            }
+        }
+        for &(source, target) in edges {
+            let delta = (
+                positions[source].0 - positions[target].0,
+                positions[source].1 - positions[target].1,
+            );
+            let distance = delta.0.hypot(delta.1).max(0.01);
+            let force = distance.powi(2) / ATLAS_LAYOUT_IDEAL_DISTANCE;
+            let unit = (delta.0 / distance, delta.1 / distance);
+            displacement[source].0 -= unit.0 * force;
+            displacement[source].1 -= unit.1 * force;
+            displacement[target].0 += unit.0 * force;
+            displacement[target].1 += unit.1 * force;
+        }
+        let temperature = (ATLAS_LAYOUT_INITIAL_TEMPERATURE
+            * (1.0 - iteration as f64 / ATLAS_LAYOUT_ITERATIONS as f64))
+            .max(0.1);
+        for (position, delta) in positions.iter_mut().zip(&displacement) {
+            let distance = delta.0.hypot(delta.1);
+            if distance > f64::EPSILON {
+                let step = distance.min(temperature) / distance;
+                position.0 += delta.0 * step;
+                position.1 += delta.1 * step;
+            }
         }
     }
-    if value.fract().abs() < f64::EPSILON {
-        format!("{value:.0}")
-    } else {
-        format!("{value:.1}")
-    }
 }
 
-/// Format workload-specific break-even values without deriving a replacement aggregate.
-fn agent_efficiency_break_even_label(row: &AgentEfficiencyBaselineRow) -> String {
-    if row.break_even.is_empty() {
-        return "n/a".to_string();
+/// Map graph-derived first-hop branches to the stable dashboard accent palette.
+const fn atlas_cluster_color(cluster: usize) -> Color {
+    match cluster % 4 {
+        0 => THEME_BLUE,
+        1 => THEME_GREEN,
+        2 => THEME_YELLOW,
+        _ => THEME_PURPLE,
     }
-    row.break_even
-        .iter()
-        .map(|value| {
-            let workload = match value.workload.as_str() {
-                "small-clean" => "clean",
-                "small-dirty" => "dirty",
-                "small-non-git" => "non-git",
-                "huge-vscode" => "huge",
-                workload => workload,
-            };
-            format!(
-                "{}={}",
-                bounded_dashboard_text(workload, 16),
-                value
-                    .wall_time_tasks
-                    .map_or_else(|| "n/a".to_string(), |tasks| tasks.to_string())
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Return the compact label for one closed navigation capability.
-fn agent_efficiency_capability_label(
-    capability: AgentEfficiencyCapability,
-    compact: bool,
-) -> &'static str {
-    match (capability, compact) {
-        (AgentEfficiencyCapability::Search, _) => "search",
-        (AgentEfficiencyCapability::Other, _) => "other",
-        (AgentEfficiencyCapability::Discovery, true) => "disc",
-        (AgentEfficiencyCapability::SummaryAndSlice, true) => "sum/slice",
-        (AgentEfficiencyCapability::SymbolsAndRelations, true) => "sym/rel",
-        (AgentEfficiencyCapability::Discovery, false) => "discovery",
-        (AgentEfficiencyCapability::SummaryAndSlice, false) => "summary+slice",
-        (AgentEfficiencyCapability::SymbolsAndRelations, false) => "symbols+relations",
-    }
-}
-
-/// Format exact byte counts compactly for bounded dashboard rows.
-fn compact_bytes(value: u64) -> String {
-    if value >= 1_125_899_906_842_624 {
-        compact_integer_unit(value, 1_125_899_906_842_624, "PiB")
-    } else if value >= 1_099_511_627_776 {
-        compact_integer_unit(value, 1_099_511_627_776, "TiB")
-    } else if value >= 1_073_741_824 {
-        compact_integer_unit(value, 1_073_741_824, "GiB")
-    } else if value >= 1_048_576 {
-        compact_integer_unit(value, 1_048_576, "MiB")
-    } else if value >= 1_024 {
-        compact_integer_unit(value, 1_024, "KiB")
-    } else {
-        format!("{value}B")
-    }
-}
-
-/// Format one integer value to one decimal place in the selected binary unit.
-fn compact_integer_unit(value: u64, unit: u64, suffix: &str) -> String {
-    let rounded_tenths = (u128::from(value) * 10 + u128::from(unit) / 2) / u128::from(unit);
-    let whole = rounded_tenths / 10;
-    let tenth = rounded_tenths % 10;
-    format!("{whole}.{tenth}{suffix}")
-}
-
-/// Format a validated floating-point byte metric compactly.
-fn compact_byte_value(value: f64) -> String {
-    if value >= 1_125_899_906_842_624.0 {
-        format!("{:.1}PiB", value / 1_125_899_906_842_624.0)
-    } else if value >= 1_099_511_627_776.0 {
-        format!("{:.1}TiB", value / 1_099_511_627_776.0)
-    } else if value >= 1_073_741_824.0 {
-        format!("{:.1}GiB", value / 1_073_741_824.0)
-    } else if value >= 1_048_576.0 {
-        format!("{:.1}MiB", value / 1_048_576.0)
-    } else if value >= 1_024.0 {
-        format!("{:.1}KiB", value / 1_024.0)
-    } else {
-        format!("{value:.0}B")
-    }
-}
-
-/// Return a short digest or commit identity for the bounded TUI.
-fn short_identity(value: &str) -> String {
-    value.chars().take(12).collect()
-}
-
-/// Bound trusted display text without allowing it to consume adjacent fields.
-fn bounded_dashboard_text(value: &str, max_chars: usize) -> String {
-    let character_count = value.chars().count();
-    if character_count <= max_chars {
-        return value.to_string();
-    }
-    if max_chars <= 3 {
-        return ".".repeat(max_chars);
-    }
-    let mut output = value.chars().take(max_chars - 3).collect::<String>();
-    output.push_str("...");
-    output
 }
 
 /// Draw calibration notes without duplicating headline totals.
@@ -1404,46 +1643,33 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect) {
         .split(area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("ProjectAtlas v", Style::default().fg(THEME_INK_WHITE)),
+            Span::styled(
+                "ProjectAtlas v",
+                Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL),
+            ),
             Span::styled(
                 env!("CARGO_PKG_VERSION"),
-                Style::default().fg(THEME_INK_WHITE),
+                Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL),
             ),
-        ])),
+        ]))
+        .style(Style::default().bg(THEME_PANEL)),
         columns[0],
     );
     let clock = current_clock_label();
-    let controls = if area.width < 100 {
-        let compact_clock = clock.get(..5).unwrap_or(&clock).to_string();
-        Line::from(vec![
-            Span::styled("q Quit  ? Help  r Refresh  ", body_style()),
-            Span::styled("● Auto ", Style::default().fg(THEME_GREEN)),
-            Span::styled(compact_clock, body_style()),
-        ])
+    let status = if area.width < 100 {
+        format!(
+            "Snapshot {} • rerun to refresh",
+            clock.get(..5).unwrap_or(&clock)
+        )
     } else {
-        Line::from(vec![
-            keycap("q"),
-            Span::styled(" Quit   ", body_style()),
-            keycap("?"),
-            Span::styled(" Help   ", body_style()),
-            keycap("r"),
-            Span::styled(" Refresh   ", body_style()),
-            Span::styled("● Auto ", Style::default().fg(THEME_GREEN)),
-            Span::styled(clock, body_style()),
-        ])
+        format!("Snapshot {clock} • rerun command to refresh")
     };
     frame.render_widget(
-        Paragraph::new(controls).alignment(Alignment::Right),
+        Paragraph::new(Span::styled(status, body_style().bg(THEME_PANEL)))
+            .style(Style::default().bg(THEME_PANEL))
+            .alignment(Alignment::Right),
         columns[1],
     );
-}
-
-/// Return a styled keycap for the status bar.
-fn keycap(text: &'static str) -> Span<'static> {
-    Span::styled(
-        format!(" {text} "),
-        Style::default().fg(THEME_TEXT).bg(THEME_KEYCAP_BG),
-    )
 }
 
 /// Render a horizontal divider in a panel.
@@ -1958,7 +2184,7 @@ fn render_trend_frame(frame: &mut Frame<'_>, report: &TokenTrendReport) {
             Span::styled(" ProjectAtlas Token Trends ", identity_title_style()),
             Span::styled(format!("{} ", report.window), body_style()),
         ]))
-        .border_style(Style::default().fg(THEME_BORDER))
+        .border_style(Style::default().fg(THEME_TEXT))
         .style(Style::default().fg(THEME_TEXT));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
@@ -2197,6 +2423,10 @@ fn themed_color(color: Color) -> Color {
     match active_token_theme() {
         TokenDashboardTheme::Dark => color,
         TokenDashboardTheme::Light => remap_to_light_theme(color),
+        TokenDashboardTheme::Terminal => match color {
+            THEME_BG | THEME_PANEL | THEME_TEXT | THEME_MUTED | THEME_INK_WHITE => Color::Reset,
+            _ => color,
+        },
     }
 }
 
@@ -2213,8 +2443,8 @@ fn remap_to_light_theme(color: Color) -> Color {
         THEME_YELLOW => LIGHT_THEME.yellow,
         THEME_BORDER => LIGHT_THEME.border,
         THEME_BAR_EMPTY => LIGHT_THEME.bar_empty,
-        THEME_KEYCAP_BG => LIGHT_THEME.keycap_bg,
         THEME_RED => LIGHT_THEME.red,
+        THEME_PURPLE => LIGHT_THEME.purple,
         _ => color,
     }
 }
@@ -2257,9 +2487,19 @@ fn ratio(part: usize, total: usize) -> f64 {
 
 /// Return the preferred dashboard width.
 fn dashboard_width() -> usize {
-    std::env::var("COLUMNS")
+    let columns = std::env::var("COLUMNS")
         .ok()
-        .and_then(|value| value.parse::<usize>().ok())
+        .and_then(|value| value.parse::<usize>().ok());
+    let terminal_width = ratatui::crossterm::terminal::size()
+        .ok()
+        .map(|(width, _)| width);
+    resolve_dashboard_width(columns, terminal_width)
+}
+
+/// Resolve an explicit dashboard width before using the detected terminal width.
+fn resolve_dashboard_width(columns: Option<usize>, terminal_width: Option<u16>) -> usize {
+    columns
+        .or_else(|| terminal_width.map(usize::from))
         .unwrap_or(140)
 }
 
@@ -2288,23 +2528,25 @@ fn signed_count(value: isize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DASHBOARD_HEIGHT, THEME_BAR_EMPTY, THEME_BG, THEME_BLUE, THEME_GREEN, THEME_INK_WHITE,
-        THEME_MUTED, THEME_RED, THEME_YELLOW, TokenDashboardTheme, block_bar, dashboard_width,
-        grouped_count, reconciled_without_projectatlas, reference_title,
-        render_dashboard_to_string, render_overview_frame, render_token_dashboard,
+        ATLAS_CANVAS_X_BOUND, ATLAS_CANVAS_Y_BOUND, ATLAS_PREVIEW_MAX_EDGES,
+        ATLAS_PREVIEW_MAX_NODE_DEGREE, ATLAS_PREVIEW_MAX_NODES, DASHBOARD_HEIGHT, THEME_BAR_EMPTY,
+        THEME_BG, THEME_BLUE, THEME_GREEN, THEME_INK_WHITE, THEME_YELLOW,
+        TOKEN_IMPACT_COLUMN_WIDTH, TokenAtlasPreview, TokenDashboardTheme, atlas_layout, block_bar,
+        buffer_to_string, dashboard_width, grouped_count, reconciled_without_projectatlas,
+        reference_title, render_dashboard_to_string, render_overview_frame,
+        render_overview_frame_with_atlas, render_token_dashboard,
         render_token_dashboard_with_theme, render_token_trend_dashboard,
-        render_token_trend_dashboard_with_theme, savings_source_rows_for_width, signed_count,
-        signed_trend_points, signed_y_bounds,
+        render_token_trend_dashboard_with_theme, resolve_dashboard_width,
+        savings_source_rows_for_width, signed_count, signed_trend_points, signed_y_bounds,
     };
+    use projectatlas_core::graph::GraphRelationKind;
+    use projectatlas_core::symbols::RelationKind;
     use projectatlas_core::telemetry::{
-        AgentEfficiencyArtifactIdentity, AgentEfficiencyBaseline, AgentEfficiencyBaselineRow,
-        AgentEfficiencyBreakEven, AgentEfficiencyCapability, AgentEfficiencyCapabilityContribution,
-        AgentEfficiencyComparison, AgentEfficiencyEvidenceState, AgentEfficiencyMetricComparison,
-        AgentEfficiencyMetricKind, TOKEN_ACCOUNTING_MODELED_AVOIDANCE,
-        TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_SELECTED_CANDIDATES,
-        TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_CONFIDENCE_INFERRED,
-        TOKEN_CONFIDENCE_POLICY_ESTIMATE, TOKEN_DEDUPE_SCOPE_SESSION, TokenOverview,
-        TokenTrendPeriod, TokenTrendReport, TokenTrendWindow, usage_from_estimates,
+        AgentEfficiencyComparison, AgentEfficiencyEvidenceState,
+        TOKEN_ACCOUNTING_MODELED_AVOIDANCE, TOKEN_BASELINE_DIRECTORY_WALK,
+        TOKEN_BASELINE_SELECTED_CANDIDATES, TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
+        TOKEN_CONFIDENCE_INFERRED, TOKEN_CONFIDENCE_POLICY_ESTIMATE, TOKEN_DEDUPE_SCOPE_SESSION,
+        TokenOverview, TokenTrendPeriod, TokenTrendReport, TokenTrendWindow, usage_from_estimates,
         usage_from_estimates_with_accounting, usage_from_text,
     };
     use ratatui::Terminal;
@@ -2312,6 +2554,14 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::style::{Color, Modifier};
     use ratatui::text::Line;
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+    #[test]
+    fn dashboard_width_prefers_override_then_terminal_then_fallback() {
+        assert_eq!(resolve_dashboard_width(Some(200), Some(190)), 200);
+        assert_eq!(resolve_dashboard_width(None, Some(190)), 190);
+        assert_eq!(resolve_dashboard_width(None, None), 140);
+    }
 
     #[test]
     fn overview_dashboard_matches_reference_sections_and_order() {
@@ -2335,7 +2585,8 @@ mod tests {
             "Confidence",
             "Measured from summaries/slices",
             "Navigation narrowing",
-            "Repeated baselines collapsed",
+            "Impact scope:",
+            "tokens + reads + walks + candidates",
             "Estimate type: local model",
             "Tokenizer audit:",
             "Source",
@@ -2346,28 +2597,36 @@ mod tests {
             "Skipped broad folder walk",
             "Opened fewer candidates (A)",
             "Opened fewer candidates (B)",
-            "q  Quit",
-            "?  Help",
-            "r  Refresh",
-            "Auto",
+            "Snapshot",
+            "rerun command to refresh",
         ] {
             assert!(
                 dashboard.contains(text),
                 "dashboard should contain {text:?}"
             );
         }
+        assert!(!dashboard.contains("Broad folder walks skipped"));
+        assert!(!dashboard.contains("Candidate files not opened"));
+        assert!(!dashboard.contains("source steps account for"));
         for title in [
             "TOTAL TOKENS AVOIDED",
-            "FILE READS AVOIDED",
+            "NAVIGATION WORK AVOIDED",
             "SAVINGS COMPOSITION",
             "SIGNAL",
             "WHERE THE SAVINGS CAME FROM",
-            "AGENT EFFICIENCY",
             "CALIBRATION & NOTES",
         ] {
             assert!(dashboard.contains(&reference_title(title)));
         }
 
+        assert!(!dashboard.contains("q  Quit"));
+        assert!(!dashboard.contains("?  Help"));
+        assert!(!dashboard.contains("r  Refresh"));
+        assert!(!dashboard.contains("Auto"));
+        assert!(!dashboard.contains(&reference_title("REPEATED-WORK BENCHMARK")));
+        assert!(!dashboard.contains(&reference_title("REQUESTED BENCHMARK EVIDENCE")));
+        assert!(!dashboard.contains("Frozen v0.3.26"));
+        assert!(!dashboard.contains("Plain Codex control"));
         assert!(!dashboard.contains("ProjectAtlas Savings Overview"));
         assert!(!dashboard.contains("Saved-token trends"));
         assert!(!dashboard.contains("Calibration optional"));
@@ -2383,10 +2642,9 @@ mod tests {
             &[
                 "ProjectAtlas",
                 &reference_title("TOTAL TOKENS AVOIDED"),
-                &reference_title("FILE READS AVOIDED"),
+                &reference_title("NAVIGATION WORK AVOIDED"),
                 &reference_title("SAVINGS COMPOSITION"),
                 &reference_title("WHERE THE SAVINGS CAME FROM"),
-                &reference_title("AGENT EFFICIENCY"),
                 &reference_title("CALIBRATION & NOTES"),
             ],
         );
@@ -2568,6 +2826,24 @@ mod tests {
             !overview_light.contains("48;2;252;249;241"),
             "light overview output must not paint the terminal canvas"
         );
+        let overview_terminal =
+            render_token_dashboard_with_theme(&overview, Some("s"), TokenDashboardTheme::Terminal);
+        assert!(
+            !overview_terminal.contains("48;2;5;16;25"),
+            "terminal overview theme must preserve the terminal background inside panels"
+        );
+        let terminal_neutral_roles = super::with_token_theme(TokenDashboardTheme::Terminal, || {
+            (
+                super::themed_color(super::THEME_TEXT),
+                super::themed_color(super::THEME_MUTED),
+                super::themed_color(THEME_INK_WHITE),
+            )
+        });
+        assert_eq!(
+            terminal_neutral_roles,
+            (Color::Reset, Color::Reset, Color::Reset),
+            "terminal overview theme must use the terminal foreground for neutral text"
+        );
 
         let report = sample_trend_report();
         let trend_buffer = render_trend_buffer(&report);
@@ -2590,6 +2866,12 @@ mod tests {
         assert!(
             !trend_light.contains("48;2;252;249;241"),
             "light trend output must not paint the terminal canvas"
+        );
+        let trend_terminal =
+            render_token_trend_dashboard_with_theme(&report, TokenDashboardTheme::Terminal);
+        assert!(
+            !trend_terminal.contains("48;2;5;16;25"),
+            "terminal trend theme must preserve the terminal background inside panels"
         );
     }
 
@@ -2667,12 +2949,53 @@ mod tests {
         assert!(dashboard.contains("ProjectAtlas"));
         assert!(dashboard.contains("Token Impact"));
         assert!(dashboard.contains(&reference_title("TOTAL TOKENS AVOIDED")));
-        assert!(dashboard.contains(&reference_title("FILE READS AVOIDED")));
+        assert!(dashboard.contains(&reference_title("NAVIGATION WORK AVOIDED")));
+        assert!(dashboard.contains(&reference_title("SAVINGS MIX")));
+        assert!(!dashboard.contains(&reference_title("SAVINGS COMPOSITION")));
         assert!(dashboard.contains(&reference_title("WHERE THE SAVINGS CAME FROM")));
-        assert!(dashboard.contains("Fewer candidates"));
-        assert!(dashboard.contains(&reference_title("AGENT EFFICIENCY")));
+        assert!(dashboard.contains("Skipped folder walk"));
+        assert!(dashboard.contains("Fewer candidates B"));
+        assert!(!dashboard.contains("Broad folder walks skipped"));
+        assert!(!dashboard.contains("Candidate files not opened"));
         assert!(dashboard.contains(&reference_title("CALIBRATION & NOTES")));
+        assert!(!dashboard.contains(&reference_title("REPEATED-WORK BENCHMARK")));
         assert!(!dashboard.contains("Saved-token trends"));
+    }
+
+    #[test]
+    fn benchmark_evidence_never_changes_the_human_overview() {
+        let live = sample_overview();
+        for state in [
+            AgentEfficiencyEvidenceState::Unavailable,
+            AgentEfficiencyEvidenceState::Failed,
+            AgentEfficiencyEvidenceState::Incompatible,
+            AgentEfficiencyEvidenceState::Partial,
+            AgentEfficiencyEvidenceState::Compatible,
+        ] {
+            let mut with_benchmark = live.clone();
+            with_benchmark.agent_efficiency = AgentEfficiencyComparison {
+                state,
+                reason: Some(
+                    "structured benchmark evidence remains available to agents".to_string(),
+                ),
+                artifact: None,
+                baselines: Vec::new(),
+                capabilities: Vec::new(),
+                provider_counters_descriptive_only: true,
+            };
+            for width in [80, 140, 200] {
+                let live = normalize_dashboard_clock(buffer_to_string(
+                    &render_overview_buffer_at_width(&live, Some("s"), width),
+                ));
+                let with_benchmark = normalize_dashboard_clock(buffer_to_string(
+                    &render_overview_buffer_at_width(&with_benchmark, Some("s"), width),
+                ));
+                assert_eq!(with_benchmark, live);
+                assert!(!with_benchmark.contains("BENCHMARK"));
+                assert!(!with_benchmark.contains("Frozen v0.3.26"));
+                assert!(!with_benchmark.contains("Plain Codex control"));
+            }
+        }
     }
 
     #[test]
@@ -2694,14 +3017,22 @@ mod tests {
             overview.observed_file_read_replacements + overview.modeled_file_reads_avoided,
             overview.likely_file_reads_avoided
         );
-
         let dashboard = strip_ansi(&render_token_dashboard(&overview, Some("s")));
         let source_rows = savings_source_rows_for_width(&overview, false);
         let source_steps = source_rows.iter().map(|row| row.steps).sum::<usize>();
         let source_tokens = source_rows.iter().map(|row| row.tokens).sum::<isize>();
 
+        assert_eq!(
+            source_rows
+                .iter()
+                .find(|row| row.label == "Skipped broad folder walk")
+                .map(|row| row.steps),
+            Some(1)
+        );
         assert_eq!(source_steps, overview.calls);
         assert_eq!(source_tokens, conservative_avoided);
+        assert!(!dashboard.contains("Broad folder walks skipped"));
+        assert!(!dashboard.contains("Candidate files not opened"));
         assert!(dashboard.contains(&signed_count(without_projectatlas)));
         assert!(dashboard.contains(&signed_count(with_projectatlas)));
         assert!(dashboard.contains(&signed_count(conservative_avoided)));
@@ -2780,277 +3111,200 @@ mod tests {
     }
 
     #[test]
-    fn agent_efficiency_panel_renders_compatible_and_partial_typed_evidence() {
-        let mut compatible = sample_overview();
-        compatible.agent_efficiency = sample_agent_efficiency(false);
-        let compatible_buffer = render_overview_buffer_at_width(&compatible, Some("s"), 140);
-        let compatible_panel = agent_efficiency_panel_text(&compatible_buffer);
-
-        for text in [
-            "Evidence compatible",
-            "artifact 111111111111 schema 1",
-            "candidate projectatlas 0.4.0",
-            "Frozen v0.3.26 [compatible]",
-            "Plain Codex [compatible]",
-            "matched 12",
-            "candidate/baseline calls 12/30",
-            "file visits p/w c/b 4/10 0/3",
-            "reads broad/full 2/8 1/5",
-            "backtracks 0/1",
-            "net context 16.0KiB/64.0KiB (75.0%)",
-            "runtime c/b 30.0s/50.0s",
-            "break-even: clean=1",
-            "huge=n/a",
-            "Capability calls/emitted bytes only; no causal savings attribution:",
-            "discovery 7/2.0KiB",
-            "summary+slice 11/4.0KiB",
-            "search 5/1.0KiB",
-            "symbols+relations 3/512B",
-        ] {
-            assert!(
-                compatible_panel.contains(text),
-                "compatible panel should contain {text:?}"
-            );
+    fn atlas_preview_is_bounded_connected_and_centers_the_strongest_hub() {
+        let kinds = [
+            GraphRelationKind::Legacy(RelationKind::Imports),
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            GraphRelationKind::Legacy(RelationKind::DependsOn),
+        ];
+        let mut relations = Vec::new();
+        for branch in 0..12 {
+            let branch_length = if branch < 11 { 4 } else { 3 };
+            let root = format!("branch-{branch:02}-00");
+            relations.push(("hub".to_string(), root.clone(), kinds[branch % kinds.len()]));
+            let mut previous = root.clone();
+            for depth in 1..branch_length {
+                let node = format!("branch-{branch:02}-{depth:02}");
+                relations.push((
+                    previous,
+                    node.clone(),
+                    kinds[(branch + depth) % kinds.len()],
+                ));
+                previous = node;
+            }
+            relations.push((root, previous, kinds[(branch + 1) % kinds.len()]));
         }
-        assert_cell_style(
-            &compatible_buffer,
-            "compatible",
-            THEME_GREEN,
-            Modifier::BOLD,
-        );
-        assert_cell_style(
-            &compatible_buffer,
-            "Frozen v0.3.26",
-            THEME_BLUE,
-            Modifier::BOLD,
-        );
-        assert_cell_style(
-            &compatible_buffer,
-            "Plain Codex",
-            THEME_INK_WHITE,
-            Modifier::BOLD,
-        );
-
-        let mut partial = sample_overview();
-        partial.agent_efficiency = sample_agent_efficiency(true);
-        let partial_buffer = render_overview_buffer_at_width(&partial, Some("s"), 140);
-        let partial_panel = agent_efficiency_panel_text(&partial_buffer);
-        assert!(partial_panel.contains("Evidence partial"));
-        assert!(partial_panel.contains("Frozen v0.3.26 [partial]"));
-        assert!(partial_panel.contains("failed candidate/baseline 0/3"));
-        assert!(partial_panel.contains("unmatched 3"));
-        assert!(partial_panel.contains("Plain Codex [compatible]"));
-        assert!(partial_panel.contains("frozen huge-corpus setup retained three failures"));
-        assert_cell_style(&partial_buffer, "partial", THEME_YELLOW, Modifier::BOLD);
-    }
-
-    #[test]
-    fn agent_efficiency_panel_preserves_explicit_invalid_states_without_zero_rows() {
-        for (state, reason, color) in [
-            (
-                AgentEfficiencyEvidenceState::Unavailable,
-                "benchmark artifact not supplied",
-                THEME_MUTED,
-            ),
-            (
-                AgentEfficiencyEvidenceState::Failed,
-                "benchmark artifact could not be decoded",
-                THEME_RED,
-            ),
-            (
-                AgentEfficiencyEvidenceState::Incompatible,
-                "candidate identity does not match the supported release",
-                THEME_RED,
-            ),
-        ] {
-            let mut overview = sample_overview();
-            overview.agent_efficiency = AgentEfficiencyComparison {
-                state,
-                reason: Some(reason.to_string()),
-                artifact: None,
-                baselines: Vec::new(),
-                capabilities: Vec::new(),
-                provider_counters_descriptive_only: true,
-            };
-            let buffer = render_overview_buffer_at_width(&overview, Some("s"), 140);
-            let panel = agent_efficiency_panel_text(&buffer);
-
-            assert!(panel.contains(&format!("Evidence {}", state.as_str())));
-            assert!(panel.contains(reason));
-            assert!(!panel.contains("Frozen v0.3.26"));
-            assert!(!panel.contains("Plain Codex"));
-            assert!(!panel.contains("candidate/baseline calls"));
-            assert!(!panel.contains("0.0%"));
-            assert_cell_style(&buffer, state.as_str(), color, Modifier::BOLD);
+        for branch in 0..5 {
+            relations.push((
+                format!("branch-{branch:02}-02"),
+                format!("branch-{:02}-02", branch + 1),
+                kinds[(branch + 2) % kinds.len()],
+            ));
         }
-    }
+        relations.extend([
+            ("island-a".to_string(), "island-b".to_string(), kinds[0]),
+            ("island-b".to_string(), "island-c".to_string(), kinds[1]),
+        ]);
 
-    #[test]
-    fn agent_efficiency_panel_keeps_compact_evidence_visible_without_overflow() {
-        let mut overview = sample_overview();
-        overview.agent_efficiency = sample_agent_efficiency(true);
-        let buffer = render_overview_buffer_at_width(&overview, Some("s"), 80);
-        let panel = agent_efficiency_panel_text(&buffer);
+        let atlas = TokenAtlasPreview::from_resolved_edges(relations, false);
+        let layout = atlas_layout(&atlas.edges);
+        let repeated_layout = atlas_layout(&atlas.edges);
 
-        for text in [
-            "State partial",
-            "artifact s1 cand projectatlas 0.4.0",
-            "Frozen v0.3.26 [partial] m=12 f(c/b)=0/3 u=3",
-            "Plain Codex [compatible] m=15 f(c/b)=0/0 u=0",
-            "c/b calls 12/30",
-            "reads 2/8",
-            "net ctx 16.0KiB/64.0KiB (75.0%)",
-            "MCP capability calls/bytes only (no causal savings):",
-            "disc 7/2.0KiB",
-            "sum/slice 11/4.0KiB",
-            "search 5/1.0KiB",
-            "sym/rel 3/512B",
-            "frozen huge-corpus setup retained three failures",
-        ] {
-            assert!(
-                panel.contains(text),
-                "compact panel should contain {text:?}"
-            );
+        assert!(atlas.available);
+        assert!(atlas.truncated);
+        assert_eq!(atlas.node_count(), ATLAS_PREVIEW_MAX_NODES);
+        assert_eq!(atlas.edges.len(), ATLAS_PREVIEW_MAX_EDGES);
+        assert_eq!(layout.hub, "hub");
+        let Some(hub) = layout.nodes.get(&layout.hub) else {
+            unreachable!("connected atlas should retain its hub placement");
+        };
+        assert_eq!((hub.x, hub.y), (0.0, 0.0));
+        assert_eq!(layout.nodes, repeated_layout.nodes);
+        assert!(
+            atlas.edges.iter().all(
+                |edge| !edge.source.starts_with("island") && !edge.target.starts_with("island")
+            )
+        );
+        let mut selected_degrees = BTreeMap::<&str, usize>::new();
+        let mut adjacency = BTreeMap::<&str, BTreeSet<&str>>::new();
+        for edge in &atlas.edges {
+            *selected_degrees.entry(&edge.source).or_default() += 1;
+            *selected_degrees.entry(&edge.target).or_default() += 1;
+            adjacency
+                .entry(&edge.source)
+                .or_default()
+                .insert(&edge.target);
+            adjacency
+                .entry(&edge.target)
+                .or_default()
+                .insert(&edge.source);
         }
         assert!(
-            !panel.contains("runtime c/b"),
-            "compact layout should spend its bounded rows on required call/read/context truth"
+            selected_degrees
+                .values()
+                .all(|degree| *degree <= ATLAS_PREVIEW_MAX_NODE_DEGREE)
         );
-
-        let Some((_, title_y)) = find_text(&buffer, &reference_title("AGENT EFFICIENCY")) else {
-            unreachable!("agent-efficiency title should render");
-        };
-        for y in (title_y + 1)..(title_y + 11) {
-            assert_eq!(
-                buffer.cell((78, y)).map(ratatui::buffer::Cell::symbol),
-                Some("│"),
-                "compact panel right border should remain intact at row {y}"
-            );
-        }
-    }
-
-    #[test]
-    fn agent_efficiency_panel_uses_compact_rows_below_normal_width() {
-        let mut overview = sample_overview();
-        overview.agent_efficiency = sample_agent_efficiency(true);
-        let buffer = render_overview_buffer_at_width(&overview, Some("s"), 120);
-        let panel = agent_efficiency_panel_text(&buffer);
-
-        for text in [
-            "State partial",
-            "Frozen v0.3.26 [partial]",
-            "Plain Codex [compatible]",
-            "MCP capability calls/bytes only (no causal savings):",
-            "sym/rel 3/512B",
-            "frozen huge-corpus setup retained three failures",
-        ] {
-            assert!(
-                panel.contains(text),
-                "120-column panel should contain {text:?}; panel:\n{panel}"
-            );
-        }
-    }
-
-    #[test]
-    fn agent_efficiency_panel_bounds_maximum_valid_values_and_other_capability() {
-        let mut overview = sample_overview();
-        overview.agent_efficiency = sample_agent_efficiency(true);
-        for baseline in &mut overview.agent_efficiency.baselines {
-            for metric in &mut baseline.metrics {
-                metric.candidate_median = 9_007_199_254_740_991.0;
-                metric.baseline_median = 9_007_199_254_740_991.0;
-                metric.candidate_maximum = 9_007_199_254_740_991.0;
-                metric.baseline_maximum = 9_007_199_254_740_991.0;
+        let mut visited = BTreeSet::from([layout.hub.as_str()]);
+        let mut frontier = VecDeque::from([layout.hub.as_str()]);
+        while let Some(node) = frontier.pop_front() {
+            if let Some(neighbors) = adjacency.get(node) {
+                for neighbor in neighbors {
+                    if visited.insert(*neighbor) {
+                        frontier.push_back(*neighbor);
+                    }
+                }
             }
         }
-        overview
-            .agent_efficiency
-            .capabilities
-            .push(AgentEfficiencyCapabilityContribution {
-                capability: AgentEfficiencyCapability::Other,
-                calls: 4_096,
-                emitted_bytes: 9_007_199_254_740_991,
-            });
+        assert_eq!(visited.len(), atlas.node_count());
+        assert!(
+            layout
+                .nodes
+                .values()
+                .all(|node| node.x.abs() < ATLAS_CANVAS_X_BOUND
+                    && node.y.abs() < ATLAS_CANVAS_Y_BOUND)
+        );
+    }
 
-        let buffer = render_overview_buffer_at_width(&overview, Some("s"), 80);
-        let panel = agent_efficiency_panel_text(&buffer);
-        for text in [
-            "State partial",
-            "Frozen v0.3.26 [partial]",
-            "Plain Codex [compatible]",
-            "c/b calls 9.0P/9.0P",
-            "net ctx 8.0PiB/8.0PiB",
-            "MCP capability calls/bytes only (no causal savings):",
-            "other 4,096/8.0PiB",
-            "frozen huge-corpus setup retained three failures",
-        ] {
-            assert!(
-                panel.contains(text),
-                "maximum-value panel should contain {text:?}; panel:\n{panel}"
+    #[test]
+    fn atlas_preview_excludes_containment_before_applying_bounds() {
+        let mut relations = (0..80)
+            .map(|index| {
+                (
+                    "containment-root".to_string(),
+                    format!("contained-{index:02}"),
+                    GraphRelationKind::Legacy(RelationKind::Contains),
+                )
+            })
+            .collect::<Vec<_>>();
+        relations.extend([
+            (
+                "network-root".to_string(),
+                "network-a".to_string(),
+                GraphRelationKind::Legacy(RelationKind::Calls),
+            ),
+            (
+                "network-a".to_string(),
+                "network-b".to_string(),
+                GraphRelationKind::Legacy(RelationKind::Imports),
+            ),
+        ]);
+
+        let atlas = TokenAtlasPreview::from_resolved_edges(relations, false);
+
+        assert_eq!(atlas.edges.len(), 2);
+        assert!(atlas.edges.iter().all(|edge| {
+            !matches!(edge.kind, GraphRelationKind::Legacy(RelationKind::Contains))
+                && !edge.source.starts_with("contain")
+                && !edge.target.starts_with("contain")
+        }));
+    }
+
+    #[test]
+    fn wide_atlas_map_renders_real_counts_and_stays_inside_its_panel() {
+        let kind = GraphRelationKind::Legacy(RelationKind::Calls);
+        let mut relations = (0..6)
+            .map(|index| ("hub".to_string(), format!("node-{index}"), kind))
+            .collect::<Vec<_>>();
+        relations.extend([
+            ("node-0".to_string(), "satellite-a".to_string(), kind),
+            ("satellite-a".to_string(), "satellite-b".to_string(), kind),
+        ]);
+        let atlas = TokenAtlasPreview::from_resolved_edges(relations, false);
+        let buffer =
+            render_overview_buffer_with_atlas_at_width(&sample_overview(), Some("s"), &atlas, 200);
+        let dashboard = buffer_to_string(&buffer);
+
+        assert!(dashboard.contains(&reference_title("ATLAS MAP")));
+        assert!(dashboard.contains("9 nodes • 8 links"));
+        assert!(dashboard.contains("bounded live graph • static snapshot"));
+        assert!(buffer_contains_braille(
+            &buffer,
+            TOKEN_IMPACT_COLUMN_WIDTH + 2
+        ));
+        assert!(!dashboard.contains("Frozen v0.3.26"));
+        assert!(!dashboard.contains("Plain Codex"));
+        assert!(!dashboard.contains(&reference_title("REPEATED-WORK BENCHMARK")));
+        for y in 2..(DASHBOARD_HEIGHT - 2) {
+            assert_eq!(
+                buffer.cell((198, y)).map(ratatui::buffer::Cell::symbol),
+                Some("│"),
+                "atlas panel right border should remain intact at row {y}"
             );
         }
     }
 
     #[test]
-    fn agent_efficiency_panel_clamps_visual_ratio_and_preserves_unavailable_ratio() {
-        let mut overview = sample_overview();
-        overview.agent_efficiency = sample_agent_efficiency(false);
-        let frozen = overview
-            .agent_efficiency
-            .baselines
-            .iter_mut()
-            .find(|row| row.baseline == AgentEfficiencyBaseline::FrozenProjectAtlasV0326);
-        let Some(frozen) = frozen else {
-            unreachable!("sample comparison should contain the frozen baseline");
-        };
-        let context = frozen
-            .metrics
-            .iter_mut()
-            .find(|value| value.metric == AgentEfficiencyMetricKind::NetNavigationBytes);
-        let Some(context) = context else {
-            unreachable!("sample comparison should contain net context");
-        };
-        context.median_percent_saving = Some(250.0);
-
-        let clamped_buffer = render_overview_buffer_at_width(&overview, Some("s"), 140);
-        let Some((_, clamped_y)) = find_text(&clamped_buffer, "context saved") else {
-            unreachable!("normal comparison should render the context-savings bar");
-        };
-        let clamped_line = line_symbols(&clamped_buffer, clamped_y);
-        assert!(clamped_line.contains("250.0%"));
-        assert_eq!(
-            clamped_line.chars().filter(|value| *value == '█').count(),
-            6
+    fn atlas_map_hides_when_narrow_and_never_invents_empty_state_data() {
+        let kind = GraphRelationKind::Legacy(RelationKind::Calls);
+        let atlas = TokenAtlasPreview::from_resolved_edges(
+            [("source".to_string(), "target".to_string(), kind)],
+            false,
         );
-        assert_eq!(
-            clamped_line.chars().filter(|value| *value == '░').count(),
-            0
-        );
+        let narrow =
+            render_overview_buffer_with_atlas_at_width(&sample_overview(), Some("s"), &atlas, 189);
+        assert!(!buffer_to_string(&narrow).contains(&reference_title("ATLAS MAP")));
 
-        let context = overview
-            .agent_efficiency
-            .baselines
-            .iter_mut()
-            .find(|row| row.baseline == AgentEfficiencyBaseline::FrozenProjectAtlasV0326)
-            .and_then(|row| {
-                row.metrics
-                    .iter_mut()
-                    .find(|value| value.metric == AgentEfficiencyMetricKind::NetNavigationBytes)
-            });
-        let Some(context) = context else {
-            unreachable!("sample comparison should retain net context");
-        };
-        context.median_percent_saving = None;
-
-        let unavailable_buffer = render_overview_buffer_at_width(&overview, Some("s"), 140);
-        let Some((_, unavailable_y)) = find_text(&unavailable_buffer, "context saved") else {
-            unreachable!("normal comparison should render unavailable context savings");
-        };
-        let unavailable_line = line_symbols(&unavailable_buffer, unavailable_y);
-        assert!(unavailable_line.contains("context saved n/a"));
-        assert!(!unavailable_line.contains('█'));
-        assert!(!unavailable_line.contains('░'));
-        assert!(!unavailable_line.contains("0.0%"));
+        for (atlas, message) in [
+            (TokenAtlasPreview::empty(), "No resolved graph links"),
+            (
+                TokenAtlasPreview::unavailable(),
+                "Graph preview unavailable",
+            ),
+        ] {
+            let buffer = render_overview_buffer_with_atlas_at_width(
+                &sample_overview(),
+                Some("s"),
+                &atlas,
+                200,
+            );
+            let dashboard = buffer_to_string(&buffer);
+            assert!(dashboard.contains(message));
+            assert!(!dashboard.contains("nodes •"));
+            assert!(!buffer_contains_braille(
+                &buffer,
+                TOKEN_IMPACT_COLUMN_WIDTH + 2
+            ));
+        }
     }
 
     #[test]
@@ -3211,184 +3465,6 @@ mod tests {
         ])
     }
 
-    fn sample_agent_efficiency(partial: bool) -> AgentEfficiencyComparison {
-        let frozen_state = if partial {
-            AgentEfficiencyEvidenceState::Partial
-        } else {
-            AgentEfficiencyEvidenceState::Compatible
-        };
-        AgentEfficiencyComparison {
-            state: frozen_state,
-            reason: partial.then(|| "frozen huge-corpus setup retained three failures".to_string()),
-            artifact: Some(AgentEfficiencyArtifactIdentity {
-                schema_version: 1,
-                artifact_digest_kind: "sha256".to_string(),
-                artifact_digest: "1111111111111111111111111111111111111111111111111111111111111111"
-                    .to_string(),
-                candidate_version: "projectatlas 0.4.0".to_string(),
-                candidate_runtime_sha256:
-                    "2222222222222222222222222222222222222222222222222222222222222222".to_string(),
-                candidate_functional_head: "3333333333333333333333333333333333333333".to_string(),
-                candidate_checklist_head: "4444444444444444444444444444444444444444".to_string(),
-                frozen_version: "projectatlas 0.3.26".to_string(),
-                frozen_runtime_sha256:
-                    "5555555555555555555555555555555555555555555555555555555555555555".to_string(),
-            }),
-            baselines: vec![
-                sample_agent_efficiency_baseline(
-                    AgentEfficiencyBaseline::FrozenProjectAtlasV0326,
-                    frozen_state,
-                    12,
-                    if partial { 3 } else { 0 },
-                ),
-                sample_agent_efficiency_baseline(
-                    AgentEfficiencyBaseline::PlainCodex,
-                    AgentEfficiencyEvidenceState::Compatible,
-                    15,
-                    0,
-                ),
-            ],
-            capabilities: vec![
-                AgentEfficiencyCapabilityContribution {
-                    capability: AgentEfficiencyCapability::Discovery,
-                    calls: 7,
-                    emitted_bytes: 2_048,
-                },
-                AgentEfficiencyCapabilityContribution {
-                    capability: AgentEfficiencyCapability::SummaryAndSlice,
-                    calls: 11,
-                    emitted_bytes: 4_096,
-                },
-                AgentEfficiencyCapabilityContribution {
-                    capability: AgentEfficiencyCapability::Search,
-                    calls: 5,
-                    emitted_bytes: 1_024,
-                },
-                AgentEfficiencyCapabilityContribution {
-                    capability: AgentEfficiencyCapability::SymbolsAndRelations,
-                    calls: 3,
-                    emitted_bytes: 512,
-                },
-            ],
-            provider_counters_descriptive_only: true,
-        }
-    }
-
-    fn sample_agent_efficiency_baseline(
-        baseline: AgentEfficiencyBaseline,
-        state: AgentEfficiencyEvidenceState,
-        matched_trials: usize,
-        baseline_failed_trials: usize,
-    ) -> AgentEfficiencyBaselineRow {
-        AgentEfficiencyBaselineRow {
-            baseline,
-            state,
-            matched_trials,
-            candidate_failed_trials: 0,
-            baseline_failed_trials,
-            unmatched_trials: baseline_failed_trials,
-            metrics: vec![
-                sample_agent_efficiency_metric(
-                    AgentEfficiencyMetricKind::TotalToolCalls,
-                    12.0,
-                    30.0,
-                    Some(60.0),
-                ),
-                sample_agent_efficiency_metric(
-                    AgentEfficiencyMetricKind::BroadReads,
-                    2.0,
-                    8.0,
-                    Some(75.0),
-                ),
-                sample_agent_efficiency_metric(
-                    AgentEfficiencyMetricKind::FullReads,
-                    1.0,
-                    5.0,
-                    Some(80.0),
-                ),
-                sample_agent_efficiency_metric(
-                    AgentEfficiencyMetricKind::ProductiveFiles,
-                    4.0,
-                    10.0,
-                    Some(60.0),
-                ),
-                sample_agent_efficiency_metric(
-                    AgentEfficiencyMetricKind::WrongFiles,
-                    0.0,
-                    3.0,
-                    Some(100.0),
-                ),
-                sample_agent_efficiency_metric(
-                    AgentEfficiencyMetricKind::Backtracks,
-                    0.0,
-                    1.0,
-                    Some(100.0),
-                ),
-                sample_agent_efficiency_metric(
-                    AgentEfficiencyMetricKind::NetNavigationBytes,
-                    16_384.0,
-                    65_536.0,
-                    Some(75.0),
-                ),
-                sample_agent_efficiency_metric(
-                    AgentEfficiencyMetricKind::RuntimeWallSeconds,
-                    30.0,
-                    50.0,
-                    Some(40.0),
-                ),
-            ],
-            break_even: vec![
-                AgentEfficiencyBreakEven {
-                    workload: "small-clean".to_string(),
-                    wall_time_tasks: Some(1),
-                },
-                AgentEfficiencyBreakEven {
-                    workload: "small-dirty".to_string(),
-                    wall_time_tasks: Some(1),
-                },
-                AgentEfficiencyBreakEven {
-                    workload: "small-non-git".to_string(),
-                    wall_time_tasks: None,
-                },
-                AgentEfficiencyBreakEven {
-                    workload: "medium".to_string(),
-                    wall_time_tasks: None,
-                },
-                AgentEfficiencyBreakEven {
-                    workload: "huge-vscode".to_string(),
-                    wall_time_tasks: None,
-                },
-            ],
-            provider_usage_descriptive_only: Vec::new(),
-        }
-    }
-
-    fn sample_agent_efficiency_metric(
-        metric: AgentEfficiencyMetricKind,
-        candidate_median: f64,
-        baseline_median: f64,
-        median_percent_saving: Option<f64>,
-    ) -> AgentEfficiencyMetricComparison {
-        AgentEfficiencyMetricComparison {
-            metric,
-            candidate_median,
-            baseline_median,
-            candidate_maximum: candidate_median,
-            baseline_maximum: baseline_median,
-            median_percent_saving,
-        }
-    }
-
-    fn agent_efficiency_panel_text(buffer: &Buffer) -> String {
-        let Some((_, title_y)) = find_text(buffer, &reference_title("AGENT EFFICIENCY")) else {
-            unreachable!("agent-efficiency title should render");
-        };
-        (title_y..(title_y + 12).min(buffer.area.height))
-            .map(|y| line_symbols(buffer, y))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     fn render_overview_buffer(overview: &TokenOverview, session: Option<&str>) -> Buffer {
         let width = dashboard_width().clamp(80, 140) as u16;
         render_overview_buffer_at_width(overview, session, width)
@@ -3406,6 +3482,33 @@ mod tests {
             .draw(|frame| render_overview_frame(frame, overview, session))
             .expect("in-memory token dashboard should render");
         frame.buffer.clone()
+    }
+
+    fn render_overview_buffer_with_atlas_at_width(
+        overview: &TokenOverview,
+        session: Option<&str>,
+        atlas: &TokenAtlasPreview,
+        width: u16,
+    ) -> Buffer {
+        let backend = TestBackend::new(width, DASHBOARD_HEIGHT);
+        let mut terminal =
+            Terminal::new(backend).expect("in-memory token dashboard backend should initialize");
+        let frame = terminal
+            .draw(|frame| render_overview_frame_with_atlas(frame, overview, session, Some(atlas)))
+            .expect("in-memory token dashboard with atlas should render");
+        frame.buffer.clone()
+    }
+
+    fn buffer_contains_braille(buffer: &Buffer, start_x: u16) -> bool {
+        (0..buffer.area.height).any(|y| {
+            (start_x..buffer.area.width).any(|x| {
+                buffer.cell((x, y)).is_some_and(|cell| {
+                    cell.symbol()
+                        .chars()
+                        .any(|character| ('\u{2801}'..='\u{28ff}').contains(&character))
+                })
+            })
+        })
     }
 
     fn render_trend_buffer(report: &TokenTrendReport) -> Buffer {
@@ -3495,6 +3598,22 @@ mod tests {
                     .enumerate()
                     .all(|(index, byte)| index == 2 || index == 5 || byte.is_ascii_digit())
         })
+    }
+
+    fn normalize_dashboard_clock(mut dashboard: String) -> String {
+        let Some(time_start) = dashboard
+            .find("Snapshot ")
+            .map(|start| start + "Snapshot ".len())
+        else {
+            return dashboard;
+        };
+        let time_len = if dashboard.as_bytes().get(time_start + 5) == Some(&b':') {
+            8
+        } else {
+            5
+        };
+        dashboard.replace_range(time_start..time_start + time_len, "CLOCK");
+        dashboard
     }
 
     fn assert_bar_segments(line: &Line<'_>, filled: usize, empty: usize, color: Color) {

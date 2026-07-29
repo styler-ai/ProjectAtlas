@@ -380,9 +380,14 @@ pub struct AgentEfficiencyArtifactIdentity {
     pub candidate_version: String,
     /// Candidate runtime SHA-256 identity.
     pub candidate_runtime_sha256: String,
-    /// Candidate functional source commit.
+    /// Descriptive source checkout commit recorded by the benchmark.
+    #[serde(default)]
+    pub candidate_source_head: String,
+    /// Compatibility identity key; descriptive only and mirrors `candidate_source_head`.
+    #[serde(default)]
     pub candidate_functional_head: String,
-    /// Candidate checklist source commit.
+    /// Compatibility identity key; descriptive only and mirrors `candidate_source_head`.
+    #[serde(default)]
     pub candidate_checklist_head: String,
     /// Frozen `ProjectAtlas` runtime semantic version.
     pub frozen_version: String,

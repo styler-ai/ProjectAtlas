@@ -12,14 +12,28 @@ The human-readable and machine-readable MCP composition evaluations SHALL name t
 - **WHEN** either published digest differs from the raw input or from the other representation
 - **THEN** release readiness fails before promotion
 
-### Requirement: Published Campaigns Match The Functional Release Candidate
+### Requirement: Published Campaigns Are Opt-In And Honestly Bound
 
-The published v0.4 system-scale and final agent-navigation results SHALL measure a functional head containing every release-affecting runtime, packaged-skill, MCP inventory/schema, relation-service, and repository-graph behavior change. Their recorded source, runtime, skill, and tool identities SHALL match the measured artifacts. Later commits MAY change only benchmark locks, raw results, evaluations, landing copy, or finite release checklist state; any later product-behavior change SHALL invalidate the affected publication.
+The published v0.4 system-scale and final agent-navigation results SHALL measure only the behavior each campaign claims. Their recorded runtime, skill, tool, platform, environment, artifact, and closed measurement-harness input identities SHALL match the measured artifacts; harness inputs SHALL be content-digested and commit SHAs SHALL remain provenance only. Standard CI, pre-push, prepublication, merge, and release paths SHALL NOT execute either full campaign. A later change to an owning behavior-relevant input, measurement-harness digest, or measured identity SHALL make the prior publication historical or unavailable for the candidate without blocking release or triggering a rerun. A full campaign SHALL run only after an explicit user request; focused harness unit tests and published-artifact integrity checks remain required.
 
-#### Scenario: The final functional candidate is measured
+#### Scenario: The release benchmark behavior is measured
 - **WHEN** release readiness validates the system-scale and agent-navigation publications
-- **THEN** both campaigns identify and measure the current functional release candidate and its exact runtime, skill, and MCP surface
+- **THEN** both campaigns identify their measured runtime, skill, MCP surface, platform, environment, behavior-relevant inputs, and closed measurement-owner file set by content digest
 
 #### Scenario: Release behavior changes after measurement
-- **WHEN** a later commit changes runtime, packaged-skill, MCP, relation-service, or repository-graph behavior
-- **THEN** the affected campaign is relocked and rerun before promotion
+- **WHEN** a later commit changes behavior or an artifact identity owned by a campaign
+- **THEN** the prior publication is labeled historical or unavailable for the candidate
+- **AND** release proceeds without a replacement campaign unless the user explicitly requests one
+
+#### Scenario: Standard validation or release runs
+- **WHEN** pre-push, standard CI, prepublication, merge, or release validation executes
+- **THEN** a routing-policy check rejects any full system-scale or agent-navigation campaign invocation
+- **AND** focused harness unit tests and published-artifact integrity checks may still run
+
+#### Scenario: Unrelated metadata or behavior changes
+- **WHEN** a later commit changes no input or artifact identity owned by a campaign
+- **THEN** the passed publication remains valid without a rerun
+
+#### Scenario: The user explicitly requests a new campaign
+- **WHEN** the user explicitly requests system-scale or agent-navigation measurement
+- **THEN** the campaign follows its preregistered schedule and retains every scheduled, failed, or completed row

@@ -69,27 +69,11 @@ jobs:
             echo "Main promotion tree differs from its verified dev parent" >&2
             exit 1
           fi
-          mapfile -t run_ids < <(
-            gh api \
-              "/repos/$GITHUB_REPOSITORY/actions/workflows/optional-parser-pack.yml/runs?event=workflow_dispatch&status=success&head_sha=$promotion_sha&per_page=100" \
-              --jq '.workflow_runs | sort_by(.run_number) | reverse | .[].id'
-          )
-          parser_pack_run_id=""
-          for run_id in "${run_ids[@]}"; do
-            mapfile -t artifacts < <(
-              gh api \
-                "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" \
-                --jq '.artifacts[] | select(.name == "optional-parser-pack-release-assets" and (.expired | not)) | .id'
-            )
-            if [[ ${#artifacts[@]} -gt 0 ]]; then
-              parser_pack_run_id="$run_id"
-              break
-            fi
-          done
-          if [[ -z "$parser_pack_run_id" ]]; then
-            echo "No unexpired clean optional-parser handoff matches promotion $promotion_sha" >&2
-            exit 1
-          fi
+          parser_pack_run_id="$(
+            python3 .github/scripts/resolve-optional-parser-handoff.py \
+              --repository "$GITHUB_REPOSITORY" \
+              --promotion-sha "$promotion_sha"
+          )"
           echo "run_id=$parser_pack_run_id" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch release workflow

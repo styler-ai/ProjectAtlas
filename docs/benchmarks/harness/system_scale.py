@@ -45,6 +45,118 @@ WATCH_BASELINE_TIMEOUT_SECONDS = 5.0
 TOON_INTEGER = r"^\s+{key}: (\d+)$"
 TOON_SCALAR = r"^\s+{key}: (.+)$"
 GRAPH_STAGE_PREFIX = "graph-stage-"
+POWERSHELL = shutil.which("pwsh")
+PATH_PLACEHOLDERS = {
+    "{REPO_ROOT}": "candidate repository root",
+    "{USER_HOME}": "current operating-system user home",
+    "{POWERSHELL}": "PowerShell executable",
+}
+SYSTEM_SCALE_MEASUREMENT_INPUTS = (
+    "docs/benchmarks/harness/system_scale.py",
+    "docs/benchmarks/harness/mcp_composition.py",
+    "docs/benchmarks/harness/requirements.txt",
+    "docs/benchmarks/fixtures/mcp-composition",
+)
+
+
+def committed_git_object_sha256(
+    relative: str,
+    *,
+    root: Path | None = None,
+    revision: str = "HEAD",
+) -> str | None:
+    """Return the SHA-256 of one canonical committed Git blob or tree."""
+
+    root = ROOT if root is None else root
+    for object_type in ("blob", "tree"):
+        process = subprocess.run(
+            ["git", "cat-file", object_type, f"{revision}:{relative}"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            timeout=120,
+        )
+        if process.returncode == 0:
+            return hashlib.sha256(process.stdout).hexdigest()
+    return None
+
+
+def measurement_input_errors(
+    preregistration: dict[str, Any],
+    required_paths: tuple[str, ...],
+    *,
+    root: Path | None = None,
+    revision: str = "HEAD",
+) -> list[str]:
+    """Validate one closed content lock over canonical committed harness inputs."""
+
+    root = ROOT if root is None else root
+    locked = preregistration.get("measurement_inputs")
+    if not isinstance(locked, dict) or set(locked) != set(required_paths):
+        return ["measurement input lock does not match the required path set"]
+    if revision != "HEAD" and not re.fullmatch(r"[0-9a-f]{40}", revision):
+        return ["measurement input revision is malformed"]
+    errors = []
+    for relative in required_paths:
+        expected = locked.get(relative)
+        if (
+            not isinstance(expected, str)
+            or len(expected) != 64
+            or any(character not in "0123456789abcdef" for character in expected)
+        ):
+            errors.append(f"measurement input digest is malformed: {relative}")
+            continue
+        path = (root / relative).resolve()
+        try:
+            path.relative_to(root.resolve())
+        except ValueError:
+            errors.append(f"measurement input escapes the repository: {relative}")
+            continue
+        actual = committed_git_object_sha256(relative, root=root, revision=revision)
+        if actual is None:
+            errors.append(f"measurement input is missing from {revision}: {relative}")
+            continue
+        if actual != expected:
+            errors.append(f"measurement input changed after lock: {relative}")
+    return errors
+
+
+def candidate_file_identity(
+    relative: str, *, root: Path = ROOT
+) -> dict[str, str | int]:
+    path = (root / relative).resolve()
+    try:
+        canonical_relative = path.relative_to(root.resolve()).as_posix()
+    except ValueError as error:
+        raise ValueError("candidate artifact path escapes the repository") from error
+    if not path.is_file():
+        raise ValueError("candidate artifact path is not a regular file")
+    payload = path.read_bytes()
+    return {
+        "path": canonical_relative,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
+    }
+
+
+def redact_local_paths(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: redact_local_paths(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_local_paths(item) for item in value]
+    if not isinstance(value, str):
+        return value
+    replacements = [(ROOT, "{REPO_ROOT}"), (Path.home(), "{USER_HOME}")]
+    if POWERSHELL:
+        replacements.append((Path(POWERSHELL), "{POWERSHELL}"))
+    redacted = value
+    for path, placeholder in sorted(
+        replacements, key=lambda item: len(str(item[0])), reverse=True
+    ):
+        parts = re.split(r"[\\/]+", str(path))
+        pattern = r"[\\/]+".join(re.escape(part) for part in parts)
+        redacted = re.sub(pattern, placeholder, redacted, flags=re.IGNORECASE)
+    return redacted
 
 
 def command(*args: str, cwd: Path, env: dict[str, str] | None = None) -> None:
@@ -3077,6 +3189,23 @@ def cooperative_cancellation_reopen(
     }
 
 
+def termination_recovery_is_complete(
+    reopen_process: dict[str, Any],
+    checkpoint: dict[str, int],
+    recovery_profile: dict[str, Any],
+    final_storage: dict[str, int],
+) -> bool:
+    return (
+        reopen_process.get("returncode") == 0
+        and not reopen_process.get("timed_out", False)
+        and checkpoint.get("busy") == 0
+        and recovery_profile.get("quick_check") == "ok"
+        and final_storage.get("wal_bytes") == 0
+        and final_storage.get("staging_bytes") == 0
+        and final_storage.get("stage_directories") == 0
+    )
+
+
 def forced_termination_quiescence(
     runtime: Path,
     source_root: Path,
@@ -3084,7 +3213,8 @@ def forced_termination_quiescence(
     env: dict[str, str],
     threshold_seconds: float,
 ) -> dict[str, Any]:
-    database = work_root / "cancel/projectatlas.db"
+    recovery_root = work_root / "default-core-parent-termination"
+    database = recovery_root / ".projectatlas/projectatlas.db"
     database.parent.mkdir(parents=True, exist_ok=True)
     process = subprocess.Popen(
         [
@@ -3096,7 +3226,7 @@ def forced_termination_quiescence(
             "--db",
             str(database),
             "scan",
-            ".",
+            str(source_root),
         ],
         cwd=source_root,
         env=env,
@@ -3112,6 +3242,7 @@ def forced_termination_quiescence(
         return {
             "passed": False,
             "reason": "scan completed before cancellation could be requested",
+            "returncode": process.returncode,
             "known_processes": len(known),
         }
     requested = time.perf_counter()
@@ -3132,16 +3263,68 @@ def forced_termination_quiescence(
                 continue
         if not survivors:
             elapsed = time.perf_counter() - requested
+            try:
+                reopen_process, reopen_settings = measured_json(
+                    runtime,
+                    ["--db", str(database), "settings"],
+                    cwd=source_root,
+                    env=env,
+                    timeout_seconds=threshold_seconds,
+                )
+                connection = sqlite3.connect(
+                    database, timeout=threshold_seconds
+                )
+                try:
+                    checkpoint_row = connection.execute(
+                        "PRAGMA wal_checkpoint(TRUNCATE)"
+                    ).fetchone()
+                finally:
+                    connection.close()
+                if checkpoint_row is None:
+                    raise RuntimeError(
+                        "terminated database checkpoint returned no result"
+                    )
+                checkpoint = {
+                    "busy": int(checkpoint_row[0]),
+                    "log_frames": int(checkpoint_row[1]),
+                    "checkpointed_frames": int(checkpoint_row[2]),
+                }
+                recovery_profile = database_profile(database)
+                final_storage = persistent_sizes(recovery_root)
+            except Exception as error:
+                return {
+                    "scope": "default-core in-process scan parent",
+                    "passed": False,
+                    "quiescence_seconds": round(elapsed, 6),
+                    "known_processes": len(known),
+                    "survivors": [],
+                    "reason": f"terminated database recovery failed: {error}",
+                }
+            recovery_complete = termination_recovery_is_complete(
+                reopen_process, checkpoint, recovery_profile, final_storage
+            )
+            passed = len(known) == 1 and recovery_complete
             return {
                 "scope": "default-core in-process scan parent",
-                "passed": len(known) == 1,
+                "passed": passed,
                 "quiescence_seconds": round(elapsed, 6),
                 "known_processes": len(known),
                 "survivors": [],
+                "reopen": {
+                    "process": reopen_process,
+                    "settings": reopen_settings,
+                },
+                "checkpoint": checkpoint,
+                "recovery_profile": recovery_profile,
+                "final_storage": final_storage,
                 "reason": (
                     None
-                    if len(known) == 1
-                    else "default-core scan unexpectedly created child processes"
+                    if passed
+                    else (
+                        "default-core scan unexpectedly created child processes"
+                        if len(known) != 1
+                        else "terminated database did not reopen, checkpoint, and recover cleanly"
+                    )
                 ),
             }
         time.sleep(MEASURE_INTERVAL_SECONDS)
@@ -3162,23 +3345,26 @@ def forced_termination_quiescence(
 def publication_identity_errors(
     preregistration: dict[str, Any],
     *,
-    git_head: str,
     runtime_sha256: str,
     mcp_tools_sha256: str,
+    skill_sha256: str,
+    skill_bytes: int,
     runtime_info: dict[str, Any],
     dirty_paths: list[str],
-    preregistration_path: str,
+    measurement_errors: list[str],
 ) -> list[str]:
     candidate = preregistration["candidate"]
     errors = []
     if preregistration.get("status") != "locked_for_final_measurement":
         errors.append("preregistration is not locked for final measurement")
-    if candidate.get("functional_git_head") != git_head:
-        errors.append("functional Git head does not match the preregistered candidate")
     if candidate.get("runtime_sha256") != runtime_sha256:
         errors.append("runtime SHA-256 does not match the preregistered candidate")
     if candidate.get("mcp_tools_sha256") != mcp_tools_sha256:
         errors.append("MCP tool inventory/schema digest does not match the candidate")
+    if candidate.get("skill_sha256") != skill_sha256:
+        errors.append("packaged skill SHA-256 does not match the candidate")
+    if candidate.get("skill_bytes") != skill_bytes:
+        errors.append("packaged skill size does not match the candidate")
     if runtime_info.get("project") != "ProjectAtlas":
         errors.append("runtime identity is not ProjectAtlas")
     if runtime_info.get("version") != candidate.get("required_version"):
@@ -3190,26 +3376,44 @@ def publication_identity_errors(
         errors.append("runtime text format is not TOON")
     if len(runtime_info.get("mcp_tools", [])) != 40:
         errors.append("runtime does not advertise the frozen 40-tool MCP surface")
-    unexpected_dirty = [
-        path for path in dirty_paths if path.replace("\\", "/") != preregistration_path
-    ]
-    if unexpected_dirty:
+    if dirty_paths:
         errors.append(
-            "tracked benchmark source is dirty outside the preregistration: "
-            + ", ".join(unexpected_dirty)
+            "tracked benchmark source is dirty: " + ", ".join(dirty_paths)
         )
+    errors.extend(measurement_errors)
     return errors
+
+
+def candidate_source_identity(preregistration_path: Path) -> dict[str, str]:
+    try:
+        preregistration_relative = (
+            preregistration_path.resolve().relative_to(ROOT.resolve()).as_posix()
+        )
+    except ValueError as error:
+        raise ValueError(
+            "preregistration must be inside the candidate checkout"
+        ) from error
+    return {
+        "checkout_head": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ).strip(),
+        "preregistration_path": preregistration_relative,
+    }
 
 
 def validate_publication_identity(
     runtime: Path,
     preregistration: dict[str, Any],
     preregistration_path: Path,
-) -> dict[str, Any]:
-    git_head = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-    ).strip()
+) -> tuple[dict[str, Any], dict[str, str]]:
+    candidate = preregistration["candidate"]
     runtime_sha256 = hashlib.sha256(runtime.read_bytes()).hexdigest()
+    try:
+        skill_identity = candidate_file_identity(str(candidate.get("skill_path", "")))
+    except ValueError as error:
+        raise RuntimeError(f"packaged skill identity is invalid: {error}") from error
+    skill_sha256 = str(skill_identity["sha256"])
+    skill_bytes = int(skill_identity["bytes"])
     runtime_process = subprocess.run(
         [
             str(runtime),
@@ -3260,36 +3464,42 @@ def validate_publication_identity(
         for row in status_rows
         if len(row) > 3
     ]
-    preregistration_relative = preregistration_path.resolve().relative_to(ROOT).as_posix()
     errors = publication_identity_errors(
         preregistration,
-        git_head=git_head,
         runtime_sha256=runtime_sha256,
         mcp_tools_sha256=mcp_tools_sha256,
+        skill_sha256=skill_sha256,
+        skill_bytes=skill_bytes,
         runtime_info=runtime_info,
         dirty_paths=dirty_paths,
-        preregistration_path=preregistration_relative,
+        measurement_errors=measurement_input_errors(
+            preregistration,
+            SYSTEM_SCALE_MEASUREMENT_INPUTS,
+        ),
     )
     if errors:
         raise RuntimeError(
             "publication candidate identity rejected before fixture preparation: "
             + "; ".join(errors)
         )
-    return {
-        "git_head": git_head,
-        "runtime_sha256": runtime_sha256,
-        "mcp_tools_sha256": mcp_tools_sha256,
-        "runtime_info": runtime_info,
-        "dirty_tracked_paths": dirty_paths,
-        "allowed_dirty_path": preregistration_relative,
-    }
+    return (
+        {
+            "runtime_sha256": runtime_sha256,
+            "mcp_tools_sha256": mcp_tools_sha256,
+            "skill_path": skill_identity["path"],
+            "skill_sha256": skill_sha256,
+            "skill_bytes": skill_bytes,
+            "runtime_info": runtime_info,
+        },
+        candidate_source_identity(preregistration_path),
+    )
 
 
 def write_result(result: dict[str, Any], output: Path) -> None:
     """Persist every result, then fail the command when any gate rejected it."""
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
-        json.dumps(result, indent=2, ensure_ascii=False) + "\n",
+        json.dumps(redact_local_paths(result), indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -3345,11 +3555,12 @@ def run_benchmark(args: argparse.Namespace) -> None:
         and not measurement_eligibility["final_platform_eligible"]
     ):
         raise RuntimeError(measurement_eligibility["ineligible_reason"])
-    publication_identity = (
-        validate_publication_identity(runtime, preregistration, preregistration_path)
-        if args.only == "all"
-        else None
-    )
+    if args.only == "all":
+        publication_identity, source_identity = validate_publication_identity(
+            runtime, preregistration, preregistration_path
+        )
+    else:
+        publication_identity, source_identity = None, None
     work_root = args.work_root.resolve()
     allowed = (ROOT / "target/benchmarks/system-scale").resolve()
     if work_root == allowed or allowed not in work_root.parents:
@@ -3510,11 +3721,10 @@ def run_benchmark(args: argparse.Namespace) -> None:
             "runtime": str(runtime),
             "runtime_sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
             "runtime_bytes": runtime.stat().st_size,
-            "git_head": subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-            ).strip(),
             "publication_identity": publication_identity,
         },
+        "candidate_source_identity": source_identity,
+        "path_placeholders": PATH_PLACEHOLDERS,
         "environment": {
             "platform": platform.platform(),
             "python": platform.python_version(),

@@ -19,7 +19,10 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use projectatlas_cli::optional_parser_lifecycle::{
     OptionalParserPackLifecycle, OptionalParserPackLifecycleError,
 };
-use projectatlas_core::graph::{ConfidenceClass, GraphLimits, RepositoryFilePath};
+use projectatlas_core::graph::{
+    ConfidenceClass, GraphEntityKey, GraphLimits, GraphRelationKind, LogicalRelation,
+    RepositoryFilePath,
+};
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::telemetry::{
@@ -35,7 +38,8 @@ use projectatlas_core::{
 };
 use projectatlas_db::{
     AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, ProjectRootTransition,
-    ProjectRootTransitionResult, RepositoryCoverageQuery, verify_project_database,
+    ProjectRootTransitionResult, RepositoryCoverageQuery, RepositoryGraphDirection,
+    RepositoryGraphRelationQuery, verify_project_database,
 };
 use projectatlas_service::{
     COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CodeSliceBudget, CodeSliceDraft, CoverageDiscoveryReport,
@@ -73,7 +77,7 @@ use runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -82,7 +86,9 @@ use thiserror::Error;
 #[cfg(test)]
 use token_tui::render_token_dashboard;
 use token_tui::{
-    TokenDashboardTheme, render_token_dashboard_with_theme, render_token_trend_dashboard_with_theme,
+    TokenAtlasPreview, TokenDashboardTheme, render_token_dashboard_with_atlas,
+    render_token_trend_dashboard_with_theme, token_atlas_network_relation,
+    token_dashboard_wants_atlas,
 };
 
 /// Default relative path for the `SQLite` index.
@@ -587,6 +593,8 @@ enum TokenTheme {
     Dark,
     /// Light dashboard theme for light terminal backgrounds.
     Light,
+    /// Preserve the terminal background while retaining semantic accents.
+    Terminal,
 }
 
 impl From<TokenTheme> for TokenDashboardTheme {
@@ -594,6 +602,7 @@ impl From<TokenTheme> for TokenDashboardTheme {
         match theme {
             TokenTheme::Dark => Self::Dark,
             TokenTheme::Light => Self::Light,
+            TokenTheme::Terminal => Self::Terminal,
         }
     }
 }
@@ -2510,9 +2519,15 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         print_output(cli.format, &render_token_overview(&overview), &overview)?;
                     }
                     TokenView::Tui => {
-                        write_stdout(&render_token_dashboard_with_theme(
+                        let atlas = if token_dashboard_wants_atlas() {
+                            load_token_atlas_preview(&store)
+                        } else {
+                            TokenAtlasPreview::empty()
+                        };
+                        write_stdout(&render_token_dashboard_with_atlas(
                             &overview,
                             session.as_deref(),
+                            &atlas,
                             (*theme).into(),
                         ))?;
                     }
@@ -4095,6 +4110,127 @@ fn build_token_calibration(
     })
 }
 
+/// Load the tiny optional atlas preview through existing indexed relation-family reads.
+fn load_token_atlas_preview(store: &AtlasStore) -> TokenAtlasPreview {
+    let Some((relations, truncated)) = load_token_atlas_relations(store) else {
+        return TokenAtlasPreview::unavailable();
+    };
+    TokenAtlasPreview::from_relations(&relations, truncated)
+}
+
+/// Load the bounded resolved-relation input owned by the optional atlas preview.
+fn load_token_atlas_relations(store: &AtlasStore) -> Option<(Vec<LogicalRelation>, bool)> {
+    const RELATIONS_PER_FAMILY: u32 = 128;
+    const ADJACENCY_ROWS_PER_ROUND: usize = 512;
+    const ADJACENCY_ROUNDS: usize = 2;
+    const ADJACENCY_FRONTIER_MAX: usize = 128;
+    const SEEDS_PER_RELATION_FAMILY: usize = 4;
+
+    let network_relation_kinds = GraphRelationKind::ALL
+        .into_iter()
+        .filter(|relation| token_atlas_network_relation(*relation))
+        .collect::<Vec<_>>();
+    let mut relations = Vec::with_capacity(
+        network_relation_kinds.len() * usize::try_from(RELATIONS_PER_FAMILY).unwrap_or_default(),
+    );
+    let mut adjacency_relation_kinds = Vec::new();
+    let mut truncated = false;
+    for &relation in &network_relation_kinds {
+        let Ok(page) = store.repository_graph_relations(
+            RepositoryGraphRelationQuery::Family { relation },
+            RELATIONS_PER_FAMILY,
+        ) else {
+            return None;
+        };
+        if page.truncated {
+            adjacency_relation_kinds.push(relation);
+        }
+        truncated |= page.truncated;
+        relations.extend(page.rows);
+    }
+    let mut degrees_by_kind = BTreeMap::<String, BTreeMap<String, (GraphEntityKey, usize)>>::new();
+    for relation in &relations {
+        let Some(target) = relation.resolution().resolved_target() else {
+            continue;
+        };
+        let degrees = degrees_by_kind
+            .entry(relation.kind().as_str().to_string())
+            .or_default();
+        for endpoint in [relation.source(), target] {
+            let entry = degrees
+                .entry(endpoint.digest().to_string())
+                .or_insert_with(|| (endpoint.clone(), 0));
+            entry.1 += 1;
+        }
+    }
+    let mut seeds = BTreeMap::new();
+    for degrees in degrees_by_kind.into_values() {
+        let mut ranked = degrees.into_values().collect::<Vec<_>>();
+        ranked.sort_by(|left, right| {
+            right
+                .1
+                .cmp(&left.1)
+                .then_with(|| left.0.digest().cmp(right.0.digest()))
+        });
+        for (seed, _) in ranked.into_iter().take(SEEDS_PER_RELATION_FAMILY) {
+            seeds.insert(seed.digest().to_string(), seed);
+        }
+    }
+    let mut frontier = seeds.into_values().collect::<Vec<_>>();
+    let mut seen = frontier
+        .iter()
+        .map(|seed| seed.digest().to_string())
+        .collect::<BTreeSet<_>>();
+    for _ in 0..ADJACENCY_ROUNDS {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut next = BTreeMap::new();
+        for direction in [
+            RepositoryGraphDirection::Outbound,
+            RepositoryGraphDirection::Inbound,
+        ] {
+            let page_limit = ((GraphLimits::MAX_ROWS as usize + 1) / frontier.len())
+                .saturating_sub(1)
+                .clamp(1, ADJACENCY_ROWS_PER_ROUND);
+            let mut remaining_rows = page_limit;
+            for (index, &relation_kind) in adjacency_relation_kinds.iter().enumerate() {
+                if remaining_rows == 0 {
+                    truncated = true;
+                    break;
+                }
+                let remaining_families = adjacency_relation_kinds.len() - index;
+                let family_limit = remaining_rows.div_ceil(remaining_families);
+                let Ok(page) = store.repository_graph_adjacency_page_filtered(
+                    &frontier,
+                    direction,
+                    Some(relation_kind),
+                    None,
+                    u32::try_from(family_limit).unwrap_or(1),
+                    None,
+                ) else {
+                    return None;
+                };
+                truncated |= page.truncated;
+                remaining_rows = remaining_rows.saturating_sub(page.rows.len());
+                for row in page.rows {
+                    let relation = row.detail.relation;
+                    if let Some(target) = relation.resolution().resolved_target() {
+                        for endpoint in [relation.source(), target] {
+                            if seen.insert(endpoint.digest().to_string()) {
+                                next.insert(endpoint.digest().to_string(), endpoint.clone());
+                            }
+                        }
+                    }
+                    relations.push(relation);
+                }
+            }
+        }
+        frontier = next.into_values().take(ADJACENCY_FRONTIER_MAX).collect();
+    }
+    Some((relations, truncated))
+}
+
 /// Render root diagnostics as compact TOON.
 fn render_root_report(report: &RootReport) -> String {
     encode_agent_payload(&json!({ "root": report }))
@@ -4305,20 +4441,25 @@ mod tests {
         watch_path_requires_full_scan, watcher_status_report,
     };
     use super::{
-        Cli, CliError, Command, OutputFormat, SearchRetrievalMode, SearchRetrievalModeArg,
-        ServiceError, build_runtime_info, render_cli_error, render_token_dashboard,
-        serialized_output, truthy_env,
+        Cli, CliError, Command, GraphRelationKind, OutputFormat, SearchRetrievalMode,
+        SearchRetrievalModeArg, ServiceError, build_runtime_info, load_token_atlas_relations,
+        render_cli_error, render_token_dashboard, serialized_output, token_atlas_network_relation,
+        truthy_env,
     };
     #[cfg(feature = "optional-parser-supervisor")]
     use super::{OptionalParserPackLifecycleError, ParserPackCommand};
     use clap::Parser as _;
     use notify::EventKind;
+    use projectatlas_core::graph::{
+        Completeness, ConfidenceClass, EntitySelector, GraphEntity, LogicalRelation,
+        RelationResolution, RepositoryFilePath,
+    };
     use projectatlas_core::symbols::{
         CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
     };
     use projectatlas_core::telemetry::TokenOverview;
-    use projectatlas_core::{Node, NodeKind, normalize_native_path_display};
-    use projectatlas_db::{AtlasStore, DbError};
+    use projectatlas_core::{IndexGeneration, Node, NodeKind, normalize_native_path_display};
+    use projectatlas_db::{AtlasStore, DbError, RepositoryGraphDirection};
     use projectatlas_fs::ScanOptions;
     use rmcp::model::{CallToolRequestParams, ClientInfo};
     use rmcp::{ClientHandler, ServiceExt};
@@ -5074,12 +5215,20 @@ mod tests {
         assert!(dashboard.contains("Without ProjectAtlas"));
         assert!(dashboard.contains("With ProjectAtlas"));
         assert!(dashboard.contains("Saved by ProjectAtlas"));
-        assert!(dashboard.contains("F I L E   R E A D S   A V O I D E D"));
+        assert!(dashboard.contains("N A V I G A T I O N   W O R K   A V O I D E D"));
+        assert!(
+            dashboard
+                .to_ascii_lowercase()
+                .contains("file reads avoided")
+        );
+        assert!(!dashboard.contains("Broad folder walks skipped"));
+        assert!(!dashboard.contains("Candidate files not opened"));
+        assert!(!dashboard.contains("source steps account for"));
         assert!(dashboard.contains("S A V I N G S   C O M P O S I T I O N"));
         assert!(dashboard.contains("S I G N A L"));
         assert!(dashboard.contains("W H E R E   T H E   S A V I N G S   C A M E   F R O M"));
         assert!(dashboard.contains("C A L I B R A T I O N   &   N O T E S"));
-        assert!(dashboard.contains("not_recorded"));
+        assert!(dashboard.contains("Confidence"));
         assert!(dashboard.contains("Tokenizer audit"));
         assert!(
             dashboard
@@ -5087,8 +5236,150 @@ mod tests {
                 .any(|character| matches!(character, '█' | '\u{2801}'..='\u{28ff}'))
         );
         assert!(!dashboard.contains("Gross tokens: without vs with ProjectAtlas"));
+        assert!(!dashboard.contains("REQUESTED BENCHMARK EVIDENCE"));
         assert!(!dashboard.contains("How ProjectAtlas helped"));
         assert!(!dashboard.contains("Saved-token trends"));
+    }
+
+    #[test]
+    fn token_atlas_network_excludes_containment() {
+        assert!(!token_atlas_network_relation(GraphRelationKind::Legacy(
+            RelationKind::Contains,
+        )));
+        assert!(token_atlas_network_relation(GraphRelationKind::Legacy(
+            RelationKind::Imports,
+        )));
+    }
+
+    #[test]
+    fn token_atlas_loader_filters_containment_before_paging() -> Result<(), Box<dyn Error>> {
+        const FAMILY_PAGE_ROWS: usize = 128;
+        const ADJACENCY_PAGE_ROWS: u32 = 512;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("token-atlas-loader");
+        fs::create_dir_all(root.join("src"))?;
+        let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("token atlas fixture project identity is missing")?;
+        let generation = IndexGeneration::new(1);
+        let entity = |path: &str| {
+            Ok::<_, Box<dyn Error>>(GraphEntity::new(
+                project,
+                EntitySelector::File {
+                    path: RepositoryFilePath::new(Path::new(path))?,
+                },
+                generation,
+            )?)
+        };
+        let node = |path: &str, kind: NodeKind, hash: Option<&str>| {
+            let is_file = kind == NodeKind::File;
+            Node {
+                path: path.to_string(),
+                kind,
+                parent_path: is_file.then(|| "src".to_string()),
+                extension: is_file.then(|| ".rs".to_string()),
+                language: is_file.then(|| "rust".to_string()),
+                size_bytes: is_file.then_some(17),
+                mtime_ns: is_file.then_some(1),
+                content_hash: hash.map(str::to_string),
+            }
+        };
+        let mut nodes = vec![node("src", NodeKind::Folder, None)];
+        let mut entities = Vec::new();
+        let mut add_file_entity = |path: String| -> Result<GraphEntity, Box<dyn Error>> {
+            let graph_entity = entity(&path)?;
+            nodes.push(node(&path, NodeKind::File, Some(&path)));
+            entities.push(graph_entity.clone());
+            Ok(graph_entity)
+        };
+        let source = add_file_entity("src/source.rs".to_string())?;
+        let mut imports = Vec::with_capacity(FAMILY_PAGE_ROWS + 1);
+        for index in 0..=FAMILY_PAGE_ROWS {
+            let target = add_file_entity(format!("src/import-target-{index:03}.rs"))?;
+            imports.push(LogicalRelation::new(
+                &source,
+                GraphRelationKind::Legacy(RelationKind::Imports),
+                RelationResolution::resolved(&target)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?);
+        }
+        imports.sort_by(|left, right| left.key().digest().cmp(right.key().digest()));
+        let hidden_import = imports
+            .last()
+            .cloned()
+            .ok_or("token atlas import fixture is empty")?;
+        let call_target = add_file_entity("src/call-target.rs".to_string())?;
+        let calls = LogicalRelation::new(
+            &source,
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            RelationResolution::resolved(&call_target)?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )?;
+        let mut graph_relations = imports;
+        graph_relations.push(calls);
+        for index in 0..=ADJACENCY_PAGE_ROWS {
+            let target = add_file_entity(format!("src/contained-{index:03}.rs"))?;
+            graph_relations.push(LogicalRelation::new(
+                &source,
+                GraphRelationKind::Legacy(RelationKind::Contains),
+                RelationResolution::resolved(&target)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?);
+        }
+        let mut publication = store.begin_index_publication("token-atlas-loader")?;
+        publication.begin_scan_replacement()?;
+        publication.upsert_scan_node_batch(&nodes)?;
+        publication.finish_scan_replacement()?;
+        publication.replace_repository_graph(project, &entities, &graph_relations, &[], &[])?;
+        publication.complete()?;
+
+        let raw = store.repository_graph_adjacency_page(
+            &[source.key().clone()],
+            RepositoryGraphDirection::Outbound,
+            None,
+            ADJACENCY_PAGE_ROWS,
+            None,
+        )?;
+        if !raw.truncated {
+            return Err(io::Error::other("raw adjacency fixture was not truncated").into());
+        }
+        if !raw.rows.iter().any(|row| {
+            row.detail.relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
+        }) {
+            return Err(io::Error::other("raw adjacency omitted containment fixture").into());
+        }
+        if raw
+            .rows
+            .iter()
+            .any(|row| row.detail.relation.key() == hidden_import.key())
+        {
+            return Err(
+                io::Error::other("raw adjacency unexpectedly reached hidden import").into(),
+            );
+        }
+        let (relations, _) = load_token_atlas_relations(&store)
+            .ok_or("token atlas relation loader unexpectedly failed")?;
+        if !relations
+            .iter()
+            .any(|relation| relation.key() == hidden_import.key())
+        {
+            return Err(io::Error::other("token atlas omitted paged network relation").into());
+        }
+        if !relations
+            .iter()
+            .all(|relation| token_atlas_network_relation(relation.kind()))
+        {
+            return Err(io::Error::other("token atlas retained containment").into());
+        }
+        Ok(())
     }
 
     #[test]

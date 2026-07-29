@@ -68,10 +68,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 .github/scripts/issue-checklists.py --self-test
+          python3 .github/scripts/test-optional-parser-proof-inputs.py
           python3 .github/scripts/issue-checklists.py \
             --repo "$GITHUB_REPOSITORY" \
             --root . \
             --issue-map openspec/issue-map.json
+
+      - name: Manual-only full benchmark policy
+        run: python3 .github/scripts/verify-manual-benchmark-policy.py
+
+      - name: Published benchmark measurement locks
+        run: python3 .github/scripts/verify-published-benchmark-locks.py
 
       - name: Codex PR review thread gate
         if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment'

@@ -3663,6 +3663,12 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     let workflow_dir = workspace_root.join(".github").join("workflows");
     let release_workflow = fs::read_to_string(workflow_dir.join("release.yml"))?;
     let auto_release_workflow = fs::read_to_string(workflow_dir.join("03-auto-release.yml"))?;
+    let optional_parser_handoff_resolver = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("scripts")
+            .join("resolve-optional-parser-handoff.py"),
+    )?;
     let optional_parser_workflow =
         fs::read_to_string(workflow_dir.join("optional-parser-pack.yml"))?;
     let ci_workflow = fs::read_to_string(workflow_dir.join("ci.yml"))?;
@@ -4049,6 +4055,7 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         "parser_pack_run_id:",
         "parser-pack-assets:",
         "optional-parser-pack-release-assets",
+        "optional-parser-proof-inputs.py",
         "github-token: ${{ github.token }}",
         "run-id: ${{ inputs.parser_pack_run_id }}",
         "verify-optional-parser-release-assets.py",
@@ -4077,13 +4084,36 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     }
     for required in [
         "git rev-parse HEAD^2",
-        "optional-parser-pack-release-assets",
-        "head_sha=$promotion_sha",
+        "resolve-optional-parser-handoff.py",
         "--field parser_pack_run_id=",
     ] {
         if !auto_release_workflow.contains(required) {
             return Err(io::Error::other(format!(
-                "auto-release workflow is missing exact optional-parser handoff guard {required:?}"
+                "auto-release workflow is missing input-bound optional-parser handoff guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "--paginate",
+        "--slurp",
+        "optional-parser-pack-release-assets",
+        "optional-parser-proof-inputs.py",
+    ] {
+        if !optional_parser_handoff_resolver.contains(required) {
+            return Err(io::Error::other(format!(
+                "optional-parser handoff resolver is missing pagination or eligibility guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for rejected in [
+        "head_sha=$promotion_sha",
+        "Optional-parser handoff tree differs from the release tree",
+    ] {
+        if auto_release_workflow.contains(rejected) || release_workflow.contains(rejected) {
+            return Err(io::Error::other(format!(
+                "release workflows retain SHA-only optional-parser proof {rejected:?}"
             ))
             .into());
         }
@@ -4209,6 +4239,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --no-deps --all-features --locked",
         "cargo deny --locked --all-features check -D warnings",
         "issue-checklists.py --self-test",
+        "test-optional-parser-proof-inputs.py",
     ] {
         if !hook.contains(required) || !workflow_docs.contains(required) {
             return Err(io::Error::other(format!(
@@ -4225,6 +4256,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled",
         "cargo test --doc --workspace --all-features --locked",
         "cargo deny --locked --all-features check -D warnings",
+        "test-optional-parser-proof-inputs.py",
         "--issue-map openspec/issue-map.json",
     ] {
         if !ci.contains(required) {
@@ -4250,6 +4282,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         || !release.contains(
             "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled",
         )
+        || !release.contains("test-optional-parser-proof-inputs.py")
     {
         return Err(io::Error::other(
             "release must retain milestone completion, ordinary gates, and a non-publishing package-proof mode",
@@ -7272,10 +7305,14 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .stdout(predicate::str::contains("With ProjectAtlas"))
         .stdout(predicate::str::contains("Saved by ProjectAtlas"))
         .stdout(predicate::str::contains(
-            "F I L E   R E A D S   A V O I D E D",
+            "N A V I G A T I O N   W O R K   A V O I D E D",
         ))
-        .stdout(predicate::str::contains("Observed"))
-        .stdout(predicate::str::contains("Modeled narrowing"))
+        .stdout(predicate::str::contains("File reads avoided"))
+        .stdout(predicate::str::contains("Observed:"))
+        .stdout(predicate::str::contains("Modeled:"))
+        .stdout(predicate::str::contains("Broad folder walks skipped").not())
+        .stdout(predicate::str::contains("Candidate files not opened").not())
+        .stdout(predicate::str::contains("source steps account for").not())
         .stdout(predicate::str::contains("S A V I N G S"))
         .stdout(predicate::str::contains("S I G N A L"))
         .stdout(predicate::str::contains(
@@ -7288,6 +7325,7 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
             "C A L I B R A T I O N   &   N O T E S",
         ))
         .stdout(predicate::str::contains("Gross tokens: without").not())
+        .stdout(predicate::str::contains("REQUESTED BENCHMARK EVIDENCE").not())
         .stdout(predicate::str::contains("latest").not())
         .stdout(predicate::str::contains("Saved-token trends").not());
     Command::cargo_bin("projectatlas")?
@@ -8201,6 +8239,17 @@ fn agent_efficiency_cli_mcp_contract_is_typed_read_only_and_isolated() -> Result
 
     let partial = token_overview_json(&repo, &database, Some(AGENT_EFFICIENCY_PARTIAL_FILE))?;
     require_json_string(&partial, &["agent_efficiency", "state"], "partial")?;
+    let source_head = partial
+        .pointer("/agent_efficiency/artifact/candidate_source_head")
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("candidate source identity is missing"))?;
+    for key in ["candidate_functional_head", "candidate_checklist_head"] {
+        require_json_string(
+            &partial,
+            &["agent_efficiency", "artifact", key],
+            source_head,
+        )?;
+    }
     require_json_usize(
         &partial,
         &[
@@ -10327,7 +10376,11 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains("ProjectAtlas")
         || !stdout.contains("Token Impact")
         || !stdout.contains("T O T A L   T O K E N S   A V O I D E D")
-        || !stdout.contains("F I L E   R E A D S   A V O I D E D")
+        || !stdout.contains("N A V I G A T I O N   W O R K   A V O I D E D")
+        || !stdout.to_ascii_lowercase().contains("file reads avoided")
+        || stdout.contains("Broad folder walks skipped")
+        || stdout.contains("Candidate files not opened")
+        || stdout.contains("source steps account for")
         || !stdout.contains("S I G N A L")
         || !stdout.contains("purpose_review:")
         || !stdout.contains("failed: 0")

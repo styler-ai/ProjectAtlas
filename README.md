@@ -74,14 +74,20 @@ For active sessions, the agent can run the watcher so file edits continuously re
 The final v0.4 navigation campaign retained all 45 preregistered trials:
 ProjectAtlas v0.4 completed 15/15, frozen v0.3.26 completed 12/15 and failed all
 three pinned VS Code setups, and the plain control completed 15/15. The final
-manual result was 35/42 completed answers: all 42 were substantively correct,
-but seven used invalid temporary-root citation targets. Against v0.3.26, v0.4
-cut median net navigation context by 18.5–19.6% on the three small tasks, but
-used 2,356.8% more on the medium task. Plain navigation used the least context
-at every measured scale, while v0.4 avoided several broad and full reads at the
-cost of indexing, discovery, and skill context. See the
+manual result was 30/42 citation-valid answers: all 42 were substantively
+correct, but twelve used malformed temporary-root citation targets (12/15 for
+v0.4, 9/12 for frozen v0.3.26, and 9/15 for plain). Against v0.3.26 on the
+three small tasks, v0.4 used 18.8–38.5% fewer median calls and 18.7–19.7% less
+median net navigation context. On the medium task it used one more median call,
+3.9 times the median net context, and took 53.6% longer including setup. Plain
+navigation used the least context at every measured scale. Against plain on
+huge source, v0.4 used two more median calls and 4.75 times the median net
+context after a 731.3-second setup. See the
 [reviewed report](docs/benchmarks/v0.4-agent-navigation-evaluation.md) and
 [published 45-trial result](docs/benchmarks/v0.4-agent-navigation-results.json).
+Full system-scale and agent-navigation campaigns are manual-only publications,
+not standard CI or release gates; an input-incompatible result is labeled
+historical or unavailable unless a user explicitly requests a new campaign.
 
 The token-overview record below is intentionally a separate representative
 large-application audit, not a marketing constant or the controlled
@@ -238,7 +244,7 @@ For a human token dashboard:
 projectatlas token --view tui
 ```
 
-That opens the Ratatui token impact dashboard: a readable reconciled `Without ProjectAtlas - With ProjectAtlas = Saved by ProjectAtlas` equation, file reads avoided, observed summaries/slices, modeled narrowing, source rows, calibration notes, and compact status hints. The default theme is dark; use `projectatlas token --view tui --theme light` for light terminal color schemes. Ani remains the ProjectAtlas mascot in the design assets, but the token TUI defers mascot rendering until a future focused pass.
+That renders a Ratatui token-impact snapshot: a readable reconciled `Without ProjectAtlas - With ProjectAtlas = Saved by ProjectAtlas` equation, source-reconciled file reads avoided with their observed and modeled split, persisted modeled folder-walk steps, source rows, and calibration notes. A wide terminal adds a bounded, non-interactive atlas map drawn only from resolved relations in the active project database; narrower terminals keep the proven overview without crowding it. The default theme is dark; use `--theme light` for light terminals or `--theme terminal` to preserve the terminal background. Rerun the command to refresh the snapshot. Ani remains the ProjectAtlas mascot in the design assets, but the token TUI defers mascot rendering until a future focused pass.
 
 For a local tokenizer calibration of indexed UTF-8 files, add `--tokenizer o200k_base` or `--tokenizer cl100k_base`.
 

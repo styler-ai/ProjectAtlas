@@ -2,10 +2,16 @@
   "schema_version": 1,
   "benchmark": "projectatlas-v0.4-system-scale",
   "status": "locked_for_final_measurement",
+  "measurement_input_lock_basis": "Content digests from the recorded measurement checkout; a later run must relock after any listed input changes.",
+  "measurement_inputs": {
+    "docs/benchmarks/harness/system_scale.py": "a5cbd962508b10be149d9c5bea8984e7dcf37f9dcdb117f9e4589fd90c327364",
+    "docs/benchmarks/harness/mcp_composition.py": "04dd5bf8bac306d1ac5faf8c92bd75cf63e6284f39e53dfcef80ac3c3ac17832",
+    "docs/benchmarks/harness/requirements.txt": "b6c8d86768d07e1dae4fb734c2e93997445a318d43290b307bfc1c800a0b1e52",
+    "docs/benchmarks/fixtures/mcp-composition": "498cccec02061a12330b738fd0e3094063627934979b0277c493d90564e02553"
+  },
   "measurement_amendments": [
     {
       "prior_result": "docs/benchmarks/v0.4-system-scale-failed-runs.json",
-      "prior_candidate_head": "f86b460c1c366f47b6e233331e1e83ac592ca9d2",
       "disposition": "retained failed run; no failed cell is excluded",
       "changes": [
         "Cap peak WAL and private staging bytes by the existing per-scale database-size limit instead of unvalidated global limits that were smaller than the accepted huge persistent footprint.",
@@ -16,7 +22,6 @@
     },
     {
       "prior_result": "docs/benchmarks/v0.4-system-scale-failed-e624475.json",
-      "prior_candidate_head": "e6244751c54a94ebc925afa57dad679ed13dc6d8",
       "disposition": "retained failed run; all corpus, contention, cancellation, recovery, storage, and query gates passed; the concurrent resource proxy is corrected before repetition",
       "changes": [
         "Divide the existing host worker budget equally across concurrent CLI processes through the public --max-workers control, which already owns repository traversal and parser work.",
@@ -25,25 +30,48 @@
     },
     {
       "prior_result": "docs/benchmarks/v0.4-system-scale-results.json",
-      "prior_candidate_head": "c0814b989338177f9960646e79c82ced8c83a3bf",
-      "disposition": "superseded publication retained in Git history; exact promotion review found that it predates release-affecting runtime, MCP, relation-service, and repository-graph changes",
+      "disposition": "superseded publication retained in Git history; promotion review found that it predates release-affecting runtime, MCP, relation-service, and repository-graph changes",
       "changes": [
         "Relock the runtime and MCP inventory identities and repeat the complete small, medium, huge, concurrency, contention, cancellation, and termination matrix against the corrected functional release candidate."
+      ]
+    },
+    {
+      "prior_result": "docs/benchmarks/v0.4-system-scale-results.json",
+      "disposition": "superseded publication retained in Git history; exact-head review found that its content lock omitted the copied small-fixture corpus",
+      "changes": [
+        "Bind the complete committed mcp-composition fixture tree, relock the corrected runtime and harness identities, and repeat the complete publication campaign."
+      ]
+    },
+    {
+      "prior_result": "docs/benchmarks/v0.4-system-scale-results.json",
+      "disposition": "superseded publication retained in Git history; release-proof audit found that forced termination did not prove production reopen and final WAL cleanup, and that the system publication omitted the packaged-skill identity",
+      "changes": [
+        "Reopen the exact terminated database through the candidate runtime, record settings, checkpoint, integrity, and final storage, and reject a busy checkpoint or nonzero final WAL or graph-stage state.",
+        "Bind the packaged v0.4 skill path, SHA-256, and byte size as candidate artifact identity."
+      ]
+    },
+    {
+      "prior_result": "docs/benchmarks/v0.4-system-scale-failed-termination-source-root.json",
+      "disposition": "retained failed complete campaign; every scale, concurrency, contention, and cooperative-cancellation gate passed, but the parent-termination setup scanned the empty recovery database root instead of the huge corpus",
+      "changes": [
+        "Pass the explicit huge corpus root to scan because a default '.' is intentionally rebound to the project root inferred from an explicit default-layout database path.",
+        "Record the early child return code before repeating the complete campaign; termination, production reopen, checkpoint, integrity, storage, and survivor gates remain unchanged."
       ]
     }
   ],
   "preflight_failures": [
     {
       "result": "docs/benchmarks/v0.4-system-scale-failed-f30cb0c-preflight.json",
-      "candidate_head": "f30cb0c3d671c03c70b0d6216536f6f528eb55a8",
       "disposition": "no measurement executed; restored the unchanged single-process thread thresholds still used by per-case gates after removing only their misleading concurrent use"
     }
   ],
   "candidate": {
     "required_version": "0.4.0",
-    "functional_git_head": "0ffeffb21818f8d648d9149204b00deee26bbabd",
-    "runtime_sha256": "4c4ecfa629b797c790b4b439494509e32f0d58f612e5898a18300faa17202169",
+    "runtime_sha256": "e8708723434a428b6a59d80f60d9c7e707d9b8e3f04cea52dc51a0aacfbf3b4a",
     "mcp_tools_sha256": "0c21ea673bdb9cdff48203a274db04fbaccb888bd362407d46fc1bcc0e506b28",
+    "skill_path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
+    "skill_sha256": "208af75344199e1ad70ebf8e00f1f07e3879ece043e5f3ce79b8723de00d5547",
+    "skill_bytes": 20801,
     "telemetry": "disabled",
     "build_profile": "release-default-features"
   },
