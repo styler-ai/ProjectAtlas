@@ -2688,7 +2688,26 @@ impl AtlasStore {
             let limit_parameter = chunk.len().saturating_add(1);
             let sql = format!(
                 "
-                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+                SELECT
+                    path,
+                    language,
+                    name,
+                    kind,
+                    signature,
+                    line_start,
+                    line_end,
+                    parent,
+                    parser,
+                    detail,
+                    exported,
+                    documentation,
+                    length(CAST(path AS BLOB))
+                        + COALESCE(length(CAST(language AS BLOB)), 0)
+                        + length(CAST(name AS BLOB))
+                        + length(CAST(signature AS BLOB))
+                        + COALESCE(length(CAST(parent AS BLOB)), 0)
+                        + COALESCE(length(CAST(detail AS BLOB)), 0)
+                        + COALESCE(length(CAST(documentation AS BLOB)), 0)
                 FROM symbols
                 WHERE path IN ({placeholders})
                 ORDER BY path, line_start, name
@@ -2712,6 +2731,11 @@ impl AtlasStore {
                         }
                         if symbols.len() >= row_limit {
                             reached_limit.get_or_insert(SymbolBatchReadLimit::Rows);
+                            break;
+                        }
+                        let preflight_bytes = code_symbol_preflight_bytes(row)?;
+                        if decoded_bytes.saturating_add(preflight_bytes) > budget.decoded_bytes() {
+                            reached_limit.get_or_insert(SymbolBatchReadLimit::DecodedBytes);
                             break;
                         }
                         let symbol = code_symbol_from_row(row)?;
@@ -7023,15 +7047,38 @@ fn code_symbol_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSymbol>
         path: row.get(0)?,
         language: row.get(1)?,
         name: row.get(2)?,
-        kind: SymbolKind::from_db(&row.get::<_, String>(3)?),
+        kind: SymbolKind::from_db(row.get_ref(3)?.as_str()?),
         signature: row.get(4)?,
         line_start: i64_to_usize(row.get::<_, i64>(5)?),
         line_end: i64_to_usize(row.get::<_, i64>(6)?),
         parent: row.get(7)?,
-        parser: ParserKind::from_db(&row.get::<_, String>(8)?),
+        parser: ParserKind::from_db(row.get_ref(8)?.as_str()?),
         detail: row.get(9)?,
         exported: row.get::<_, i64>(10)? != 0,
         documentation: row.get(11)?,
+    })
+}
+
+/// Read the exact owned-string byte floor before hydrating one symbol row.
+fn code_symbol_preflight_bytes(row: &rusqlite::Row<'_>) -> DbResult<u64> {
+    let string_bytes = row.get::<_, i64>(12)?;
+    let string_bytes = u64::try_from(string_bytes).map_err(|source| DbError::InvalidCount {
+        field: "symbol persisted field bytes",
+        value: string_bytes,
+        source,
+    })?;
+    let row_bytes = u64::try_from(std::mem::size_of::<CodeSymbol>()).map_err(|source| {
+        DbError::InvalidCount {
+            field: "symbol persisted field bytes",
+            value: i64::MAX,
+            source,
+        }
+    })?;
+    row_bytes.checked_add(string_bytes).ok_or_else(|| {
+        GraphContractError::InvalidLimits {
+            reason: "symbol persisted row bytes overflowed",
+        }
+        .into()
     })
 }
 
@@ -12327,6 +12374,32 @@ mod tests {
             "exact decoded-byte boundary accounting",
         )?;
 
+        let oversized_signature =
+            "x".repeat(usize::try_from(MAX_SYMBOL_BATCH_DECODED_BYTES)?.saturating_add(1));
+        store.connection.execute(
+            "UPDATE symbols SET signature = ?1, line_start = 'invalid' WHERE path = 'src/b.rs'",
+            [&oversized_signature],
+        )?;
+        let oversized_row = store.load_symbols_for_paths_bounded(
+            &["src/b.rs".to_string()],
+            SymbolBatchReadBudget::new(1, 1, MAX_SYMBOL_BATCH_DECODED_BYTES)?,
+            None,
+        )?;
+        require_eq(
+            &oversized_row.reached_limit,
+            &Some(SymbolBatchReadLimit::DecodedBytes),
+            "oversized persisted row was rejected before hydration",
+        )?;
+        require_eq(
+            &oversized_row.rows.len(),
+            &0,
+            "oversized persisted row retained no allocation",
+        )?;
+        store.connection.execute(
+            "UPDATE symbols SET signature = 'fn gamma()', line_start = 1 WHERE path = 'src/b.rs'",
+            [],
+        )?;
+
         let many_paths = (0..65)
             .rev()
             .map(|index| format!("generated/{index:04}.rs"))
@@ -12406,7 +12479,26 @@ mod tests {
 
         let mut plan_statement = store.connection.prepare(
             "EXPLAIN QUERY PLAN
-             SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+             SELECT
+                 path,
+                 language,
+                 name,
+                 kind,
+                 signature,
+                 line_start,
+                 line_end,
+                 parent,
+                 parser,
+                 detail,
+                 exported,
+                 documentation,
+                 length(CAST(path AS BLOB))
+                     + COALESCE(length(CAST(language AS BLOB)), 0)
+                     + length(CAST(name AS BLOB))
+                     + length(CAST(signature AS BLOB))
+                     + COALESCE(length(CAST(parent AS BLOB)), 0)
+                     + COALESCE(length(CAST(detail AS BLOB)), 0)
+                     + COALESCE(length(CAST(documentation AS BLOB)), 0)
              FROM symbols
              WHERE path IN (?1, ?2)
              ORDER BY path, line_start, name
