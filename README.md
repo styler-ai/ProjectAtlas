@@ -5,7 +5,7 @@
   <br><em>Ani, your repository cartographer.</em>
 </p>
 
-<h3 align="center">Give your coding agent a map before it opens the repository.</h3>
+<h3 align="center">Every file not opened. Every folder not explored. Tokens saved.</h3>
 
 <p align="center">
   <strong>Index once. Keep it fresh incrementally. Reuse the intelligence across agents, sessions, and tasks.</strong>
