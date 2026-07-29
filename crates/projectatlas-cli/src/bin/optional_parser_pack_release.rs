@@ -2144,9 +2144,9 @@ mod tests {
         )
     }
 
-    /// Accept one large valid proof and reject one divergent candidate.
+    /// Accept one large valid proof and reject one cross-platform toolchain divergence.
     #[test]
-    fn aggregate_accepts_large_valid_proof_and_rejects_divergent_candidate() -> ToolResult<()> {
+    fn aggregate_accepts_large_valid_proof_and_rejects_divergent_toolchain() -> ToolResult<()> {
         let accepted_path = accepted_manifest_path()?;
         let accepted_bytes = read_bounded_file(
             &accepted_path,
@@ -2186,7 +2186,7 @@ mod tests {
         let last = divergent
             .last_mut()
             .ok_or_else(|| invalid("proof fixture set is empty"))?;
-        last.candidate.projectatlas_revision = SourceRevision::new("c".repeat(40))?;
+        last.candidate.rustc_commit_hash = "c".repeat(40);
         let divergent_paths = divergent
             .iter()
             .enumerate()
@@ -2203,7 +2203,7 @@ mod tests {
                 &directory.path().join("divergent-aggregate.json"),
             )
             .is_err(),
-            "aggregate accepted platform proofs from divergent candidates",
+            "aggregate accepted platform proofs from divergent Rust toolchains",
         )
     }
 }
