@@ -172,9 +172,9 @@ def publication_status(
     preregistration_payload = committed_object(preregistration_path, "blob")
     result_payload = committed_object(result_path, "blob")
     if preregistration_payload is None:
-        return [], f"{label}: unavailable (committed preregistration is missing)"
+        return [f"{label}: committed preregistration is missing"], ""
     if result_payload is None:
-        return [], f"{label}: unavailable (committed result is missing)"
+        return [f"{label}: committed result is missing"], ""
     try:
         preregistration = json.loads(preregistration_payload)
         result = json.loads(result_payload)
@@ -252,6 +252,14 @@ def self_test() -> None:
     assert candidate_source_revision({"checkout_head": "a" * 40}) == "a" * 40
     assert candidate_source_revision({"checkout_head": "not-a-revision"}) is None
     assert candidate_source_revision(None) is None
+    missing_preregistration, status = publication_status(
+        "missing-preregistration", "", "", "__missing-preregistration.json", ""
+    )
+    assert missing_preregistration and not status
+    missing_result, status = publication_status(
+        "missing-result", "", "", PUBLICATIONS[0][3], "__missing-result.json"
+    )
+    assert missing_result and not status
 
 
 def main() -> int:

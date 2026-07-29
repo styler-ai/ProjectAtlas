@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -13,6 +14,10 @@ def campaign_entrypoint(line: str) -> bool:
     normalized = line.replace("\\", "/")
     return any(
         f"docs/benchmarks/harness/{entrypoint}" in normalized
+        or re.search(
+            rf"\b(?:python(?:3(?:\.\d+)?)?|py)\b[^#\n]*\b{re.escape(entrypoint)}\b",
+            normalized,
+        )
         for entrypoint in CAMPAIGN_ENTRYPOINTS
     )
 
@@ -24,6 +29,12 @@ def main() -> int:
         r"python docs\benchmarks\harness\agent_navigation.py --repeats 3"
     ):
         raise RuntimeError("full campaign invocation must be detected")
+    if not campaign_entrypoint("python3 system_scale.py"):
+        raise RuntimeError("basename campaign invocation must be detected")
+    if not campaign_entrypoint(
+        "cd docs/benchmarks/harness && python agent_navigation.py"
+    ):
+        raise RuntimeError("changed-directory campaign invocation must be detected")
 
     root = Path(__file__).resolve().parents[2]
     workflow_root = root / ".github/workflows"
