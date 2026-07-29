@@ -268,6 +268,7 @@ Every release runs:
 
 - [Live ProjectAtlas documentation](https://styler-ai.github.io/ProjectAtlas/)
 - [CLI and MCP runtime rustdoc](https://styler-ai.github.io/ProjectAtlas/projectatlas/)
+- [Core model rustdoc](https://styler-ai.github.io/ProjectAtlas/projectatlas_core/)
 - [Agent integration](docs/agent-integration.md)
 - [Configuration](docs/configuration.md)
 - [Workflow and troubleshooting](docs/workflow.md)
@@ -278,6 +279,7 @@ Every release runs:
 - [ProjectAtlas architecture](docs/projectatlas-3-architecture.md)
 - [Token-savings methodology](docs/benchmarks/large-application-token-savings.md)
 - [Complete v0.4 navigation evaluation](docs/benchmarks/v0.4-agent-navigation-evaluation.md)
+- [Published v0.4 navigation results](docs/benchmarks/v0.4-agent-navigation-results.json)
 
 Ani is the ProjectAtlas mascot. Versioned design references: [mascot reference](docs/design/ani-mascot-reference.png), [clean mascot SVG](docs/design/projectatlas-mascot-clean-transparent.svg), and [token-impact TUI reference](docs/design/token-impact-tui-reference.png).
 
