@@ -157,7 +157,7 @@
     "arms": {
       "v0.4": {
         "runtime": "target/release/projectatlas.exe",
-        "runtime_sha256": "352195ff426785780fb114566b9421f8142f9d500108aac65ebdc4cef41d5494",
+        "runtime_sha256": "df057255b8ffb972d23695e11678d74cfc7b431a84dd023e0b2bdb9cc6b164af",
         "version": "projectatlas 0.4.0",
         "require_version": "0.4.0",
         "skill_path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
