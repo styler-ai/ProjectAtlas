@@ -4,7 +4,7 @@
   "status": "locked_for_final_measurement",
   "measurement_input_lock_basis": "Content digests from the recorded measurement checkout; a later run must relock after any listed input changes.",
   "measurement_inputs": {
-    "docs/benchmarks/harness/system_scale.py": "1937b4e01759bdca1d9cbf6eeac4cf3fc3a0c18c4ca5d6179930c8076c84d5e8",
+    "docs/benchmarks/harness/system_scale.py": "a5cbd962508b10be149d9c5bea8984e7dcf37f9dcdb117f9e4589fd90c327364",
     "docs/benchmarks/harness/mcp_composition.py": "04dd5bf8bac306d1ac5faf8c92bd75cf63e6284f39e53dfcef80ac3c3ac17832",
     "docs/benchmarks/harness/requirements.txt": "b6c8d86768d07e1dae4fb734c2e93997445a318d43290b307bfc1c800a0b1e52",
     "docs/benchmarks/fixtures/mcp-composition": "498cccec02061a12330b738fd0e3094063627934979b0277c493d90564e02553"
@@ -48,6 +48,14 @@
       "changes": [
         "Reopen the exact terminated database through the candidate runtime, record settings, checkpoint, integrity, and final storage, and reject a busy checkpoint or nonzero final WAL or graph-stage state.",
         "Bind the packaged v0.4 skill path, SHA-256, and byte size as candidate artifact identity."
+      ]
+    },
+    {
+      "prior_result": "docs/benchmarks/v0.4-system-scale-failed-termination-source-root.json",
+      "disposition": "retained failed complete campaign; every scale, concurrency, contention, and cooperative-cancellation gate passed, but the parent-termination setup scanned the empty recovery database root instead of the huge corpus",
+      "changes": [
+        "Pass the explicit huge corpus root to scan because a default '.' is intentionally rebound to the project root inferred from an explicit default-layout database path.",
+        "Record the early child return code before repeating the complete campaign; termination, production reopen, checkpoint, integrity, storage, and survivor gates remain unchanged."
       ]
     }
   ],
