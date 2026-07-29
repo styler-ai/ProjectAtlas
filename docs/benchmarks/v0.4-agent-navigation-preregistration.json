@@ -4,7 +4,7 @@
   "measurement_input_lock_basis": "Content digests from the recorded measurement checkout; a later run must relock after any listed input changes.",
   "measurement_inputs": {
     "docs/benchmarks/harness/agent_navigation.py": "76b3150be4bb71f3c6dcb6ab55c6a242f5107750862eb0d807dba04338d553ae",
-    "docs/benchmarks/harness/system_scale.py": "e1eaf8524801b425fb3eddff0b25ed3612231c9354d4d9ea094b4b8457ff8ace",
+    "docs/benchmarks/harness/system_scale.py": "1937b4e01759bdca1d9cbf6eeac4cf3fc3a0c18c4ca5d6179930c8076c84d5e8",
     "docs/benchmarks/harness/mcp_composition.py": "04dd5bf8bac306d1ac5faf8c92bd75cf63e6284f39e53dfcef80ac3c3ac17832",
     "docs/benchmarks/harness/requirements.txt": "b6c8d86768d07e1dae4fb734c2e93997445a318d43290b307bfc1c800a0b1e52",
     "docs/benchmarks/fixtures/mcp-composition": "498cccec02061a12330b738fd0e3094063627934979b0277c493d90564e02553"
@@ -60,6 +60,13 @@
       "disposition": "superseded publication retained in Git history; exact-head review found that its content lock omitted the copied small-fixture corpus",
       "changes": [
         "Bind the complete committed mcp-composition fixture tree, relock the corrected runtime and harness identities, and repeat all 45 scheduled trials without changing the frozen v0.3.26 or plain controls."
+      ]
+    },
+    {
+      "prior_result": "docs/benchmarks/v0.4-agent-navigation-results.json",
+      "disposition": "superseded publication retained in Git history; release-proof audit corrected the shared system-scale recovery and packaged-skill identity contract",
+      "changes": [
+        "Relock the shared system-scale measurement helper and repeat all 45 scheduled trials without changing the runtime, packaged skill, MCP inventory, frozen v0.3.26, or plain controls."
       ]
     }
   ],

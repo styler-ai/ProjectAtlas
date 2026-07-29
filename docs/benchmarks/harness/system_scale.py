@@ -121,6 +121,24 @@ def measurement_input_errors(
     return errors
 
 
+def candidate_file_identity(
+    relative: str, *, root: Path = ROOT
+) -> dict[str, str | int]:
+    path = (root / relative).resolve()
+    try:
+        canonical_relative = path.relative_to(root.resolve()).as_posix()
+    except ValueError as error:
+        raise ValueError("candidate artifact path escapes the repository") from error
+    if not path.is_file():
+        raise ValueError("candidate artifact path is not a regular file")
+    payload = path.read_bytes()
+    return {
+        "path": canonical_relative,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
+    }
+
+
 def redact_local_paths(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: redact_local_paths(item) for key, item in value.items()}
@@ -3171,6 +3189,23 @@ def cooperative_cancellation_reopen(
     }
 
 
+def termination_recovery_is_complete(
+    reopen_process: dict[str, Any],
+    checkpoint: dict[str, int],
+    recovery_profile: dict[str, Any],
+    final_storage: dict[str, int],
+) -> bool:
+    return (
+        reopen_process.get("returncode") == 0
+        and not reopen_process.get("timed_out", False)
+        and checkpoint.get("busy") == 0
+        and recovery_profile.get("quick_check") == "ok"
+        and final_storage.get("wal_bytes") == 0
+        and final_storage.get("staging_bytes") == 0
+        and final_storage.get("stage_directories") == 0
+    )
+
+
 def forced_termination_quiescence(
     runtime: Path,
     source_root: Path,
@@ -3178,7 +3213,8 @@ def forced_termination_quiescence(
     env: dict[str, str],
     threshold_seconds: float,
 ) -> dict[str, Any]:
-    database = work_root / "cancel/projectatlas.db"
+    recovery_root = work_root / "default-core-parent-termination"
+    database = recovery_root / ".projectatlas/projectatlas.db"
     database.parent.mkdir(parents=True, exist_ok=True)
     process = subprocess.Popen(
         [
@@ -3226,16 +3262,68 @@ def forced_termination_quiescence(
                 continue
         if not survivors:
             elapsed = time.perf_counter() - requested
+            try:
+                reopen_process, reopen_settings = measured_json(
+                    runtime,
+                    ["--db", str(database), "settings"],
+                    cwd=source_root,
+                    env=env,
+                    timeout_seconds=threshold_seconds,
+                )
+                connection = sqlite3.connect(
+                    database, timeout=threshold_seconds
+                )
+                try:
+                    checkpoint_row = connection.execute(
+                        "PRAGMA wal_checkpoint(TRUNCATE)"
+                    ).fetchone()
+                finally:
+                    connection.close()
+                if checkpoint_row is None:
+                    raise RuntimeError(
+                        "terminated database checkpoint returned no result"
+                    )
+                checkpoint = {
+                    "busy": int(checkpoint_row[0]),
+                    "log_frames": int(checkpoint_row[1]),
+                    "checkpointed_frames": int(checkpoint_row[2]),
+                }
+                recovery_profile = database_profile(database)
+                final_storage = persistent_sizes(recovery_root)
+            except Exception as error:
+                return {
+                    "scope": "default-core in-process scan parent",
+                    "passed": False,
+                    "quiescence_seconds": round(elapsed, 6),
+                    "known_processes": len(known),
+                    "survivors": [],
+                    "reason": f"terminated database recovery failed: {error}",
+                }
+            recovery_complete = termination_recovery_is_complete(
+                reopen_process, checkpoint, recovery_profile, final_storage
+            )
+            passed = len(known) == 1 and recovery_complete
             return {
                 "scope": "default-core in-process scan parent",
-                "passed": len(known) == 1,
+                "passed": passed,
                 "quiescence_seconds": round(elapsed, 6),
                 "known_processes": len(known),
                 "survivors": [],
+                "reopen": {
+                    "process": reopen_process,
+                    "settings": reopen_settings,
+                },
+                "checkpoint": checkpoint,
+                "recovery_profile": recovery_profile,
+                "final_storage": final_storage,
                 "reason": (
                     None
-                    if len(known) == 1
-                    else "default-core scan unexpectedly created child processes"
+                    if passed
+                    else (
+                        "default-core scan unexpectedly created child processes"
+                        if len(known) != 1
+                        else "terminated database did not reopen, checkpoint, and recover cleanly"
+                    )
                 ),
             }
         time.sleep(MEASURE_INTERVAL_SECONDS)
@@ -3258,6 +3346,8 @@ def publication_identity_errors(
     *,
     runtime_sha256: str,
     mcp_tools_sha256: str,
+    skill_sha256: str,
+    skill_bytes: int,
     runtime_info: dict[str, Any],
     dirty_paths: list[str],
     measurement_errors: list[str],
@@ -3270,6 +3360,10 @@ def publication_identity_errors(
         errors.append("runtime SHA-256 does not match the preregistered candidate")
     if candidate.get("mcp_tools_sha256") != mcp_tools_sha256:
         errors.append("MCP tool inventory/schema digest does not match the candidate")
+    if candidate.get("skill_sha256") != skill_sha256:
+        errors.append("packaged skill SHA-256 does not match the candidate")
+    if candidate.get("skill_bytes") != skill_bytes:
+        errors.append("packaged skill size does not match the candidate")
     if runtime_info.get("project") != "ProjectAtlas":
         errors.append("runtime identity is not ProjectAtlas")
     if runtime_info.get("version") != candidate.get("required_version"):
@@ -3311,7 +3405,14 @@ def validate_publication_identity(
     preregistration: dict[str, Any],
     preregistration_path: Path,
 ) -> tuple[dict[str, Any], dict[str, str]]:
+    candidate = preregistration["candidate"]
     runtime_sha256 = hashlib.sha256(runtime.read_bytes()).hexdigest()
+    try:
+        skill_identity = candidate_file_identity(str(candidate.get("skill_path", "")))
+    except ValueError as error:
+        raise RuntimeError(f"packaged skill identity is invalid: {error}") from error
+    skill_sha256 = str(skill_identity["sha256"])
+    skill_bytes = int(skill_identity["bytes"])
     runtime_process = subprocess.run(
         [
             str(runtime),
@@ -3366,6 +3467,8 @@ def validate_publication_identity(
         preregistration,
         runtime_sha256=runtime_sha256,
         mcp_tools_sha256=mcp_tools_sha256,
+        skill_sha256=skill_sha256,
+        skill_bytes=skill_bytes,
         runtime_info=runtime_info,
         dirty_paths=dirty_paths,
         measurement_errors=measurement_input_errors(
@@ -3382,6 +3485,9 @@ def validate_publication_identity(
         {
             "runtime_sha256": runtime_sha256,
             "mcp_tools_sha256": mcp_tools_sha256,
+            "skill_path": skill_identity["path"],
+            "skill_sha256": skill_sha256,
+            "skill_bytes": skill_bytes,
             "runtime_info": runtime_info,
         },
         candidate_source_identity(preregistration_path),

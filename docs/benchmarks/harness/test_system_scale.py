@@ -1,3 +1,4 @@
+import hashlib
 import inspect
 import json
 import os
@@ -217,12 +218,16 @@ class SystemScaleHarnessTests(unittest.TestCase):
                 "required_version": "0.4.0",
                 "runtime_sha256": "expected-runtime",
                 "mcp_tools_sha256": "expected-tools",
+                "skill_sha256": "expected-skill",
+                "skill_bytes": 100,
             },
         }
         errors = system_scale.publication_identity_errors(
             preregistration,
             runtime_sha256="other-runtime",
             mcp_tools_sha256="other-tools",
+            skill_sha256="other-skill",
+            skill_bytes=200,
             runtime_info={
                 "project": "Other",
                 "version": "0.3.26",
@@ -236,7 +241,36 @@ class SystemScaleHarnessTests(unittest.TestCase):
             ],
             measurement_errors=["measurement input lock is invalid"],
         )
-        self.assertEqual(len(errors), 10)
+        self.assertEqual(len(errors), 12)
+
+    def test_candidate_file_identity_rejects_escape_and_missing_artifacts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = parent / "candidate"
+            skill = root / "plugins/projectatlas/skills/projectatlas/SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_bytes(b"skill\n")
+            self.assertEqual(
+                system_scale.candidate_file_identity(
+                    "plugins/projectatlas/skills/projectatlas/SKILL.md",
+                    root=root,
+                ),
+                {
+                    "path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
+                    "sha256": hashlib.sha256(b"skill\n").hexdigest(),
+                    "bytes": 6,
+                },
+            )
+            (parent / "outside.md").write_bytes(b"outside\n")
+            with self.assertRaisesRegex(ValueError, "escapes"):
+                system_scale.candidate_file_identity(
+                    "../outside.md",
+                    root=root,
+                )
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                system_scale.candidate_file_identity("missing.md", root=root)
 
     def test_publication_identity_allows_clean_content_bound_preregistration(
         self,
@@ -247,12 +281,16 @@ class SystemScaleHarnessTests(unittest.TestCase):
                 "required_version": "0.4.0",
                 "runtime_sha256": "runtime",
                 "mcp_tools_sha256": "tools",
+                "skill_sha256": "skill",
+                "skill_bytes": 100,
             },
         }
         errors = system_scale.publication_identity_errors(
             preregistration,
             runtime_sha256="runtime",
             mcp_tools_sha256="tools",
+            skill_sha256="skill",
+            skill_bytes=100,
             runtime_info={
                 "project": "ProjectAtlas",
                 "version": "0.4.0",
@@ -264,6 +302,58 @@ class SystemScaleHarnessTests(unittest.TestCase):
             measurement_errors=[],
         )
         self.assertEqual(errors, [])
+
+    def test_termination_recovery_requires_reopen_integrity_and_cleanup(
+        self,
+    ) -> None:
+        process = {"returncode": 0, "timed_out": False}
+        checkpoint = {"busy": 0}
+        profile = {"quick_check": "ok"}
+        storage = {"wal_bytes": 0, "staging_bytes": 0, "stage_directories": 0}
+        self.assertTrue(
+            system_scale.termination_recovery_is_complete(
+                process, checkpoint, profile, storage
+            )
+        )
+        failures = (
+            (
+                {"returncode": 1, "timed_out": False},
+                checkpoint,
+                profile,
+                storage,
+            ),
+            (
+                {"returncode": 0, "timed_out": True},
+                checkpoint,
+                profile,
+                storage,
+            ),
+            (process, {"busy": 1}, profile, storage),
+            (process, checkpoint, {"quick_check": "malformed"}, storage),
+            (process, checkpoint, profile, {**storage, "wal_bytes": 1}),
+            (process, checkpoint, profile, {**storage, "staging_bytes": 1}),
+            (process, checkpoint, profile, {**storage, "stage_directories": 1}),
+        )
+        for (
+            reopen_process,
+            recovery_checkpoint,
+            recovery_profile,
+            final_storage,
+        ) in failures:
+            with self.subTest(
+                reopen_process=reopen_process,
+                recovery_checkpoint=recovery_checkpoint,
+                recovery_profile=recovery_profile,
+                final_storage=final_storage,
+            ):
+                self.assertFalse(
+                    system_scale.termination_recovery_is_complete(
+                        reopen_process,
+                        recovery_checkpoint,
+                        recovery_profile,
+                        final_storage,
+                    )
+                )
 
     def test_measurement_input_lock_fails_closed_on_path_or_digest_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

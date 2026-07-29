@@ -4,7 +4,7 @@
   "status": "locked_for_final_measurement",
   "measurement_input_lock_basis": "Content digests from the recorded measurement checkout; a later run must relock after any listed input changes.",
   "measurement_inputs": {
-    "docs/benchmarks/harness/system_scale.py": "e1eaf8524801b425fb3eddff0b25ed3612231c9354d4d9ea094b4b8457ff8ace",
+    "docs/benchmarks/harness/system_scale.py": "1937b4e01759bdca1d9cbf6eeac4cf3fc3a0c18c4ca5d6179930c8076c84d5e8",
     "docs/benchmarks/harness/mcp_composition.py": "04dd5bf8bac306d1ac5faf8c92bd75cf63e6284f39e53dfcef80ac3c3ac17832",
     "docs/benchmarks/harness/requirements.txt": "b6c8d86768d07e1dae4fb734c2e93997445a318d43290b307bfc1c800a0b1e52",
     "docs/benchmarks/fixtures/mcp-composition": "498cccec02061a12330b738fd0e3094063627934979b0277c493d90564e02553"
@@ -41,6 +41,14 @@
       "changes": [
         "Bind the complete committed mcp-composition fixture tree, relock the corrected runtime and harness identities, and repeat the complete publication campaign."
       ]
+    },
+    {
+      "prior_result": "docs/benchmarks/v0.4-system-scale-results.json",
+      "disposition": "superseded publication retained in Git history; release-proof audit found that forced termination did not prove production reopen and final WAL cleanup, and that the system publication omitted the packaged-skill identity",
+      "changes": [
+        "Reopen the exact terminated database through the candidate runtime, record settings, checkpoint, integrity, and final storage, and reject a busy checkpoint or nonzero final WAL or graph-stage state.",
+        "Bind the packaged v0.4 skill path, SHA-256, and byte size as candidate artifact identity."
+      ]
     }
   ],
   "preflight_failures": [
@@ -53,6 +61,9 @@
     "required_version": "0.4.0",
     "runtime_sha256": "352195ff426785780fb114566b9421f8142f9d500108aac65ebdc4cef41d5494",
     "mcp_tools_sha256": "0c21ea673bdb9cdff48203a274db04fbaccb888bd362407d46fc1bcc0e506b28",
+    "skill_path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
+    "skill_sha256": "208af75344199e1ad70ebf8e00f1f07e3879ece043e5f3ce79b8723de00d5547",
+    "skill_bytes": 20801,
     "telemetry": "disabled",
     "build_profile": "release-default-features"
   },
