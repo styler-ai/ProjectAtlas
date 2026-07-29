@@ -340,7 +340,6 @@ pass its repository-relative path:
 ```bash
 projectatlas token --benchmark-results docs/benchmarks/v0.4-agent-navigation-results.json
 projectatlas --format json token --benchmark-results docs/benchmarks/v0.4-agent-navigation-results.json
-projectatlas token --view tui --benchmark-results docs/benchmarks/v0.4-agent-navigation-results.json
 ```
 
 The equivalent MCP request adds:
@@ -352,6 +351,11 @@ The equivalent MCP request adds:
 ```
 
 The path is optional and applies only to token overviews, not trend reports.
+The human TUI always remains the focused live token-impact dashboard and
+reserves no space for release or plain-control comparisons. Supplying a
+benchmark path populates only the structured CLI JSON/TOON and MCP report; even
+an explicit `--view tui --benchmark-results <path>` combination leaves the
+human layout and all non-clock cells unchanged.
 ProjectAtlas accepts only a direct regular file below the selected project root
 and reads at most 8 MiB. No path yields `unavailable`; safe read/decode failures
 yield `failed`; a decoded but unsupported contract yields `incompatible`;
@@ -360,9 +364,10 @@ retained unmatched failures yield `partial`; and fully matched evidence yields
 paths are rejected at the request boundary.
 
 The comparison is read-only publication evidence. It is attached once as
-`TokenOverview.agent_efficiency` and rendered identically by CLI JSON/TOON,
-`atlas_token_report`, and the Ratatui overview. The benchmark is never written
-to SQLite, added to live `tokens_avoided` or file-read estimates, or cached.
+`TokenOverview.agent_efficiency` and rendered identically by CLI JSON/TOON and
+`atlas_token_report`; the Ratatui overview never renders it. The benchmark is
+never written to SQLite, added to live `tokens_avoided` or file-read estimates,
+or cached.
 Provider token counters remain descriptive-only; capability rows report calls
 and emitted bytes without claiming per-tool token causality.
 
@@ -370,6 +375,13 @@ Read-avoidance counters are also local workflow estimates. Observed
 summary/outline/slice replacements are stronger evidence than search-modeled
 file reads avoided; aggregate bucket-only reports must stay `not_recorded`
 instead of inventing whole-file-read counts.
+
+The TUI keeps those file-read sources as separate proportional bars. Beneath
+them, broad folder walks skipped and candidate files not opened each use two
+different denominators: activity share is the row's persisted source steps
+divided by all reconciled source steps, while token impact is the row's avoided
+tokens divided by reconciled `tokens_avoided`. The exact source ledger below the
+charts uses the same rows, counts, and token allocation.
 
 For freshness, treat `projectatlas watch` as the steady-state updater for local editing sessions. Line slices
 validate against SQLite and then read the current file from disk. Symbol slices also read current disk content,

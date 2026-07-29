@@ -18,6 +18,10 @@ on:
         required: false
         default: false
         type: boolean
+      parser_pack_run_id:
+        description: "Successful clean optional-parser-pack workflow run for this release tree"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -78,6 +82,21 @@ jobs:
 
       - name: Issue checklist self-test
         run: python3 .github/scripts/issue-checklists.py --self-test
+
+      - name: Optional-parser proof-input unit test
+        run: python3 .github/scripts/test-optional-parser-proof-inputs.py
+
+      - name: Optional-parser release-asset self-test
+        run: python3 .github/scripts/verify-optional-parser-release-assets.py --self-test
+
+      - name: MCP composition integrity
+        run: python3 docs/benchmarks/harness/mcp_composition.py --self-test
+
+      - name: Manual-only full benchmark policy
+        run: python3 .github/scripts/verify-manual-benchmark-policy.py
+
+      - name: Published benchmark measurement locks
+        run: python3 .github/scripts/verify-published-benchmark-locks.py
 
       - name: Verify version
         run: |
@@ -440,10 +459,88 @@ jobs:
             throw "Packaged CLI behavior contract failed with exit code $LASTEXITCODE."
           }
 
+  parser-pack-assets:
+    name: optional-parser release assets
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PARSER_PACK_RUN_ID: ${{ inputs.parser_pack_run_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Bind clean handoff to these release inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$PARSER_PACK_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "parser_pack_run_id must be a positive workflow run id" >&2
+            exit 1
+          fi
+          run_json="$RUNNER_TEMP/parser-pack-run.json"
+          gh api \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$PARSER_PACK_RUN_ID" \
+            > "$run_json"
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            '
+              .repository.full_name == $repository
+              and .head_repository.full_name == $repository
+              and .path == ".github/workflows/optional-parser-pack.yml"
+              and .event == "workflow_dispatch"
+              and .status == "completed"
+              and .conclusion == "success"
+            ' \
+            "$run_json" \
+            > /dev/null
+          run_sha="$(jq -r '.head_sha' "$run_json")"
+          git fetch --no-tags origin "$run_sha"
+          python3 .github/scripts/optional-parser-proof-inputs.py \
+            --base "$run_sha" \
+            --head HEAD
+          echo "PARSER_PACK_RUN_SHA=$run_sha" >> "$GITHUB_ENV"
+
+      - name: Download clean optional-parser handoff
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: optional-parser-pack-release-assets
+          path: ${{ runner.temp }}/optional-parser-release-source
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.parser_pack_run_id }}
+
+      - name: Validate and stage optional-parser release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/verify-optional-parser-release-assets.py \
+            --source "$RUNNER_TEMP/optional-parser-release-source" \
+            --output "$RUNNER_TEMP/optional-parser-release-assets" \
+            --release-version "$RELEASE_VERSION" \
+            --revision "$PARSER_PACK_RUN_SHA" \
+            --cargo-lock Cargo.lock
+
+      - name: Upload optional-parser release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: projectatlas-parser-packs
+          path: ${{ runner.temp }}/optional-parser-release-assets/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
   publish:
     name: publish
     if: ${{ !inputs.prepublish_only }}
-    needs: [prepublish-installer-smoke-unix, prepublish-installer-smoke-windows]
+    needs:
+      [prepublish-installer-smoke-unix, prepublish-installer-smoke-windows, parser-pack-assets]
     runs-on: ubuntu-latest
     permissions:
       contents: write

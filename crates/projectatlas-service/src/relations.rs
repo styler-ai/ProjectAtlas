@@ -536,6 +536,9 @@ pub struct DetailedRelationReport {
     pub rows: Vec<DetailedRelationRow>,
 }
 
+/// Exact typed external identity eligible for call-scoped rendezvous.
+pub(super) type ExternalRelationIdentity = (String, String, String);
+
 /// Cursor algorithm responsible for traversal-state interpretation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1721,6 +1724,26 @@ pub(super) fn relation_matches(relation: &LogicalRelation, query: &DetailedRelat
         }
 }
 
+/// Retain exact external identities reached by one bounded traversal page.
+pub(super) fn external_relation_identities(
+    report: &DetailedRelationReport,
+) -> BTreeSet<ExternalRelationIdentity> {
+    report
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let RelationResolution::External { external, .. } = row.relation.resolution() else {
+                return None;
+            };
+            Some((
+                row.relation.kind().as_str().to_string(),
+                external.system.as_str().to_string(),
+                external.identity.as_str().to_string(),
+            ))
+        })
+        .collect()
+}
+
 /// Convert confidence classes to their stable descending rank.
 const fn confidence_rank(value: ConfidenceClass) -> u8 {
     match value {
@@ -2237,7 +2260,7 @@ fn relation_database_budget(
 }
 
 /// Measure deterministic serialized-equivalent bytes without retaining an encoding.
-fn serialized_equivalent_bytes<T>(value: &T) -> ServiceResult<u64>
+pub(super) fn serialized_equivalent_bytes<T>(value: &T) -> ServiceResult<u64>
 where
     T: Serialize + ?Sized,
 {
@@ -2327,7 +2350,7 @@ fn relation_work_overflow() -> ServiceError {
 }
 
 /// Bind every database call to the earlier caller or service deadline.
-fn relation_request_control(
+pub(super) fn relation_request_control(
     caller: Option<&IndexWorkControl>,
     service_deadline: Instant,
 ) -> IndexWorkControl {

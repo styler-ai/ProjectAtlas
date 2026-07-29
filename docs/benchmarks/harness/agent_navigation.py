@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import hashlib
 import json
 import math
@@ -21,6 +20,8 @@ from typing import Any
 
 from mcp_composition import PURPOSES, clear_git_repository_environment, remove_tree
 from system_scale import (
+    committed_git_object_sha256,
+    measurement_input_errors,
     persistent_sizes,
     prepare_huge,
     prepare_medium,
@@ -76,10 +77,14 @@ PATH_PLACEHOLDERS = {
     "{USER_HOME}": "current operating-system user home",
     "{POWERSHELL}": "PowerShell executable",
 }
-TASKS_PATH = Path(
-    "openspec/changes/advance-rust-repository-intelligence/tasks.md"
-)
 POWERSHELL = shutil.which("pwsh")
+AGENT_NAVIGATION_MEASUREMENT_INPUTS = (
+    "docs/benchmarks/harness/agent_navigation.py",
+    "docs/benchmarks/harness/system_scale.py",
+    "docs/benchmarks/harness/mcp_composition.py",
+    "docs/benchmarks/harness/requirements.txt",
+    "docs/benchmarks/fixtures/mcp-composition",
+)
 
 
 def file_sha256(path: Path) -> str:
@@ -929,7 +934,7 @@ def validate_preregistration(preregistration: dict[str, Any]) -> dict[str, Any]:
     return identities
 
 
-def validate_candidate_source(
+def validate_candidate_checkout(
     preregistration: dict[str, Any], preregistration_path: Path
 ) -> dict[str, str]:
     candidate = preregistration.get("candidate")
@@ -938,10 +943,6 @@ def validate_candidate_source(
     head = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
     ).strip()
-    if candidate.get("functional_head") != head:
-        raise ValueError(
-            "functional Git head does not match the preregistered candidate"
-        )
     try:
         preregistration_relative = (
             preregistration_path.resolve().relative_to(ROOT.resolve()).as_posix()
@@ -958,13 +959,9 @@ def validate_candidate_source(
         for row in status
         if len(row) > 3
     ]
-    unexpected_dirty = [
-        path for path in dirty_paths if path != preregistration_relative
-    ]
-    if unexpected_dirty:
+    if dirty_paths:
         raise ValueError(
-            "candidate checkout is dirty outside the preregistration: "
-            + ", ".join(unexpected_dirty)
+            "candidate checkout is dirty: " + ", ".join(dirty_paths)
         )
     try:
         committed_preregistration = json.loads(
@@ -980,50 +977,18 @@ def validate_candidate_source(
         ) from error
     if not isinstance(committed_preregistration, dict):
         raise ValueError("committed preregistration must be a JSON object")
-    current_locked = copy.deepcopy(preregistration)
-    committed_locked = copy.deepcopy(committed_preregistration)
-    try:
-        current_locked["candidate"].pop("functional_head")
-        committed_locked["candidate"].pop("functional_head")
-    except (AttributeError, KeyError) as error:
-        raise ValueError(
-            "both preregistrations must define candidate.functional_head"
-        ) from error
-    if current_locked != committed_locked:
-        raise ValueError(
-            "preregistration changed outside candidate.functional_head"
-        )
-    checklist_head = str(candidate.get("checklist_head", ""))
-    if (
-        subprocess.run(
-            ["git", "merge-base", "--is-ancestor", checklist_head, head],
-            cwd=ROOT,
-            check=False,
-        ).returncode
-        != 0
-    ):
-        raise ValueError("checklist head is not an ancestor of the candidate")
-    if (
-        subprocess.run(
-            [
-                "git",
-                "diff",
-                "--quiet",
-                checklist_head,
-                head,
-                "--",
-                TASKS_PATH.as_posix(),
-            ],
-            cwd=ROOT,
-            check=False,
-        ).returncode
-        != 0
-    ):
-        raise ValueError("OpenSpec task state changed after the checklist head")
+    if preregistration != committed_preregistration:
+        raise ValueError("preregistration changed after its committed lock")
+    input_errors = measurement_input_errors(
+        preregistration,
+        AGENT_NAVIGATION_MEASUREMENT_INPUTS,
+        root=ROOT,
+    )
+    if input_errors:
+        raise ValueError("; ".join(input_errors))
     return {
-        "functional_head": head,
-        "checklist_head": checklist_head,
-        "allowed_dirty_path": preregistration_relative,
+        "checkout_head": head,
+        "preregistration_path": preregistration_relative,
     }
 
 
@@ -1217,7 +1182,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             f"--repeats {args.repeats} does not match preregistered {expected_repeats}"
         )
-    source_identity = validate_candidate_source(preregistration, preregistration_path)
+    source_identity = validate_candidate_checkout(preregistration, preregistration_path)
     identities = validate_preregistration(preregistration)
     environment = actual_environment(preregistration["candidate"])
     expected_environment = preregistration["environment"]["expected"]
@@ -1282,10 +1247,17 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         runs.append(record)
         append_checkpoint(record, journal)
     journal_sha256 = file_sha256(journal)
+    preregistration_sha256 = committed_git_object_sha256(
+        source_identity["preregistration_path"],
+        root=ROOT,
+        revision=source_identity["checkout_head"],
+    )
+    if preregistration_sha256 is None:
+        raise ValueError("committed preregistration disappeared before result assembly")
     result = {
         "schema_version": 1,
         "preregistration": str(preregistration_path),
-        "preregistration_sha256": file_sha256(preregistration_path),
+        "preregistration_sha256": preregistration_sha256,
         "effective_preregistration": preregistration,
         "repeat_count": args.repeats,
         "schedule": planned,

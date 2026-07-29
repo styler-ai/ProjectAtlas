@@ -1492,7 +1492,7 @@ impl AtlasStore {
             if chunk.is_empty() {
                 continue;
             }
-            let values_clause = resolution_values_clause(chunk.len(), 4);
+            let values_clause = anonymous_values_clause(chunk.len(), 4);
             let sql = format!(
                 "WITH requested(project_instance_id, resolution_domain, key_digest, canonical_identity)
                       AS (VALUES {values_clause})
@@ -1762,23 +1762,34 @@ impl AtlasStore {
                     control,
                     IndexWorkStage::RepositoryTraversal,
                     || {
-                        let mut statement = self.connection.prepare_cached(
-                            "SELECT relation_key, project_instance_id, canonical_identity,
-                                source_entity_key, relation_scope, relation_kind,
-                                resolution_status, target_entity_key, reference_text,
-                                candidate_count, confidence, completeness
-                           FROM graph_relations
-                          WHERE project_instance_id = ?1
-                            AND relation_scope = ?2 AND relation_kind = ?3
-                          ORDER BY relation_key
-                          LIMIT ?4",
-                        )?;
-                        collect_relation_rows(statement.query(params![
-                            &project.as_bytes()[..],
-                            scope,
-                            kind,
-                            limit_plus_one
-                        ])?)
+                        #[cfg(feature = "sqlite-progress-test-observer")]
+                        crate::sqlite_progress_test_observer::notify(
+                            crate::sqlite_progress_test_observer::SqliteReadProgressEvent::RepositoryRelationFamilyQueryEntered,
+                        );
+                        let result = (|| {
+                            let mut statement = self.connection.prepare_cached(
+                                "SELECT relation_key, project_instance_id, canonical_identity,
+                                    source_entity_key, relation_scope, relation_kind,
+                                    resolution_status, target_entity_key, reference_text,
+                                    candidate_count, confidence, completeness
+                               FROM graph_relations
+                              WHERE project_instance_id = ?1
+                                AND relation_scope = ?2 AND relation_kind = ?3
+                              ORDER BY relation_key
+                              LIMIT ?4",
+                            )?;
+                            collect_relation_rows(statement.query(params![
+                                &project.as_bytes()[..],
+                                scope,
+                                kind,
+                                limit_plus_one
+                            ])?)
+                        })();
+                        #[cfg(feature = "sqlite-progress-test-observer")]
+                        crate::sqlite_progress_test_observer::notify(
+                            crate::sqlite_progress_test_observer::SqliteReadProgressEvent::RepositoryRelationFamilyQueryExited,
+                        );
+                        result
                     },
                 )?;
                 (project, raw)
@@ -3537,6 +3548,8 @@ impl IndexPublicationGuard<'_> {
 const RESOLUTION_KEYS_PER_QUERY: usize = 200;
 /// Conservative path count that stays below `SQLite`'s legacy bind ceiling.
 const RESOLUTION_PATHS_PER_QUERY: usize = 400;
+/// Conservative affected-entity count for one external-candidate adjacency batch.
+const EXTERNAL_CANDIDATE_KEYS_PER_QUERY: usize = 400;
 
 /// Closed owner projections that retain canonical resolution keys.
 #[derive(Clone, Copy)]
@@ -3723,7 +3736,7 @@ fn validate_persisted_resolution_keys(
         if chunk.is_empty() {
             continue;
         }
-        let values_clause = resolution_values_clause(chunk.len(), 4);
+        let values_clause = anonymous_values_clause(chunk.len(), 4);
         let sql = format!(
             "WITH requested(project_instance_id, resolution_domain, key_digest, canonical_identity)
                   AS (VALUES {values_clause})
@@ -3770,7 +3783,7 @@ fn affected_source_paths(
         if chunk.is_empty() {
             continue;
         }
-        let values_clause = resolution_values_clause(chunk.len(), 4);
+        let values_clause = anonymous_values_clause(chunk.len(), 4);
         let sql = format!(
             "WITH requested(project_instance_id, resolution_domain, key_digest, canonical_identity)
                   AS (VALUES {values_clause})
@@ -4046,7 +4059,7 @@ fn affected_source_footprint_sql(path_count: usize) -> String {
 }
 
 /// Build an anonymous `VALUES` clause with fixed columns per row.
-fn resolution_values_clause(rows: usize, columns: usize) -> String {
+fn anonymous_values_clause(rows: usize, columns: usize) -> String {
     let row = format!("({})", vec!["?"; columns].join(","));
     vec![row; rows].join(",")
 }
@@ -4209,7 +4222,7 @@ fn remove_touched_orphan_resolution_keys(
         if chunk.is_empty() {
             continue;
         }
-        let values_clause = resolution_values_clause(chunk.len(), 3);
+        let values_clause = anonymous_values_clause(chunk.len(), 3);
         let sql = format!(
             "WITH touched(project_instance_id, resolution_domain, key_digest)
                   AS (VALUES {values_clause})
@@ -4270,33 +4283,45 @@ fn affected_external_candidates(
         }
     }
 
-    let mut outgoing = connection.prepare_cached(
-        "SELECT relation.target_entity_key
-           FROM graph_relations AS relation INDEXED BY idx_graph_relations_source_kind
-           JOIN graph_entities AS external
-             ON external.entity_key = relation.target_entity_key
-          WHERE relation.source_entity_key = ?1 AND external.entity_kind = 'external'",
-    )?;
-    let mut incoming = connection.prepare_cached(
-        "SELECT relation.source_entity_key
-           FROM graph_relations AS relation INDEXED BY idx_graph_relations_target_kind
-           JOIN graph_entities AS external
-             ON external.entity_key = relation.source_entity_key
-          WHERE relation.target_entity_key = ?1 AND external.entity_kind = 'external'",
-    )?;
     let mut candidates = HashSet::new();
-    for local_key in local_keys {
-        for statement in [&mut outgoing, &mut incoming] {
-            let mut rows = statement.query([&local_key[..]])?;
-            while let Some(row) = rows.next()? {
-                candidates.insert(fixed_bytes::<32>(
-                    "graph_entities.entity_key",
-                    row.get::<_, Vec<u8>>(0)?,
-                )?);
-            }
+    let local_keys = local_keys.into_iter().collect::<Vec<_>>();
+    for chunk in local_keys.chunks(EXTERNAL_CANDIDATE_KEYS_PER_QUERY) {
+        let sql = external_candidate_batch_sql(chunk.len());
+        let mut statement = connection.prepare_cached(&sql)?;
+        let mut rows = statement.query(params_from_iter(chunk.iter().map(|key| &key[..])))?;
+        while let Some(row) = rows.next()? {
+            candidates.insert(fixed_bytes::<32>(
+                "graph_entities.entity_key",
+                row.get::<_, Vec<u8>>(0)?,
+            )?);
         }
     }
     Ok(candidates)
+}
+
+/// Build one two-direction indexed adjacency query for a bounded affected-key batch.
+fn external_candidate_batch_sql(key_count: usize) -> String {
+    let values = anonymous_values_clause(key_count, 1);
+    format!(
+        "WITH affected(entity_key) AS (VALUES {values})
+         SELECT relation.target_entity_key
+           FROM affected
+           CROSS JOIN graph_relations AS relation
+                      INDEXED BY idx_graph_relations_source_kind
+           JOIN graph_entities AS external
+             ON external.entity_key = relation.target_entity_key
+          WHERE relation.source_entity_key = affected.entity_key
+            AND external.entity_kind = 'external'
+         UNION ALL
+         SELECT relation.source_entity_key
+           FROM affected
+           CROSS JOIN graph_relations AS relation
+                      INDEXED BY idx_graph_relations_target_kind
+           JOIN graph_entities AS external
+             ON external.entity_key = relation.source_entity_key
+          WHERE relation.target_entity_key = affected.entity_key
+            AND external.entity_kind = 'external'"
+    )
 }
 
 /// Delete one affected local closure through statements prepared once per batch.
@@ -7269,6 +7294,38 @@ mod tests {
                 &format!("{context} was not bounded by index order: {details:?}"),
             )?;
         }
+
+        for key_count in [2, EXTERNAL_CANDIDATE_KEYS_PER_QUERY] {
+            let sql = format!(
+                "EXPLAIN QUERY PLAN {}",
+                external_candidate_batch_sql(key_count)
+            );
+            let bindings = (0..key_count)
+                .map(|_| Value::Blob(vec![0_u8; 32]))
+                .collect::<Vec<_>>();
+            let mut statement = store.connection.prepare(&sql)?;
+            let details = statement
+                .query_map(params_from_iter(bindings.iter()), |row| {
+                    row.get::<_, String>(3)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            require(
+                [
+                    "SEARCH relation USING INDEX idx_graph_relations_source_kind (source_entity_key=?)",
+                    "SEARCH relation USING INDEX idx_graph_relations_target_kind (target_entity_key=?)",
+                ]
+                .iter()
+                .all(|seek| details.iter().any(|detail| detail.contains(seek)))
+                    && details.iter().all(|detail| {
+                        !detail.contains("SCAN relation")
+                            && !detail.contains("SCAN graph_relations")
+                            && !detail.contains("USE TEMP B-TREE")
+                    }),
+                &format!(
+                    "{key_count}-key external cleanup batch was not driven by indexed point seeks: {details:?}"
+                ),
+            )?;
+        }
         Ok(())
     }
 
@@ -8370,6 +8427,30 @@ mod tests {
             )?;
             publication.complete()?;
         }
+
+        let affected_paths = [
+            RepositoryNodePath::new(Path::new("src/a"))?,
+            RepositoryNodePath::new(Path::new("packages/api/Cargo.toml"))?,
+        ];
+        let (candidates, statements) = trace_statements(&mut store, |store| {
+            affected_external_candidates(&store.connection, &affected_paths)
+        })?;
+        require(
+            candidates.contains(&orphan_external.key().digest_bytes()?),
+            "batched external cleanup omitted an affected candidate",
+        )?;
+        require_eq(
+            &statements
+                .iter()
+                .filter(|statement| {
+                    statement.contains("WITH affected(entity_key)")
+                        && statement.contains("idx_graph_relations_source_kind")
+                        && statement.contains("idx_graph_relations_target_kind")
+                })
+                .count(),
+            &1,
+            "bounded external candidate adjacency batches",
+        )?;
 
         let generation_two = IndexGeneration::new(2);
         let replacement_folder = GraphEntity::new(

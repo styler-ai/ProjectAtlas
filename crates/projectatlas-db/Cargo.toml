@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[features]
+sqlite-progress-test-observer = []
+
 [dependencies]
 blake3.workspace = true
 getrandom.workspace = true

@@ -87,7 +87,7 @@ The larger the repository and the more often agents work in it, the more useful 
   <img src="docs/assets/token-savings-bar.svg" alt="Bar chart comparing a 221.1 million-token modeled candidate-read baseline with 0.4 million compact ProjectAtlas payload tokens in the same representative audit" width="860">
 </p>
 
-¹ The published representative audit covered a 679-file application and 142 indexed ProjectAtlas calls. Its offline `chars/bytes ÷ 4` model counted 221,114,448 tokens across candidate files, directory walks, and full-file reads, while the returned compact ProjectAtlas payloads contained 425,622 estimated tokens—99.8% less context than that modeled candidate-read baseline. This is a navigation-model comparison, not a measured plain-agent arm or provider billing counter. Warm indexed CLI reads in the same audit were approximately 160–166 ms. Results vary by repository and usage; see the [full formula, measurements, and limitations](docs/benchmarks/large-application-token-savings.md) and the separately controlled [v0.4 navigation evaluation](docs/benchmarks/v0.4-agent-navigation-evaluation.md).
+¹ The published representative audit covered a 679-file application and 142 indexed ProjectAtlas calls. Its offline `chars/bytes ÷ 4` model counted 221,114,448 tokens across candidate files, directory walks, and full-file reads, while the returned compact ProjectAtlas payloads contained 425,622 estimated tokens—99.8% less context than that modeled candidate-read baseline. This is a navigation-model comparison, not a measured plain-agent arm or provider billing counter. Warm indexed CLI reads in the same audit were approximately 160–166 ms. Results vary by repository and usage; see the [full formula, measurements, and limitations](docs/benchmarks/large-application-token-savings.md) and the separately controlled, now historical [v0.4 navigation evaluation](docs/benchmarks/v0.4-agent-navigation-evaluation.md).
 
 ## How ProjectAtlas works
 
@@ -237,7 +237,7 @@ projectatlas watch
 | Find structure drift | `projectatlas health-check` | `atlas_health` |
 | Measure context savings | `projectatlas token` | `atlas_token_report` |
 
-Use `projectatlas token --view tui` for the human token-impact dashboard, including conservative tokens avoided, likely file reads avoided, observed summary/slice replacements, modeled narrowing, and optional local tokenizer calibration.
+Use `projectatlas token --view tui` for the human token-impact dashboard. It reconciles tokens with and without ProjectAtlas, shows observed and modeled file reads avoided, keeps exact folder-walk and candidate-opening values in the source table, and adds a bounded live atlas map on wide terminals. The dark, light, and terminal-background themes preserve the same data and layout. Add `--tokenizer o200k_base` or `--tokenizer cl100k_base` for local tokenizer calibration.
 
 ## Local-first security
 

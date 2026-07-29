@@ -939,6 +939,21 @@ jobs:
             --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Exercise Windows fixed-epoch sharing guards
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "parser-pack-runtime-e2e-target"
+          cargo test `
+            -p projectatlas-cli `
+            --lib `
+            --all-features `
+            --locked `
+            -- `
+            --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Exercise packaged archive through the normal runtime lifecycle
         shell: pwsh
         run: |
@@ -964,10 +979,14 @@ jobs:
               )
             }
             return @(
-              & /bin/ps -eo pid=,args= |
+              & /bin/ps -eo pid= |
                 ForEach-Object {
-                  if ($_ -match '^\s*(\d+)\s+.*(?:/|\\)projectatlas-parser-worker(?:\s|$)') {
-                    [int]$Matches[1]
+                  $processIdText = $_.Trim()
+                  if ($processIdText -match '^\d+$') {
+                    $executableTarget = & /usr/bin/readlink "/proc/$processIdText/exe" 2>$null
+                    if ($executableTarget -match '^/memfd:projectatlas-parser-worker(?: \(deleted\))?$') {
+                      [int]$processIdText
+                    }
                   }
                 }
             )
@@ -998,6 +1017,43 @@ jobs:
           $status = @(git status --porcelain=v1 --untracked-files=all)
           if ($LASTEXITCODE -ne 0 -or $revision -ne $env:GITHUB_SHA -or $status.Count -ne 0) {
             throw "Candidate source changed during normal-runtime parser-pack verification."
+          }
+
+      - name: Prove Linux launches retain sealed worker and grammar authority
+        if: runner.os == 'Linux'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archive = Join-Path `
+            $env:RUNNER_TEMP `
+            "parser-pack-runtime-e2e/projectatlas-broad-parser-${{ matrix.target }}.tar.zst"
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw "Normal-runtime parser-pack archive is missing."
+          }
+
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "parser-pack-runtime-e2e-target"
+          $env:PROJECTATLAS_OPTIONAL_PARSER_ARCHIVE = $archive
+          sudo --non-interactive sysctl -q -w vm.memfd_noexec=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $memfdNoexec = (sysctl -n vm.memfd_noexec).Trim()
+          if ($LASTEXITCODE -ne 0 -or $memfdNoexec -ne "1") {
+            throw "Linux packaged authority proof requires vm.memfd_noexec=1."
+          }
+          cargo test `
+            -p projectatlas-cli `
+            --test parser_launch_authority `
+            --locked `
+            sealed_worker_and_grammar_survive_concurrent_path_replacement `
+            -- `
+            --ignored `
+            --exact `
+            --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $revision = (git rev-parse HEAD).Trim()
+          $status = @(git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0 -or $revision -ne $env:GITHUB_SHA -or $status.Count -ne 0) {
+            throw "Candidate source changed during sealed launch-authority verification."
           }
 
       - name: Prove contained worker crash preserves publication
@@ -1166,6 +1222,52 @@ jobs:
         with:
           name: optional-parser-pack-proof-aggregate
           path: ${{ runner.temp }}/parser-pack-aggregate-output/optional-parser-pack-proof-aggregate.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Download clean release construction archives
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: parser-pack-*-construction
+          path: ${{ runner.temp }}/parser-pack-release-source/construction
+          merge-multiple: true
+
+      - name: Download clean release construction receipts
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: parser-pack-*-cargo-layer-receipt
+          path: ${{ runner.temp }}/parser-pack-release-source/receipts
+          merge-multiple: true
+
+      - name: Assemble clean release handoff
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$RUNNER_TEMP/parser-pack-release-source"
+          output="$RUNNER_TEMP/parser-pack-release-output"
+          mkdir -p "$output"
+          install -m 0644 \
+            "$RUNNER_TEMP/parser-pack-aggregate-output/optional-parser-pack-proof-aggregate.json" \
+            "$output/optional-parser-pack-proof-aggregate.json"
+          for target in x86_64-unknown-linux-gnu x86_64-pc-windows-msvc; do
+            install -m 0644 \
+              "$source/construction/projectatlas-broad-parser-$target.tar.zst" \
+              "$output/projectatlas-broad-parser-$target.tar.zst"
+            install -m 0644 \
+              "$source/receipts/cargo-layer-$target.json" \
+              "$output/cargo-layer-$target.json"
+          done
+
+      - name: Upload clean release handoff
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: optional-parser-pack-release-assets
+          path: ${{ runner.temp }}/parser-pack-release-output/*
           if-no-files-found: error
           compression-level: 0
           retention-days: 14

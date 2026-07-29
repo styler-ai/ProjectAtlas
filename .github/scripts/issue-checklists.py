@@ -30,6 +30,58 @@ MITIGATION_RE = re.compile(
     rf"(?mi)^[ ]{{0,3}}{UNORDERED_LIST_MARKER_RE}\s+\[([ xX])\]\s+(.+?)\s+"
     r"\(OpenSpec tasks:\s*(\d+(?:\.\d+)*(?:\s*,\s*\d+(?:\.\d+)*)*)\)\s*$"
 )
+EXACT_HEAD_PROOF_RE = re.compile(r"(?i)\bexact[- ]head\b")
+EXACT_HEAD_REQUIREMENT_RE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:must|shall|mandatory|obligat\w*|need(?:s|ed|ing)?|requir\w*|enforc\w*|bind\w*|"
+    r"verif\w*|accept\w*|allow\w*|permit\w*)\b"
+    r"[^.\n!?]{0,120}\bexact[- ]head\b"
+    r"|"
+    r"\bexact[- ]head\b[^.\n!?]{0,120}"
+    r"\b(?:must|shall|mandatory|obligat\w*|need(?:s|ed|ing)?|requir\w*|enforc\w*|bind\w*|"
+    r"verif\w*|accept\w*|allow\w*|permit\w*)\b"
+    r")"
+)
+EXACT_HEAD_NEGATION_RE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:is|are)\s+not\s+(?:required|needed|used|accepted|mandatory|allowed|permitted)\b"
+    r"[^.\n!?]{0,120}\bexact[- ]head\b"
+    r"|"
+    r"\bno\s+exact[- ]head\b"
+    r"|"
+    r"\bneed\s+not\b[^.\n!?]{0,120}\bexact[- ]head\b"
+    r"|"
+    r"\bexact[- ]head\b[^.\n!?]{0,120}\bneed\s+not\b"
+    r"|"
+    r"\b(?:rather than|instead of|independent(?:ly)? of)\b"
+    r"[^.\n!?]{0,120}\bexact[- ]head\b"
+    r"|"
+    r"\b(?:must not|shall not|should not|cannot|can't)\s+be\b"
+    r"[^.\n!?]{0,120}\bexact[- ]head\b"
+    r"|"
+    r"\b(?:do not|don't|does not|doesn't|must not|shall not|should not|cannot|can't|no longer)"
+    r"\s+(?:need|require|use|bind|demand|enforce|accept|allow|permit)\b"
+    r"[^.\n!?]{0,120}\bexact[- ]head\b"
+    r"|"
+    r"\b(?:remove|removing|removed|reject|rejecting|rejected|avoid|avoiding|"
+    r"drop|dropping|dropped|retire|retiring|retired|without)\b"
+    r"[^.\n!?]{0,120}\bexact[- ]head\b"
+    r"|"
+    r"\bexact[- ]head\b[^.\n!?]{0,120}"
+    r"\b(?:is|are)?\s*(?:not|no longer)\s+"
+    r"(?:required|used|needed|accepted|mandatory|allowed|permitted)\b"
+    r")"
+)
+EXACT_HEAD_SHARED_NEGATION_RE = re.compile(
+    r"(?i)\b(?:do not|don't|does not|doesn't|must not|shall not|should not|cannot|can't|no longer)"
+    r"\s+(?:need|require|use|bind|demand|enforce|accept|allow|permit)\b"
+)
+EXACT_HEAD_BARE_ACTION_RE = re.compile(
+    r"(?i)^\s*(?:need|require|use|bind|demand|enforce|accept|allow|permit)\b"
+)
+EXACT_HEAD_BARE_ACTION_ONLY_RE = re.compile(
+    r"(?i)^\s*(?:need|require|use|bind|demand|enforce|accept|allow|permit)\s*$"
+)
 REQUIRED_OPEN_ISSUE_HEADINGS = (
     "why",
     "what changes",
@@ -109,6 +161,44 @@ def visible_markdown(text: str) -> str:
             continue
         visible.append(line)
     return "".join(visible)
+
+
+def requires_exact_head_proof(text: str) -> bool:
+    """Return whether visible prose affirmatively requires commit-head proof."""
+
+    without_link_targets = MARKDOWN_LINK_RE.sub(
+        lambda match: match.group(0).replace(match.group(1), ""), text
+    )
+    for sentence in re.split(r"[.\n!?]+", without_link_targets):
+        for clause in re.split(
+            r"\s*(?:[:;—]|\b(?:but|however|yet)\b)\s*",
+            sentence,
+            flags=re.IGNORECASE,
+        ):
+            assertion_parts = re.split(
+                r"\s+\b(?:and|or)\b\s+",
+                clause,
+                flags=re.IGNORECASE,
+            )
+            shared_negation = False
+            for assertion in assertion_parts:
+                inherits_negation = shared_negation and bool(
+                    EXACT_HEAD_BARE_ACTION_RE.match(assertion)
+                )
+                if (
+                    EXACT_HEAD_PROOF_RE.search(assertion)
+                    and not inherits_negation
+                    and not EXACT_HEAD_NEGATION_RE.search(assertion)
+                    and EXACT_HEAD_REQUIREMENT_RE.search(assertion)
+                ):
+                    return True
+                shared_negation = bool(
+                    EXACT_HEAD_SHARED_NEGATION_RE.search(assertion)
+                ) or (
+                    shared_negation
+                    and bool(EXACT_HEAD_BARE_ACTION_ONLY_RE.match(assertion))
+                )
+    return False
 
 
 def github_heading_slug(heading: str) -> str:
@@ -446,6 +536,10 @@ def issue_contract_failures(
     if not isinstance(body, str):
         return ["body is not text"]
     visible_body = visible_markdown(body)
+    if requires_exact_head_proof(visible_body):
+        return [
+            "must bind proof to behavior-relevant inputs instead of exact-head commit identity"
+        ]
     headings = list(HEADING_RE.finditer(visible_body))
     normalized = [clean(heading.group(2)).lower() for heading in headings]
     failures: list[str] = []
@@ -811,6 +905,89 @@ Mitigations:
         return issue_contract_failures(issue, tasks, "owner/repo", self_test_root)
 
     assert contract_failures({"state": "OPEN", "body": issue_contract}, expected) == []
+    exact_head_contract = issue_contract.replace(
+        "Explain the need.", "Require exact-head proof."
+    )
+    assert any(
+        "behavior-relevant inputs" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": exact_head_contract}, expected
+        )
+    )
+    no_exact_head_contract = issue_contract.replace(
+        "Explain the need.", "Do not require exact-head proof."
+    )
+    assert (
+        contract_failures(
+            {"state": "OPEN", "body": no_exact_head_contract}, expected
+        )
+        == []
+    )
+    for negative_modal in [
+        "Proof is not required at exact-head.",
+        "No exact-head proof is required.",
+        "Require input-bound proof rather than exact-head proof.",
+        "Proof must be independent of exact-head identity.",
+        "Proof must not be exact-head.",
+        "Proof must not require exact-head identity.",
+        "Proof should not require exact-head identity.",
+        "Proof cannot require exact-head identity.",
+        "Proof does not require exact-head identity.",
+        "Exact-head proof is not mandatory.",
+        "Exact-head proof is not allowed.",
+        "Exact-head proof is not permitted.",
+        "Exact-head proof need not be rerun.",
+        "Proof need not require exact-head identity.",
+    ]:
+        assert not requires_exact_head_proof(negative_modal)
+    assert not requires_exact_head_proof(
+        "[Architecture](https://example.invalid/design#exact-head-proof)"
+    )
+    assert requires_exact_head_proof(
+        "Do not use stale proof; require exact-head proof."
+    )
+    assert requires_exact_head_proof(
+        "Proof does not require exact-head identity and exact-head evidence "
+        "is required before release."
+    )
+    assert requires_exact_head_proof(
+        "Exact-head proof is needed before release."
+    )
+    assert requires_exact_head_proof(
+        "Proof does not require and instead enforces exact-head identity."
+    )
+    assert not requires_exact_head_proof(
+        "Proof does not require or enforce exact-head identity."
+    )
+    assert not requires_exact_head_proof(
+        "We do not need exact-head proof."
+    )
+    assert not requires_exact_head_proof(
+        "Do not require commit receipts or bind releases to exact-head proof."
+    )
+    assert not requires_exact_head_proof(
+        "Proof does not require and does not enforce exact-head identity."
+    )
+    assert requires_exact_head_proof(
+        "Proof does not require stale-SHA identity and the release gate "
+        "enforces exact-head identity."
+    )
+    for mandatory_requirement in [
+        "Exact-head commit identity is mandatory before release.",
+        "The release shall use exact-head commit identity.",
+        "Only exact-head commit identity is allowed.",
+        "Release is permitted only with exact-head commit identity.",
+    ]:
+        assert requires_exact_head_proof(mandatory_requirement)
+    assert not requires_exact_head_proof(
+        "The release shall not allow exact-head commit identity."
+    )
+    assert not requires_exact_head_proof(
+        "Exact-head proof caused unnecessary reruns."
+    )
+    assert not requires_exact_head_proof(
+        "We replace exact-head proof with input-based reuse."
+    )
     punctuation_heading_contract = issue_contract.replace(
         "#architecture-views", "#sqlite-wal-durability-and-checkpoint-flow"
     )

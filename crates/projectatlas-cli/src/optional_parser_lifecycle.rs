@@ -1020,6 +1020,7 @@ impl OptionalParserPackLifecycle {
             ));
         }
         cleanup_platform_profile(supervisor.pack_root(), supervisor.artifact_identity())?;
+        drop(supervisor);
         let cleaned = transition_tombstone_to_profile_cleaned(&pending)?;
         remove_tree_if_present(&cleaned.entry_root)?;
         Ok(true)

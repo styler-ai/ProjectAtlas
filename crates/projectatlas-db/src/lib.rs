@@ -6227,6 +6227,75 @@ fn validate_indexed_file_text(text: &IndexedFileText) -> DbResult<()> {
 /// Virtual-machine operations between bounded database-read progress checks.
 const SQLITE_READ_PROGRESS_OPS: i32 = 1_000;
 
+/// Deterministic observation of production `SQLite` progress boundaries for downstream tests.
+#[cfg(feature = "sqlite-progress-test-observer")]
+pub mod sqlite_progress_test_observer {
+    use projectatlas_core::IndexWorkStage;
+    use std::cell::RefCell;
+
+    /// One observable event emitted by the production `SQLite` read-progress boundary.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum SqliteReadProgressEvent {
+        /// A repository relation-family query entered after its live-control precheck.
+        RepositoryRelationFamilyQueryEntered,
+        /// A repository relation-family query returned from `SQLite`.
+        RepositoryRelationFamilyQueryExited,
+        /// `SQLite` invoked the production progress callback.
+        CallbackEntered {
+            /// Typed work stage owned by the guarded query.
+            stage: IndexWorkStage,
+        },
+        /// The production progress callback evaluated its control.
+        CallbackEvaluated {
+            /// Typed work stage owned by the guarded query.
+            stage: IndexWorkStage,
+            /// Whether the callback requested `SQLite` interruption.
+            interrupted: bool,
+        },
+    }
+
+    /// Thread-local callback used only while a downstream test owns observation.
+    type Observer = Box<dyn FnMut(SqliteReadProgressEvent)>;
+
+    thread_local! {
+        /// Observer scoped to the synchronous test thread running the SQLite connection.
+        static OBSERVER: RefCell<Option<Observer>> = RefCell::new(None);
+    }
+
+    /// Restores a prior nested observer on every return or unwind path.
+    struct ObserverGuard {
+        /// Observer replaced for the current scope.
+        previous: Option<Observer>,
+    }
+
+    impl Drop for ObserverGuard {
+        fn drop(&mut self) {
+            OBSERVER.with(|slot| {
+                drop(slot.replace(self.previous.take()));
+            });
+        }
+    }
+
+    /// Run one operation while observing its synchronous `SQLite` progress events.
+    pub fn observe_sqlite_read_progress<T>(
+        observer: impl FnMut(SqliteReadProgressEvent) + 'static,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        let previous = OBSERVER.with(|slot| slot.replace(Some(Box::new(observer))));
+        let _guard = ObserverGuard { previous };
+        operation()
+    }
+
+    /// Notify the current thread-local observer when one is installed.
+    pub(crate) fn notify(event: SqliteReadProgressEvent) {
+        OBSERVER.with(|slot| {
+            if let Some(observer) = slot.borrow_mut().as_mut() {
+                observer(event);
+            }
+        });
+    }
+}
+
 /// Clears a connection-local `SQLite` progress handler on every exit path.
 pub(crate) struct SqliteReadProgressGuard<'connection> {
     /// Connection whose temporary progress callback is armed.
@@ -6247,7 +6316,23 @@ impl<'connection> SqliteReadProgressGuard<'connection> {
             let progress_control = control.clone();
             connection.progress_handler(
                 SQLITE_READ_PROGRESS_OPS,
-                Some(move || progress_control.check(stage).is_err()),
+                Some(move || {
+                    #[cfg(feature = "sqlite-progress-test-observer")]
+                    sqlite_progress_test_observer::notify(
+                        sqlite_progress_test_observer::SqliteReadProgressEvent::CallbackEntered {
+                            stage,
+                        },
+                    );
+                    let interrupted = progress_control.check(stage).is_err();
+                    #[cfg(feature = "sqlite-progress-test-observer")]
+                    sqlite_progress_test_observer::notify(
+                        sqlite_progress_test_observer::SqliteReadProgressEvent::CallbackEvaluated {
+                            stage,
+                            interrupted,
+                        },
+                    );
+                    interrupted
+                }),
             );
             true
         } else {

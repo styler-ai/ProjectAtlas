@@ -2135,6 +2135,9 @@ pub(crate) fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 mod tests {
     use super::*;
     use crate::{AtlasStore, DbError};
+    use projectatlas_core::telemetry::{
+        TokenOverview, TokenTrendPeriod, TokenTrendWindow, UsageEvent,
+    };
     use std::error::Error;
     use std::fs;
     use std::io;
@@ -2696,6 +2699,212 @@ mod tests {
                     .into());
                 }
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn released_schema_eight_upgrade_preserves_token_impact_across_reopen()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        let connection = Connection::open(&db_path)?;
+        configure_writable(&connection)?;
+        create_released_schema_eight(&connection)?;
+        set_metadata(
+            &connection,
+            PROJECT_ROOT_KEY,
+            &normalize_native_path_display(&root),
+        )?;
+
+        let events = [
+            UsageEvent {
+                session_id: "preserved-session".to_string(),
+                command: "summary".to_string(),
+                path: Some("src/lib.rs".to_string()),
+                query: None,
+                estimated_tokens_without_projectatlas: Some(1_000),
+                estimated_tokens_with_projectatlas: Some(100),
+                estimated_tokens_saved: Some(900),
+                token_savings_bucket: "full_file_compression".to_string(),
+                provider: "heuristic".to_string(),
+                model: "unknown".to_string(),
+                tokenizer_backend: "chars_div_4".to_string(),
+                accuracy: "heuristic_estimate".to_string(),
+                baseline_kind: "full_file".to_string(),
+                confidence: "observed".to_string(),
+                calculation_trace: "released-schema-observed".to_string(),
+                accounting_layer: "observed_delta".to_string(),
+                estimate_method: "heuristic_chars_or_bytes_div_ceil_4".to_string(),
+                denominator_kind: "full_file".to_string(),
+                baseline_identity: String::new(),
+                baseline_fingerprint: String::new(),
+                dedupe_scope: "event".to_string(),
+            },
+            UsageEvent {
+                session_id: "preserved-session".to_string(),
+                command: "files".to_string(),
+                path: None,
+                query: Some("src".to_string()),
+                estimated_tokens_without_projectatlas: Some(600),
+                estimated_tokens_with_projectatlas: Some(40),
+                estimated_tokens_saved: Some(560),
+                token_savings_bucket: "navigation_avoidance".to_string(),
+                provider: "heuristic".to_string(),
+                model: "unknown".to_string(),
+                tokenizer_backend: "chars_div_4".to_string(),
+                accuracy: "heuristic_estimate".to_string(),
+                baseline_kind: "selected_candidates".to_string(),
+                confidence: "inferred".to_string(),
+                calculation_trace: "released-schema-modeled".to_string(),
+                accounting_layer: "modeled_avoidance".to_string(),
+                estimate_method: "heuristic_chars_or_bytes_div_ceil_4".to_string(),
+                denominator_kind: "selected_candidates".to_string(),
+                baseline_identity: "files:src".to_string(),
+                baseline_fingerprint: "files:src:v1".to_string(),
+                dedupe_scope: "session".to_string(),
+            },
+            UsageEvent {
+                session_id: "preserved-session".to_string(),
+                command: "files".to_string(),
+                path: None,
+                query: Some("src".to_string()),
+                estimated_tokens_without_projectatlas: Some(600),
+                estimated_tokens_with_projectatlas: Some(40),
+                estimated_tokens_saved: Some(560),
+                token_savings_bucket: "navigation_avoidance".to_string(),
+                provider: "heuristic".to_string(),
+                model: "unknown".to_string(),
+                tokenizer_backend: "chars_div_4".to_string(),
+                accuracy: "heuristic_estimate".to_string(),
+                baseline_kind: "selected_candidates".to_string(),
+                confidence: "inferred".to_string(),
+                calculation_trace: "released-schema-modeled".to_string(),
+                accounting_layer: "modeled_avoidance".to_string(),
+                estimate_method: "heuristic_chars_or_bytes_div_ceil_4".to_string(),
+                denominator_kind: "selected_candidates".to_string(),
+                baseline_identity: "files:src".to_string(),
+                baseline_fingerprint: "files:src:v1".to_string(),
+                dedupe_scope: "session".to_string(),
+            },
+        ];
+        let created_at = [
+            "2026-06-15 10:00:00",
+            "2026-06-16 10:00:00",
+            "2026-07-01 10:00:00",
+        ];
+        let mut insert = connection.prepare_cached(
+            "INSERT INTO usage_events(
+                 session_id, command, path, query,
+                 estimated_tokens_without_projectatlas,
+                 estimated_tokens_with_projectatlas,
+                 estimated_tokens_saved,
+                 token_savings_bucket, provider, model, tokenizer_backend,
+                 accuracy, baseline_kind, confidence, calculation_trace,
+                 accounting_layer, estimate_method, denominator_kind,
+                 baseline_identity, baseline_fingerprint, dedupe_scope, created_at
+             ) VALUES(
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                 ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+             )",
+        )?;
+        for (event, created_at) in events.iter().zip(created_at) {
+            insert.execute(params![
+                event.session_id,
+                event.command,
+                event.path,
+                event.query,
+                event
+                    .estimated_tokens_without_projectatlas
+                    .map(i64::try_from)
+                    .transpose()?,
+                event
+                    .estimated_tokens_with_projectatlas
+                    .map(i64::try_from)
+                    .transpose()?,
+                event
+                    .estimated_tokens_saved
+                    .map(i64::try_from)
+                    .transpose()?,
+                event.token_savings_bucket,
+                event.provider,
+                event.model,
+                event.tokenizer_backend,
+                event.accuracy,
+                event.baseline_kind,
+                event.confidence,
+                event.calculation_trace,
+                event.accounting_layer,
+                event.estimate_method,
+                event.denominator_kind,
+                event.baseline_identity,
+                event.baseline_fingerprint,
+                event.dedupe_scope,
+                created_at,
+            ])?;
+        }
+        drop(insert);
+        drop(connection);
+
+        let expected_overview = TokenOverview::from_events(&events);
+        let expected_periods = vec![
+            TokenTrendPeriod::from_buckets(
+                "2026-06".to_string(),
+                TokenOverview::from_events(&events[..2]).buckets,
+            ),
+            TokenTrendPeriod::from_buckets(
+                "2026-07".to_string(),
+                TokenOverview::from_events(&events[2..]).buckets,
+            ),
+        ];
+        let store = AtlasStore::open_for_project(&db_path, &root)?;
+        let migrated_overview = store.token_overview(Some("preserved-session"))?;
+        let migrated_totals = (
+            migrated_overview.calls,
+            migrated_overview.estimated_without_projectatlas,
+            migrated_overview.estimated_with_projectatlas,
+            migrated_overview.estimated_saved,
+            migrated_overview.tokens_avoided,
+            migrated_overview.repeated_baselines_deduped,
+            migrated_overview.likely_file_reads_avoided,
+            &migrated_overview.buckets,
+        );
+        let expected_totals = (
+            expected_overview.calls,
+            expected_overview.estimated_without_projectatlas,
+            expected_overview.estimated_with_projectatlas,
+            expected_overview.estimated_saved,
+            expected_overview.tokens_avoided,
+            expected_overview.repeated_baselines_deduped,
+            expected_overview.likely_file_reads_avoided,
+            &expected_overview.buckets,
+        );
+        if migrated_totals != expected_totals {
+            return Err(io::Error::other(
+                "released schema-8 token overview changed during migration",
+            )
+            .into());
+        }
+        let migrated_trends =
+            store.token_trends(Some("preserved-session"), TokenTrendWindow::Month)?;
+        if migrated_trends.periods != expected_periods {
+            return Err(io::Error::other(
+                "released schema-8 token trends changed during migration",
+            )
+            .into());
+        }
+        drop(store);
+
+        let reopened = AtlasStore::open_for_project(&db_path, &root)?;
+        if reopened.token_overview(Some("preserved-session"))? != migrated_overview {
+            return Err(io::Error::other("reopen changed the migrated token overview").into());
+        }
+        if reopened.token_trends(Some("preserved-session"), TokenTrendWindow::Month)?
+            != migrated_trends
+        {
+            return Err(io::Error::other("reopen changed the migrated token trends").into());
         }
         Ok(())
     }
@@ -3433,6 +3642,109 @@ mod tests {
         let inventory_before = directory_entry_names(temp.path())?;
         drop(AtlasStore::open_read_only_for_project(&db_path, &root)?);
         require_unchanged(temp.path(), &db_path, &database_before, &inventory_before)?;
+        Ok(())
+    }
+
+    #[test]
+    fn released_schema_malformed_telemetry_rolls_back_unchanged_and_retries()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        write_schema_eight_fixture(&db_path, &root)?;
+        let connection = Connection::open(&db_path)?;
+        connection.execute(
+            "INSERT INTO usage_events(
+                 session_id, command,
+                 estimated_tokens_without_projectatlas,
+                 estimated_tokens_with_projectatlas,
+                 estimated_tokens_saved,
+                 created_at
+             ) VALUES('legacy', 'summary', 100, 10, 90, 'not-a-timestamp')",
+            [],
+        )?;
+        drop(connection);
+
+        let Err(error) = AtlasStore::open_for_project(&db_path, &root) else {
+            return Err(
+                io::Error::other("malformed released telemetry unexpectedly migrated").into(),
+            );
+        };
+        if !matches!(error, DbError::InvalidEnum { .. }) {
+            return Err(io::Error::other(format!(
+                "malformed released telemetry returned the wrong error: {error}"
+            ))
+            .into());
+        }
+
+        let normalized_root = normalize_native_path_display(&root);
+        let (preflight, _) = preflight(&db_path, Some(&normalized_root))?;
+        if preflight.state != SchemaState::UpgradeRequired
+            || preflight.schema_version != Some(PREVIOUS_SCHEMA_VERSION)
+            || preflight.project_root.as_deref() != Some(normalized_root.as_str())
+        {
+            return Err(
+                io::Error::other("failed migration changed released-schema identity").into(),
+            );
+        }
+        let connection = Connection::open(&db_path)?;
+        let preserved = connection.query_row(
+            "SELECT
+                 (SELECT value FROM metadata WHERE key = ?1),
+                 COUNT(*), MIN(command), MIN(created_at),
+                 MIN(estimated_tokens_without_projectatlas),
+                 MIN(estimated_tokens_with_projectatlas),
+                 MIN(estimated_tokens_saved)
+             FROM usage_events",
+            [INDEX_PUBLICATION_STATE_KEY],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            },
+        )?;
+        if preserved
+            != (
+                "complete".to_string(),
+                1,
+                "summary".to_string(),
+                "not-a-timestamp".to_string(),
+                100,
+                10,
+                90,
+            )
+        {
+            return Err(
+                io::Error::other("failed released-schema migration changed durable state").into(),
+            );
+        }
+        connection.execute("UPDATE usage_events SET created_at = CURRENT_TIMESTAMP", [])?;
+        drop(connection);
+        let store = AtlasStore::open_for_project(&db_path, &root)?;
+        if read_metadata(&store.connection, SCHEMA_VERSION_KEY)? != Some(SCHEMA_VERSION.to_string())
+        {
+            return Err(
+                io::Error::other("released-schema retry did not advance the schema").into(),
+            );
+        }
+        let events =
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM usage_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        if events != 1 {
+            return Err(
+                io::Error::other("released-schema retry did not preserve telemetry").into(),
+            );
+        }
         Ok(())
     }
 

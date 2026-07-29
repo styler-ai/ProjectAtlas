@@ -11,11 +11,11 @@
 
 ## 3. Ratatui Dashboard
 
-- [x] 3.1 Add one bounded agent-efficiency comparison panel to the existing overview while preserving the accepted headline, file-read, composition, source, calibration, footer, palette, background, and separate trend dashboard.
-- [x] 3.2 Cover compatible, partial, unavailable, failed, and incompatible states plus normal/compact labels, styles, clamped ratios, failed trials, hidden-overflow prevention, and unchanged accounting equations in deterministic Ratatui buffer tests.
+- [x] 3.1 Keep agent-efficiency comparison rows in structured CLI/MCP output and out of the Ratatui overview even when a caller supplies benchmark evidence, preserving the accepted headline, navigation-work, composition, source, calibration, footer, palette, background, and separate trend dashboard.
+- [x] 3.2 Prove attached compatible, partial, failed, and incompatible comparison states cannot alter the human overview at compact, normal, or wide layouts, while structured consumers retain their bounded typed values and live accounting equations remain unchanged.
 
 ## 4. Documentation And Release Proof
 
-- [x] 4.1 Update the owning telemetry architecture view and user documentation for read-only benchmark validation, typed report ownership, CLI/MCP/TUI flow, provenance, compatibility, limitations, and provider-counter separation; render every changed Mermaid block and inspect semantic and visual correctness.
+- [x] 4.1 Update the owning telemetry architecture view and user documentation for read-only benchmark validation, typed report ownership, structured CLI/MCP flow, TUI exclusion, provenance, compatibility, limitations, and provider-counter separation; render every changed Mermaid block and inspect semantic and visual correctness.
 - [x] 4.2 Run focused core/service/DB-read-only/CLI/MCP/TUI tests, `cargo fmt --check`, workspace check, Clippy, full tests, doc tests, rustdoc, dependency policy, strict OpenSpec validation, ProjectAtlas lint, and IssueOps synchronization; capture and visually inspect a real normal-width dashboard render.
-- [x] 4.3 Inspect and disposition all live PR review threads plus Codex and Dependabot feedback on the exact head, then synchronize the completed OpenSpec and GitHub issue checklists before merge and closure.
+- [ ] 4.3 Inspect and disposition all live PR review threads plus Codex and Dependabot feedback on the exact head, then synchronize the completed OpenSpec and GitHub issue checklists before merge and closure.

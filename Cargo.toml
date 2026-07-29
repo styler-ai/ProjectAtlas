@@ -84,6 +84,7 @@ getrandom = "0.4.3"
 ignore = "0.4"
 jsonc-parser = { version = "0.32", features = ["serde"] }
 landlock = "=0.4.5"
+libloading = "=0.9.0"
 nix = { version = "=0.31.3", default-features = false, features = [
     "fs",
     "process",
@@ -123,6 +124,7 @@ tree-sitter-java = "=0.23.5"
 tree-sitter-javascript = "=0.25.0"
 tree-sitter-kotlin-ng = "=1.1.0"
 tree-sitter-language-pack = { version = "=1.13.2", default-features = false, features = ["dynamic-loading"] }
+tree-sitter-language = "=0.1.7"
 tree-sitter-objc = "=3.0.2"
 tree-sitter-python = "=0.25.0"
 tree-sitter-rust = "=0.24.2"

@@ -10,11 +10,17 @@ use projectatlas_core::optional_parser_protocol::PARSER_WINDOWS_BROKER_ADMISSION
 use projectatlas_core::optional_parser_protocol::{
     PARSER_FRAME_HEADER_BYTES, PARSER_MAX_STDERR_BYTES, PARSER_PROTOCOL_VERSION,
     ParserArtifactIdentity, ParserCompletion, ParserCompletionEvidence, ParserContainmentKind,
-    ParserControl, ParserFrame, ParserFrameHeader, ParserFrameKind, ParserLanguageIdentity,
-    ParserProgress, ParserProgressStage, ParserReady, ParserRequest, ParserRequestIdentity,
-    ParserResponseIdentity, ParserSessionIdentity, ParserSyntaxKind,
-    decode_parser_request_for_session, decode_parser_session_open, encode_parser_control,
+    ParserControl, ParserFailure, ParserFailureCode, ParserFrame, ParserFrameHeader,
+    ParserFrameKind, ParserLanguageIdentity, ParserProgress, ParserProgressStage, ParserReady,
+    ParserRequest, ParserRequestIdentity, ParserResponseIdentity, ParserSessionIdentity,
+    ParserSyntaxKind, decode_parser_request_for_session, decode_parser_session_open,
+    encode_parser_control,
 };
+
+#[allow(dead_code, unused_imports)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[path = "../src/parser_linux_authority.rs"]
+mod parser_linux_authority;
 
 #[allow(dead_code, unused_imports)]
 #[path = "../src/parser_supervisor.rs"]
@@ -162,7 +168,13 @@ fn hostile_peer(scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let request_bytes = read_frame(&mut input)?;
+    let request_bytes = match read_frame(&mut input) {
+        Ok(bytes) => bytes,
+        Err(error) if scenario == "idle-close" && error.kind() == io::ErrorKind::UnexpectedEof => {
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
     let request = decode_parser_request_for_session(
         ParserFrame::decode_exact(&request_bytes)?,
         opening.session(),
@@ -212,11 +224,33 @@ fn hostile_peer(scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
         "completion-oversized" => {
             write_oversized_header(&mut output, ParserFrameKind::Completion)?;
+            thread::sleep(Duration::from_secs(5));
+        }
+        "failure-exit" => {
+            write_control(
+                &mut output,
+                &ParserControl::Failure(ParserFailure::new(
+                    ParserResponseIdentity::for_request(&request),
+                    ParserFailureCode::ParseRejected,
+                )),
+            )?;
         }
         "stderr-flood" => {
             diagnostic.write_all(&vec![b'x'; PARSER_MAX_STDERR_BYTES + 1])?;
             diagnostic.flush()?;
             thread::sleep(Duration::from_secs(5));
+        }
+        "stderr-completion" => {
+            diagnostic.write_all(b"bounded diagnostic")?;
+            diagnostic.flush()?;
+            write_completion(
+                &mut output,
+                &request,
+                request.source().byte_len(),
+                1,
+                1,
+                "source_file",
+            )?;
         }
         "limit-source" => write_completion(
             &mut output,
@@ -250,7 +284,7 @@ fn hostile_peer(scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
             1,
             "source_file_with_a_deliberately_long_but_valid_name",
         )?,
-        "healthy" => write_completion(
+        "healthy" | "idle-close" => write_completion(
             &mut output,
             &request,
             request.source().byte_len(),
@@ -260,7 +294,7 @@ fn hostile_peer(scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
         )?,
         _ => {}
     }
-    if scenario == "healthy" {
+    if matches!(scenario, "healthy" | "idle-close") {
         io::copy(&mut input, &mut io::sink())?;
     }
     Ok(())

@@ -4,6 +4,14 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 #[cfg(feature = "optional-parser-supervisor")]
 use projectatlas_cli::optional_parser_lifecycle::OPTIONAL_PARSER_PACK_SELECTION_POLICY_PATH;
+#[cfg(all(debug_assertions, feature = "optional-parser-supervisor"))]
+use projectatlas_cli::optional_parser_lifecycle::OptionalParserPackLifecycle;
+#[cfg(all(debug_assertions, feature = "optional-parser-supervisor"))]
+use projectatlas_cli::parser_supervisor::{
+    ParserSupervisorError, install_currentness_test_hook, install_pre_spawn_test_hook,
+};
+#[cfg(all(debug_assertions, feature = "optional-parser-supervisor"))]
+use projectatlas_core::IndexCancellation;
 use projectatlas_core::PurposeSource;
 use projectatlas_core::graph::{
     Completeness, ConfidenceClass, CoverageRecord, CoverageScope, CoverageState, EntitySelector,
@@ -12,12 +20,20 @@ use projectatlas_core::graph::{
     RepositoryNodePath,
 };
 use projectatlas_core::language::{BROAD_SOURCE_EXTENSIONS, detect_language_for_path};
+#[cfg(all(
+    debug_assertions,
+    feature = "optional-parser-supervisor",
+    target_os = "linux"
+))]
+use projectatlas_core::optional_parser_pack::OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION;
 #[cfg(feature = "optional-parser-supervisor")]
 use projectatlas_core::optional_parser_pack::{
     OPTIONAL_PARSER_PACK_ID, OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES,
     OPTIONAL_PARSER_PACK_MAX_ARCHIVE_BYTES, OPTIONAL_PARSER_PACK_MAX_EXPANDED_BYTES,
     OPTIONAL_PARSER_PACK_MAX_FILE_BYTES, OPTIONAL_PARSER_PACK_MAX_FILE_ENTRIES, PackRelativePath,
 };
+#[cfg(all(debug_assertions, feature = "optional-parser-supervisor"))]
+use projectatlas_core::optional_parser_protocol::{PARSER_MAX_OUTPUT_BYTES, ParserRequestLimits};
 use projectatlas_core::relation_capabilities::{RELATION_FAMILY_CAPABILITIES, RelationFamilyState};
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
@@ -45,6 +61,11 @@ use std::io::{self, BufRead, BufReader, Read as IoRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command as StdCommand, Stdio};
 use std::sync::mpsc::{self, Receiver};
+#[cfg(all(debug_assertions, feature = "optional-parser-supervisor"))]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 use yaml_rust2::{Yaml, YamlLoader};
@@ -66,6 +87,7 @@ const PARENT_CANARY_FILE_NAME: &str = "parent-canary.txt";
 const ATLAS_DIR_NAME: &str = ".projectatlas";
 const GITHOOKS_DIR_NAME: &str = ".githooks";
 const ISSUE_TEMPLATE_DIR_NAME: &str = "ISSUE_TEMPLATE";
+const VERSIONS_DIR_NAME: &str = "versions";
 const PRE_PUSH_HOOK_FILE_NAME: &str = "pre-push";
 const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
@@ -1061,6 +1083,110 @@ fn optional_parser_pack_real_archive_normal_runtime_lifecycle() -> Result<(), Bo
         return Err(io::Error::other("parser-pack enable did not persist selection").into());
     }
 
+    #[cfg(debug_assertions)]
+    {
+        const CURRENTNESS_DELAY: Duration = Duration::from_secs(2);
+        const PRE_SPAWN_DELAY: Duration = Duration::from_secs(14);
+        const PRE_READY_NO_PROGRESS: Duration = Duration::from_secs(15);
+
+        let lifecycle = OptionalParserPackLifecycle::new(&repo, Some(storage))?;
+        let mut runtime_selection = lifecycle
+            .resolve_selected_pack()?
+            .ok_or_else(|| io::Error::other("enabled parser pack did not resolve"))?;
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+            let artifact_manifest = logical_pack_root
+                .join(VERSIONS_DIR_NAME)
+                .join(OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION)
+                .join(&artifact)
+                .join("artifact-manifest.json");
+            let before = fs::metadata(&artifact_manifest)?;
+            let original = before.permissions();
+            let epoch = |metadata: &fs::Metadata| {
+                (
+                    metadata.len(),
+                    metadata.modified().ok(),
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            };
+            let before_epoch = epoch(&before);
+            let drift_deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let mut changed = original.clone();
+                changed.set_mode(original.mode() ^ 0o200);
+                fs::set_permissions(&artifact_manifest, changed)?;
+                fs::set_permissions(&artifact_manifest, original.clone())?;
+                if epoch(&fs::metadata(&artifact_manifest)?) != before_epoch {
+                    break;
+                }
+                if Instant::now() >= drift_deadline {
+                    return Err(io::Error::other(
+                        "parser-pack manifest did not enter a new Unix change epoch",
+                    )
+                    .into());
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        let currentness_seen = Arc::new(AtomicBool::new(false));
+        let currentness_hook_seen = Arc::clone(&currentness_seen);
+        install_currentness_test_hook(move || {
+            currentness_hook_seen.store(true, Ordering::Release);
+            thread::sleep(CURRENTNESS_DELAY);
+        })?;
+        let pre_spawn_seen = Arc::new(AtomicBool::new(false));
+        let pre_spawn_hook_seen = Arc::clone(&pre_spawn_seen);
+        install_pre_spawn_test_hook(move || {
+            pre_spawn_hook_seen.store(true, Ordering::Release);
+            thread::sleep(PRE_SPAWN_DELAY);
+        })?;
+
+        let parser_source = fs::read(&optional_source)?;
+        let request_limits = ParserRequestLimits::new(PARSER_MAX_OUTPUT_BYTES, 100_000, 512)?;
+        let cumulative_result = runtime_selection.supervisor_mut().parse(
+            "awk",
+            &parser_source,
+            request_limits,
+            Instant::now() + Duration::from_secs(60),
+            PRE_READY_NO_PROGRESS,
+            &IndexCancellation::new(),
+        );
+        if !currentness_seen.load(Ordering::Acquire) || !pre_spawn_seen.load(Ordering::Acquire) {
+            return Err(io::Error::other(
+                "real parser-pack cumulative epoch did not traverse both bounded phases",
+            )
+            .into());
+        }
+        match cumulative_result {
+            Err(ParserSupervisorError::NoProgress {
+                phase: "process launch",
+            }) => {}
+            other => {
+                return Err(io::Error::other(format!(
+                    "real parser-pack cumulative epoch returned the wrong result: {other:?}"
+                ))
+                .into());
+            }
+        }
+        runtime_selection.supervisor_mut().shutdown()?;
+        runtime_selection.supervisor_mut().parse(
+            "awk",
+            &parser_source,
+            request_limits,
+            Instant::now() + Duration::from_secs(30),
+            Duration::from_secs(10),
+            &IndexCancellation::new(),
+        )?;
+        runtime_selection.supervisor_mut().shutdown()?;
+        drop(runtime_selection);
+    }
+
     projectatlas_json(&repo, &host_state, &[OsStr::new("scan")])?;
     let store = AtlasStore::open_read_only(&db)?;
     let selected_node = store
@@ -1191,7 +1317,9 @@ fn optional_parser_pack_real_archive_normal_runtime_lifecycle() -> Result<(), Bo
     require_json_string(&updated, &["selected", "artifact"], &replacement_artifact)?;
     require_json_string(&updated, &["rollback", "artifact"], &artifact)?;
     let release_version = json_string_at(&updated, &["selected", "projectatlas_version"])?;
-    let versions_root = logical_pack_root.join("versions").join(release_version);
+    let versions_root = logical_pack_root
+        .join(VERSIONS_DIR_NAME)
+        .join(release_version);
     if !versions_root.join(&artifact).is_dir()
         || !versions_root.join(&replacement_artifact).is_dir()
     {
@@ -3163,6 +3291,11 @@ fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<
     )?;
     for required in [
         "For task-directed work in an existing indexed repository",
+        "On first use in each distinct project root",
+        "Every project root owns its own `.projectatlas/projectatlas.db`",
+        "**Fresh existing index:** make no indexing call",
+        "**Changed files:** use `atlas_watch_once`",
+        "**Deep symbol/graph rebuild:** use `atlas_symbols_build` only when",
         "`atlas_session_brief` once at task-oriented startup",
         "`atlas_session_brief` once at task-oriented startup with `query`, `project_path` when needed, and `compact: true`",
         "start with `file_limit: 3`, `folder_limit: 3`, `blocker_limit: 1`, and `purpose_limit: 1`",
@@ -3177,6 +3310,13 @@ fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<
         "`connections_truncated` describes the compact sample",
         "Do not guess a symbol line or other disambiguator",
         "Fall back to `atlas_overview` only when the session-brief MCP tool is unavailable",
+        "partition a large queue into bounded, non-overlapping batches",
+        "becomes `approved`, `source: agent`, and `agent_reviewed: true` immediately",
+        "add one durable pointer to the nearest harness instruction file",
+        "a runtime `version` matching the selected plugin release",
+        "resolve the installer from the installed, version-matched ProjectAtlas plugin root",
+        "-ProjectRoot \"<target-project-root>\"",
+        "Do not assume an unrelated target repository contains `plugins/projectatlas/scripts`",
     ] {
         if !skill.contains(required) {
             return Err(io::Error::other(format!(
@@ -3523,6 +3663,14 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     let workflow_dir = workspace_root.join(".github").join("workflows");
     let release_workflow = fs::read_to_string(workflow_dir.join("release.yml"))?;
     let auto_release_workflow = fs::read_to_string(workflow_dir.join("03-auto-release.yml"))?;
+    let optional_parser_handoff_resolver = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("scripts")
+            .join("resolve-optional-parser-handoff.py"),
+    )?;
+    let optional_parser_workflow =
+        fs::read_to_string(workflow_dir.join("optional-parser-pack.yml"))?;
     let ci_workflow = fs::read_to_string(workflow_dir.join("ci.yml"))?;
     let dependabot = fs::read_to_string(workspace_root.join(".github").join("dependabot.yml"))?;
     let deny = fs::read_to_string(workspace_root.join("deny.toml"))?;
@@ -3903,6 +4051,73 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
             .into());
         }
     }
+    for required in [
+        "parser_pack_run_id:",
+        "parser-pack-assets:",
+        "optional-parser-pack-release-assets",
+        "optional-parser-proof-inputs.py",
+        "github-token: ${{ github.token }}",
+        "run-id: ${{ inputs.parser_pack_run_id }}",
+        "verify-optional-parser-release-assets.py",
+        "projectatlas-parser-packs",
+        "MCP composition integrity",
+    ] {
+        if !release_workflow.contains(required) {
+            return Err(io::Error::other(format!(
+                "release workflow is missing optional-parser handoff guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all'",
+        "optional-parser-pack-release-assets",
+        "cargo-layer-$target.json",
+        "projectatlas-broad-parser-$target.tar.zst",
+    ] {
+        if !optional_parser_workflow.contains(required) {
+            return Err(io::Error::other(format!(
+                "optional-parser workflow is missing clean release handoff guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "git rev-parse HEAD^2",
+        "resolve-optional-parser-handoff.py",
+        "--field parser_pack_run_id=",
+    ] {
+        if !auto_release_workflow.contains(required) {
+            return Err(io::Error::other(format!(
+                "auto-release workflow is missing input-bound optional-parser handoff guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "--paginate",
+        "--slurp",
+        "optional-parser-pack-release-assets",
+        "optional-parser-proof-inputs.py",
+    ] {
+        if !optional_parser_handoff_resolver.contains(required) {
+            return Err(io::Error::other(format!(
+                "optional-parser handoff resolver is missing pagination or eligibility guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for rejected in [
+        "head_sha=$promotion_sha",
+        "Optional-parser handoff tree differs from the release tree",
+    ] {
+        if auto_release_workflow.contains(rejected) || release_workflow.contains(rejected) {
+            return Err(io::Error::other(format!(
+                "release workflows retain SHA-only optional-parser proof {rejected:?}"
+            ))
+            .into());
+        }
+    }
     if !auto_release_workflow.contains("permissions:\n  contents: read\n  actions: write") {
         return Err(io::Error::other(
             "auto-release workflow must narrow permissions to contents read and actions write",
@@ -4024,6 +4239,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --no-deps --all-features --locked",
         "cargo deny --locked --all-features check -D warnings",
         "issue-checklists.py --self-test",
+        "test-optional-parser-proof-inputs.py",
     ] {
         if !hook.contains(required) || !workflow_docs.contains(required) {
             return Err(io::Error::other(format!(
@@ -4040,6 +4256,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled",
         "cargo test --doc --workspace --all-features --locked",
         "cargo deny --locked --all-features check -D warnings",
+        "test-optional-parser-proof-inputs.py",
         "--issue-map openspec/issue-map.json",
     ] {
         if !ci.contains(required) {
@@ -4065,6 +4282,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         || !release.contains(
             "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled",
         )
+        || !release.contains("test-optional-parser-proof-inputs.py")
     {
         return Err(io::Error::other(
             "release must retain milestone completion, ordinary gates, and a non-publishing package-proof mode",
@@ -4135,7 +4353,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "packaged-contract-runner-${{ matrix.suffix }}",
         "packaged-contract-runner-x86_64-pc-windows-msvc",
         "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE",
-        "needs: [prepublish-installer-smoke-unix, prepublish-installer-smoke-windows]",
+        "[prepublish-installer-smoke-unix, prepublish-installer-smoke-windows, parser-pack-assets]",
         "pattern: projectatlas-*",
     ] {
         if !release.contains(required) {
@@ -4153,7 +4371,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let windows_prepublish = release
         .split("  prepublish-installer-smoke-windows:")
         .nth(1)
-        .and_then(|tail| tail.split("  publish:").next())
+        .and_then(|tail| tail.split("  parser-pack-assets:").next())
         .ok_or_else(|| io::Error::other("release omitted the Windows prepublish job"))?;
     for (job, body) in [("Unix", unix_prepublish), ("Windows", windows_prepublish)] {
         for contract in [
@@ -7087,10 +7305,14 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .stdout(predicate::str::contains("With ProjectAtlas"))
         .stdout(predicate::str::contains("Saved by ProjectAtlas"))
         .stdout(predicate::str::contains(
-            "F I L E   R E A D S   A V O I D E D",
+            "N A V I G A T I O N   W O R K   A V O I D E D",
         ))
-        .stdout(predicate::str::contains("Observed"))
-        .stdout(predicate::str::contains("Modeled narrowing"))
+        .stdout(predicate::str::contains("File reads avoided"))
+        .stdout(predicate::str::contains("Observed:"))
+        .stdout(predicate::str::contains("Modeled:"))
+        .stdout(predicate::str::contains("Broad folder walks skipped").not())
+        .stdout(predicate::str::contains("Candidate files not opened").not())
+        .stdout(predicate::str::contains("source steps account for").not())
         .stdout(predicate::str::contains("S A V I N G S"))
         .stdout(predicate::str::contains("S I G N A L"))
         .stdout(predicate::str::contains(
@@ -7103,6 +7325,7 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
             "C A L I B R A T I O N   &   N O T E S",
         ))
         .stdout(predicate::str::contains("Gross tokens: without").not())
+        .stdout(predicate::str::contains("REQUESTED BENCHMARK EVIDENCE").not())
         .stdout(predicate::str::contains("latest").not())
         .stdout(predicate::str::contains("Saved-token trends").not());
     Command::cargo_bin("projectatlas")?
@@ -8016,6 +8239,17 @@ fn agent_efficiency_cli_mcp_contract_is_typed_read_only_and_isolated() -> Result
 
     let partial = token_overview_json(&repo, &database, Some(AGENT_EFFICIENCY_PARTIAL_FILE))?;
     require_json_string(&partial, &["agent_efficiency", "state"], "partial")?;
+    let source_head = partial
+        .pointer("/agent_efficiency/artifact/candidate_source_head")
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("candidate source identity is missing"))?;
+    for key in ["candidate_functional_head", "candidate_checklist_head"] {
+        require_json_string(
+            &partial,
+            &["agent_efficiency", "artifact", key],
+            source_head,
+        )?;
+    }
     require_json_usize(
         &partial,
         &[
@@ -10142,7 +10376,11 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains("ProjectAtlas")
         || !stdout.contains("Token Impact")
         || !stdout.contains("T O T A L   T O K E N S   A V O I D E D")
-        || !stdout.contains("F I L E   R E A D S   A V O I D E D")
+        || !stdout.contains("N A V I G A T I O N   W O R K   A V O I D E D")
+        || !stdout.to_ascii_lowercase().contains("file reads avoided")
+        || stdout.contains("Broad folder walks skipped")
+        || stdout.contains("Candidate files not opened")
+        || stdout.contains("source steps account for")
         || !stdout.contains("S I G N A L")
         || !stdout.contains("purpose_review:")
         || !stdout.contains("failed: 0")

@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_navigation import (
+    AGENT_NAVIGATION_MEASUREMENT_INPUTS,
     aggregate_runs,
     append_checkpoint,
     build_command,
@@ -19,9 +20,10 @@ from agent_navigation import (
     parse_trace,
     projectatlas_mcp_contract,
     schedule,
-    validate_candidate_source,
+    validate_candidate_checkout,
     write_result,
 )
+from system_scale import committed_git_object_sha256
 
 
 MARKER = "BENCHMARK_SELF_AUDIT:"
@@ -356,9 +358,7 @@ class AgentNavigationHarnessTests(unittest.TestCase):
             )
             self.assertFalse((root / "result.json.tmp").exists())
 
-    def test_candidate_source_identity_is_exact_and_only_preregistration_is_dirty(
-        self,
-    ) -> None:
+    def test_candidate_checkout_requires_a_committed_lock_and_clean_tree(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             subprocess.run(["git", "init", "-q"], cwd=root, check=True)
@@ -372,25 +372,27 @@ class AgentNavigationHarnessTests(unittest.TestCase):
                 cwd=root,
                 check=True,
             )
-            tasks = (
-                root
-                / "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            subprocess.run(
+                ["git", "config", "core.autocrlf", "false"], cwd=root, check=True
             )
-            tasks.parent.mkdir(parents=True)
-            tasks.write_text("- [ ] 7.6 final benchmark\n", encoding="utf-8")
-            (root / "harness.py").write_text("candidate = True\n", encoding="utf-8")
+            for index, relative in enumerate(AGENT_NAVIGATION_MEASUREMENT_INPUTS):
+                path = root / relative
+                if relative == "docs/benchmarks/fixtures/mcp-composition":
+                    path /= "clean/src/lib.rs"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(f"measurement input {index}\n".encode())
             subprocess.run(["git", "add", "."], cwd=root, check=True)
             subprocess.run(
-                ["git", "commit", "-q", "-m", "checklist"], cwd=root, check=True
+                ["git", "commit", "-q", "-m", "lock inputs"],
+                cwd=root,
+                check=True,
             )
-            checklist_head = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=root, text=True
-            ).strip()
             preregistration = root / "preregistration.json"
             preregistered = {
-                "candidate": {
-                    "functional_head": "updated after candidate lock",
-                    "checklist_head": checklist_head,
+                "candidate": {"runtime_sha256": "locked"},
+                "measurement_inputs": {
+                    relative: committed_git_object_sha256(relative, root=root)
+                    for relative in AGENT_NAVIGATION_MEASUREMENT_INPUTS
                 },
                 "protocol": {"repeats": 3},
                 "rubric": {"small-clean": ["locked"]},
@@ -399,36 +401,47 @@ class AgentNavigationHarnessTests(unittest.TestCase):
                 json.dumps(preregistered, indent=2) + "\n", encoding="utf-8"
             )
             subprocess.run(
-                ["git", "add", preregistration.name], cwd=root, check=True
+                ["git", "add", "."], cwd=root, check=True
             )
             subprocess.run(
                 ["git", "commit", "-q", "-m", "lock preregistration"],
                 cwd=root,
                 check=True,
             )
-            head = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=root, text=True
-            ).strip()
-            preregistered["candidate"]["functional_head"] = head
-            preregistration.write_text(
-                json.dumps(preregistered, indent=2) + "\n", encoding="utf-8"
-            )
             with patch("agent_navigation.ROOT", root):
-                identity = validate_candidate_source(preregistered, preregistration)
-                self.assertEqual(identity["functional_head"], head)
+                identity = validate_candidate_checkout(preregistered, preregistration)
+                first_head = identity["checkout_head"]
+                self.assertEqual(
+                    identity["preregistration_path"], "preregistration.json"
+                )
+                metadata = root / "openspec/changes/release/tasks.md"
+                metadata.parent.mkdir(parents=True)
+                metadata.write_text("- [x] release\n", encoding="utf-8")
+                subprocess.run(["git", "add", "."], cwd=root, check=True)
+                subprocess.run(
+                    ["git", "commit", "-q", "-m", "metadata only"],
+                    cwd=root,
+                    check=True,
+                )
+                identity = validate_candidate_checkout(preregistered, preregistration)
+                self.assertNotEqual(identity["checkout_head"], first_head)
+                changed_input = root / AGENT_NAVIGATION_MEASUREMENT_INPUTS[0]
+                changed_input.write_text("changed methodology\n", encoding="utf-8")
+                subprocess.run(["git", "add", "."], cwd=root, check=True)
+                subprocess.run(
+                    ["git", "commit", "-q", "-m", "change measurement input"],
+                    cwd=root,
+                    check=True,
+                )
+                with self.assertRaisesRegex(ValueError, "measurement input changed"):
+                    validate_candidate_checkout(preregistered, preregistration)
                 preregistered["rubric"]["small-clean"] = ["changed"]
-                preregistration.write_text(
-                    json.dumps(preregistered, indent=2) + "\n", encoding="utf-8"
-                )
-                with self.assertRaisesRegex(ValueError, "changed outside"):
-                    validate_candidate_source(preregistered, preregistration)
+                with self.assertRaisesRegex(ValueError, "changed after"):
+                    validate_candidate_checkout(preregistered, preregistration)
                 preregistered["rubric"]["small-clean"] = ["locked"]
-                preregistration.write_text(
-                    json.dumps(preregistered, indent=2) + "\n", encoding="utf-8"
-                )
                 (root / "unexpected.txt").write_text("dirty\n", encoding="utf-8")
-                with self.assertRaisesRegex(ValueError, "dirty outside"):
-                    validate_candidate_source(preregistered, preregistration)
+                with self.assertRaisesRegex(ValueError, "dirty"):
+                    validate_candidate_checkout(preregistered, preregistration)
 
     def test_main_refuses_a_retained_journal_without_creating_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
