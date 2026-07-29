@@ -36,6 +36,8 @@ A generalized dependency graph was rejected because the existing proof boundarie
 
 OpenSpec, IssueOps, live review threads, branch topology, version policy, and release eligibility rerun after metadata-only changes. Expensive construction and behavior proof is reused only after those cheap gates show that no owning input changed.
 
+Full system-scale and agent-navigation campaigns are not construction or release gates. Standard CI and release keep their focused harness and artifact-integrity checks, but never execute the campaigns. If an owning input changes, the prior publication becomes historical or unavailable for that candidate; only an explicit user request authorizes a replacement run.
+
 ## Risks / Trade-offs
 
 - [A relevant path is omitted] → Use conservative owned path sets and treat unknown changes as invalidating.

@@ -2039,6 +2039,14 @@ reconsidered only if a measured package, installation, or platform ceiling fails
 
 #### CI Dependency-Layer Reuse And Clean Release Proof
 
+The full system-scale and agent-navigation campaigns sit outside automated
+validation and release orchestration. A routing-policy check keeps their
+entrypoints out of pre-push, standard CI, prepublication, merge, and release
+workflows. Those paths retain focused harness unit tests and artifact-integrity
+checks, but an input-incompatible campaign publication becomes historical or
+unavailable instead of triggering a run. Only an explicit user request starts a
+full campaign.
+
 The optional-pack workflow may reuse only sanitized Cargo dependency build state.
 An exact key binds the target, Rust and native toolchains, Cargo lockfile and
 manifests, and an explicit cache-policy ABI that changes only when reusable artifact

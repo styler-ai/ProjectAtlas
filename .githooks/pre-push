@@ -9,6 +9,7 @@ for git_variable in $(git rev-parse --local-env-vars); do
 done
 
 python3 docs/benchmarks/harness/mcp_composition.py --self-test
+python3 .github/scripts/verify-manual-benchmark-policy.py
 cargo fmt --all --check
 cargo check --workspace --all-targets --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings

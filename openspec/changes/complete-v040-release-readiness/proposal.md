@@ -13,7 +13,7 @@ ProjectAtlas v0.4.0 has completed its feature program, but review of the promoti
 - Restrict cross-root rendezvous evidence to exact external identities reached by the primary anchored traversal in the requested direction.
 - Bind every rendezvous database read to the earlier caller or service deadline and count serialized-equivalent federation state without retaining another encoded copy.
 - Correct the MCP composition evaluation's raw-input digest in both published representations and verify the binding directly.
-- Relock and rerun the system-scale and agent-navigation publications whenever later runtime, packaged-skill, MCP, relation-service, or repository-graph behavior invalidates their recorded candidate identities.
+- Keep the system-scale and agent-navigation publications honest about their measured identities, but make both full campaigns manual-only: standard CI and release proceed without rerunning an invalidated publication, which becomes historical or unavailable for the candidate unless the user explicitly requests a new campaign.
 - Preserve cumulative token-impact history through the released v0.3.26-to-v0.4.0 database upgrade and every later compatible migration.
 - Keep the human token-impact TUI truthful and focused on persisted impact data, with source-reconciled file reads, broad-folder-walk and candidate-open activity/token-impact charts, no benchmark-comparison panel, and a bounded connected and clustered static preview of real resolved repository-graph relations in wide terminals.
 - Prepare the `dev`-to-`main` promotion while keeping `main` and publication untouched until readiness is complete.
@@ -29,7 +29,7 @@ ProjectAtlas v0.4.0 has completed its feature program, but review of the promoti
 
 - `cross-repository-intelligence`: Require federated rendezvous evidence to remain inside the primary anchored and directed traversal, the request deadline, and the aggregate intermediate-state ceiling.
 - `language-intelligence-registry`: Require supported optional-parser archives to ship only through an exact clean-run release handoff.
-- `repository-intelligence-benchmarks`: Require published evaluation digests to match their named raw input and published system-scale and agent-navigation results to measure the final functional release candidate.
+- `repository-intelligence-benchmarks`: Require published evaluation digests to match their named raw input and keep full system-scale and agent-navigation campaigns manual-only rather than standard release gates.
 - `token-telemetry`: Preserve cumulative usage history across compatible upgrades and require every human-dashboard value to derive from persisted telemetry or be explicitly unavailable.
 - `token-tui-dashboard`: Remove release/control comparisons and add a bounded connected, clustered, non-interactive wide-layout atlas drawn only from resolved relations in the active project database.
 

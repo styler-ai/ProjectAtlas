@@ -92,6 +92,9 @@ jobs:
       - name: MCP composition integrity
         run: python3 docs/benchmarks/harness/mcp_composition.py --self-test
 
+      - name: Manual-only full benchmark policy
+        run: python3 .github/scripts/verify-manual-benchmark-policy.py
+
       - name: Verify version
         run: |
           requested="$RELEASE_VERSION"

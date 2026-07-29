@@ -22,7 +22,7 @@ The user also requires branch, worktree, and external ProjectAtlas checkout clea
 - Publish both supported optional-parser archives only after binding them to one clean all-platform run and unchanged behavior-relevant release inputs.
 - Keep federated rendezvous evidence inside the primary anchor/direction result without changing SQLite schema or query ownership.
 - Carry the same caller-or-service deadline into rendezvous SQLite reads and measure retained federation state without an additional encoded buffer.
-- Retain published system-scale and agent-navigation campaigns when their behavior-relevant inputs and measured artifact identities remain valid, and rerun only affected campaigns.
+- Retain published system-scale and agent-navigation campaigns when their behavior-relevant inputs and measured artifact identities remain valid; otherwise label them historical or unavailable and release without rerunning unless the user explicitly requests a new campaign.
 - Preserve cumulative token-impact history when a released v0.3.26 database is upgraded to v0.4.0 and through later compatible migrations.
 - Keep the token-impact TUI focused on reconciled persisted impact data, including the observed and modeled file-read split plus broad-folder-walk and candidate-open activity/token-impact charts; keep comparison evidence in structured CLI/MCP output even when an explicit benchmark artifact is supplied; and use only real resolved SQLite relations for its bounded connected, clustered, depth-cued static wide-layout atlas.
 - Keep `main`, tags, and GitHub releases untouched until all prepublication evidence is green.
@@ -61,7 +61,7 @@ Both the human-readable and machine-readable MCP composition evaluations name th
 
 The system-scale and agent-navigation preregistrations bind the behavior they measure plus their runtime, skill, tool-inventory, source-state, platform, and environment identities. Commit SHAs remain provenance only. Benchmark lock, raw-result, evaluation, landing-copy, and finite checklist commits do not invalidate a publication by themselves.
 
-Any later change to an owning behavior or measured artifact identity invalidates the affected publication and requires a fresh lock and rerun. Unrelated behavior or metadata changes reuse the passed publication. Reusing the existing harnesses and publication formats was selected over a new benchmark framework.
+Any later change to an owning behavior or measured artifact identity invalidates the affected publication for the candidate. Standard CI and release label that publication historical or unavailable and continue without a replacement run. Only an explicit user request authorizes a fresh lock and full campaign; focused harness unit tests and artifact-integrity checks remain standard gates. Reusing the existing harnesses and publication formats was selected over a new benchmark framework.
 
 ### Separate provenance from proof invalidation
 
@@ -112,7 +112,7 @@ Until readiness is complete, `main`, tags, and releases remain untouched. If any
 - **A rendezvous family query runs past the service deadline** → Bind every database call to the existing caller-or-service request control.
 - **Exact federation accounting doubles retained memory while measuring it** → Stream serialized-equivalent bytes into the existing counter without retaining another encoding.
 - **Published MCP composition metadata names stale input** → Compute its raw input SHA-256 and compare both published representations in the release gate.
-- **Published system-scale or agent-navigation results measure changed behavior** → Bind both campaigns to their owning behavior plus measured runtime, skill, tool, and platform identities; invalidate and rerun only the affected campaign.
+- **Published system-scale or agent-navigation results measure changed behavior** → Bind both campaigns to their owning behavior plus measured runtime, skill, tool, and platform identities; label an invalidated result historical or unavailable and release without rerunning unless the user explicitly requests it.
 - **A compatible upgrade resets cumulative token history** → Compare released v0.3.26 overview and trend totals before migration, after migration, and after reopen; require atomic rollback on invalid predecessor rows.
 - **The dashboard shows plausible but non-authoritative values** → Render numeric fields from the persisted report object, assert arithmetic and labels against it, and show unavailable state instead of fallback values.
 - **The miniature atlas implies complete graph analysis or consumes unbounded state** → Read only resolved rows through existing indexed bounded queries, cap nodes and edges, label the static preview, and keep the full explorer in #357.
@@ -129,7 +129,7 @@ Until readiness is complete, `main`, tags, and releases remain untouched. If any
 3. Complete and close #341 after its Linux and Windows empty-cache proof and land its reconciled checklist state.
 4. Land the supported optional-parser release handoff, anchored and deadline-bound federation filtering with allocation-free byte accounting, benchmark digest correction, focused tests, specs, and architecture diagram.
 5. Prove released-schema telemetry preservation and finish the truthful token-impact TUI plus its bounded live graph preview and visual review.
-6. Merge all remaining readiness artifacts into `dev`, retain or rerun each benchmark according to its behavior-relevant inputs and measured artifact identities, then lock the corrected release candidate.
+6. Merge all remaining readiness artifacts into `dev`, retain valid benchmark publications or label invalidated ones historical or unavailable without rerunning them, then lock the corrected release candidate.
 7. Run the complete local gates, `01-CI`, clean optional-parser proof when its inputs changed, and `02-Release` with `prepublish_only=true` and an input-compatible clean handoff.
 8. Reconcile #311 and mirror the GitHub checklist, then rerun cheap current-state gates.
 9. Close #311 after strict OpenSpec, IssueOps, ProjectAtlas low lint, review checks, applicable CI, and the reusable or refreshed clean optional-parser handoff pass; then pass milestone IssueOps.

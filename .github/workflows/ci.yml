@@ -74,6 +74,9 @@ jobs:
             --root . \
             --issue-map openspec/issue-map.json
 
+      - name: Manual-only full benchmark policy
+        run: python3 .github/scripts/verify-manual-benchmark-policy.py
+
       - name: Codex PR review thread gate
         if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment'
         env:

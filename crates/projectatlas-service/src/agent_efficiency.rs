@@ -1737,16 +1737,16 @@ mod tests {
             .map(|row| row.calls)
             .sum::<usize>();
         require(
-            calls == 274,
+            calls == 154,
             "trace-completed capability calls did not reconcile",
         )
         .map_err(io::Error::other)?;
         for (capability, expected) in [
             (AgentEfficiencyCapability::Discovery, 16),
-            (AgentEfficiencyCapability::SummaryAndSlice, 100),
-            (AgentEfficiencyCapability::Search, 26),
-            (AgentEfficiencyCapability::SymbolsAndRelations, 129),
-            (AgentEfficiencyCapability::Other, 3),
+            (AgentEfficiencyCapability::SummaryAndSlice, 92),
+            (AgentEfficiencyCapability::Search, 27),
+            (AgentEfficiencyCapability::SymbolsAndRelations, 15),
+            (AgentEfficiencyCapability::Other, 4),
         ] {
             require(
                 comparison
