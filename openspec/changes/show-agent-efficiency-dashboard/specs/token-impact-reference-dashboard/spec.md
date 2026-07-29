@@ -1,51 +1,53 @@
 ## ADDED Requirements
 
-### Requirement: Agent Efficiency Comparison Remains Visually Distinct
-The token overview TUI SHALL render explicitly requested validated benchmark evidence in a bounded agent-efficiency panel that is visually and semantically separate from observed and modeled live telemetry. The normal no-artifact dashboard SHALL remain focused on live token impact and SHALL omit release-version and plain-control comparisons.
+### Requirement: Agent Efficiency Comparison Stays Out Of The Human Overview
+The token overview TUI SHALL render only live token-impact and repository context from the active project. Validated benchmark comparison state SHALL remain available to structured CLI JSON/TOON and MCP consumers, but SHALL NOT add a panel, row, label, value, reason, or reserved space to the Ratatui overview.
 
-#### Scenario: Compatible or partial evidence is available
+#### Scenario: Compatible or partial evidence is attached
 - **WHEN** `projectatlas token --view tui --benchmark-results <path>` receives validated benchmark comparison rows
-- **THEN** the dashboard SHALL show the comparison state and artifact identity
-- **AND** it SHALL show distinct frozen-v0.3.26 and plain-control rows with matched and failed trial counts
-- **AND** it SHALL NOT add benchmark values to `tokens_avoided` or `likely_file_reads_avoided`.
+- **THEN** the dashboard SHALL omit the comparison state, artifact identity, frozen-v0.3.26 row, and plain-control row
+- **AND** its human layout and rendered live values SHALL match the same overview without attached benchmark evidence
+- **AND** the benchmark values SHALL NOT alter `tokens_avoided`, `likely_file_reads_avoided`, source rows, or composition.
 
 #### Scenario: No evidence is requested
 - **WHEN** no benchmark path is supplied and comparison state is unavailable
-- **THEN** the dashboard SHALL omit the comparison panel
-- **AND** the live token-impact hierarchy SHALL not reserve empty comparison space.
+- **THEN** the dashboard SHALL render the same live-only hierarchy
+- **AND** it SHALL reserve no comparison space.
 
-#### Scenario: Requested evidence is invalid
-- **WHEN** an explicitly requested comparison is failed or incompatible
-- **THEN** the dashboard SHALL show that explicit state and a bounded reason
-- **AND** it SHALL NOT render fabricated zero-valued efficiency rows or savings percentages.
+#### Scenario: Requested evidence is failed or incompatible
+- **WHEN** an explicitly requested comparison produces a typed failed or incompatible state
+- **THEN** the TUI SHALL remain live-only
+- **AND** structured output SHALL retain the bounded state and reason without fabricating zero-valued efficiency rows or savings percentages.
 
-### Requirement: Comparison Layout Preserves The Accepted Dashboard
-The agent-efficiency panel SHALL preserve the accepted token-impact hierarchy, semantic palette, terminal-background behavior, trend mode, and compact-width contract.
+### Requirement: The Live Dashboard Preserves Meaningful Navigation Charts
+The human overview SHALL preserve the accepted token-impact hierarchy, semantic palette, terminal-background behavior, trend mode, and compact-width contract. Its navigation-work section SHALL present file reads avoided, broad folder walks skipped, and candidate files not opened as distinct persisted measures.
 
 #### Scenario: Normal-width overview renders
 - **WHEN** the overview renders at the canonical normal width
-- **THEN** the existing headline, file-read, composition, signal, source, calibration, and footer sections SHALL retain their accounting and semantic roles
-- **AND** the agent-efficiency panel SHALL show total calls, broad/full reads, net navigation context, runtime, and workload break-even without hidden overflow.
+- **THEN** file reads avoided SHALL show the exact observed and modeled split with proportional bars
+- **AND** broad folder walks and candidate files not opened SHALL each show an activity-share bar against reconciled persisted source steps
+- **AND** each SHALL show a token-impact-share bar against reconciled tokens avoided
+- **AND** exact activity and token values SHALL match the source table below.
 
 #### Scenario: Compact-width overview renders
 - **WHEN** the overview renders at 80 columns
-- **THEN** comparison state, both baseline identities, matched/failed trials, and the principal call/read/context result SHALL remain visible
-- **AND** the layout SHALL use bounded short labels rather than truncating into adjacent columns.
+- **THEN** all three navigation-work outcomes, exact values, percentages, and proportional bars SHALL remain inside the dashboard bounds
+- **AND** labels SHALL shorten without changing their source meaning.
 
 #### Scenario: Trend mode is selected
 - **WHEN** a user requests the dedicated token trend dashboard
 - **THEN** trend mode SHALL remain unchanged
-- **AND** it SHALL NOT duplicate the agent-efficiency comparison panel.
+- **AND** it SHALL NOT add benchmark comparison content.
 
-### Requirement: Dashboard Values Come From The Typed Report
-The Ratatui dashboard SHALL render comparison values and states from the authoritative typed token overview and SHALL NOT parse benchmark JSON or maintain independent comparison arithmetic.
+### Requirement: Dashboard Values Come From The Typed Live Report
+The Ratatui dashboard SHALL render live values from the authoritative typed token overview and SHALL NOT parse benchmark JSON or maintain independent comparison arithmetic.
 
-#### Scenario: Ratatui buffer tests render representative states
-- **WHEN** tests render the hidden no-artifact state plus explicitly requested compatible, partial, failed, and incompatible comparison reports
-- **THEN** labels, semantic styles, bounded values and reasons, absent values, failed counts, normal layout, and compact layout SHALL match the typed values
-- **AND** existing conservative token and file-read equations SHALL continue to reconcile.
+#### Scenario: Ratatui buffer tests attach representative comparison states
+- **WHEN** tests render unavailable, compatible, partial, failed, and incompatible comparison reports at compact, normal, and wide widths
+- **THEN** attached comparison state SHALL NOT alter the human buffer
+- **AND** existing conservative token, file-read, source-step, and source-token equations SHALL continue to reconcile.
 
 #### Scenario: Real visual review is performed
 - **WHEN** the implementation is ready for acceptance
-- **THEN** a real normal-width dashboard render SHALL be compared to the approved token-impact reference
-- **AND** the new panel SHALL remain readable without weakening the existing visual hierarchy.
+- **THEN** real 80-, 140-, and 200-column dark, light, and terminal-background renders SHALL be compared to the approved token-impact reference
+- **AND** the navigation-work charts, source table, footer, and optional wide atlas SHALL remain readable and bounded.

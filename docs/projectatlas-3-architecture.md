@@ -2476,9 +2476,9 @@ the existing token overview with CLI `--benchmark-results <path>` or MCP
 `benchmark_results`. The selected project's SQLite database remains
 authoritative only for observed and modeled live usage; ProjectAtlas never
 copies the benchmark into SQLite or creates a cache, sidecar, telemetry event,
-or background loader for it. The normal no-artifact Ratatui dashboard omits the
-comparison completely; an explicit benchmark path adds one bounded panel without
-changing any live token-impact total.
+or background loader for it. The Ratatui dashboard always omits the comparison
+completely; an explicit benchmark path populates the structured CLI JSON/TOON
+and MCP report without changing the human layout or any live token-impact total.
 
 ```mermaid
 sequenceDiagram
@@ -2487,7 +2487,8 @@ sequenceDiagram
     participant DB as projectatlas.db
     participant Artifact as Benchmark JSON
     participant Report as projectatlas-core TokenOverview
-    participant Adapters as JSON, TOON, MCP, and Ratatui
+    participant Structured as JSON, TOON, and MCP
+    participant TUI as Ratatui live overview
 
     Request->>Service: Optional repository-relative benchmark path
     Service->>DB: Read bounded live telemetry snapshot
@@ -2518,10 +2519,12 @@ sequenceDiagram
     opt typed report completed
         Service->>DB: Revalidate captured project binding
         Service->>Report: Return one typed overview
-        Report-->>Adapters: Identical agent_efficiency values
+        Report-->>Structured: Typed overview including agent_efficiency
+        Report-->>TUI: Live token-impact fields only
     end
     Note over Artifact,DB: Benchmark evidence never enters SQLite
-    Note over Report,Adapters: Provider counters remain descriptive-only and non-causal
+    Note over Report,Structured: Provider counters remain descriptive-only and non-causal
+    Note over Report,TUI: Comparison state never changes TUI cells
 ```
 
 `projectatlas-service` owns the trust boundary. It resolves the requested path
@@ -2566,8 +2569,9 @@ identities. It does not expose local paths, prompts, answers, or raw traces.
 
 `projectatlas-core` owns the closed comparison enums and the single
 backward-compatible defaulted `TokenOverview.agent_efficiency` field. CLI
-JSON/TOON, MCP, and Ratatui render that same typed overview and perform no
-independent parsing or arithmetic. Capability rows report trace-completed
+JSON/TOON and MCP serialize that field from the same typed overview; Ratatui
+selects only live token-impact fields and performs no comparison parsing or
+arithmetic. Capability rows report trace-completed
 ProjectAtlas MCP calls and emitted bytes by discovery, summary/slice, search,
 symbols/relations, or bounded `other` responsibility. Provider input,
 cached-input, output, and reasoning counters remain descriptive-only and never
@@ -2580,6 +2584,14 @@ collection capped before projection. There is no cache, worker pool, SQLite
 write, schema or migration, retention or WAL/checkpoint policy, query-plan
 change, or persistent-size growth. Omitting the path preserves the existing
 fast token overview.
+
+The live navigation section uses the same reconciled source rows as the source
+ledger below it. File reads retain their exact observed summary/slice and
+search-modeled split. Broad folder walks skipped and candidate files not opened
+each show an activity bar against all persisted source steps and a separate
+token-impact bar against reconciled `tokens_avoided`; therefore a rare but
+high-impact source can appear small in activity and dominant in avoided tokens
+without any bar being normalized to an uninformative 100%.
 
 Token accounting model:
 

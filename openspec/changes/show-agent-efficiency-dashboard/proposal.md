@@ -1,13 +1,13 @@
 ## Why
 
-ProjectAtlas v0.4 now has a reproducible three-arm navigation benchmark, but the existing token report cannot show that comparison without mixing controlled evidence into live telemetry. Users need one typed, honest view that keeps observed and modeled session accounting separate from a validated benchmark comparison.
+ProjectAtlas v0.4 now has a reproducible three-arm navigation benchmark, but controlled comparison evidence must not crowd or visually compete with the live human token-impact overview. Agents need one typed, honest structured view that keeps observed and modeled session accounting separate from a validated benchmark comparison.
 
 ## What Changes
 
 - Add an optional, bounded, read-only benchmark-result input to the existing token overview request.
 - Validate the supported benchmark schema, candidate/runtime identity, run completeness, comparison arms, required metrics, and numeric bounds before exposing any comparison values.
 - Extend the authoritative typed token overview with explicit unavailable, incompatible, partial, failed, and compatible comparison states.
-- Render compatible tool-call, navigation-visit, broad/full-read, backtrack, context, setup/runtime, and break-even evidence through the existing CLI JSON/TOON, MCP, and Ratatui dashboard paths.
+- Render compatible tool-call, navigation-visit, broad/full-read, backtrack, context, setup/runtime, and break-even evidence through the existing CLI JSON/TOON and MCP paths while keeping the Ratatui overview live-only.
 - Keep provider token counters descriptive and separate from causal navigation savings.
 - Preserve the existing conservative token/file-read arithmetic, trend mode, semantic palette, compact layout, and backward-compatible output fields.
 
@@ -19,7 +19,7 @@ ProjectAtlas v0.4 now has a reproducible three-arm navigation benchmark, but the
 
 ### Modified Capabilities
 
-- `token-impact-reference-dashboard`: Add a distinct benchmark-comparison panel and compact fallback while preserving the accepted reference hierarchy and accounting semantics.
+- `token-impact-reference-dashboard`: Keep benchmark comparisons out of the human overview while preserving the accepted reference hierarchy and accounting semantics.
 
 ## Impact
 

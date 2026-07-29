@@ -72,17 +72,18 @@ The normal v0.4.0 database-open path SHALL preserve all compatible cumulative to
 - **THEN** the migration rolls back atomically and the last-valid predecessor database remains retryable without lost history
 
 ### Requirement: The token dashboard is truthful and focused
-The human token-impact dashboard SHALL derive every live numeric field from the active project's persisted token report. Its normal no-artifact view SHALL focus on tokens, lookups performed, source-reconciled file reads avoided with their observed and modeled split, and modeled folder walks avoided without release-version, frozen-baseline, plain-control, or repeated-work benchmark comparisons. An explicitly supplied `--benchmark-results` artifact MAY add one bounded, visually separate comparison panel without changing any live total. At wide terminal sizes the dashboard MAY show a bounded connected, clustered, and depth-cued non-interactive constellation drawn only from resolved logical relations in the active project database; it SHALL NOT invent graph rows or imply complete graph analysis.
+The human token-impact dashboard SHALL derive every live numeric field from the active project's persisted token report. It SHALL focus on tokens, lookups performed, source-reconciled file reads avoided with their observed and modeled split, broad folder walks skipped, and candidate files not opened without release-version, frozen-baseline, plain-control, repeated-work, artifact, failure, runtime, or break-even benchmark comparisons. Broad-folder-walk and candidate-open rows SHALL each show an activity-share bar against reconciled persisted source steps and a token-impact-share bar against reconciled tokens avoided. An explicitly supplied `--benchmark-results` artifact SHALL remain available to structured CLI/MCP consumers but SHALL NOT change the Ratatui layout or cells. At wide terminal sizes the dashboard MAY show a bounded connected, clustered, and depth-cued non-interactive constellation drawn only from resolved logical relations in the active project database; it SHALL NOT invent graph rows or imply complete graph analysis.
 
 #### Scenario: Persisted impact is rendered
 - **WHEN** the dashboard renders an overview without a benchmark artifact
-- **THEN** its lookups, token equation, file-read total and split, persisted directory-walk steps, source rows, and composition reconcile exactly with that overview
+- **THEN** its lookups, token equation, file-read total and split, persisted directory-walk and selected-candidate steps, activity shares, token-impact shares, source rows, and composition reconcile exactly with that overview
 - **AND** it omits frozen-baseline, plain-control, and repeated-work comparison rows
 
 #### Scenario: Benchmark evidence is explicitly requested
 - **WHEN** a caller supplies `--benchmark-results`
-- **THEN** one bounded separate panel renders only the typed comparison state and values
-- **AND** those values do not alter persisted tokens, file reads, folder walks, source rows, or composition.
+- **THEN** structured CLI/MCP output retains the typed comparison state and values
+- **AND** the Ratatui overview remains visually identical to the same live report without attached comparison evidence
+- **AND** those values do not alter persisted tokens, file reads, folder walks, candidate opens, source rows, or composition.
 
 #### Scenario: A wide project graph is available
 - **WHEN** the active database returns resolved logical relations within the preview bounds

@@ -3,11 +3,9 @@
 use projectatlas_core::graph::{GraphRelationKind, LogicalRelation};
 use projectatlas_core::symbols::RelationKind;
 use projectatlas_core::telemetry::{
-    AgentEfficiencyBaseline, AgentEfficiencyBaselineRow, AgentEfficiencyComparison,
-    AgentEfficiencyEvidenceState, AgentEfficiencyMetricKind, TOKEN_ACCOUNTING_OBSERVED_DELTA,
-    TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_FULL_FILE, TOKEN_BASELINE_SELECTED_CANDIDATES,
-    TOKEN_BUCKET_FULL_FILE_COMPRESSION, TokenBucketOverview, TokenOverview, TokenTrendPeriod,
-    TokenTrendReport,
+    TOKEN_ACCOUNTING_OBSERVED_DELTA, TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_FULL_FILE,
+    TOKEN_BASELINE_SELECTED_CANDIDATES, TOKEN_BUCKET_FULL_FILE_COMPRESSION, TokenBucketOverview,
+    TokenOverview, TokenTrendPeriod, TokenTrendReport,
 };
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -23,9 +21,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Fixed terminal height for the token overview dashboard snapshot.
-const DASHBOARD_HEIGHT: u16 = 48;
-/// Extra rows used only when the caller explicitly supplies benchmark evidence.
-const BENCHMARK_PANEL_HEIGHT: u16 = 10;
+const DASHBOARD_HEIGHT: u16 = 58;
 /// Width at which the human dashboard can show the atlas without crowding impact data.
 const ATLAS_DASHBOARD_MIN_WIDTH: usize = 190;
 /// Maximum human dashboard width.
@@ -372,7 +368,7 @@ pub(crate) fn render_token_dashboard_with_theme(
 ) -> String {
     let width = dashboard_width().clamp(80, 140) as u16;
     with_token_theme(theme, || {
-        render_dashboard_to_ansi_string(width, overview_dashboard_height(overview), |frame| {
+        render_dashboard_to_ansi_string(width, DASHBOARD_HEIGHT, |frame| {
             render_overview_frame(frame, overview, session);
         })
     })
@@ -387,7 +383,7 @@ pub(crate) fn render_token_dashboard_with_atlas(
 ) -> String {
     let width = dashboard_width().clamp(80, DASHBOARD_MAX_WIDTH) as u16;
     with_token_theme(theme, || {
-        render_dashboard_to_ansi_string(width, overview_dashboard_height(overview), |frame| {
+        render_dashboard_to_ansi_string(width, DASHBOARD_HEIGHT, |frame| {
             render_overview_frame_with_atlas(frame, overview, session, Some(atlas));
         })
     })
@@ -407,27 +403,10 @@ pub(crate) fn render_token_dashboard_plain_with_theme(
 ) -> String {
     let width = dashboard_width().clamp(80, 140) as u16;
     with_token_theme(theme, || {
-        render_dashboard_to_string(width, overview_dashboard_height(overview), |frame| {
+        render_dashboard_to_string(width, DASHBOARD_HEIGHT, |frame| {
             render_overview_frame(frame, overview, session);
         })
     })
-}
-
-/// Return the snapshot height for the requested live-only or benchmark-attached view.
-fn overview_dashboard_height(overview: &TokenOverview) -> u16 {
-    DASHBOARD_HEIGHT
-        + if benchmark_evidence_requested(&overview.agent_efficiency) {
-            BENCHMARK_PANEL_HEIGHT
-        } else {
-            0
-        }
-}
-
-/// Return whether the caller supplied benchmark evidence rather than the default live-only view.
-fn benchmark_evidence_requested(comparison: &AgentEfficiencyComparison) -> bool {
-    comparison.state != AgentEfficiencyEvidenceState::Unavailable
-        || comparison.artifact.is_some()
-        || !comparison.baselines.is_empty()
 }
 
 /// Render token trends as a human terminal dashboard.
@@ -551,21 +530,17 @@ fn render_overview_main(
     overview: &TokenOverview,
     session: Option<&str>,
 ) {
-    let benchmark_requested = benchmark_evidence_requested(&overview.agent_efficiency);
-    let mut constraints = vec![
-        Constraint::Length(7),
-        Constraint::Length(13),
-        Constraint::Length(6),
-        Constraint::Length(6),
-        Constraint::Min(8),
-    ];
-    if benchmark_requested {
-        constraints.push(Constraint::Length(BENCHMARK_PANEL_HEIGHT));
-    }
-    constraints.extend([Constraint::Length(4), Constraint::Length(1)]);
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(constraints)
+        .constraints([
+            Constraint::Length(7),
+            Constraint::Length(13),
+            Constraint::Length(16),
+            Constraint::Length(6),
+            Constraint::Min(8),
+            Constraint::Length(4),
+            Constraint::Length(1),
+        ])
         .split(area);
 
     render_token_header(frame, sections[0], overview, session);
@@ -573,14 +548,8 @@ fn render_overview_main(
     render_avoided_navigation_card(frame, sections[2], overview);
     render_composition_and_signal(frame, sections[3], overview);
     render_savings_breakdown_table(frame, sections[4], overview);
-    let calibration_index = if benchmark_requested {
-        render_requested_benchmark_evidence(frame, sections[5], &overview.agent_efficiency);
-        6
-    } else {
-        5
-    };
-    render_calibration_notes(frame, sections[calibration_index], overview);
-    render_status_bar(frame, sections[calibration_index + 1]);
+    render_calibration_notes(frame, sections[5], overview);
+    render_status_bar(frame, sections[6]);
 }
 
 /// Return a screenshot-matched dashboard panel.
@@ -848,25 +817,71 @@ fn render_avoided_navigation_card(frame: &mut Frame<'_>, area: Rect, overview: &
     let compact = inner.width < 100;
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(3)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(4),
+            Constraint::Length(4),
+            Constraint::Length(4),
+        ])
         .split(inner);
-    let title = if compact {
-        "FILE & FOLDER WORK AVOIDED"
-    } else {
-        "FILE READS AVOIDED • FOLDER WALKS AVOIDED"
-    };
     frame.render_widget(
-        Paragraph::new(reference_title(title)).style(section_title_style().bg(THEME_PANEL)),
+        Paragraph::new(reference_title("NAVIGATION WORK AVOIDED"))
+            .style(section_title_style().bg(THEME_PANEL)),
         rows[0],
     );
 
+    render_file_read_impact_row(frame, rows[1], overview, compact);
+    let source_rows = savings_source_rows_for_width(overview, compact);
+    let folder_walk = source_rows.iter().find(|row| {
+        row.label
+            == if compact {
+                "Skipped folder walk"
+            } else {
+                "Skipped broad folder walk"
+            }
+    });
+    let candidate_opens = source_rows.iter().find(|row| {
+        row.label
+            == if compact {
+                "Fewer candidates B"
+            } else {
+                "Opened fewer candidates (B)"
+            }
+    });
+    render_source_impact_row(
+        frame,
+        rows[2],
+        "□  Broad folder walks skipped",
+        folder_walk,
+        overview,
+        compact,
+    );
+    render_source_impact_row(
+        frame,
+        rows[3],
+        "▥  Candidate files not opened",
+        candidate_opens,
+        overview,
+        compact,
+    );
+}
+
+/// Draw the source-reconciled file-read total and its observed/modeled split.
+fn render_file_read_impact_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    overview: &TokenOverview,
+    compact: bool,
+) {
     let total_reads = overview.likely_file_reads_avoided;
-    let folder_walks = modeled_folder_walks_avoided(overview);
+    let observed_ratio = ratio(overview.observed_file_read_replacements, total_reads);
+    let modeled_ratio = ratio(overview.modeled_file_reads_avoided, total_reads);
     if compact {
+        let bar_width = area.width.saturating_sub(34).min(24) as usize;
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(vec![
-                    Span::styled("File reads avoided: ", body_style().bg(THEME_PANEL)),
+                    Span::styled("⌁  File reads avoided: ", body_style().bg(THEME_PANEL)),
                     Span::styled(
                         grouped_count(total_reads),
                         Style::default()
@@ -874,34 +889,46 @@ fn render_avoided_navigation_card(frame: &mut Frame<'_>, area: Rect, overview: &
                             .bg(THEME_PANEL)
                             .add_modifier(Modifier::BOLD),
                     ),
-                ]),
-                Line::from(vec![
-                    Span::styled("Observed: ", body_style().bg(THEME_PANEL)),
-                    Span::styled(
-                        grouped_count(overview.observed_file_read_replacements),
-                        Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL),
-                    ),
-                    Span::styled("  •  Modeled: ", body_style().bg(THEME_PANEL)),
-                    Span::styled(
-                        grouped_count(overview.modeled_file_reads_avoided),
-                        Style::default().fg(THEME_YELLOW).bg(THEME_PANEL),
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::styled("Folder walks avoided: ", body_style().bg(THEME_PANEL)),
-                    Span::styled(
-                        grouped_count(folder_walks),
-                        Style::default().fg(THEME_YELLOW).bg(THEME_PANEL),
-                    ),
-                    Span::styled("  •  Confidence: ", body_style().bg(THEME_PANEL)),
+                    Span::styled("  •  confidence ", muted_style().bg(THEME_PANEL)),
                     Span::styled(
                         overview.read_avoidance_confidence.clone(),
                         Style::default().fg(THEME_YELLOW).bg(THEME_PANEL),
                     ),
                 ]),
+                impact_bar_line(
+                    "Observed",
+                    &format!(
+                        "{}/{}",
+                        grouped_count(overview.observed_file_read_replacements),
+                        grouped_count(total_reads)
+                    ),
+                    observed_ratio,
+                    THEME_INK_WHITE,
+                    bar_width,
+                ),
+                impact_bar_line(
+                    "Modeled",
+                    &format!(
+                        "{}/{}",
+                        grouped_count(overview.modeled_file_reads_avoided),
+                        grouped_count(total_reads)
+                    ),
+                    modeled_ratio,
+                    THEME_YELLOW,
+                    bar_width,
+                ),
+                Line::from(Span::styled(
+                    format!(
+                        "{} observed + {} modeled = {}",
+                        grouped_count(overview.observed_file_read_replacements),
+                        grouped_count(overview.modeled_file_reads_avoided),
+                        grouped_count(total_reads)
+                    ),
+                    muted_style().bg(THEME_PANEL),
+                )),
             ])
             .style(body_style().bg(THEME_PANEL)),
-            rows[1],
+            area,
         );
         return;
     }
@@ -909,112 +936,37 @@ fn render_avoided_navigation_card(frame: &mut Frame<'_>, area: Rect, overview: &
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(20),
+            Constraint::Percentage(22),
             Constraint::Length(1),
-            Constraint::Percentage(25),
+            Constraint::Percentage(30),
             Constraint::Length(1),
-            Constraint::Percentage(25),
+            Constraint::Percentage(30),
             Constraint::Length(1),
-            Constraint::Percentage(18),
-            Constraint::Length(1),
-            Constraint::Percentage(8),
+            Constraint::Percentage(15),
         ])
-        .split(rows[1]);
-    let observed_ratio = ratio(overview.observed_file_read_replacements, total_reads);
-    let modeled_ratio = ratio(overview.modeled_file_reads_avoided, total_reads);
-
+        .split(area);
     render_file_read_total(frame, columns[0], total_reads);
     render_vertical_separator(frame, columns[1]);
-
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                "Observed (summaries/slices)",
-                Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL),
-            )),
-            Line::from(vec![
-                Span::styled(
-                    grouped_count(overview.observed_file_read_replacements),
-                    Style::default()
-                        .fg(THEME_INK_WHITE)
-                        .bg(THEME_PANEL)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    percentage_label(overview.observed_file_read_replacements, total_reads),
-                    muted_style().bg(THEME_PANEL),
-                ),
-            ]),
-            block_bar(
-                columns[2].width.saturating_sub(2).min(24) as usize,
-                observed_ratio,
-                THEME_INK_WHITE,
-            ),
-        ])
-        .style(body_style().bg(THEME_PANEL)),
+    render_impact_metric(
+        frame,
         columns[2],
+        "Observed (summaries/slices)",
+        overview.observed_file_read_replacements,
+        total_reads,
+        observed_ratio,
+        THEME_INK_WHITE,
     );
     render_vertical_separator(frame, columns[3]);
-
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                "Search-modeled narrowing",
-                Style::default().fg(THEME_YELLOW).bg(THEME_PANEL),
-            )),
-            Line::from(vec![
-                Span::styled(
-                    grouped_count(overview.modeled_file_reads_avoided),
-                    Style::default()
-                        .fg(THEME_YELLOW)
-                        .bg(THEME_PANEL)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    percentage_label(overview.modeled_file_reads_avoided, total_reads),
-                    muted_style().bg(THEME_PANEL),
-                ),
-            ]),
-            block_bar(
-                columns[4].width.saturating_sub(2).min(24) as usize,
-                modeled_ratio,
-                THEME_YELLOW,
-            ),
-        ])
-        .style(body_style().bg(THEME_PANEL)),
+    render_impact_metric(
+        frame,
         columns[4],
+        "Search-modeled narrowing",
+        overview.modeled_file_reads_avoided,
+        total_reads,
+        modeled_ratio,
+        THEME_YELLOW,
     );
     render_vertical_separator(frame, columns[5]);
-
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                "Folder walks avoided",
-                Style::default().fg(THEME_YELLOW).bg(THEME_PANEL),
-            )),
-            Line::from(vec![
-                Span::styled(
-                    grouped_count(folder_walks),
-                    Style::default()
-                        .fg(THEME_YELLOW)
-                        .bg(THEME_PANEL)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled("modeled", muted_style().bg(THEME_PANEL)),
-            ]),
-            Line::from(Span::styled(
-                "persisted modeled steps",
-                muted_style().bg(THEME_PANEL),
-            )),
-        ])
-        .style(body_style().bg(THEME_PANEL)),
-        columns[6],
-    );
-
-    render_vertical_separator(frame, columns[7]);
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled("Confidence", muted_style().bg(THEME_PANEL))),
@@ -1028,8 +980,133 @@ fn render_avoided_navigation_card(frame: &mut Frame<'_>, area: Rect, overview: &
         ])
         .style(body_style().bg(THEME_PANEL))
         .alignment(Alignment::Center),
-        columns[8],
+        columns[6],
     );
+}
+
+/// Draw one file-read component with its exact share of the reconciled total.
+fn render_impact_metric(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &'static str,
+    value: usize,
+    total: usize,
+    ratio_value: f64,
+    color: Color,
+) {
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                label,
+                Style::default().fg(color).bg(THEME_PANEL),
+            )),
+            Line::from(vec![
+                Span::styled(
+                    grouped_count(value),
+                    Style::default()
+                        .fg(color)
+                        .bg(THEME_PANEL)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    percentage_label(value, total),
+                    muted_style().bg(THEME_PANEL),
+                ),
+            ]),
+            block_bar(
+                area.width.saturating_sub(2).min(32) as usize,
+                ratio_value,
+                color,
+            ),
+        ])
+        .style(body_style().bg(THEME_PANEL)),
+        area,
+    );
+}
+
+/// Draw source activity and token-impact shares against their reconciled totals.
+fn render_source_impact_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &'static str,
+    row: Option<&SavingsSourceRow>,
+    overview: &TokenOverview,
+    compact: bool,
+) {
+    let steps = row.map_or(0, |value| value.steps);
+    let tokens = row.map_or(0, |value| value.tokens);
+    let meaning = row.map_or("No persisted source activity", |value| value.meaning);
+    let activity_ratio = ratio(steps, overview.calls);
+    let token_ratio = ratio(
+        tokens.unsigned_abs(),
+        overview.tokens_avoided.unsigned_abs(),
+    );
+    let bar_width = if compact { 18 } else { 34 };
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("{title}: "),
+                    Style::default()
+                        .fg(THEME_YELLOW)
+                        .bg(THEME_PANEL)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    grouped_count(steps),
+                    Style::default()
+                        .fg(THEME_YELLOW)
+                        .bg(THEME_PANEL)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  •  {meaning}"), muted_style().bg(THEME_PANEL)),
+            ]),
+            impact_bar_line(
+                "Activity",
+                &format!("{}/{}", grouped_count(steps), grouped_count(overview.calls)),
+                activity_ratio,
+                THEME_YELLOW,
+                bar_width,
+            ),
+            impact_bar_line(
+                "Token impact",
+                &signed_count(tokens),
+                token_ratio,
+                signed_color(tokens),
+                bar_width,
+            ),
+            Line::from(Span::styled(
+                format!(
+                    "{} source steps account for {} of avoided tokens",
+                    grouped_count(steps),
+                    percentage_one_decimal(token_ratio)
+                ),
+                muted_style().bg(THEME_PANEL),
+            )),
+        ])
+        .style(body_style().bg(THEME_PANEL)),
+        area,
+    );
+}
+
+/// Return one labeled, exact ratio and its proportional block bar.
+fn impact_bar_line(
+    label: &'static str,
+    exact: &str,
+    ratio_value: f64,
+    color: Color,
+    bar_width: usize,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!(
+            "{label}: {exact} • {}  ",
+            percentage_one_decimal(ratio_value)
+        ),
+        body_style().bg(THEME_PANEL),
+    )];
+    spans.extend(block_bar(bar_width, ratio_value, color).spans);
+    Line::from(spans)
 }
 
 /// Draw the left file-read total with the reference document-icon hierarchy.
@@ -1203,7 +1280,7 @@ fn render_signal_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOvervie
                 Span::styled("▣  ", Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL)),
                 Span::styled("Impact scope: ", body_style().bg(THEME_PANEL)),
                 Span::styled(
-                    "tokens + file reads + folder walks",
+                    "tokens + reads + walks + candidates",
                     Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL),
                 ),
             ]),
@@ -1233,7 +1310,7 @@ fn render_savings_breakdown_table(frame: &mut Frame<'_>, area: Rect, overview: &
     let compact = area.width < 92;
     let constraints = if compact {
         [
-            Constraint::Length(20),
+            Constraint::Length(22),
             Constraint::Length(1),
             Constraint::Length(7),
             Constraint::Length(1),
@@ -1284,218 +1361,6 @@ fn render_savings_breakdown_table(frame: &mut Frame<'_>, area: Rect, overview: &
         .column_spacing(1)
         .block(panel("WHERE THE SAVINGS CAME FROM"));
     frame.render_widget(table, area);
-}
-
-/// Draw only benchmark evidence that the caller explicitly attached to the live overview.
-fn render_requested_benchmark_evidence(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    comparison: &AgentEfficiencyComparison,
-) {
-    let block = panel("REQUESTED BENCHMARK EVIDENCE");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let compact = inner.width < 100;
-    let mut lines = vec![benchmark_identity_line(comparison, compact)];
-    if matches!(
-        comparison.state,
-        AgentEfficiencyEvidenceState::Compatible | AgentEfficiencyEvidenceState::Partial
-    ) {
-        for baseline in [
-            AgentEfficiencyBaseline::FrozenProjectAtlasV0326,
-            AgentEfficiencyBaseline::PlainCodex,
-        ] {
-            if let Some(row) = comparison
-                .baselines
-                .iter()
-                .find(|row| row.baseline == baseline)
-            {
-                lines.extend(benchmark_baseline_lines(
-                    row,
-                    compact,
-                    usize::from(inner.width),
-                ));
-            }
-        }
-    }
-    if let Some(reason) = comparison.reason.as_deref() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                if comparison.state == AgentEfficiencyEvidenceState::Partial {
-                    "Note: "
-                } else {
-                    "Reason: "
-                },
-                muted_bold_style().bg(THEME_PANEL),
-            ),
-            Span::styled(
-                bounded_dashboard_text(reason, usize::from(inner.width).saturating_sub(8)),
-                Style::default()
-                    .fg(benchmark_state_color(comparison.state))
-                    .bg(THEME_PANEL),
-            ),
-        ]));
-    }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(body_style().bg(THEME_PANEL))
-            .wrap(Wrap { trim: true }),
-        inner,
-    );
-}
-
-/// Return the requested benchmark state and immutable artifact identity.
-fn benchmark_identity_line(comparison: &AgentEfficiencyComparison, compact: bool) -> Line<'static> {
-    let mut spans = vec![
-        Span::styled("Evidence: ", muted_bold_style().bg(THEME_PANEL)),
-        Span::styled(
-            comparison.state.as_str(),
-            Style::default()
-                .fg(benchmark_state_color(comparison.state))
-                .bg(THEME_PANEL)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
-    if let Some(artifact) = comparison.artifact.as_ref() {
-        let identity = if compact {
-            format!(
-                " • artifact {} • schema {}",
-                short_identity(&artifact.artifact_digest),
-                artifact.schema_version
-            )
-        } else {
-            format!(
-                " • artifact {} • schema {} • candidate {}",
-                short_identity(&artifact.artifact_digest),
-                artifact.schema_version,
-                bounded_dashboard_text(&artifact.candidate_version, 28)
-            )
-        };
-        spans.push(Span::styled(identity, body_style().bg(THEME_PANEL)));
-    }
-    Line::from(spans)
-}
-
-/// Return compact typed rows for one requested benchmark baseline.
-fn benchmark_baseline_lines(
-    row: &AgentEfficiencyBaselineRow,
-    compact: bool,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let color = match row.baseline {
-        AgentEfficiencyBaseline::FrozenProjectAtlasV0326 => THEME_BLUE,
-        AgentEfficiencyBaseline::PlainCodex => THEME_INK_WHITE,
-    };
-    let label = match row.baseline {
-        AgentEfficiencyBaseline::FrozenProjectAtlasV0326 => "Frozen v0.3.26",
-        AgentEfficiencyBaseline::PlainCodex => "Plain Codex control",
-    };
-    let identity = format!(
-        "{label} [{}] • matched {} • failed {}/{} • unmatched {}",
-        row.state.as_str(),
-        grouped_count(row.matched_trials),
-        grouped_count(row.candidate_failed_trials),
-        grouped_count(row.baseline_failed_trials),
-        grouped_count(row.unmatched_trials)
-    );
-    let metrics = format!(
-        "  calls {} • reads broad/full {} {} • net context {}",
-        benchmark_metric_pair(row, AgentEfficiencyMetricKind::TotalToolCalls),
-        benchmark_metric_pair(row, AgentEfficiencyMetricKind::BroadReads),
-        benchmark_metric_pair(row, AgentEfficiencyMetricKind::FullReads),
-        benchmark_metric_pair(row, AgentEfficiencyMetricKind::NetNavigationBytes),
-    );
-    let mut lines = vec![
-        Line::from(Span::styled(
-            bounded_dashboard_text(&identity, width),
-            Style::default()
-                .fg(color)
-                .bg(THEME_PANEL)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            bounded_dashboard_text(&metrics, width),
-            body_style().bg(THEME_PANEL),
-        )),
-    ];
-    if !compact {
-        let runtime = format!(
-            "  runtime {} • break-even {}",
-            benchmark_metric_pair(row, AgentEfficiencyMetricKind::RuntimeWallSeconds),
-            benchmark_break_even(row)
-        );
-        lines.push(Line::from(Span::styled(
-            bounded_dashboard_text(&runtime, width),
-            body_style().bg(THEME_PANEL),
-        )));
-    }
-    lines
-}
-
-/// Format one candidate/baseline metric pair without recalculating comparison arithmetic.
-fn benchmark_metric_pair(
-    row: &AgentEfficiencyBaselineRow,
-    metric: AgentEfficiencyMetricKind,
-) -> String {
-    let Some(value) = row.metrics.iter().find(|value| value.metric == metric) else {
-        return "n/a".to_string();
-    };
-    format!(
-        "{}/{}",
-        benchmark_metric_value(metric, value.candidate_median),
-        benchmark_metric_value(metric, value.baseline_median)
-    )
-}
-
-/// Format one typed benchmark metric in a bounded terminal unit.
-fn benchmark_metric_value(metric: AgentEfficiencyMetricKind, value: f64) -> String {
-    match metric {
-        AgentEfficiencyMetricKind::GrossNavigationBytes
-        | AgentEfficiencyMetricKind::NetNavigationBytes
-        | AgentEfficiencyMetricKind::PersistentBytes => compact_byte_value(value),
-        AgentEfficiencyMetricKind::SetupWallSeconds
-        | AgentEfficiencyMetricKind::RuntimeWallSeconds => format!("{value:.1}s"),
-        _ if value.fract().abs() < f64::EPSILON => format!("{value:.0}"),
-        _ => format!("{value:.1}"),
-    }
-}
-
-/// Format workload break-even truth without manufacturing an aggregate.
-fn benchmark_break_even(row: &AgentEfficiencyBaselineRow) -> String {
-    if row.break_even.is_empty() {
-        return "n/a".to_string();
-    }
-    row.break_even
-        .iter()
-        .map(|value| {
-            let workload = match value.workload.as_str() {
-                "small-clean" => "clean",
-                "small-dirty" => "dirty",
-                "small-non-git" => "non-git",
-                "huge-vscode" => "huge",
-                other => other,
-            };
-            format!(
-                "{workload}={}",
-                value
-                    .wall_time_tasks
-                    .map_or_else(|| "n/a".to_string(), |tasks| tasks.to_string())
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Return the semantic color for one benchmark evidence state.
-const fn benchmark_state_color(state: AgentEfficiencyEvidenceState) -> Color {
-    match state {
-        AgentEfficiencyEvidenceState::Compatible => THEME_GREEN,
-        AgentEfficiencyEvidenceState::Partial => THEME_YELLOW,
-        AgentEfficiencyEvidenceState::Unavailable => THEME_MUTED,
-        AgentEfficiencyEvidenceState::Failed | AgentEfficiencyEvidenceState::Incompatible => {
-            THEME_RED
-        }
-    }
 }
 
 /// Draw the bounded live repository constellation in the wide dashboard column.
@@ -2155,19 +2020,6 @@ fn observed_source_steps(overview: &TokenOverview) -> usize {
     }
 }
 
-/// Return persisted modeled steps that replaced broad directory walks.
-fn modeled_folder_walks_avoided(overview: &TokenOverview) -> usize {
-    overview
-        .buckets
-        .iter()
-        .filter(|bucket| {
-            !is_observed_source_bucket(bucket)
-                && bucket.baseline_kind == TOKEN_BASELINE_DIRECTORY_WALK
-                && bucket.denominator_kind == TOKEN_BASELINE_DIRECTORY_WALK
-        })
-        .fold(0usize, |total, bucket| total.saturating_add(bucket.calls))
-}
-
 /// Return modeled source rows backed by actual telemetry buckets.
 fn modeled_source_groups(overview: &TokenOverview) -> Vec<ModeledSourceGroup> {
     let mut groups = [
@@ -2754,40 +2606,6 @@ fn resolve_dashboard_width(columns: Option<usize>, terminal_width: Option<u16>) 
         .unwrap_or(140)
 }
 
-/// Format a validated floating-point byte metric compactly.
-fn compact_byte_value(value: f64) -> String {
-    for (unit, suffix) in [
-        (1_125_899_906_842_624.0, "PiB"),
-        (1_099_511_627_776.0, "TiB"),
-        (1_073_741_824.0, "GiB"),
-        (1_048_576.0, "MiB"),
-        (1_024.0, "KiB"),
-    ] {
-        if value >= unit {
-            return format!("{:.1}{suffix}", value / unit);
-        }
-    }
-    format!("{value:.0}B")
-}
-
-/// Return a short immutable identity for the bounded TUI.
-fn short_identity(value: &str) -> String {
-    value.chars().take(12).collect()
-}
-
-/// Bound trusted display text so it cannot consume adjacent fields.
-fn bounded_dashboard_text(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_string();
-    }
-    if max_chars <= 3 {
-        return ".".repeat(max_chars);
-    }
-    let mut output = value.chars().take(max_chars - 3).collect::<String>();
-    output.push_str("...");
-    output
-}
-
 /// Format an unsigned count with thousands separators.
 fn grouped_count(value: usize) -> String {
     let raw = value.to_string();
@@ -2817,19 +2635,17 @@ mod tests {
         ATLAS_PREVIEW_MAX_NODE_DEGREE, ATLAS_PREVIEW_MAX_NODES, DASHBOARD_HEIGHT, THEME_BAR_EMPTY,
         THEME_BG, THEME_BLUE, THEME_GREEN, THEME_INK_WHITE, THEME_YELLOW,
         TOKEN_IMPACT_COLUMN_WIDTH, TokenAtlasPreview, TokenDashboardTheme, atlas_layout, block_bar,
-        buffer_to_string, dashboard_width, grouped_count, modeled_folder_walks_avoided,
-        overview_dashboard_height, reconciled_without_projectatlas, reference_title,
-        render_dashboard_to_string, render_overview_frame, render_overview_frame_with_atlas,
-        render_token_dashboard, render_token_dashboard_with_theme, render_token_trend_dashboard,
+        buffer_to_string, dashboard_width, grouped_count, percentage_one_decimal, ratio,
+        reconciled_without_projectatlas, reference_title, render_dashboard_to_string,
+        render_overview_frame, render_overview_frame_with_atlas, render_token_dashboard,
+        render_token_dashboard_with_theme, render_token_trend_dashboard,
         render_token_trend_dashboard_with_theme, resolve_dashboard_width,
         savings_source_rows_for_width, signed_count, signed_trend_points, signed_y_bounds,
     };
     use projectatlas_core::graph::GraphRelationKind;
     use projectatlas_core::symbols::RelationKind;
     use projectatlas_core::telemetry::{
-        AgentEfficiencyArtifactIdentity, AgentEfficiencyBaseline, AgentEfficiencyBaselineRow,
-        AgentEfficiencyBreakEven, AgentEfficiencyComparison, AgentEfficiencyEvidenceState,
-        AgentEfficiencyMetricComparison, AgentEfficiencyMetricKind,
+        AgentEfficiencyComparison, AgentEfficiencyEvidenceState,
         TOKEN_ACCOUNTING_MODELED_AVOIDANCE, TOKEN_BASELINE_DIRECTORY_WALK,
         TOKEN_BASELINE_SELECTED_CANDIDATES, TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
         TOKEN_CONFIDENCE_INFERRED, TOKEN_CONFIDENCE_POLICY_ESTIMATE, TOKEN_DEDUPE_SCOPE_SESSION,
@@ -2867,15 +2683,18 @@ mod tests {
             "With ProjectAtlas",
             "Saved by ProjectAtlas",
             "file reads avoided",
-            "Folder walks avoided",
-            "persisted modeled steps",
+            "Broad folder walks skipped",
+            "Candidate files not opened",
+            "Activity:",
+            "Token impact:",
+            "source steps account for",
             "Observed (summaries/slices)",
             "Search-modeled narrowing",
             "Confidence",
             "Measured from summaries/slices",
             "Navigation narrowing",
             "Impact scope:",
-            "tokens + file reads + folder walks",
+            "tokens + reads + walks + candidates",
             "Estimate type: local model",
             "Tokenizer audit:",
             "Source",
@@ -2896,7 +2715,7 @@ mod tests {
         }
         for title in [
             "TOTAL TOKENS AVOIDED",
-            "FILE READS AVOIDED • FOLDER WALKS AVOIDED",
+            "NAVIGATION WORK AVOIDED",
             "SAVINGS COMPOSITION",
             "SIGNAL",
             "WHERE THE SAVINGS CAME FROM",
@@ -2928,7 +2747,7 @@ mod tests {
             &[
                 "ProjectAtlas",
                 &reference_title("TOTAL TOKENS AVOIDED"),
-                &reference_title("FILE READS AVOIDED • FOLDER WALKS AVOIDED"),
+                &reference_title("NAVIGATION WORK AVOIDED"),
                 &reference_title("SAVINGS COMPOSITION"),
                 &reference_title("WHERE THE SAVINGS CAME FROM"),
                 &reference_title("CALIBRATION & NOTES"),
@@ -3235,158 +3054,50 @@ mod tests {
         assert!(dashboard.contains("ProjectAtlas"));
         assert!(dashboard.contains("Token Impact"));
         assert!(dashboard.contains(&reference_title("TOTAL TOKENS AVOIDED")));
-        assert!(dashboard.contains(&reference_title("FILE & FOLDER WORK AVOIDED")));
+        assert!(dashboard.contains(&reference_title("NAVIGATION WORK AVOIDED")));
         assert!(dashboard.contains(&reference_title("SAVINGS MIX")));
         assert!(!dashboard.contains(&reference_title("SAVINGS COMPOSITION")));
         assert!(dashboard.contains(&reference_title("WHERE THE SAVINGS CAME FROM")));
-        assert!(dashboard.contains("Fewer candidates"));
+        assert!(dashboard.contains("Skipped folder walk"));
+        assert!(dashboard.contains("Fewer candidates B"));
         assert!(dashboard.contains(&reference_title("CALIBRATION & NOTES")));
         assert!(!dashboard.contains(&reference_title("REPEATED-WORK BENCHMARK")));
         assert!(!dashboard.contains("Saved-token trends"));
     }
 
     #[test]
-    fn explicitly_requested_benchmark_evidence_is_bounded_and_separate() {
-        let mut overview = sample_overview();
-        overview.agent_efficiency = sample_agent_efficiency(true);
-        for width in [80, 140] {
-            let buffer = render_overview_buffer_at_width(&overview, Some("s"), width);
-            let dashboard = buffer_to_string(&buffer);
-            let benchmark_title = reference_title("REQUESTED BENCHMARK EVIDENCE");
-            for text in [
-                benchmark_title.as_str(),
-                "Evidence: partial",
-                "artifact 111111111111",
-                "Frozen v0.3.26 [partial]",
-                "matched 12",
-                "failed 0/3",
-                "Plain Codex control [compatible]",
-                "calls 12/30",
-                "reads broad/full 2/8 1/5",
-                "net context 16.0KiB/64.0KiB",
-                "frozen huge-corpus setup retained three failures",
-            ] {
-                assert!(
-                    dashboard.contains(text),
-                    "{width}-column requested benchmark panel should contain {text:?}"
-                );
-            }
-            assert_eq!(
-                dashboard
-                    .matches(&reference_title("REQUESTED BENCHMARK EVIDENCE"))
-                    .count(),
-                1
-            );
-        }
-
-        let wide_buffer = render_overview_buffer_at_width(&overview, Some("s"), 140);
-        let wide = buffer_to_string(&wide_buffer);
-        assert!(wide.contains("runtime 30.0s/50.0s"));
-        assert!(wide.contains("break-even clean=1"));
-        assert_cell_style(&wide_buffer, "partial", THEME_YELLOW, Modifier::BOLD);
-        assert_cell_style(&wide_buffer, "Frozen v0.3.26", THEME_BLUE, Modifier::BOLD);
-        assert_cell_style(
-            &wide_buffer,
-            "Plain Codex control",
-            THEME_INK_WHITE,
-            Modifier::BOLD,
-        );
-        let Some((_, panel_y)) = find_text(
-            &wide_buffer,
-            &reference_title("REQUESTED BENCHMARK EVIDENCE"),
-        ) else {
-            unreachable!("requested benchmark panel title should render");
-        };
-        for y in panel_y..panel_y + super::BENCHMARK_PANEL_HEIGHT {
-            let expected = if y == panel_y {
-                "╮"
-            } else if y + 1 == panel_y + super::BENCHMARK_PANEL_HEIGHT {
-                "╯"
-            } else {
-                "│"
-            };
-            assert_eq!(
-                wide_buffer
-                    .cell((138, y))
-                    .map(ratatui::buffer::Cell::symbol),
-                Some(expected),
-                "requested benchmark panel right border should remain intact at row {y}"
-            );
-        }
-        let compact = buffer_to_string(&render_overview_buffer_at_width(&overview, Some("s"), 80));
-        assert!(!compact.contains("runtime 30.0s/50.0s"));
-
-        let mut compatible = sample_overview();
-        compatible.agent_efficiency = sample_agent_efficiency(false);
-        let compatible_buffer = render_overview_buffer_at_width(&compatible, Some("s"), 140);
-        let compatible_dashboard = buffer_to_string(&compatible_buffer);
-        assert!(compatible_dashboard.contains("Evidence: compatible"));
-        assert!(compatible_dashboard.contains("Frozen v0.3.26 [compatible]"));
-        assert!(!compatible_dashboard.contains("frozen huge-corpus setup"));
-        assert_cell_style(
-            &compatible_buffer,
-            "compatible",
-            THEME_GREEN,
-            Modifier::BOLD,
-        );
-    }
-
-    #[test]
-    fn explicitly_requested_invalid_benchmark_has_no_fabricated_rows() {
+    fn benchmark_evidence_never_changes_the_human_overview() {
+        let live = sample_overview();
         for state in [
+            AgentEfficiencyEvidenceState::Unavailable,
             AgentEfficiencyEvidenceState::Failed,
             AgentEfficiencyEvidenceState::Incompatible,
+            AgentEfficiencyEvidenceState::Partial,
+            AgentEfficiencyEvidenceState::Compatible,
         ] {
-            let mut overview = sample_overview();
-            overview.agent_efficiency = AgentEfficiencyComparison {
+            let mut with_benchmark = live.clone();
+            with_benchmark.agent_efficiency = AgentEfficiencyComparison {
                 state,
-                reason: Some("requested benchmark was rejected".to_string()),
+                reason: Some(
+                    "structured benchmark evidence remains available to agents".to_string(),
+                ),
                 artifact: None,
                 baselines: Vec::new(),
                 capabilities: Vec::new(),
                 provider_counters_descriptive_only: true,
             };
-            let dashboard = render_overview_buffer_at_width(&overview, Some("s"), 140);
-            assert_cell_style(&dashboard, state.as_str(), super::THEME_RED, Modifier::BOLD);
-            let dashboard = buffer_to_string(&dashboard);
-            assert!(dashboard.contains(&format!("Evidence: {}", state.as_str())));
-            assert!(dashboard.contains("requested benchmark was rejected"));
-            assert!(!dashboard.contains("Frozen v0.3.26"));
-            assert!(!dashboard.contains("Plain Codex control"));
-            assert!(!dashboard.contains("0.0%"));
-        }
-
-        let mut overview = sample_overview();
-        overview.agent_efficiency = AgentEfficiencyComparison {
-            state: AgentEfficiencyEvidenceState::Failed,
-            reason: Some(format!("{} hidden-tail", "bounded ".repeat(80))),
-            artifact: None,
-            baselines: Vec::new(),
-            capabilities: Vec::new(),
-            provider_counters_descriptive_only: true,
-        };
-        let buffer = render_overview_buffer_at_width(&overview, Some("s"), 80);
-        let dashboard = buffer_to_string(&buffer);
-        assert!(dashboard.contains("Reason: bounded"));
-        assert!(!dashboard.contains("hidden-tail"));
-        let Some((_, panel_y)) =
-            find_text(&buffer, &reference_title("REQUESTED BENCHMARK EVIDENCE"))
-        else {
-            unreachable!("requested invalid benchmark panel title should render");
-        };
-        for y in panel_y..panel_y + super::BENCHMARK_PANEL_HEIGHT {
-            let expected = if y == panel_y {
-                "╮"
-            } else if y + 1 == panel_y + super::BENCHMARK_PANEL_HEIGHT {
-                "╯"
-            } else {
-                "│"
-            };
-            assert_eq!(
-                buffer.cell((78, y)).map(ratatui::buffer::Cell::symbol),
-                Some(expected),
-                "compact requested benchmark panel right border should remain intact at row {y}"
-            );
+            for width in [80, 140, 200] {
+                let live = normalize_dashboard_clock(buffer_to_string(
+                    &render_overview_buffer_at_width(&live, Some("s"), width),
+                ));
+                let with_benchmark = normalize_dashboard_clock(buffer_to_string(
+                    &render_overview_buffer_at_width(&with_benchmark, Some("s"), width),
+                ));
+                assert_eq!(with_benchmark, live);
+                assert!(!with_benchmark.contains("BENCHMARK"));
+                assert!(!with_benchmark.contains("Frozen v0.3.26"));
+                assert!(!with_benchmark.contains("Plain Codex control"));
+            }
         }
     }
 
@@ -3409,15 +3120,41 @@ mod tests {
             overview.observed_file_read_replacements + overview.modeled_file_reads_avoided,
             overview.likely_file_reads_avoided
         );
-        assert_eq!(modeled_folder_walks_avoided(&overview), 1);
-
         let dashboard = strip_ansi(&render_token_dashboard(&overview, Some("s")));
         let source_rows = savings_source_rows_for_width(&overview, false);
         let source_steps = source_rows.iter().map(|row| row.steps).sum::<usize>();
         let source_tokens = source_rows.iter().map(|row| row.tokens).sum::<isize>();
 
+        assert_eq!(
+            source_rows
+                .iter()
+                .find(|row| row.label == "Skipped broad folder walk")
+                .map(|row| row.steps),
+            Some(1)
+        );
         assert_eq!(source_steps, overview.calls);
         assert_eq!(source_tokens, conservative_avoided);
+        for source in source_rows.iter().filter(|row| {
+            matches!(
+                row.label,
+                "Skipped broad folder walk" | "Opened fewer candidates (B)"
+            )
+        }) {
+            assert!(dashboard.contains(&format!(
+                "Activity: {}/{} • {}",
+                grouped_count(source.steps),
+                grouped_count(overview.calls),
+                percentage_one_decimal(ratio(source.steps, overview.calls))
+            )));
+            assert!(dashboard.contains(&format!(
+                "Token impact: {} • {}",
+                signed_count(source.tokens),
+                percentage_one_decimal(ratio(
+                    source.tokens.unsigned_abs(),
+                    overview.tokens_avoided.unsigned_abs()
+                ))
+            )));
+        }
         assert!(dashboard.contains(&signed_count(without_projectatlas)));
         assert!(dashboard.contains(&signed_count(with_projectatlas)));
         assert!(dashboard.contains(&signed_count(conservative_avoided)));
@@ -3850,105 +3587,6 @@ mod tests {
         ])
     }
 
-    fn sample_agent_efficiency(partial: bool) -> AgentEfficiencyComparison {
-        let frozen_state = if partial {
-            AgentEfficiencyEvidenceState::Partial
-        } else {
-            AgentEfficiencyEvidenceState::Compatible
-        };
-        AgentEfficiencyComparison {
-            state: frozen_state,
-            reason: partial.then(|| "frozen huge-corpus setup retained three failures".to_string()),
-            artifact: Some(AgentEfficiencyArtifactIdentity {
-                schema_version: 1,
-                artifact_digest_kind: "sha256".to_string(),
-                artifact_digest: "1".repeat(64),
-                candidate_version: "projectatlas 0.4.0".to_string(),
-                candidate_runtime_sha256: "2".repeat(64),
-                candidate_source_head: "3".repeat(40),
-                frozen_version: "projectatlas 0.3.26".to_string(),
-                frozen_runtime_sha256: "4".repeat(64),
-            }),
-            baselines: vec![
-                sample_agent_efficiency_baseline(
-                    AgentEfficiencyBaseline::FrozenProjectAtlasV0326,
-                    frozen_state,
-                    12,
-                    usize::from(partial) * 3,
-                ),
-                sample_agent_efficiency_baseline(
-                    AgentEfficiencyBaseline::PlainCodex,
-                    AgentEfficiencyEvidenceState::Compatible,
-                    15,
-                    0,
-                ),
-            ],
-            capabilities: Vec::new(),
-            provider_counters_descriptive_only: true,
-        }
-    }
-
-    fn sample_agent_efficiency_baseline(
-        baseline: AgentEfficiencyBaseline,
-        state: AgentEfficiencyEvidenceState,
-        matched_trials: usize,
-        baseline_failed_trials: usize,
-    ) -> AgentEfficiencyBaselineRow {
-        AgentEfficiencyBaselineRow {
-            baseline,
-            state,
-            matched_trials,
-            candidate_failed_trials: 0,
-            baseline_failed_trials,
-            unmatched_trials: baseline_failed_trials,
-            metrics: vec![
-                sample_agent_efficiency_metric(
-                    AgentEfficiencyMetricKind::TotalToolCalls,
-                    12.0,
-                    30.0,
-                ),
-                sample_agent_efficiency_metric(AgentEfficiencyMetricKind::BroadReads, 2.0, 8.0),
-                sample_agent_efficiency_metric(AgentEfficiencyMetricKind::FullReads, 1.0, 5.0),
-                sample_agent_efficiency_metric(
-                    AgentEfficiencyMetricKind::NetNavigationBytes,
-                    16_384.0,
-                    65_536.0,
-                ),
-                sample_agent_efficiency_metric(
-                    AgentEfficiencyMetricKind::RuntimeWallSeconds,
-                    30.0,
-                    50.0,
-                ),
-            ],
-            break_even: vec![
-                AgentEfficiencyBreakEven {
-                    workload: "small-clean".to_string(),
-                    wall_time_tasks: Some(1),
-                },
-                AgentEfficiencyBreakEven {
-                    workload: "small-dirty".to_string(),
-                    wall_time_tasks: None,
-                },
-            ],
-            provider_usage_descriptive_only: Vec::new(),
-        }
-    }
-
-    fn sample_agent_efficiency_metric(
-        metric: AgentEfficiencyMetricKind,
-        candidate_median: f64,
-        baseline_median: f64,
-    ) -> AgentEfficiencyMetricComparison {
-        AgentEfficiencyMetricComparison {
-            metric,
-            candidate_median,
-            baseline_median,
-            candidate_maximum: candidate_median,
-            baseline_maximum: baseline_median,
-            median_percent_saving: None,
-        }
-    }
-
     fn render_overview_buffer(overview: &TokenOverview, session: Option<&str>) -> Buffer {
         let width = dashboard_width().clamp(80, 140) as u16;
         render_overview_buffer_at_width(overview, session, width)
@@ -3959,7 +3597,7 @@ mod tests {
         session: Option<&str>,
         width: u16,
     ) -> Buffer {
-        let backend = TestBackend::new(width, overview_dashboard_height(overview));
+        let backend = TestBackend::new(width, DASHBOARD_HEIGHT);
         let mut terminal =
             Terminal::new(backend).expect("in-memory token dashboard backend should initialize");
         let frame = terminal
@@ -3974,7 +3612,7 @@ mod tests {
         atlas: &TokenAtlasPreview,
         width: u16,
     ) -> Buffer {
-        let backend = TestBackend::new(width, overview_dashboard_height(overview));
+        let backend = TestBackend::new(width, DASHBOARD_HEIGHT);
         let mut terminal =
             Terminal::new(backend).expect("in-memory token dashboard backend should initialize");
         let frame = terminal
@@ -4082,6 +3720,22 @@ mod tests {
                     .enumerate()
                     .all(|(index, byte)| index == 2 || index == 5 || byte.is_ascii_digit())
         })
+    }
+
+    fn normalize_dashboard_clock(mut dashboard: String) -> String {
+        let Some(time_start) = dashboard
+            .find("Snapshot ")
+            .map(|start| start + "Snapshot ".len())
+        else {
+            return dashboard;
+        };
+        let time_len = if dashboard.as_bytes().get(time_start + 5) == Some(&b':') {
+            8
+        } else {
+            5
+        };
+        dashboard.replace_range(time_start..time_start + time_len, "CLOCK");
+        dashboard
     }
 
     fn assert_bar_segments(line: &Line<'_>, filled: usize, empty: usize, color: Color) {

@@ -7305,12 +7305,15 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .stdout(predicate::str::contains("With ProjectAtlas"))
         .stdout(predicate::str::contains("Saved by ProjectAtlas"))
         .stdout(predicate::str::contains(
-            "F I L E   &   F O L D E R   W O R K   A V O I D E D",
+            "N A V I G A T I O N   W O R K   A V O I D E D",
         ))
         .stdout(predicate::str::contains("File reads avoided"))
         .stdout(predicate::str::contains("Observed:"))
         .stdout(predicate::str::contains("Modeled:"))
-        .stdout(predicate::str::contains("Folder walks avoided"))
+        .stdout(predicate::str::contains("Broad folder walks skipped"))
+        .stdout(predicate::str::contains("Candidate files not opened"))
+        .stdout(predicate::str::contains("Activity:"))
+        .stdout(predicate::str::contains("Token impact:"))
         .stdout(predicate::str::contains("S A V I N G S"))
         .stdout(predicate::str::contains("S I G N A L"))
         .stdout(predicate::str::contains(
@@ -7323,6 +7326,7 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
             "C A L I B R A T I O N   &   N O T E S",
         ))
         .stdout(predicate::str::contains("Gross tokens: without").not())
+        .stdout(predicate::str::contains("REQUESTED BENCHMARK EVIDENCE").not())
         .stdout(predicate::str::contains("latest").not())
         .stdout(predicate::str::contains("Saved-token trends").not());
     Command::cargo_bin("projectatlas")?
@@ -10362,11 +10366,11 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains("ProjectAtlas")
         || !stdout.contains("Token Impact")
         || !stdout.contains("T O T A L   T O K E N S   A V O I D E D")
-        || (!stdout.contains(
-            "F I L E   R E A D S   A V O I D E D   •   F O L D E R   W A L K S   A V O I D E D",
-        ) && !stdout.contains("F I L E   &   F O L D E R   W O R K   A V O I D E D"))
+        || !stdout.contains("N A V I G A T I O N   W O R K   A V O I D E D")
         || !stdout.to_ascii_lowercase().contains("file reads avoided")
-        || !stdout.contains("Folder walks avoided")
+        || !stdout.contains("Broad folder walks skipped")
+        || !stdout.contains("Candidate files not opened")
+        || !stdout.contains("Token impact:")
         || !stdout.contains("S I G N A L")
         || !stdout.contains("purpose_review:")
         || !stdout.contains("failed: 0")

@@ -5215,17 +5215,16 @@ mod tests {
         assert!(dashboard.contains("Without ProjectAtlas"));
         assert!(dashboard.contains("With ProjectAtlas"));
         assert!(dashboard.contains("Saved by ProjectAtlas"));
-        assert!(
-            dashboard.contains(
-                "F I L E   R E A D S   A V O I D E D   •   F O L D E R   W A L K S   A V O I D E D"
-            ) || dashboard.contains("F I L E   &   F O L D E R   W O R K   A V O I D E D")
-        );
+        assert!(dashboard.contains("N A V I G A T I O N   W O R K   A V O I D E D"));
         assert!(
             dashboard
                 .to_ascii_lowercase()
                 .contains("file reads avoided")
         );
-        assert!(dashboard.contains("Folder walks avoided"));
+        assert!(dashboard.contains("Broad folder walks skipped"));
+        assert!(dashboard.contains("Candidate files not opened"));
+        assert!(dashboard.contains("Activity:"));
+        assert!(dashboard.contains("Token impact:"));
         assert!(dashboard.contains("S A V I N G S   C O M P O S I T I O N"));
         assert!(dashboard.contains("S I G N A L"));
         assert!(dashboard.contains("W H E R E   T H E   S A V I N G S   C A M E   F R O M"));
@@ -5238,6 +5237,7 @@ mod tests {
                 .any(|character| matches!(character, '█' | '\u{2801}'..='\u{28ff}'))
         );
         assert!(!dashboard.contains("Gross tokens: without vs with ProjectAtlas"));
+        assert!(!dashboard.contains("REQUESTED BENCHMARK EVIDENCE"));
         assert!(!dashboard.contains("How ProjectAtlas helped"));
         assert!(!dashboard.contains("Saved-token trends"));
     }
