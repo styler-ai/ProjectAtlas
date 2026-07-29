@@ -74,15 +74,15 @@ For active sessions, the agent can run the watcher so file edits continuously re
 The final v0.4 navigation campaign retained all 45 preregistered trials:
 ProjectAtlas v0.4 completed 15/15, frozen v0.3.26 completed 12/15 and failed all
 three pinned VS Code setups, and the plain control completed 15/15. The final
-manual result was 33/42 completed answers: all 42 were substantively correct,
-but nine used invalid temporary-root citation targets (11/15 for v0.4, 8/12
-for frozen v0.3.26, and 14/15 for plain). Against v0.3.26 on the three small
-tasks, v0.4 used 15.4–33.3% fewer median calls and 18.3–20.2% less median net
-navigation context. On the medium task it used 31.2% more calls, 41% more net
-context, and took 92.9% longer including setup, while selecting 33.3% more
-productive files and making 33.3% fewer broad reads. Plain navigation used the
-least context at every measured scale. Against plain on huge source, v0.4 used
-120% more calls and 189.7% more net context after a 733.5-second setup. See the
+manual result was 32/42 completed answers: all 42 were substantively correct,
+but ten used invalid temporary-root citation targets (14/15 for v0.4, 8/12
+for frozen v0.3.26, and 10/15 for plain). Against v0.3.26 on the three small
+tasks, v0.4 used 7.7–37.5% fewer median calls and 18.2–19.1% less median net
+navigation context. On the medium task it used 3.8 times the median calls,
+25.9 times the median net context, and took 36.8% longer including setup.
+Plain navigation used the least context at every measured scale. Against plain
+on huge source, v0.4 used the same median call count and 4.3 times the median
+net context after a 725.8-second setup. See the
 [reviewed report](docs/benchmarks/v0.4-agent-navigation-evaluation.md) and
 [published 45-trial result](docs/benchmarks/v0.4-agent-navigation-results.json).
 

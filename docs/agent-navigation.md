@@ -10,7 +10,8 @@ analysis views are current v0.4 behavior. The representative task-7.3 forward
 test passes its clean, saved-dirty, and non-Git compatibility boundaries. The
 final task-7.6 campaign retained all 45 preregistered v0.4, frozen-v0.3.26, and
 plain trials: v0.4 completed all 15, frozen v0.3.26 failed its three pinned
-VS Code setups, and final manual review passed 35 of 42 completed answers. The
+VS Code setups, and final citation review passed 32 of 42 completed answers.
+All 42 completed answers were substantively correct. The
 [agent evaluation](benchmarks/v0.4-agent-navigation-evaluation.md)
 reports the measured strengths, medium-context regression, huge indexing cost,
 plain-control advantage, and limitations without claiming universal savings.
@@ -457,23 +458,22 @@ repeats of five corpora across v0.4, frozen v0.3.26, and no ProjectAtlas. All
 V0.4 and plain completed 15/15. Frozen v0.3.26 completed 12/15 and failed every
 pinned VS Code setup on a tracked non-UTF-8 source file.
 
-Manual review found all 42 produced answers substantively correct. Nine
-answers had invalid temporary-root citation targets, leaving a 33/42 final
-manual result: 11/15 for v0.4, 8/12 for frozen v0.3.26, and 14/15 for plain.
-Against v0.3.26 on the small tasks, v0.4 used 15.4–33.3% fewer median calls and
-18.3–20.2% less median net navigation context. On the medium task it used
-31.2% more median calls, 41% more median net context, and took 92.9% longer
-including setup, while selecting 33.3% more productive files and making 33.3%
-fewer broad reads. It could not be compared with v0.3.26 on huge source. Plain
-navigation used the least context on every corpus. Against plain on huge
-source, v0.4 used 120% more median calls and 189.7% more median net context,
-after a 733.5-second setup with 2,361 MiB peak RSS and 3,809.4 MiB persistent
-storage.
+Manual review found all 42 produced answers substantively correct. Ten answers
+had invalid temporary-root citation targets, leaving a 32/42 final citation
+result: 14/15 for v0.4, 8/12 for frozen v0.3.26, and 10/15 for plain. Against
+v0.3.26 on the small tasks, v0.4 used 7.7–37.5% fewer median calls and
+18.2–19.1% less median net navigation context. On the medium task it used 3.8
+times the median calls, 25.9 times the median net context, and took 36.8%
+longer including setup. It could not be compared with v0.3.26 on huge source.
+Plain navigation used the least context on every corpus. Against plain on huge
+source, v0.4 used the same median call count and 4.3 times the median net
+context, after a 725.8-second setup with about 2,362 MiB peak RSS and 3,809.8
+MiB persistent storage.
 
 The reviewed report publishes absolute values, median and observed-maximum
 percentage comparisons, all tool calls and visits, gross versus fully charged
 net context, provider counters as non-causal observations, task-7.4 resource
-reconciliation, exact identities and prompts, rerun commands, all failed and
+reconciliation, candidate versions and prompts, rerun commands, all failed and
 aborted attempts, and limitations. These results preserve the product's
 purpose-led indexed-navigation contract without relabeling it as a universal
 latency or token advantage.
