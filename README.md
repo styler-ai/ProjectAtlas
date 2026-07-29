@@ -279,7 +279,7 @@ Every release runs:
 - [Token-savings methodology](docs/benchmarks/large-application-token-savings.md)
 - [Complete v0.4 navigation evaluation](docs/benchmarks/v0.4-agent-navigation-evaluation.md)
 
-Ani is the ProjectAtlas mascot. Versioned design references live in [`docs/design/`](docs/design/).
+Ani is the ProjectAtlas mascot. Versioned design references: [mascot reference](docs/design/ani-mascot-reference.png), [clean mascot SVG](docs/design/projectatlas-mascot-clean-transparent.svg), and [token-impact TUI reference](docs/design/token-impact-tui-reference.png).
 
 ## License
 
