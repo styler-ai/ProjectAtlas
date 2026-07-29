@@ -5319,21 +5319,25 @@ mod tests {
             16,
             None,
         )?;
-        assert!(raw.rows.iter().any(|row| {
+        if !raw.rows.iter().any(|row| {
             row.detail.relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
-        }));
+        }) {
+            return Err(io::Error::other("raw adjacency omitted containment fixture").into());
+        }
         let (relations, _) = load_token_atlas_relations(&store)
             .ok_or("token atlas relation loader unexpectedly failed")?;
-        assert!(
-            relations.iter().any(|relation| {
-                relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
-            })
-        );
-        assert!(
-            relations
-                .iter()
-                .all(|relation| token_atlas_network_relation(relation.kind()))
-        );
+        if !relations
+            .iter()
+            .any(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls))
+        {
+            return Err(io::Error::other("token atlas omitted network fixture").into());
+        }
+        if !relations
+            .iter()
+            .all(|relation| token_atlas_network_relation(relation.kind()))
+        {
+            return Err(io::Error::other("token atlas retained containment").into());
+        }
         Ok(())
     }
 
