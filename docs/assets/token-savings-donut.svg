@@ -9,6 +9,7 @@
     .muted { fill: #57606a; font-size: 14px; }
     .track { fill: none; stroke: #d0d7de; stroke-width: 26; }
     .avoided { fill: none; stroke: #0969da; stroke-width: 26; stroke-linecap: butt; }
+    .payload-segment { fill: none; stroke: #1a7f37; stroke-width: 26; stroke-linecap: butt; }
     .payload { fill: #1a7f37; }
     .avoided-key { fill: #0969da; }
     @media (prefers-color-scheme: dark) {
@@ -17,6 +18,7 @@
       .muted { fill: #8c959f; }
       .track { stroke: #30363d; }
       .avoided { stroke: #58a6ff; }
+      .payload-segment { stroke: #3fb950; }
       .avoided-key { fill: #58a6ff; }
       .payload { fill: #3fb950; }
     }
@@ -28,6 +30,7 @@
   <g transform="translate(140 192) rotate(-90)">
     <circle r="82" class="track" />
     <circle r="82" class="avoided" pathLength="100" stroke-dasharray="99.8 0.2" />
+    <circle r="82" class="payload-segment" pathLength="100" stroke-dasharray="0.2 99.8" transform="rotate(359.28)" />
   </g>
 
   <text x="140" y="188" text-anchor="middle" class="headline">99.8%</text>

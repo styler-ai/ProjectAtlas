@@ -267,6 +267,7 @@ Every release runs:
 ## Documentation
 
 - [Live ProjectAtlas documentation](https://styler-ai.github.io/ProjectAtlas/)
+- [CLI and MCP runtime rustdoc](https://styler-ai.github.io/ProjectAtlas/projectatlas/)
 - [Agent integration](docs/agent-integration.md)
 - [Configuration](docs/configuration.md)
 - [Workflow and troubleshooting](docs/workflow.md)
