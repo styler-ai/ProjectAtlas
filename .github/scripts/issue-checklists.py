@@ -44,6 +44,9 @@ EXACT_HEAD_REQUIREMENT_RE = re.compile(
 )
 EXACT_HEAD_NEGATION_RE = re.compile(
     r"(?i)(?:"
+    r"\b(?:must not|shall not|should not|cannot|can't)\s+be\b"
+    r"[^.\n!?]{0,120}\bexact[- ]head\b"
+    r"|"
     r"\b(?:do not|don't|does not|doesn't|must not|shall not|should not|cannot|can't|no longer)"
     r"\s+(?:need|require|use|bind|demand|enforce|accept|allow|permit)\b"
     r"[^.\n!?]{0,120}\bexact[- ]head\b"
@@ -908,6 +911,7 @@ Mitigations:
         == []
     )
     for negative_modal in [
+        "Proof must not be exact-head.",
         "Proof must not require exact-head identity.",
         "Proof should not require exact-head identity.",
         "Proof cannot require exact-head identity.",

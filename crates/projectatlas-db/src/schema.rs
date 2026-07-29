@@ -3646,6 +3646,109 @@ mod tests {
     }
 
     #[test]
+    fn released_schema_malformed_telemetry_rolls_back_unchanged_and_retries()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        write_schema_eight_fixture(&db_path, &root)?;
+        let connection = Connection::open(&db_path)?;
+        connection.execute(
+            "INSERT INTO usage_events(
+                 session_id, command,
+                 estimated_tokens_without_projectatlas,
+                 estimated_tokens_with_projectatlas,
+                 estimated_tokens_saved,
+                 created_at
+             ) VALUES('legacy', 'summary', 100, 10, 90, 'not-a-timestamp')",
+            [],
+        )?;
+        drop(connection);
+
+        let Err(error) = AtlasStore::open_for_project(&db_path, &root) else {
+            return Err(
+                io::Error::other("malformed released telemetry unexpectedly migrated").into(),
+            );
+        };
+        if !matches!(error, DbError::InvalidEnum { .. }) {
+            return Err(io::Error::other(format!(
+                "malformed released telemetry returned the wrong error: {error}"
+            ))
+            .into());
+        }
+
+        let normalized_root = normalize_native_path_display(&root);
+        let (preflight, _) = preflight(&db_path, Some(&normalized_root))?;
+        if preflight.state != SchemaState::UpgradeRequired
+            || preflight.schema_version != Some(PREVIOUS_SCHEMA_VERSION)
+            || preflight.project_root.as_deref() != Some(normalized_root.as_str())
+        {
+            return Err(
+                io::Error::other("failed migration changed released-schema identity").into(),
+            );
+        }
+        let connection = Connection::open(&db_path)?;
+        let preserved = connection.query_row(
+            "SELECT
+                 (SELECT value FROM metadata WHERE key = ?1),
+                 COUNT(*), MIN(command), MIN(created_at),
+                 MIN(estimated_tokens_without_projectatlas),
+                 MIN(estimated_tokens_with_projectatlas),
+                 MIN(estimated_tokens_saved)
+             FROM usage_events",
+            [INDEX_PUBLICATION_STATE_KEY],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            },
+        )?;
+        if preserved
+            != (
+                "complete".to_string(),
+                1,
+                "summary".to_string(),
+                "not-a-timestamp".to_string(),
+                100,
+                10,
+                90,
+            )
+        {
+            return Err(
+                io::Error::other("failed released-schema migration changed durable state").into(),
+            );
+        }
+        connection.execute("UPDATE usage_events SET created_at = CURRENT_TIMESTAMP", [])?;
+        drop(connection);
+        let store = AtlasStore::open_for_project(&db_path, &root)?;
+        if read_metadata(&store.connection, SCHEMA_VERSION_KEY)? != Some(SCHEMA_VERSION.to_string())
+        {
+            return Err(
+                io::Error::other("released-schema retry did not advance the schema").into(),
+            );
+        }
+        let events =
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM usage_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        if events != 1 {
+            return Err(
+                io::Error::other("released-schema retry did not preserve telemetry").into(),
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn active_wal_schema_eight_is_refused_without_migration() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("repository");
