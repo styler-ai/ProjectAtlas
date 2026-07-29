@@ -87,6 +87,8 @@ The larger the repository and the more often agents work in it, the more useful 
   <img src="docs/assets/token-savings-bar.svg" alt="Bar chart comparing a 221.1 million-token modeled candidate-read baseline with 0.4 million compact ProjectAtlas payload tokens in the same representative audit" width="860">
 </p>
 
+> **Historical controlled navigation result:** v0.4 used less median net navigation context than v0.3.26 on all three small tasks, but 3.9× as much on the medium task; frozen v0.3.26 did not complete the huge corpus. The plain control used the least navigation context on every corpus. This retained campaign is historical, not current release proof, and supports no universal token-savings claim.
+
 ¹ The published representative audit covered a 679-file application and 142 indexed ProjectAtlas calls. Its offline `chars/bytes ÷ 4` model counted 221,114,448 tokens across candidate files, directory walks, and full-file reads, while the returned compact ProjectAtlas payloads contained 425,622 estimated tokens—99.8% less context than that modeled candidate-read baseline. This is a navigation-model comparison, not a measured plain-agent arm or provider billing counter. Warm indexed CLI reads in the same audit were approximately 160–166 ms. Results vary by repository and usage; see the [full formula, measurements, and limitations](docs/benchmarks/large-application-token-savings.md) and the separately controlled, now historical [v0.4 navigation evaluation](docs/benchmarks/v0.4-agent-navigation-evaluation.md).
 
 ## How ProjectAtlas works
