@@ -33,19 +33,19 @@ MITIGATION_RE = re.compile(
 EXACT_HEAD_PROOF_RE = re.compile(r"(?i)\bexact[- ]head\b")
 EXACT_HEAD_REQUIREMENT_RE = re.compile(
     r"(?i)(?:"
-    r"\b(?:must|shall|mandatory|obligat\w*|requir\w*|enforc\w*|bind\w*|"
+    r"\b(?:must|shall|mandatory|obligat\w*|need(?:s|ed|ing)?|requir\w*|enforc\w*|bind\w*|"
     r"verif\w*|accept\w*|allow\w*|permit\w*)\b"
     r"[^.\n!?]{0,120}\bexact[- ]head\b"
     r"|"
     r"\bexact[- ]head\b[^.\n!?]{0,120}"
-    r"\b(?:must|shall|mandatory|obligat\w*|requir\w*|enforc\w*|bind\w*|"
+    r"\b(?:must|shall|mandatory|obligat\w*|need(?:s|ed|ing)?|requir\w*|enforc\w*|bind\w*|"
     r"verif\w*|accept\w*|allow\w*|permit\w*)\b"
     r")"
 )
 EXACT_HEAD_NEGATION_RE = re.compile(
     r"(?i)(?:"
     r"\b(?:do not|don't|does not|doesn't|must not|shall not|should not|cannot|can't|no longer)"
-    r"\s+(?:require|use|bind|demand|enforce|accept|allow|permit)\b"
+    r"\s+(?:need|require|use|bind|demand|enforce|accept|allow|permit)\b"
     r"[^.\n!?]{0,120}\bexact[- ]head\b"
     r"|"
     r"\b(?:remove|removing|removed|reject|rejecting|rejected|avoid|avoiding|"
@@ -58,13 +58,13 @@ EXACT_HEAD_NEGATION_RE = re.compile(
 )
 EXACT_HEAD_SHARED_NEGATION_RE = re.compile(
     r"(?i)\b(?:do not|don't|does not|doesn't|must not|shall not|should not|cannot|can't|no longer)"
-    r"\s+(?:require|use|bind|demand|enforce|accept|allow|permit)\b"
+    r"\s+(?:need|require|use|bind|demand|enforce|accept|allow|permit)\b"
 )
 EXACT_HEAD_BARE_ACTION_RE = re.compile(
-    r"(?i)^\s*(?:require|use|bind|demand|enforce|accept|allow|permit)\b"
+    r"(?i)^\s*(?:need|require|use|bind|demand|enforce|accept|allow|permit)\b"
 )
 EXACT_HEAD_BARE_ACTION_ONLY_RE = re.compile(
-    r"(?i)^\s*(?:require|use|bind|demand|enforce|accept|allow|permit)\s*$"
+    r"(?i)^\s*(?:need|require|use|bind|demand|enforce|accept|allow|permit)\s*$"
 )
 REQUIRED_OPEN_ISSUE_HEADINGS = (
     "why",
@@ -925,10 +925,16 @@ Mitigations:
         "is required before release."
     )
     assert requires_exact_head_proof(
+        "Exact-head proof is needed before release."
+    )
+    assert requires_exact_head_proof(
         "Proof does not require and instead enforces exact-head identity."
     )
     assert not requires_exact_head_proof(
         "Proof does not require or enforce exact-head identity."
+    )
+    assert not requires_exact_head_proof(
+        "We do not need exact-head proof."
     )
     assert not requires_exact_head_proof(
         "Do not require commit receipts or bind releases to exact-head proof."
