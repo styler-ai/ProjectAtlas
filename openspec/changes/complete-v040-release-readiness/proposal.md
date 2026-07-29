@@ -15,7 +15,7 @@ ProjectAtlas v0.4.0 has completed its feature program, but review of the promoti
 - Correct the MCP composition evaluation's raw-input digest in both published representations and verify the binding directly.
 - Keep the system-scale and agent-navigation publications honest about their measured identities, but make both full campaigns manual-only: standard CI and release proceed without rerunning an invalidated publication, which becomes historical or unavailable for the candidate unless the user explicitly requests a new campaign.
 - Preserve cumulative token-impact history through the released v0.3.26-to-v0.4.0 database upgrade and every later compatible migration.
-- Keep the human token-impact TUI truthful and focused on persisted impact data, with source-reconciled file reads, broad-folder-walk and candidate-open activity/token-impact charts, no benchmark-comparison panel, and a bounded connected and clustered static preview of real resolved repository-graph relations in wide terminals.
+- Keep the human token-impact TUI truthful and focused on persisted impact data, with source-reconciled file-read bars, exact broad-folder-walk and candidate-open source rows without duplicate expanded charts, no benchmark-comparison panel, and a bounded connected and clustered static preview of real resolved repository-graph relations in wide terminals.
 - Prepare the `dev`-to-`main` promotion while keeping `main` and publication untouched until readiness is complete.
 - Create a separate non-milestone post-release issue that owns published-release verification and the user-requested safe branch, worktree, and external ProjectAtlas checkout cleanup.
 

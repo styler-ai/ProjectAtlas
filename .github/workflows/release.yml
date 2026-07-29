@@ -95,6 +95,9 @@ jobs:
       - name: Manual-only full benchmark policy
         run: python3 .github/scripts/verify-manual-benchmark-policy.py
 
+      - name: Published benchmark measurement locks
+        run: python3 .github/scripts/verify-published-benchmark-locks.py
+
       - name: Verify version
         run: |
           requested="$RELEASE_VERSION"

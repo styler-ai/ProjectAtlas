@@ -10,6 +10,7 @@ done
 
 python3 docs/benchmarks/harness/mcp_composition.py --self-test
 python3 .github/scripts/verify-manual-benchmark-policy.py
+python3 .github/scripts/verify-published-benchmark-locks.py
 cargo fmt --all --check
 cargo check --workspace --all-targets --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings

@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Fixed terminal height for the token overview dashboard snapshot.
-const DASHBOARD_HEIGHT: u16 = 58;
+const DASHBOARD_HEIGHT: u16 = 50;
 /// Width at which the human dashboard can show the atlas without crowding impact data.
 const ATLAS_DASHBOARD_MIN_WIDTH: usize = 190;
 /// Maximum human dashboard width.
@@ -499,7 +499,7 @@ fn render_overview_frame_with_atlas(
     let area = frame.area();
     let outer = Block::bordered()
         .border_set(symbols::border::ROUNDED)
-        .border_style(Style::default().fg(THEME_BORDER))
+        .border_style(Style::default().fg(THEME_TEXT))
         .style(Style::default().fg(THEME_TEXT));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
@@ -535,7 +535,7 @@ fn render_overview_main(
         .constraints([
             Constraint::Length(7),
             Constraint::Length(13),
-            Constraint::Length(16),
+            Constraint::Length(8),
             Constraint::Length(6),
             Constraint::Min(8),
             Constraint::Length(4),
@@ -556,7 +556,7 @@ fn render_overview_main(
 fn panel(title: &'static str) -> Block<'static> {
     let block = Block::bordered()
         .border_set(symbols::border::ROUNDED)
-        .border_style(Style::default().fg(THEME_BORDER))
+        .border_style(Style::default().fg(THEME_TEXT))
         .style(Style::default().fg(THEME_TEXT).bg(THEME_PANEL));
     if title.is_empty() {
         block
@@ -664,7 +664,7 @@ fn render_token_header(
 
 /// Draw the dominant saved-token hero panel.
 fn render_token_hero(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
-    let block = panel("").border_style(Style::default().fg(THEME_BORDER));
+    let block = panel("").border_style(Style::default().fg(THEME_TEXT));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -817,12 +817,7 @@ fn render_avoided_navigation_card(frame: &mut Frame<'_>, area: Rect, overview: &
     let compact = inner.width < 100;
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(4),
-            Constraint::Length(4),
-            Constraint::Length(4),
-        ])
+        .constraints([Constraint::Length(1), Constraint::Min(4)])
         .split(inner);
     frame.render_widget(
         Paragraph::new(reference_title("NAVIGATION WORK AVOIDED"))
@@ -831,39 +826,6 @@ fn render_avoided_navigation_card(frame: &mut Frame<'_>, area: Rect, overview: &
     );
 
     render_file_read_impact_row(frame, rows[1], overview, compact);
-    let source_rows = savings_source_rows_for_width(overview, compact);
-    let folder_walk = source_rows.iter().find(|row| {
-        row.label
-            == if compact {
-                "Skipped folder walk"
-            } else {
-                "Skipped broad folder walk"
-            }
-    });
-    let candidate_opens = source_rows.iter().find(|row| {
-        row.label
-            == if compact {
-                "Fewer candidates B"
-            } else {
-                "Opened fewer candidates (B)"
-            }
-    });
-    render_source_impact_row(
-        frame,
-        rows[2],
-        "□  Broad folder walks skipped",
-        folder_walk,
-        overview,
-        compact,
-    );
-    render_source_impact_row(
-        frame,
-        rows[3],
-        "▥  Candidate files not opened",
-        candidate_opens,
-        overview,
-        compact,
-    );
 }
 
 /// Draw the source-reconciled file-read total and its observed/modeled split.
@@ -1019,71 +981,6 @@ fn render_impact_metric(
                 ratio_value,
                 color,
             ),
-        ])
-        .style(body_style().bg(THEME_PANEL)),
-        area,
-    );
-}
-
-/// Draw source activity and token-impact shares against their reconciled totals.
-fn render_source_impact_row(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    title: &'static str,
-    row: Option<&SavingsSourceRow>,
-    overview: &TokenOverview,
-    compact: bool,
-) {
-    let steps = row.map_or(0, |value| value.steps);
-    let tokens = row.map_or(0, |value| value.tokens);
-    let meaning = row.map_or("No persisted source activity", |value| value.meaning);
-    let activity_ratio = ratio(steps, overview.calls);
-    let token_ratio = ratio(
-        tokens.unsigned_abs(),
-        overview.tokens_avoided.unsigned_abs(),
-    );
-    let bar_width = if compact { 18 } else { 34 };
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(
-                    format!("{title}: "),
-                    Style::default()
-                        .fg(THEME_YELLOW)
-                        .bg(THEME_PANEL)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    grouped_count(steps),
-                    Style::default()
-                        .fg(THEME_YELLOW)
-                        .bg(THEME_PANEL)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!("  •  {meaning}"), muted_style().bg(THEME_PANEL)),
-            ]),
-            impact_bar_line(
-                "Activity",
-                &format!("{}/{}", grouped_count(steps), grouped_count(overview.calls)),
-                activity_ratio,
-                THEME_YELLOW,
-                bar_width,
-            ),
-            impact_bar_line(
-                "Token impact",
-                &signed_count(tokens),
-                token_ratio,
-                signed_color(tokens),
-                bar_width,
-            ),
-            Line::from(Span::styled(
-                format!(
-                    "{} source steps account for {} of avoided tokens",
-                    grouped_count(steps),
-                    percentage_one_decimal(token_ratio)
-                ),
-                muted_style().bg(THEME_PANEL),
-            )),
         ])
         .style(body_style().bg(THEME_PANEL)),
         area,
@@ -1419,7 +1316,7 @@ fn render_atlas_map(frame: &mut Frame<'_>, area: Rect, atlas: &TokenAtlasPreview
                     source.y,
                     target.x,
                     target.y,
-                    THEME_BAR_EMPTY,
+                    THEME_MUTED,
                 ));
             }
             context.layer();
@@ -2287,7 +2184,7 @@ fn render_trend_frame(frame: &mut Frame<'_>, report: &TokenTrendReport) {
             Span::styled(" ProjectAtlas Token Trends ", identity_title_style()),
             Span::styled(format!("{} ", report.window), body_style()),
         ]))
-        .border_style(Style::default().fg(THEME_BORDER))
+        .border_style(Style::default().fg(THEME_TEXT))
         .style(Style::default().fg(THEME_TEXT));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
@@ -2635,9 +2532,9 @@ mod tests {
         ATLAS_PREVIEW_MAX_NODE_DEGREE, ATLAS_PREVIEW_MAX_NODES, DASHBOARD_HEIGHT, THEME_BAR_EMPTY,
         THEME_BG, THEME_BLUE, THEME_GREEN, THEME_INK_WHITE, THEME_YELLOW,
         TOKEN_IMPACT_COLUMN_WIDTH, TokenAtlasPreview, TokenDashboardTheme, atlas_layout, block_bar,
-        buffer_to_string, dashboard_width, grouped_count, percentage_one_decimal, ratio,
-        reconciled_without_projectatlas, reference_title, render_dashboard_to_string,
-        render_overview_frame, render_overview_frame_with_atlas, render_token_dashboard,
+        buffer_to_string, dashboard_width, grouped_count, reconciled_without_projectatlas,
+        reference_title, render_dashboard_to_string, render_overview_frame,
+        render_overview_frame_with_atlas, render_token_dashboard,
         render_token_dashboard_with_theme, render_token_trend_dashboard,
         render_token_trend_dashboard_with_theme, resolve_dashboard_width,
         savings_source_rows_for_width, signed_count, signed_trend_points, signed_y_bounds,
@@ -2683,11 +2580,6 @@ mod tests {
             "With ProjectAtlas",
             "Saved by ProjectAtlas",
             "file reads avoided",
-            "Broad folder walks skipped",
-            "Candidate files not opened",
-            "Activity:",
-            "Token impact:",
-            "source steps account for",
             "Observed (summaries/slices)",
             "Search-modeled narrowing",
             "Confidence",
@@ -2713,6 +2605,9 @@ mod tests {
                 "dashboard should contain {text:?}"
             );
         }
+        assert!(!dashboard.contains("Broad folder walks skipped"));
+        assert!(!dashboard.contains("Candidate files not opened"));
+        assert!(!dashboard.contains("source steps account for"));
         for title in [
             "TOTAL TOKENS AVOIDED",
             "NAVIGATION WORK AVOIDED",
@@ -3060,6 +2955,8 @@ mod tests {
         assert!(dashboard.contains(&reference_title("WHERE THE SAVINGS CAME FROM")));
         assert!(dashboard.contains("Skipped folder walk"));
         assert!(dashboard.contains("Fewer candidates B"));
+        assert!(!dashboard.contains("Broad folder walks skipped"));
+        assert!(!dashboard.contains("Candidate files not opened"));
         assert!(dashboard.contains(&reference_title("CALIBRATION & NOTES")));
         assert!(!dashboard.contains(&reference_title("REPEATED-WORK BENCHMARK")));
         assert!(!dashboard.contains("Saved-token trends"));
@@ -3134,27 +3031,8 @@ mod tests {
         );
         assert_eq!(source_steps, overview.calls);
         assert_eq!(source_tokens, conservative_avoided);
-        for source in source_rows.iter().filter(|row| {
-            matches!(
-                row.label,
-                "Skipped broad folder walk" | "Opened fewer candidates (B)"
-            )
-        }) {
-            assert!(dashboard.contains(&format!(
-                "Activity: {}/{} • {}",
-                grouped_count(source.steps),
-                grouped_count(overview.calls),
-                percentage_one_decimal(ratio(source.steps, overview.calls))
-            )));
-            assert!(dashboard.contains(&format!(
-                "Token impact: {} • {}",
-                signed_count(source.tokens),
-                percentage_one_decimal(ratio(
-                    source.tokens.unsigned_abs(),
-                    overview.tokens_avoided.unsigned_abs()
-                ))
-            )));
-        }
+        assert!(!dashboard.contains("Broad folder walks skipped"));
+        assert!(!dashboard.contains("Candidate files not opened"));
         assert!(dashboard.contains(&signed_count(without_projectatlas)));
         assert!(dashboard.contains(&signed_count(with_projectatlas)));
         assert!(dashboard.contains(&signed_count(conservative_avoided)));

@@ -33,17 +33,19 @@ MITIGATION_RE = re.compile(
 EXACT_HEAD_PROOF_RE = re.compile(r"(?i)\bexact[- ]head\b")
 EXACT_HEAD_REQUIREMENT_RE = re.compile(
     r"(?i)(?:"
-    r"\b(?:must|requir\w*|enforc\w*|bind\w*|verif\w*|evidence|proof|gate)\b"
+    r"\b(?:must|shall|mandatory|obligat\w*|requir\w*|enforc\w*|bind\w*|"
+    r"verif\w*|accept\w*|allow\w*|permit\w*)\b"
     r"[^.\n!?]{0,120}\bexact[- ]head\b"
     r"|"
     r"\bexact[- ]head\b[^.\n!?]{0,120}"
-    r"\b(?:must|requir\w*|enforc\w*|bind\w*|verif\w*|evidence|proof|gate)\b"
+    r"\b(?:must|shall|mandatory|obligat\w*|requir\w*|enforc\w*|bind\w*|"
+    r"verif\w*|accept\w*|allow\w*|permit\w*)\b"
     r")"
 )
 EXACT_HEAD_NEGATION_RE = re.compile(
     r"(?i)(?:"
-    r"\b(?:do not|don't|does not|doesn't|must not|should not|cannot|can't|no longer)"
-    r"\s+(?:require|use|bind|demand|enforce)\b"
+    r"\b(?:do not|don't|does not|doesn't|must not|shall not|should not|cannot|can't|no longer)"
+    r"\s+(?:require|use|bind|demand|enforce|accept|allow|permit)\b"
     r"[^.\n!?]{0,120}\bexact[- ]head\b"
     r"|"
     r"\b(?:remove|removing|removed|reject|rejecting|rejected|avoid|avoiding|"
@@ -55,14 +57,14 @@ EXACT_HEAD_NEGATION_RE = re.compile(
     r")"
 )
 EXACT_HEAD_SHARED_NEGATION_RE = re.compile(
-    r"(?i)\b(?:do not|don't|does not|doesn't|must not|should not|cannot|can't|no longer)"
-    r"\s+(?:require|use|bind|demand|enforce)\b"
+    r"(?i)\b(?:do not|don't|does not|doesn't|must not|shall not|should not|cannot|can't|no longer)"
+    r"\s+(?:require|use|bind|demand|enforce|accept|allow|permit)\b"
 )
 EXACT_HEAD_BARE_ACTION_RE = re.compile(
-    r"(?i)^\s*(?:require|use|bind|demand|enforce)\b"
+    r"(?i)^\s*(?:require|use|bind|demand|enforce|accept|allow|permit)\b"
 )
 EXACT_HEAD_BARE_ACTION_ONLY_RE = re.compile(
-    r"(?i)^\s*(?:require|use|bind|demand|enforce)\s*$"
+    r"(?i)^\s*(?:require|use|bind|demand|enforce|accept|allow|permit)\s*$"
 )
 REQUIRED_OPEN_ISSUE_HEADINGS = (
     "why",
@@ -937,6 +939,22 @@ Mitigations:
     assert requires_exact_head_proof(
         "Proof does not require stale-SHA identity and the release gate "
         "enforces exact-head identity."
+    )
+    for mandatory_requirement in [
+        "Exact-head commit identity is mandatory before release.",
+        "The release shall use exact-head commit identity.",
+        "Only exact-head commit identity is allowed.",
+        "Release is permitted only with exact-head commit identity.",
+    ]:
+        assert requires_exact_head_proof(mandatory_requirement)
+    assert not requires_exact_head_proof(
+        "The release shall not allow exact-head commit identity."
+    )
+    assert not requires_exact_head_proof(
+        "Exact-head proof caused unnecessary reruns."
+    )
+    assert not requires_exact_head_proof(
+        "We replace exact-head proof with input-based reuse."
     )
     punctuation_heading_contract = issue_contract.replace(
         "#architecture-views", "#sqlite-wal-durability-and-checkpoint-flow"

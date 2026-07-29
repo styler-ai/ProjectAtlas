@@ -19,20 +19,19 @@ The token overview TUI SHALL render only live token-impact and repository contex
 - **THEN** the TUI SHALL remain live-only
 - **AND** structured output SHALL retain the bounded state and reason without fabricating zero-valued efficiency rows or savings percentages.
 
-### Requirement: The Live Dashboard Preserves Meaningful Navigation Charts
-The human overview SHALL preserve the accepted token-impact hierarchy, semantic palette, terminal-background behavior, trend mode, and compact-width contract. Its navigation-work section SHALL present file reads avoided, broad folder walks skipped, and candidate files not opened as distinct persisted measures.
+### Requirement: The Live Dashboard Preserves Meaningful Navigation Reporting
+The human overview SHALL preserve the accepted token-impact hierarchy, semantic palette, terminal-background behavior, trend mode, and compact-width contract. Its navigation-work chart SHALL present file reads avoided, while broad folder walks skipped and candidate files not opened SHALL remain distinct persisted measures in the source table without duplicative expanded charts.
 
 #### Scenario: Normal-width overview renders
 - **WHEN** the overview renders at the canonical normal width
 - **THEN** file reads avoided SHALL show the exact observed and modeled split with proportional bars
-- **AND** broad folder walks and candidate files not opened SHALL each show an activity-share bar against reconciled persisted source steps
-- **AND** each SHALL show a token-impact-share bar against reconciled tokens avoided
-- **AND** exact activity and token values SHALL match the source table below.
+- **AND** broad folder walks and each candidate source group SHALL show exact reconciled step and token values in the source table below
+- **AND** the dashboard SHALL NOT duplicate those source rows as expanded activity-share or token-impact-share charts.
 
 #### Scenario: Compact-width overview renders
 - **WHEN** the overview renders at 80 columns
-- **THEN** all three navigation-work outcomes, exact values, percentages, and proportional bars SHALL remain inside the dashboard bounds
-- **AND** labels SHALL shorten without changing their source meaning.
+- **THEN** the file-read chart and the exact broad-walk and candidate source rows SHALL remain inside the dashboard bounds
+- **AND** labels SHALL shorten without changing source meaning or adding duplicate detail blocks.
 
 #### Scenario: Trend mode is selected
 - **WHEN** a user requests the dedicated token trend dashboard
@@ -50,4 +49,4 @@ The Ratatui dashboard SHALL render live values from the authoritative typed toke
 #### Scenario: Real visual review is performed
 - **WHEN** the implementation is ready for acceptance
 - **THEN** real 80-, 140-, and 200-column dark, light, and terminal-background renders SHALL be compared to the approved token-impact reference
-- **AND** the navigation-work charts, source table, footer, and optional wide atlas SHALL remain readable and bounded.
+- **AND** the navigation-work chart, source table, footer, and optional wide atlas SHALL remain readable and bounded.

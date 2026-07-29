@@ -5221,10 +5221,9 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("file reads avoided")
         );
-        assert!(dashboard.contains("Broad folder walks skipped"));
-        assert!(dashboard.contains("Candidate files not opened"));
-        assert!(dashboard.contains("Activity:"));
-        assert!(dashboard.contains("Token impact:"));
+        assert!(!dashboard.contains("Broad folder walks skipped"));
+        assert!(!dashboard.contains("Candidate files not opened"));
+        assert!(!dashboard.contains("source steps account for"));
         assert!(dashboard.contains("S A V I N G S   C O M P O S I T I O N"));
         assert!(dashboard.contains("S I G N A L"));
         assert!(dashboard.contains("W H E R E   T H E   S A V I N G S   C A M E   F R O M"));
