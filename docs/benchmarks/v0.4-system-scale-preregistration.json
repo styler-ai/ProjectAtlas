@@ -4,9 +4,10 @@
   "status": "locked_for_final_measurement",
   "measurement_input_lock_basis": "Content digests from the recorded measurement checkout; a later run must relock after any listed input changes.",
   "measurement_inputs": {
-    "docs/benchmarks/harness/system_scale.py": "d27016b3b526f505edad89ac16cb5fac45a57faa6250889bb111e5390ebc6dc9",
+    "docs/benchmarks/harness/system_scale.py": "e1eaf8524801b425fb3eddff0b25ed3612231c9354d4d9ea094b4b8457ff8ace",
     "docs/benchmarks/harness/mcp_composition.py": "04dd5bf8bac306d1ac5faf8c92bd75cf63e6284f39e53dfcef80ac3c3ac17832",
-    "docs/benchmarks/harness/requirements.txt": "b6c8d86768d07e1dae4fb734c2e93997445a318d43290b307bfc1c800a0b1e52"
+    "docs/benchmarks/harness/requirements.txt": "b6c8d86768d07e1dae4fb734c2e93997445a318d43290b307bfc1c800a0b1e52",
+    "docs/benchmarks/fixtures/mcp-composition": "498cccec02061a12330b738fd0e3094063627934979b0277c493d90564e02553"
   },
   "measurement_amendments": [
     {
@@ -33,6 +34,13 @@
       "changes": [
         "Relock the runtime and MCP inventory identities and repeat the complete small, medium, huge, concurrency, contention, cancellation, and termination matrix against the corrected functional release candidate."
       ]
+    },
+    {
+      "prior_result": "docs/benchmarks/v0.4-system-scale-results.json",
+      "disposition": "superseded publication retained in Git history; exact-head review found that its content lock omitted the copied small-fixture corpus",
+      "changes": [
+        "Bind the complete committed mcp-composition fixture tree, relock the corrected runtime and harness identities, and repeat the complete publication campaign."
+      ]
     }
   ],
   "preflight_failures": [
@@ -43,7 +51,7 @@
   ],
   "candidate": {
     "required_version": "0.4.0",
-    "runtime_sha256": "e9fa5fbe6041c2f37cb55c7934240564c312d4d28554875ce11c525e549116b4",
+    "runtime_sha256": "352195ff426785780fb114566b9421f8142f9d500108aac65ebdc4cef41d5494",
     "mcp_tools_sha256": "0c21ea673bdb9cdff48203a274db04fbaccb888bd362407d46fc1bcc0e506b28",
     "telemetry": "disabled",
     "build_profile": "release-default-features"
