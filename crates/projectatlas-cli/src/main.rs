@@ -4126,20 +4126,25 @@ fn load_token_atlas_relations(store: &AtlasStore) -> Option<(Vec<LogicalRelation
     const ADJACENCY_FRONTIER_MAX: usize = 128;
     const SEEDS_PER_RELATION_FAMILY: usize = 4;
 
+    let network_relation_kinds = GraphRelationKind::ALL
+        .into_iter()
+        .filter(|relation| token_atlas_network_relation(*relation))
+        .collect::<Vec<_>>();
     let mut relations = Vec::with_capacity(
-        GraphRelationKind::ALL.len() * usize::try_from(RELATIONS_PER_FAMILY).unwrap_or_default(),
+        network_relation_kinds.len() * usize::try_from(RELATIONS_PER_FAMILY).unwrap_or_default(),
     );
+    let mut adjacency_relation_kinds = Vec::new();
     let mut truncated = false;
-    for relation in GraphRelationKind::ALL {
-        if !token_atlas_network_relation(relation) {
-            continue;
-        }
+    for &relation in &network_relation_kinds {
         let Ok(page) = store.repository_graph_relations(
             RepositoryGraphRelationQuery::Family { relation },
             RELATIONS_PER_FAMILY,
         ) else {
             return None;
         };
+        if page.truncated {
+            adjacency_relation_kinds.push(relation);
+        }
         truncated |= page.truncated;
         relations.extend(page.rows);
     }
@@ -4188,29 +4193,37 @@ fn load_token_atlas_relations(store: &AtlasStore) -> Option<(Vec<LogicalRelation
             let page_limit = ((GraphLimits::MAX_ROWS as usize + 1) / frontier.len())
                 .saturating_sub(1)
                 .clamp(1, ADJACENCY_ROWS_PER_ROUND);
-            let Ok(page) = store.repository_graph_adjacency_page(
-                &frontier,
-                direction,
-                None,
-                u32::try_from(page_limit).unwrap_or(1),
-                None,
-            ) else {
-                return None;
-            };
-            truncated |= page.truncated;
-            for row in page.rows {
-                let relation = row.detail.relation;
-                if !token_atlas_network_relation(relation.kind()) {
-                    continue;
+            let mut remaining_rows = page_limit;
+            for (index, &relation_kind) in adjacency_relation_kinds.iter().enumerate() {
+                if remaining_rows == 0 {
+                    truncated = true;
+                    break;
                 }
-                if let Some(target) = relation.resolution().resolved_target() {
-                    for endpoint in [relation.source(), target] {
-                        if seen.insert(endpoint.digest().to_string()) {
-                            next.insert(endpoint.digest().to_string(), endpoint.clone());
+                let remaining_families = adjacency_relation_kinds.len() - index;
+                let family_limit = remaining_rows.div_ceil(remaining_families);
+                let Ok(page) = store.repository_graph_adjacency_page_filtered(
+                    &frontier,
+                    direction,
+                    Some(relation_kind),
+                    None,
+                    u32::try_from(family_limit).unwrap_or(1),
+                    None,
+                ) else {
+                    return None;
+                };
+                truncated |= page.truncated;
+                remaining_rows = remaining_rows.saturating_sub(page.rows.len());
+                for row in page.rows {
+                    let relation = row.detail.relation;
+                    if let Some(target) = relation.resolution().resolved_target() {
+                        for endpoint in [relation.source(), target] {
+                            if seen.insert(endpoint.digest().to_string()) {
+                                next.insert(endpoint.digest().to_string(), endpoint.clone());
+                            }
                         }
                     }
+                    relations.push(relation);
                 }
-                relations.push(relation);
             }
         }
         frontier = next.into_values().take(ADJACENCY_FRONTIER_MAX).collect();
@@ -5240,13 +5253,13 @@ mod tests {
     }
 
     #[test]
-    fn token_atlas_loader_excludes_sqlite_containment_adjacency() -> Result<(), Box<dyn Error>> {
+    fn token_atlas_loader_filters_containment_before_paging() -> Result<(), Box<dyn Error>> {
+        const FAMILY_PAGE_ROWS: usize = 128;
+        const ADJACENCY_PAGE_ROWS: u32 = 512;
+
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("token-atlas-loader");
         fs::create_dir_all(root.join("src"))?;
-        for path in ["src/a.rs", "src/b.rs", "src/c.rs"] {
-            fs::write(root.join(path), "pub fn item() {}\n")?;
-        }
         let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), &root)?;
         let project = store
             .project_instance_id()?
@@ -5261,25 +5274,6 @@ mod tests {
                 generation,
             )?)
         };
-        let source = entity("src/a.rs")?;
-        let network_target = entity("src/b.rs")?;
-        let contained_target = entity("src/c.rs")?;
-        let calls = LogicalRelation::new(
-            &source,
-            GraphRelationKind::Legacy(RelationKind::Calls),
-            RelationResolution::resolved(&network_target)?,
-            ConfidenceClass::Exact,
-            Completeness::Complete,
-            generation,
-        )?;
-        let contains = LogicalRelation::new(
-            &source,
-            GraphRelationKind::Legacy(RelationKind::Contains),
-            RelationResolution::resolved(&contained_target)?,
-            ConfidenceClass::Exact,
-            Completeness::Complete,
-            generation,
-        )?;
         let node = |path: &str, kind: NodeKind, hash: Option<&str>| {
             let is_file = kind == NodeKind::File;
             Node {
@@ -5293,44 +5287,92 @@ mod tests {
                 content_hash: hash.map(str::to_string),
             }
         };
-        let nodes = [
-            node("src", NodeKind::Folder, None),
-            node("src/a.rs", NodeKind::File, Some("a")),
-            node("src/b.rs", NodeKind::File, Some("b")),
-            node("src/c.rs", NodeKind::File, Some("c")),
-        ];
+        let mut nodes = vec![node("src", NodeKind::Folder, None)];
+        let mut entities = Vec::new();
+        let mut add_file_entity = |path: String| -> Result<GraphEntity, Box<dyn Error>> {
+            let graph_entity = entity(&path)?;
+            nodes.push(node(&path, NodeKind::File, Some(&path)));
+            entities.push(graph_entity.clone());
+            Ok(graph_entity)
+        };
+        let source = add_file_entity("src/source.rs".to_string())?;
+        let mut imports = Vec::with_capacity(FAMILY_PAGE_ROWS + 1);
+        for index in 0..=FAMILY_PAGE_ROWS {
+            let target = add_file_entity(format!("src/import-target-{index:03}.rs"))?;
+            imports.push(LogicalRelation::new(
+                &source,
+                GraphRelationKind::Legacy(RelationKind::Imports),
+                RelationResolution::resolved(&target)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?);
+        }
+        imports.sort_by(|left, right| left.key().digest().cmp(right.key().digest()));
+        let hidden_import = imports
+            .last()
+            .cloned()
+            .ok_or("token atlas import fixture is empty")?;
+        let call_target = add_file_entity("src/call-target.rs".to_string())?;
+        let calls = LogicalRelation::new(
+            &source,
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            RelationResolution::resolved(&call_target)?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )?;
+        let mut graph_relations = imports;
+        graph_relations.push(calls);
+        for index in 0..=ADJACENCY_PAGE_ROWS {
+            let target = add_file_entity(format!("src/contained-{index:03}.rs"))?;
+            graph_relations.push(LogicalRelation::new(
+                &source,
+                GraphRelationKind::Legacy(RelationKind::Contains),
+                RelationResolution::resolved(&target)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?);
+        }
         let mut publication = store.begin_index_publication("token-atlas-loader")?;
         publication.begin_scan_replacement()?;
         publication.upsert_scan_node_batch(&nodes)?;
         publication.finish_scan_replacement()?;
-        publication.replace_repository_graph(
-            project,
-            &[source.clone(), network_target, contained_target],
-            &[calls, contains],
-            &[],
-            &[],
-        )?;
+        publication.replace_repository_graph(project, &entities, &graph_relations, &[], &[])?;
         publication.complete()?;
 
         let raw = store.repository_graph_adjacency_page(
             &[source.key().clone()],
             RepositoryGraphDirection::Outbound,
             None,
-            16,
+            ADJACENCY_PAGE_ROWS,
             None,
         )?;
+        if !raw.truncated {
+            return Err(io::Error::other("raw adjacency fixture was not truncated").into());
+        }
         if !raw.rows.iter().any(|row| {
             row.detail.relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
         }) {
             return Err(io::Error::other("raw adjacency omitted containment fixture").into());
         }
+        if raw
+            .rows
+            .iter()
+            .any(|row| row.detail.relation.key() == hidden_import.key())
+        {
+            return Err(
+                io::Error::other("raw adjacency unexpectedly reached hidden import").into(),
+            );
+        }
         let (relations, _) = load_token_atlas_relations(&store)
             .ok_or("token atlas relation loader unexpectedly failed")?;
         if !relations
             .iter()
-            .any(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls))
+            .any(|relation| relation.key() == hidden_import.key())
         {
-            return Err(io::Error::other("token atlas omitted network fixture").into());
+            return Err(io::Error::other("token atlas omitted paged network relation").into());
         }
         if !relations
             .iter()

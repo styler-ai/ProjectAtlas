@@ -20,7 +20,7 @@ from typing import Any
 
 from mcp_composition import PURPOSES, clear_git_repository_environment, remove_tree
 from system_scale import (
-    committed_file_sha256,
+    committed_git_object_sha256,
     measurement_input_errors,
     persistent_sizes,
     prepare_huge,
@@ -83,6 +83,7 @@ AGENT_NAVIGATION_MEASUREMENT_INPUTS = (
     "docs/benchmarks/harness/system_scale.py",
     "docs/benchmarks/harness/mcp_composition.py",
     "docs/benchmarks/harness/requirements.txt",
+    "docs/benchmarks/fixtures/mcp-composition",
 )
 
 
@@ -1246,7 +1247,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         runs.append(record)
         append_checkpoint(record, journal)
     journal_sha256 = file_sha256(journal)
-    preregistration_sha256 = committed_file_sha256(
+    preregistration_sha256 = committed_git_object_sha256(
         source_identity["preregistration_path"],
         root=ROOT,
         revision=source_identity["checkout_head"],

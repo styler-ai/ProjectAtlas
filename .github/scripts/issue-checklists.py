@@ -56,7 +56,7 @@ EXACT_HEAD_NEGATION_RE = re.compile(
 )
 EXACT_HEAD_SHARED_NEGATION_RE = re.compile(
     r"(?i)\b(?:do not|don't|does not|doesn't|must not|should not|cannot|can't|no longer)"
-    r"\s+(?:require|use|bind|demand|enforce)\s*$"
+    r"\s+(?:require|use|bind|demand|enforce)\b"
 )
 EXACT_HEAD_BARE_ACTION_RE = re.compile(
     r"(?i)^\s*(?:require|use|bind|demand|enforce)\b"
@@ -927,6 +927,9 @@ Mitigations:
     )
     assert not requires_exact_head_proof(
         "Proof does not require or enforce exact-head identity."
+    )
+    assert not requires_exact_head_proof(
+        "Do not require commit receipts or bind releases to exact-head proof."
     )
     assert not requires_exact_head_proof(
         "Proof does not require and does not enforce exact-head identity."

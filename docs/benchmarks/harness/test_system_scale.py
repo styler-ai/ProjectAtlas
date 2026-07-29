@@ -282,10 +282,16 @@ class SystemScaleHarnessTests(unittest.TestCase):
             subprocess.run(
                 ["git", "config", "core.autocrlf", "false"], cwd=root, check=True
             )
-            required = ("docs/benchmarks/harness/measure.py",)
+            required = (
+                "docs/benchmarks/harness/measure.py",
+                "docs/benchmarks/fixtures/mcp-composition",
+            )
             path = root / required[0]
             path.parent.mkdir(parents=True)
             path.write_bytes(b"locked\n")
+            fixture = root / required[1] / "clean/src/lib.rs"
+            fixture.parent.mkdir(parents=True)
+            fixture.write_bytes(b"fixture\n")
             subprocess.run(["git", "add", "."], cwd=root, check=True)
             subprocess.run(
                 ["git", "commit", "-q", "-m", "lock input"], cwd=root, check=True
@@ -293,12 +299,14 @@ class SystemScaleHarnessTests(unittest.TestCase):
             locked_head = subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=root, text=True
             ).strip()
-            digest = system_scale.hashlib.sha256(
-                subprocess.check_output(
-                    ["git", "cat-file", "blob", f"HEAD:{required[0]}"], cwd=root
-                )
-            ).hexdigest()
-            preregistration = {"measurement_inputs": {required[0]: digest}}
+            preregistration = {
+                "measurement_inputs": {
+                    relative: system_scale.committed_git_object_sha256(
+                        relative, root=root
+                    )
+                    for relative in required
+                }
+            }
             self.assertEqual(
                 system_scale.measurement_input_errors(
                     preregistration, required, root=root
@@ -328,6 +336,22 @@ class SystemScaleHarnessTests(unittest.TestCase):
                     preregistration, required, root=root, revision=locked_head
                 ),
                 [],
+            )
+            path.write_bytes(b"locked\n")
+            added_fixture = root / required[1] / "dirty/src/added.rs"
+            added_fixture.parent.mkdir(parents=True)
+            added_fixture.write_bytes(b"added\n")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "change fixture tree"],
+                cwd=root,
+                check=True,
+            )
+            self.assertEqual(
+                system_scale.measurement_input_errors(
+                    preregistration, required, root=root
+                ),
+                [f"measurement input changed after lock: {required[1]}"],
             )
             self.assertEqual(
                 system_scale.measurement_input_errors(

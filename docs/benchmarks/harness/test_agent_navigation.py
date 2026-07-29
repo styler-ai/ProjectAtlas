@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import subprocess
 import tempfile
@@ -24,6 +23,7 @@ from agent_navigation import (
     validate_candidate_checkout,
     write_result,
 )
+from system_scale import committed_git_object_sha256
 
 
 MARKER = "BENCHMARK_SELF_AUDIT:"
@@ -377,6 +377,8 @@ class AgentNavigationHarnessTests(unittest.TestCase):
             )
             for index, relative in enumerate(AGENT_NAVIGATION_MEASUREMENT_INPUTS):
                 path = root / relative
+                if relative == "docs/benchmarks/fixtures/mcp-composition":
+                    path /= "clean/src/lib.rs"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(f"measurement input {index}\n".encode())
             subprocess.run(["git", "add", "."], cwd=root, check=True)
@@ -389,12 +391,7 @@ class AgentNavigationHarnessTests(unittest.TestCase):
             preregistered = {
                 "candidate": {"runtime_sha256": "locked"},
                 "measurement_inputs": {
-                    relative: hashlib.sha256(
-                        subprocess.check_output(
-                            ["git", "cat-file", "blob", f"HEAD:{relative}"],
-                            cwd=root,
-                        )
-                    ).hexdigest()
+                    relative: committed_git_object_sha256(relative, root=root)
                     for relative in AGENT_NAVIGATION_MEASUREMENT_INPUTS
                 },
                 "protocol": {"repeats": 3},

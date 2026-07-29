@@ -55,26 +55,30 @@ SYSTEM_SCALE_MEASUREMENT_INPUTS = (
     "docs/benchmarks/harness/system_scale.py",
     "docs/benchmarks/harness/mcp_composition.py",
     "docs/benchmarks/harness/requirements.txt",
+    "docs/benchmarks/fixtures/mcp-composition",
 )
 
 
-def committed_file_sha256(
+def committed_git_object_sha256(
     relative: str,
     *,
     root: Path | None = None,
     revision: str = "HEAD",
 ) -> str | None:
-    """Return the SHA-256 of one canonical committed Git blob."""
+    """Return the SHA-256 of one canonical committed Git blob or tree."""
 
     root = ROOT if root is None else root
-    process = subprocess.run(
-        ["git", "cat-file", "blob", f"{revision}:{relative}"],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        timeout=120,
-    )
-    return hashlib.sha256(process.stdout).hexdigest() if process.returncode == 0 else None
+    for object_type in ("blob", "tree"):
+        process = subprocess.run(
+            ["git", "cat-file", object_type, f"{revision}:{relative}"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            timeout=120,
+        )
+        if process.returncode == 0:
+            return hashlib.sha256(process.stdout).hexdigest()
+    return None
 
 
 def measurement_input_errors(
@@ -108,7 +112,7 @@ def measurement_input_errors(
         except ValueError:
             errors.append(f"measurement input escapes the repository: {relative}")
             continue
-        actual = committed_file_sha256(relative, root=root, revision=revision)
+        actual = committed_git_object_sha256(relative, root=root, revision=revision)
         if actual is None:
             errors.append(f"measurement input is missing from {revision}: {relative}")
             continue
