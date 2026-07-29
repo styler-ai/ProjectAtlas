@@ -450,6 +450,7 @@ fn validate_and_project(
         .candidate_identities
         .get(FROZEN_ARM)
         .ok_or_else(|| "frozen identity is missing".to_string())?;
+    let candidate_source_head = artifact.candidate_source_identity.checkout_head.clone();
     Ok(AgentEfficiencyComparison {
         state,
         reason,
@@ -465,7 +466,9 @@ fn validate_and_project(
                 .runtime_sha256
                 .clone()
                 .ok_or_else(|| "candidate runtime digest is missing".to_string())?,
-            candidate_source_head: artifact.candidate_source_identity.checkout_head.clone(),
+            candidate_source_head: candidate_source_head.clone(),
+            candidate_functional_head: candidate_source_head.clone(),
+            candidate_checklist_head: candidate_source_head,
             frozen_version: frozen
                 .version
                 .clone()

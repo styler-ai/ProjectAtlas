@@ -8239,6 +8239,17 @@ fn agent_efficiency_cli_mcp_contract_is_typed_read_only_and_isolated() -> Result
 
     let partial = token_overview_json(&repo, &database, Some(AGENT_EFFICIENCY_PARTIAL_FILE))?;
     require_json_string(&partial, &["agent_efficiency", "state"], "partial")?;
+    let source_head = partial
+        .pointer("/agent_efficiency/artifact/candidate_source_head")
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("candidate source identity is missing"))?;
+    for key in ["candidate_functional_head", "candidate_checklist_head"] {
+        require_json_string(
+            &partial,
+            &["agent_efficiency", "artifact", key],
+            source_head,
+        )?;
+    }
     require_json_usize(
         &partial,
         &[

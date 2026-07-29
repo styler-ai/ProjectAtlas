@@ -10,7 +10,7 @@ analysis views are current v0.4 behavior. The representative task-7.3 forward
 test passes its clean, saved-dirty, and non-Git compatibility boundaries. The
 final task-7.6 campaign retained all 45 preregistered v0.4, frozen-v0.3.26, and
 plain trials: v0.4 completed all 15, frozen v0.3.26 failed its three pinned
-VS Code setups, and final citation review passed 32 of 42 completed answers.
+VS Code setups, and final citation review passed 30 of 42 completed answers.
 All 42 completed answers were substantively correct. The
 [agent evaluation](benchmarks/v0.4-agent-navigation-evaluation.md)
 reports the measured strengths, medium-context regression, huge indexing cost,
