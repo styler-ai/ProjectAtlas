@@ -13,9 +13,38 @@ body:
   - type: textarea
     id: summary
     attributes:
-      label: Summary
-      description: What is broken?
+      label: Why
+      description: What is broken, and why does it matter?
       placeholder: "ProjectAtlas reports stale file purposes after..."
+    validations:
+      required: true
+  - type: textarea
+    id: changes
+    attributes:
+      label: What Changes
+      description: What behavior should change to resolve the bug?
+    validations:
+      required: true
+  - type: textarea
+    id: capabilities
+    attributes:
+      label: Capabilities
+      description: Which ProjectAtlas capabilities are affected or need correction?
+    validations:
+      required: true
+  - type: textarea
+    id: architecture_diagrams
+    attributes:
+      label: Architecture Diagrams
+      description: Link the versioned Markdown architecture views for this work under `https://github.com/styler-ai/ProjectAtlas/blob/dev/docs/`. Reuse an existing document when architecture is unchanged; do not attach a duplicate PDF.
+      placeholder: "- [Architecture views](https://github.com/styler-ai/ProjectAtlas/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)"
+    validations:
+      required: true
+  - type: textarea
+    id: release_scope
+    attributes:
+      label: Release Scope
+      description: Which milestone and implementation surfaces should contain the fix?
     validations:
       required: true
   - type: textarea
@@ -44,6 +73,16 @@ body:
     validations:
       required: true
   - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: What observable behavior and tests must pass before this bug is fixed?
+      placeholder: |
+        - The reproduction no longer fails.
+        - Regression tests cover the corrected behavior.
+    validations:
+      required: true
+  - type: textarea
     id: environment
     attributes:
       label: Environment
@@ -62,6 +101,26 @@ body:
       label: Logs or output
       description: Paste relevant terminal output. Redact secrets and private paths.
       render: shell
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-Goals
+      description: What must the fix deliberately avoid changing?
+    validations:
+      required: true
+  - type: textarea
+    id: premortem
+    attributes:
+      label: Pre-Mortem
+      description: List likely fix failures and mitigation checkboxes mapped to the OpenSpec tasks that own them.
+      placeholder: |
+        Likely failure modes:
+        - The fix handles the reported case but breaks a compatibility path.
+
+        Mitigations:
+        - [ ] Cover the reproduction and compatibility behavior together. (OpenSpec tasks: 1.2)
+    validations:
+      required: true
   - type: textarea
     id: openspec
     attributes:

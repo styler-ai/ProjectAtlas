@@ -25,6 +25,29 @@ function Test-Truthy {
     return @("1", "true", "yes", "on") -contains $Value.ToLowerInvariant()
 }
 
+function Assert-ProjectAtlasDirectPath {
+    param(
+        [string]$Path,
+        [string]$Label
+    )
+    $item = Get-Item -Force -LiteralPath $Path -ErrorAction SilentlyContinue
+    if ($item -and (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "$Label must not be a symlink, junction, or reparse point: $Path"
+    }
+}
+
+function Assert-ProjectAtlasDirectFilePath {
+    param(
+        [string]$Path,
+        [string]$Label
+    )
+    Assert-ProjectAtlasDirectPath $Path $Label
+    $item = Get-Item -Force -LiteralPath $Path -ErrorAction SilentlyContinue
+    if ($item -and -not ($item -is [System.IO.FileInfo])) {
+        throw "$Label must be a regular file: $Path"
+    }
+}
+
 function Resolve-PluginReleaseVersion {
     $scriptDirectory = Split-Path -Parent $PSCommandPath
     $pluginRoot = Split-Path -Parent $scriptDirectory
@@ -566,7 +589,7 @@ function Resolve-ProjectAtlasCodexCommand {
         }
     }
     if (-not $codexCommandPath) {
-        Write-Output "${Operation} skipped: codex command not found."
+        Write-Host "${Operation} skipped: codex command not found."
         return $null
     }
     return $codexCommandPath
@@ -1112,6 +1135,8 @@ if (-not $RuntimePath -and $env:PROJECTATLAS_RUNTIME_PATH) {
 
 $releaseBinaryOnly = $ReleaseBinaryOnly -or (Test-Truthy $env:PROJECTATLAS_RELEASE_BINARY_ONLY)
 $ProjectRoot = (Resolve-Path $ProjectRoot).Path
+$atlasDir = Join-Path $ProjectRoot ".projectatlas"
+Assert-ProjectAtlasDirectPath $atlasDir "ProjectAtlas project state directory"
 
 if ($RuntimePath) {
     $projectAtlas = (Resolve-Path $RuntimePath).Path
@@ -1123,7 +1148,6 @@ if ($RuntimePath) {
 }
 else {
     $cargo = Find-Cargo
-    $sourceManifest = Join-Path $ProjectRoot "crates\projectatlas-cli\Cargo.toml"
     $installedBinary = $null
 
     if ($releaseBinaryOnly) {
@@ -1133,15 +1157,6 @@ else {
         }
         if (-not (Test-ProjectAtlasRuntime $installedBinary $ProjectAtlasVersion)) {
             throw "ProjectAtlas release-binary install produced an invalid runtime for ${ProjectAtlasVersion}: $installedBinary"
-        }
-    }
-    elseif ($cargo -and (Test-Path -LiteralPath $sourceManifest)) {
-        Push-Location $ProjectRoot
-        try {
-            Invoke-Checked $cargo @("install", "--path", "crates/projectatlas-cli", "--locked", "--force")
-        }
-        finally {
-            Pop-Location
         }
     }
     else {
@@ -1172,8 +1187,9 @@ Confirm-ProjectAtlasBareCommandResolution $projectAtlas $ProjectAtlasVersion
 Quarantine-ProjectAtlasStaleShims $projectAtlas $ProjectAtlasVersion
 Write-ProjectAtlasPathShadowReport $projectAtlas $ProjectAtlasVersion
 
-$atlasDir = Join-Path $ProjectRoot ".projectatlas"
+Assert-ProjectAtlasDirectPath $atlasDir "ProjectAtlas project state directory"
 New-Item -ItemType Directory -Force -Path $atlasDir | Out-Null
+Assert-ProjectAtlasDirectPath $atlasDir "ProjectAtlas project state directory"
 $dbPath = Join-Path $atlasDir "projectatlas.db"
 $projectConfigPath = Join-Path $atlasDir "config.toml"
 $flatConfigPath = Join-Path $ProjectRoot "projectatlas.toml"
@@ -1203,7 +1219,18 @@ function Write-ProjectAtlasMcpConfig {
     }
     $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
     $mcpConfigText = ($mcpConfig -join [Environment]::NewLine) + [Environment]::NewLine
-    [System.IO.File]::WriteAllText($OutputPath, $mcpConfigText, $utf8NoBom)
+    Assert-ProjectAtlasDirectFilePath $OutputPath "ProjectAtlas MCP config output"
+    $temporaryOutputPath = Join-Path $atlasDir (".projectatlas-mcp-config-" + [guid]::NewGuid().ToString("N") + ".tmp")
+    try {
+        [System.IO.File]::WriteAllText($temporaryOutputPath, $mcpConfigText, $utf8NoBom)
+        Assert-ProjectAtlasDirectFilePath $OutputPath "ProjectAtlas MCP config output"
+        Move-Item -LiteralPath $temporaryOutputPath -Destination $OutputPath -Force
+    }
+    finally {
+        if ([System.IO.File]::Exists($temporaryOutputPath)) {
+            [System.IO.File]::Delete($temporaryOutputPath)
+        }
+    }
 }
 
 Write-ProjectAtlasMcpConfig $mcpConfigPath $null

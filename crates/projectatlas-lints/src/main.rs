@@ -147,6 +147,7 @@ const E2E_ALLOWED_REPEATED_PATH_JOIN_LITERALS: &[&str] = &[
 
 /// Reviewed diagnostic format templates that must stay inline for Rust format macros.
 const MCP_ALLOWED_INLINE_LITERALS: &[&str] = &[
+    "absolute path '{}' has no existing ancestor",
     "ProjectAtlas index '{}' is missing for selected project root '{}'; {MISSING_INDEX_GUIDANCE}",
     "project path '{}' is not a directory",
     "MCP path '{original}' resolves to '{resolved_display}', not the selected project root '{project_root_display}'; {SELECTED_ROOT_ASSERTION_GUIDANCE}",
@@ -725,9 +726,10 @@ fn write_violations(
 mod tests {
     use super::{
         E2E_FIXTURE_PATH_LITERALS, MCP_PROJECT_SCHEMA_LITERALS, PathJoinLiteralRule,
-        StringLiteralRule, lint_repeated_path_join_literals, lint_source,
+        StringLiteralRule, lint_repeated_path_join_literals, lint_source, run_strict_strings,
     };
     use std::io;
+    use std::path::Path;
 
     /// Rule used by parser-focused unit tests.
     const TEST_RULE: StringLiteralRule = StringLiteralRule {
@@ -774,6 +776,19 @@ mod tests {
         } else {
             Err(io::Error::other(message.to_string()).into())
         }
+    }
+
+    /// Ordinary workspace tests must enforce the same repository source contracts as CI.
+    #[test]
+    fn repository_strict_string_contracts_pass() -> Result<(), Box<dyn std::error::Error>> {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| {
+                io::Error::other("lint crate must be nested below the workspace root")
+            })?;
+        run_strict_strings(workspace_root)?;
+        Ok(())
     }
 
     /// Macro literals are parsed and reported as protected schema strings.

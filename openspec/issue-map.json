@@ -1,19 +1,39 @@
 {
+  "schema_version": 2,
   "changes": {
     "add-agent-session-brief": 292,
     "add-mcp-task-progress-model": 295,
     "add-nearest-project-routing": 276,
+    "advance-rust-repository-intelligence": 308,
+    "centralize-cargo-dependency-management": 316,
     "close-mcp-cli-parity": 281,
+    "complete-v040-release-readiness": 311,
     "converge-claude-code-installer": 278,
     "converge-opencode-installer": 279,
     "delegate-bulk-purpose-curation": 301,
+    "enforce-rust-test-quality-gates": 309,
     "expose-mcp-capabilities-settings": 293,
     "gate-codex-pr-review-threads": 299,
+    "harden-parser-runtime-and-graph-invalidation": 356,
     "harden-project-path-types": 294,
     "enhance-projectatlas-init-first-run": 305,
     "fix-token-tui-reference-visual-regression": 304,
     "match-token-impact-reference-tui": 302,
+    "persist-agent-project-context": {
+      "contract": "checklist-v1",
+      "primary_issue": 314,
+      "owners": [
+        {
+          "issue": 314,
+          "first_task": "1.1",
+          "last_task": "7.4"
+        }
+      ]
+    },
     "publish-rustdoc-readme-links": 300,
+    "reuse-release-proof-by-inputs": 366,
+    "reuse-unchanged-ci-build-layers": 341,
+    "show-agent-efficiency-dashboard": 340,
     "simplify-token-tui-dashboard": 296
   }
 }

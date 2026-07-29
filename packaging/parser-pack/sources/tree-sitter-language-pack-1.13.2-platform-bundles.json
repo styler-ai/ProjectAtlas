@@ -1,0 +1,36 @@
+{
+  "schema_version": 2,
+  "source_package": "tree-sitter-language-pack",
+  "source_version": "1.13.2",
+  "cargo_archive": {
+    "vcs_revision": "ce9e9c0974731d25b4b9426711a62d544d993368",
+    "path_in_vcs": "crates/ts-pack-core",
+    "sha256": "44dc94ef7a5f7f4247d88d5acdd26d842c8fc6f5eaf491a970c8e3d8fc9c9287"
+  },
+  "native_release": {
+    "tag": "v1.13.2",
+    "revision": "6258abac30304283763a0d2dc8a48cb87fbcf438",
+    "source_bundle_sha256": "d684799dc664553c9c746d5fe676a5b599f9efcec4cad5450bec7ec5a29574a9"
+  },
+  "upstream_release_manifest": {
+    "url": "https://github.com/xberg-io/tree-sitter-language-pack/releases/download/v1.13.2/parsers.json",
+    "sha256": "3fc3b2395650c8e2f207d047e731cd9fdc2cd07f4e41d5cce0919ef0977f5bf5",
+    "byte_length": 25002
+  },
+  "platforms": [
+    {
+      "platform": "x86_64-unknown-linux-gnu",
+      "upstream_platform": "linux-x86_64",
+      "url": "https://github.com/xberg-io/tree-sitter-language-pack/releases/download/v1.13.2/parsers-linux-x86_64.tar.zst",
+      "sha256": "3a6fc64f10d02db623df1243c320c4827e8259743786a724cf91450fdeb294bb",
+      "byte_length": 18665326
+    },
+    {
+      "platform": "x86_64-pc-windows-msvc",
+      "upstream_platform": "windows-x86_64",
+      "url": "https://github.com/xberg-io/tree-sitter-language-pack/releases/download/v1.13.2/parsers-windows-x86_64.tar.zst",
+      "sha256": "8943c83ad928ef1475894a23cedd46d730e2731e41ac436d563185b254b97f40",
+      "byte_length": 18051497
+    }
+  ]
+}

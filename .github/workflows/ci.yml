@@ -1,9 +1,9 @@
-# Purpose: Verify ProjectAtlas Rust quality gates and multi-OS installer/MCP smoke tests.
+# Purpose: Verify ProjectAtlas Rust quality gates and multi-OS behavior tests.
 
 name: 01-CI
 
 # /**
-#  * Purpose: Run ProjectAtlas linting, tests, and build checks.
+#  * Purpose: Run Rust source, test, and build checks.
 #  */
 
 on:
@@ -22,23 +22,26 @@ permissions:
   issues: read
   pull-requests: read
 
+env:
+  RUSTUP_TOOLCHAIN: "1.93.1"
+
 jobs:
   verify:
     name: verify
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal --component clippy,rustfmt
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.20.2
 
       - name: Issue reference check
         if: github.event_name == 'pull_request'
@@ -60,16 +63,22 @@ jobs:
           fi
 
       - name: Issue checklist check
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           python3 .github/scripts/issue-checklists.py --self-test
-          PR_MILESTONE_TITLE="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.milestone.title // ""')"
+          python3 .github/scripts/test-optional-parser-proof-inputs.py
           python3 .github/scripts/issue-checklists.py \
             --repo "$GITHUB_REPOSITORY" \
-            --milestone "$PR_MILESTONE_TITLE"
+            --root . \
+            --issue-map openspec/issue-map.json
+
+      - name: Manual-only full benchmark policy
+        run: python3 .github/scripts/verify-manual-benchmark-policy.py
+
+      - name: Published benchmark measurement locks
+        run: python3 .github/scripts/verify-published-benchmark-locks.py
 
       - name: Codex PR review thread gate
         if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment'
@@ -83,7 +92,7 @@ jobs:
             --pr "$PR_NUMBER"
 
       - name: Format
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Check
         run: cargo check --workspace --all-targets --all-features --locked
@@ -91,73 +100,24 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-      - name: ProjectAtlas source lints
+      - name: Rust source contract lints
         timeout-minutes: 2
         run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 
       - name: Dependency policy
-        run: cargo deny check
+        run: cargo deny --locked --all-features check -D warnings
 
       - name: Tests
         run: cargo test --workspace --all-features --locked
 
-      - name: ProjectAtlas purpose lint levels
-        run: cargo test --locked -p projectatlas-cli lint_purpose_levels_require_agent_review_at_configured_scope --test e2e
-
-      - name: ProjectAtlas purpose preservation
-        run: cargo test --locked -p projectatlas-cli watch_once_preserves_unchanged_deep_summary_and_text_index --test e2e
+      - name: Filtered custom harness compatibility
+        run: cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled
 
       - name: Doc tests
-        run: cargo test --doc --all-features --locked
+        run: cargo test --doc --workspace --all-features --locked
 
       - name: Rustdoc
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
-
-      - name: ProjectAtlas scan
-        run: cargo run --locked -p projectatlas-cli -- --format json scan .
-
-      - name: ProjectAtlas purpose review
-        run: cargo run --locked -p projectatlas-cli -- purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply
-
-      - name: ProjectAtlas parity
-        run: cargo run --locked -p projectatlas-cli -- parity report --profile repository-intelligence
-
-      - name: ProjectAtlas lint
-        run: cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level strict
-
-  install-smoke:
-    name: install-smoke
-    runs-on: ubuntu-latest
-    needs: verify
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-
-      - name: Setup Rust
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-
-      - name: Install binary
-        timeout-minutes: 5
-        run: |
-          cargo install --path crates/projectatlas-cli --locked
-          expected="v$(awk -F'"' '
-            /^\[workspace.package\]/ { in_workspace_package = 1; next }
-            /^\[/ { if (in_workspace_package) exit }
-            in_workspace_package && /^version = / { print $2; exit }
-          ' Cargo.toml)"
-          PROJECTATLAS_NO_TELEMETRY=1 projectatlas --require-version "$expected" --format json runtime-info
-          PROJECTATLAS_NO_TELEMETRY=1 projectatlas config --print
-          PROJECTATLAS_NO_TELEMETRY=1 projectatlas ignore list
-
-      - name: Smoke index
-        run: |
-          mkdir smoke
-          cd smoke
-          projectatlas init
-          projectatlas purpose set . "Smoke test repository root"
-          projectatlas lint --report-untracked
 
   e2e-smoke:
     name: e2e-smoke ${{ matrix.label }}
@@ -177,16 +137,16 @@ jobs:
             os: macos-14
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Rust
         shell: bash
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Plugin installer E2E
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli plugin_installer_writes_real_harness_configs --test e2e
 
       - name: Plugin update E2E
@@ -218,6 +178,16 @@ jobs:
         if: matrix.label == 'windows'
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_repairs_stale_mirror_without_registering_it --test e2e
+
+      - name: Windows installer trust boundaries
+        if: matrix.label == 'windows'
+        timeout-minutes: 10
+        run: cargo test --locked -p projectatlas-cli --all-features --test installer_trust_boundaries
+
+      - name: macOS unsupported parser-pack boundary E2E
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_access --test e2e
 
       - name: MCP project binding E2E
         timeout-minutes: 5

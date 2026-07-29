@@ -1,0 +1,1273 @@
+name: optional-parser-pack
+
+on:
+  workflow_dispatch:
+    inputs:
+      clean_construction:
+        description: Bypass dependency-cache restore and save for release acceptance
+        required: true
+        default: false
+        type: boolean
+      target:
+        description: Run all release targets or one bounded diagnostic target
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - x86_64-unknown-linux-gnu
+          - x86_64-pc-windows-msvc
+  pull_request:
+    branches: [dev]
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: optional-parser-pack-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  RUSTUP_TOOLCHAIN: 1.93.1
+
+jobs:
+  construct:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.label.name == 'optional-parser-pack-proof'
+    name: construct ${{ matrix.target }}
+    runs-on: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu-24.04' || 'windows-2025' }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.target != 'all' && format('["{0}"]', inputs.target) || '["x86_64-unknown-linux-gnu","x86_64-pc-windows-msvc"]') }}
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default $env:RUSTUP_TOOLCHAIN
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Bind exact clean candidate identity
+        id: identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $revision = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $revision -ne $env:GITHUB_SHA) {
+            throw "Checkout revision does not equal GITHUB_SHA."
+          }
+          $status = @(git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0 -or $status.Count -ne 0) {
+            throw "Parser-pack construction requires an exact clean checkout."
+          }
+          $credentialConfig = @(
+            git config --local --get-regexp `
+              '^(http\..*\.extraheader|credential\.|url\..*\.insteadof)' 2>$null
+          )
+          $credentialConfigExit = $LASTEXITCODE
+          if (($credentialConfigExit -ne 0 -and $credentialConfigExit -ne 1) -or
+              $credentialConfig.Count -ne 0) {
+            throw "Candidate checkout contains credential-bearing local Git configuration."
+          }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json -Depth 64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $packageVersions = @(
+            $metadata.packages |
+              Where-Object { $_.name -like "projectatlas-*" } |
+              ForEach-Object { [string]$_.version } |
+              Sort-Object -Unique
+          )
+          if ($packageVersions.Count -ne 1) {
+            throw "ProjectAtlas workspace packages do not share one version."
+          }
+          $accepted = Get-Content -Raw -LiteralPath "packaging/parser-pack/accepted-capabilities.json" |
+            ConvertFrom-Json -Depth 64
+          $intendedVersion = [string]$accepted.runtime.projectatlas_version
+          if ($packageVersions[0] -ne $intendedVersion) {
+            throw "Workspace package version does not match the accepted parser-pack release."
+          }
+
+          $rustcLines = @(rustc -vV)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $rustcRelease = ($rustcLines | Where-Object { $_ -match '^release: ' }) -replace '^release: ', ''
+          $rustcCommit = ($rustcLines | Where-Object { $_ -match '^commit-hash: ' }) -replace '^commit-hash: ', ''
+          $rustcHost = ($rustcLines | Where-Object { $_ -match '^host: ' }) -replace '^host: ', ''
+          if ($rustcHost -ne "${{ matrix.target }}") {
+            throw "Pinned Rust host does not match the workflow target."
+          }
+          $lockSha = (Get-FileHash -Algorithm SHA256 -LiteralPath "Cargo.lock").Hash.ToLowerInvariant()
+          $toolchainRoot = (rustc --print sysroot).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $pwshPath = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+
+          "revision=$revision" >> $env:GITHUB_OUTPUT
+          "cargo_package_version=$($packageVersions[0])" >> $env:GITHUB_OUTPUT
+          "intended_release_version=$intendedVersion" >> $env:GITHUB_OUTPUT
+          "cargo_lock_sha256=$lockSha" >> $env:GITHUB_OUTPUT
+          "rustc_release=$rustcRelease" >> $env:GITHUB_OUTPUT
+          "rustc_commit_hash=$rustcCommit" >> $env:GITHUB_OUTPUT
+          "toolchain_root=$toolchainRoot" >> $env:GITHUB_OUTPUT
+          "pwsh_path=$pwshPath" >> $env:GITHUB_OUTPUT
+
+      - name: Bind native construction toolchain identity
+        id: native-toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $identity = [System.Collections.Generic.List[string]]::new()
+          foreach ($value in @($env:ImageOS, $env:ImageVersion)) {
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              throw "Hosted runner image identity is unavailable."
+            }
+          }
+          $identity.Add("image_os=$env:ImageOS")
+          $identity.Add("image_version=$env:ImageVersion")
+
+          if ($env:RUNNER_OS -eq "Windows") {
+            $programFilesX86 = [System.Environment]::GetFolderPath(
+              [System.Environment+SpecialFolder]::ProgramFilesX86
+            )
+            $vswhere = Join-Path $programFilesX86 "Microsoft Visual Studio/Installer/vswhere.exe"
+            $vsInstall = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+            $vsVersion = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationVersion).Trim()
+            if ($LASTEXITCODE -ne 0 -or
+                [string]::IsNullOrWhiteSpace($vsInstall) -or
+                [string]::IsNullOrWhiteSpace($vsVersion)) {
+              throw "Visual Studio C++ toolchain identity is unavailable."
+            }
+            $vcVersionFile = Join-Path $vsInstall "VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt"
+            $vcVersion = (Get-Content -Raw -LiteralPath $vcVersionFile).Trim()
+            $sdkRoot = Join-Path $programFilesX86 "Windows Kits/10/Lib"
+            $sdkVersion = Get-ChildItem -LiteralPath $sdkRoot -Directory |
+              Sort-Object Name |
+              Select-Object -Last 1 -ExpandProperty Name
+            if ([string]::IsNullOrWhiteSpace($vcVersion) -or
+                [string]::IsNullOrWhiteSpace($sdkVersion)) {
+              throw "Windows native compiler or SDK identity is unavailable."
+            }
+            $identity.Add("visual_studio=$vsVersion")
+            $identity.Add("vc_tools=$vcVersion")
+            $identity.Add("windows_sdk=$sdkVersion")
+          }
+          else {
+            foreach ($tool in @("cc", "ld", "ldd")) {
+              $command = Get-Command $tool -CommandType Application -ErrorAction Stop |
+                Select-Object -First 1
+              $version = @(& $command.Source --version)
+              if ($LASTEXITCODE -ne 0 -or $version.Count -eq 0) {
+                throw "Linux native toolchain identity is unavailable for $tool."
+              }
+              $identity.Add("$tool=$($version[0])")
+            }
+          }
+
+          $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes(
+            (($identity | Sort-Object) -join "`n") + "`n"
+          )
+          $digest = [System.Convert]::ToHexString(
+            [System.Security.Cryptography.SHA256]::HashData($bytes)
+          ).ToLowerInvariant()
+          "sha256=$digest" >> $env:GITHUB_OUTPUT
+
+      - name: Derive exact reusable Cargo layer key
+        id: cargo-cache-key
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $manifestHash = "${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml') }}"
+          # Bump when reusable artifact compatibility or the declared feature closure changes.
+          $cachePolicy = "parser-pack-cargo-v3"
+          $compatibleV2Policy = "parser-pack-cargo-v2"
+          $rustcCommit = "${{ steps.identity.outputs.rustc_commit_hash }}"
+          if ($rustcCommit -cnotmatch '\A[0-9a-f]{40}\z') {
+            throw "Reusable Cargo layer key contains an invalid rustc commit."
+          }
+          foreach ($digest in @(
+            "${{ steps.native-toolchain.outputs.sha256 }}",
+            $manifestHash
+          )) {
+            if ($digest -cnotmatch '\A[0-9a-f]{64}\z') {
+              throw "Reusable Cargo layer key contains an invalid digest."
+            }
+          }
+          $key = @(
+            $cachePolicy,
+            "${{ matrix.target }}",
+            $rustcCommit,
+            "${{ steps.native-toolchain.outputs.sha256 }}",
+            $manifestHash
+          ) -join "-"
+          $compatibleV2Key = @(
+            $compatibleV2Policy,
+            "${{ matrix.target }}",
+            $rustcCommit,
+            "${{ steps.native-toolchain.outputs.sha256 }}",
+            $manifestHash
+          ) -join "-"
+          foreach ($candidateKey in @($key, $compatibleV2Key)) {
+            if ($candidateKey.Length -gt 512) {
+              throw "Reusable Cargo layer key exceeds the GitHub cache limit."
+            }
+          }
+          $keyBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($key)
+          $keyDigest = [System.Convert]::ToHexString(
+            [System.Security.Cryptography.SHA256]::HashData($keyBytes)
+          ).ToLowerInvariant()
+          "key=$key" >> $env:GITHUB_OUTPUT
+          "sha256=$keyDigest" >> $env:GITHUB_OUTPUT
+          "compatible_v2_key=$compatibleV2Key" >> $env:GITHUB_OUTPUT
+
+      - name: Restore exact reusable Cargo layer
+        id: cargo-cache-restore
+        if: >-
+          matrix.target == 'x86_64-unknown-linux-gnu' &&
+          (github.event_name != 'workflow_dispatch' || !inputs.clean_construction)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/parser-pack-output/build
+          key: ${{ steps.cargo-cache-key.outputs.key }}
+
+      - name: Restore exact compatible v2 Cargo layer
+        id: cargo-cache-compatible-restore
+        if: >-
+          matrix.target == 'x86_64-unknown-linux-gnu' &&
+          (github.event_name != 'workflow_dispatch' || !inputs.clean_construction) &&
+          steps.cargo-cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/parser-pack-output/build
+          key: ${{ steps.cargo-cache-key.outputs.compatible_v2_key }}
+
+      - name: Test bounded construction diagnostics
+        shell: pwsh
+        run: pwsh -NoProfile -File .github/scripts/test-parser-pack-construction-diagnostics.ps1
+
+      - name: Prove baseline network reachability
+        id: network
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $checker = ".github/scripts/check-parser-pack-network-boundary.ps1"
+          $discovery = pwsh -NoProfile -File $checker -Mode discover-resolver | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File $checker -Mode require-reachable -ResolverAddress $discovery.resolver_address
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "resolver_address=$($discovery.resolver_address)" >> $env:GITHUB_OUTPUT
+
+      - name: Acquire pinned inputs and vendor dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $inputs = Join-Path $env:RUNNER_TEMP "parser-pack-inputs"
+          $cargoHome = Join-Path $env:RUNNER_TEMP "parser-pack-cargo-home"
+          $vendor = Join-Path $env:RUNNER_TEMP "parser-pack-vendor"
+          $output = Join-Path $env:RUNNER_TEMP "parser-pack-output"
+          $containedTemp = Join-Path $env:RUNNER_TEMP "parser-pack-contained-temp"
+          $containedHome = Join-Path $env:RUNNER_TEMP "parser-pack-contained-home"
+          foreach ($directory in @($cargoHome, $output, $containedTemp, $containedHome)) {
+            [System.IO.Directory]::CreateDirectory($directory) | Out-Null
+          }
+          pwsh -NoProfile -File .github/scripts/acquire-parser-pack-inputs.ps1 `
+            -Target "${{ matrix.target }}" `
+            -SourceManifest packaging/parser-pack/sources/tree-sitter-language-pack-1.13.2-platform-bundles.json `
+            -Destination $inputs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $vendorConfig = cargo vendor --locked --versioned-dirs $vendor | Out-String
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [System.IO.File]::WriteAllText(
+            (Join-Path $cargoHome "config.toml"),
+            $vendorConfig,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+
+      - name: Build standalone Windows AppContainer launcher
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $launcherDirectory = Join-Path $env:RUNNER_TEMP "parser-pack-appcontainer"
+          [System.IO.Directory]::CreateDirectory($launcherDirectory) | Out-Null
+          powershell -NoProfile -ExecutionPolicy Bypass `
+            -File .github/scripts/build-parser-pack-appcontainer-launcher.ps1 `
+            -OutputPath (Join-Path $launcherDirectory "launcher.exe") `
+            -RunSelfTest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Construct inside Linux network namespace
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain_root='${{ steps.identity.outputs.toolchain_root }}'
+          pwsh_path='${{ steps.identity.outputs.pwsh_path }}'
+          setpriv_path="$(command -v setpriv)"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          cd "$GITHUB_WORKSPACE"
+          set +e
+          sudo --non-interactive unshare --net -- \
+            "$setpriv_path" --no-new-privs --reuid="$runner_uid" --regid="$runner_gid" --clear-groups \
+            /usr/bin/env -i \
+              HOME="$RUNNER_TEMP/parser-pack-contained-home" \
+              CARGO_HOME="$RUNNER_TEMP/parser-pack-cargo-home" \
+              PATH="$toolchain_root/bin:/usr/bin:/bin" \
+              TMPDIR="$RUNNER_TEMP/parser-pack-contained-temp" \
+              CARGO_INCREMENTAL=0 \
+              CARGO_TERM_COLOR=never \
+            "$pwsh_path" -NoLogo -NoProfile -NonInteractive \
+              -File "$GITHUB_WORKSPACE/.github/scripts/run-parser-pack-contained-construction.ps1" \
+              -Target '${{ matrix.target }}' \
+              -SourceRoot "$GITHUB_WORKSPACE" \
+              -InputDirectory "$RUNNER_TEMP/parser-pack-inputs" \
+              -OutputDirectory "$RUNNER_TEMP/parser-pack-output" \
+              -ProjectAtlasRevision '${{ steps.identity.outputs.revision }}' \
+              -CargoPackageVersion '${{ steps.identity.outputs.cargo_package_version }}' \
+              -IntendedReleaseVersion '${{ steps.identity.outputs.intended_release_version }}' \
+              -CargoLockSha256 '${{ steps.identity.outputs.cargo_lock_sha256 }}' \
+              -RustcRelease '${{ steps.identity.outputs.rustc_release }}' \
+              -RustcCommitHash '${{ steps.identity.outputs.rustc_commit_hash }}' \
+              -NetworkIsolation '${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'linux-network-namespace' || 'windows-principal-firewall' }}' \
+              -ResolverAddress '${{ steps.network.outputs.resolver_address }}'
+          construction_exit=$?
+          set -e
+          if (( construction_exit != 0 )); then
+            for diagnostic in \
+              construction-status.json \
+              construction-cache-disposition.json \
+              construction-diagnostic.txt
+            do
+              diagnostic_path="$RUNNER_TEMP/parser-pack-output/$diagnostic"
+              if [[ -f "$diagnostic_path" && ! -L "$diagnostic_path" ]] &&
+                (( $(stat -c '%s' "$diagnostic_path") <= 65536 ))
+              then
+                printf '%s\n' "[contained-construction:$diagnostic]"
+                head -c 65536 "$diagnostic_path"
+                printf '\n'
+              fi
+            done
+            exit "$construction_exit"
+          fi
+
+      - name: Construct under a disposable Windows principal
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $programFilesX86 = [System.Environment]::GetFolderPath(
+            [System.Environment+SpecialFolder]::ProgramFilesX86
+          )
+          $vswhere = Join-Path $programFilesX86 "Microsoft Visual Studio/Installer/vswhere.exe"
+          $vsInstall = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($vsInstall)) {
+            throw "Visual Studio C++ toolchain was not found."
+          }
+          Import-Module (Join-Path $vsInstall "Common7/Tools/Microsoft.VisualStudio.DevShell.dll")
+          Enter-VsDevShell -VsInstallPath $vsInstall -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64" | Out-Null
+
+          $wrapper = Join-Path $env:GITHUB_WORKSPACE ".github/scripts/invoke-parser-pack-windows-construction.ps1"
+          $broker = Join-Path $env:GITHUB_WORKSPACE ".github/scripts/invoke-parser-pack-windows-runner-job-broker.ps1"
+          $state = Join-Path $env:RUNNER_TEMP "parser-pack-windows-construction-state/state.json"
+          $launcher = Join-Path $env:RUNNER_TEMP "parser-pack-appcontainer/launcher.exe"
+          $constructionParameters = @{
+            Mode = "construct"
+            StatePath = $state
+            SourceRoot = $env:GITHUB_WORKSPACE
+            InputDirectory = Join-Path $env:RUNNER_TEMP "parser-pack-inputs"
+            VendorDirectory = Join-Path $env:RUNNER_TEMP "parser-pack-vendor"
+            OutputDirectory = Join-Path $env:RUNNER_TEMP "parser-pack-output"
+            CargoHome = Join-Path $env:RUNNER_TEMP "parser-pack-cargo-home"
+            TemporaryDirectory = Join-Path $env:RUNNER_TEMP "parser-pack-contained-temp"
+            HomeDirectory = Join-Path $env:RUNNER_TEMP "parser-pack-contained-home"
+            ToolchainRoot = '${{ steps.identity.outputs.toolchain_root }}'
+            PwshPath = '${{ steps.identity.outputs.pwsh_path }}'
+            VcToolsRoot = $env:VCToolsInstallDir.TrimEnd('\')
+            WindowsSdkRoot = $env:WindowsSdkDir.TrimEnd('\')
+            ProjectAtlasRevision = '${{ steps.identity.outputs.revision }}'
+            CargoPackageVersion = '${{ steps.identity.outputs.cargo_package_version }}'
+            IntendedReleaseVersion = '${{ steps.identity.outputs.intended_release_version }}'
+            CargoLockSha256 = '${{ steps.identity.outputs.cargo_lock_sha256 }}'
+            RustcRelease = '${{ steps.identity.outputs.rustc_release }}'
+            RustcCommitHash = '${{ steps.identity.outputs.rustc_commit_hash }}'
+            ResolverAddress = '${{ steps.network.outputs.resolver_address }}'
+          }
+          & $broker `
+            -TargetKind recovery `
+            -TimeoutSeconds 600 `
+            -TargetParameters @{
+              ProductionWrapper = $wrapper
+              LauncherPath = $launcher
+              ConstructionParameters = $constructionParameters
+              RecoveryRoot = Join-Path $env:RUNNER_TEMP "parser-pack-windows-recovery"
+              RunnerTemporaryRoot = $env:RUNNER_TEMP
+            }
+          & $broker `
+            -TargetKind construction `
+            -TimeoutSeconds 3660 `
+            -TargetParameters $constructionParameters
+
+          $publish = Join-Path $env:RUNNER_TEMP "parser-pack-output/publish"
+          $publishedLauncher = Join-Path $publish "parser-pack-appcontainer-launcher.exe"
+          [System.IO.File]::Copy($launcher, $publishedLauncher, $false)
+          $launcherDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $launcher).Hash.ToLowerInvariant()
+          [System.IO.File]::WriteAllText(
+            (Join-Path $publish "parser-pack-appcontainer-launcher.sha256"),
+            "$launcherDigest`n",
+            [System.Text.UTF8Encoding]::new($false)
+          )
+
+      - name: Remove disposable Windows construction identity
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $wrapper = Join-Path $env:GITHUB_WORKSPACE ".github/scripts/invoke-parser-pack-windows-construction.ps1"
+          $statePaths = @(
+            (Join-Path $env:RUNNER_TEMP "parser-pack-windows-construction-state/state.json"),
+            (Join-Path $env:RUNNER_TEMP "parser-pack-windows-recovery/account-journal/parser-pack-windows-construction-state/state.json"),
+            (Join-Path $env:RUNNER_TEMP "parser-pack-windows-recovery/legacy-journal/parser-pack-windows-construction-state/state.json"),
+            (Join-Path $env:RUNNER_TEMP "parser-pack-windows-recovery/launcher-admission/parser-pack-windows-construction-state/state.json"),
+            (Join-Path $env:RUNNER_TEMP "parser-pack-windows-recovery/cleanup-retry/parser-pack-windows-construction-state/state.json")
+          )
+          $cleanupFailures = [System.Collections.Generic.List[System.Exception]]::new()
+          foreach ($statePath in $statePaths) {
+            try {
+              & {
+                param([string]$CleanupWrapper, [string]$CleanupStatePath)
+                . $CleanupWrapper -Mode cleanup -StatePath $CleanupStatePath
+                Invoke-Cleanup
+              } $wrapper $statePath
+            }
+            catch {
+              $cleanupFailures.Add($_.Exception)
+            }
+          }
+          if ($cleanupFailures.Count -ne 0) {
+            throw [System.AggregateException]::new(
+              "One or more Windows construction recovery cleanups failed.",
+              @($cleanupFailures)
+            )
+          }
+
+      - name: Verify exact constructed Windows runtime containment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .github/scripts/verify-parser-pack-runtime-containment.ps1 `
+            -OutputRoot (Join-Path $env:RUNNER_TEMP "parser-pack-output")
+
+      - name: Remove candidate outputs from reusable Cargo layer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $build = Join-Path $env:RUNNER_TEMP "parser-pack-output/build"
+          if (-not (Test-Path -LiteralPath $build -PathType Container)) {
+            throw "Reusable Cargo target is missing after construction."
+          }
+          $cleanArguments = @(
+            "clean",
+            "--frozen",
+            "--release",
+            "--target-dir",
+            $build
+          )
+          foreach ($package in @(
+            "projectatlas-lints",
+            "projectatlas-cli",
+            "projectatlas-core",
+            "projectatlas-db",
+            "projectatlas-fs",
+            "projectatlas-service",
+            "projectatlas-symbols"
+          )) {
+            $cleanArguments += @("--package", $package)
+          }
+          $env:CARGO_NET_OFFLINE = "true"
+          cargo @cleanArguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $broker = Join-Path $build "release/projectatlas-parser-containment.exe"
+          if (Test-Path -LiteralPath $broker) {
+            $brokerItem = Get-Item -LiteralPath $broker -Force
+            if ($brokerItem.PSIsContainer -or
+                (($brokerItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+              throw "Reusable Cargo layer broker output is not one regular file."
+            }
+            [System.IO.File]::Delete($brokerItem.FullName)
+          }
+          $candidateEntries = @(
+            Get-ChildItem -LiteralPath $build -Force -Recurse |
+              Where-Object {
+                $_.Name -cmatch (
+                  '\A(?:(?:lib)?projectatlas(?:_|-)|' +
+                  'optional_parser_pack_release(?:-|\.|$)|' +
+                  'assemble_optional_parser_artifact(?:-|\.|$))'
+                )
+              }
+          )
+          if ($candidateEntries.Count -ne 0) {
+            throw "ProjectAtlas candidate artifacts remain in the reusable Cargo layer."
+          }
+
+      - name: Revalidate exact candidate after construction
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $revision = (git rev-parse HEAD).Trim()
+          $status = @(git status --porcelain=v1 --untracked-files=all)
+          $lockSha = (Get-FileHash -Algorithm SHA256 -LiteralPath "Cargo.lock").Hash.ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0 -or
+              $revision -ne "${{ steps.identity.outputs.revision }}" -or
+              $status.Count -ne 0 -or
+              $lockSha -ne "${{ steps.identity.outputs.cargo_lock_sha256 }}") {
+            throw "Candidate source changed during contained construction."
+          }
+
+      - name: Record reusable Cargo layer disposition
+        id: cargo-cache-disposition
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $source = Join-Path $env:RUNNER_TEMP "parser-pack-output/construction-cache-disposition.json"
+          $state = Get-Content -Raw -LiteralPath $source | ConvertFrom-Json -Depth 4
+          if ($state.disposition -notin @("miss", "hit", "rejected") -or
+              [uint64]$state.entries -gt 200000 -or
+              [uint64]$state.bytes -gt [uint64](8GB)) {
+            throw "Contained construction returned an invalid cache disposition."
+          }
+          $clean = "${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction }}" -eq "true"
+          $reuseEnabled = "${{ matrix.target == 'x86_64-unknown-linux-gnu' }}" -eq "true"
+          $restoreAttempted = $reuseEnabled -and -not $clean
+          $exactHit = "${{ steps.cargo-cache-restore.outputs.cache-hit }}" -eq "true"
+          $compatibleHit = "${{ steps.cargo-cache-compatible-restore.outputs.cache-hit }}" -eq "true"
+          $saveEligible = (
+            $reuseEnabled -and
+            "${{ github.event_name }}" -eq "workflow_dispatch" -and
+            -not $clean -and
+            -not $exactHit -and
+            $state.disposition -ne "rejected"
+          )
+          $effectiveDisposition = if ($clean) {
+            "clean"
+          }
+          elseif (-not $reuseEnabled) {
+            "disabled"
+          }
+          else {
+            [string]$state.disposition
+          }
+          $receiptDirectory = Join-Path $env:RUNNER_TEMP "parser-pack-cache-receipt"
+          [System.IO.Directory]::CreateDirectory($receiptDirectory) | Out-Null
+          $receipt = [ordered]@{
+            schema_version = 1
+            target = "${{ matrix.target }}"
+            revision = "${{ steps.identity.outputs.revision }}"
+            key_sha256 = "${{ steps.cargo-cache-key.outputs.sha256 }}"
+            disposition = $effectiveDisposition
+            restore_attempted = $restoreAttempted
+            exact_hit = $exactHit
+            compatible_hit = $compatibleHit
+            restored_entries = [uint64]$state.entries
+            restored_bytes = [uint64]$state.bytes
+            save_eligible = $saveEligible
+          }
+          $receiptPath = Join-Path $receiptDirectory "cargo-layer-${{ matrix.target }}.json"
+          [System.IO.File]::WriteAllText(
+            $receiptPath,
+            (($receipt | ConvertTo-Json -Depth 4) + "`n"),
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          "value=$($state.disposition)" >> $env:GITHUB_OUTPUT
+          "effective=$effectiveDisposition" >> $env:GITHUB_OUTPUT
+          @(
+            "### Reusable Cargo layer: ${{ matrix.target }}",
+            "",
+            "- disposition: ``$effectiveDisposition``",
+            "- key SHA-256: ``${{ steps.cargo-cache-key.outputs.sha256 }}``",
+            "- compatible v2 hit: ``$compatibleHit``",
+            "- restored entries: ``$([uint64]$state.entries)``",
+            "- restored bytes: ``$([uint64]$state.bytes)``",
+            "- save eligible: ``$saveEligible``"
+          ) >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload immutable construction output
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: parser-pack-${{ matrix.target }}-construction
+          path: ${{ runner.temp }}/parser-pack-output/publish/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload reusable Cargo layer receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: parser-pack-${{ matrix.target }}-cargo-layer-receipt
+          path: ${{ runner.temp }}/parser-pack-cache-receipt/cargo-layer-${{ matrix.target }}.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Save exact reusable Cargo layer
+        if: >-
+          matrix.target == 'x86_64-unknown-linux-gnu' &&
+          github.event_name == 'workflow_dispatch' &&
+          !inputs.clean_construction &&
+          steps.cargo-cache-restore.outputs.cache-hit != 'true' &&
+          steps.cargo-cache-disposition.outputs.value != 'rejected'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/parser-pack-output/build
+          key: ${{ steps.cargo-cache-key.outputs.key }}
+
+  verify:
+    name: verify ${{ matrix.target }}
+    needs: construct
+    runs-on: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu-24.04' || 'windows-2025' }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.target != 'all' && format('["{0}"]', inputs.target) || '["x86_64-unknown-linux-gnu","x86_64-pc-windows-msvc"]') }}
+    steps:
+      - name: Download platform construction output
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: parser-pack-${{ matrix.target }}-construction
+          path: ${{ runner.temp }}/parser-pack-download
+
+      - name: Validate fresh-runner package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $download = Join-Path $env:RUNNER_TEMP "parser-pack-download"
+          $suffix = ""
+          if ($env:RUNNER_OS -eq "Windows") { $suffix = ".exe" }
+          $expected = @(
+            "accepted-capabilities.json",
+            "check-parser-pack-network-boundary.ps1",
+            "optional_parser_pack_release$suffix",
+            "optional_parser_pack_release.sha256",
+            "projectatlas-broad-parser-${{ matrix.target }}.tar.zst"
+          )
+          if ($env:RUNNER_OS -eq "Windows") {
+            $expected += @(
+              "parser-pack-appcontainer-launcher.exe",
+              "parser-pack-appcontainer-launcher.sha256"
+            )
+          }
+          $items = @(Get-ChildItem -LiteralPath $download -Force)
+          if (@($items | Where-Object { $_.PSIsContainer }).Count -ne 0) {
+            throw "Fresh-runner package contains an unexpected directory."
+          }
+          $actual = @($items | ForEach-Object { $_.Name } | Sort-Object)
+          $expected = @($expected | Sort-Object)
+          if (Compare-Object -ReferenceObject $expected -DifferenceObject $actual) {
+            throw "Fresh-runner package does not match the closed file inventory."
+          }
+          foreach ($item in $items) {
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.Length -le 0) {
+              throw "Fresh-runner package contains a non-regular or empty file."
+            }
+          }
+
+          $verifier = Join-Path $download "optional_parser_pack_release$suffix"
+          $expectedVerifierHash = [System.IO.File]::ReadAllText(
+            (Join-Path $download "optional_parser_pack_release.sha256")
+          ).Trim()
+          if ($expectedVerifierHash -notmatch '\A[0-9a-f]{64}\z' -or
+              (Get-FileHash -Algorithm SHA256 -LiteralPath $verifier).Hash.ToLowerInvariant() -ne $expectedVerifierHash) {
+            throw "Fresh-runner verifier digest is invalid."
+          }
+          if ($env:RUNNER_OS -ne "Windows") {
+            & /bin/chmod 0755 $verifier
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+          foreach ($directoryName in @("parser-pack-verify-output", "parser-pack-verify-temp", "parser-pack-verify-home")) {
+            [System.IO.Directory]::CreateDirectory((Join-Path $env:RUNNER_TEMP $directoryName)) | Out-Null
+          }
+
+      - name: Prove fresh-runner baseline network reachability
+        id: network
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $checker = Join-Path $env:RUNNER_TEMP "parser-pack-download/check-parser-pack-network-boundary.ps1"
+          $discovery = pwsh -NoProfile -File $checker -Mode discover-resolver | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File $checker -Mode require-reachable -ResolverAddress $discovery.resolver_address
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "resolver_address=$($discovery.resolver_address)" >> $env:GITHUB_OUTPUT
+
+      - name: Recheck standalone AppContainer launcher
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $download = Join-Path $env:RUNNER_TEMP "parser-pack-download"
+          $launcher = Join-Path $download "parser-pack-appcontainer-launcher.exe"
+          $expected = [System.IO.File]::ReadAllText(
+            (Join-Path $download "parser-pack-appcontainer-launcher.sha256")
+          ).Trim()
+          if ($expected -notmatch '\A[0-9a-f]{64}\z' -or
+              (Get-FileHash -Algorithm SHA256 -LiteralPath $launcher).Hash.ToLowerInvariant() -ne $expected) {
+            throw "Downloaded AppContainer launcher digest is invalid."
+          }
+          & $launcher self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prove Linux fresh-runner network denial
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          setpriv_path="$(command -v setpriv)"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          sudo --non-interactive unshare --net -- \
+            "$setpriv_path" --no-new-privs --reuid="$runner_uid" --regid="$runner_gid" --clear-groups \
+            /usr/bin/env -i \
+              HOME="$RUNNER_TEMP/parser-pack-verify-home" \
+              TMPDIR="$RUNNER_TEMP/parser-pack-verify-temp" \
+            "$(command -v pwsh)" -NoLogo -NoProfile -NonInteractive \
+              -File "$RUNNER_TEMP/parser-pack-download/check-parser-pack-network-boundary.ps1" \
+              -Mode require-denied \
+              -ResolverAddress '${{ steps.network.outputs.resolver_address }}'
+
+      - name: Prove Windows fresh-runner network denial
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $download = Join-Path $env:RUNNER_TEMP "parser-pack-download"
+          $output = Join-Path $env:RUNNER_TEMP "parser-pack-verify-output"
+          $temp = Join-Path $env:RUNNER_TEMP "parser-pack-verify-temp"
+          $launcher = Join-Path $download "parser-pack-appcontainer-launcher.exe"
+          $pwsh = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+          & $launcher launch `
+            --executable $pwsh `
+            --working-directory $output `
+            --temp-directory $temp `
+            --timeout-seconds 60 `
+            --read-root $download `
+            --read-root (Split-Path -Parent $pwsh) `
+            --write-root $output `
+            --write-root $temp `
+            -- `
+            -NoLogo -NoProfile -NonInteractive `
+            -File (Join-Path $download "check-parser-pack-network-boundary.ps1") `
+            -Mode require-denied `
+            -ResolverAddress '${{ steps.network.outputs.resolver_address }}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Write fresh-runner context
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $download = Join-Path $env:RUNNER_TEMP "parser-pack-download"
+          $context = [ordered]@{
+            fresh_host = "verified"
+            repository_inputs_absent = "verified"
+            build_tools_not_invoked = "verified"
+            working_directory_outside_pack = "verified"
+            ambient_library_paths_cleared = "verified"
+            network_denial = [ordered]@{
+              mechanism = "${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'linux-network-namespace' || 'windows-app-container' }}"
+              dns_denied = $true
+              direct_tcp_denied = $true
+              https_denied = $true
+            }
+          }
+          [System.IO.File]::WriteAllText(
+            (Join-Path $download "runner-context.json"),
+            (($context | ConvertTo-Json -Depth 4) + "`n"),
+            [System.Text.UTF8Encoding]::new($false)
+          )
+
+      - name: Verify archive inside Linux network namespace
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          download="$RUNNER_TEMP/parser-pack-download"
+          output="$RUNNER_TEMP/parser-pack-verify-output"
+          temp="$RUNNER_TEMP/parser-pack-verify-temp"
+          cd "$output"
+          setpriv_path="$(command -v setpriv)"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          sudo --non-interactive unshare --net -- \
+            "$setpriv_path" --no-new-privs --reuid="$runner_uid" --regid="$runner_gid" --clear-groups \
+            /usr/bin/env -i \
+              HOME="$RUNNER_TEMP/parser-pack-verify-home" \
+              TMPDIR="$temp" \
+            "$download/optional_parser_pack_release" verify \
+              "$download/projectatlas-broad-parser-${{ matrix.target }}.tar.zst" \
+              "$download/runner-context.json" \
+              "$output/platform-proof-${{ matrix.target }}.json"
+
+      - name: Verify archive through production Windows containment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $download = Join-Path $env:RUNNER_TEMP "parser-pack-download"
+          $output = Join-Path $env:RUNNER_TEMP "parser-pack-verify-output"
+          $temp = Join-Path $env:RUNNER_TEMP "parser-pack-verify-temp"
+          $verifier = Join-Path $download "optional_parser_pack_release.exe"
+          $start = [System.Diagnostics.ProcessStartInfo]::new()
+          $start.FileName = $verifier
+          $start.WorkingDirectory = $output
+          $start.UseShellExecute = $false
+          $start.CreateNoWindow = $true
+          $start.RedirectStandardOutput = $true
+          $start.RedirectStandardError = $true
+          $start.Environment.Clear()
+          $start.Environment["SystemRoot"] = $env:SystemRoot
+          $start.Environment["WINDIR"] = $env:WINDIR
+          $start.Environment["TEMP"] = $temp
+          $start.Environment["TMP"] = $temp
+          foreach ($argument in @(
+            "verify",
+            (Join-Path $download "projectatlas-broad-parser-${{ matrix.target }}.tar.zst"),
+            (Join-Path $download "runner-context.json"),
+            (Join-Path $output "platform-proof-${{ matrix.target }}.json")
+          )) {
+            $start.ArgumentList.Add($argument)
+          }
+          $process = [System.Diagnostics.Process]::new()
+          $process.StartInfo = $start
+          try {
+            if (-not $process.Start()) {
+              throw "Fresh-runner verifier did not start."
+            }
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $stderr = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit(1800000)) {
+              $process.Kill($true)
+              if (-not $process.WaitForExit(5000)) {
+                throw "Fresh-runner verifier could not be reaped within 5 seconds after termination."
+              }
+              throw "Fresh-runner verifier exceeded its 1800-second deadline."
+            }
+            $stdoutText = $stdout.GetAwaiter().GetResult()
+            $stderrText = $stderr.GetAwaiter().GetResult()
+            if (-not [string]::IsNullOrWhiteSpace($stdoutText)) { Write-Host $stdoutText.TrimEnd() }
+            if (-not [string]::IsNullOrWhiteSpace($stderrText)) { Write-Host $stderrText.TrimEnd() }
+            if ($process.ExitCode -ne 0) {
+              throw "Fresh-runner verifier failed with exit code $($process.ExitCode)."
+            }
+          }
+          finally {
+            $process.Dispose()
+          }
+
+      - name: Upload fresh platform proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: parser-pack-${{ matrix.target }}-proof
+          path: ${{ runner.temp }}/parser-pack-verify-output/platform-proof-${{ matrix.target }}.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  runtime-e2e:
+    name: normal runtime lifecycle ${{ matrix.target }}
+    needs: [construct, verify]
+    runs-on: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu-24.04' || 'windows-2025' }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.target != 'all' && format('["{0}"]', inputs.target) || '["x86_64-unknown-linux-gnu","x86_64-pc-windows-msvc"]') }}
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default $env:RUSTUP_TOOLCHAIN
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Bind exact clean candidate identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $revision = (git rev-parse HEAD).Trim()
+          $status = @(git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0 -or $revision -ne $env:GITHUB_SHA -or $status.Count -ne 0) {
+            throw "Normal-runtime parser-pack verification requires the exact clean candidate."
+          }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Download platform construction output
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: parser-pack-${{ matrix.target }}-construction
+          path: ${{ runner.temp }}/parser-pack-runtime-e2e
+
+      - name: Exercise adversarial supervisor protocol and cleanup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "parser-pack-runtime-e2e-target"
+          cargo test `
+            -p projectatlas-cli `
+            --test parser_supervisor_adversarial `
+            --all-features `
+            --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Exercise Windows fixed-epoch sharing guards
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "parser-pack-runtime-e2e-target"
+          cargo test `
+            -p projectatlas-cli `
+            --lib `
+            --all-features `
+            --locked `
+            -- `
+            --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Exercise packaged archive through the normal runtime lifecycle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archive = Join-Path `
+            $env:RUNNER_TEMP `
+            "parser-pack-runtime-e2e/projectatlas-broad-parser-${{ matrix.target }}.tar.zst"
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw "Normal-runtime parser-pack archive is missing."
+          }
+
+          function Get-OptionalParserProcessIds {
+            if ($env:RUNNER_OS -eq "Windows") {
+              return @(
+                Get-CimInstance Win32_Process |
+                  Where-Object {
+                    $_.Name -in @(
+                      "projectatlas-parser-worker.exe",
+                      "projectatlas-parser-containment.exe"
+                    )
+                  } |
+                  ForEach-Object { [int]$_.ProcessId }
+              )
+            }
+            return @(
+              & /bin/ps -eo pid= |
+                ForEach-Object {
+                  $processIdText = $_.Trim()
+                  if ($processIdText -match '^\d+$') {
+                    $executableTarget = & /usr/bin/readlink "/proc/$processIdText/exe" 2>$null
+                    if ($executableTarget -match '^/memfd:projectatlas-parser-worker(?: \(deleted\))?$') {
+                      [int]$processIdText
+                    }
+                  }
+                }
+            )
+          }
+
+          $before = @(Get-OptionalParserProcessIds)
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "parser-pack-runtime-e2e-target"
+          $env:PROJECTATLAS_OPTIONAL_PARSER_ARCHIVE = $archive
+          cargo test `
+            -p projectatlas-cli `
+            --test e2e `
+            --locked `
+            optional_parser_pack_real_archive_normal_runtime_lifecycle `
+            -- `
+            --ignored `
+            --exact `
+            --nocapture
+          $testExitCode = $LASTEXITCODE
+
+          $after = @(Get-OptionalParserProcessIds)
+          $residue = @($after | Where-Object { $_ -notin $before })
+          if ($residue.Count -ne 0) {
+            throw "Normal-runtime parser-pack test retained process IDs: $($residue -join ', ')."
+          }
+          if ($testExitCode -ne 0) { exit $testExitCode }
+
+          $revision = (git rev-parse HEAD).Trim()
+          $status = @(git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0 -or $revision -ne $env:GITHUB_SHA -or $status.Count -ne 0) {
+            throw "Candidate source changed during normal-runtime parser-pack verification."
+          }
+
+      - name: Prove Linux launches retain sealed worker and grammar authority
+        if: runner.os == 'Linux'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archive = Join-Path `
+            $env:RUNNER_TEMP `
+            "parser-pack-runtime-e2e/projectatlas-broad-parser-${{ matrix.target }}.tar.zst"
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw "Normal-runtime parser-pack archive is missing."
+          }
+
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "parser-pack-runtime-e2e-target"
+          $env:PROJECTATLAS_OPTIONAL_PARSER_ARCHIVE = $archive
+          sudo --non-interactive sysctl -q -w vm.memfd_noexec=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $memfdNoexec = (sysctl -n vm.memfd_noexec).Trim()
+          if ($LASTEXITCODE -ne 0 -or $memfdNoexec -ne "1") {
+            throw "Linux packaged authority proof requires vm.memfd_noexec=1."
+          }
+          cargo test `
+            -p projectatlas-cli `
+            --test parser_launch_authority `
+            --locked `
+            sealed_worker_and_grammar_survive_concurrent_path_replacement `
+            -- `
+            --ignored `
+            --exact `
+            --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $revision = (git rev-parse HEAD).Trim()
+          $status = @(git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0 -or $revision -ne $env:GITHUB_SHA -or $status.Count -ne 0) {
+            throw "Candidate source changed during sealed launch-authority verification."
+          }
+
+      - name: Prove contained worker crash preserves publication
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archive = Join-Path `
+            $env:RUNNER_TEMP `
+            "parser-pack-runtime-e2e/projectatlas-broad-parser-${{ matrix.target }}.tar.zst"
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw "Normal-runtime parser-pack archive is missing."
+          }
+
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "parser-pack-runtime-e2e-target"
+          $env:PROJECTATLAS_OPTIONAL_PARSER_ARCHIVE = $archive
+          cargo test `
+            -p projectatlas-cli `
+            --test optional_parser_worker_failure `
+            --locked `
+            contained_worker_crash_preserves_active_generation `
+            -- `
+            --ignored `
+            --exact `
+            --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $revision = (git rev-parse HEAD).Trim()
+          $status = @(git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0 -or $revision -ne $env:GITHUB_SHA -or $status.Count -ne 0) {
+            throw "Candidate source changed during contained-worker failure verification."
+          }
+
+      - name: Prove abrupt ProjectAtlas parent death cleans runtime and preserves publication
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archive = Join-Path `
+            $env:RUNNER_TEMP `
+            "parser-pack-runtime-e2e/projectatlas-broad-parser-${{ matrix.target }}.tar.zst"
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw "Normal-runtime parser-pack archive is missing."
+          }
+
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "parser-pack-runtime-e2e-target"
+          $env:PROJECTATLAS_OPTIONAL_PARSER_ARCHIVE = $archive
+          cargo test `
+            -p projectatlas-cli `
+            --test optional_parser_worker_failure `
+            --locked `
+            abrupt_parent_death_reaps_optional_runtime_and_preserves_active_generation `
+            -- `
+            --ignored `
+            --exact `
+            --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $revision = (git rev-parse HEAD).Trim()
+          $status = @(git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0 -or $revision -ne $env:GITHUB_SHA -or $status.Count -ne 0) {
+            throw "Candidate source changed during abrupt-parent-death verification."
+          }
+
+      - name: Prove stalled worker cancellation preserves MCP reads and publication
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archive = Join-Path `
+            $env:RUNNER_TEMP `
+            "parser-pack-runtime-e2e/projectatlas-broad-parser-${{ matrix.target }}.tar.zst"
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw "Normal-runtime parser-pack archive is missing."
+          }
+
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "parser-pack-runtime-e2e-target"
+          $env:PROJECTATLAS_OPTIONAL_PARSER_ARCHIVE = $archive
+          cargo test `
+            -p projectatlas-cli `
+            --test optional_parser_worker_failure `
+            --locked `
+            stalled_worker_cancellation_preserves_mcp_reads_and_active_generation `
+            -- `
+            --ignored `
+            --exact `
+            --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $revision = (git rev-parse HEAD).Trim()
+          $status = @(git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0 -or $revision -ne $env:GITHUB_SHA -or $status.Count -ne 0) {
+            throw "Candidate source changed during stalled-worker cancellation verification."
+          }
+
+      - name: Measure the absent-pack default and control runtime boundary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archive = Join-Path `
+            $env:RUNNER_TEMP `
+            "parser-pack-runtime-e2e/projectatlas-broad-parser-${{ matrix.target }}.tar.zst"
+          $measurementDirectory = Join-Path $env:RUNNER_TEMP "parser-pack-runtime-measurement"
+          [System.IO.Directory]::CreateDirectory($measurementDirectory) | Out-Null
+          pwsh -NoProfile -NonInteractive `
+            -File .github/scripts/measure-default-runtime-optional-pack-boundary.ps1 `
+            -SourceRoot $env:GITHUB_WORKSPACE `
+            -ArchivePath $archive `
+            -CargoTargetRoot (Join-Path $env:RUNNER_TEMP "parser-pack-runtime-comparison-targets") `
+            -OutputPath (Join-Path $measurementDirectory "absent-pack-runtime-comparison-${{ matrix.target }}.json") `
+            -Target "${{ matrix.target }}" `
+            -CandidateSha $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload absent-pack runtime comparison
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: parser-pack-${{ matrix.target }}-absent-pack-runtime-comparison
+          path: ${{ runner.temp }}/parser-pack-runtime-measurement/absent-pack-runtime-comparison-${{ matrix.target }}.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  aggregate:
+    name: aggregate exact supported-platform proof
+    needs: [verify, runtime-e2e]
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Download Linux construction tools
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: parser-pack-x86_64-unknown-linux-gnu-construction
+          path: ${{ runner.temp }}/parser-pack-aggregate-tools
+
+      - name: Download all platform proofs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: parser-pack-*-proof
+          path: ${{ runner.temp }}/parser-pack-aggregate-proofs
+          merge-multiple: true
+
+      - name: Aggregate exact proofs
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/parser-pack-aggregate-tools"
+          proofs="$RUNNER_TEMP/parser-pack-aggregate-proofs"
+          output="$RUNNER_TEMP/parser-pack-aggregate-output"
+          mkdir -p "$output"
+          expected_hash="$(tr -d '\r\n' < "$tools/optional_parser_pack_release.sha256")"
+          observed_hash="$(sha256sum "$tools/optional_parser_pack_release" | awk '{print $1}')"
+          test "$expected_hash" = "$observed_hash"
+          chmod 0755 "$tools/optional_parser_pack_release"
+          test "$(find "$proofs" -maxdepth 1 -type f -name 'platform-proof-*.json' | wc -l)" -eq 2
+          /usr/bin/env -i \
+            HOME="$RUNNER_TEMP" \
+            TMPDIR="$RUNNER_TEMP" \
+            "$tools/optional_parser_pack_release" aggregate \
+              "$tools/accepted-capabilities.json" \
+              "$proofs/platform-proof-x86_64-unknown-linux-gnu.json" \
+              "$proofs/platform-proof-x86_64-pc-windows-msvc.json" \
+              "$output/optional-parser-pack-proof-aggregate.json"
+
+      - name: Upload aggregate proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: optional-parser-pack-proof-aggregate
+          path: ${{ runner.temp }}/parser-pack-aggregate-output/optional-parser-pack-proof-aggregate.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Download clean release construction archives
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: parser-pack-*-construction
+          path: ${{ runner.temp }}/parser-pack-release-source/construction
+          merge-multiple: true
+
+      - name: Download clean release construction receipts
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: parser-pack-*-cargo-layer-receipt
+          path: ${{ runner.temp }}/parser-pack-release-source/receipts
+          merge-multiple: true
+
+      - name: Assemble clean release handoff
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$RUNNER_TEMP/parser-pack-release-source"
+          output="$RUNNER_TEMP/parser-pack-release-output"
+          mkdir -p "$output"
+          install -m 0644 \
+            "$RUNNER_TEMP/parser-pack-aggregate-output/optional-parser-pack-proof-aggregate.json" \
+            "$output/optional-parser-pack-proof-aggregate.json"
+          for target in x86_64-unknown-linux-gnu x86_64-pc-windows-msvc; do
+            install -m 0644 \
+              "$source/construction/projectatlas-broad-parser-$target.tar.zst" \
+              "$output/projectatlas-broad-parser-$target.tar.zst"
+            install -m 0644 \
+              "$source/receipts/cargo-layer-$target.json" \
+              "$output/cargo-layer-$target.json"
+          done
+
+      - name: Upload clean release handoff
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: optional-parser-pack-release-assets
+          path: ${{ runner.temp }}/parser-pack-release-output/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

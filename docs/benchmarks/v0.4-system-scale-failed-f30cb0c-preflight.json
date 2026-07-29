@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "preregistration": "{REPO_ROOT}\\docs\\benchmarks\\v0.4-system-scale-preregistration.json",
+  "mode": "all",
+  "final_measurement_eligibility": {
+    "backend": "windows-job-basic-and-io-accounting-plus-psutil-peaks",
+    "kind": "exact-terminal-owned-process-tree-accounting",
+    "required_final_platform": "Windows",
+    "final_platform_eligible": true,
+    "ineligible_reason": null,
+    "requested": true,
+    "disposition": "eligible"
+  },
+  "publication_eligible": false,
+  "passed": false,
+  "failure": {
+    "type": "KeyError",
+    "message": "'maximum_process_tree_threads'"
+  }
+}

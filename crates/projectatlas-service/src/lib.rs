@@ -1,22 +1,61 @@
 //! Purpose: Provide shared `ProjectAtlas` query services for CLI and MCP adapters.
 
+mod agent_efficiency;
+mod analysis;
+mod federation;
 mod import_aliases;
+mod relations;
 
+pub use analysis::{
+    AnalysisFinding, AnalysisFindingKind, AnalysisNode, AnalysisStatus, GitImpactSelection,
+    RelationAnalysisDraft, RelationAnalysisMode, RelationAnalysisQuery, RelationAnalysisReport,
+    RelationAnalysisWork, VcsImpact, load_relation_analysis,
+};
+pub use federation::{
+    FederatedAnalysisDraft, FederatedAnalysisReport, FederatedDetailedRelationDraft,
+    FederatedDetailedRelationReport, FederatedInputWork, FederatedParticipant,
+    FederatedRelationEvidence, FederatedRelationWork, FederatedRendezvous, FederatedStore,
+    MAX_FEDERATED_DATABASE_BYTES, MAX_FEDERATED_INPUT_BYTES, load_federated_detailed_relations,
+    load_federated_relation_analysis, validate_federated_root_count,
+};
+pub use relations::{
+    DetailedRelationBudget, DetailedRelationNode, DetailedRelationPageDraft, DetailedRelationQuery,
+    DetailedRelationReport, DetailedRelationRow, DetailedRelationWork, RelationAnchor,
+    RelationDirection, RelationNextCall, RelationPurpose, RelationResolutionFilter,
+    RelationTotalState, load_detailed_relation_page, load_detailed_relations,
+    parse_relation_confidence, parse_relation_direction, parse_relation_resolution,
+};
+
+use agent_efficiency::load_agent_efficiency_comparison;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use import_aliases::{ImportAliasMap, load_import_alias_map};
+use projectatlas_core::graph::{
+    CoverageScope, CoverageState, ExtendedRelationKind, GraphLimitKind, GraphLimits,
+    GraphRelationKind,
+};
 use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolKind, SymbolRelation,
 };
+use projectatlas_core::telemetry::{TokenOverview, TokenTrendReport, TokenTrendWindow};
 use projectatlas_core::{
-    IndexedNode, NodeKind, RankedNode, repo_path_to_native, validated_repo_file_key,
+    IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
+    IndexedNode, NavigationNextCall, NavigationNextCapability, NodeKind, RankedConnectionKind,
+    RankedConnectionTarget, RankedNode, RankedReasonCode, repo_path_to_native,
+    validated_repo_file_key,
 };
-use projectatlas_db::{AtlasStore, DbError, IndexedFileText};
+use projectatlas_db::{
+    AtlasStore, CapturedProjectBinding, DbError, FileTextAdmission, FileTextFtsQuery,
+    IndexedFileText, MAX_FILE_TEXT_FTS_CANDIDATES, RepositoryCoverageQuery, RepositoryCoverageRow,
+    RepositoryNavigationConnections, RepositoryNavigationNode,
+};
+use projectatlas_symbols::module_aliases_for_path;
 use regex::RegexBuilder;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
 
 /// Maximum caller references retained for one summarized symbol.
@@ -29,15 +68,64 @@ const FILE_METADATA_SYMBOL_LIMIT: usize = 20;
 const RANKED_REASON_LIMIT: usize = 6;
 /// Maximum selected candidates considered when service-side ranking enriches DB output.
 const RANKED_CANDIDATE_LIMIT: usize = 100;
+/// Maximum validated relationships retained for one navigation family.
+const RANKED_CONNECTION_FAMILY_LIMIT: u32 = 4;
+/// Maximum high-value connections sampled into one ranked row.
+const RANKED_CONNECTION_SAMPLE_LIMIT: usize = 3;
 /// Default number of folders and files returned by `next`.
 const NEXT_REPORT_DEFAULT_LIMIT: usize = 3;
 /// Maximum number of folders and files returned by `next`.
 const NEXT_REPORT_MAX_LIMIT: usize = 10;
+/// Maximum rows returned by one agent-facing coverage page.
+pub const COVERAGE_PAGE_MAX_LIMIT: u32 = 200;
+/// Maximum rows retained by one selected-file coverage digest.
+const COVERAGE_DIGEST_ROW_LIMIT: u32 = 16;
 /// Status emitted when live source was read successfully.
 const SOURCE_STATUS_LIVE: &str = "live-source";
 /// Status emitted when indexed metadata had to stand in for live source.
 const SOURCE_STATUS_INDEXED: &str = "indexed-metadata";
+/// Maximum selected persisted-text files inspected by one lexical search.
+const SEARCH_MAX_SELECTED_FILES: usize = 50_000;
+/// Maximum selected persisted-text bytes inspected by one lexical search.
+const SEARCH_MAX_SELECTED_BYTES: usize = 128 * 1024 * 1024;
+/// Maximum wall time available to one lexical search.
+const SEARCH_MAX_ELAPSED: Duration = Duration::from_secs(10);
+/// Maximum context lines retained on either side of one match.
+const SEARCH_MAX_CONTEXT_LINES: usize = 20;
+/// Maximum result rows retained by one lexical search.
+const SEARCH_MAX_RESULT_ROWS: usize = 1_000;
+/// Maximum approximate payload bytes retained before adapter serialization.
+const SEARCH_MAX_RETAINED_BYTES: usize = 2 * 1024 * 1024;
+/// Maximum UTF-8 bytes accepted in one literal, regex, or fuzzy pattern.
+const SEARCH_MAX_PATTERN_BYTES: usize = 64 * 1024;
+/// Maximum UTF-8 bytes accepted in one repository path glob.
+const SEARCH_MAX_FILE_PATTERN_BYTES: usize = 4 * 1024;
+/// Stable state reported until the optional semantic lifecycle lands in task 6.3.
+const SEARCH_SEMANTIC_UNAVAILABLE_STATE: &str = "not-installed";
+/// Stable recovery guidance for an explicitly unavailable retrieval mode.
+const SEARCH_SEMANTIC_RECOVERY: &str =
+    "install and enable a compatible semantic retrieval pack, then build a ready generation";
 
+/// Internal resource ceilings for one lexical search execution.
+#[derive(Clone, Copy, Debug)]
+struct SearchBounds {
+    /// Maximum persisted-text rows admitted for decoding.
+    selected_files: usize,
+    /// Maximum persisted-text bytes admitted for decoding.
+    selected_bytes: usize,
+    /// Maximum elapsed search duration.
+    elapsed: Duration,
+    /// Maximum approximate bytes retained before serialization.
+    retained_bytes: usize,
+}
+
+/// Product search ceilings applied identically to CLI and MCP calls.
+const DEFAULT_SEARCH_BOUNDS: SearchBounds = SearchBounds {
+    selected_files: SEARCH_MAX_SELECTED_FILES,
+    selected_bytes: SEARCH_MAX_SELECTED_BYTES,
+    elapsed: SEARCH_MAX_ELAPSED,
+    retained_bytes: SEARCH_MAX_RETAINED_BYTES,
+};
 /// Service-layer failures.
 #[derive(Debug, Error)]
 pub enum ServiceError {
@@ -58,10 +146,550 @@ pub enum ServiceError {
     /// Serialization failed while building a telemetry baseline.
     #[error("serialization error: {0}")]
     Serialize(#[from] serde_json::Error),
+    /// The selected database has no complete project binding.
+    #[error("selected project binding is unavailable")]
+    SelectedProjectUnavailable,
+    /// The selected project binding changed while the report was being read.
+    #[error("selected project binding changed while loading the token report")]
+    SelectedProjectChanged,
+    /// An explicitly requested optional search capability has no ready generation.
+    #[error("search retrieval mode {requested_mode:?} is unavailable ({state}); {guidance}")]
+    SearchCapabilityUnavailable {
+        /// Caller-selected retrieval mode.
+        requested_mode: SearchRetrievalMode,
+        /// Stable optional-capability lifecycle state.
+        state: &'static str,
+        /// Actionable recovery guidance.
+        guidance: &'static str,
+    },
+    /// A detailed-relation cursor is malformed or violates its bounded state invariants.
+    #[error("invalid detailed relation cursor: {reason}; restart the relation request")]
+    RelationCursorInvalid {
+        /// Bounded validation reason safe to expose to the caller.
+        reason: &'static str,
+    },
+    /// A detailed-relation cursor belongs to another normalized request.
+    #[error("detailed relation cursor does not match {field}; restart the relation request")]
+    RelationCursorMismatched {
+        /// Result-defining request field that changed.
+        field: &'static str,
+    },
+    /// A detailed-relation cursor belongs to stale repository or purpose state.
+    #[error("detailed relation cursor is stale for {field}; restart the relation request")]
+    RelationCursorStale {
+        /// Captured state field that changed.
+        field: &'static str,
+    },
 }
 
 /// Convenient result alias for service operations.
 pub type ServiceResult<T> = Result<T, ServiceError>;
+
+/// Closed token-report request selected by CLI and MCP adapters.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TokenReportRequest<'a> {
+    /// Load the all-time token overview for an optional caller label.
+    Overview {
+        /// Optional caller-visible label filter.
+        caller_label: Option<&'a str>,
+        /// Optional repository-relative controlled benchmark artifact.
+        benchmark_results: Option<&'a Path>,
+    },
+    /// Load retained token trends for an optional caller label and window.
+    Trends {
+        /// Optional caller-visible label filter.
+        caller_label: Option<&'a str>,
+        /// Calendar grouping requested by the adapter.
+        window: TokenTrendWindow,
+    },
+}
+
+/// Typed token-report result returned without transport rendering.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TokenReport {
+    /// All-time token overview.
+    Overview(Box<TokenOverview>),
+    /// Retained token trend periods.
+    Trends(TokenTrendReport),
+}
+
+/// Capture the root and identity validated when the selected store opened.
+fn selected_project_binding(store: &AtlasStore) -> ServiceResult<CapturedProjectBinding> {
+    match store.captured_project_binding() {
+        Ok(binding) => Ok(binding),
+        Err(DbError::ProjectRootMissing | DbError::ProjectInstanceIdentityMissing) => {
+            Err(ServiceError::SelectedProjectUnavailable)
+        }
+        Err(error) => Err(ServiceError::Db(error)),
+    }
+}
+
+/// Revalidate the selected binding on a fresh snapshot after the report read.
+fn revalidate_selected_project_binding(store: &AtlasStore) -> ServiceResult<()> {
+    match store.revalidate_captured_project_binding() {
+        Ok(()) => Ok(()),
+        Err(
+            DbError::ProjectRootMissing
+            | DbError::ProjectInstanceIdentityMissing
+            | DbError::ProjectRootMismatch { .. }
+            | DbError::ProjectRootTransitionChanged { .. },
+        ) => Err(ServiceError::SelectedProjectChanged),
+        Err(error) => Err(ServiceError::Db(error)),
+    }
+}
+
+/// Load one token report through the selected-project service boundary.
+///
+/// # Errors
+///
+/// Returns an error when the selected project is unavailable or changes during
+/// the bounded database read, or when the report query fails.
+pub fn load_token_report(
+    store: &AtlasStore,
+    request: TokenReportRequest<'_>,
+) -> ServiceResult<TokenReport> {
+    let selected_project = selected_project_binding(store)?;
+    let report = match request {
+        TokenReportRequest::Overview {
+            caller_label,
+            benchmark_results,
+        } => {
+            let mut overview = store.token_overview(caller_label)?;
+            overview.set_agent_efficiency(load_agent_efficiency_comparison(
+                &selected_project,
+                benchmark_results,
+            )?);
+            TokenReport::Overview(Box::new(overview))
+        }
+        TokenReportRequest::Trends {
+            caller_label,
+            window,
+        } => TokenReport::Trends(store.token_trends(caller_label, window)?),
+    };
+    revalidate_selected_project_binding(store)?;
+    Ok(report)
+}
+
+/// Closed trust projection for one normalized coverage state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageTrustState {
+    /// The selected producer reported complete coverage.
+    Trusted,
+    /// Some current facts are available while omissions remain explicit.
+    Partial,
+    /// The selected facts are unavailable or not current enough to trust.
+    Untrusted,
+}
+
+/// Closed producer family represented by one coverage row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageExtractionPass {
+    /// File parse and fact projection coverage.
+    GraphProjection,
+    /// One normalized relationship-family extraction pass.
+    Relationship,
+}
+
+/// Typed cardinality knowledge for one bounded coverage page.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", content = "value", rename_all = "snake_case")]
+pub enum CoverageTotalState {
+    /// The bounded page proves the exact filtered total.
+    Exact(u32),
+    /// At least this many matching rows exist.
+    AtLeast(u32),
+    /// An exact or lower-bound total is unavailable at this continuation.
+    Unknown,
+}
+
+/// Per-state counts retained by one selected-file coverage digest.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct CoverageStateCounts {
+    /// Complete coverage rows.
+    pub complete: u32,
+    /// Partial coverage rows.
+    pub partial: u32,
+    /// Failed coverage rows.
+    pub failed: u32,
+    /// Intentionally ignored coverage rows.
+    pub ignored: u32,
+    /// Oversized coverage rows.
+    pub oversized: u32,
+    /// Quarantined coverage rows.
+    pub quarantined: u32,
+    /// Stale coverage rows.
+    pub stale: u32,
+}
+
+/// Compact relationship and parse coverage attached to one selected-file summary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CoverageDigest {
+    /// Whether current coverage rows exist for the selected file.
+    pub available: bool,
+    /// Active generation shared by every retained row, or zero when unavailable.
+    pub active_generation: IndexGeneration,
+    /// Source parser pass recorded for the file.
+    pub parser: Option<ParserKind>,
+    /// Fact provider pass recorded for the file.
+    pub provider: Option<ParserKind>,
+    /// Bounded per-state coverage counts.
+    pub states: CoverageStateCounts,
+    /// Total items declared by retained coverage rows.
+    pub total: u64,
+    /// Covered items declared by retained coverage rows.
+    pub covered: u64,
+    /// Omitted or untrusted items declared by retained coverage rows.
+    pub omitted: u64,
+    /// Number of retained relation-family rows.
+    pub relation_rows: u32,
+    /// Whether additional selected-file rows were omitted by the digest bound.
+    pub truncated: bool,
+    /// Conservative trust state across the retained digest.
+    pub trust: CoverageTrustState,
+    /// Existing opt-in health surface for deeper coverage discovery.
+    pub next_call: NavigationNextCall,
+}
+
+/// One actionable row in an opt-in coverage page.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CoverageDiscoveryRow {
+    /// Exact repository-relative path, or `.` for project-scoped coverage.
+    pub path: String,
+    /// Stable extraction-pass owner for parse or relationship facts.
+    pub extraction_pass: CoverageExtractionPass,
+    /// Optional normalized relation family.
+    pub relation: Option<GraphRelationKind>,
+    /// Current coverage lifecycle state.
+    pub state: CoverageState,
+    /// Conservative trust projection.
+    pub trust: CoverageTrustState,
+    /// Total items represented by this row.
+    pub total: u64,
+    /// Successfully covered items.
+    pub covered: u64,
+    /// Omitted or untrusted items.
+    pub omitted: u64,
+    /// Actionable explanation when coverage is not complete.
+    pub reason: Option<String>,
+    /// Reached product limit when applicable.
+    pub reached_limit: Option<GraphLimitKind>,
+    /// Active complete index generation.
+    pub active_generation: IndexGeneration,
+    /// Source parser pass for path-scoped coverage.
+    pub parser: Option<ParserKind>,
+    /// Fact provider pass for path-scoped coverage.
+    pub provider: Option<ParserKind>,
+    /// Existing selected-file summary or health surface to call next.
+    pub next_call: NavigationNextCall,
+}
+
+/// Agent-facing bounded coverage discovery report.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CoverageDiscoveryReport {
+    /// Zero-based result offset after filters.
+    pub start_index: u32,
+    /// Requested page limit after the service ceiling is applied.
+    pub limit: u32,
+    /// Maximum service page size.
+    pub max_limit: u32,
+    /// Number of rows returned.
+    pub returned: u32,
+    /// Whether at least one additional validated row exists.
+    pub truncated: bool,
+    /// Next zero-based continuation when another row exists.
+    pub continuation: Option<u32>,
+    /// Product ceiling reached when further continuation is intentionally unavailable.
+    pub reached_limit: Option<GraphLimitKind>,
+    /// Typed knowledge of the filtered total.
+    pub total: CoverageTotalState,
+    /// Encoded output bytes, filled by the selected adapter.
+    pub output_bytes: u32,
+    /// Absolute encoded-output ceiling.
+    pub max_output_bytes: u32,
+    /// Fully validated actionable rows.
+    pub rows: Vec<CoverageDiscoveryRow>,
+}
+
+/// Parse one public parser/provider coverage filter.
+///
+/// # Errors
+///
+/// Returns an error when the value is not a supported parser pass.
+pub fn parse_coverage_parser(value: &str) -> ServiceResult<ParserKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "tree-sitter" | "tree_sitter" => Ok(ParserKind::TreeSitter),
+        "manifest" => Ok(ParserKind::Manifest),
+        "structural" => Ok(ParserKind::Structural),
+        "fallback" => Ok(ParserKind::Fallback),
+        _ => Err(ServiceError::InvalidInput(format!(
+            "invalid coverage parser/provider '{value}'; expected tree-sitter, manifest, structural, or fallback"
+        ))),
+    }
+}
+
+/// Parse one public relation-family coverage filter.
+///
+/// # Errors
+///
+/// Returns an error when the value is not a supported legacy or extended family.
+pub fn parse_coverage_relation(value: &str) -> ServiceResult<GraphRelationKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "contains" => Ok(GraphRelationKind::Legacy(RelationKind::Contains)),
+        "imports" => Ok(GraphRelationKind::Legacy(RelationKind::Imports)),
+        "calls" => Ok(GraphRelationKind::Legacy(RelationKind::Calls)),
+        "depends-on" | "depends_on" => Ok(GraphRelationKind::Legacy(RelationKind::DependsOn)),
+        "references" => Ok(GraphRelationKind::Extended(
+            ExtendedRelationKind::References,
+        )),
+        "tests" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Tests)),
+        "routes-to" | "routes_to" => {
+            Ok(GraphRelationKind::Extended(ExtendedRelationKind::RoutesTo))
+        }
+        "configures" => Ok(GraphRelationKind::Extended(
+            ExtendedRelationKind::Configures,
+        )),
+        "deploys" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Deploys)),
+        "reads" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Reads)),
+        "writes" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Writes)),
+        _ => Err(ServiceError::InvalidInput(format!(
+            "invalid coverage relation '{value}'"
+        ))),
+    }
+}
+
+/// Parse one public coverage lifecycle filter.
+///
+/// # Errors
+///
+/// Returns an error when the value is not one of the seven closed states.
+pub fn parse_coverage_state(value: &str) -> ServiceResult<CoverageState> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "complete" => Ok(CoverageState::Complete),
+        "partial" => Ok(CoverageState::Partial),
+        "failed" => Ok(CoverageState::Failed),
+        "ignored" => Ok(CoverageState::Ignored),
+        "oversized" => Ok(CoverageState::Oversized),
+        "quarantined" => Ok(CoverageState::Quarantined),
+        "stale" => Ok(CoverageState::Stale),
+        _ => Err(ServiceError::InvalidInput(format!(
+            "invalid coverage state '{value}'"
+        ))),
+    }
+}
+
+/// Load one bounded opt-in coverage page without starting index work.
+///
+/// # Errors
+///
+/// Returns an error when the selected project has no identity, the query bounds
+/// are invalid, or persisted coverage/provenance is inconsistent.
+pub fn load_coverage_discovery(
+    store: &AtlasStore,
+    mut query: RepositoryCoverageQuery,
+) -> ServiceResult<CoverageDiscoveryReport> {
+    if query.start_index >= GraphLimits::MAX_ROWS {
+        return Err(ServiceError::InvalidInput(format!(
+            "coverage start index must be below {}",
+            GraphLimits::MAX_ROWS
+        )));
+    }
+    query.limit = query
+        .limit
+        .clamp(1, COVERAGE_PAGE_MAX_LIMIT)
+        .min(GraphLimits::MAX_ROWS - query.start_index);
+    let project = store
+        .project_instance_id()?
+        .ok_or(ServiceError::SelectedProjectUnavailable)?;
+    let page = store.repository_coverage_page(project, &query)?;
+    let rows = page
+        .rows
+        .into_iter()
+        .map(coverage_discovery_row)
+        .collect::<Vec<_>>();
+    let returned = u32::try_from(rows.len()).map_err(|error| {
+        ServiceError::InvalidInput(format!("coverage row count did not fit u32: {error}"))
+    })?;
+    let proved = query.start_index.saturating_add(returned);
+    let total = if page.truncated {
+        CoverageTotalState::AtLeast(proved.saturating_add(1))
+    } else if query.start_index == 0 || returned > 0 {
+        CoverageTotalState::Exact(proved)
+    } else {
+        CoverageTotalState::Unknown
+    };
+    let next_index = query.start_index.saturating_add(returned);
+    let continuation = (page.truncated && next_index < GraphLimits::MAX_ROWS).then_some(next_index);
+    let reached_limit = (page.truncated && continuation.is_none()).then_some(GraphLimitKind::Rows);
+    Ok(CoverageDiscoveryReport {
+        start_index: query.start_index,
+        limit: query.limit,
+        max_limit: COVERAGE_PAGE_MAX_LIMIT,
+        returned,
+        truncated: page.truncated,
+        continuation,
+        reached_limit,
+        total,
+        output_bytes: 0,
+        max_output_bytes: GraphLimits::MAX_OUTPUT_BYTES,
+        rows,
+    })
+}
+
+/// Project one validated storage row into the agent-facing coverage contract.
+fn coverage_discovery_row(row: RepositoryCoverageRow) -> CoverageDiscoveryRow {
+    let coverage = row.coverage;
+    let path = match coverage.scope() {
+        CoverageScope::Project => ".".to_string(),
+        CoverageScope::Path { path } => path.as_str().to_string(),
+    };
+    let relation = coverage.relation();
+    CoverageDiscoveryRow {
+        next_call: NavigationNextCall {
+            capability: if matches!(coverage.scope(), CoverageScope::Path { .. }) {
+                NavigationNextCapability::Summary
+            } else {
+                NavigationNextCapability::Health
+            },
+            path: path.clone(),
+        },
+        path,
+        extraction_pass: if relation.is_some() {
+            CoverageExtractionPass::Relationship
+        } else {
+            CoverageExtractionPass::GraphProjection
+        },
+        relation,
+        state: coverage.state(),
+        trust: coverage_trust(coverage.state()),
+        total: coverage.total(),
+        covered: coverage.covered(),
+        omitted: coverage.omitted(),
+        reason: coverage.reason().map(|reason| reason.as_str().to_string()),
+        reached_limit: coverage.reached_limit(),
+        active_generation: coverage.generation(),
+        parser: row.parser,
+        provider: row.provider,
+    }
+}
+
+/// Return the conservative trust state for one coverage lifecycle state.
+const fn coverage_trust(state: CoverageState) -> CoverageTrustState {
+    match state {
+        CoverageState::Complete => CoverageTrustState::Trusted,
+        CoverageState::Partial => CoverageTrustState::Partial,
+        CoverageState::Failed
+        | CoverageState::Ignored
+        | CoverageState::Oversized
+        | CoverageState::Quarantined
+        | CoverageState::Stale => CoverageTrustState::Untrusted,
+    }
+}
+
+/// Build the bounded selected-file coverage digest used by normal summaries.
+fn load_coverage_digest(
+    store: &AtlasStore,
+    path: &str,
+    parse_metadata: Option<&SourceParseMetadata>,
+) -> ServiceResult<CoverageDigest> {
+    let project = store
+        .project_instance_id()?
+        .ok_or(ServiceError::SelectedProjectUnavailable)?;
+    let path_page = store.repository_coverage_page(
+        project,
+        &RepositoryCoverageQuery {
+            start_index: 0,
+            limit: COVERAGE_DIGEST_ROW_LIMIT,
+            path_prefix: Some(path.to_string()),
+            parser: None,
+            provider: None,
+            relation: None,
+            state: None,
+            reason: None,
+        },
+    )?;
+    let rows = path_page
+        .rows
+        .into_iter()
+        .filter(|row| {
+            matches!(
+                row.coverage.scope(),
+                CoverageScope::Path { path: row_path } if row_path.as_str() == path
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut states = CoverageStateCounts::default();
+    let mut total = 0_u64;
+    let mut covered = 0_u64;
+    let mut omitted = 0_u64;
+    let mut relation_rows = 0_u32;
+    let mut trust = CoverageTrustState::Trusted;
+    for row in &rows {
+        let record = &row.coverage;
+        increment_coverage_state(&mut states, record.state());
+        total = checked_coverage_sum(total, record.total(), "total")?;
+        covered = checked_coverage_sum(covered, record.covered(), "covered")?;
+        omitted = checked_coverage_sum(omitted, record.omitted(), "omitted")?;
+        if record.relation().is_some() {
+            relation_rows = relation_rows.saturating_add(1);
+        }
+        trust = match (trust, coverage_trust(record.state())) {
+            (_, CoverageTrustState::Untrusted) => CoverageTrustState::Untrusted,
+            (CoverageTrustState::Trusted, CoverageTrustState::Partial) => {
+                CoverageTrustState::Partial
+            }
+            (current, _) => current,
+        };
+    }
+    let available = !rows.is_empty();
+    if !available {
+        trust = CoverageTrustState::Untrusted;
+    }
+    Ok(CoverageDigest {
+        available,
+        active_generation: rows
+            .first()
+            .map_or(IndexGeneration::ZERO, |row| row.coverage.generation()),
+        parser: rows
+            .iter()
+            .find_map(|row| row.parser)
+            .or_else(|| parse_metadata.map(|metadata| metadata.parser)),
+        provider: rows.iter().find_map(|row| row.provider),
+        states,
+        total,
+        covered,
+        omitted,
+        relation_rows,
+        truncated: path_page.truncated,
+        trust,
+        next_call: NavigationNextCall {
+            capability: NavigationNextCapability::Health,
+            path: path.to_string(),
+        },
+    })
+}
+
+/// Add one persisted non-negative coverage count without silent overflow.
+fn checked_coverage_sum(current: u64, value: u64, field: &str) -> ServiceResult<u64> {
+    current.checked_add(value).ok_or_else(|| {
+        ServiceError::InvalidInput(format!("selected-file coverage {field} overflowed u64"))
+    })
+}
+
+/// Increment the closed selected-file state counter.
+fn increment_coverage_state(counts: &mut CoverageStateCounts, state: CoverageState) {
+    let count = match state {
+        CoverageState::Complete => &mut counts.complete,
+        CoverageState::Partial => &mut counts.partial,
+        CoverageState::Failed => &mut counts.failed,
+        CoverageState::Ignored => &mut counts.ignored,
+        CoverageState::Oversized => &mut counts.oversized,
+        CoverageState::Quarantined => &mut counts.quarantined,
+        CoverageState::Stale => &mut counts.stale,
+    };
+    *count = count.saturating_add(1);
+}
 
 /// Structured deterministic intelligence for one indexed file.
 #[derive(Debug, Serialize)]
@@ -132,6 +760,8 @@ pub struct FileSummaryReport {
     pub exports: Vec<String>,
     /// Call relationships discovered inside this file.
     pub calls: Vec<FileCallSummary>,
+    /// Compact current relationship and parse coverage.
+    pub coverage: CoverageDigest,
 }
 
 /// Compact file-summary symbol row.
@@ -185,6 +815,54 @@ pub struct SearchMatch {
     pub context_after: Vec<String>,
 }
 
+/// Caller-selected retrieval family for repository search.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchRetrievalMode {
+    /// Correctness-authoritative persisted lexical search.
+    #[default]
+    Lexical,
+    /// Optional semantic retrieval generation.
+    Semantic,
+    /// Lexical-complete ranking with optional semantic enrichment.
+    Hybrid,
+}
+
+impl SearchRetrievalMode {
+    /// Return the stable adapter-facing mode name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lexical => "lexical",
+            Self::Semantic => "semantic",
+            Self::Hybrid => "hybrid",
+        }
+    }
+}
+
+/// Complete typed request for one bounded indexed-text search.
+#[derive(Clone, Copy, Debug)]
+pub struct SearchQuery<'query> {
+    /// Literal, regex, or fuzzy source pattern.
+    pub pattern: &'query str,
+    /// Whether the source pattern is a regular expression.
+    pub regex: bool,
+    /// Whether the source pattern is a fuzzy subsequence.
+    pub fuzzy: bool,
+    /// Whether exact matching preserves source case.
+    pub case_sensitive: bool,
+    /// Optional repository-relative glob.
+    pub file_pattern: Option<&'query str>,
+    /// Context lines retained before and after each match.
+    pub context_lines: usize,
+    /// Number of exact matches skipped before result retention.
+    pub start_index: usize,
+    /// Maximum exact matches returned.
+    pub limit: usize,
+    /// Explicit retrieval family; omitted adapters use lexical.
+    pub retrieval_mode: SearchRetrievalMode,
+}
+
 /// Search report returned by CLI and MCP adapters.
 #[derive(Debug, Serialize)]
 pub struct SearchReport {
@@ -192,8 +870,12 @@ pub struct SearchReport {
     pub query: String,
     /// Search mode: `literal`, `regex`, or `fuzzy`.
     pub mode: String,
+    /// Retrieval family selected by the caller.
+    pub retrieval_mode: String,
     /// Source used for broad repository search.
     pub source: String,
+    /// Candidate strategy used while preserving exact lexical semantics.
+    pub strategy: String,
     /// Pagination start index.
     pub start_index: usize,
     /// Matches observed before pagination and bounded early stop.
@@ -208,8 +890,14 @@ pub struct SearchReport {
     pub searched_files: usize,
     /// Source bytes read while serving the query.
     pub searched_bytes: usize,
+    /// Metadata-only FTS candidates considered before exact verification.
+    pub candidate_files: usize,
+    /// Approximate retained result bytes before adapter serialization.
+    pub retained_bytes: usize,
     /// Whether the search stopped after satisfying the requested page.
     pub truncated: bool,
+    /// Stable first bound that stopped exhaustive search, when applicable.
+    pub truncation_reason: Option<String>,
     /// Search matches.
     pub results: Vec<SearchMatch>,
 }
@@ -244,6 +932,87 @@ pub struct CodeSlice {
     pub content: String,
 }
 
+/// Unrendered exact slice with its selected adapter-output ceiling.
+#[derive(Debug)]
+pub struct CodeSliceDraft {
+    /// Compatibility-preserving exact slice payload.
+    slice: CodeSlice,
+    /// Exact adapter-output ceiling selected for this slice.
+    output_budget: CodeSliceBudget,
+}
+
+impl CodeSliceDraft {
+    /// Borrow the compatibility-preserving slice payload.
+    #[must_use]
+    pub const fn slice(&self) -> &CodeSlice {
+        &self.slice
+    }
+
+    /// Encode this slice and enforce the selected adapter-output ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when encoding fails or the exact encoded
+    /// output exceeds the selected byte ceiling.
+    pub fn fit_output<F, E, O>(&self, encode: F) -> Result<O, E>
+    where
+        F: FnOnce(&CodeSlice) -> Result<O, E>,
+        E: From<ServiceError>,
+        O: AsRef<[u8]>,
+    {
+        let output = encode(&self.slice)?;
+        if output.as_ref().len() > self.output_budget.output_bytes() as usize {
+            return Err(E::from(ServiceError::InvalidInput(format!(
+                "slice output exceeds the requested {}-byte ceiling; narrow the line or symbol range or raise output-bytes",
+                self.output_budget.output_bytes()
+            ))));
+        }
+        Ok(output)
+    }
+}
+
+/// Encoded-output ceiling shared by line and symbol slices.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CodeSliceBudget {
+    /// Maximum bytes emitted by the selected adapter.
+    output_bytes: u32,
+}
+
+impl CodeSliceBudget {
+    /// Compatibility-preserving default for callers that omit a byte ceiling.
+    pub const DEFAULT_OUTPUT_BYTES: u32 = 256 * 1_024;
+
+    /// Validate one requested exact-output ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the limit is zero or above the shared product
+    /// output ceiling.
+    pub fn new(output_bytes: u32) -> ServiceResult<Self> {
+        if output_bytes == 0 || output_bytes > GraphLimits::MAX_OUTPUT_BYTES {
+            return Err(ServiceError::InvalidInput(format!(
+                "slice output byte limit must be between 1 and {}",
+                GraphLimits::MAX_OUTPUT_BYTES
+            )));
+        }
+        Ok(Self { output_bytes })
+    }
+
+    /// Return the exact adapter-output ceiling.
+    #[must_use]
+    pub const fn output_bytes(self) -> u32 {
+        self.output_bytes
+    }
+}
+
+impl Default for CodeSliceBudget {
+    fn default() -> Self {
+        Self {
+            output_bytes: Self::DEFAULT_OUTPUT_BYTES,
+        }
+    }
+}
+
 /// Optional selectors for disambiguating a symbol slice.
 #[derive(Debug, Default)]
 pub struct SymbolSliceSelector<'a> {
@@ -253,6 +1022,8 @@ pub struct SymbolSliceSelector<'a> {
     pub parent: Option<&'a str>,
     /// Optional symbol kind, such as `function`, `method`, or `struct`.
     pub kind: Option<&'a str>,
+    /// Optional exact normalized declaration signature.
+    pub signature: Option<&'a str>,
     /// Optional line that must fall inside the selected symbol range.
     pub line: Option<usize>,
 }
@@ -280,6 +1051,60 @@ pub fn build_file_summary(
     limit: usize,
 ) -> ServiceResult<FileSummaryReport> {
     let file_key = validated_indexed_file_key(store, file)?;
+    let source_read =
+        indexed_native_path(store, &file_key).and_then(|path| read_file_content(&path));
+    match source_read {
+        Ok(content) => build_file_summary_with_source_state(
+            store,
+            file,
+            limit,
+            Some(&content),
+            SOURCE_STATUS_LIVE.to_string(),
+            String::new(),
+        ),
+        Err(error) => build_file_summary_with_source_state(
+            store,
+            file,
+            limit,
+            None,
+            SOURCE_STATUS_INDEXED.to_string(),
+            error.to_string(),
+        ),
+    }
+}
+
+/// Build structured file intelligence from caller-verified source bytes.
+///
+/// # Errors
+///
+/// Returns an error when the file path is invalid, not indexed, or indexed
+/// metadata cannot be read.
+pub fn build_file_summary_from_source(
+    store: &AtlasStore,
+    file: &Path,
+    limit: usize,
+    source: &str,
+) -> ServiceResult<FileSummaryReport> {
+    build_file_summary_with_source_state(
+        store,
+        file,
+        limit,
+        Some(source),
+        SOURCE_STATUS_LIVE.to_string(),
+        String::new(),
+    )
+}
+
+/// Build one summary from optional already-selected live source.
+fn build_file_summary_with_source_state(
+    store: &AtlasStore,
+    file: &Path,
+    limit: usize,
+    file_content: Option<&str>,
+    source_status: String,
+    source_error: String,
+) -> ServiceResult<FileSummaryReport> {
+    let file_key = validated_indexed_file_key(store, file)?;
     let effective_limit = limit.max(1);
     let indexed = store
         .load_node_by_path(&file_key)?
@@ -289,18 +1114,11 @@ pub fn build_file_summary(
         &metadata_symbol_kinds(),
         FILE_METADATA_SYMBOL_LIMIT,
     )?;
-    let source_read =
-        indexed_native_path(store, &file_key).and_then(|path| read_file_content(&path));
-    let (file_content, source_status, source_error) = match source_read {
-        Ok(content) => (Some(content), SOURCE_STATUS_LIVE.to_string(), String::new()),
-        Err(error) => (None, SOURCE_STATUS_INDEXED.to_string(), error.to_string()),
-    };
-    let line_count = file_content.as_deref().map_or_else(
+    let line_count = file_content.map_or_else(
         || store.max_symbol_end_line_for_path(&file_key),
         |content| Ok(line_count_from_content(content)),
     )?;
     let docstring = file_content
-        .as_deref()
         .and_then(file_level_docstring)
         .unwrap_or_else(|| file_docstring(&metadata_symbols));
     let function_symbols =
@@ -365,6 +1183,7 @@ pub fn build_file_summary(
     let symbol_count = store.symbol_count_for_path(&file_key)?;
     let symbol_parser_kinds = store.symbol_parser_kinds_for_path(&file_key)?;
     let parse_metadata = store.load_source_parse_metadata(&file_key)?;
+    let coverage = load_coverage_digest(store, &file_key, parse_metadata.as_ref())?;
     let truncated = [
         total_functions,
         total_methods,
@@ -432,6 +1251,7 @@ pub fn build_file_summary(
         dependencies,
         exports,
         calls,
+        coverage,
     })
 }
 
@@ -567,73 +1387,296 @@ pub fn search_indexed_files(
     start_index: usize,
     limit: usize,
 ) -> ServiceResult<SearchReport> {
-    if regex && fuzzy {
+    search_indexed_files_with_control(
+        store,
+        &SearchQuery {
+            pattern,
+            regex,
+            fuzzy,
+            case_sensitive,
+            file_pattern,
+            context_lines,
+            start_index,
+            limit,
+            retrieval_mode: SearchRetrievalMode::Lexical,
+        },
+        None,
+    )
+}
+
+/// Search indexed project files through one bounded, cancellable retrieval request.
+///
+/// Safe ASCII literal tokens may use the rebuildable FTS5 projection only as a
+/// complete metadata candidate superset. Persisted `file_texts` remains the
+/// authority and every candidate is exact-verified in deterministic path order.
+/// All other shapes use the persisted-text fallback with path admission before
+/// content decoding.
+///
+/// # Errors
+///
+/// Returns a typed capability error for unavailable semantic/hybrid requests,
+/// or an error when input, storage, cancellation, or persisted text is invalid.
+pub fn search_indexed_files_with_control(
+    store: &AtlasStore,
+    query: &SearchQuery<'_>,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<SearchReport> {
+    search_indexed_files_with_bounds(store, query, control, DEFAULT_SEARCH_BOUNDS)
+}
+
+/// Execute one search under an explicit internal resource envelope.
+fn search_indexed_files_with_bounds(
+    store: &AtlasStore,
+    query: &SearchQuery<'_>,
+    control: Option<&IndexWorkControl>,
+    bounds: SearchBounds,
+) -> ServiceResult<SearchReport> {
+    if query.retrieval_mode != SearchRetrievalMode::Lexical {
+        return Err(ServiceError::SearchCapabilityUnavailable {
+            requested_mode: query.retrieval_mode,
+            state: SEARCH_SEMANTIC_UNAVAILABLE_STATE,
+            guidance: SEARCH_SEMANTIC_RECOVERY,
+        });
+    }
+    if query.regex && query.fuzzy {
         return Err(ServiceError::InvalidInput(
             "search cannot combine regex and fuzzy modes".to_string(),
         ));
     }
-    let path_matcher = build_path_matcher(file_pattern)?;
-    let matcher = if regex {
+    if query.pattern.len() > SEARCH_MAX_PATTERN_BYTES {
+        return Err(ServiceError::InvalidInput(format!(
+            "search pattern cannot exceed {SEARCH_MAX_PATTERN_BYTES} UTF-8 bytes"
+        )));
+    }
+    if query
+        .file_pattern
+        .is_some_and(|pattern| pattern.len() > SEARCH_MAX_FILE_PATTERN_BYTES)
+    {
+        return Err(ServiceError::InvalidInput(format!(
+            "search file pattern cannot exceed {SEARCH_MAX_FILE_PATTERN_BYTES} UTF-8 bytes"
+        )));
+    }
+    if query.context_lines > SEARCH_MAX_CONTEXT_LINES {
+        return Err(ServiceError::InvalidInput(format!(
+            "search context lines cannot exceed {SEARCH_MAX_CONTEXT_LINES}"
+        )));
+    }
+    if query.limit > SEARCH_MAX_RESULT_ROWS {
+        return Err(ServiceError::InvalidInput(format!(
+            "search result limit cannot exceed {SEARCH_MAX_RESULT_ROWS}"
+        )));
+    }
+    let path_matcher = build_path_matcher(query.file_pattern)?;
+    let matcher = if query.regex {
         LineMatcher::Regex(
-            RegexBuilder::new(pattern)
-                .case_insensitive(!case_sensitive)
+            RegexBuilder::new(query.pattern)
+                .case_insensitive(!query.case_sensitive)
                 .build()
                 .map_err(|source| ServiceError::InvalidInput(source.to_string()))?,
         )
-    } else if fuzzy {
+    } else if query.fuzzy {
         LineMatcher::Fuzzy {
-            needle: normalized_search_text(pattern, case_sensitive),
-            case_sensitive,
+            needle: normalized_search_text(query.pattern, query.case_sensitive),
+            case_sensitive: query.case_sensitive,
         }
     } else {
         LineMatcher::Literal {
-            needle: normalized_search_text(pattern, case_sensitive),
-            case_sensitive,
+            needle: normalized_search_text(query.pattern, query.case_sensitive),
+            case_sensitive: query.case_sensitive,
         }
     };
     let mut report = SearchReport {
-        query: pattern.to_string(),
+        query: query.pattern.to_string(),
         mode: matcher.mode().to_string(),
+        retrieval_mode: query.retrieval_mode.as_str().to_string(),
         source: "sqlite-file-text".to_string(),
-        start_index,
+        strategy: "persisted-text-fallback".to_string(),
+        start_index: query.start_index,
         total: 0,
         observed_total: 0,
         total_is_complete: true,
         returned: 0,
         searched_files: 0,
         searched_bytes: 0,
+        candidate_files: 0,
+        retained_bytes: 0,
         truncated: false,
+        truncation_reason: None,
         results: Vec::new(),
     };
-    if limit == 0 {
+    let bounded_control = control.map_or_else(
+        || IndexWorkControl::new(IndexCancellation::new(), Some(bounds.elapsed)),
+        |control| control.with_timeout_ceiling(bounds.elapsed),
+    );
+    if let Err(failure) = bounded_control.check(IndexWorkStage::TextIndex) {
+        if matches!(failure, IndexWorkFailure::DeadlineExceeded { .. }) {
+            mark_search_truncated(&mut report, "elapsed-time-limit");
+            return Ok(finalize_search_report(report));
+        }
+        return Err(DbError::from(failure).into());
+    }
+    if query.limit == 0 {
         return Ok(report);
     }
-    let needed = start_index.saturating_add(limit);
-    store.visit_file_texts_for_search(matcher.literal_prefilter(), case_sensitive, |text| {
-        if !path_matches(&text.path, path_matcher.as_ref()) {
-            return Ok(true);
+    let needed = query.start_index.saturating_add(query.limit);
+    let path_prefix = search_path_prefix(query.file_pattern);
+    let mut used_fts = false;
+    if let Some(literal_token) = matcher.fts_literal_token()
+        && store.file_text_fts_ready()?
+    {
+        let mut page = match store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token,
+                path_prefix: path_prefix.as_deref(),
+                limit: MAX_FILE_TEXT_FTS_CANDIDATES,
+            },
+            Some(&bounded_control),
+        ) {
+            Ok(page) => page,
+            Err(error) if is_search_deadline(&error) => {
+                mark_search_truncated(&mut report, "elapsed-time-limit");
+                return Ok(finalize_search_report(report));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        report.candidate_files = page.candidates.len();
+        if !page.overflow {
+            page.candidates
+                .sort_by(|left, right| left.path.cmp(&right.path));
+            report.strategy = "fts5-bm25-candidates-exact-verified".to_string();
+            used_fts = true;
+            for candidate in page.candidates {
+                if !path_matches(&candidate.path, path_matcher.as_ref()) {
+                    continue;
+                }
+                if let Err(failure) = bounded_control.check(IndexWorkStage::RepositoryTraversal) {
+                    if matches!(failure, IndexWorkFailure::DeadlineExceeded { .. }) {
+                        mark_search_truncated(&mut report, "elapsed-time-limit");
+                        break;
+                    }
+                    return Err(DbError::from(failure).into());
+                }
+                if !search_metadata_within_bounds(
+                    &mut report,
+                    candidate.byte_count,
+                    bounds.selected_files,
+                    bounds.selected_bytes,
+                ) {
+                    break;
+                }
+                let text = store.load_file_text(&candidate.path)?.ok_or_else(|| {
+                    ServiceError::InvalidInput(format!(
+                        "FTS candidate {:?} has no authoritative persisted text",
+                        candidate.path
+                    ))
+                })?;
+                if text.byte_count != candidate.byte_count
+                    || text.line_count != candidate.line_count
+                    || text.content_hash != candidate.content_hash
+                {
+                    return Err(ServiceError::InvalidInput(format!(
+                        "FTS candidate metadata changed for {:?}",
+                        candidate.path
+                    )));
+                }
+                report.searched_files += 1;
+                report.searched_bytes += candidate.byte_count;
+                if let Err(failure) = inspect_search_text(
+                    &mut report,
+                    &text,
+                    &matcher,
+                    query.context_lines,
+                    needed,
+                    bounds.retained_bytes,
+                    &bounded_control,
+                ) {
+                    if matches!(failure, IndexWorkFailure::DeadlineExceeded { .. }) {
+                        mark_search_truncated(&mut report, "elapsed-time-limit");
+                        break;
+                    }
+                    return Err(DbError::from(failure).into());
+                }
+                if report.truncated {
+                    break;
+                }
+            }
         }
-        report.searched_files += 1;
-        report.searched_bytes = report.searched_bytes.saturating_add(text.byte_count);
-        let lines = indexed_text_lines(&text);
-        append_line_matches(
-            &mut report,
-            &text.path,
-            &lines,
-            &matcher,
-            context_lines,
-            needed,
+    }
+    if !used_fts {
+        let mut selected_files = 0usize;
+        let mut selected_bytes = 0usize;
+        let mut searched_files = 0usize;
+        let mut searched_bytes = 0usize;
+        let mut admission_truncation = None;
+        let fallback_result = store.visit_file_texts_for_fallback(
+            path_prefix.as_deref(),
+            Some(&bounded_control),
+            |metadata| {
+                if !path_matches(&metadata.path, path_matcher.as_ref()) {
+                    return Ok(FileTextAdmission::Skip);
+                }
+                if selected_files >= bounds.selected_files {
+                    admission_truncation = Some("selected-file-limit");
+                    return Ok(FileTextAdmission::Stop);
+                }
+                let Some(next_bytes) = selected_bytes.checked_add(metadata.byte_count) else {
+                    admission_truncation = Some("selected-byte-limit");
+                    return Ok(FileTextAdmission::Stop);
+                };
+                if next_bytes > bounds.selected_bytes {
+                    admission_truncation = Some("selected-byte-limit");
+                    return Ok(FileTextAdmission::Stop);
+                }
+                selected_files += 1;
+                selected_bytes = next_bytes;
+                Ok(FileTextAdmission::Read)
+            },
+            |text| {
+                searched_files += 1;
+                searched_bytes += text.byte_count;
+                inspect_search_text(
+                    &mut report,
+                    &text,
+                    &matcher,
+                    query.context_lines,
+                    needed,
+                    bounds.retained_bytes,
+                    &bounded_control,
+                )
+                .map_err(DbError::from)?;
+                Ok(!report.truncated)
+            },
         );
-        if report.results.len() >= limit {
-            report.truncated = true;
-            return Ok(false);
+        report.searched_files = searched_files;
+        report.searched_bytes = searched_bytes;
+        match fallback_result {
+            Ok(()) => {}
+            Err(error) if is_search_deadline(&error) => {
+                mark_search_truncated(&mut report, "elapsed-time-limit");
+            }
+            Err(error) => return Err(error.into()),
         }
-        Ok(true)
-    })?;
+        if let Some(reason) = admission_truncation {
+            mark_search_truncated(&mut report, reason);
+        }
+    }
+    Ok(finalize_search_report(report))
+}
+
+/// Finalize counters that describe the bounded work observed by one search.
+fn finalize_search_report(mut report: SearchReport) -> SearchReport {
     report.returned = report.results.len();
     report.observed_total = report.total;
     report.total_is_complete = !report.truncated;
-    Ok(report)
+    report
+}
+
+/// Return whether a database read stopped only because its deadline elapsed.
+fn is_search_deadline(error: &DbError) -> bool {
+    matches!(
+        error,
+        DbError::IndexWork(IndexWorkFailure::DeadlineExceeded { .. })
+    )
 }
 
 /// Filter file nodes through a repository-relative glob.
@@ -667,8 +1710,32 @@ pub fn load_ranked_file_nodes(
     limit: usize,
     include_content: bool,
 ) -> ServiceResult<Vec<IndexedNode>> {
-    let matcher = FilePathMatcher::new(file_pattern)?;
     let target = limit.max(1);
+    let selected = load_ranked_file_node_candidates(
+        store,
+        query,
+        folder,
+        file_pattern,
+        target,
+        include_content,
+    )?;
+    Ok(ranked_nodes_with_reasons(store, query, selected)?
+        .into_iter()
+        .take(target)
+        .map(|ranked| ranked.node)
+        .collect())
+}
+
+/// Load the bounded file candidate set before final graph-aware truncation.
+fn load_ranked_file_node_candidates(
+    store: &AtlasStore,
+    query: &str,
+    folder: Option<&str>,
+    file_pattern: Option<&str>,
+    target: usize,
+    include_content: bool,
+) -> ServiceResult<Vec<IndexedNode>> {
+    let matcher = FilePathMatcher::new(file_pattern)?;
     let candidate_target = ranked_candidate_target(query, target);
     let mut selected = if matcher.filters() {
         load_ranked_file_nodes_matching_glob(store, query, folder, &matcher, candidate_target)?
@@ -686,8 +1753,6 @@ pub fn load_ranked_file_nodes(
         )?;
     }
     append_paired_file_nodes(store, &matcher, candidate_target, &mut selected)?;
-    selected = sort_ranked_file_nodes(store, query, selected)?;
-    selected.truncate(target);
     Ok(selected)
 }
 
@@ -701,8 +1766,12 @@ pub fn load_ranked_folder_nodes_with_reasons(
     query: &str,
     limit: usize,
 ) -> ServiceResult<Vec<RankedNode>> {
-    let selected = store.load_ranked_nodes(query, NodeKind::Folder, None, limit.max(1), 0)?;
-    ranked_nodes_with_reasons(store, query, selected)
+    let target = limit.max(1);
+    let candidate_target = ranked_candidate_target(query, target);
+    let selected = store.load_ranked_nodes(query, NodeKind::Folder, None, candidate_target, 0)?;
+    let mut ranked = ranked_nodes_with_reasons(store, query, selected)?;
+    ranked.truncate(target);
+    Ok(ranked)
 }
 
 /// Load ranked files with concise reasons.
@@ -718,9 +1787,18 @@ pub fn load_ranked_file_nodes_with_reasons(
     limit: usize,
     include_content: bool,
 ) -> ServiceResult<Vec<RankedNode>> {
-    let selected =
-        load_ranked_file_nodes(store, query, folder, file_pattern, limit, include_content)?;
-    ranked_nodes_with_reasons(store, query, selected)
+    let target = limit.max(1);
+    let selected = load_ranked_file_node_candidates(
+        store,
+        query,
+        folder,
+        file_pattern,
+        target,
+        include_content,
+    )?;
+    let mut ranked = ranked_nodes_with_reasons(store, query, selected)?;
+    ranked.truncate(target);
+    Ok(ranked)
 }
 
 /// Build an indexed-metadata recommendation report for the next inspection step.
@@ -750,10 +1828,18 @@ pub fn build_next_report(
 #[derive(Debug)]
 /// Score and evidence computed for one ranked node.
 struct RankedEvidence {
-    /// Additive deterministic score for ordering a bounded candidate set.
-    score: usize,
+    /// Exact normalized full-path dominance tier.
+    exact_path: bool,
+    /// Exact normalized basename dominance tier.
+    exact_name: bool,
+    /// Reviewed responsibility-purpose dominance tier.
+    reviewed_purpose: bool,
+    /// Bounded lexical and query-relevant graph context score.
+    context_score: usize,
     /// Concise evidence strings emitted to the agent-facing result.
     reasons: Vec<String>,
+    /// Compact stable evidence emitted to programmatic consumers.
+    reason_codes: Vec<RankedReasonCode>,
 }
 
 /// Return the bounded candidate count used before final ranking truncation.
@@ -767,7 +1853,7 @@ fn ranked_candidate_target(query: &str, target: usize) -> usize {
     }
 }
 
-/// Attach reasons to a ranked node list without changing its order.
+/// Rank and enrich one bounded candidate set through a single graph batch call.
 fn ranked_nodes_with_reasons(
     store: &AtlasStore,
     query: &str,
@@ -775,45 +1861,81 @@ fn ranked_nodes_with_reasons(
 ) -> ServiceResult<Vec<RankedNode>> {
     let terms = normalize_ranking_terms(query);
     let text_hit_paths = indexed_text_hit_paths(store, &selected, &terms)?;
-    selected
-        .into_iter()
-        .map(|node| {
-            let evidence = ranked_node_evidence(store, &node, &terms, &text_hit_paths)?;
-            Ok(RankedNode {
-                node,
-                reasons: evidence.reasons,
-            })
+    let owners = selected
+        .iter()
+        .map(|node| RepositoryNavigationNode {
+            path: node.node.path.clone(),
+            kind: node.node.kind,
         })
-        .collect()
-}
-
-/// Sort a bounded file candidate list by service-level ranking evidence.
-fn sort_ranked_file_nodes(
-    store: &AtlasStore,
-    query: &str,
-    selected: Vec<IndexedNode>,
-) -> ServiceResult<Vec<IndexedNode>> {
-    if query.trim().is_empty() || selected.len() <= 1 {
-        return Ok(selected);
-    }
-    let terms = normalize_ranking_terms(query);
-    let text_hit_paths = indexed_text_hit_paths(store, &selected, &terms)?;
+        .collect::<Vec<_>>();
+    let connections = store.repository_navigation_connections(
+        &owners,
+        RANKED_CONNECTION_FAMILY_LIMIT,
+        RANKED_CONNECTION_SAMPLE_LIMIT,
+    )?;
+    let mut connections_by_path = connections
+        .into_iter()
+        .map(|page| (page.path.clone(), page))
+        .collect::<HashMap<_, _>>();
+    let exact_query = normalize_exact_ranking_query(query);
     let mut scored = selected
         .into_iter()
         .enumerate()
         .map(|(index, node)| {
-            let evidence = ranked_node_evidence(store, &node, &terms, &text_hit_paths)?;
-            Ok((index, evidence.score, node))
+            let page = connections_by_path.remove(&node.node.path).ok_or_else(|| {
+                ServiceError::InvalidInput(format!(
+                    "graph navigation batch omitted indexed path {:?}",
+                    node.node.path
+                ))
+            })?;
+            let evidence =
+                ranked_node_evidence(store, &node, &terms, &exact_query, &text_hit_paths, &page)?;
+            let next_capability = match node.node.kind {
+                NodeKind::Folder => NavigationNextCapability::Files,
+                NodeKind::File if page.truncated => NavigationNextCapability::Relations,
+                NodeKind::File => NavigationNextCapability::Summary,
+            };
+            Ok((
+                index,
+                RankedEvidence {
+                    exact_path: evidence.exact_path,
+                    exact_name: evidence.exact_name,
+                    reviewed_purpose: evidence.reviewed_purpose,
+                    context_score: evidence.context_score,
+                    reasons: Vec::new(),
+                    reason_codes: Vec::new(),
+                },
+                RankedNode {
+                    node,
+                    reasons: evidence.reasons,
+                    reason_codes: evidence.reason_codes,
+                    connection_counts: page.counts,
+                    connections: page.connections,
+                    connections_truncated: page.truncated,
+                    next_call: NavigationNextCall {
+                        capability: next_capability,
+                        path: owners[index].path.clone(),
+                    },
+                },
+            ))
         })
         .collect::<ServiceResult<Vec<_>>>()?;
     scored.sort_by(|left, right| {
-        right
-            .1
-            .cmp(&left.1)
+        ranked_evidence_order(&left.1, &right.1)
             .then_with(|| left.0.cmp(&right.0))
-            .then_with(|| left.2.node.path.cmp(&right.2.node.path))
+            .then_with(|| left.2.node.node.path.cmp(&right.2.node.node.path))
     });
     Ok(scored.into_iter().map(|(_, _, node)| node).collect())
+}
+
+/// Compare ranking tiers before stable candidate order and path tie-breakers.
+fn ranked_evidence_order(left: &RankedEvidence, right: &RankedEvidence) -> std::cmp::Ordering {
+    right
+        .exact_path
+        .cmp(&left.exact_path)
+        .then_with(|| right.exact_name.cmp(&left.exact_name))
+        .then_with(|| right.reviewed_purpose.cmp(&left.reviewed_purpose))
+        .then_with(|| right.context_score.cmp(&left.context_score))
 }
 
 /// Compute score and reasons for one node from indexed metadata.
@@ -821,53 +1943,146 @@ fn ranked_node_evidence(
     store: &AtlasStore,
     node: &IndexedNode,
     terms: &[String],
+    exact_query: &str,
     text_hit_paths: &HashSet<String>,
+    connections: &RepositoryNavigationConnections,
 ) -> ServiceResult<RankedEvidence> {
-    let mut score = 0usize;
+    let normalized_path = node.node.path.replace('\\', "/").to_lowercase();
+    let normalized_name = normalized_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&normalized_path);
+    let exact_path = !exact_query.is_empty() && normalized_path == exact_query;
+    let exact_name = !exact_query.is_empty() && normalized_name == exact_query;
+    let mut reviewed_purpose = false;
+    let mut context_score = 0usize;
     let mut reasons = Vec::new();
-    if terms.is_empty() {
-        return Ok(RankedEvidence { score, reasons });
+    let mut reason_codes = Vec::new();
+
+    if exact_path {
+        push_ranked_reason(&mut reasons, "exact path".to_string());
+        push_ranked_reason_code(&mut reason_codes, RankedReasonCode::ExactPath);
+    }
+    if exact_name {
+        push_ranked_reason(&mut reasons, "exact name".to_string());
+        push_ranked_reason_code(&mut reason_codes, RankedReasonCode::ExactName);
     }
 
-    if let Some(term) = first_matching_term(&node.node.path, terms) {
-        score = score.saturating_add(40);
-        push_ranked_reason(&mut reasons, format!("path matched {term}"));
-    }
-    if let Some(term) = node
-        .purpose
-        .purpose
-        .as_deref()
-        .and_then(|purpose| first_matching_term(purpose, terms))
+    if let Some(term) = first_matching_term(&node.node.path, terms)
+        && !exact_path
     {
-        score = score.saturating_add(50);
+        context_score = context_score.saturating_add(40);
+        push_ranked_reason(&mut reasons, format!("path matched {term}"));
+        push_ranked_reason_code(&mut reason_codes, RankedReasonCode::Path);
+    }
+    if node.purpose.agent_reviewed()
+        && let Some(term) = node
+            .purpose
+            .purpose
+            .as_deref()
+            .and_then(|purpose| first_matching_term(purpose, terms))
+    {
+        reviewed_purpose = true;
         push_ranked_reason(&mut reasons, format!("purpose matched {term}"));
+        push_ranked_reason_code(&mut reason_codes, RankedReasonCode::ReviewedPurpose);
     }
     if let Some(term) = node
         .summary
         .as_deref()
         .and_then(|summary| first_matching_term(summary, terms))
     {
-        score = score.saturating_add(20);
+        context_score = context_score.saturating_add(20);
         push_ranked_reason(&mut reasons, format!("summary matched {term}"));
+        push_ranked_reason_code(&mut reason_codes, RankedReasonCode::Summary);
     }
     if node.node.kind == NodeKind::File {
         if let Some((symbol_name, term)) = first_symbol_match(store, &node.node.path, terms)? {
-            score = score.saturating_add(35);
+            context_score = context_score.saturating_add(35);
             push_ranked_reason(&mut reasons, format!("symbol {symbol_name} matched {term}"));
+            push_ranked_reason_code(&mut reason_codes, RankedReasonCode::Symbol);
         }
         if text_hit_paths.contains(&node.node.path)
             && let Some(term) = indexed_text_match_term(store, &node.node.path, terms)?
         {
-            score = score.saturating_add(15);
+            context_score = context_score.saturating_add(15);
             push_ranked_reason(&mut reasons, format!("indexed text matched {term}"));
+            push_ranked_reason_code(&mut reason_codes, RankedReasonCode::IndexedText);
         }
         if let Some(reason) = paired_path_reason(store, &node.node.path)? {
-            score = score.saturating_add(10);
+            context_score = context_score.saturating_add(10);
             push_ranked_reason(&mut reasons, reason);
+            push_ranked_reason_code(&mut reason_codes, RankedReasonCode::PairedFile);
         }
     }
 
-    Ok(RankedEvidence { score, reasons })
+    let mut graph_context_score = 0usize;
+    for count in &connections.counts {
+        if count.count == 0 {
+            continue;
+        }
+        graph_context_score = graph_context_score.saturating_add(2);
+        push_ranked_reason_code(&mut reason_codes, graph_reason_code(count.kind));
+    }
+    for connection in &connections.connections {
+        if ranked_connection_matches_terms(&connection.target, terms) {
+            graph_context_score = graph_context_score.saturating_add(18);
+            push_ranked_reason_code(&mut reason_codes, graph_reason_code(connection.kind));
+        }
+    }
+    context_score = context_score.saturating_add(graph_context_score.min(32));
+
+    Ok(RankedEvidence {
+        exact_path,
+        exact_name,
+        reviewed_purpose,
+        context_score,
+        reasons,
+        reason_codes,
+    })
+}
+
+/// Normalize a complete query for exact path and basename dominance.
+fn normalize_exact_ranking_query(query: &str) -> String {
+    query.trim().replace('\\', "/").to_lowercase()
+}
+
+/// Return whether one compact graph endpoint matches any normalized query term.
+fn ranked_connection_matches_terms(target: &RankedConnectionTarget, terms: &[String]) -> bool {
+    let fields = match target {
+        RankedConnectionTarget::Local { path, symbol } => {
+            [Some(path.as_str()), symbol.as_deref(), None]
+        }
+        RankedConnectionTarget::Package {
+            manager,
+            name,
+            manifest,
+        } => [
+            Some(manager.as_str()),
+            Some(name.as_str()),
+            Some(manifest.as_str()),
+        ],
+        RankedConnectionTarget::External { system, identity } => {
+            [Some(system.as_str()), Some(identity.as_str()), None]
+        }
+        RankedConnectionTarget::Unresolved { reference } => [Some(reference.as_str()), None, None],
+    };
+    fields
+        .into_iter()
+        .flatten()
+        .any(|field| first_matching_term(field, terms).is_some())
+}
+
+/// Map one connection family to its compact ranking signal.
+const fn graph_reason_code(kind: RankedConnectionKind) -> RankedReasonCode {
+    match kind {
+        RankedConnectionKind::Package => RankedReasonCode::GraphPackage,
+        RankedConnectionKind::Import => RankedReasonCode::GraphImport,
+        RankedConnectionKind::Call => RankedReasonCode::GraphCall,
+        RankedConnectionKind::Reference => RankedReasonCode::GraphReference,
+        RankedConnectionKind::Test => RankedReasonCode::GraphTest,
+        RankedConnectionKind::Route => RankedReasonCode::GraphRoute,
+        RankedConnectionKind::Config => RankedReasonCode::GraphConfig,
+    }
 }
 
 /// Split a query into unique lowercase terms used by ranking evidence.
@@ -895,6 +2110,13 @@ fn first_matching_term(text: &str, terms: &[String]) -> Option<String> {
 fn push_ranked_reason(reasons: &mut Vec<String>, reason: String) {
     if reasons.len() < RANKED_REASON_LIMIT && !reasons.contains(&reason) {
         reasons.push(reason);
+    }
+}
+
+/// Append one unique compact reason code in stable discovery order.
+fn push_ranked_reason_code(codes: &mut Vec<RankedReasonCode>, code: RankedReasonCode) {
+    if !codes.contains(&code) {
+        codes.push(code);
     }
 }
 
@@ -1245,7 +2467,49 @@ pub fn read_indexed_code_slice(
 ) -> ServiceResult<CodeSlice> {
     let file_key = validated_indexed_file_key(store, file)?;
     let native_file = indexed_native_path(store, &file_key)?;
-    read_code_slice(&native_file, &file_key, start_line, end_line)
+    let content = read_file_content(&native_file)?;
+    read_indexed_code_slice_from_source(store, file, start_line, end_line, &content)
+}
+
+/// Read an exact line slice from caller-verified source bytes.
+///
+/// # Errors
+///
+/// Returns an error when the file is not indexed or line numbers are invalid.
+pub fn read_indexed_code_slice_from_source(
+    store: &AtlasStore,
+    file: &Path,
+    start_line: usize,
+    end_line: Option<usize>,
+    source: &str,
+) -> ServiceResult<CodeSlice> {
+    read_indexed_code_slice_from_source_bounded(
+        store,
+        file,
+        start_line,
+        end_line,
+        source,
+        CodeSliceBudget::default(),
+    )
+    .map(|draft| draft.slice)
+}
+
+/// Read a byte-bounded exact line slice from caller-verified source bytes.
+///
+/// # Errors
+///
+/// Returns an error when the file is not indexed, line numbers are invalid,
+/// or the verbatim slice cannot fit the requested output budget.
+pub fn read_indexed_code_slice_from_source_bounded(
+    store: &AtlasStore,
+    file: &Path,
+    start_line: usize,
+    end_line: Option<usize>,
+    source: &str,
+    output_budget: CodeSliceBudget,
+) -> ServiceResult<CodeSliceDraft> {
+    let file_key = validated_indexed_file_key(store, file)?;
+    read_code_slice(source, &file_key, start_line, end_line, output_budget)
 }
 
 /// Read a symbol body by exact symbol name and optional disambiguators.
@@ -1260,6 +2524,42 @@ pub fn read_symbol_slice(
     selector: &SymbolSliceSelector<'_>,
 ) -> ServiceResult<CodeSlice> {
     let file_key = validated_indexed_file_key(store, file)?;
+    let native_file = indexed_native_path(store, &file_key)?;
+    let content = read_file_content(&native_file)?;
+    read_symbol_slice_from_source(store, file, selector, &content)
+}
+
+/// Read a symbol body from caller-verified source bytes.
+///
+/// # Errors
+///
+/// Returns an error when the symbol is absent, ambiguous, filtered out by the
+/// selector, or its indexed range is invalid for the supplied source.
+pub fn read_symbol_slice_from_source(
+    store: &AtlasStore,
+    file: &Path,
+    selector: &SymbolSliceSelector<'_>,
+    source: &str,
+) -> ServiceResult<CodeSlice> {
+    read_symbol_slice_from_source_bounded(store, file, selector, source, CodeSliceBudget::default())
+        .map(|draft| draft.slice)
+}
+
+/// Read a byte-bounded symbol body from caller-verified source bytes.
+///
+/// # Errors
+///
+/// Returns an error when the symbol is absent, ambiguous, filtered out by the
+/// selector, its indexed range is invalid, or its verbatim body cannot fit the
+/// requested output budget.
+pub fn read_symbol_slice_from_source_bounded(
+    store: &AtlasStore,
+    file: &Path,
+    selector: &SymbolSliceSelector<'_>,
+    source: &str,
+    output_budget: CodeSliceBudget,
+) -> ServiceResult<CodeSliceDraft> {
+    let file_key = validated_indexed_file_key(store, file)?;
     let requested_kind = selector.kind.map(parse_symbol_kind).transpose()?;
     let mut symbols = store.load_symbols_by_exact_file_and_name(&file_key, selector.name)?;
     if let Some(parent) = selector.parent {
@@ -1267,6 +2567,9 @@ pub fn read_symbol_slice(
     }
     if let Some(kind) = requested_kind {
         symbols.retain(|symbol| symbol.kind == kind);
+    }
+    if let Some(signature) = selector.signature {
+        symbols.retain(|symbol| symbol.signature == signature);
     }
     if let Some(line) = selector.line {
         symbols.retain(|symbol| symbol.line_start <= line && line <= symbol.line_end);
@@ -1281,18 +2584,18 @@ pub fn read_symbol_slice(
         }
         _ => {
             return Err(ServiceError::InvalidInput(format!(
-                "symbol {:?} is ambiguous in {file_key}; pass symbol_parent, symbol_kind, or symbol_line. candidates: {}",
+                "symbol {:?} is ambiguous in {file_key}; pass symbol_parent, symbol_kind, symbol_signature, or symbol_line. candidates: {}",
                 selector.name,
                 describe_symbol_candidates(&symbols)
             )));
         }
     };
-    let native_file = indexed_native_path(store, &file_key)?;
     read_code_slice(
-        &native_file,
+        source,
         &file_key,
         symbol.line_start,
         Some(symbol.line_end),
+        output_budget,
     )
 }
 
@@ -1358,6 +2661,77 @@ fn build_path_matcher(pattern: Option<&str>) -> ServiceResult<Option<GlobSet>> {
         .map_err(|source| ServiceError::InvalidInput(source.to_string()))
 }
 
+/// Return an exact path-or-descendant prefix that safely narrows a glob.
+fn search_path_prefix(pattern: Option<&str>) -> Option<String> {
+    let normalized = pattern?.trim().replace('\\', "/");
+    if normalized.is_empty() || normalized == "*" {
+        return None;
+    }
+    let wildcard = normalized
+        .char_indices()
+        .find_map(|(index, character)| "*?[{".contains(character).then_some(index));
+    let prefix = wildcard.map_or(normalized.as_str(), |index| &normalized[..index]);
+    let prefix = if wildcard.is_some() {
+        prefix.rsplit_once('/').map_or("", |(parent, _)| parent)
+    } else {
+        prefix.trim_end_matches('/')
+    };
+    (!prefix.is_empty()).then(|| prefix.to_string())
+}
+
+/// Check whether one more hydrated source row fits file and byte ceilings.
+fn search_metadata_within_bounds(
+    report: &mut SearchReport,
+    byte_count: usize,
+    max_files: usize,
+    max_bytes: usize,
+) -> bool {
+    if report.searched_files >= max_files {
+        mark_search_truncated(report, "selected-file-limit");
+        return false;
+    }
+    let Some(next_bytes) = report.searched_bytes.checked_add(byte_count) else {
+        mark_search_truncated(report, "selected-byte-limit");
+        return false;
+    };
+    if next_bytes > max_bytes {
+        mark_search_truncated(report, "selected-byte-limit");
+        return false;
+    }
+    true
+}
+
+/// Preserve the first stable reason that made exhaustive search impossible.
+fn mark_search_truncated(report: &mut SearchReport, reason: &'static str) {
+    report.truncated = true;
+    if report.truncation_reason.is_none() {
+        report.truncation_reason = Some(reason.to_string());
+    }
+}
+
+/// Exact-verify one admitted authoritative text row.
+fn inspect_search_text(
+    report: &mut SearchReport,
+    text: &IndexedFileText,
+    matcher: &LineMatcher,
+    context_lines: usize,
+    needed: usize,
+    max_retained_bytes: usize,
+    control: &IndexWorkControl,
+) -> Result<(), IndexWorkFailure> {
+    let lines = indexed_text_lines(text);
+    append_line_matches(
+        report,
+        &text.path,
+        &lines,
+        matcher,
+        context_lines,
+        needed,
+        max_retained_bytes,
+        control,
+    )
+}
+
 /// Add one normalized glob to a builder.
 fn add_glob(builder: &mut GlobSetBuilder, pattern: &str) -> ServiceResult<()> {
     let glob = GlobBuilder::new(pattern)
@@ -1403,11 +2777,18 @@ impl LineMatcher {
         }
     }
 
-    /// Return a literal substring prefilter when SQL can safely narrow files.
-    fn literal_prefilter(&self) -> Option<&str> {
+    /// Return one FTS-safe token whose candidates remain a complete superset.
+    fn fts_literal_token(&self) -> Option<&str> {
         match self {
-            Self::Literal { needle, .. } => Some(needle.as_str()),
-            Self::Regex(_) | Self::Fuzzy { .. } => None,
+            Self::Literal { needle, .. }
+                if needle.len() >= 3
+                    && needle
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric()) =>
+            {
+                Some(needle.as_str())
+            }
+            Self::Regex(_) | Self::Fuzzy { .. } | Self::Literal { .. } => None,
         }
     }
 
@@ -1435,8 +2816,12 @@ fn append_line_matches(
     matcher: &LineMatcher,
     context_lines: usize,
     needed: usize,
-) {
+    max_retained_bytes: usize,
+    control: &IndexWorkControl,
+) -> Result<(), IndexWorkFailure> {
+    let result_limit = needed.saturating_sub(report.start_index);
     for (index, line) in lines.iter().enumerate() {
+        control.check(IndexWorkStage::TextIndex)?;
         if !matcher.is_match(line) {
             continue;
         }
@@ -1444,18 +2829,48 @@ fn append_line_matches(
         if report.total <= report.start_index {
             continue;
         }
-        if report.results.len() >= needed.saturating_sub(report.start_index) {
-            report.truncated = true;
-            return;
+        if report.results.len() >= result_limit {
+            mark_search_truncated(report, "result-limit");
+            control.check(IndexWorkStage::TextIndex)?;
+            return Ok(());
         }
-        report.results.push(SearchMatch {
+        let row = SearchMatch {
             path: path.to_string(),
             line: index + 1,
             context_before: context_before(lines, index, context_lines),
             text: (*line).to_string(),
             context_after: context_after(lines, index, context_lines),
-        });
+        };
+        let retained_bytes = row
+            .path
+            .len()
+            .saturating_add(row.text.len())
+            .saturating_add(
+                row.context_before
+                    .iter()
+                    .chain(&row.context_after)
+                    .map(String::len)
+                    .sum::<usize>(),
+            );
+        let Some(next_retained_bytes) = report.retained_bytes.checked_add(retained_bytes) else {
+            mark_search_truncated(report, "retained-byte-limit");
+            control.check(IndexWorkStage::TextIndex)?;
+            return Ok(());
+        };
+        if next_retained_bytes > max_retained_bytes {
+            mark_search_truncated(report, "retained-byte-limit");
+            control.check(IndexWorkStage::TextIndex)?;
+            return Ok(());
+        }
+        report.retained_bytes = next_retained_bytes;
+        report.results.push(row);
+        if report.results.len() >= result_limit {
+            mark_search_truncated(report, "result-limit");
+            control.check(IndexWorkStage::TextIndex)?;
+            return Ok(());
+        }
     }
+    control.check(IndexWorkStage::TextIndex)
 }
 
 /// Normalize search text for case-sensitive or insensitive matching.
@@ -1508,44 +2923,87 @@ fn context_after(lines: &[&str], index: usize, context_lines: usize) -> Vec<Stri
 
 /// Read an exact line slice from a previously validated file.
 fn read_code_slice(
-    native_file: &Path,
+    content: &str,
     file_key: &str,
     start_line: usize,
     end_line: Option<usize>,
-) -> ServiceResult<CodeSlice> {
+    output_budget: CodeSliceBudget,
+) -> ServiceResult<CodeSliceDraft> {
     if start_line == 0 {
         return Err(ServiceError::InvalidInput(
             "start-line must be one or greater".to_string(),
         ));
     }
-    let content = read_file_content(native_file)?;
-    let lines = content.lines().collect::<Vec<_>>();
-    let line_count = lines.len();
-    let end_line = end_line.unwrap_or(start_line);
-    if end_line < start_line {
+    let requested_end_line = end_line.unwrap_or(start_line);
+    if requested_end_line < start_line {
         return Err(ServiceError::InvalidInput(
             "end-line must be greater than or equal to start-line".to_string(),
         ));
+    }
+    let mut line_count = 0usize;
+    let mut offset = 0usize;
+    let mut selected_start = None;
+    let mut selected_end = None;
+    for line in content.split_inclusive('\n') {
+        line_count = line_count.saturating_add(1);
+        let line_start = offset;
+        let line_end_with_terminator = offset.checked_add(line.len()).ok_or_else(|| {
+            ServiceError::InvalidInput("slice source byte offset overflowed".to_string())
+        })?;
+        let line_end = if line.ends_with("\r\n") {
+            line_end_with_terminator - 2
+        } else if line.ends_with('\n') {
+            line_end_with_terminator - 1
+        } else {
+            line_end_with_terminator
+        };
+        if line_count == start_line {
+            selected_start = Some(line_start);
+        }
+        if line_count >= start_line && line_count <= requested_end_line {
+            selected_end = Some(line_end);
+        }
+        offset = line_end_with_terminator;
     }
     if start_line > line_count {
         return Err(ServiceError::InvalidInput(format!(
             "start-line {start_line} exceeds file line count {line_count}"
         )));
     }
-    let end_index = end_line.min(line_count);
-    let content = lines[start_line - 1..end_index].join("\n");
-    Ok(CodeSlice {
-        path: file_key.to_string(),
-        start_line,
-        end_line: end_index,
-        line_count,
-        estimated_tokens: estimate_tokens(&content),
-        content,
+    let end_index = requested_end_line.min(line_count);
+    let selected_start = selected_start
+        .ok_or_else(|| ServiceError::InvalidInput("slice start byte was not found".to_string()))?;
+    let selected_end = selected_end
+        .ok_or_else(|| ServiceError::InvalidInput("slice end byte was not found".to_string()))?;
+    let content_bytes = selected_end.checked_sub(selected_start).ok_or_else(|| {
+        ServiceError::InvalidInput("slice content byte range was invalid".to_string())
+    })?;
+    if content_bytes > output_budget.output_bytes() as usize {
+        return Err(ServiceError::InvalidInput(format!(
+            "verbatim slice content exceeds the requested {}-byte output ceiling; narrow the line or symbol range or raise output-bytes",
+            output_budget.output_bytes()
+        )));
+    }
+    let content = content[selected_start..selected_end].to_string();
+    Ok(CodeSliceDraft {
+        slice: CodeSlice {
+            path: file_key.to_string(),
+            start_line,
+            end_line: end_index,
+            line_count,
+            estimated_tokens: estimate_tokens(&content),
+            content,
+        },
+        output_budget,
     })
 }
 
 /// Parse a user-facing symbol kind selector.
-fn parse_symbol_kind(kind: &str) -> ServiceResult<SymbolKind> {
+///
+/// # Errors
+///
+/// Returns an error when the value is not one of the supported persisted kinds.
+pub fn parse_symbol_kind(kind: &str) -> ServiceResult<SymbolKind> {
     let normalized = kind.trim().to_ascii_lowercase();
     let parsed = SymbolKind::from_db(&normalized);
     if parsed == SymbolKind::Unknown && normalized != "unknown" {
@@ -1734,66 +3192,6 @@ fn symbol_target_aliases(symbol: &CodeSymbol) -> Vec<String> {
     values
 }
 
-/// Return module aliases inferred from a normalized repository path.
-fn module_aliases_for_path(path: &str) -> Vec<String> {
-    let mut aliases = HashSet::new();
-    for stem in source_stems_for_path(path) {
-        let mut components = stem
-            .split('/')
-            .filter(|component| !component.is_empty())
-            .collect::<Vec<_>>();
-        if components
-            .first()
-            .is_some_and(|component| *component == "src")
-        {
-            components.remove(0);
-        }
-        if components.last().is_some_and(|component| {
-            matches!(*component, "lib" | "main" | "mod" | "index" | "__init__")
-        }) {
-            components.pop();
-        }
-        if components.is_empty() {
-            continue;
-        }
-        aliases.insert(components.join("::"));
-        aliases.insert(components.join("."));
-        if let Some(last) = components.last() {
-            aliases.insert((*last).to_string());
-        }
-    }
-    let mut values = aliases.into_iter().collect::<Vec<_>>();
-    values.sort();
-    values
-}
-
-/// Return source path stems, including package-entry aliases.
-fn source_stems_for_path(path: &str) -> Vec<String> {
-    let stem = strip_known_source_extension(path);
-    let mut stems = vec![stem.clone()];
-    if let Some((parent, entry_name)) = stem.rsplit_once('/')
-        && matches!(entry_name, "index" | "__init__" | "mod")
-    {
-        stems.push(parent.to_string());
-    }
-    stems.sort();
-    stems.dedup();
-    stems
-}
-
-/// Strip common source extensions while preserving dotted directory names.
-fn strip_known_source_extension(path: &str) -> String {
-    for extension in [
-        ".d.ts", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs",
-    ] {
-        if let Some(stem) = path.strip_suffix(extension) {
-            return stem.to_string();
-        }
-    }
-    path.rsplit_once('.')
-        .map_or_else(|| path.to_string(), |(stem, _extension)| stem.to_string())
-}
-
 /// Build a stable identity key for a summarized symbol row.
 fn symbol_summary_key(symbol: &CodeSymbol) -> String {
     format!("{}\0{}\0{}", symbol.path, symbol.name, symbol.line_start)
@@ -1980,10 +3378,397 @@ fn exported_symbol_names(symbols: &[CodeSymbol]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use projectatlas_core::graph::{
+        CoverageRecord, GraphIdentityText, GraphLimitKind, RepositoryNodePath,
+    };
     use projectatlas_core::symbols::{ParserKind, SymbolGraph};
+    use projectatlas_core::telemetry::{
+        AgentEfficiencyBaseline, AgentEfficiencyEvidenceState, UsageDetailAvailability,
+    };
     use projectatlas_core::{Node, Purpose, PurposeSource, PurposeStatus, normalized_parent};
     use std::error::Error;
     use std::io;
+
+    #[test]
+    fn token_report_service_selects_typed_reports_and_requires_a_project_binding()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let atlas_dir = root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let store = AtlasStore::open_for_project(&atlas_dir.join("projectatlas.db"), &root)?;
+
+        let overview = load_token_report(
+            &store,
+            TokenReportRequest::Overview {
+                caller_label: None,
+                benchmark_results: None,
+            },
+        )?;
+        match overview {
+            TokenReport::Overview(overview) => {
+                require_eq(&overview.calls, &0, "empty overview calls")?;
+                require_eq(
+                    &overview.detail_availability,
+                    &UsageDetailAvailability::Retained,
+                    "empty overview detail availability",
+                )?;
+                require_eq(
+                    &overview.agent_efficiency.state,
+                    &AgentEfficiencyEvidenceState::Unavailable,
+                    "empty overview agent-efficiency state",
+                )?;
+            }
+            TokenReport::Trends(_) => {
+                return Err(io::Error::other("overview request returned token trends").into());
+            }
+        }
+
+        let trends = load_token_report(
+            &store,
+            TokenReportRequest::Trends {
+                caller_label: None,
+                window: TokenTrendWindow::Month,
+            },
+        )?;
+        match trends {
+            TokenReport::Trends(report) => {
+                require_eq(&report.window, &TokenTrendWindow::Month, "trend window")?;
+                require_eq(
+                    &report.detail_availability,
+                    &UsageDetailAvailability::Retained,
+                    "empty trend detail availability",
+                )?;
+            }
+            TokenReport::Overview(_) => {
+                return Err(io::Error::other("trend request returned token overview").into());
+            }
+        }
+
+        let unbound = AtlasStore::in_memory()?;
+        if !matches!(
+            load_token_report(
+                &unbound,
+                TokenReportRequest::Overview {
+                    caller_label: None,
+                    benchmark_results: None,
+                }
+            ),
+            Err(ServiceError::SelectedProjectUnavailable)
+        ) {
+            return Err(io::Error::other("unbound token report did not fail closed").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn token_report_service_bounds_and_classifies_benchmark_evidence() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("benchmark-service");
+        let atlas_dir = root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let store = AtlasStore::open_for_project(&atlas_dir.join("projectatlas.db"), &root)?;
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/benchmarks/v0.4-agent-navigation-results.json");
+        let published = root.join("published.json");
+        fs::copy(&source, &published)?;
+
+        let report = load_token_report(
+            &store,
+            TokenReportRequest::Overview {
+                caller_label: None,
+                benchmark_results: Some(Path::new("published.json")),
+            },
+        )?;
+        let TokenReport::Overview(report) = report else {
+            return Err(io::Error::other("benchmark request returned token trends").into());
+        };
+        require_eq(
+            &report.agent_efficiency.state,
+            &AgentEfficiencyEvidenceState::Partial,
+            "published benchmark state",
+        )?;
+        let frozen = report
+            .agent_efficiency
+            .baselines
+            .iter()
+            .find(|row| row.baseline == AgentEfficiencyBaseline::FrozenProjectAtlasV0326)
+            .ok_or_else(|| io::Error::other("frozen baseline row missing"))?;
+        require_eq(
+            &frozen.baseline_failed_trials,
+            &3,
+            "published frozen failed trials",
+        )?;
+
+        fs::write(root.join("malformed.json"), b"{")?;
+        let malformed = load_token_report(
+            &store,
+            TokenReportRequest::Overview {
+                caller_label: None,
+                benchmark_results: Some(Path::new("malformed.json")),
+            },
+        )?;
+        let TokenReport::Overview(malformed) = malformed else {
+            return Err(io::Error::other("malformed request returned token trends").into());
+        };
+        require_eq(
+            &malformed.agent_efficiency.state,
+            &AgentEfficiencyEvidenceState::Failed,
+            "malformed benchmark state",
+        )?;
+
+        let stale = String::from_utf8(fs::read(&source)?)?.replacen(
+            "\"schema_version\": 1",
+            "\"schema_version\": 2",
+            1,
+        );
+        fs::write(root.join("stale.json"), stale)?;
+        let stale = load_token_report(
+            &store,
+            TokenReportRequest::Overview {
+                caller_label: None,
+                benchmark_results: Some(Path::new("stale.json")),
+            },
+        )?;
+        let TokenReport::Overview(stale) = stale else {
+            return Err(io::Error::other("stale request returned token trends").into());
+        };
+        require_eq(
+            &stale.agent_efficiency.state,
+            &AgentEfficiencyEvidenceState::Incompatible,
+            "stale benchmark state",
+        )?;
+
+        let missing = load_token_report(
+            &store,
+            TokenReportRequest::Overview {
+                caller_label: None,
+                benchmark_results: Some(Path::new("missing.json")),
+            },
+        )?;
+        let TokenReport::Overview(missing) = missing else {
+            return Err(io::Error::other("missing request returned token trends").into());
+        };
+        require_eq(
+            &missing.agent_efficiency.state,
+            &AgentEfficiencyEvidenceState::Failed,
+            "missing benchmark state",
+        )?;
+
+        fs::write(
+            root.join("oversized.json"),
+            vec![b' '; super::agent_efficiency::BENCHMARK_MAX_BYTES + 1],
+        )?;
+        let oversized = load_token_report(
+            &store,
+            TokenReportRequest::Overview {
+                caller_label: None,
+                benchmark_results: Some(Path::new("oversized.json")),
+            },
+        )?;
+        let TokenReport::Overview(oversized) = oversized else {
+            return Err(io::Error::other("oversized request returned token trends").into());
+        };
+        require_eq(
+            &oversized.agent_efficiency.state,
+            &AgentEfficiencyEvidenceState::Failed,
+            "oversized benchmark state",
+        )?;
+
+        for escaped in [published.as_path(), Path::new("../outside.json")] {
+            if !matches!(
+                load_token_report(
+                    &store,
+                    TokenReportRequest::Overview {
+                        caller_label: None,
+                        benchmark_results: Some(escaped),
+                    },
+                ),
+                Err(ServiceError::InvalidInput(_))
+            ) {
+                return Err(io::Error::other(
+                    "escaping benchmark path did not fail at the service boundary",
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn summary_digest_and_opt_in_coverage_page_share_current_typed_rows()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("coverage-service");
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(root.join("src/lib.rs"), "pub fn run() {}\n")?;
+        let db_path = root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("service fixture identity is missing"))?;
+        let generation = IndexGeneration::new(1);
+        let mut publication = store.begin_index_publication("coverage-service")?;
+        publication.begin_scan_replacement()?;
+        publication.upsert_scan_node_batch(&[test_node("src/lib.rs", "coverage-hash")])?;
+        publication.finish_scan_replacement()?;
+        publication.replace_symbol_graph(&SymbolGraph {
+            path: "src/lib.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: Vec::new(),
+            relations: Vec::new(),
+        })?;
+        let mut coverage = vec![
+            CoverageRecord::new(
+                CoverageScope::Path {
+                    path: RepositoryNodePath::new(Path::new("src/lib.rs"))?,
+                },
+                None,
+                CoverageState::Partial,
+                3,
+                1,
+                generation,
+                Some(GraphIdentityText::new("one fallback fact omitted")?),
+                Some(GraphLimitKind::Rows),
+            )?,
+            CoverageRecord::new(
+                CoverageScope::Project,
+                Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+                CoverageState::Failed,
+                0,
+                1,
+                generation,
+                Some(GraphIdentityText::new("parser failed")?),
+                None,
+            )?,
+        ];
+        for index in 0..=COVERAGE_DIGEST_ROW_LIMIT {
+            let sibling_path = format!("src/lib.rs.{index:02}");
+            coverage.push(CoverageRecord::new(
+                CoverageScope::Path {
+                    path: RepositoryNodePath::new(Path::new(&sibling_path))?,
+                },
+                None,
+                CoverageState::Complete,
+                1,
+                0,
+                generation,
+                None,
+                None,
+            )?);
+        }
+        publication.replace_repository_graph(project, &[], &[], &[], &coverage)?;
+        publication.complete()?;
+        drop(store);
+
+        let store = AtlasStore::open_read_only_for_project(&db_path, &root)?;
+        let summary = build_file_summary(&store, Path::new("src/lib.rs"), 10)?;
+        require_eq(
+            &summary.coverage.available,
+            &true,
+            "summary coverage availability",
+        )?;
+        require_eq(
+            &summary.coverage.states.partial,
+            &1,
+            "summary partial coverage count",
+        )?;
+        require_eq(
+            &summary.coverage.states.complete,
+            &0,
+            "summary excluded lexical sibling coverage",
+        )?;
+        require_eq(
+            &summary.coverage.states.failed,
+            &0,
+            "summary excluded project-wide coverage",
+        )?;
+        require_eq(
+            &summary.coverage.truncated,
+            &false,
+            "summary exact-file coverage truncation",
+        )?;
+        require_eq(
+            &summary.coverage.trust,
+            &CoverageTrustState::Partial,
+            "summary exact-file coverage trust",
+        )?;
+        require_eq(
+            &summary.coverage.provider,
+            &Some(ParserKind::TreeSitter),
+            "summary fact provider",
+        )?;
+        require_eq(
+            &summary.coverage.next_call.capability,
+            &NavigationNextCapability::Health,
+            "summary coverage next call",
+        )?;
+
+        let report = load_coverage_discovery(
+            &store,
+            RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 10,
+                path_prefix: None,
+                parser: None,
+                provider: None,
+                relation: Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+                state: Some(CoverageState::Failed),
+                reason: Some("parser failed".to_string()),
+            },
+        )?;
+        require_eq(&report.returned, &1, "filtered service coverage row")?;
+        require_eq(
+            &report.total,
+            &CoverageTotalState::Exact(1),
+            "bounded exact coverage total",
+        )?;
+        require_eq(
+            &report.rows[0].next_call.capability,
+            &NavigationNextCapability::Health,
+            "project coverage next call",
+        )?;
+        let truncated = load_coverage_discovery(
+            &store,
+            RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 1,
+                path_prefix: None,
+                parser: None,
+                provider: None,
+                relation: None,
+                state: None,
+                reason: None,
+            },
+        )?;
+        require_eq(
+            &truncated.total,
+            &CoverageTotalState::AtLeast(2),
+            "truncated coverage lower bound",
+        )?;
+        require_eq(&truncated.continuation, &Some(1), "coverage continuation")?;
+        let exhausted = load_coverage_discovery(
+            &store,
+            RepositoryCoverageQuery {
+                start_index: 100,
+                limit: 1,
+                path_prefix: None,
+                parser: None,
+                provider: None,
+                relation: None,
+                state: None,
+                reason: None,
+            },
+        )?;
+        require_eq(
+            &exhausted.total,
+            &CoverageTotalState::Unknown,
+            "exhausted nonzero continuation total",
+        )?;
+        Ok(())
+    }
 
     #[test]
     fn metadata_helpers_are_stable() -> Result<(), Box<dyn Error>> {
@@ -3025,6 +4810,492 @@ mod tests {
     }
 
     #[test]
+    fn search_fts_candidates_preserve_fallback_results_and_unsafe_shapes_fall_back()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src"))?;
+        fs::create_dir_all(root.join("docs"))?;
+        fs::write(
+            root.join("src/a.rs"),
+            "Needle alpha\nneedle-beta\nnëedle unicode\n",
+        )?;
+        fs::write(root.join("src/b.rs"), "prefixneedlesuffix gamma\n")?;
+        fs::write(root.join("docs/readme.md"), "needle docs\n")?;
+        let nodes = [
+            test_node("src/a.rs", "hash-a"),
+            test_node("src/b.rs", "hash-b"),
+            test_node("docs/readme.md", "hash-docs"),
+        ];
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&nodes)?;
+        index_test_file_texts(&mut store, root, &nodes)?;
+
+        let lexical = search_indexed_files_with_control(
+            &store,
+            &SearchQuery {
+                pattern: "needle",
+                regex: false,
+                fuzzy: false,
+                case_sensitive: false,
+                file_pattern: Some("src/*.rs"),
+                context_lines: 0,
+                start_index: 0,
+                limit: 20,
+                retrieval_mode: SearchRetrievalMode::Lexical,
+            },
+            None,
+        )?;
+        require_eq(
+            &lexical.strategy,
+            &"fts5-bm25-candidates-exact-verified".to_string(),
+            "safe literal strategy",
+        )?;
+        require_eq(&lexical.candidate_files, &2, "safe literal candidates")?;
+
+        let fallback = search_indexed_files_with_control(
+            &store,
+            &SearchQuery {
+                pattern: "needle",
+                regex: true,
+                fuzzy: false,
+                case_sensitive: false,
+                file_pattern: Some("src/*.rs"),
+                context_lines: 0,
+                start_index: 0,
+                limit: 20,
+                retrieval_mode: SearchRetrievalMode::Lexical,
+            },
+            None,
+        )?;
+        let lexical_rows = lexical
+            .results
+            .iter()
+            .map(|row| (&row.path, row.line, &row.text))
+            .collect::<Vec<_>>();
+        let fallback_rows = fallback
+            .results
+            .iter()
+            .map(|row| (&row.path, row.line, &row.text))
+            .collect::<Vec<_>>();
+        require_eq(
+            &lexical_rows,
+            &fallback_rows,
+            "FTS and fallback exact results",
+        )?;
+        require_eq(
+            &fallback.strategy,
+            &"persisted-text-fallback".to_string(),
+            "regex fallback strategy",
+        )?;
+
+        for (pattern, regex, fuzzy, expected_rows) in [
+            (
+                "ne",
+                false,
+                false,
+                vec!["src/a.rs:1", "src/a.rs:2", "src/b.rs:1"],
+            ),
+            ("needle-", false, false, vec!["src/a.rs:2"]),
+            ("nëedle", false, false, vec!["src/a.rs:3"]),
+            (
+                "needle",
+                false,
+                true,
+                vec!["src/a.rs:1", "src/a.rs:2", "src/b.rs:1"],
+            ),
+        ] {
+            let report = search_indexed_files_with_control(
+                &store,
+                &SearchQuery {
+                    pattern,
+                    regex,
+                    fuzzy,
+                    case_sensitive: false,
+                    file_pattern: Some("src/*.rs"),
+                    context_lines: 0,
+                    start_index: 0,
+                    limit: 20,
+                    retrieval_mode: SearchRetrievalMode::Lexical,
+                },
+                None,
+            )?;
+            require_eq(
+                &report.strategy,
+                &"persisted-text-fallback".to_string(),
+                "unsafe shape fallback strategy",
+            )?;
+            require_eq(&report.candidate_files, &0, "unsafe shape candidates")?;
+            let rows = report
+                .results
+                .iter()
+                .map(|row| format!("{}:{}", row.path, row.line))
+                .collect::<Vec<_>>();
+            require_eq(
+                &rows,
+                &expected_rows
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+                "unsafe fallback exact rows",
+            )?;
+        }
+
+        for (pattern, expected_rows) in [("Needle", 1), ("needle", 2)] {
+            let exact = search_indexed_files_with_control(
+                &store,
+                &SearchQuery {
+                    pattern,
+                    regex: false,
+                    fuzzy: false,
+                    case_sensitive: true,
+                    file_pattern: Some("src/*.rs"),
+                    context_lines: 0,
+                    start_index: 0,
+                    limit: 20,
+                    retrieval_mode: SearchRetrievalMode::Lexical,
+                },
+                None,
+            )?;
+            let regex = search_indexed_files_with_control(
+                &store,
+                &SearchQuery {
+                    pattern,
+                    regex: true,
+                    fuzzy: false,
+                    case_sensitive: true,
+                    file_pattern: Some("src/*.rs"),
+                    context_lines: 0,
+                    start_index: 0,
+                    limit: 20,
+                    retrieval_mode: SearchRetrievalMode::Lexical,
+                },
+                None,
+            )?;
+            let exact_rows = exact
+                .results
+                .iter()
+                .map(|row| (&row.path, row.line, &row.text))
+                .collect::<Vec<_>>();
+            let regex_rows = regex
+                .results
+                .iter()
+                .map(|row| (&row.path, row.line, &row.text))
+                .collect::<Vec<_>>();
+            require_eq(&exact_rows, &regex_rows, "case-sensitive equivalence")?;
+            require_eq(&exact.returned, &expected_rows, "case-sensitive exact rows")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn search_fts_candidate_overflow_uses_complete_persisted_text_fallback()
+    -> Result<(), Box<dyn Error>> {
+        const MATCHING_FILES: usize = MAX_FILE_TEXT_FTS_CANDIDATES + 1;
+        const CONTENT: &str = "needle\n";
+        let mut store = AtlasStore::in_memory()?;
+        let paths = (0..MATCHING_FILES)
+            .map(|index| format!("overflow/{index:04}.rs"))
+            .collect::<Vec<_>>();
+        let nodes = paths
+            .iter()
+            .map(|path| test_node(path, "hash"))
+            .collect::<Vec<_>>();
+        let texts = paths
+            .iter()
+            .map(|path| IndexedFileText {
+                path: path.clone(),
+                content_hash: Some("hash".to_string()),
+                byte_count: CONTENT.len(),
+                line_count: 1,
+                content: CONTENT.to_string(),
+            })
+            .collect::<Vec<_>>();
+        store.replace_scan(&nodes)?;
+        store.replace_file_texts_for_paths(&paths, &texts)?;
+
+        let request = SearchQuery {
+            pattern: "needle",
+            regex: false,
+            fuzzy: false,
+            case_sensitive: false,
+            file_pattern: Some("overflow/*.rs"),
+            context_lines: 0,
+            start_index: MATCHING_FILES - 1,
+            limit: 1,
+            retrieval_mode: SearchRetrievalMode::Lexical,
+        };
+        let overflow = search_indexed_files_with_control(&store, &request, None)?;
+        require_eq(
+            &overflow.strategy,
+            &"persisted-text-fallback".to_string(),
+            "overflow fallback strategy",
+        )?;
+        require_eq(
+            &overflow.candidate_files,
+            &MAX_FILE_TEXT_FTS_CANDIDATES,
+            "overflow retained candidates",
+        )?;
+        require_eq(
+            &overflow.searched_files,
+            &MATCHING_FILES,
+            "overflow fallback searched files",
+        )?;
+        require_eq(
+            &overflow.searched_bytes,
+            &(MATCHING_FILES * CONTENT.len()),
+            "overflow fallback searched bytes",
+        )?;
+        require_eq(
+            &overflow.results[0].path,
+            &format!("overflow/{:04}.rs", MATCHING_FILES - 1),
+            "overflow fallback exact path order",
+        )?;
+
+        let authoritative = search_indexed_files_with_control(
+            &store,
+            &SearchQuery {
+                regex: true,
+                ..request
+            },
+            None,
+        )?;
+        let overflow_rows = overflow
+            .results
+            .iter()
+            .map(|row| (&row.path, row.line, &row.text))
+            .collect::<Vec<_>>();
+        let authoritative_rows = authoritative
+            .results
+            .iter()
+            .map(|row| (&row.path, row.line, &row.text))
+            .collect::<Vec<_>>();
+        require_eq(
+            &overflow_rows,
+            &authoritative_rows,
+            "overflow and authoritative fallback rows",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn search_reports_resource_bounds_cancellation_and_optional_capability_state()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(root.join("src/a.rs"), "needle one\n")?;
+        fs::write(root.join("src/b.rs"), "needle two\n")?;
+        let nodes = [
+            test_node("src/a.rs", "hash-a"),
+            test_node("src/b.rs", "hash-b"),
+        ];
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&nodes)?;
+        index_test_file_texts(&mut store, root, &nodes)?;
+        let query = SearchQuery {
+            pattern: "needle",
+            regex: true,
+            fuzzy: false,
+            case_sensitive: false,
+            file_pattern: Some("src/*.rs"),
+            context_lines: 0,
+            start_index: 0,
+            limit: 20,
+            retrieval_mode: SearchRetrievalMode::Lexical,
+        };
+
+        let file_bounded = search_indexed_files_with_bounds(
+            &store,
+            &query,
+            None,
+            SearchBounds {
+                selected_files: 1,
+                selected_bytes: usize::MAX,
+                elapsed: Duration::from_secs(1),
+                retained_bytes: usize::MAX,
+            },
+        )?;
+        require_eq(
+            &file_bounded.searched_files,
+            &1,
+            "file bound searched files",
+        )?;
+        require_eq(&file_bounded.truncated, &true, "file bound truncation")?;
+        require_eq(
+            &file_bounded.truncation_reason,
+            &Some("selected-file-limit".to_string()),
+            "file bound reason",
+        )?;
+
+        let byte_bounded = search_indexed_files_with_bounds(
+            &store,
+            &query,
+            None,
+            SearchBounds {
+                selected_files: usize::MAX,
+                selected_bytes: 1,
+                elapsed: Duration::from_secs(1),
+                retained_bytes: usize::MAX,
+            },
+        )?;
+        require_eq(
+            &byte_bounded.searched_files,
+            &0,
+            "byte bound searched files",
+        )?;
+        require_eq(
+            &byte_bounded.truncation_reason,
+            &Some("selected-byte-limit".to_string()),
+            "byte bound reason",
+        )?;
+
+        let output_bounded = search_indexed_files_with_bounds(
+            &store,
+            &query,
+            None,
+            SearchBounds {
+                selected_files: usize::MAX,
+                selected_bytes: usize::MAX,
+                elapsed: Duration::from_secs(1),
+                retained_bytes: 1,
+            },
+        )?;
+        require_eq(&output_bounded.returned, &0, "output bound returned rows")?;
+        require_eq(
+            &output_bounded.truncation_reason,
+            &Some("retained-byte-limit".to_string()),
+            "output bound reason",
+        )?;
+
+        let cancellation = IndexCancellation::new();
+        cancellation.cancel();
+        let control = IndexWorkControl::new(cancellation, None);
+        let cancelled = search_indexed_files_with_control(&store, &query, Some(&control));
+        if !matches!(cancelled, Err(ServiceError::Db(DbError::IndexWork(_)))) {
+            return Err(io::Error::other("search cancellation was not typed").into());
+        }
+        let expired = IndexWorkControl::new(IndexCancellation::new(), Some(Duration::ZERO));
+        let deadline = search_indexed_files_with_control(&store, &query, Some(&expired))?;
+        require_eq(&deadline.truncated, &true, "deadline truncation")?;
+        require_eq(
+            &deadline.truncation_reason,
+            &Some("elapsed-time-limit".to_string()),
+            "deadline truncation reason",
+        )?;
+        require_eq(
+            &deadline.total_is_complete,
+            &false,
+            "deadline total completeness",
+        )?;
+
+        let line_cancellation = IndexCancellation::new();
+        let line_control = IndexWorkControl::new(line_cancellation.clone(), None);
+        line_cancellation.cancel();
+        let mut line_report = file_bounded;
+        let line_match = append_line_matches(
+            &mut line_report,
+            "src/a.rs",
+            &["needle"],
+            &LineMatcher::Literal {
+                needle: "needle".to_string(),
+                case_sensitive: true,
+            },
+            0,
+            1,
+            usize::MAX,
+            &line_control,
+        );
+        if !matches!(
+            line_match,
+            Err(IndexWorkFailure::Cancelled {
+                stage: IndexWorkStage::TextIndex
+            })
+        ) {
+            return Err(io::Error::other("in-memory line matching ignored cancellation").into());
+        }
+
+        let maximum_pattern = "a".repeat(SEARCH_MAX_PATTERN_BYTES);
+        search_indexed_files_with_control(
+            &store,
+            &SearchQuery {
+                pattern: &maximum_pattern,
+                regex: false,
+                limit: 0,
+                ..query
+            },
+            None,
+        )?;
+        let oversized_pattern = "a".repeat(SEARCH_MAX_PATTERN_BYTES + 1);
+        if !matches!(
+            search_indexed_files_with_control(
+                &store,
+                &SearchQuery {
+                    pattern: &oversized_pattern,
+                    regex: false,
+                    limit: 0,
+                    ..query
+                },
+                None,
+            ),
+            Err(ServiceError::InvalidInput(_))
+        ) {
+            return Err(io::Error::other("oversized search pattern was accepted").into());
+        }
+        let maximum_file_pattern = "a".repeat(SEARCH_MAX_FILE_PATTERN_BYTES);
+        search_indexed_files_with_control(
+            &store,
+            &SearchQuery {
+                pattern: "needle",
+                regex: false,
+                file_pattern: Some(&maximum_file_pattern),
+                limit: 0,
+                ..query
+            },
+            None,
+        )?;
+        let oversized_file_pattern = "a".repeat(SEARCH_MAX_FILE_PATTERN_BYTES + 1);
+        if !matches!(
+            search_indexed_files_with_control(
+                &store,
+                &SearchQuery {
+                    pattern: "needle",
+                    regex: false,
+                    file_pattern: Some(&oversized_file_pattern),
+                    limit: 0,
+                    ..query
+                },
+                None,
+            ),
+            Err(ServiceError::InvalidInput(_))
+        ) {
+            return Err(io::Error::other("oversized search file pattern was accepted").into());
+        }
+
+        let unavailable = search_indexed_files_with_control(
+            &store,
+            &SearchQuery {
+                retrieval_mode: SearchRetrievalMode::Semantic,
+                ..query
+            },
+            None,
+        );
+        if !matches!(
+            unavailable,
+            Err(ServiceError::SearchCapabilityUnavailable {
+                requested_mode: SearchRetrievalMode::Semantic,
+                state: SEARCH_SEMANTIC_UNAVAILABLE_STATE,
+                guidance: SEARCH_SEMANTIC_RECOVERY,
+            })
+        ) {
+            return Err(io::Error::other("semantic unavailable state was not typed").into());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn file_glob_filter_matches_repository_paths() -> Result<(), Box<dyn Error>> {
         let nodes = vec![
             test_indexed_node("src/a.rs", "hash-a"),
@@ -3189,6 +5460,23 @@ mod tests {
         require_reason(&ranked[0].reasons, "symbol install_runtime matched install")?;
         require_reason(&ranked[0].reasons, "indexed text matched hiddenneedle")?;
         require_reason(&ranked[0].reasons, "paired test file tests/installer.rs")?;
+        require_eq(
+            &ranked[0]
+                .reason_codes
+                .contains(&RankedReasonCode::ReviewedPurpose),
+            &true,
+            "reviewed purpose reason code",
+        )?;
+        require_eq(
+            &ranked[0].connection_counts,
+            &Vec::new(),
+            "deterministic no-graph fallback counts",
+        )?;
+        require_eq(
+            &ranked[0].next_call.capability,
+            &NavigationNextCapability::Summary,
+            "no-graph fallback next call",
+        )?;
         if !ranked.iter().any(|node| {
             node.node.node.path == "tests/installer.rs"
                 && node
@@ -3198,6 +5486,149 @@ mod tests {
         }) {
             return Err(io::Error::other("paired test result/reason was missing").into());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn ranked_evidence_keeps_reviewed_purpose_ahead_of_bounded_graph_popularity()
+    -> Result<(), Box<dyn Error>> {
+        let store = AtlasStore::in_memory()?;
+        let mut popular = test_indexed_node("src/popular.rs", "popular-hash");
+        popular.purpose = Purpose {
+            path: popular.node.path.clone(),
+            purpose: Some("generated auth suggestion".to_string()),
+            source: PurposeSource::Generated,
+            status: PurposeStatus::Suggested,
+        };
+        popular.summary = None;
+        let counts = [
+            RankedConnectionKind::Package,
+            RankedConnectionKind::Import,
+            RankedConnectionKind::Call,
+            RankedConnectionKind::Reference,
+            RankedConnectionKind::Test,
+            RankedConnectionKind::Route,
+            RankedConnectionKind::Config,
+        ]
+        .into_iter()
+        .map(|kind| projectatlas_core::RankedConnectionCount {
+            kind,
+            count: RANKED_CONNECTION_FAMILY_LIMIT as usize,
+            truncated: true,
+        })
+        .collect::<Vec<_>>();
+        let popular_connections = RepositoryNavigationConnections {
+            path: popular.node.path.clone(),
+            counts,
+            connections: vec![projectatlas_core::RankedConnection {
+                kind: RankedConnectionKind::Call,
+                direction: projectatlas_core::RankedConnectionDirection::Inbound,
+                target: RankedConnectionTarget::Local {
+                    path: "src/auth.rs".to_string(),
+                    symbol: Some("authenticate".to_string()),
+                },
+            }],
+            truncated: true,
+        };
+        let popular_evidence = ranked_node_evidence(
+            &store,
+            &popular,
+            &["auth".to_string()],
+            "",
+            &HashSet::new(),
+            &popular_connections,
+        )?;
+        require_eq(
+            &popular_evidence.reviewed_purpose,
+            &false,
+            "generated purpose authority",
+        )?;
+        if popular_evidence.context_score > 32 {
+            return Err(io::Error::other("graph popularity was not saturated").into());
+        }
+
+        let mut reviewed = test_indexed_node("src/responsibility.rs", "reviewed-hash");
+        reviewed.purpose.purpose = Some("Own auth responsibility".to_string());
+        reviewed.summary = None;
+        let reviewed_evidence = ranked_node_evidence(
+            &store,
+            &reviewed,
+            &["auth".to_string()],
+            "",
+            &HashSet::new(),
+            &RepositoryNavigationConnections {
+                path: reviewed.node.path.clone(),
+                counts: Vec::new(),
+                connections: Vec::new(),
+                truncated: false,
+            },
+        )?;
+        require_eq(
+            &reviewed_evidence.reviewed_purpose,
+            &true,
+            "reviewed purpose tier",
+        )?;
+        require_eq(
+            &ranked_evidence_order(&reviewed_evidence, &popular_evidence),
+            &std::cmp::Ordering::Less,
+            "reviewed purpose dominance",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn ranked_service_preserves_dominant_tiers_across_more_than_one_hundred_weaker_matches()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let mut nodes = vec![
+            test_node("needle", "hash-exact"),
+            test_node("deep/needle", "hash-name"),
+            test_node("reviewed.rs", "hash-reviewed"),
+        ];
+        nodes
+            .extend((0..130).map(|index| test_node(&format!("weak/needle-{index:03}.rs"), "hash")));
+        store.replace_scan(&nodes)?;
+        store.set_purpose(
+            "reviewed.rs",
+            "Own needle responsibility",
+            PurposeSource::Agent,
+        )?;
+        for index in 0..130 {
+            let path = format!("weak/needle-{index:03}.rs");
+            store.set_suggested_purpose(&path, "Generated needle suggestion")?;
+            store.set_node_summary(&path, "Observed needle summary")?;
+        }
+
+        let ranked = load_ranked_file_nodes_with_reasons(&store, "needle", None, None, 3, false)?;
+        require_eq(
+            &ranked
+                .iter()
+                .map(|node| node.node.node.path.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["needle", "deep/needle", "reviewed.rs"],
+            "service exact path basename and reviewed-purpose order",
+        )?;
+        require_eq(
+            &ranked[0]
+                .reason_codes
+                .contains(&RankedReasonCode::ExactPath),
+            &true,
+            "exact path reason code",
+        )?;
+        require_eq(
+            &ranked[1]
+                .reason_codes
+                .contains(&RankedReasonCode::ExactName),
+            &true,
+            "exact basename reason code",
+        )?;
+        require_eq(
+            &ranked[2]
+                .reason_codes
+                .contains(&RankedReasonCode::ReviewedPurpose),
+            &true,
+            "reviewed purpose reason code after adversarial admission",
+        )?;
         Ok(())
     }
 
@@ -3247,10 +5678,12 @@ mod tests {
         store.replace_scan(&[test_node("src/lib.rs", "hash-lib")])?;
         let mut a_run = test_symbol("src/lib.rs", SymbolKind::Method, "run");
         a_run.parent = Some("A".to_string());
+        a_run.signature = "fn run(&self) for A".to_string();
         a_run.line_start = 3;
         a_run.line_end = 5;
         let mut b_run = test_symbol("src/lib.rs", SymbolKind::Method, "run");
         b_run.parent = Some("B".to_string());
+        b_run.signature = "fn run(&self) for B".to_string();
         b_run.line_start = 9;
         b_run.line_end = 11;
         store.replace_symbol_graph(&SymbolGraph {
@@ -3287,6 +5720,82 @@ mod tests {
         )?;
         if !slice.content.contains("b();") || slice.content.contains("a();") {
             return Err(io::Error::other("parent selector returned wrong symbol slice").into());
+        }
+        let signature_slice = read_symbol_slice(
+            &store,
+            Path::new("src/lib.rs"),
+            &SymbolSliceSelector {
+                name: "run",
+                signature: Some("fn run(&self) for A"),
+                ..SymbolSliceSelector::default()
+            },
+        )?;
+        if !signature_slice.content.contains("a();") || signature_slice.content.contains("b();") {
+            return Err(io::Error::other("signature selector returned wrong symbol slice").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn code_slice_budget_preserves_verbatim_utf8_and_rejects_oversized_output()
+    -> Result<(), Box<dyn Error>> {
+        let source = "fn café() {\r\n    println!(\"λ\");\r\n}\r\n";
+        let budget = CodeSliceBudget::new(512)?;
+        let slice = read_code_slice(source, "src/lib.rs", 1, Some(3), budget)?;
+        require_eq(
+            &slice.slice().content,
+            &source
+                .strip_suffix("\r\n")
+                .ok_or_else(|| io::Error::other("CRLF fixture terminator missing"))?
+                .to_string(),
+            "verbatim UTF-8 slice",
+        )?;
+        let encoded = slice.fit_output::<_, ServiceError, _>(|slice| {
+            serde_json::to_vec(slice).map_err(ServiceError::from)
+        })?;
+        if encoded.len() > budget.output_bytes() as usize {
+            return Err(io::Error::other(
+                "accepted slice exceeded its exact encoded-output ceiling",
+            )
+            .into());
+        }
+        let payload: serde_json::Value = serde_json::from_slice(&encoded)?;
+        if payload.get("output_budget").is_some() {
+            return Err(io::Error::other(
+                "additive slice budget changed the compatibility payload",
+            )
+            .into());
+        }
+
+        let content_error =
+            read_code_slice(source, "src/lib.rs", 1, Some(3), CodeSliceBudget::new(8)?);
+        if !matches!(
+            content_error,
+            Err(ServiceError::InvalidInput(message))
+                if message.contains("verbatim slice content exceeds")
+        ) {
+            return Err(io::Error::other(
+                "oversized verbatim slice content was allocated or truncated",
+            )
+            .into());
+        }
+
+        let envelope_budget = CodeSliceBudget::new(64)?;
+        let envelope = read_code_slice("λ", "src/lib.rs", 1, Some(1), envelope_budget)?;
+        let envelope_error = envelope.fit_output::<_, ServiceError, _>(|slice| {
+            serde_json::to_vec(slice).map_err(ServiceError::from)
+        });
+        if !matches!(
+            envelope_error,
+            Err(ServiceError::InvalidInput(message))
+                if message.contains("slice output exceeds")
+        ) {
+            return Err(io::Error::other("oversized encoded slice envelope was accepted").into());
+        }
+        if CodeSliceBudget::new(0).is_ok()
+            || CodeSliceBudget::new(GraphLimits::MAX_OUTPUT_BYTES + 1).is_ok()
+        {
+            return Err(io::Error::other("invalid slice output ceilings were accepted").into());
         }
         Ok(())
     }

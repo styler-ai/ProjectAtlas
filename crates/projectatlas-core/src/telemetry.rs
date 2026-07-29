@@ -2,7 +2,8 @@
 
 use crate::outline::estimate_tokens;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
+use thiserror::Error;
 
 /// Token overview counting mode.
 pub const TOKEN_ESTIMATE_KIND: &str = "heuristic";
@@ -74,10 +75,138 @@ pub const TOKEN_COMMAND_MCP_SLICE: &str = "mcp.atlas_slice";
 /// MCP event label for indexed search.
 pub const TOKEN_COMMAND_MCP_SEARCH: &str = "mcp.atlas_search";
 
+/// Typed telemetry-domain validation failure.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum TelemetryContractError {
+    /// The all-zero durable runtime identifier is reserved.
+    #[error("the zero usage instance identifier is reserved")]
+    ZeroUsageInstanceId,
+}
+
+/// One bounded CLI invocation or MCP process inside an authoritative project database.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct UsageInstanceId([u8; 16]);
+
+impl UsageInstanceId {
+    /// Construct an identity from its durable 16-byte representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for the reserved all-zero value.
+    pub fn from_bytes(bytes: [u8; 16]) -> Result<Self, TelemetryContractError> {
+        if bytes == [0; 16] {
+            return Err(TelemetryContractError::ZeroUsageInstanceId);
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Return the durable 16-byte representation.
+    #[must_use]
+    pub const fn as_bytes(self) -> [u8; 16] {
+        self.0
+    }
+}
+
+/// Runtime owner of one internal telemetry instance.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageInstanceOwner {
+    /// One short-lived command-line invocation.
+    CliInvocation,
+    /// One long-lived MCP server process.
+    McpProcess,
+    /// One direct database-library handle retained for API compatibility.
+    LibraryHandle,
+    /// Historical rows compacted during a supported migration.
+    MigratedLegacy,
+}
+
+impl UsageInstanceOwner {
+    /// Return the stable `SQLite` representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CliInvocation => "cli_invocation",
+            Self::McpProcess => "mcp_process",
+            Self::LibraryHandle => "library_handle",
+            Self::MigratedLegacy => "migrated_legacy",
+        }
+    }
+
+    /// Parse the stable `SQLite` representation.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "cli_invocation" => Some(Self::CliInvocation),
+            "mcp_process" => Some(Self::McpProcess),
+            "library_handle" => Some(Self::LibraryHandle),
+            "migrated_legacy" => Some(Self::MigratedLegacy),
+            _ => None,
+        }
+    }
+}
+
+/// Truth state for caller-label and raw telemetry detail.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageDetailAvailability {
+    /// Aggregate and retained recent detail are complete for the requested scope.
+    Retained,
+    /// Numeric aggregates remain available but some detail or dimensions were compacted.
+    Partial,
+    /// A bounded tombstone proves the requested label existed but its report expired.
+    Expired,
+    /// No retained aggregate or tombstone can establish the requested scope.
+    #[default]
+    Unavailable,
+}
+
+impl UsageDetailAvailability {
+    /// Return the stable serialized label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Retained => "retained",
+            Self::Partial => "partial",
+            Self::Expired => "expired",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    /// Parse the stable `SQLite` representation.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "retained" => Some(Self::Retained),
+            "partial" => Some(Self::Partial),
+            "expired" => Some(Self::Expired),
+            "unavailable" => Some(Self::Unavailable),
+            _ => None,
+        }
+    }
+}
+
+/// Wide separated accounting totals before narrowing to the public report representation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TokenAccountingTotals {
+    /// Observed before/after saved tokens.
+    pub measured_tokens_saved: i128,
+    /// Gross modeled avoided tokens before baseline deduplication.
+    pub gross_modeled_tokens_avoided: i128,
+    /// Modeled avoided tokens after runtime-instance baseline deduplication.
+    pub deduped_modeled_tokens_avoided: i128,
+    /// Number of repeated modeled baseline calls collapsed by deduplication.
+    pub repeated_baselines_deduped: u128,
+    /// Observed calls that replaced a whole-file read.
+    pub observed_file_read_replacements: u128,
+    /// Modeled navigation calls that likely avoided a whole-file read.
+    pub modeled_file_reads_avoided: u128,
+}
+
 /// Token savings event for a funnel command.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UsageEvent {
-    /// Session identifier.
+    /// Optional caller-visible compatibility label, distinct from runtime identity.
     pub session_id: String,
     /// Command or tool name.
     pub command: String,
@@ -197,6 +326,256 @@ pub struct TokenCalibrationOverview {
     pub heuristic_to_calibrated_ratio: Option<f64>,
 }
 
+/// Validation state for optional agent-efficiency benchmark evidence.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEfficiencyEvidenceState {
+    /// No benchmark artifact was requested.
+    #[default]
+    Unavailable,
+    /// The requested artifact could not be read or decoded safely.
+    Failed,
+    /// The artifact decoded but does not match the supported release contract.
+    Incompatible,
+    /// Some matched evidence is valid while retained failures remain explicit.
+    Partial,
+    /// All required candidate and baseline trials matched successfully.
+    Compatible,
+}
+
+impl AgentEfficiencyEvidenceState {
+    /// Return the stable serialized label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::Failed => "failed",
+            Self::Incompatible => "incompatible",
+            Self::Partial => "partial",
+            Self::Compatible => "compatible",
+        }
+    }
+}
+
+/// Baseline arm compared with the `v0.4` candidate.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEfficiencyBaseline {
+    /// Frozen `ProjectAtlas` `v0.3.26` runtime and packaged skill.
+    FrozenProjectAtlasV0326,
+    /// Codex navigation without `ProjectAtlas`.
+    PlainCodex,
+}
+
+/// Identity retained from one validated benchmark artifact.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentEfficiencyArtifactIdentity {
+    /// Supported benchmark schema version.
+    pub schema_version: u32,
+    /// Digest algorithm used for `artifact_digest`.
+    pub artifact_digest_kind: String,
+    /// Digest of the exact validated artifact bytes.
+    pub artifact_digest: String,
+    /// Candidate runtime semantic version.
+    pub candidate_version: String,
+    /// Candidate runtime SHA-256 identity.
+    pub candidate_runtime_sha256: String,
+    /// Descriptive source checkout commit recorded by the benchmark.
+    #[serde(default)]
+    pub candidate_source_head: String,
+    /// Compatibility identity key; descriptive only and mirrors `candidate_source_head`.
+    #[serde(default)]
+    pub candidate_functional_head: String,
+    /// Compatibility identity key; descriptive only and mirrors `candidate_source_head`.
+    #[serde(default)]
+    pub candidate_checklist_head: String,
+    /// Frozen `ProjectAtlas` runtime semantic version.
+    pub frozen_version: String,
+    /// Frozen `ProjectAtlas` runtime `SHA-256` identity.
+    pub frozen_runtime_sha256: String,
+}
+
+/// Closed navigation metric projected from matched benchmark trials.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEfficiencyMetricKind {
+    /// All tool calls made by the agent.
+    TotalToolCalls,
+    /// Calls made through the `ProjectAtlas` MCP server.
+    ProjectAtlasCalls,
+    /// Productive folder selections.
+    ProductiveFolders,
+    /// Productive file selections.
+    ProductiveFiles,
+    /// Productive relation selections.
+    ProductiveRelations,
+    /// Wrong folder selections.
+    WrongFolders,
+    /// Wrong file selections.
+    WrongFiles,
+    /// Wrong relation selections.
+    WrongRelations,
+    /// Broad source reads.
+    BroadReads,
+    /// Full source-file reads.
+    FullReads,
+    /// Navigation backtracks.
+    Backtracks,
+    /// Gross navigation-context bytes.
+    GrossNavigationBytes,
+    /// Net navigation-context bytes including setup material.
+    NetNavigationBytes,
+    /// Gross navigation-context heuristic tokens.
+    GrossNavigationTokens,
+    /// Net navigation-context heuristic tokens including setup material.
+    NetNavigationTokens,
+    /// Candidate setup wall time.
+    SetupWallSeconds,
+    /// Per-task runtime wall time after setup.
+    RuntimeWallSeconds,
+    /// Persistent bytes retained after the trial.
+    PersistentBytes,
+}
+
+/// Candidate and baseline distribution summary for one navigation metric.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AgentEfficiencyMetricComparison {
+    /// Metric represented by this row.
+    pub metric: AgentEfficiencyMetricKind,
+    /// Median across matched candidate trials.
+    pub candidate_median: f64,
+    /// Median across matched baseline trials.
+    pub baseline_median: f64,
+    /// Observed maximum across matched candidate trials.
+    pub candidate_maximum: f64,
+    /// Observed maximum across matched baseline trials.
+    pub baseline_maximum: f64,
+    /// Lower-is-better median percentage saving, absent for a zero denominator.
+    pub median_percent_saving: Option<f64>,
+}
+
+/// Workload-specific setup/runtime break-even truth.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentEfficiencyBreakEven {
+    /// Validated benchmark workload name.
+    pub workload: String,
+    /// Tasks required to repay setup wall time, or `None` when no positive saving exists.
+    pub wall_time_tasks: Option<u64>,
+}
+
+/// Provider counter represented only as descriptive benchmark context.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEfficiencyProviderMetricKind {
+    /// Provider input-token counter.
+    InputTokens,
+    /// Provider cached-input-token counter.
+    CachedInputTokens,
+    /// Provider cache-write input-token counter.
+    CacheWriteInputTokens,
+    /// Provider output-token counter.
+    OutputTokens,
+    /// Provider reasoning-output-token counter.
+    ReasoningOutputTokens,
+}
+
+/// Descriptive-only candidate and baseline provider counter.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AgentEfficiencyProviderMetric {
+    /// Provider counter represented by this row.
+    pub metric: AgentEfficiencyProviderMetricKind,
+    /// Candidate median reported by the provider.
+    pub candidate_median: f64,
+    /// Baseline median reported by the provider.
+    pub baseline_median: f64,
+    /// Candidate observed maximum reported by the provider.
+    pub candidate_maximum: f64,
+    /// Baseline observed maximum reported by the provider.
+    pub baseline_maximum: f64,
+    /// Always false because provider counters do not prove navigation causality.
+    pub causal_attribution: bool,
+}
+
+/// One matched baseline comparison projected from the benchmark artifact.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AgentEfficiencyBaselineRow {
+    /// Compared baseline arm.
+    pub baseline: AgentEfficiencyBaseline,
+    /// Evidence state for this baseline.
+    pub state: AgentEfficiencyEvidenceState,
+    /// Candidate and baseline trials that completed the same workload and repeat.
+    pub matched_trials: usize,
+    /// Failed candidate trials retained outside matched denominators.
+    pub candidate_failed_trials: usize,
+    /// Failed baseline trials retained outside matched denominators.
+    pub baseline_failed_trials: usize,
+    /// Completed trials without a completed counterpart.
+    pub unmatched_trials: usize,
+    /// Bounded matched navigation distributions.
+    pub metrics: Vec<AgentEfficiencyMetricComparison>,
+    /// Workload-specific setup/runtime break-even truth.
+    pub break_even: Vec<AgentEfficiencyBreakEven>,
+    /// Provider counters retained as descriptive-only context.
+    pub provider_usage_descriptive_only: Vec<AgentEfficiencyProviderMetric>,
+}
+
+/// Durable `ProjectAtlas` navigation capability represented in the benchmark.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEfficiencyCapability {
+    /// Initial project, purpose, and connection discovery.
+    Discovery,
+    /// Summary, outline, and exact-slice compression.
+    SummaryAndSlice,
+    /// Lexical search narrowing.
+    Search,
+    /// Symbol and relation navigation.
+    SymbolsAndRelations,
+    /// Trace-completed `ProjectAtlas` calls outside the supported named groups.
+    Other,
+}
+
+/// Trace-completed `v0.4` MCP calls grouped by navigation responsibility.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentEfficiencyCapabilityContribution {
+    /// Capability responsibility represented by this row.
+    pub capability: AgentEfficiencyCapability,
+    /// Trace-completed `ProjectAtlas` MCP calls.
+    pub calls: usize,
+    /// Bytes emitted by those MCP calls.
+    pub emitted_bytes: u64,
+}
+
+/// Optional controlled benchmark comparison attached to live token telemetry.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AgentEfficiencyComparison {
+    /// Overall evidence state.
+    pub state: AgentEfficiencyEvidenceState,
+    /// Bounded explanation for unavailable, failed, incompatible, or partial evidence.
+    pub reason: Option<String>,
+    /// Validated artifact and runtime identity.
+    pub artifact: Option<AgentEfficiencyArtifactIdentity>,
+    /// Frozen-v0.3.26 and plain-control rows.
+    pub baselines: Vec<AgentEfficiencyBaselineRow>,
+    /// Trace-completed candidate MCP calls grouped without causal token attribution.
+    pub capabilities: Vec<AgentEfficiencyCapabilityContribution>,
+    /// Whether provider counters are explicitly non-causal.
+    pub provider_counters_descriptive_only: bool,
+}
+
+impl Default for AgentEfficiencyComparison {
+    fn default() -> Self {
+        Self {
+            state: AgentEfficiencyEvidenceState::Unavailable,
+            reason: Some("benchmark artifact not supplied".to_string()),
+            artifact: None,
+            baselines: Vec::new(),
+            capabilities: Vec::new(),
+            provider_counters_descriptive_only: true,
+        }
+    }
+}
+
 /// Token savings overview.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TokenOverview {
@@ -247,6 +626,12 @@ pub struct TokenOverview {
     pub read_avoidance_confidence: String,
     /// Optional local tokenizer calibration for indexed UTF-8 files.
     pub calibration: Option<TokenCalibrationOverview>,
+    /// Availability of caller-label and retained raw detail for this report.
+    #[serde(default)]
+    pub detail_availability: UsageDetailAvailability,
+    /// Optional validated controlled benchmark evidence kept separate from live accounting.
+    #[serde(default)]
+    pub agent_efficiency: AgentEfficiencyComparison,
 }
 
 /// Token trend grouping window.
@@ -322,12 +707,118 @@ pub struct TokenTrendReport {
     pub estimator: String,
     /// Scope and accuracy boundary for the reported numbers.
     pub estimate_scope: String,
-    /// Optional session filter.
+    /// Optional caller-visible compatibility-label filter.
     pub session: Option<String>,
     /// Grouping window.
     pub window: TokenTrendWindow,
     /// Period aggregates ordered oldest to newest.
     pub periods: Vec<TokenTrendPeriod>,
+    /// Availability of the requested retained trend scope.
+    #[serde(default)]
+    pub detail_availability: UsageDetailAvailability,
+}
+
+impl UsageEvent {
+    /// Return whether this event represents an observed before/after source comparison.
+    #[must_use]
+    pub fn is_observed(&self) -> bool {
+        is_observed_event(self)
+    }
+
+    /// Return whether this event represents modeled navigation avoidance.
+    #[must_use]
+    pub fn is_modeled(&self) -> bool {
+        is_modeled_event(self)
+    }
+
+    /// Return whether this observed event is strong whole-file replacement evidence.
+    #[must_use]
+    pub fn is_observed_file_read_replacement(&self, baseline_tokens: usize) -> bool {
+        is_observed_read_replacement_event(self, baseline_tokens)
+    }
+
+    /// Return whether this modeled event is strong whole-file avoidance evidence.
+    #[must_use]
+    pub fn is_modeled_file_read_avoidance(&self, baseline_tokens: usize) -> bool {
+        is_modeled_read_avoidance_event(self, baseline_tokens)
+    }
+
+    /// Return the normalized accounting layer used by bucket reports.
+    #[must_use]
+    pub fn report_accounting_layer(&self) -> &str {
+        if self.is_observed() {
+            TOKEN_ACCOUNTING_OBSERVED_DELTA
+        } else {
+            &self.accounting_layer
+        }
+    }
+
+    /// Return the normalized denominator used by bucket reports.
+    #[must_use]
+    pub fn report_denominator_kind(&self) -> &str {
+        if self.is_observed() {
+            TOKEN_BASELINE_FULL_FILE
+        } else {
+            &self.denominator_kind
+        }
+    }
+
+    /// Return the normalized deduplication scope used by bucket reports.
+    #[must_use]
+    pub fn report_dedupe_scope(&self) -> &str {
+        if self.is_observed() {
+            TOKEN_DEDUPE_SCOPE_EVENT
+        } else {
+            &self.dedupe_scope
+        }
+    }
+
+    /// Return the modeled baseline identity, including the legacy fallback.
+    #[must_use]
+    pub fn effective_baseline_identity(&self) -> Cow<'_, str> {
+        if self.baseline_identity.is_empty() {
+            Cow::Owned(default_baseline_identity(
+                &self.command,
+                self.path.as_deref(),
+                self.query.as_deref(),
+                &self.baseline_kind,
+            ))
+        } else {
+            Cow::Borrowed(&self.baseline_identity)
+        }
+    }
+
+    /// Return the modeled baseline fingerprint, including the legacy fallback.
+    #[must_use]
+    pub fn effective_baseline_fingerprint(&self) -> Cow<'_, str> {
+        if self.baseline_fingerprint.is_empty() {
+            self.effective_baseline_identity()
+        } else {
+            Cow::Borrowed(&self.baseline_fingerprint)
+        }
+    }
+
+    /// Return the fixed collision-resistant key for one modeled baseline witness.
+    #[must_use]
+    pub fn modeled_baseline_key(&self) -> [u8; 32] {
+        let identity = self.effective_baseline_identity();
+        let fingerprint = if self.baseline_fingerprint.is_empty() {
+            identity.as_ref()
+        } else {
+            self.baseline_fingerprint.as_str()
+        };
+        let mut hasher = blake3::Hasher::new();
+        for value in [
+            identity.as_ref(),
+            fingerprint,
+            self.denominator_kind.as_str(),
+        ] {
+            let bytes = value.as_bytes();
+            hasher.update(&(bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        }
+        *hasher.finalize().as_bytes()
+    }
 }
 
 impl TokenOverview {
@@ -420,6 +911,8 @@ impl TokenOverview {
             read_avoidance_scope: READ_AVOIDANCE_SCOPE.to_string(),
             read_avoidance_confidence: READ_AVOIDANCE_CONFIDENCE_NOT_RECORDED.to_string(),
             calibration: None,
+            detail_availability: UsageDetailAvailability::Retained,
+            agent_efficiency: AgentEfficiencyComparison::default(),
             buckets,
         }
     }
@@ -427,6 +920,43 @@ impl TokenOverview {
     /// Attach a local tokenizer calibration section.
     pub fn set_calibration(&mut self, calibration: TokenCalibrationOverview) {
         self.calibration = Some(calibration);
+    }
+
+    /// Attach one validated controlled benchmark comparison.
+    pub fn set_agent_efficiency(&mut self, comparison: AgentEfficiencyComparison) {
+        self.agent_efficiency = comparison;
+    }
+
+    /// Apply exact separated accounting totals loaded from durable aggregates.
+    pub fn apply_accounting_totals(&mut self, totals: TokenAccountingTotals) {
+        self.measured_tokens_saved = saturating_i128_to_isize(totals.measured_tokens_saved);
+        self.gross_modeled_tokens_avoided =
+            saturating_i128_to_isize(totals.gross_modeled_tokens_avoided);
+        self.deduped_modeled_tokens_avoided =
+            saturating_i128_to_isize(totals.deduped_modeled_tokens_avoided);
+        self.tokens_avoided = saturating_isize_add(
+            self.measured_tokens_saved,
+            self.deduped_modeled_tokens_avoided,
+        );
+        self.repeated_baselines_deduped =
+            saturating_u128_to_usize(totals.repeated_baselines_deduped);
+        self.observed_file_read_replacements =
+            saturating_u128_to_usize(totals.observed_file_read_replacements);
+        self.modeled_file_reads_avoided =
+            saturating_u128_to_usize(totals.modeled_file_reads_avoided);
+        self.likely_file_reads_avoided = self
+            .observed_file_read_replacements
+            .saturating_add(self.modeled_file_reads_avoided);
+        self.read_avoidance_confidence = read_avoidance_confidence_for(
+            self.observed_file_read_replacements,
+            self.modeled_file_reads_avoided,
+        )
+        .to_string();
+    }
+
+    /// Set the truth state for caller-label and retained raw detail.
+    pub const fn set_detail_availability(&mut self, availability: UsageDetailAvailability) {
+        self.detail_availability = availability;
     }
 
     /// Apply separated measured/modeled accounting totals from raw usage events.
@@ -563,7 +1093,13 @@ impl TokenTrendReport {
             session,
             window,
             periods,
+            detail_availability: UsageDetailAvailability::Retained,
         }
+    }
+
+    /// Set the truth state for the requested retained trend scope.
+    pub const fn set_detail_availability(&mut self, availability: UsageDetailAvailability) {
+        self.detail_availability = availability;
     }
 }
 
@@ -1071,6 +1607,17 @@ fn saturating_u128_to_usize(value: u128) -> usize {
     }
 }
 
+/// Convert a wide signed aggregate to `isize` with saturation.
+fn saturating_i128_to_isize(value: i128) -> isize {
+    if value > isize::MAX as i128 {
+        isize::MAX
+    } else if value < isize::MIN as i128 {
+        isize::MIN
+    } else {
+        value as isize
+    }
+}
+
 /// Add signed token totals without overflowing.
 fn saturating_isize_add(left: isize, right: isize) -> isize {
     left.saturating_add(right)
@@ -1162,12 +1709,223 @@ fn is_modeled_bucket(bucket: &TokenBucketOverview) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        READ_AVOIDANCE_CONFIDENCE_MODELED, READ_AVOIDANCE_CONFIDENCE_NOT_RECORDED,
-        READ_AVOIDANCE_CONFIDENCE_OBSERVED, READ_AVOIDANCE_SCOPE,
-        TOKEN_BUCKET_FULL_FILE_COMPRESSION, TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_ESTIMATE_KIND,
-        TOKEN_ESTIMATE_SCOPE, TOKEN_ESTIMATOR, TokenOverview, usage_from_estimates,
-        usage_from_text,
+        AgentEfficiencyEvidenceState, READ_AVOIDANCE_CONFIDENCE_MODELED,
+        READ_AVOIDANCE_CONFIDENCE_NOT_RECORDED, READ_AVOIDANCE_CONFIDENCE_OBSERVED,
+        READ_AVOIDANCE_SCOPE, TOKEN_BUCKET_FULL_FILE_COMPRESSION,
+        TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_ESTIMATE_KIND, TOKEN_ESTIMATE_SCOPE,
+        TOKEN_ESTIMATOR, TelemetryContractError, TokenAccountingTotals, TokenOverview,
+        TokenTrendReport, TokenTrendWindow, UsageDetailAvailability, UsageInstanceId,
+        UsageInstanceOwner, usage_from_estimates, usage_from_text,
     };
+    use std::io;
+
+    fn require_eq<T: std::fmt::Debug + PartialEq>(
+        actual: &T,
+        expected: &T,
+        label: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "{label} mismatch: expected {expected:?}, got {actual:?}"
+            ))
+            .into())
+        }
+    }
+
+    #[test]
+    fn usage_instance_ids_validate_and_round_trip() {
+        let bytes = [7; 16];
+        let identity = UsageInstanceId::from_bytes(bytes);
+        assert_eq!(identity.map(UsageInstanceId::as_bytes), Ok(bytes));
+        assert_eq!(
+            UsageInstanceId::from_bytes([0; 16]),
+            Err(TelemetryContractError::ZeroUsageInstanceId)
+        );
+    }
+
+    #[test]
+    fn usage_states_parse_and_missing_report_state_fails_honest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (value, expected) in [
+            ("cli_invocation", UsageInstanceOwner::CliInvocation),
+            ("mcp_process", UsageInstanceOwner::McpProcess),
+            ("library_handle", UsageInstanceOwner::LibraryHandle),
+            ("migrated_legacy", UsageInstanceOwner::MigratedLegacy),
+        ] {
+            require_eq(
+                &UsageInstanceOwner::parse(value),
+                &Some(expected),
+                "usage instance owner parse",
+            )?;
+            require_eq(&expected.as_str(), &value, "usage instance owner encoding")?;
+        }
+        require_eq(
+            &UsageInstanceOwner::parse("unknown"),
+            &None,
+            "unknown usage instance owner",
+        )?;
+
+        for (value, expected) in [
+            ("retained", UsageDetailAvailability::Retained),
+            ("partial", UsageDetailAvailability::Partial),
+            ("expired", UsageDetailAvailability::Expired),
+            ("unavailable", UsageDetailAvailability::Unavailable),
+        ] {
+            require_eq(
+                &UsageDetailAvailability::parse(value),
+                &Some(expected),
+                "detail availability parse",
+            )?;
+            require_eq(&expected.as_str(), &value, "detail availability encoding")?;
+        }
+        require_eq(
+            &UsageDetailAvailability::parse("unknown"),
+            &None,
+            "unknown detail availability",
+        )?;
+        require_eq(
+            &UsageDetailAvailability::default(),
+            &UsageDetailAvailability::Unavailable,
+            "default detail availability",
+        )?;
+
+        let overview = TokenOverview::from_events(&[]);
+        require_eq(
+            &overview.detail_availability,
+            &UsageDetailAvailability::Retained,
+            "new overview detail availability",
+        )?;
+        let mut overview_value = serde_json::to_value(overview)?;
+        let overview_object = overview_value
+            .as_object_mut()
+            .ok_or_else(|| io::Error::other("serialized token overview was not an object"))?;
+        overview_object.remove("detail_availability");
+        overview_object.remove("agent_efficiency");
+        let decoded_overview: TokenOverview = serde_json::from_value(overview_value)?;
+        require_eq(
+            &decoded_overview.detail_availability,
+            &UsageDetailAvailability::Unavailable,
+            "missing overview detail availability",
+        )?;
+        require_eq(
+            &decoded_overview.agent_efficiency.state,
+            &AgentEfficiencyEvidenceState::Unavailable,
+            "missing agent-efficiency evidence state",
+        )?;
+        require_eq(
+            &decoded_overview.agent_efficiency.baselines,
+            &Vec::new(),
+            "missing agent-efficiency baseline rows",
+        )?;
+        require_eq(
+            &AgentEfficiencyEvidenceState::Partial.as_str(),
+            &"partial",
+            "agent-efficiency evidence encoding",
+        )?;
+
+        let trends = TokenTrendReport::new(None, TokenTrendWindow::Day, Vec::new());
+        require_eq(
+            &trends.detail_availability,
+            &UsageDetailAvailability::Retained,
+            "new trend detail availability",
+        )?;
+        let mut trends_value = serde_json::to_value(trends)?;
+        let trends_object = trends_value
+            .as_object_mut()
+            .ok_or_else(|| io::Error::other("serialized token trends were not an object"))?;
+        trends_object.remove("detail_availability");
+        let decoded_trends: TokenTrendReport = serde_json::from_value(trends_value)?;
+        require_eq(
+            &decoded_trends.detail_availability,
+            &UsageDetailAvailability::Unavailable,
+            "missing trend detail availability",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn modeled_baseline_keys_preserve_legacy_fallback_and_component_boundaries() {
+        let event = usage_from_estimates(
+            "session",
+            "search",
+            Some("src/lib.rs".to_string()),
+            Some("needle".to_string()),
+            100,
+            20,
+        );
+        let expected_key = event.modeled_baseline_key();
+        assert_eq!(
+            event.effective_baseline_identity().as_ref(),
+            event.baseline_identity
+        );
+        assert_eq!(
+            event.effective_baseline_fingerprint().as_ref(),
+            event.baseline_fingerprint
+        );
+
+        let mut legacy = event.clone();
+        legacy.baseline_identity.clear();
+        legacy.baseline_fingerprint.clear();
+        assert_eq!(legacy.modeled_baseline_key(), expected_key);
+
+        let mut changed_fingerprint = event.clone();
+        changed_fingerprint
+            .baseline_fingerprint
+            .push_str("-changed");
+        assert_ne!(changed_fingerprint.modeled_baseline_key(), expected_key);
+
+        let mut left = event.clone();
+        left.baseline_identity = "ab".to_string();
+        left.baseline_fingerprint = "c".to_string();
+        let mut right = event;
+        right.baseline_identity = "a".to_string();
+        right.baseline_fingerprint = "bc".to_string();
+        assert_ne!(left.modeled_baseline_key(), right.modeled_baseline_key());
+    }
+
+    #[test]
+    fn wide_accounting_totals_narrow_only_at_the_report_boundary() {
+        let mut overview = TokenOverview::from_events(&[]);
+        overview.apply_accounting_totals(TokenAccountingTotals {
+            measured_tokens_saved: 7,
+            gross_modeled_tokens_avoided: 100,
+            deduped_modeled_tokens_avoided: 30,
+            repeated_baselines_deduped: 2,
+            observed_file_read_replacements: 1,
+            modeled_file_reads_avoided: 3,
+        });
+        assert_eq!(overview.measured_tokens_saved, 7);
+        assert_eq!(overview.gross_modeled_tokens_avoided, 100);
+        assert_eq!(overview.deduped_modeled_tokens_avoided, 30);
+        assert_eq!(overview.tokens_avoided, 37);
+        assert_eq!(overview.repeated_baselines_deduped, 2);
+        assert_eq!(overview.observed_file_read_replacements, 1);
+        assert_eq!(overview.modeled_file_reads_avoided, 3);
+        assert_eq!(overview.likely_file_reads_avoided, 4);
+        assert_eq!(
+            overview.read_avoidance_confidence,
+            READ_AVOIDANCE_CONFIDENCE_MODELED
+        );
+
+        overview.apply_accounting_totals(TokenAccountingTotals {
+            measured_tokens_saved: i128::MAX,
+            gross_modeled_tokens_avoided: i128::MIN,
+            deduped_modeled_tokens_avoided: i128::MAX,
+            repeated_baselines_deduped: u128::MAX,
+            observed_file_read_replacements: u128::MAX,
+            modeled_file_reads_avoided: u128::MAX,
+        });
+        assert_eq!(overview.measured_tokens_saved, isize::MAX);
+        assert_eq!(overview.gross_modeled_tokens_avoided, isize::MIN);
+        assert_eq!(overview.deduped_modeled_tokens_avoided, isize::MAX);
+        assert_eq!(overview.tokens_avoided, isize::MAX);
+        assert_eq!(overview.repeated_baselines_deduped, usize::MAX);
+        assert_eq!(overview.observed_file_read_replacements, usize::MAX);
+        assert_eq!(overview.modeled_file_reads_avoided, usize::MAX);
+        assert_eq!(overview.likely_file_reads_avoided, usize::MAX);
+    }
 
     #[test]
     fn usage_from_text_tracks_positive_and_negative_savings() {

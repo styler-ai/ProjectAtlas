@@ -13,6 +13,15 @@ on:
         description: "Release version (e.g. v0.3.0)"
         required: true
         type: string
+      prepublish_only:
+        description: "Build, install, and test release packages without publishing"
+        required: false
+        default: false
+        type: boolean
+      parser_pack_run_id:
+        description: "Successful clean optional-parser-pack workflow run for this release tree"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -20,6 +29,7 @@ permissions:
 
 env:
   RELEASE_VERSION: ${{ inputs.version }}
+  RUSTUP_TOOLCHAIN: "1.93.1"
 
 jobs:
   verify:
@@ -27,20 +37,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal --component clippy,rustfmt
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.20.2
 
       - name: Format
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Check
         run: cargo check --workspace --all-targets --all-features --locked
@@ -48,21 +58,18 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-      - name: ProjectAtlas source lints
+      - name: Rust source contract lints
         timeout-minutes: 2
         run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 
       - name: Dependency policy
-        run: cargo deny check
+        run: cargo deny --locked --all-features check -D warnings
 
       - name: Tests
         run: cargo test --workspace --all-features --locked
 
-      - name: ProjectAtlas purpose lint levels
-        run: cargo test --locked -p projectatlas-cli lint_purpose_levels_require_agent_review_at_configured_scope --test e2e
-
-      - name: ProjectAtlas purpose preservation
-        run: cargo test --locked -p projectatlas-cli watch_once_preserves_unchanged_deep_summary_and_text_index --test e2e
+      - name: Filtered custom harness compatibility
+        run: cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled
 
       - name: Doc tests
         run: cargo test --doc --workspace --all-features --locked
@@ -75,6 +82,21 @@ jobs:
 
       - name: Issue checklist self-test
         run: python3 .github/scripts/issue-checklists.py --self-test
+
+      - name: Optional-parser proof-input unit test
+        run: python3 .github/scripts/test-optional-parser-proof-inputs.py
+
+      - name: Optional-parser release-asset self-test
+        run: python3 .github/scripts/verify-optional-parser-release-assets.py --self-test
+
+      - name: MCP composition integrity
+        run: python3 docs/benchmarks/harness/mcp_composition.py --self-test
+
+      - name: Manual-only full benchmark policy
+        run: python3 .github/scripts/verify-manual-benchmark-policy.py
+
+      - name: Published benchmark measurement locks
+        run: python3 .github/scripts/verify-published-benchmark-locks.py
 
       - name: Verify version
         run: |
@@ -99,24 +121,13 @@ jobs:
           fi
 
       - name: Release issue checklist gate
+        if: ${{ !inputs.prepublish_only }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 .github/scripts/issue-checklists.py \
             --repo "$GITHUB_REPOSITORY" \
             --milestone "${RELEASE_VERSION}-00"
-
-      - name: ProjectAtlas scan
-        run: cargo run --locked -p projectatlas-cli -- --format json scan .
-
-      - name: ProjectAtlas purpose review
-        run: cargo run --locked -p projectatlas-cli -- purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply
-
-      - name: ProjectAtlas parity
-        run: cargo run --locked -p projectatlas-cli -- parity report --profile repository-intelligence
-
-      - name: ProjectAtlas lint
-        run: cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level strict
 
   package-unix:
     name: package ${{ matrix.label }}
@@ -138,15 +149,26 @@ jobs:
             suffix: aarch64-apple-darwin
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Build
         run: cargo build --locked -p projectatlas-cli --release
+
+      - name: Build packaged contract runner
+        run: |
+          cargo test --locked --release -p projectatlas-cli --test e2e --no-run
+          contract="$(find target/release/deps -maxdepth 1 -type f -name 'e2e-*' -perm -111 -print -quit)"
+          if [[ -z "$contract" ]]; then
+            echo "Compiled packaged contract runner was not found" >&2
+            exit 1
+          fi
+          mkdir -p contract-artifacts
+          cp "$contract" contract-artifacts/projectatlas-packaged-contract
 
       - name: Package
         run: |
@@ -165,6 +187,13 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
 
+      - name: Upload packaged contract runner
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: packaged-contract-runner-${{ matrix.suffix }}
+          path: contract-artifacts/*
+          if-no-files-found: error
+
   package-windows:
     name: package windows-x64
     needs: verify
@@ -172,17 +201,28 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Rust
         shell: pwsh
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$env:RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$env:RUSTUP_TOOLCHAIN"
 
       - name: Build
         shell: pwsh
         run: cargo build --locked -p projectatlas-cli --release
+
+      - name: Build packaged contract runner
+        shell: pwsh
+        run: |
+          cargo test --locked --release -p projectatlas-cli --test e2e --no-run
+          $contracts = @(Get-ChildItem -LiteralPath "target\release\deps" -Filter "e2e-*.exe" -File)
+          if ($contracts.Count -ne 1) {
+            throw "Expected one compiled packaged contract runner, found $($contracts.Count)."
+          }
+          New-Item -ItemType Directory -Force -Path "contract-artifacts" | Out-Null
+          Copy-Item -LiteralPath $contracts[0].FullName -Destination "contract-artifacts\projectatlas-packaged-contract.exe"
 
       - name: Package
         shell: pwsh
@@ -207,6 +247,13 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
 
+      - name: Upload packaged contract runner
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: packaged-contract-runner-x86_64-pc-windows-msvc
+          path: contract-artifacts/*
+          if-no-files-found: error
+
   prepublish-installer-smoke-unix:
     name: prepublish installer smoke ${{ matrix.label }}
     needs: package-unix
@@ -226,13 +273,19 @@ jobs:
             suffix: aarch64-apple-darwin
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download packaged runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: projectatlas-${{ matrix.suffix }}
           path: release-assets
+
+      - name: Download packaged contract runner
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: packaged-contract-runner-${{ matrix.suffix }}
+          path: contract-artifacts
 
       - name: Install packaged runtime through plugin
         timeout-minutes: 5
@@ -291,6 +344,19 @@ jobs:
           require_args(command[1:])
           require(Path(opencode["cwd"]).resolve() == root, "opencode cwd mismatch")
           PY
+          chmod +x contract-artifacts/projectatlas-packaged-contract
+          PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
+          PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
+            contract-artifacts/projectatlas-packaged-contract \
+              mcp_advertised_tools_own_their_real_sqlite_effects --exact --nocapture
+          PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
+          PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
+            contract-artifacts/projectatlas-packaged-contract \
+              packaged_cli_surface_preserves_v0326_routes_and_defaults --exact --nocapture
+          PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
+          PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
+            contract-artifacts/projectatlas-packaged-contract \
+              packaged_cli_commands_own_their_real_sqlite_effects --exact --nocapture
 
   prepublish-installer-smoke-windows:
     name: prepublish installer smoke windows-x64
@@ -298,13 +364,19 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download packaged runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: projectatlas-x86_64-pc-windows-msvc
           path: release-assets
+
+      - name: Download packaged contract runner
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: packaged-contract-runner-x86_64-pc-windows-msvc
+          path: contract-artifacts
 
       - name: Install packaged runtime through plugin
         timeout-minutes: 5
@@ -371,10 +443,104 @@ jobs:
           Assert-Equal ([System.IO.Path]::GetFullPath($command[0])) $expectedRuntime "OpenCode command path mismatch"
           Assert-McpArgs @($command[1..($command.Count - 1)])
           Assert-Equal ([System.IO.Path]::GetFullPath($opencodeServer.cwd)) $expectedRoot "OpenCode cwd mismatch"
+          $env:PROJECTATLAS_MCP_CONTRACT_EXECUTABLE = $expectedRuntime
+          $env:PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT = [System.IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE "plugins\projectatlas"))
+          $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.exe"
+          & $contractRunner mcp_advertised_tools_own_their_real_sqlite_effects --exact --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged MCP contract failed with exit code $LASTEXITCODE."
+          }
+          & $contractRunner packaged_cli_surface_preserves_v0326_routes_and_defaults --exact --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged CLI surface contract failed with exit code $LASTEXITCODE."
+          }
+          & $contractRunner packaged_cli_commands_own_their_real_sqlite_effects --exact --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged CLI behavior contract failed with exit code $LASTEXITCODE."
+          }
+
+  parser-pack-assets:
+    name: optional-parser release assets
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PARSER_PACK_RUN_ID: ${{ inputs.parser_pack_run_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Bind clean handoff to these release inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$PARSER_PACK_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "parser_pack_run_id must be a positive workflow run id" >&2
+            exit 1
+          fi
+          run_json="$RUNNER_TEMP/parser-pack-run.json"
+          gh api \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$PARSER_PACK_RUN_ID" \
+            > "$run_json"
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            '
+              .repository.full_name == $repository
+              and .head_repository.full_name == $repository
+              and .path == ".github/workflows/optional-parser-pack.yml"
+              and .event == "workflow_dispatch"
+              and .status == "completed"
+              and .conclusion == "success"
+            ' \
+            "$run_json" \
+            > /dev/null
+          run_sha="$(jq -r '.head_sha' "$run_json")"
+          git fetch --no-tags origin "$run_sha"
+          python3 .github/scripts/optional-parser-proof-inputs.py \
+            --base "$run_sha" \
+            --head HEAD
+          echo "PARSER_PACK_RUN_SHA=$run_sha" >> "$GITHUB_ENV"
+
+      - name: Download clean optional-parser handoff
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: optional-parser-pack-release-assets
+          path: ${{ runner.temp }}/optional-parser-release-source
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.parser_pack_run_id }}
+
+      - name: Validate and stage optional-parser release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/verify-optional-parser-release-assets.py \
+            --source "$RUNNER_TEMP/optional-parser-release-source" \
+            --output "$RUNNER_TEMP/optional-parser-release-assets" \
+            --release-version "$RELEASE_VERSION" \
+            --revision "$PARSER_PACK_RUN_SHA" \
+            --cargo-lock Cargo.lock
+
+      - name: Upload optional-parser release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: projectatlas-parser-packs
+          path: ${{ runner.temp }}/optional-parser-release-assets/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
 
   publish:
     name: publish
-    needs: [prepublish-installer-smoke-unix, prepublish-installer-smoke-windows]
+    if: ${{ !inputs.prepublish_only }}
+    needs:
+      [prepublish-installer-smoke-unix, prepublish-installer-smoke-windows, parser-pack-assets]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -384,7 +550,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -392,6 +558,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: release-assets
+          pattern: projectatlas-*
           merge-multiple: true
 
       - name: Prepare release assets
@@ -467,7 +634,7 @@ jobs:
             suffix: aarch64-apple-darwin
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install release runtime through plugin
         timeout-minutes: 5
@@ -527,7 +694,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install release runtime through plugin
         timeout-minutes: 5

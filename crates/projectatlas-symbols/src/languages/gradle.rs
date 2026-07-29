@@ -3,26 +3,40 @@
 use projectatlas_core::symbols::{SymbolGraph, SymbolKind};
 use regex::Regex;
 
-use crate::push_symbol;
+use crate::{check_parser_iteration, push_symbol};
 
 /// Add Gradle Kotlin DSL task registrations from `.gradle.kts` files.
-pub(super) fn augment_kotlin(graph: &mut SymbolGraph, content: &str) {
+pub(super) fn augment_kotlin<E>(
+    graph: &mut SymbolGraph,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    check()?;
     if !path_has_ascii_suffix(&graph.path, ".gradle.kts") {
-        return;
+        return Ok(());
     }
     if let Some(patterns) = GradleTaskPatterns::kotlin() {
-        augment_tasks(graph, content, &patterns, "gradle-kotlin-dsl-task");
+        augment_tasks(graph, content, &patterns, "gradle-kotlin-dsl-task", check)?;
     }
+    check()?;
+    Ok(())
 }
 
 /// Add Gradle Groovy DSL task registrations from `.gradle` files.
-pub(super) fn augment_groovy(graph: &mut SymbolGraph, content: &str) {
+pub(super) fn augment_groovy<E>(
+    graph: &mut SymbolGraph,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    check()?;
     if !path_has_ascii_suffix(&graph.path, ".gradle") {
-        return;
+        return Ok(());
     }
     if let Some(patterns) = GradleTaskPatterns::groovy() {
-        augment_tasks(graph, content, &patterns, "gradle-groovy-dsl-task");
+        augment_tasks(graph, content, &patterns, "gradle-groovy-dsl-task", check)?;
     }
+    check()?;
+    Ok(())
 }
 
 /// Regexes for one Gradle DSL task declaration style.
@@ -98,16 +112,19 @@ impl GradleTaskPatterns {
 }
 
 /// Add task symbols from one Gradle DSL source.
-fn augment_tasks(
+fn augment_tasks<E>(
     graph: &mut SymbolGraph,
     content: &str,
     patterns: &GradleTaskPatterns,
     detail: &str,
-) {
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    check()?;
     let mut in_tasks_block = false;
     let mut tasks_block_depth = 0_i32;
     let mut pending_gradle_task_line: Option<usize> = None;
     for (line_index, line) in content.lines().enumerate() {
+        check_parser_iteration(line_index, check)?;
         let line_number = line_index + 1;
         let trimmed = line.trim();
         let tasks_block_starts = patterns.tasks_block_regex.is_match(trimmed);
@@ -151,6 +168,8 @@ fn augment_tasks(
             }
         }
     }
+    check()?;
+    Ok(())
 }
 
 /// Return the first captured identifier from a set of regexes.

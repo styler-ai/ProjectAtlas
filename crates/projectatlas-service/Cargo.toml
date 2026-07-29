@@ -7,8 +7,10 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+blake3.workspace = true
 projectatlas-core.workspace = true
 projectatlas-db.workspace = true
+projectatlas-symbols.workspace = true
 globset.workspace = true
 regex.workspace = true
 serde.workspace = true
@@ -16,6 +18,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+projectatlas-db = { workspace = true, features = ["sqlite-progress-test-observer"] }
 tempfile.workspace = true
 
 [lints]

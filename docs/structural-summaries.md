@@ -41,11 +41,12 @@ recorded in `fixtures/languages/baselines.toon`, decoded in tests through the
 official `toon-format` crate, and verified by the CLI end-to-end test
 `language_fixture_summaries_match_baselines`.
 
-The separate end-to-end test `scan_indexes_every_supported_language_extension`
-creates one temporary fixture for every extension in ProjectAtlas's public
-language registry and proves the real scanner indexes each path with the
-expected language family. It also runs the real `projectatlas summary` command
-for each fixture and verifies a non-empty content summary, non-missing parser
-kind, and non-missing summary status. This broad registry test is intentionally
-separate from the exact summary baseline so fallback-supported languages remain
-covered without requiring brittle one-line summaries for every extension alias.
+The separate end-to-end test `default_scan_indexes_complete_accepted_core_surface`
+creates one temporary fixture for every accepted default-core extension and proves
+the real scanner indexes each path with the expected language family. It also runs
+the real `projectatlas summary` command for each fixture and verifies a non-empty
+content summary, non-missing parser kind, and non-missing summary status. The core
+registry tests independently verify every recognition-only optional-catalog rule
+against the pinned accepted projection. Optional rows join the effective scanner
+only through the verified pack lifecycle, so catalog breadth cannot silently add
+data-like or secret-bearing extensions to the default scan surface.

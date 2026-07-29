@@ -29,6 +29,8 @@ pub fn render_node_rows(label: &str, nodes: &[IndexedNode]) -> Vec<serde_json::V
                     "folder_purpose": purpose,
                     "content_summary": content_summary,
                     "status": node.purpose.status.to_string(),
+                    "purpose_source": node.purpose.source,
+                    "purpose_agent_reviewed": node.purpose.agent_reviewed(),
                 }),
                 "files" => json!({
                     "path": node.node.path,
@@ -37,6 +39,8 @@ pub fn render_node_rows(label: &str, nodes: &[IndexedNode]) -> Vec<serde_json::V
                     "file_purpose": purpose,
                     "content_summary": content_summary,
                     "status": node.purpose.status.to_string(),
+                    "purpose_source": node.purpose.source,
+                    "purpose_agent_reviewed": node.purpose.agent_reviewed(),
                 }),
                 _ => json!({
                     "path": node.node.path,
@@ -44,6 +48,8 @@ pub fn render_node_rows(label: &str, nodes: &[IndexedNode]) -> Vec<serde_json::V
                     "purpose": purpose,
                     "content_summary": content_summary,
                     "status": node.purpose.status.to_string(),
+                    "purpose_source": node.purpose.source,
+                    "purpose_agent_reviewed": node.purpose.agent_reviewed(),
                 }),
             }
         })
@@ -62,6 +68,17 @@ pub fn render_ranked_node_rows(label: &str, nodes: &[RankedNode]) -> Vec<serde_j
                 .unwrap_or_else(|| json!({}));
             if let Some(object) = row.as_object_mut() {
                 object.insert("reasons".to_string(), json!(ranked.reasons));
+                object.insert("reason_codes".to_string(), json!(ranked.reason_codes));
+                object.insert(
+                    "connection_counts".to_string(),
+                    json!(ranked.connection_counts),
+                );
+                object.insert("connections".to_string(), json!(ranked.connections));
+                object.insert(
+                    "connections_truncated".to_string(),
+                    json!(ranked.connections_truncated),
+                );
+                object.insert("next_call".to_string(), json!(ranked.next_call));
             }
             row
         })
@@ -141,6 +158,7 @@ pub fn render_token_overview(overview: &TokenOverview) -> String {
             "estimate_kind": overview.estimate_kind,
             "estimator": overview.estimator,
             "estimate_scope": overview.estimate_scope,
+            "detail_availability": overview.detail_availability,
             "calls": overview.calls,
             "estimated_without_projectatlas": overview.estimated_without_projectatlas,
             "estimated_with_projectatlas": overview.estimated_with_projectatlas,
@@ -160,6 +178,7 @@ pub fn render_token_overview(overview: &TokenOverview) -> String {
                 "confidence": overview.read_avoidance_confidence,
                 "plain_language": "ProjectAtlas summaries, search results, and slices were used instead of opening likely whole files.",
             },
+            "agent_efficiency": overview.agent_efficiency,
             "calibration": overview.calibration,
             "savings_rate": savings_rate,
             "totals": {
@@ -228,6 +247,7 @@ pub fn render_token_trends(report: &TokenTrendReport) -> String {
             "estimate_scope": report.estimate_scope,
             "session": report.session.as_deref().unwrap_or("all sessions"),
             "window": report.window,
+            "detail_availability": report.detail_availability,
             "periods": periods,
         }
     }))
@@ -328,9 +348,12 @@ fn quoted_fallback(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_agent_payload, render_symbols, render_token_overview};
+    use super::{encode_agent_payload, render_symbols, render_token_overview, render_token_trends};
     use crate::symbols::{CodeSymbol, ParserKind, SymbolKind};
-    use crate::telemetry::{TokenOverview, usage_from_estimates, usage_from_text};
+    use crate::telemetry::{
+        TokenOverview, TokenTrendReport, TokenTrendWindow, UsageDetailAvailability,
+        usage_from_estimates, usage_from_text,
+    };
     use serde_json::{Value, json};
 
     #[test]
@@ -415,6 +438,31 @@ mod tests {
                 "ProjectAtlas summaries, search results, and slices were used instead of opening likely whole files."
             ),
             "plain language read avoidance",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn token_toon_reports_retained_detail_truth_for_overview_and_trends()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut overview = TokenOverview::from_events(&[]);
+        overview.set_detail_availability(UsageDetailAvailability::Partial);
+        let overview_toon = render_token_overview(&overview);
+        let decoded_overview: Value = toon_format::decode_default(&overview_toon)?;
+        require_json_eq(
+            &decoded_overview["token_savings"]["detail_availability"],
+            &json!("partial"),
+            "overview detail availability",
+        )?;
+
+        let mut trends = TokenTrendReport::new(None, TokenTrendWindow::Month, Vec::new());
+        trends.set_detail_availability(UsageDetailAvailability::Expired);
+        let trends_toon = render_token_trends(&trends);
+        let decoded_trends: Value = toon_format::decode_default(&trends_toon)?;
+        require_json_eq(
+            &decoded_trends["token_trends"]["detail_availability"],
+            &json!("expired"),
+            "trend detail availability",
         )?;
         Ok(())
     }

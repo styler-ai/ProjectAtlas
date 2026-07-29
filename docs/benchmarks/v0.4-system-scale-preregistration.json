@@ -1,0 +1,211 @@
+{
+  "schema_version": 1,
+  "benchmark": "projectatlas-v0.4-system-scale",
+  "status": "locked_for_final_measurement",
+  "measurement_input_lock_basis": "Content digests from the recorded measurement checkout; a later run must relock after any listed input changes.",
+  "measurement_inputs": {
+    "docs/benchmarks/harness/system_scale.py": "a5cbd962508b10be149d9c5bea8984e7dcf37f9dcdb117f9e4589fd90c327364",
+    "docs/benchmarks/harness/mcp_composition.py": "04dd5bf8bac306d1ac5faf8c92bd75cf63e6284f39e53dfcef80ac3c3ac17832",
+    "docs/benchmarks/harness/requirements.txt": "b6c8d86768d07e1dae4fb734c2e93997445a318d43290b307bfc1c800a0b1e52",
+    "docs/benchmarks/fixtures/mcp-composition": "498cccec02061a12330b738fd0e3094063627934979b0277c493d90564e02553"
+  },
+  "measurement_amendments": [
+    {
+      "prior_result": "docs/benchmarks/v0.4-system-scale-failed-runs.json",
+      "disposition": "retained failed run; no failed cell is excluded",
+      "changes": [
+        "Cap peak WAL and private staging bytes by the existing per-scale database-size limit instead of unvalidated global limits that were smaller than the accepted huge persistent footprint.",
+        "Retain process read-operation counts as raw diagnostics but remove the 512-operation gate because Windows Job accounting counts operating-system I/O operations, not SQLite statements; byte, indexed-row, hydration, and output bounds remain authoritative.",
+        "Accept typed refresh_required after a canceled dirty-source scan because serving an overview would violate the freshness contract; last-complete generation, writer release, reopen, integrity, cleanup, and survivor checks remain required.",
+        "Cap Rayon worker pools by admitted work cardinality before repeating the concurrent-isolation measurement."
+      ]
+    },
+    {
+      "prior_result": "docs/benchmarks/v0.4-system-scale-failed-e624475.json",
+      "disposition": "retained failed run; all corpus, contention, cancellation, recovery, storage, and query gates passed; the concurrent resource proxy is corrected before repetition",
+      "changes": [
+        "Divide the existing host worker budget equally across concurrent CLI processes through the public --max-workers control, which already owns repository traversal and parser work.",
+        "Retain raw OS-thread peaks as diagnostics but remove their hard gate because summed per-process peaks conflate controlled workers with fixed orchestration threads and are not an observed concurrent worker peak; hard-gate the exact configured aggregate worker budget, child-process bounds, terminal accounting, RSS, behavior, and retained-thread growth instead."
+      ]
+    },
+    {
+      "prior_result": "docs/benchmarks/v0.4-system-scale-results.json",
+      "disposition": "superseded publication retained in Git history; promotion review found that it predates release-affecting runtime, MCP, relation-service, and repository-graph changes",
+      "changes": [
+        "Relock the runtime and MCP inventory identities and repeat the complete small, medium, huge, concurrency, contention, cancellation, and termination matrix against the corrected functional release candidate."
+      ]
+    },
+    {
+      "prior_result": "docs/benchmarks/v0.4-system-scale-results.json",
+      "disposition": "superseded publication retained in Git history; exact-head review found that its content lock omitted the copied small-fixture corpus",
+      "changes": [
+        "Bind the complete committed mcp-composition fixture tree, relock the corrected runtime and harness identities, and repeat the complete publication campaign."
+      ]
+    },
+    {
+      "prior_result": "docs/benchmarks/v0.4-system-scale-results.json",
+      "disposition": "superseded publication retained in Git history; release-proof audit found that forced termination did not prove production reopen and final WAL cleanup, and that the system publication omitted the packaged-skill identity",
+      "changes": [
+        "Reopen the exact terminated database through the candidate runtime, record settings, checkpoint, integrity, and final storage, and reject a busy checkpoint or nonzero final WAL or graph-stage state.",
+        "Bind the packaged v0.4 skill path, SHA-256, and byte size as candidate artifact identity."
+      ]
+    },
+    {
+      "prior_result": "docs/benchmarks/v0.4-system-scale-failed-termination-source-root.json",
+      "disposition": "retained failed complete campaign; every scale, concurrency, contention, and cooperative-cancellation gate passed, but the parent-termination setup scanned the empty recovery database root instead of the huge corpus",
+      "changes": [
+        "Pass the explicit huge corpus root to scan because a default '.' is intentionally rebound to the project root inferred from an explicit default-layout database path.",
+        "Record the early child return code before repeating the complete campaign; termination, production reopen, checkpoint, integrity, storage, and survivor gates remain unchanged."
+      ]
+    }
+  ],
+  "preflight_failures": [
+    {
+      "result": "docs/benchmarks/v0.4-system-scale-failed-f30cb0c-preflight.json",
+      "disposition": "no measurement executed; restored the unchanged single-process thread thresholds still used by per-case gates after removing only their misleading concurrent use"
+    }
+  ],
+  "candidate": {
+    "required_version": "0.4.0",
+    "runtime_sha256": "e8708723434a428b6a59d80f60d9c7e707d9b8e3f04cea52dc51a0aacfbf3b4a",
+    "mcp_tools_sha256": "0c21ea673bdb9cdff48203a274db04fbaccb888bd362407d46fc1bcc0e506b28",
+    "skill_path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
+    "skill_sha256": "208af75344199e1ad70ebf8e00f1f07e3879ece043e5f3ce79b8723de00d5547",
+    "skill_bytes": 20801,
+    "telemetry": "disabled",
+    "build_profile": "release-default-features"
+  },
+  "final_measurement_contract": {
+    "required_platform": "Windows",
+    "process_io_metric_backend": "Windows JobObjectBasicAndIoAccountingInformation for exact terminal tree CPU, cumulative process count, conservative worker bounds, and I/O plus psutil for sampled peak RSS, process, thread, and storage diagnostics; watch-edit baselines require 100 ms of unchanged exact Job accounting after readiness",
+    "process_io_metric_kind": "exact-terminal-owned-process-tree-accounting",
+    "non_windows_disposition": "skip smoke-only data and fail publication eligibility because terminal counters are incomplete"
+  },
+  "proof_ownership": {
+    "observer_epoch_reuse_and_invalidation": [
+      "crates/projectatlas-cli/src/mcp.rs::long_lived_mcp_query_families_reuse_one_verified_epoch",
+      "crates/projectatlas-cli/src/runtime/source_observation.rs unit tests"
+    ],
+    "relation_query_plan_and_statement_bounds": [
+      "crates/projectatlas-db/src/repository_graph.rs::detailed_relation_storage_statements_are_indexed_and_batch_bounded"
+    ],
+    "repeated_query_matrix": "repeated-call process I/O, latency, bounded output, and stable publication identity only"
+  },
+  "corpora": {
+    "small": {
+      "source": "docs/benchmarks/fixtures/mcp-composition",
+      "variants": [
+        "clean",
+        "dirty",
+        "non-git"
+      ],
+      "minimum_indexed_files": 5,
+      "maximum_indexed_files": 100
+    },
+    "medium": {
+      "source": "deterministic-rust-high-degree-v1",
+      "caller_files": 1024,
+      "minimum_indexed_files": 1000,
+      "narrow_edit": "append one comment to src/caller_0000.rs",
+      "expanded_edit": "rename the src/hub.rs shared export while retaining inbound references"
+    },
+    "huge": {
+      "repository": "https://github.com/microsoft/vscode.git",
+      "tag": "1.130.0",
+      "commit": "1b6a188127eeaf9194f945eb6eb89a657e93c54c",
+      "minimum_indexed_files": 5000,
+      "minimum_tracked_bytes": 20971520,
+      "target_file": "src/vs/platform/instantiation/common/instantiation.ts"
+    }
+  },
+  "measurements": [
+    "full scan wall time and process-tree CPU, peak RSS, workers, and I/O",
+    "included corpus files and bytes plus indexed text and parsed symbol work",
+    "unchanged, narrow, and expanded incremental refresh work",
+    "MCP startup, first exact verification, repeated stable-publication query latency, work, output, and retained RSS",
+    "representative SQLite page, freelist, statistics, WAL, checkpoint, and operating-profile state",
+    "full and rebuild process I/O transfer bytes with per-scale absolute caps, reported source/pre-run-input ratios, database-adjusted initial output-efficiency and rebuild input-efficiency ratios, absolute unchanged/narrow/guidance transfer bounds, and separate peak database, WAL, SHM, staging, and persistent-size gates",
+    "bounded intrusive writer-availability sampling with a conservative interval bound plus fail-fast contention and deterministic retry",
+    "cross-root concurrent publication, same-root writer race, final identity, generation, content, integrity, and cleanup",
+    "cooperative MCP task cancellation followed by CLI and MCP reopen with last-complete generation preservation",
+    "indexed and correctness-fallback search bounds",
+    "SQLite version, compile options, schema, journal, synchronous, busy, checkpoint, statistics, database, WAL, and persistent bytes",
+    "process-tree worker, thread, retained-thread, child-process, CPU-efficiency, and RSS bounds",
+    "default-core in-process scan parent termination plus separately owned real-pack Linux/Windows parser containment proof"
+  ],
+  "thresholds": {
+    "all": {
+      "command_timeout_seconds": 900,
+      "mcp_request_timeout_seconds": 60,
+      "maximum_worker_processes": 20,
+      "maximum_process_tree_threads": 32,
+      "maximum_worker_processes_per_logical_cpu": 1,
+      "maximum_process_tree_threads_per_logical_cpu": 1.25,
+      "maximum_concurrent_peak_rss_bytes": 536870912,
+      "maximum_retained_thread_growth": 2,
+      "maximum_mcp_startup_milliseconds": 250,
+      "maximum_bounded_output_bytes": 262144,
+      "maximum_bounded_query_process_read_bytes": 67108864,
+      "maximum_fallback_selected_text_bytes": 134217728,
+      "maximum_fallback_search_seconds": 10,
+      "maximum_relation_database_requested_rows": 128,
+      "maximum_relation_database_returned_rows": 256,
+      "maximum_relation_database_decoded_bytes": 262144,
+      "maximum_relation_hydrated_entities": 64,
+      "maximum_relation_hydrated_purpose_paths": 128,
+      "maximum_database_adjusted_read_transfer_ratio": 40,
+      "maximum_database_adjusted_write_transfer_ratio": 32,
+      "maximum_narrow_refresh_process_read_transfer_bytes": 8388608,
+      "maximum_narrow_refresh_process_write_transfer_bytes": 2097152,
+      "maximum_expanded_guidance_process_read_transfer_bytes": 67108864,
+      "maximum_expanded_guidance_process_write_transfer_bytes": 2097152,
+      "maximum_freelist_ratio": 0.05,
+      "maximum_publication_writer_unavailable_seconds": 1,
+      "maximum_contention_failure_seconds": 1,
+      "maximum_retained_rss_growth_bytes": 134217728,
+      "maximum_cancellation_quiescence_seconds": 5
+    },
+    "small": {
+      "maximum_full_scan_seconds": 30,
+      "maximum_unchanged_refresh_seconds": 10,
+      "maximum_query_p95_milliseconds": 250,
+      "maximum_peak_rss_bytes": 268435456,
+      "maximum_full_process_read_transfer_bytes": 67108864,
+      "maximum_full_process_write_transfer_bytes": 67108864,
+      "maximum_unchanged_refresh_process_read_transfer_bytes": 1048576,
+      "maximum_database_bytes": 67108864,
+      "maximum_persistent_bytes": 67108864
+    },
+    "medium": {
+      "maximum_full_scan_seconds": 180,
+      "maximum_unchanged_refresh_seconds": 30,
+      "maximum_query_p95_milliseconds": 500,
+      "maximum_peak_rss_bytes": 268435456,
+      "maximum_full_process_read_transfer_bytes": 134217728,
+      "maximum_full_process_write_transfer_bytes": 536870912,
+      "maximum_unchanged_refresh_process_read_transfer_bytes": 4194304,
+      "minimum_scan_one_core_cpu_percent": 60,
+      "maximum_database_bytes": 536870912,
+      "maximum_persistent_bytes": 536870912
+    },
+    "huge": {
+      "maximum_full_scan_seconds": 900,
+      "maximum_unchanged_refresh_seconds": 120,
+      "maximum_query_p95_milliseconds": 2000,
+      "maximum_peak_rss_bytes": 3221225472,
+      "maximum_full_process_read_transfer_bytes": 137438953472,
+      "maximum_full_process_write_transfer_bytes": 137438953472,
+      "maximum_unchanged_refresh_process_read_transfer_bytes": 536870912,
+      "minimum_scan_one_core_cpu_percent": 80,
+      "maximum_database_bytes": 4294967296,
+      "maximum_persistent_bytes": 4294967296
+    }
+  },
+  "failure_rules": [
+    "Any correctness, freshness, migration, corruption, timeout, or nonzero-exit failure rejects the candidate.",
+    "Any whole-tree or whole-node-table amplification on repeated stable-publication bounded reads, or any full, unchanged, narrow, expanded-guidance, or rebuild absolute-transfer or database-adjusted-efficiency threshold breach rejects the candidate.",
+    "Any hot-query plan scan, temporary sort, missing owning index, unbounded retained materialization, worker or thread oversubscription, unexplained busy/lock failure, excessive publication writer-unavailable interval, or surviving canceled process rejects the candidate.",
+    "Any cross-root identity leak, same-root double publication, partial canceled generation, failed reopen, nonzero final WAL/stage state, or unexpected SQLite operating-profile drift rejects the candidate.",
+    "A threshold miss is reported and investigated; results are not silently excluded or thresholds changed after measurement."
+  ]
+}

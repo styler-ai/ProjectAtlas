@@ -1,2 +1,8 @@
 [alias]
 projectatlas-lints = "run --locked --package projectatlas-lints --bin cargo-projectatlas-lints --"
+
+[env]
+# The optional parser dependency's build script otherwise performs its own
+# source download even when ProjectAtlas only repackages pinned native bundles.
+TSLP_OFFLINE = { value = "1", force = true }
+TSLP_LINK_MODE = { value = "dynamic", force = true }

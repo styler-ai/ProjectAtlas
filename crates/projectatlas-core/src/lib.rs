@@ -1,11 +1,21 @@
 //! Purpose: Define `ProjectAtlas` 3 core domain models and shared helpers.
 
+pub mod graph;
 pub mod health;
+pub mod index_work;
 pub mod language;
+pub mod optional_parser_pack;
+pub mod optional_parser_protocol;
 pub mod outline;
+pub mod relation_capabilities;
+pub mod support_catalog;
 pub mod symbols;
 pub mod telemetry;
 pub mod toon;
+
+pub use index_work::{
+    IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkResource, IndexWorkStage,
+};
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -41,6 +51,43 @@ pub enum CoreError {
 
 /// Convenient result alias for `ProjectAtlas` core operations.
 pub type CoreResult<T> = Result<T, CoreError>;
+
+/// Monotonic identity of one completely published derived index.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct IndexGeneration(u64);
+
+impl IndexGeneration {
+    /// Generation before the first complete publication.
+    pub const ZERO: Self = Self(0);
+
+    /// Construct a generation from its durable integer representation.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Return the durable integer representation.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Advance to the next complete publication generation.
+    #[must_use]
+    pub const fn checked_next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+}
+
+impl fmt::Display for IndexGeneration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
 
 /// File or folder node kind.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -83,7 +130,10 @@ pub enum PurposeStatus {
     Suggested,
     /// A purpose has been explicitly approved.
     Approved,
-    /// The node changed enough that the purpose should be reviewed.
+    /// A legacy or explicitly flagged accepted purpose awaits explicit review.
+    ///
+    /// Normal source, hash, summary, symbol, and graph changes never create
+    /// this state or demote an approved purpose.
     Stale,
 }
 
@@ -327,6 +377,151 @@ pub struct IndexedNode {
     pub summary: Option<String>,
 }
 
+/// Compact deterministic reasons used by agent-facing repository ranking.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RankedReasonCode {
+    /// The normalized query exactly selected the repository path.
+    ExactPath,
+    /// The normalized query exactly selected the final path component.
+    ExactName,
+    /// An agent-approved responsibility purpose matched the query.
+    ReviewedPurpose,
+    /// Repository path text contributed weaker lexical evidence.
+    Path,
+    /// Observed summary text contributed weaker lexical evidence.
+    Summary,
+    /// An indexed symbol contributed weaker lexical evidence.
+    Symbol,
+    /// Persisted source text contributed weaker lexical evidence.
+    IndexedText,
+    /// A conventional source or test counterpart was present.
+    PairedFile,
+    /// Current package/dependency context contributed graph evidence.
+    GraphPackage,
+    /// Current import context contributed graph evidence.
+    GraphImport,
+    /// Current call context contributed graph evidence.
+    GraphCall,
+    /// Current reference context contributed graph evidence.
+    GraphReference,
+    /// Current test context contributed graph evidence.
+    GraphTest,
+    /// Current route context contributed graph evidence.
+    GraphRoute,
+    /// Current configuration context contributed graph evidence.
+    GraphConfig,
+}
+
+/// Closed connection families exposed by folder and file navigation rows.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RankedConnectionKind {
+    /// Package or manifest dependency context.
+    Package,
+    /// Source import context.
+    Import,
+    /// Static call context.
+    Call,
+    /// Static reference context.
+    Reference,
+    /// Test-to-source context.
+    Test,
+    /// Route or protocol context.
+    Route,
+    /// Configuration context.
+    Config,
+}
+
+/// Direction of one sampled relationship relative to the ranked node.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RankedConnectionDirection {
+    /// The ranked node owns the relation source.
+    Outbound,
+    /// The ranked node owns the resolved relation target.
+    Inbound,
+}
+
+/// Compact typed target for a sampled ranked-node connection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RankedConnectionTarget {
+    /// A repository-local file or declaration.
+    Local {
+        /// Exact repository-relative source path.
+        path: String,
+        /// Declaration name when the target is a symbol.
+        symbol: Option<String>,
+    },
+    /// A manifest-owned package identity.
+    Package {
+        /// Package ecosystem or manifest family.
+        manager: String,
+        /// Package name declared by the manifest.
+        name: String,
+        /// Exact repository-relative owning manifest.
+        manifest: String,
+    },
+    /// A typed target outside the selected repository.
+    External {
+        /// External namespace.
+        system: String,
+        /// Identity inside the external namespace.
+        identity: String,
+    },
+    /// A static reference that could not be resolved uniquely.
+    Unresolved {
+        /// Bounded reference identity retained by graph persistence.
+        reference: String,
+    },
+}
+
+/// One bounded high-value connection sampled for a ranked node.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RankedConnection {
+    /// Closed relationship family.
+    pub kind: RankedConnectionKind,
+    /// Direction relative to the ranked node.
+    pub direction: RankedConnectionDirection,
+    /// Typed compact target or source at the other end.
+    pub target: RankedConnectionTarget,
+}
+
+/// Bounded count metadata for one connection family.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RankedConnectionCount {
+    /// Closed relationship family.
+    pub kind: RankedConnectionKind,
+    /// Number of validated rows observed inside the family bound.
+    pub count: usize,
+    /// Whether at least one additional row exists for this family.
+    pub truncated: bool,
+}
+
+/// Existing navigation capability recommended after one ranked row.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NavigationNextCapability {
+    /// Narrow a selected folder to indexed files.
+    Files,
+    /// Inspect one selected file summary.
+    Summary,
+    /// Inspect detailed typed relations after a connection sample truncates.
+    Relations,
+    /// Inspect bounded structural or coverage health for the selected path.
+    Health,
+}
+
+/// Directly reusable next navigation call for one ranked row.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NavigationNextCall {
+    /// Existing capability to invoke next.
+    pub capability: NavigationNextCapability,
+    /// Exact repository-relative path accepted by that capability.
+    pub path: String,
+}
+
 /// A ranked node with concise evidence for why it was selected.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RankedNode {
@@ -334,6 +529,16 @@ pub struct RankedNode {
     pub node: IndexedNode,
     /// Bounded human-readable ranking signals.
     pub reasons: Vec<String>,
+    /// Bounded stable ranking signals for programmatic consumers.
+    pub reason_codes: Vec<RankedReasonCode>,
+    /// Sparse stable-order connection counts.
+    pub connection_counts: Vec<RankedConnectionCount>,
+    /// Bounded high-value current connection sample.
+    pub connections: Vec<RankedConnection>,
+    /// Whether the bounded sample omitted any validated relation through family or global overflow.
+    pub connections_truncated: bool,
+    /// Existing navigation capability recommended after this row.
+    pub next_call: NavigationNextCall,
 }
 
 /// Overview returned by startup/overview commands.
@@ -518,12 +723,7 @@ pub fn normalized_parent(path: &str) -> Option<String> {
 /// Return a normalized extension for indexing.
 #[must_use]
 pub fn normalized_extension(path: &Path) -> Option<String> {
-    let file_name = path.file_name()?.to_string_lossy();
-    if file_name.ends_with(".d.ts") {
-        return Some(".d.ts".to_string());
-    }
-    path.extension()
-        .map(|extension| format!(".{}", extension.to_string_lossy().to_lowercase()))
+    language::normalized_language_extension(path)
 }
 
 #[cfg(test)]

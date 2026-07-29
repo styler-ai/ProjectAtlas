@@ -4,19 +4,25 @@ use projectatlas_core::symbols::{SymbolGraph, SymbolKind};
 use regex::Regex;
 
 use super::{push_contains_relation, symbol_exists, upsert_method_parent};
-use crate::push_symbol;
+use crate::{check_parser_iteration, push_symbol};
 
 /// Add Kotlin package, type, and method facts missing from generic traversal.
-pub(super) fn augment(graph: &mut SymbolGraph, content: &str) {
+pub(super) fn augment<E>(
+    graph: &mut SymbolGraph,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    check()?;
     let (Ok(package_regex), Ok(type_regex), Ok(function_regex)) = (
         Regex::new(r"^\s*package\s+([A-Za-z_][A-Za-z0-9_.]*)"),
         Regex::new(r"\b(?:class|interface|object)\s+([A-Za-z_][A-Za-z0-9_]*)"),
         Regex::new(r"\bfun\s+([A-Za-z_][A-Za-z0-9_]*)\s*\("),
     ) else {
-        return;
+        return Ok(());
     };
     let mut current_type: Option<String> = None;
     for (line_index, line) in content.lines().enumerate() {
+        check_parser_iteration(line_index, check)?;
         let line_number = line_index + 1;
         let trimmed = line.trim();
         if let Some(capture) = package_regex.captures(trimmed)
@@ -62,4 +68,6 @@ pub(super) fn augment(graph: &mut SymbolGraph, content: &str) {
             current_type = None;
         }
     }
+    check()?;
+    Ok(())
 }

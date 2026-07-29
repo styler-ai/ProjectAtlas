@@ -1,13 +1,12 @@
 //! Import-alias caller resolution over persisted symbol relations.
 
-use projectatlas_core::symbols::{CodeSymbol, RelationKind, SymbolRelation};
-use projectatlas_db::AtlasStore;
+use projectatlas_core::symbols::CodeSymbol;
+use projectatlas_db::{AtlasStore, StoredImportRelation};
+use projectatlas_symbols::{ImportSyntax, parse_import_references, resolve_relative_import_path};
+use projectatlas_symbols::{module_aliases_for_path, source_stems_for_path};
 use std::collections::{HashMap, HashSet};
 
-use crate::{
-    ServiceResult, module_aliases_for_path, source_stems_for_path, strip_known_source_extension,
-    symbol_summary_key, symbol_target_aliases,
-};
+use crate::{ServiceResult, symbol_summary_key, symbol_target_aliases};
 
 /// Import relations inspected per module term for alias-based caller lookup.
 const IMPORT_RELATION_LIMIT_PER_TERM: usize = 500;
@@ -40,7 +39,7 @@ pub(crate) fn load_import_alias_map(
 fn load_import_relations_for_symbols(
     store: &AtlasStore,
     symbols: &[CodeSymbol],
-) -> ServiceResult<Vec<SymbolRelation>> {
+) -> ServiceResult<Vec<StoredImportRelation>> {
     let mut terms = symbols
         .iter()
         .flat_map(|symbol| module_aliases_for_path(&symbol.path))
@@ -57,10 +56,7 @@ fn load_import_relations_for_symbols(
     caller_paths.dedup();
     for caller_path in caller_paths {
         relations.extend(
-            store
-                .load_symbol_relations(Some(&caller_path), None, IMPORT_RELATION_LIMIT_PER_CALLER)?
-                .into_iter()
-                .filter(|relation| relation.kind == RelationKind::Imports),
+            store.load_import_relations_for_path(&caller_path, IMPORT_RELATION_LIMIT_PER_CALLER)?,
         );
     }
     relations.sort_by(|left, right| {
@@ -74,7 +70,6 @@ fn load_import_relations_for_symbols(
         left.path == right.path
             && left.source_name == right.source_name
             && left.target_name == right.target_name
-            && left.kind == right.kind
             && left.line == right.line
     });
     Ok(relations)
@@ -83,15 +78,12 @@ fn load_import_relations_for_symbols(
 /// Build deterministic import-alias call targets from already loaded imports.
 fn import_alias_map(
     symbols: &[CodeSymbol],
-    import_relations: &[SymbolRelation],
+    import_relations: &[StoredImportRelation],
     alias_counts: &HashMap<String, usize>,
 ) -> ImportAliasMap {
     let local_alias_counts = import_local_alias_counts(import_relations);
     let mut candidates: HashMap<(String, String), HashSet<String>> = HashMap::new();
-    for relation in import_relations
-        .iter()
-        .filter(|relation| relation.kind == RelationKind::Imports)
-    {
+    for relation in import_relations {
         for symbol in symbols {
             for target_name in import_call_targets_for_symbol(relation, symbol, alias_counts) {
                 if import_local_alias_is_ambiguous(&local_alias_counts, relation, &target_name) {
@@ -133,13 +125,10 @@ fn import_alias_map(
 
 /// Count local import aliases per caller file.
 fn import_local_alias_counts(
-    import_relations: &[SymbolRelation],
+    import_relations: &[StoredImportRelation],
 ) -> HashMap<(String, String), usize> {
     let mut counts = HashMap::new();
-    for relation in import_relations
-        .iter()
-        .filter(|relation| relation.kind == RelationKind::Imports)
-    {
+    for relation in import_relations {
         for alias in local_aliases_from_import(&relation.target_name) {
             *counts.entry((relation.path.clone(), alias)).or_insert(0) += 1;
         }
@@ -150,7 +139,7 @@ fn import_local_alias_counts(
 /// Return whether a resolved call target uses a duplicated local import alias.
 fn import_local_alias_is_ambiguous(
     counts: &HashMap<(String, String), usize>,
-    relation: &SymbolRelation,
+    relation: &StoredImportRelation,
     target_name: &str,
 ) -> bool {
     local_alias_candidates(target_name).iter().any(|alias| {
@@ -178,78 +167,18 @@ fn local_alias_candidates(target_name: &str) -> Vec<String> {
 
 /// Extract caller-local aliases declared by one import relation.
 fn local_aliases_from_import(import_text: &str) -> Vec<String> {
-    let import_text = import_text.trim();
-    if import_text.starts_with("use ") {
-        rust_local_import_aliases(import_text)
-    } else if import_text.starts_with("import ") && import_text.contains(" from ") {
-        typescript_local_import_aliases(import_text)
-    } else if import_text.starts_with("from ") || import_text.starts_with("import ") {
-        python_local_import_aliases(import_text)
-    } else {
-        Vec::new()
-    }
-}
-
-/// Extract local aliases from simple Rust use statements.
-fn rust_local_import_aliases(import_text: &str) -> Vec<String> {
-    let Some(rest) = import_text.strip_prefix("use ") else {
-        return Vec::new();
-    };
-    let rest = rest.trim().trim_end_matches(';').trim();
-    if rest.contains('{') {
-        return Vec::new();
-    }
-    let (import_path, local_alias) = split_alias(rest, " as ");
-    let Some(last_segment) = import_path
-        .rsplit("::")
-        .next()
-        .filter(|value| !value.is_empty())
-    else {
-        return Vec::new();
-    };
-    vec![local_alias.unwrap_or(last_segment).to_string()]
-}
-
-/// Extract local aliases from TypeScript or JavaScript import statements.
-fn typescript_local_import_aliases(import_text: &str) -> Vec<String> {
-    if let Some(namespace_alias) = namespace_import_alias(import_text) {
-        return vec![namespace_alias];
-    }
-    braced_import_names(import_text).map_or_else(Vec::new, |names| {
-        names
-            .into_iter()
-            .map(|(imported, alias)| alias.unwrap_or(imported))
-            .collect()
-    })
-}
-
-/// Extract local aliases from Python import statements.
-fn python_local_import_aliases(import_text: &str) -> Vec<String> {
-    if let Some(rest) = import_text.strip_prefix("from ")
-        && let Some((_module, imports)) = rest.split_once(" import ")
-    {
-        return imports
-            .split(',')
-            .map(|item| {
-                let (imported, alias) = split_alias(item.trim(), " as ");
-                alias.unwrap_or_else(|| imported.trim()).to_string()
-            })
-            .collect();
-    }
-    let Some(rest) = import_text.strip_prefix("import ") else {
-        return Vec::new();
-    };
-    rest.split(',')
-        .map(|item| {
-            let (module, alias) = split_alias(item.trim(), " as ");
-            alias.unwrap_or(module.trim()).to_string()
-        })
-        .collect()
+    let mut aliases = parse_import_references(import_text)
+        .into_iter()
+        .map(|reference| reference.local().to_string())
+        .collect::<Vec<_>>();
+    aliases.sort();
+    aliases.dedup();
+    aliases
 }
 
 /// Return caller-local call targets that an import relation maps to a symbol.
 fn import_call_targets_for_symbol(
-    relation: &SymbolRelation,
+    relation: &StoredImportRelation,
     symbol: &CodeSymbol,
     alias_counts: &HashMap<String, usize>,
 ) -> Vec<String> {
@@ -271,38 +200,32 @@ fn rust_import_call_targets(
     symbol: &CodeSymbol,
     alias_counts: &HashMap<String, usize>,
 ) -> Vec<String> {
-    let Some(rest) = import_text.strip_prefix("use ") else {
-        return Vec::new();
-    };
-    let rest = rest.trim().trim_end_matches(';').trim();
-    if rest.contains('{') {
-        return Vec::new();
-    }
-    let (import_path, local_alias) = split_alias(rest, " as ");
-    let import_path = import_path.trim();
-    let Some(last_segment) = import_path
-        .rsplit("::")
-        .next()
-        .filter(|value| !value.is_empty())
-    else {
-        return Vec::new();
-    };
-    if last_segment == symbol.name {
-        let module_path = import_path
-            .rsplit_once("::")
-            .map_or("", |(module, _name)| module)
-            .trim();
-        if module_matches_symbol(module_path, "::", symbol, alias_counts) {
-            return vec![local_alias.unwrap_or(last_segment).to_string()];
-        }
-    } else if module_matches_symbol(import_path, "::", symbol, alias_counts) {
-        return vec![format!(
-            "{}::{}",
-            local_alias.unwrap_or(last_segment),
-            symbol.name
-        )];
-    }
-    Vec::new()
+    parse_import_references(import_text)
+        .into_iter()
+        .filter(|reference| reference.syntax() == ImportSyntax::Rust)
+        .filter_map(|reference| match reference.imported() {
+            Some(imported)
+                if imported == symbol.name
+                    && module_matches_symbol(reference.module(), "::", symbol, alias_counts) =>
+            {
+                Some(reference.local().to_string())
+            }
+            Some(imported)
+                if module_matches_symbol(
+                    &format!("{}::{imported}", reference.module()),
+                    "::",
+                    symbol,
+                    alias_counts,
+                ) =>
+            {
+                Some(format!("{}::{}", reference.local(), symbol.name))
+            }
+            None if module_matches_symbol(reference.module(), "::", symbol, alias_counts) => {
+                Some(format!("{}::{}", reference.local(), symbol.name))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Return TypeScript/JavaScript call targets introduced by import aliases.
@@ -312,22 +235,23 @@ fn typescript_import_call_targets(
     symbol: &CodeSymbol,
     alias_counts: &HashMap<String, usize>,
 ) -> Vec<String> {
-    let Some(module_spec) = quoted_module_spec_after_from(import_text) else {
-        return Vec::new();
-    };
-    if !typescript_module_matches_symbol(caller_path, module_spec, symbol, alias_counts) {
-        return Vec::new();
-    }
-    if let Some(namespace_alias) = namespace_import_alias(import_text) {
-        return vec![format!("{namespace_alias}.{}", symbol.name)];
-    }
-    let Some(imported_names) = braced_import_names(import_text) else {
-        return Vec::new();
-    };
-    imported_names
+    parse_import_references(import_text)
         .into_iter()
-        .filter_map(|(imported, alias)| {
-            (imported == symbol.name).then(|| alias.unwrap_or(imported))
+        .filter(|reference| reference.syntax() == ImportSyntax::EcmaScript)
+        .filter_map(|reference| {
+            if !typescript_module_matches_symbol(
+                caller_path,
+                reference.module(),
+                symbol,
+                alias_counts,
+            ) {
+                return None;
+            }
+            match reference.imported() {
+                Some(imported) if imported == symbol.name => Some(reference.local().to_string()),
+                None => Some(format!("{}.{}", reference.local(), symbol.name)),
+                Some(_) => None,
+            }
         })
         .collect()
 }
@@ -338,42 +262,20 @@ fn python_import_call_targets(
     symbol: &CodeSymbol,
     alias_counts: &HashMap<String, usize>,
 ) -> Vec<String> {
-    if let Some(rest) = import_text.strip_prefix("from ")
-        && let Some((module, imports)) = rest.split_once(" import ")
-        && python_module_matches_symbol(module.trim(), symbol, alias_counts)
-    {
-        return imports
-            .split(',')
-            .filter_map(|item| {
-                let (imported, alias) = split_alias(item.trim(), " as ");
-                (imported.trim() == symbol.name)
-                    .then(|| alias.unwrap_or_else(|| imported.trim()).to_string())
-            })
-            .collect();
-    }
-    let Some(rest) = import_text.strip_prefix("import ") else {
-        return Vec::new();
-    };
-    rest.split(',')
-        .filter_map(|item| {
-            let (module, alias) = split_alias(item.trim(), " as ");
-            let module = module.trim();
-            if python_module_matches_symbol(module, symbol, alias_counts) {
-                Some(format!("{}.{}", alias.unwrap_or(module), symbol.name))
-            } else {
-                None
+    parse_import_references(import_text)
+        .into_iter()
+        .filter(|reference| reference.syntax() == ImportSyntax::Python)
+        .filter_map(|reference| {
+            if !python_module_matches_symbol(reference.module(), symbol, alias_counts) {
+                return None;
+            }
+            match reference.imported() {
+                Some(imported) if imported == symbol.name => Some(reference.local().to_string()),
+                None => Some(format!("{}.{}", reference.local(), symbol.name)),
+                Some(_) => None,
             }
         })
         .collect()
-}
-
-/// Split `value` into imported path/name and optional local alias.
-fn split_alias<'a>(value: &'a str, marker: &str) -> (&'a str, Option<&'a str>) {
-    value
-        .split_once(marker)
-        .map_or((value, None), |(left, right)| {
-            (left.trim(), Some(right.trim()))
-        })
 }
 
 /// Return whether a Rust/Python module path can uniquely identify a symbol file.
@@ -409,7 +311,7 @@ fn typescript_module_matches_symbol(
     symbol: &CodeSymbol,
     alias_counts: &HashMap<String, usize>,
 ) -> bool {
-    if let Some(relative_path) = resolve_relative_module_path(caller_path, module_spec) {
+    if let Some(relative_path) = resolve_relative_import_path(caller_path, module_spec) {
         return source_stems_for_path(&symbol.path)
             .iter()
             .any(|stem| stem == &relative_path)
@@ -442,81 +344,4 @@ fn module_symbol_alias_is_unique(
     symbol_target_aliases(symbol)
         .iter()
         .any(|alias| alias == &candidate && alias_counts.get(alias).copied().unwrap_or(0) <= 1)
-}
-
-/// Extract the quoted module specifier after a TypeScript `from` clause.
-fn quoted_module_spec_after_from(import_text: &str) -> Option<&str> {
-    let (_left, right) = import_text.split_once(" from ")?;
-    quoted_text(right.trim().trim_end_matches(';'))
-}
-
-/// Extract `import * as alias from ...` namespace alias text.
-fn namespace_import_alias(import_text: &str) -> Option<String> {
-    let rest = import_text.strip_prefix("import ")?.trim_start();
-    let rest = rest.strip_prefix('*')?.trim_start();
-    let rest = rest.strip_prefix("as ")?.trim_start();
-    rest.split_whitespace()
-        .next()
-        .map(ToString::to_string)
-        .filter(|alias| !alias.is_empty())
-}
-
-/// Extract braced TypeScript import names and aliases.
-fn braced_import_names(import_text: &str) -> Option<Vec<(String, Option<String>)>> {
-    let start = import_text.find('{')?;
-    let end = import_text[start + 1..].find('}')? + start + 1;
-    Some(
-        import_text[start + 1..end]
-            .split(',')
-            .filter_map(|item| {
-                let item = item.trim();
-                if item.is_empty() {
-                    return None;
-                }
-                let (name, alias) = split_alias(item, " as ");
-                Some((name.trim().to_string(), alias.map(ToString::to_string)))
-            })
-            .collect(),
-    )
-}
-
-/// Extract the first quoted string from text.
-fn quoted_text(text: &str) -> Option<&str> {
-    for quote in ['"', '\''] {
-        let Some(start) = text.find(quote) else {
-            continue;
-        };
-        let rest = &text[start + quote.len_utf8()..];
-        let Some(end) = rest.find(quote) else {
-            continue;
-        };
-        return Some(&rest[..end]);
-    }
-    None
-}
-
-/// Resolve a relative TypeScript module specifier to a repository stem path.
-fn resolve_relative_module_path(caller_path: &str, module_spec: &str) -> Option<String> {
-    if !(module_spec.starts_with("./") || module_spec.starts_with("../")) {
-        return None;
-    }
-    let mut components = caller_path
-        .rsplit_once('/')
-        .map_or(Vec::new(), |(parent, _file)| {
-            parent
-                .split('/')
-                .filter(|component| !component.is_empty())
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        });
-    for component in module_spec.split('/') {
-        match component {
-            "." | "" => {}
-            ".." => {
-                components.pop();
-            }
-            value => components.push(value.to_string()),
-        }
-    }
-    Some(strip_known_source_extension(&components.join("/")))
 }

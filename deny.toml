@@ -28,15 +28,29 @@ allow = [
   "Unlicense",
   "Zlib",
 ]
+# tree-sitter-language-pack 1.13.2 pulls webpki-roots through its build-only
+# ureq path; keep this exception exact until the upstream build graph removes it.
+exceptions = [
+  { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots@1.0.9" },
+]
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
+multiple-versions-include-dev = true
 wildcards = "deny"
 highlight = "all"
-# Expected transitive duplicates as of 2026-06-30:
-# - hashbrown/hashlink split between rusqlite and yaml-rust2 dependency stacks.
-# - windows-sys split between notify and CLI/dev tooling stacks.
-# Keep these as warnings until normal upstream updates collapse them.
+skip = [
+  { crate = "hashbrown@0.14.5", reason = "rusqlite 0.32 resolves hashlink 0.9 and hashbrown 0.14; remove when rusqlite adopts the retained hashlink and hashbrown lines." },
+  { crate = "hashbrown@0.16.1", reason = "yaml-rust2 0.11 and ratatui 0.30 resolve hashbrown 0.16; remove when both upstream paths converge on the retained hashbrown line." },
+  { crate = "hashlink@0.9.1", reason = "rusqlite 0.32 resolves hashlink 0.9; remove when rusqlite adopts the retained hashlink line." },
+  { crate = "getrandom@0.2.17", reason = "tree-sitter-language-pack 1.13.2 resolves ahash through getrandom 0.2 only in the optional parser worker graph; remove when upstream adopts the retained getrandom line." },
+  { crate = "windows-sys@0.60.2", reason = "notify 8.2 resolves windows-sys 0.60; remove when notify adopts the retained windows-sys line." },
+]
+
+[bans.workspace-dependencies]
+duplicates = "deny"
+include-path-dependencies = true
+unused = "deny"
 
 [sources]
 unknown-registry = "deny"

@@ -1,5 +1,42 @@
 //! Purpose: Persist `ProjectAtlas` 3 indexes in `SQLite`.
 
+mod derived_snapshot;
+mod diagnostics;
+mod project_identity;
+mod repository_graph;
+mod schema;
+mod sqlite_profile;
+mod telemetry;
+
+pub use derived_snapshot::{
+    DerivedGraphSnapshot, DerivedGraphSnapshotImport, DerivedGraphSnapshotMetadata,
+    DerivedSnapshotContent, MAX_DERIVED_SNAPSHOT_JSON_BYTES,
+};
+pub use diagnostics::{
+    DatabaseCoverageSample, DatabaseCoverageSummary, DatabaseCoverageTotalState,
+    DatabaseFilesystemSupport, DatabaseOperatingProfileReport, DatabasePublicationContractState,
+    DatabasePublicationReport, DatabaseSchemaCompatibility, DatabaseSchemaReport,
+    DatabaseSettingsReport, SqliteCompileOptionsIdentity, SqliteRuntimeReport,
+    database_settings_report,
+};
+pub use project_identity::{ProjectRootTransition, ProjectRootTransitionResult};
+pub use repository_graph::{
+    MAX_REPOSITORY_GRAPH_FRONTIER, RepositoryAffectedSourceFootprint, RepositoryCoverageQuery,
+    RepositoryCoverageRow, RepositoryGraphAdjacencyContinuation, RepositoryGraphAdjacencyPage,
+    RepositoryGraphAdjacencyReadPage, RepositoryGraphAdjacencyRow, RepositoryGraphDirection,
+    RepositoryGraphPage, RepositoryGraphReadBatch, RepositoryGraphReadBudget,
+    RepositoryGraphReadPage, RepositoryGraphReadPages, RepositoryGraphReadWork,
+    RepositoryGraphRelationQuery, RepositoryGraphRelationRow, RepositoryGraphStagingGuard,
+    RepositoryNavigationConnections, RepositoryNavigationNode, RepositoryResolutionCandidate,
+};
+pub use sqlite_profile::validate_database_location;
+pub use telemetry::{
+    PlannerStatisticsPolicy, PlannerStatisticsState, SpillCleanupState, TelemetryCheckpointState,
+    TelemetryRetentionPolicy, TelemetryRetentionState,
+};
+
+use blake3::Hasher;
+use projectatlas_core::graph::{GraphContractError, ProjectInstanceId};
 use projectatlas_core::health::{
     CATEGORY_DUPLICATE_PURPOSE, CATEGORY_MISSING_PURPOSE, CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
     CATEGORY_REPEATED_TEMPORARY_FOLDER, CATEGORY_STALE_PURPOSE, CATEGORY_SUGGESTED_PURPOSE_REVIEW,
@@ -15,28 +52,95 @@ use projectatlas_core::symbols::{
     SymbolRelation,
 };
 use projectatlas_core::telemetry::{
-    TokenBucketOverview, TokenOverview, TokenTrendPeriod, TokenTrendReport, TokenTrendWindow,
-    UsageEvent, default_estimate_method, default_token_accuracy, default_token_model,
-    default_token_provider, default_token_trace, default_tokenizer_backend,
+    TelemetryContractError, TokenOverview, TokenTrendReport, TokenTrendWindow, UsageEvent,
+    UsageInstanceId, UsageInstanceOwner,
 };
 use projectatlas_core::{
     AGENT_REVIEWED_SOURCE_VALUES, HIGH_IMPACT_FILE_NAMES, HIGH_IMPACT_PATH_PREFIXES,
-    HIGH_IMPACT_PATH_SEGMENTS, IndexedNode, LEGACY_HUMAN_PURPOSE_SOURCE, Node, NodeKind, Overview,
-    Purpose, PurposeSource, PurposeStatus, normalize_native_path_display,
-    normalize_repo_path_prefix,
+    HIGH_IMPACT_PATH_SEGMENTS, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
+    IndexedNode, LEGACY_HUMAN_PURPOSE_SOURCE, Node, NodeKind, Overview, Purpose, PurposeSource,
+    PurposeStatus, normalize_native_path_display, normalize_repo_path_prefix,
 };
 use rusqlite::types::Value;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params, params_from_iter};
+use rusqlite::{
+    Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params,
+    params_from_iter,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::num::TryFromIntError;
-use std::path::Path;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::num::{ParseIntError, TryFromIntError};
+use std::ops::{Deref, DerefMut};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
 
-/// Current `SQLite` schema version supported by this crate.
-const SCHEMA_VERSION: i64 = 8;
+use schema::{
+    FILE_TEXT_FTS_PROJECTION_REVISION_KEY, FILE_TEXT_FTS_SOURCE_REVISION_KEY,
+    INDEX_PUBLICATION_FINGERPRINT_KEY, INDEX_PUBLICATION_GENERATION_KEY,
+    INDEX_PUBLICATION_STATE_KEY, PROJECT_ROOT_KEY, SchemaState,
+};
+#[cfg(test)]
+use schema::{PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION, SCHEMA_VERSION_KEY, sqlite_sidecar_path};
+use sqlite_profile::{
+    DatabaseLocation, JournalModePolicy, SQLITE_BUSY_TIMEOUT, open_writable_connection,
+};
+
 /// Maximum persisted text for denormalized symbol-name search summaries.
 const MAX_SYMBOL_SEARCH_SUMMARY_CHARS: usize = 16_000;
+/// Publication acquisition fails fast so callers must restage after contention.
+const SQLITE_PUBLICATION_ACQUIRE_TIMEOUT: Duration = Duration::ZERO;
+/// Ancillary telemetry must not delay a valid navigation result under contention.
+const SQLITE_TELEMETRY_BUSY_TIMEOUT: Duration = Duration::from_millis(25);
+/// Maximum paths admitted to one purpose-curation hydration statement.
+pub const MAX_PURPOSE_CURATION_BATCH_ROWS: usize = 200;
+/// Maximum FTS candidates decoded for one exact-verification request.
+pub const MAX_FILE_TEXT_FTS_CANDIDATES: usize = 4_096;
+/// Path-indexed metadata cursor for one exact path-or-descendant fallback scope.
+const FILE_TEXT_FALLBACK_SCOPED_METADATA_SQL: &str = "
+    SELECT path, content_hash, byte_count, line_count
+    FROM file_texts
+    WHERE path = ?1 OR (path >= ?2 AND path < ?3)
+    ORDER BY path
+";
+/// Metadata cursor used when a fallback glob has no safe fixed prefix.
+const FILE_TEXT_FALLBACK_ALL_METADATA_SQL: &str = "
+    SELECT path, content_hash, byte_count, line_count
+    FROM file_texts
+    ORDER BY path
+";
+/// Exact authoritative content hydration after service-owned admission.
+const FILE_TEXT_FALLBACK_CONTENT_SQL: &str = "SELECT content FROM file_texts WHERE path = ?1";
+/// Maximum UTF-8 bytes retained in one host-owned purpose task label.
+const MAX_PURPOSE_CURATION_TASK_BYTES: usize = 256;
+/// Domain separator for deterministic purpose-curation item work keys.
+const PURPOSE_CURATION_ITEM_KEY_DOMAIN: &str = "projectatlas:purpose-curation:item:v1";
+/// Domain separator for deterministic purpose-curation row-state tokens.
+const PURPOSE_CURATION_STATE_TOKEN_DOMAIN: &str = "projectatlas:purpose-curation:state:v1";
+/// Domain separator for deterministic purpose-curation batch work keys.
+const PURPOSE_CURATION_BATCH_KEY_DOMAIN: &str = "projectatlas:purpose-curation:batch:v1";
+/// Monotonic metadata revision for accepted authored-purpose mutations.
+const AUTHORED_PURPOSE_REVISION_KEY: &str = "purpose.authored_revision";
+/// Select create capability only for a path proven absent by preflight.
+fn writable_open_flags(state: SchemaState, database_exists: bool) -> OpenFlags {
+    match (state, database_exists) {
+        (SchemaState::Fresh, false) => {
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE
+        }
+        (SchemaState::Fresh | SchemaState::Current | SchemaState::UpgradeRequired, true)
+        | (SchemaState::Current | SchemaState::UpgradeRequired, false) => {
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+        }
+    }
+}
+
+/// Establish WAL only while creating or upgrading an admitted database.
+const fn writable_journal_policy(state: SchemaState) -> JournalModePolicy {
+    match state {
+        SchemaState::Current => JournalModePolicy::RequireWal,
+        SchemaState::Fresh | SchemaState::UpgradeRequired => JournalModePolicy::EnsureWal,
+    }
+}
 
 /// Database-layer error type.
 #[derive(Debug, Error)]
@@ -44,6 +148,133 @@ pub enum DbError {
     /// `SQLite` operation failed.
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// A live project database is located on a known unsupported filesystem.
+    #[error(
+        "database path {path:?} is on an unsupported filesystem (mount: {mount_point:?}, type: {filesystem_type:?}); live SQLite WAL requires supported local storage"
+    )]
+    DatabaseFilesystemUnsupported {
+        /// Database path rejected before writable access.
+        path: PathBuf,
+        /// Resolved mount point when one was safely available.
+        mount_point: Option<PathBuf>,
+        /// Normalized filesystem type when one was safely available.
+        filesystem_type: Option<String>,
+    },
+    /// Local WAL-safe filesystem placement could not be proved.
+    #[error(
+        "database path {path:?} has uncertain filesystem placement (mount: {mount_point:?}, type: {filesystem_type:?}): {reason}"
+    )]
+    DatabaseFilesystemUncertain {
+        /// Database path rejected before writable access.
+        path: PathBuf,
+        /// Resolved mount point when one was safely available.
+        mount_point: Option<PathBuf>,
+        /// Normalized filesystem type when one was safely available.
+        filesystem_type: Option<String>,
+        /// Bounded reason the local profile could not be established.
+        reason: String,
+    },
+    /// `SQLite` did not retain a required connection operating-profile value.
+    #[error("SQLite operating profile mismatch for {setting}: expected {expected}, found {found}")]
+    DatabaseOperatingProfile {
+        /// Connection or durable setting that did not match.
+        setting: &'static str,
+        /// Required value.
+        expected: String,
+        /// Observed value.
+        found: String,
+    },
+    /// A persisted or requested graph value violates the typed domain contract.
+    #[error("repository graph contract error: {0}")]
+    GraphContract(#[from] GraphContractError),
+    /// A telemetry identity violates its typed domain contract.
+    #[error("telemetry contract error: {0}")]
+    TelemetryContract(#[from] TelemetryContractError),
+    /// Persisted graph project identity differs from the selected identity.
+    #[error(
+        "repository graph project identity {found} does not match selected identity {expected}"
+    )]
+    GraphProjectIdentityMismatch {
+        /// Project identity selected by the caller.
+        expected: String,
+        /// Project identity stored in the database.
+        found: String,
+    },
+    /// A graph query requires one complete nonzero publication generation.
+    #[error("repository graph is unavailable without a complete published generation")]
+    GraphPublicationUnavailable,
+    /// A normalized graph row has an impossible column shape.
+    #[error("invalid {table} row: {reason}")]
+    GraphRowShape {
+        /// Owning normalized graph table.
+        table: &'static str,
+        /// Stable shape diagnostic.
+        reason: &'static str,
+    },
+    /// A derived graph snapshot violates its bounded portable contract.
+    #[error("invalid derived graph snapshot: {reason}")]
+    DerivedSnapshotInvalid {
+        /// Stable validation failure.
+        reason: &'static str,
+    },
+    /// A derived graph snapshot exceeded one declared resource ceiling.
+    #[error(
+        "derived graph snapshot {resource} exceeds the limit: found {found}, maximum {maximum}"
+    )]
+    DerivedSnapshotLimit {
+        /// Bounded resource that was exceeded.
+        resource: &'static str,
+        /// Observed amount.
+        found: u64,
+        /// Maximum admitted amount.
+        maximum: u64,
+    },
+    /// A private snapshot capture could not be created or cleaned up.
+    #[error("derived graph snapshot I/O failed for {path:?}: {source}")]
+    DerivedSnapshotIo {
+        /// Private temporary path involved in the operation.
+        path: PathBuf,
+        /// Underlying filesystem failure.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A portable snapshot payload was not valid JSON.
+    #[error("derived graph snapshot JSON is invalid: {0}")]
+    DerivedSnapshotJson(#[from] serde_json::Error),
+    /// Persisted per-file symbol rows do not match their owning parser metadata.
+    #[error("invalid persisted symbol graph for {path:?}: {reason}")]
+    SymbolGraphRowShape {
+        /// Repository path whose persisted graph is inconsistent.
+        path: String,
+        /// Stable shape diagnostic.
+        reason: &'static str,
+    },
+    /// Equal scoped resolution digests retained different canonical witnesses.
+    #[error("resolution-key collision in {domain} for digest {digest:?}")]
+    ResolutionKeyCollision {
+        /// Closed resolution domain containing the conflict.
+        domain: &'static str,
+        /// Fixed digest shared by conflicting witnesses.
+        digest: [u8; 32],
+    },
+    /// A normalized binary graph field has the wrong width.
+    #[error("invalid {field} blob length {found}; expected {expected}")]
+    InvalidBlobLength {
+        /// Owning database field.
+        field: &'static str,
+        /// Required fixed byte width.
+        expected: usize,
+        /// Observed byte width.
+        found: usize,
+    },
+    /// An unsigned graph count cannot be represented by `SQLite`.
+    #[error("graph count for {field} exceeds SQLite integer range: {value}")]
+    GraphCountOverflow {
+        /// Owning database field.
+        field: &'static str,
+        /// Unsigned domain value that exceeded the database range.
+        value: u64,
+    },
     /// Schema version is not supported.
     #[error("unsupported schema version {found}, expected {expected}")]
     SchemaVersion {
@@ -51,6 +282,115 @@ pub enum DbError {
         found: i64,
         /// Expected version.
         expected: i64,
+    },
+    /// An existing database has no durable schema version.
+    #[error("existing database is missing schema_version metadata")]
+    SchemaVersionMissing,
+    /// A durable `SQLite` object does not match the supported schema contract.
+    #[error("incompatible schema object {object:?}: expected {expected}, found {found}")]
+    SchemaShape {
+        /// Table, index, or column whose shape is incompatible.
+        object: String,
+        /// Required `SQLite` object kind.
+        expected: String,
+        /// Observed `SQLite` object kind.
+        found: String,
+    },
+    /// `SQLite` integrity validation failed before migration.
+    #[error("database integrity check failed: {message}")]
+    IntegrityCheck {
+        /// Bounded `SQLite` integrity diagnostic.
+        message: String,
+    },
+    /// A migration did not reach the supported current schema.
+    #[error("schema migration did not reach expected version {expected}")]
+    SchemaPostcondition {
+        /// Version required after migration.
+        expected: i64,
+    },
+    /// A source-owned database has no durable project identity.
+    #[error("existing database is missing project_root metadata")]
+    ProjectRootMissing,
+    /// A source-owned database belongs to another project root.
+    #[error("database project root {found:?} does not match selected root {expected:?}")]
+    ProjectRootMismatch {
+        /// Canonical root selected by the caller.
+        expected: String,
+        /// Durable root recorded in `SQLite`.
+        found: String,
+    },
+    /// A root transition destination is not an absolute existing directory.
+    #[error("invalid project root transition destination {root:?}: {source}")]
+    ProjectRootDestinationInvalid {
+        /// Destination rejected before database preflight or mutation.
+        root: String,
+        /// Filesystem or input failure that made the destination invalid.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A move or detach requires a previously bound project root.
+    #[error("project root transition requires an existing bound root")]
+    ProjectRootTransitionRequiresExistingRoot,
+    /// A move must select a destination different from the old root.
+    #[error("project root move destination {root:?} matches the existing root")]
+    ProjectRootTransitionRequiresDifferentRoot {
+        /// Root that was selected as both source and destination.
+        root: String,
+    },
+    /// A verified move cannot preserve identity while the old root still exists.
+    #[error("project root {root:?} still exists; use detach for an independent copy")]
+    ProjectRootStillPresent {
+        /// Recorded old root that remains accessible.
+        root: String,
+    },
+    /// Filesystem state could not prove that a move's old root is absent.
+    #[error("cannot prove project root {root:?} is absent: {source}")]
+    ProjectRootAbsenceUncertain {
+        /// Recorded old root whose state is uncertain.
+        root: String,
+        /// Filesystem failure that prevents an absence proof.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Root or identity state changed after transition preflight.
+    #[error(
+        "project root transition state changed: root {expected_root:?} -> {found_root:?}, identity {expected_identity:?} -> {found_identity:?}"
+    )]
+    ProjectRootTransitionChanged {
+        /// Root captured by read-only preflight.
+        expected_root: Option<String>,
+        /// Root observed inside the write transaction.
+        found_root: Option<String>,
+        /// Identity captured by read-only preflight.
+        expected_identity: Option<String>,
+        /// Identity observed inside the write transaction.
+        found_identity: Option<String>,
+    },
+    /// A bound project database has no durable instance identity.
+    #[error("bound project database is missing project instance identity")]
+    ProjectInstanceIdentityMissing,
+    /// `SQLite` did not yield a usable nonzero project identity.
+    #[error("failed to generate a distinct nonzero project instance identity")]
+    ProjectInstanceIdentityGenerationFailed,
+    /// A transaction failed and the explicit rollback also failed.
+    #[error("{operation}; rollback also failed: {rollback}")]
+    TransactionRollback {
+        /// Primary operation failure that caused rollback.
+        #[source]
+        operation: Box<DbError>,
+        /// Secondary rollback failure retained for diagnosis.
+        rollback: rusqlite::Error,
+    },
+    /// Publication acquisition failed and its standard busy policy was not restored.
+    #[error(
+        "publication writer acquisition failed: {operation}; restoring the standard busy policy also failed: {restore}"
+    )]
+    PublicationAcquirePolicyRestore {
+        /// Writer-acquisition failure observed with fail-fast busy handling.
+        #[source]
+        operation: Box<rusqlite::Error>,
+        /// Failure restoring the ordinary connection busy policy.
+        restore: Box<rusqlite::Error>,
     },
     /// Invalid enum value read from the database.
     #[error("invalid {field} value in database: {value}")]
@@ -60,7 +400,48 @@ pub enum DbError {
         /// Invalid value.
         value: String,
     },
-    /// Count value from `SQLite` could not fit in `usize`.
+    /// A literal cannot safely use the complete-candidate FTS path.
+    #[error("literal token cannot use FTS acceleration: {reason}")]
+    FileTextFtsTokenUnsafe {
+        /// Stable rejection reason for service fallback selection.
+        reason: &'static str,
+    },
+    /// One FTS request exceeded the storage-owned candidate bound.
+    #[error("FTS candidate request {requested} exceeds the maximum {maximum}")]
+    FileTextFtsCandidateLimit {
+        /// Requested exact-verification candidates.
+        requested: usize,
+        /// Storage-owned hard maximum.
+        maximum: usize,
+    },
+    /// `SQLite` returned a non-finite lexical ranking score.
+    #[error("invalid FTS BM25 score for {path:?}")]
+    FileTextFtsScoreInvalid {
+        /// Candidate path whose score was invalid.
+        path: String,
+    },
+    /// Durable FTS synchronization metadata is absent or contradictory.
+    #[error("invalid FTS synchronization state: {reason}")]
+    FileTextFtsStateInvalid {
+        /// Stable reason that makes the acceleration state untrustworthy.
+        reason: &'static str,
+    },
+    /// Persisted text metadata disagrees with its authoritative UTF-8 content.
+    #[error("file text {path:?} has invalid {field}: recorded {recorded}, actual {actual}")]
+    FileTextMetadataMismatch {
+        /// Repository-relative path owning the invalid text row.
+        path: String,
+        /// Metadata field that disagrees with content.
+        field: &'static str,
+        /// Persisted or caller-supplied value.
+        recorded: usize,
+        /// Value derived from authoritative content.
+        actual: usize,
+    },
+    /// A bounded database read observed cancellation or its deadline.
+    #[error("{0}")]
+    IndexWork(#[from] IndexWorkFailure),
+    /// Count value from `SQLite` could not fit its owning unsigned domain type.
     #[error("invalid count for {field}: {value}")]
     InvalidCount {
         /// Count field name.
@@ -70,11 +451,43 @@ pub enum DbError {
         /// Source conversion error.
         source: TryFromIntError,
     },
+    /// Integer metadata could not be parsed without losing its source error.
+    #[error("invalid integer metadata for {field}: {value:?}: {source}")]
+    InvalidInteger {
+        /// Metadata field name.
+        field: &'static str,
+        /// Invalid persisted value.
+        value: String,
+        /// Source parse failure.
+        source: ParseIntError,
+    },
+    /// Unsigned integer metadata could not advance without overflow.
+    #[error("integer metadata for {field} overflowed at {value}")]
+    IntegerMetadataOverflow {
+        /// Metadata key owning the monotonic value.
+        field: &'static str,
+        /// Largest persisted value that could not advance.
+        value: u64,
+    },
     /// A caller supplied a path that is not in the current index.
     #[error("path {path:?} is not indexed; run scan, fix the path, or choose an indexed path")]
     PathNotIndexed {
         /// Repository-relative path.
         path: String,
+    },
+    /// A purpose-curation task label is blank, unsafe, or too large.
+    #[error("invalid purpose-curation task label: {reason}")]
+    PurposeCurationTaskInvalid {
+        /// Stable validation reason.
+        reason: &'static str,
+    },
+    /// A purpose-curation hydration request exceeds the bounded statement size.
+    #[error("purpose-curation batch requested {requested} paths; maximum is {maximum}")]
+    PurposeCurationBatchTooLarge {
+        /// Number of unique paths requested.
+        requested: usize,
+        /// Maximum paths admitted to one prepared set query.
+        maximum: usize,
     },
     /// A caller attempted to resolve a health finding that is not currently active.
     #[error(
@@ -88,15 +501,488 @@ pub enum DbError {
         /// Requested primary path.
         path: String,
     },
+    /// A projection-only refresh no longer matches the established index contract.
+    #[error("index publication contract changed during projection refresh")]
+    PublicationContractChanged,
+    /// Prepared publication work was based on a generation that is no longer current.
+    #[error("index publication base generation changed: expected {expected}, found {found}")]
+    PublicationBaseGenerationChanged {
+        /// Complete generation used to prepare the publication batch.
+        expected: IndexGeneration,
+        /// Complete generation observed after reserving the writer transaction.
+        found: IndexGeneration,
+    },
+    /// A complete index generation cannot advance any further.
+    #[error("index publication generation overflowed")]
+    PublicationGenerationOverflow,
+    /// A full scan replacement has not removed its remaining absent projections.
+    #[error("index publication cannot complete before scan replacement finishes")]
+    ScanReplacementIncomplete,
+    /// The store already has an active read snapshot.
+    #[error("index read snapshot is already active on this store")]
+    IndexReadSnapshotActive,
+    /// A read-only store cannot locate its database for a separate telemetry write.
+    #[error("read-only store has no database path for telemetry persistence")]
+    TelemetryPathUnavailable,
+    /// One telemetry field exceeds its declared UTF-8 byte budget.
+    #[error("telemetry field {field} uses {bytes} UTF-8 bytes; limit is {limit}")]
+    TelemetryFieldTooLarge {
+        /// Stable field owner.
+        field: &'static str,
+        /// Observed UTF-8 byte count.
+        bytes: usize,
+        /// Maximum admitted UTF-8 byte count.
+        limit: usize,
+    },
+    /// A telemetry retention policy bound cannot make forward progress.
+    #[error("invalid telemetry retention limit for {field}: {value}")]
+    TelemetryLimitInvalid {
+        /// Stable retention-policy field.
+        field: &'static str,
+        /// Rejected policy value.
+        value: usize,
+    },
+    /// A telemetry counter cannot be represented exactly in `SQLite`.
+    #[error("telemetry integer overflow for {field}")]
+    TelemetryIntegerOverflow {
+        /// Stable counter owner.
+        field: &'static str,
+    },
+    /// A runtime attempted to reuse a sealed or expired instance.
+    #[error("telemetry usage instance is sealed or expired")]
+    TelemetryInstanceInactive,
+    /// Operating-system randomness was unavailable for optional telemetry identity creation.
+    #[error("telemetry runtime identity is unavailable")]
+    TelemetryIdentityUnavailable,
+    /// A runtime identity was reused with incompatible durable instance metadata.
+    #[error("telemetry runtime identity does not match its retained owner or caller label")]
+    TelemetryInstanceMismatch,
+    /// The bounded active-instance capacity is exhausted.
+    #[error("telemetry active-instance capacity is exhausted")]
+    TelemetryInstanceCapacity,
+    /// The bounded active-baseline capacity is exhausted.
+    #[error("telemetry modeled-baseline capacity is exhausted")]
+    TelemetryBaselineCapacity,
+    /// A compact modeled-baseline key collided with different witness material.
+    #[error("telemetry modeled-baseline key collided with different witness material")]
+    TelemetryBaselineCollision,
+}
+
+impl DbError {
+    /// Return whether a derived-index write could not proceed without implying
+    /// corruption, schema drift, or an identity-contract failure.
+    #[must_use]
+    pub fn is_write_unavailable(&self) -> bool {
+        match self {
+            Self::Sqlite(error) => matches!(
+                error.sqlite_error_code(),
+                Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked | ErrorCode::ReadOnly)
+            ),
+            _ => false,
+        }
+    }
 }
 
 /// Convenient result alias for database operations.
 pub type DbResult<T> = Result<T, DbError>;
 
+/// Maximum exact paths admitted to one bounded symbol hydration request.
+pub const MAX_SYMBOL_BATCH_PATHS: u32 = 64;
+/// Maximum symbol rows admitted to one bounded hydration request.
+pub const MAX_SYMBOL_BATCH_ROWS: u32 = 4_096;
+/// Maximum decoded symbol bytes admitted to one bounded hydration request.
+pub const MAX_SYMBOL_BATCH_DECODED_BYTES: u64 = 4 * 1_024 * 1_024;
+/// Paths bound per statement, below supported `SQLite` variable ceilings.
+const SYMBOL_BATCH_BIND_PATHS: usize = 48;
+
+/// Typed database envelope for one exact-path symbol batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SymbolBatchReadBudget {
+    /// Maximum unique exact repository paths.
+    paths: u32,
+    /// Maximum decoded symbol rows.
+    rows: u32,
+    /// Maximum retained Rust row and owned string allocation bytes.
+    decoded_bytes: u64,
+}
+
+impl SymbolBatchReadBudget {
+    /// Construct one bounded exact-path symbol read envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a limit is zero or above its product ceiling.
+    pub fn new(paths: u32, rows: u32, decoded_bytes: u64) -> DbResult<Self> {
+        if paths == 0
+            || paths > MAX_SYMBOL_BATCH_PATHS
+            || rows == 0
+            || rows > MAX_SYMBOL_BATCH_ROWS
+            || decoded_bytes == 0
+            || decoded_bytes > MAX_SYMBOL_BATCH_DECODED_BYTES
+        {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "symbol batch limit is zero or above the product ceiling",
+            }
+            .into());
+        }
+        Ok(Self {
+            paths,
+            rows,
+            decoded_bytes,
+        })
+    }
+
+    /// Return the exact-path ceiling.
+    #[must_use]
+    pub const fn paths(self) -> u32 {
+        self.paths
+    }
+
+    /// Return the decoded-row ceiling.
+    #[must_use]
+    pub const fn rows(self) -> u32 {
+        self.rows
+    }
+
+    /// Return the decoded-byte ceiling.
+    #[must_use]
+    pub const fn decoded_bytes(self) -> u64 {
+        self.decoded_bytes
+    }
+}
+
+/// Exact work retained by one bounded symbol batch read.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SymbolBatchReadWork {
+    /// Unique exact paths supplied to `SQLite`.
+    pub requested_paths: u32,
+    /// Symbol rows retained after all bounds.
+    pub returned_rows: u32,
+    /// Retained Rust row and owned string allocation bytes after all bounds.
+    pub decoded_bytes: u64,
+}
+
+/// Bounded symbols and truncation state returned for exact paths.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SymbolBatchRead {
+    /// Deterministically ordered persisted symbols.
+    pub rows: Vec<CodeSymbol>,
+    /// Whether a path, row, or decoded-byte bound omitted rows.
+    pub truncated: bool,
+    /// First deterministic database limit that omitted symbol rows.
+    pub reached_limit: Option<SymbolBatchReadLimit>,
+    /// Exact work retained by this database read.
+    pub work: SymbolBatchReadWork,
+}
+
+/// Closed database limits that can truncate an exact-path symbol batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SymbolBatchReadLimit {
+    /// More unique paths were requested than the batch admits.
+    Paths,
+    /// More symbol rows matched than the batch admits.
+    Rows,
+    /// The next symbol row crossed the decoded-byte envelope.
+    DecodedBytes,
+}
+
+/// Durable state of the multi-projection derived index publication.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexPublicationState {
+    /// A publisher may have changed only part of the derived index.
+    Updating,
+    /// Every projection completed under the recorded contract fingerprint.
+    Complete,
+}
+
+impl IndexPublicationState {
+    /// Return the stable `SQLite` representation.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Updating => "updating",
+            Self::Complete => "complete",
+        }
+    }
+
+    /// Parse the stable `SQLite` representation.
+    fn from_db(value: String) -> DbResult<Self> {
+        match value.as_str() {
+            "updating" => Ok(Self::Updating),
+            "complete" => Ok(Self::Complete),
+            _ => Err(DbError::InvalidEnum {
+                field: INDEX_PUBLICATION_STATE_KEY,
+                value,
+            }),
+        }
+    }
+}
+
+/// Persisted state needed to reject mixed or incompatible derived projections.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct IndexPublication {
+    /// Current publication state.
+    pub state: IndexPublicationState,
+    /// Contract fingerprint recorded by the last complete publication.
+    pub contract_fingerprint: Option<String>,
+    /// Monotonic generation of the last complete derived index.
+    pub generation: IndexGeneration,
+}
+
+/// Publication contract applied when one atomic writer commits.
+enum PublicationContract {
+    /// Establish or replace the complete derived-index contract.
+    Full(String),
+    /// Preserve the already established complete contract.
+    Projection(String),
+}
+
+/// Exclusive parent-owned atomic publication over all derived projections.
+pub struct IndexPublicationGuard<'store> {
+    /// Store whose connection owns the active `SQLite` write transaction.
+    store: &'store mut AtlasStore,
+    /// Contract behavior selected when the publication began.
+    contract: PublicationContract,
+    /// Generation visible before this publication began.
+    previous_generation: IndexGeneration,
+    /// Whether a full scan replacement still needs absent-projection cleanup.
+    scan_replacement_pending: bool,
+    /// Whether drop must roll the transaction back.
+    active: bool,
+}
+
 /// `SQLite`-backed `ProjectAtlas` index store.
 pub struct AtlasStore {
     /// Active database connection for index reads and writes.
     connection: Connection,
+    /// Whether normal reads currently share one explicit `SQLite` snapshot.
+    read_snapshot_active: Cell<bool>,
+    /// Durable database path when the store is file-backed.
+    database_path: Option<PathBuf>,
+    /// WAL-safe filesystem identity retained for later ancillary connections.
+    database_location: Option<DatabaseLocation>,
+    /// Whether this connection is restricted to non-mutating queries.
+    read_only: bool,
+    /// Project root validated for this store, when the database records one.
+    validated_project_root: Option<String>,
+    /// Project identity captured with the validated root binding.
+    validated_project_instance_id: Option<ProjectInstanceId>,
+    /// Bounded per-label instances used by direct library callers for this handle lifetime.
+    library_usage_instances: RefCell<HashMap<String, Option<UsageInstanceId>>>,
+}
+
+/// Root and project identity captured when one store binding was validated.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CapturedProjectBinding {
+    /// Stable project identity captured at open or explicit root transition.
+    pub project_instance_id: ProjectInstanceId,
+    /// Normalized local source root captured with the project identity.
+    pub project_root: String,
+}
+
+/// Lightweight persisted import fact used by alias resolution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredImportRelation {
+    /// Repository-relative source path that owns the import.
+    pub path: String,
+    /// Parser-selected source declaration or module.
+    pub source_name: String,
+    /// Original persisted import text.
+    pub target_name: String,
+    /// One-based source line.
+    pub line: usize,
+}
+
+/// One unapproved purpose row bound to deterministic curator work.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PurposeCurationCandidate {
+    /// Current indexed node, purpose, and summary state.
+    pub node: IndexedNode,
+    /// Project/generation/task/path work identity used to coalesce duplicate work.
+    pub work_key: String,
+    /// Opaque token binding conditional apply to this exact unapproved purpose row.
+    pub state_token: String,
+}
+
+/// Bounded purpose-curation work selected from one project generation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PurposeCurationBatch {
+    /// Stable selected-project identity.
+    pub project_instance_id: ProjectInstanceId,
+    /// Active graph/index generation observed with the queue rows.
+    pub active_generation: IndexGeneration,
+    /// Host-supplied task label used to coalesce task-local work.
+    pub task: String,
+    /// Deterministic identity of the complete returned batch.
+    pub work_key: String,
+    /// Current missing or suggested purpose rows, ordered by path.
+    pub items: Vec<PurposeCurationCandidate>,
+}
+
+/// Result of applying a purpose through the stale-safe curator path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PurposeConditionalApplyState {
+    /// The current unapproved row matched and was approved atomically.
+    Applied,
+    /// Project, generation, task, path, or purpose row state changed after selection.
+    Stale,
+    /// The path now has accepted authored intent and was not overwritten.
+    Accepted,
+    /// The selected path is no longer active in the current index.
+    PathUnavailable,
+}
+
+/// One stale-safe purpose approval copied from a queue item.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PurposeConditionalApplyRequest {
+    /// Queue task label.
+    pub task: String,
+    /// Exact repository-relative path.
+    pub path: String,
+    /// Queue item work key.
+    pub work_key: String,
+    /// Queue item current-row state token.
+    pub state_token: String,
+    /// Agent-reviewed purpose to approve on an exact state match.
+    pub purpose: String,
+}
+
+/// Per-item outcome from one atomic conditional purpose-review batch.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PurposeConditionalApplyResult {
+    /// Exact requested path.
+    pub path: String,
+    /// Applied or non-mutating stale/accepted/unavailable outcome.
+    pub state: PurposeConditionalApplyState,
+    /// Current purpose state observed or written inside the owning transaction.
+    pub current_purpose: Option<Purpose>,
+}
+
+/// Identity depth required while opening one current project binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectIdentityRequirement {
+    /// Ordinary stores require a complete root and identity binding.
+    Required,
+    /// An explicit root transition owns identity creation or repair.
+    TransitionOwned,
+}
+
+impl ProjectIdentityRequirement {
+    /// Whether a missing identity must fail the open.
+    const fn is_required(self) -> bool {
+        matches!(self, Self::Required)
+    }
+}
+
+impl Deref for IndexPublicationGuard<'_> {
+    type Target = AtlasStore;
+
+    fn deref(&self) -> &Self::Target {
+        self.store
+    }
+}
+
+impl DerefMut for IndexPublicationGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.store
+    }
+}
+
+impl IndexPublicationGuard<'_> {
+    /// Mark the current scan projection absent before bounded replacement batches.
+    ///
+    /// The caller must finish with [`Self::finish_scan_replacement`] before
+    /// completing this publication. Dropping the guard rolls every partial
+    /// replacement batch back with the parent transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the scan projection cannot be updated.
+    pub fn begin_scan_replacement(&mut self) -> DbResult<()> {
+        mark_all_scan_nodes_absent(&self.store.connection)?;
+        self.scan_replacement_pending = true;
+        Ok(())
+    }
+
+    /// Upsert one bounded scan-node batch inside the parent publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any node in the batch cannot be persisted.
+    pub fn upsert_scan_node_batch(&mut self, nodes: &[Node]) -> DbResult<()> {
+        upsert_nodes(&self.store.connection, nodes)
+    }
+
+    /// Remove derived projections for nodes left absent after replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if stale projections cannot be removed.
+    pub fn finish_scan_replacement(&mut self) -> DbResult<()> {
+        delete_absent_scan_projections(&self.store.connection)?;
+        self.scan_replacement_pending = false;
+        Ok(())
+    }
+
+    /// Commit every derived projection and advance the complete generation
+    /// exactly once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if generation metadata is invalid, a projection-only
+    /// refresh no longer matches its established contract, or commit fails.
+    pub fn complete(mut self) -> DbResult<()> {
+        if self.scan_replacement_pending {
+            return Err(DbError::ScanReplacementIncomplete);
+        }
+        let next_generation = self
+            .previous_generation
+            .checked_next()
+            .ok_or(DbError::PublicationGenerationOverflow)?;
+        match &self.contract {
+            PublicationContract::Full(contract_fingerprint) => {
+                set_metadata(
+                    &self.store.connection,
+                    INDEX_PUBLICATION_FINGERPRINT_KEY,
+                    contract_fingerprint,
+                )?;
+            }
+            PublicationContract::Projection(contract_fingerprint) => {
+                let matches =
+                    load_index_publication(&self.store.connection)?.is_some_and(|publication| {
+                        publication.state == IndexPublicationState::Updating
+                            && publication.contract_fingerprint.as_deref()
+                                == Some(contract_fingerprint.as_str())
+                            && publication.generation == self.previous_generation
+                    });
+                if !matches {
+                    return Err(DbError::PublicationContractChanged);
+                }
+            }
+        }
+        set_metadata(
+            &self.store.connection,
+            INDEX_PUBLICATION_GENERATION_KEY,
+            &next_generation.to_string(),
+        )?;
+        set_metadata(
+            &self.store.connection,
+            INDEX_PUBLICATION_STATE_KEY,
+            IndexPublicationState::Complete.as_str(),
+        )?;
+        self.store.connection.execute_batch("COMMIT")?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for IndexPublicationGuard<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let _rollback_result = self.store.connection.execute_batch("ROLLBACK");
+        }
+    }
 }
 
 /// UTF-8 source text persisted for indexed search.
@@ -112,6 +998,76 @@ pub struct IndexedFileText {
     pub line_count: usize,
     /// Full UTF-8 source text used by indexed search.
     pub content: String,
+}
+
+/// Bounded safe-token request for FTS candidate acceleration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileTextFtsQuery<'query> {
+    /// One ASCII-alphanumeric token that exact lexical matching will verify.
+    pub literal_token: &'query str,
+    /// Optional exact path-or-descendant scope.
+    pub path_prefix: Option<&'query str>,
+    /// Maximum candidates returned before reporting overflow.
+    pub limit: usize,
+}
+
+/// One FTS-ranked candidate carrying only authoritative persisted metadata.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileTextFtsCandidate {
+    /// Repository-relative file path used for budgeted content hydration.
+    pub path: String,
+    /// BLAKE3 content hash from the authoritative persisted text row.
+    pub content_hash: Option<String>,
+    /// Persisted UTF-8 source byte count used for pre-hydration budgets.
+    pub byte_count: usize,
+    /// Persisted line count.
+    pub line_count: usize,
+    /// `SQLite` FTS5 BM25 score; lower values rank first.
+    pub bm25: f64,
+}
+
+/// Bounded FTS candidate page for service-owned exact verification.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileTextFtsPage {
+    /// Candidates ordered by BM25 and repository path.
+    pub candidates: Vec<FileTextFtsCandidate>,
+    /// Whether at least one more candidate matched the bound query.
+    pub overflow: bool,
+}
+
+/// Persisted file metadata available before source-content decoding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileTextMetadata {
+    /// Repository-relative file path using forward slashes.
+    pub path: String,
+    /// BLAKE3 content hash from the scanned file node.
+    pub content_hash: Option<String>,
+    /// Persisted UTF-8 source byte count.
+    pub byte_count: usize,
+    /// Persisted line count.
+    pub line_count: usize,
+}
+
+/// Service decision made before one fallback row decodes source content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileTextAdmission {
+    /// Decode and visit this row's source content.
+    Read,
+    /// Continue without decoding this row's source content.
+    Skip,
+    /// Stop fallback iteration without decoding this row's source content.
+    Stop,
+}
+
+/// Content-free synchronization state for the rebuildable FTS projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileTextFtsState {
+    /// Authoritative persisted-text rows.
+    pub source_rows: usize,
+    /// Document rows currently represented by the FTS projection.
+    pub indexed_rows: usize,
+    /// Whether authoritative and projected document identities agree exactly.
+    pub synchronized: bool,
 }
 
 /// Agent-approved resolution for a deterministic health finding.
@@ -146,6 +1102,15 @@ pub struct HealthQuery {
     pub summary_only: bool,
     /// Health and purpose-curation scope.
     pub scope: HealthScope,
+}
+
+/// Resolution ownership used by bounded health queries.
+#[derive(Clone, Copy)]
+enum HealthResolutionFilter<'a> {
+    /// Caller-owned compatibility filter.
+    Explicit(&'a [String]),
+    /// Durable resolutions owned by the current project database.
+    Stored,
 }
 
 /// Scope controls for bounded health and purpose-curation queries.
@@ -294,18 +1259,239 @@ const PURPOSE_HEALTH_SPECS: [PurposeHealthSpec; 3] = [
 ];
 
 impl AtlasStore {
+    /// Reject mutations while this connection owns an ordinary read snapshot.
+    fn require_mutation_scope(&self) -> DbResult<()> {
+        if self.read_snapshot_active.get() {
+            Err(DbError::IndexReadSnapshotActive)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Open a nested-capable write scope after validating the active binding.
+    fn validated_savepoint(&mut self) -> DbResult<rusqlite::Savepoint<'_>> {
+        self.require_mutation_scope()?;
+        let validate_binding = self.connection.is_autocommit();
+        let expected_root = self.validated_project_root.clone();
+        let expected_identity = self.validated_project_instance_id;
+        let savepoint = self.connection.savepoint()?;
+        if validate_binding {
+            schema::validate_active_binding(
+                &savepoint,
+                expected_root.as_deref(),
+                expected_identity,
+            )?;
+        }
+        Ok(savepoint)
+    }
+
+    /// Run one atomic standalone write, reusing an already validated parent transaction.
+    fn with_validated_write<T>(
+        &self,
+        operation: impl FnOnce(&Connection) -> DbResult<T>,
+    ) -> DbResult<T> {
+        self.require_mutation_scope()?;
+        if !self.connection.is_autocommit() {
+            return operation(&self.connection);
+        }
+        let transaction =
+            rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let result = schema::validate_active_binding(
+            &transaction,
+            self.validated_project_root.as_deref(),
+            self.validated_project_instance_id,
+        )
+        .and_then(|()| operation(&transaction));
+        match result {
+            Ok(value) => {
+                transaction.commit()?;
+                Ok(value)
+            }
+            Err(operation) => match transaction.rollback() {
+                Ok(()) => Err(operation),
+                Err(rollback) => Err(DbError::TransactionRollback {
+                    operation: Box::new(operation),
+                    rollback,
+                }),
+            },
+        }
+    }
+
+    /// Run telemetry against this store's exact captured database binding.
+    ///
+    /// File-backed stores use a separate short-lived writable connection with
+    /// an ancillary fail-fast busy budget. Read-only navigation stores release
+    /// their read snapshot first. The connection is never discovered, attached,
+    /// substituted, or shared with another project.
+    fn with_telemetry_connection<T>(
+        &self,
+        operation: impl FnOnce(&Connection) -> DbResult<T>,
+    ) -> DbResult<T> {
+        if self.read_only {
+            self.finish_index_read_snapshot()?;
+        } else {
+            self.require_mutation_scope()?;
+        }
+        let (Some(path), Some(location)) =
+            (self.database_path.as_ref(), self.database_location.as_ref())
+        else {
+            if self.database_path.is_none() && self.database_location.is_none() {
+                return operation(&self.connection);
+            }
+            return Err(DbError::TelemetryPathUnavailable);
+        };
+        let connection = open_writable_connection(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+            location,
+            SQLITE_TELEMETRY_BUSY_TIMEOUT,
+            JournalModePolicy::RequireWal,
+        )?;
+        operation(&connection)
+    }
+
     /// Open or create an index store.
     ///
     /// # Errors
     ///
     /// Returns an error if `SQLite` setup or schema validation fails.
     pub fn open(path: &Path) -> DbResult<Self> {
-        let connection = Connection::open(path)?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.pragma_update(None, "synchronous", "NORMAL")?;
-        let store = Self { connection };
-        store.initialize_schema()?;
-        Ok(store)
+        Self::open_with_project_root(path, None)
+    }
+
+    /// Open or create an index store owned by one canonical project root.
+    ///
+    /// Existing databases bound to another root are rejected before writable
+    /// access. A genuinely fresh database records the supplied root in the
+    /// same transaction that creates its schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if read-only compatibility preflight, root validation,
+    /// transactional migration, or `SQLite` setup fails.
+    pub fn open_for_project(path: &Path, root: &Path) -> DbResult<Self> {
+        let expected_root = normalize_native_path_display(root);
+        Self::open_with_project_root(path, Some(&expected_root))
+    }
+
+    /// Open with an optional source-owned project identity.
+    fn open_with_project_root(path: &Path, expected_root: Option<&str>) -> DbResult<Self> {
+        Self::open_with_binding_requirement(
+            path,
+            expected_root,
+            ProjectIdentityRequirement::Required,
+        )
+    }
+
+    /// Open for an explicit root transition that owns identity repair.
+    fn open_for_root_transition(path: &Path) -> DbResult<Self> {
+        Self::open_with_binding_requirement(path, None, ProjectIdentityRequirement::TransitionOwned)
+    }
+
+    /// Open with the root and identity validation required by the caller.
+    fn open_with_binding_requirement(
+        path: &Path,
+        expected_root: Option<&str>,
+        identity_requirement: ProjectIdentityRequirement,
+    ) -> DbResult<Self> {
+        let (preflight, location) = schema::preflight(path, expected_root)?;
+        let validated_project_root = expected_root.map(str::to_owned).or(preflight.project_root);
+        let connection = open_writable_connection(
+            path,
+            writable_open_flags(preflight.state, location.database_exists),
+            &location,
+            SQLITE_BUSY_TIMEOUT,
+            writable_journal_policy(preflight.state),
+        )?;
+        let validated_project_instance_id = if preflight.state == SchemaState::Current {
+            schema::revalidate_current_binding(
+                &connection,
+                validated_project_root.as_deref(),
+                identity_requirement.is_required(),
+            )?
+        } else {
+            schema::initialize(&connection, expected_root)?;
+            project_identity::load_project_identity(&connection)?
+        };
+        if identity_requirement.is_required()
+            && validated_project_root.is_some()
+            && validated_project_instance_id.is_none()
+        {
+            return Err(DbError::ProjectInstanceIdentityMissing);
+        }
+        let database_location = if location.database_exists {
+            location
+        } else {
+            sqlite_profile::inspect_database_location(path)?
+        };
+        Ok(Self {
+            connection,
+            read_snapshot_active: Cell::new(false),
+            database_path: Some(path.to_path_buf()),
+            database_location: Some(database_location),
+            read_only: false,
+            validated_project_root,
+            validated_project_instance_id,
+            library_usage_instances: RefCell::new(HashMap::new()),
+        })
+    }
+
+    /// Open an existing index without creating, migrating, or backfilling it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be opened read-only or its
+    /// schema version is not exactly supported by this runtime.
+    pub fn open_read_only(path: &Path) -> DbResult<Self> {
+        Self::open_read_only_with_project_root(path, None)
+    }
+
+    /// Open one current read snapshot owned by a canonical project root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database is incompatible, belongs to another
+    /// root, or cannot be opened without database mutation.
+    pub fn open_read_only_for_project(path: &Path, root: &Path) -> DbResult<Self> {
+        let expected_root = normalize_native_path_display(root);
+        Self::open_read_only_with_project_root(path, Some(&expected_root))
+    }
+
+    /// Return whether this store is restricted to non-mutating queries.
+    #[must_use]
+    pub const fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// Return whether this store currently owns an open read snapshot.
+    #[must_use]
+    pub fn has_active_read_snapshot(&self) -> bool {
+        self.read_snapshot_active.get()
+    }
+
+    /// Open a current read snapshot with optional project identity validation.
+    fn open_read_only_with_project_root(
+        path: &Path,
+        expected_root: Option<&str>,
+    ) -> DbResult<Self> {
+        let (connection, preflight) = schema::open_current_read_only(path, expected_root)?;
+        let validated_project_instance_id = project_identity::load_project_identity(&connection)?;
+        schema::validate_binding_completeness(
+            preflight.project_root.as_deref(),
+            validated_project_instance_id,
+            true,
+        )?;
+        let database_location = sqlite_profile::inspect_database_location(path)?;
+        Ok(Self {
+            connection,
+            read_snapshot_active: Cell::new(true),
+            database_path: Some(path.to_path_buf()),
+            database_location: Some(database_location),
+            read_only: true,
+            validated_project_root: preflight.project_root,
+            validated_project_instance_id,
+            library_usage_instances: RefCell::new(HashMap::new()),
+        })
     }
 
     /// Open an in-memory store for tests.
@@ -316,351 +1502,25 @@ impl AtlasStore {
     pub fn in_memory() -> DbResult<Self> {
         let store = Self {
             connection: Connection::open_in_memory()?,
+            read_snapshot_active: Cell::new(false),
+            database_path: None,
+            database_location: None,
+            read_only: false,
+            validated_project_root: None,
+            validated_project_instance_id: None,
+            library_usage_instances: RefCell::new(HashMap::new()),
         };
-        store.initialize_schema()?;
+        schema::initialize(&store.connection, None)?;
         Ok(store)
     }
 
-    /// Initialize schema.
+    /// Validate, initialize, or migrate the schema through the storage owner.
     ///
     /// # Errors
     ///
-    /// Returns an error if schema creation or validation fails.
+    /// Returns an error when schema compatibility, integrity, or migration fails.
     pub fn initialize_schema(&self) -> DbResult<()> {
-        self.reset_legacy_summary_schema()?;
-        self.connection.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS metadata (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS nodes (
-                id INTEGER PRIMARY KEY,
-                path TEXT UNIQUE NOT NULL,
-                kind TEXT NOT NULL,
-                parent_path TEXT,
-                extension TEXT,
-                language TEXT,
-                size_bytes INTEGER,
-                mtime_ns INTEGER,
-                content_hash TEXT,
-                exists_now INTEGER NOT NULL DEFAULT 1,
-                first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                last_indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS purposes (
-                node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-                purpose TEXT,
-                source TEXT NOT NULL,
-                status TEXT NOT NULL,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_by TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS summaries (
-                id INTEGER PRIMARY KEY,
-                node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-                summary_level TEXT NOT NULL DEFAULT 'node',
-                subject TEXT NOT NULL DEFAULT '',
-                summary TEXT,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(node_id, summary_level, subject)
-            );
-
-            CREATE TABLE IF NOT EXISTS usage_events (
-                id INTEGER PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                command TEXT NOT NULL,
-                path TEXT,
-                query TEXT,
-                estimated_tokens_without_projectatlas INTEGER,
-                estimated_tokens_with_projectatlas INTEGER,
-                estimated_tokens_saved INTEGER,
-                token_savings_bucket TEXT NOT NULL DEFAULT 'navigation_avoidance',
-                provider TEXT NOT NULL DEFAULT 'heuristic',
-                model TEXT NOT NULL DEFAULT 'unknown',
-                tokenizer_backend TEXT NOT NULL DEFAULT 'chars_div_4',
-                accuracy TEXT NOT NULL DEFAULT 'heuristic_estimate',
-                baseline_kind TEXT NOT NULL DEFAULT 'selected_candidates',
-                confidence TEXT NOT NULL DEFAULT 'inferred',
-                calculation_trace TEXT NOT NULL DEFAULT 'heuristic=ceil(chars_or_bytes/4)',
-                accounting_layer TEXT NOT NULL DEFAULT 'modeled_avoidance',
-                estimate_method TEXT NOT NULL DEFAULT 'heuristic_chars_or_bytes_div_ceil_4',
-                denominator_kind TEXT NOT NULL DEFAULT 'selected_candidates',
-                baseline_identity TEXT NOT NULL DEFAULT '',
-                baseline_fingerprint TEXT NOT NULL DEFAULT '',
-                dedupe_scope TEXT NOT NULL DEFAULT 'session',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS symbols (
-                id INTEGER PRIMARY KEY,
-                path TEXT NOT NULL,
-                language TEXT,
-                name TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                signature TEXT NOT NULL,
-                exported INTEGER NOT NULL DEFAULT 0,
-                documentation TEXT,
-                line_start INTEGER NOT NULL,
-                line_end INTEGER NOT NULL,
-                parent TEXT,
-                parser TEXT NOT NULL,
-                detail TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS source_parse_metadata (
-                path TEXT PRIMARY KEY,
-                language TEXT,
-                parser TEXT NOT NULL,
-                symbol_count INTEGER NOT NULL,
-                relation_count INTEGER NOT NULL,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS symbol_relations (
-                id INTEGER PRIMARY KEY,
-                path TEXT NOT NULL,
-                source_name TEXT NOT NULL,
-                target_name TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                line INTEGER NOT NULL,
-                context TEXT NOT NULL,
-                parser TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS health_resolutions (
-                finding_id TEXT PRIMARY KEY,
-                category TEXT NOT NULL,
-                path TEXT NOT NULL,
-                related_path TEXT,
-                rationale TEXT NOT NULL,
-                resolved_by TEXT NOT NULL DEFAULT 'agent',
-                resolved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS file_texts (
-                path TEXT PRIMARY KEY,
-                content_hash TEXT,
-                byte_count INTEGER NOT NULL,
-                line_count INTEGER NOT NULL,
-                content TEXT NOT NULL,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
-            CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_path);
-            CREATE INDEX IF NOT EXISTS idx_purposes_status ON purposes(status);
-            CREATE INDEX IF NOT EXISTS idx_summaries_level ON summaries(summary_level);
-            CREATE INDEX IF NOT EXISTS idx_summaries_summary ON summaries(summary);
-            CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(session_id);
-            CREATE INDEX IF NOT EXISTS idx_symbols_path ON symbols(path);
-            CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
-            CREATE INDEX IF NOT EXISTS idx_symbols_kind ON symbols(kind);
-            CREATE INDEX IF NOT EXISTS idx_source_parse_metadata_parser ON source_parse_metadata(parser);
-            CREATE INDEX IF NOT EXISTS idx_symbol_relations_path ON symbol_relations(path);
-            CREATE INDEX IF NOT EXISTS idx_symbol_relations_target ON symbol_relations(target_name);
-            CREATE INDEX IF NOT EXISTS idx_health_resolutions_category ON health_resolutions(category);
-            CREATE INDEX IF NOT EXISTS idx_file_texts_hash ON file_texts(content_hash);
-            ",
-        )?;
-        self.ensure_symbol_metadata_columns()?;
-        self.ensure_usage_event_metadata_columns()?;
-        self.connection.execute_batch(
-            "
-            CREATE INDEX IF NOT EXISTS idx_usage_created_at ON usage_events(created_at);
-            CREATE INDEX IF NOT EXISTS idx_usage_session_created_at ON usage_events(session_id, created_at);
-            ",
-        )?;
-        let stored = self
-            .connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key = 'schema_version'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        match stored {
-            Some(value) => {
-                let found = value.parse::<i64>().map_or(-1, |parsed| parsed);
-                if (1..SCHEMA_VERSION).contains(&found) {
-                    self.connection.execute(
-                        "UPDATE metadata SET value = ?1 WHERE key = 'schema_version'",
-                        [SCHEMA_VERSION.to_string()],
-                    )?;
-                } else if found != SCHEMA_VERSION {
-                    return Err(DbError::SchemaVersion {
-                        found,
-                        expected: SCHEMA_VERSION,
-                    });
-                }
-            }
-            None => {
-                self.connection.execute(
-                    "INSERT INTO metadata(key, value) VALUES('schema_version', ?1)",
-                    [SCHEMA_VERSION.to_string()],
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Add usage telemetry metadata columns to older databases.
-    fn ensure_usage_event_metadata_columns(&self) -> DbResult<()> {
-        let mut statement = self.connection.prepare("PRAGMA table_info(usage_events)")?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
-        let mut columns = Vec::new();
-        for row in rows {
-            columns.push(row?);
-        }
-        self.ensure_usage_event_column(
-            &columns,
-            "token_savings_bucket",
-            "TEXT NOT NULL DEFAULT 'navigation_avoidance'",
-        )?;
-        self.ensure_usage_event_column(&columns, "provider", "TEXT NOT NULL DEFAULT 'heuristic'")?;
-        self.ensure_usage_event_column(&columns, "model", "TEXT NOT NULL DEFAULT 'unknown'")?;
-        self.ensure_usage_event_column(
-            &columns,
-            "tokenizer_backend",
-            "TEXT NOT NULL DEFAULT 'chars_div_4'",
-        )?;
-        self.ensure_usage_event_column(
-            &columns,
-            "accuracy",
-            "TEXT NOT NULL DEFAULT 'heuristic_estimate'",
-        )?;
-        self.ensure_usage_event_column(
-            &columns,
-            "baseline_kind",
-            "TEXT NOT NULL DEFAULT 'selected_candidates'",
-        )?;
-        self.ensure_usage_event_column(&columns, "confidence", "TEXT NOT NULL DEFAULT 'inferred'")?;
-        self.ensure_usage_event_column(
-            &columns,
-            "calculation_trace",
-            "TEXT NOT NULL DEFAULT 'heuristic=ceil(chars_or_bytes/4)'",
-        )?;
-        self.ensure_usage_event_column(
-            &columns,
-            "accounting_layer",
-            "TEXT NOT NULL DEFAULT 'modeled_avoidance'",
-        )?;
-        self.ensure_usage_event_column(
-            &columns,
-            "estimate_method",
-            "TEXT NOT NULL DEFAULT 'heuristic_chars_or_bytes_div_ceil_4'",
-        )?;
-        self.ensure_usage_event_column(
-            &columns,
-            "denominator_kind",
-            "TEXT NOT NULL DEFAULT 'selected_candidates'",
-        )?;
-        self.ensure_usage_event_column(&columns, "baseline_identity", "TEXT NOT NULL DEFAULT ''")?;
-        self.ensure_usage_event_column(
-            &columns,
-            "baseline_fingerprint",
-            "TEXT NOT NULL DEFAULT ''",
-        )?;
-        self.ensure_usage_event_column(
-            &columns,
-            "dedupe_scope",
-            "TEXT NOT NULL DEFAULT 'session'",
-        )?;
-        self.ensure_usage_event_column(&columns, "created_at", "TEXT")?;
-        self.connection.execute(
-            "
-            UPDATE usage_events
-            SET accounting_layer = 'observed_delta',
-                denominator_kind = 'full_file',
-                dedupe_scope = 'event'
-            WHERE token_savings_bucket = 'full_file_compression'
-              AND (
-                accounting_layer != 'observed_delta'
-                OR denominator_kind != 'full_file'
-                OR dedupe_scope != 'event'
-              )
-            ",
-            [],
-        )?;
-        self.connection.execute(
-            "UPDATE usage_events SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL OR created_at = ''",
-            [],
-        )?;
-        Ok(())
-    }
-
-    /// Add one usage event metadata column when it is absent.
-    fn ensure_usage_event_column(
-        &self,
-        columns: &[String],
-        name: &str,
-        definition: &str,
-    ) -> DbResult<()> {
-        if columns.iter().any(|column| column == name) {
-            return Ok(());
-        }
-        self.connection.execute(
-            &format!("ALTER TABLE usage_events ADD COLUMN {name} {definition}"),
-            [],
-        )?;
-        Ok(())
-    }
-
-    /// Add optional symbol metadata columns to older databases.
-    fn ensure_symbol_metadata_columns(&self) -> DbResult<()> {
-        let mut statement = self.connection.prepare("PRAGMA table_info(symbols)")?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
-        let mut columns = Vec::new();
-        for row in rows {
-            columns.push(row?);
-        }
-        if !columns.iter().any(|column| column == "exported") {
-            self.connection.execute(
-                "ALTER TABLE symbols ADD COLUMN exported INTEGER NOT NULL DEFAULT 0",
-                [],
-            )?;
-        }
-        if !columns.iter().any(|column| column == "documentation") {
-            self.connection
-                .execute("ALTER TABLE symbols ADD COLUMN documentation TEXT", [])?;
-        }
-        Ok(())
-    }
-
-    /// Drop an in-progress generated summary table that lacks multi-level keys.
-    fn reset_legacy_summary_schema(&self) -> DbResult<()> {
-        let exists = self
-            .connection
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'summaries'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .is_some();
-        if !exists {
-            return Ok(());
-        }
-        let mut statement = self.connection.prepare("PRAGMA table_info(summaries)")?;
-        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
-        let mut has_subject = false;
-        for column in columns {
-            if column? == "subject" {
-                has_subject = true;
-                break;
-            }
-        }
-        if !has_subject {
-            self.connection.execute("DROP TABLE summaries", [])?;
-        }
-        Ok(())
+        schema::initialize(&self.connection, None)
     }
 
     /// Upsert a full scan result and mark previously seen missing paths absent.
@@ -669,28 +1529,11 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn replace_scan(&mut self, nodes: &[Node]) -> DbResult<()> {
-        let transaction = self.connection.transaction()?;
-        transaction.execute("UPDATE nodes SET exists_now = 0", [])?;
-        for node in nodes {
-            upsert_node(&transaction, node)?;
-        }
-        transaction.execute(
-            "DELETE FROM symbol_relations WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
-            [],
-        )?;
-        transaction.execute(
-            "DELETE FROM symbols WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
-            [],
-        )?;
-        transaction.execute(
-            "DELETE FROM source_parse_metadata WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
-            [],
-        )?;
-        transaction.execute(
-            "DELETE FROM file_texts WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
-            [],
-        )?;
-        transaction.commit()?;
+        let savepoint = self.validated_savepoint()?;
+        mark_all_scan_nodes_absent(&savepoint)?;
+        upsert_nodes(&savepoint, nodes)?;
+        delete_absent_scan_projections(&savepoint)?;
+        savepoint.commit()?;
         Ok(())
     }
 
@@ -700,11 +1543,9 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn upsert_scan_nodes(&mut self, nodes: &[Node]) -> DbResult<()> {
-        let transaction = self.connection.transaction()?;
-        for node in nodes {
-            upsert_node(&transaction, node)?;
-        }
-        transaction.commit()?;
+        let savepoint = self.validated_savepoint()?;
+        upsert_nodes(&savepoint, nodes)?;
+        savepoint.commit()?;
         Ok(())
     }
 
@@ -714,34 +1555,44 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn mark_paths_absent(&mut self, paths: &[String]) -> DbResult<()> {
-        let transaction = self.connection.transaction()?;
-        for path in paths {
-            if path == "." || path.is_empty() {
-                continue;
-            }
-            let descendant_pattern = sqlite_descendant_pattern(path);
-            transaction.execute(
+        let savepoint = self.validated_savepoint()?;
+        let fts_revision = begin_file_text_fts_update(&savepoint)?;
+        {
+            let mut mark_nodes = savepoint.prepare_cached(
                 "UPDATE nodes SET exists_now = 0 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-                params![path, descendant_pattern],
             )?;
-            transaction.execute(
+            let mut delete_relations = savepoint.prepare_cached(
                 "DELETE FROM symbol_relations WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-                params![path, descendant_pattern],
             )?;
-            transaction.execute(
+            let mut delete_symbols = savepoint.prepare_cached(
                 "DELETE FROM symbols WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-                params![path, descendant_pattern],
             )?;
-            transaction.execute(
+            let mut delete_parse_metadata = savepoint.prepare_cached(
                 "DELETE FROM source_parse_metadata WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-                params![path, descendant_pattern],
             )?;
-            transaction.execute(
+            let mut delete_text_fts = savepoint.prepare_cached(
+                "INSERT INTO file_text_fts(file_text_fts, rowid, content) \
+                 SELECT 'delete', rowid, content FROM file_texts \
+                 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+            )?;
+            let mut delete_text = savepoint.prepare_cached(
                 "DELETE FROM file_texts WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-                params![path, descendant_pattern],
             )?;
+            for path in paths {
+                if path == "." || path.is_empty() {
+                    continue;
+                }
+                let descendant_pattern = sqlite_descendant_pattern(path);
+                mark_nodes.execute(params![path, descendant_pattern])?;
+                delete_relations.execute(params![path, descendant_pattern])?;
+                delete_symbols.execute(params![path, descendant_pattern])?;
+                delete_parse_metadata.execute(params![path, descendant_pattern])?;
+                delete_text_fts.execute(params![path, descendant_pattern])?;
+                delete_text.execute(params![path, descendant_pattern])?;
+            }
         }
-        transaction.commit()?;
+        complete_file_text_fts_update(&savepoint, fts_revision)?;
+        savepoint.commit()?;
         Ok(())
     }
 
@@ -754,19 +1605,63 @@ impl AtlasStore {
     /// # Errors
     ///
     /// Returns an error if persistence fails.
-    pub fn replace_file_texts_for_paths(
+    pub fn replace_file_texts_for_paths<'text>(
         &mut self,
         paths: &[String],
-        texts: &[IndexedFileText],
+        texts: impl IntoIterator<Item = &'text IndexedFileText>,
     ) -> DbResult<()> {
-        let transaction = self.connection.transaction()?;
-        for path in paths {
-            transaction.execute("DELETE FROM file_texts WHERE path = ?1", [path])?;
+        let texts = texts.into_iter().collect::<Vec<_>>();
+        for text in &texts {
+            validate_indexed_file_text(text)?;
         }
-        for text in texts {
-            upsert_file_text(&transaction, text)?;
+        let savepoint = self.validated_savepoint()?;
+        let fts_revision = begin_file_text_fts_update(&savepoint)?;
+        {
+            let mut delete_fts = savepoint.prepare_cached(
+                "INSERT INTO file_text_fts(file_text_fts, rowid, content) \
+                 SELECT 'delete', rowid, content FROM file_texts WHERE path = ?1",
+            )?;
+            let mut delete = savepoint.prepare_cached("DELETE FROM file_texts WHERE path = ?1")?;
+            for path in paths {
+                delete_fts.execute([path])?;
+                delete.execute([path])?;
+            }
         }
-        transaction.commit()?;
+        {
+            let mut delete_current_fts = savepoint.prepare_cached(
+                "INSERT INTO file_text_fts(file_text_fts, rowid, content) \
+                 SELECT 'delete', rowid, content FROM file_texts WHERE path = ?1",
+            )?;
+            let mut upsert = savepoint.prepare_cached(
+                "
+                INSERT INTO file_texts(path, content_hash, byte_count, line_count, content, updated_at)
+                VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
+                ON CONFLICT(path) DO UPDATE SET
+                    content_hash = excluded.content_hash,
+                    byte_count = excluded.byte_count,
+                    line_count = excluded.line_count,
+                    content = excluded.content,
+                    updated_at = CURRENT_TIMESTAMP
+                ",
+            )?;
+            let mut index = savepoint.prepare_cached(
+                "INSERT INTO file_text_fts(rowid, content) \
+                 SELECT rowid, content FROM file_texts WHERE path = ?1",
+            )?;
+            for text in texts {
+                delete_current_fts.execute([&text.path])?;
+                upsert.execute(params![
+                    text.path,
+                    text.content_hash.as_deref(),
+                    usize_to_i64(text.byte_count),
+                    usize_to_i64(text.line_count),
+                    text.content
+                ])?;
+                index.execute([&text.path])?;
+            }
+        }
+        complete_file_text_fts_update(&savepoint, fts_revision)?;
+        savepoint.commit()?;
         Ok(())
     }
 
@@ -785,6 +1680,197 @@ impl AtlasStore {
         )?;
         let mut rows = statement.query([path])?;
         rows.next()?.map(file_text_from_row).transpose()
+    }
+
+    /// Load a bounded FTS candidate superset for service-owned exact verification.
+    ///
+    /// The request accepts only one safe ASCII-alphanumeric token. The MATCH
+    /// expression is bound as data. Only authoritative metadata is returned;
+    /// callers hydrate selected paths with [`Self::load_file_text`] after
+    /// applying their file, byte, and time budgets.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the token shape or limit is unsafe, bounded work
+    /// is canceled or reaches its deadline, or persisted rows are invalid.
+    pub fn query_file_text_fts_candidates(
+        &self,
+        query: &FileTextFtsQuery<'_>,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<FileTextFtsPage> {
+        validate_file_text_fts_token(query.literal_token)?;
+        if query.limit > MAX_FILE_TEXT_FTS_CANDIDATES {
+            return Err(DbError::FileTextFtsCandidateLimit {
+                requested: query.limit,
+                maximum: MAX_FILE_TEXT_FTS_CANDIDATES,
+            });
+        }
+        let match_expression = format!("\"{}\"", query.literal_token);
+        let row_limit = usize_to_i64(query.limit.saturating_add(1));
+        with_file_text_progress(&self.connection, control, || {
+            let mut candidates = Vec::with_capacity(query.limit.saturating_add(1));
+            if let Some(path_prefix) = normalized_file_text_path_prefix(query.path_prefix) {
+                let descendant_pattern = sqlite_descendant_pattern(path_prefix);
+                let mut statement = self.connection.prepare_cached(
+                    "
+                    SELECT
+                        f.path,
+                        f.content_hash,
+                        f.byte_count,
+                        f.line_count,
+                        bm25(file_text_fts)
+                    FROM file_text_fts
+                    JOIN file_texts AS f ON f.rowid = file_text_fts.rowid
+                    WHERE file_text_fts MATCH ?1
+                      AND (f.path = ?2 OR f.path LIKE ?3 ESCAPE '\\')
+                    ORDER BY bm25(file_text_fts), f.path
+                    LIMIT ?4
+                    ",
+                )?;
+                let mut rows = statement.query(params![
+                    match_expression,
+                    path_prefix,
+                    descendant_pattern,
+                    row_limit,
+                ])?;
+                collect_file_text_fts_candidates(&mut rows, control, &mut candidates)?;
+            } else {
+                let mut statement = self.connection.prepare_cached(
+                    "
+                    SELECT
+                        f.path,
+                        f.content_hash,
+                        f.byte_count,
+                        f.line_count,
+                        bm25(file_text_fts)
+                    FROM file_text_fts
+                    JOIN file_texts AS f ON f.rowid = file_text_fts.rowid
+                    WHERE file_text_fts MATCH ?1
+                    ORDER BY bm25(file_text_fts), f.path
+                    LIMIT ?2
+                    ",
+                )?;
+                let mut rows = statement.query(params![match_expression, row_limit])?;
+                collect_file_text_fts_candidates(&mut rows, control, &mut candidates)?;
+            }
+            let overflow = candidates.len() > query.limit;
+            candidates.truncate(query.limit);
+            Ok(FileTextFtsPage {
+                candidates,
+                overflow,
+            })
+        })
+    }
+
+    /// Visit correctness-authoritative persisted text with predecode admission.
+    ///
+    /// `admit` receives path and byte metadata before the source `String` is
+    /// decoded from `SQLite`. Returning [`FileTextAdmission::Skip`] or
+    /// [`FileTextAdmission::Stop`] therefore avoids allocating excluded source
+    /// content. Returning `false` from `visitor` stops after an admitted row.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when bounded work is canceled or reaches its deadline,
+    /// persisted counts are invalid, or either callback returns an error.
+    pub fn visit_file_texts_for_fallback<A, V>(
+        &self,
+        path_prefix: Option<&str>,
+        control: Option<&IndexWorkControl>,
+        mut admit: A,
+        mut visitor: V,
+    ) -> DbResult<()>
+    where
+        A: FnMut(&FileTextMetadata) -> DbResult<FileTextAdmission>,
+        V: FnMut(IndexedFileText) -> DbResult<bool>,
+    {
+        with_file_text_progress(&self.connection, control, || {
+            let mut content_statement = self
+                .connection
+                .prepare_cached(FILE_TEXT_FALLBACK_CONTENT_SQL)?;
+            if let Some(path_prefix) = normalized_file_text_path_prefix(path_prefix) {
+                let (descendant_start, descendant_end) = file_text_descendant_range(path_prefix);
+                let mut statement = self
+                    .connection
+                    .prepare_cached(FILE_TEXT_FALLBACK_SCOPED_METADATA_SQL)?;
+                let mut rows =
+                    statement.query(params![path_prefix, descendant_start, descendant_end])?;
+                visit_file_text_fallback_rows(
+                    &mut rows,
+                    &mut content_statement,
+                    control,
+                    &mut admit,
+                    &mut visitor,
+                )
+            } else {
+                let mut statement = self
+                    .connection
+                    .prepare_cached(FILE_TEXT_FALLBACK_ALL_METADATA_SQL)?;
+                let mut rows = statement.query([])?;
+                visit_file_text_fallback_rows(
+                    &mut rows,
+                    &mut content_statement,
+                    control,
+                    &mut admit,
+                    &mut visitor,
+                )
+            }
+        })
+    }
+
+    /// Return whether the transactional FTS projection matches authoritative text.
+    ///
+    /// This constant-work readiness check is suitable for the search hot path.
+    /// Explicit settings diagnostics may additionally count projection rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable revision metadata is malformed or partial.
+    pub fn file_text_fts_ready(&self) -> DbResult<bool> {
+        Ok(load_file_text_fts_revisions(&self.connection)?
+            .is_some_and(|(source, projection)| source == projection))
+    }
+
+    /// Report content-free FTS synchronization state for settings/readiness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when authoritative or projection row state cannot be
+    /// inspected exactly.
+    pub fn file_text_fts_state(&self) -> DbResult<FileTextFtsState> {
+        let revision_synchronized = self.file_text_fts_ready()?;
+        let (source_rows, indexed_rows, synchronized) = self.connection.query_row(
+            "
+            SELECT
+                (SELECT COUNT(*) FROM file_texts),
+                (SELECT COUNT(*) FROM file_text_fts_docsize),
+                NOT EXISTS(
+                    SELECT 1
+                    FROM file_texts AS f
+                    LEFT JOIN file_text_fts_docsize AS d ON d.id = f.rowid
+                    WHERE d.id IS NULL
+                )
+                AND NOT EXISTS(
+                    SELECT 1
+                    FROM file_text_fts_docsize AS d
+                    LEFT JOIN file_texts AS f ON f.rowid = d.id
+                    WHERE f.rowid IS NULL
+                )
+            ",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)? != 0,
+                ))
+            },
+        )?;
+        Ok(FileTextFtsState {
+            source_rows: count_to_usize("file_texts", source_rows)?,
+            indexed_rows: count_to_usize("file_text_fts", indexed_rows)?,
+            synchronized: revision_synchronized && synchronized,
+        })
     }
 
     /// Load indexed text rows for search.
@@ -913,16 +1999,43 @@ impl AtlasStore {
     /// # Errors
     ///
     /// Returns an error if persistence fails.
-    pub fn set_project_root(&self, root: &Path) -> DbResult<()> {
+    pub fn set_project_root(&mut self, root: &Path) -> DbResult<()> {
         let value = normalize_metadata_path(root);
-        self.connection.execute(
-            "
-            INSERT INTO metadata(key, value)
-            VALUES('project_root', ?1)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            ",
-            [value],
-        )?;
+        let previous_identity = self.validated_project_instance_id;
+        let savepoint = self.validated_savepoint()?;
+        if let Some(found) = savepoint
+            .query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [PROJECT_ROOT_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            if found == value {
+                let (identity, identity_changed) =
+                    project_identity::ensure_project_identity(&savepoint)?;
+                savepoint.commit()?;
+                self.validated_project_root = Some(value);
+                self.validated_project_instance_id = Some(identity);
+                if identity_changed {
+                    self.library_usage_instances.get_mut().clear();
+                }
+                return Ok(());
+            }
+            return Err(DbError::ProjectRootMismatch {
+                expected: value,
+                found,
+            });
+        }
+        set_metadata(&savepoint, PROJECT_ROOT_KEY, &value)?;
+        let (identity, _) = project_identity::ensure_project_identity(&savepoint)?;
+        let identity_changed = previous_identity != Some(identity);
+        savepoint.commit()?;
+        self.validated_project_root = Some(value);
+        self.validated_project_instance_id = Some(identity);
+        if identity_changed {
+            self.library_usage_instances.get_mut().clear();
+        }
         Ok(())
     }
 
@@ -934,12 +2047,266 @@ impl AtlasStore {
     pub fn project_root(&self) -> DbResult<Option<String>> {
         self.connection
             .query_row(
-                "SELECT value FROM metadata WHERE key = 'project_root'",
-                [],
+                "SELECT value FROM metadata WHERE key = ?1",
+                [PROJECT_ROOT_KEY],
                 |row| row.get::<_, String>(0),
             )
             .optional()
             .map_err(DbError::from)
+    }
+
+    /// Return the project binding captured when this store was validated.
+    ///
+    /// This accessor performs no database read. It is intended for services
+    /// that must bind a result to the exact root and identity selected at open.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store has no complete project binding.
+    pub fn captured_project_binding(&self) -> DbResult<CapturedProjectBinding> {
+        Ok(CapturedProjectBinding {
+            project_instance_id: self
+                .validated_project_instance_id
+                .ok_or(DbError::ProjectInstanceIdentityMissing)?,
+            project_root: self
+                .validated_project_root
+                .clone()
+                .ok_or(DbError::ProjectRootMissing)?,
+        })
+    }
+
+    /// Revalidate the captured binding against a fresh database snapshot.
+    ///
+    /// File-backed stores open an independent read-only snapshot so a report
+    /// connection pinned to an older WAL end mark cannot hide a concurrent
+    /// same-root identity rotation. In-memory stores validate their only
+    /// connection because no external database binding exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database, root, identity, schema, or
+    /// filesystem binding no longer matches the state captured at open.
+    pub fn revalidate_captured_project_binding(&self) -> DbResult<()> {
+        let binding = self.captured_project_binding()?;
+        let Some(path) = self.database_path.as_deref() else {
+            return schema::validate_active_binding(
+                &self.connection,
+                Some(&binding.project_root),
+                Some(binding.project_instance_id),
+            );
+        };
+        let (connection, _) = schema::open_current_read_only(path, Some(&binding.project_root))?;
+        schema::validate_active_binding(
+            &connection,
+            Some(&binding.project_root),
+            Some(binding.project_instance_id),
+        )
+    }
+
+    /// Read the selected project identity and current purpose-work generation.
+    fn purpose_curation_context(
+        &self,
+        connection: &Connection,
+    ) -> DbResult<(ProjectInstanceId, IndexGeneration)> {
+        let selected = self
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let current = project_identity::load_project_identity(connection)?
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        if current != selected {
+            return Err(DbError::GraphProjectIdentityMismatch {
+                expected: selected.to_string(),
+                found: current.to_string(),
+            });
+        }
+        let generation =
+            project_identity::load_graph_generation(connection)?.unwrap_or(IndexGeneration::ZERO);
+        Ok((current, generation))
+    }
+
+    /// Begin one exclusive full derived-index publication.
+    ///
+    /// Every nested projection write remains inside the returned guard's
+    /// `SQLite` transaction. Other connections keep the prior complete
+    /// generation queryable until [`IndexPublicationGuard::complete`] commits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the exclusive write transaction cannot begin.
+    pub fn begin_index_publication(
+        &mut self,
+        contract_fingerprint: &str,
+    ) -> DbResult<IndexPublicationGuard<'_>> {
+        let base_generation = self
+            .index_publication()?
+            .map_or(IndexGeneration::ZERO, |publication| publication.generation);
+        self.begin_index_publication_from(contract_fingerprint, base_generation)
+    }
+
+    /// Begin one exclusive full derived-index publication only when its
+    /// prepared base generation is still current.
+    ///
+    /// [`IndexGeneration::ZERO`] matches only an uninitialized store. The
+    /// generation comparison occurs after `BEGIN IMMEDIATE` and before any
+    /// publication metadata or projection row is changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the exclusive write transaction cannot begin or
+    /// another publisher completed a newer generation after work was prepared.
+    pub fn begin_index_publication_from(
+        &mut self,
+        contract_fingerprint: &str,
+        expected_base_generation: IndexGeneration,
+    ) -> DbResult<IndexPublicationGuard<'_>> {
+        self.begin_publication(
+            PublicationContract::Full(contract_fingerprint.to_string()),
+            Some(expected_base_generation),
+        )
+    }
+
+    /// Begin one exclusive symbol/projection refresh without replacing the
+    /// established full-index contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the index is incomplete, the established contract
+    /// differs, or the exclusive write transaction cannot begin.
+    pub fn begin_index_projection_refresh(
+        &mut self,
+        contract_fingerprint: &str,
+    ) -> DbResult<IndexPublicationGuard<'_>> {
+        let base_generation = self
+            .index_publication()?
+            .map_or(IndexGeneration::ZERO, |publication| publication.generation);
+        self.begin_index_projection_refresh_from(contract_fingerprint, base_generation)
+    }
+
+    /// Begin one exclusive symbol/projection refresh only when its prepared
+    /// base generation is still current.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the index is incomplete, the established contract
+    /// differs, the base generation changed, or the exclusive write
+    /// transaction cannot begin.
+    pub fn begin_index_projection_refresh_from(
+        &mut self,
+        contract_fingerprint: &str,
+        expected_base_generation: IndexGeneration,
+    ) -> DbResult<IndexPublicationGuard<'_>> {
+        self.begin_publication(
+            PublicationContract::Projection(contract_fingerprint.to_string()),
+            Some(expected_base_generation),
+        )
+    }
+
+    /// Begin one parent-owned atomic publication transaction.
+    fn begin_publication(
+        &mut self,
+        contract: PublicationContract,
+        expected_base_generation: Option<IndexGeneration>,
+    ) -> DbResult<IndexPublicationGuard<'_>> {
+        begin_immediate_publication(&self.connection)?;
+        let setup = (|| {
+            schema::validate_active_binding(
+                &self.connection,
+                self.validated_project_root.as_deref(),
+                self.validated_project_instance_id,
+            )?;
+            let previous = load_index_publication(&self.connection)?;
+            if let Some(expected) = expected_base_generation {
+                let base_matches = match previous.as_ref() {
+                    None => expected == IndexGeneration::ZERO,
+                    Some(publication) => {
+                        publication.state == IndexPublicationState::Complete
+                            && publication.generation != IndexGeneration::ZERO
+                            && publication.generation == expected
+                    }
+                };
+                if !base_matches {
+                    return Err(DbError::PublicationBaseGenerationChanged {
+                        expected,
+                        found: previous
+                            .as_ref()
+                            .map_or(IndexGeneration::ZERO, |publication| publication.generation),
+                    });
+                }
+            }
+            if let PublicationContract::Projection(expected) = &contract {
+                let matches = previous.as_ref().is_some_and(|publication| {
+                    publication.state == IndexPublicationState::Complete
+                        && publication.contract_fingerprint.as_deref() == Some(expected.as_str())
+                });
+                if !matches {
+                    return Err(DbError::PublicationContractChanged);
+                }
+            }
+            set_metadata(
+                &self.connection,
+                INDEX_PUBLICATION_STATE_KEY,
+                IndexPublicationState::Updating.as_str(),
+            )?;
+            Ok(previous.map_or(IndexGeneration::ZERO, |publication| publication.generation))
+        })();
+        let previous_generation = match setup {
+            Ok(generation) => generation,
+            Err(error) => {
+                self.connection.execute_batch("ROLLBACK")?;
+                return Err(error);
+            }
+        };
+        Ok(IndexPublicationGuard {
+            store: self,
+            contract,
+            previous_generation,
+            scan_replacement_pending: false,
+            active: true,
+        })
+    }
+
+    /// Start one stable read snapshot for freshness verification and every
+    /// subsequent query used to construct the response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a snapshot is already active or `SQLite` cannot
+    /// begin the transaction.
+    pub fn begin_index_read_snapshot(&self) -> DbResult<()> {
+        if self.read_snapshot_active.replace(true) {
+            return Err(DbError::IndexReadSnapshotActive);
+        }
+        if let Err(error) = self.connection.execute_batch("BEGIN DEFERRED") {
+            self.read_snapshot_active.set(false);
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    /// Finish an active read snapshot before an optional telemetry write.
+    ///
+    /// This method is a no-op for stores that were not opened for a normal
+    /// freshness-verified read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `SQLite` cannot finish the read transaction.
+    pub fn finish_index_read_snapshot(&self) -> DbResult<()> {
+        if !self.read_snapshot_active.get() {
+            return Ok(());
+        }
+        self.connection.execute_batch("COMMIT")?;
+        self.read_snapshot_active.set(false);
+        Ok(())
+    }
+
+    /// Load the current derived-index publication state when initialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if metadata is invalid or cannot be read.
+    pub fn index_publication(&self) -> DbResult<Option<IndexPublication>> {
+        load_index_publication(&self.connection)
     }
 
     /// Replace the symbol graph for a file path.
@@ -949,47 +2316,77 @@ impl AtlasStore {
     /// Returns an error if persistence fails.
     pub fn replace_symbol_graph(&mut self, graph: &SymbolGraph) -> DbResult<()> {
         let metadata = SourceParseMetadata::from_graph(graph);
-        let transaction = self.connection.transaction()?;
-        transaction.execute("DELETE FROM symbols WHERE path = ?1", [&graph.path])?;
-        transaction.execute(
-            "DELETE FROM symbol_relations WHERE path = ?1",
-            [&graph.path],
-        )?;
-        transaction.execute(
-            "
-            INSERT INTO source_parse_metadata(
-                path,
-                language,
-                parser,
-                symbol_count,
-                relation_count,
-                updated_at
-            )
-            VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
-            ON CONFLICT(path) DO UPDATE SET
-                language = excluded.language,
-                parser = excluded.parser,
-                symbol_count = excluded.symbol_count,
-                relation_count = excluded.relation_count,
-                updated_at = CURRENT_TIMESTAMP
-            ",
-            params![
+        self.replace_symbol_graph_with_metadata(graph, &metadata)
+    }
+
+    /// Replace one file's symbol graph while preserving independent source parse metadata.
+    ///
+    /// This permits a grammar-backed source parse to coexist with conservative fallback
+    /// symbol and relationship facts without relabeling those facts as grammar-native.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if metadata identity/counts differ from the graph or persistence fails.
+    pub fn replace_symbol_graph_with_metadata(
+        &mut self,
+        graph: &SymbolGraph,
+        metadata: &SourceParseMetadata,
+    ) -> DbResult<()> {
+        if metadata.path != graph.path
+            || metadata.language != graph.language
+            || metadata.symbol_count != graph.symbols.len()
+            || metadata.relation_count != graph.relations.len()
+        {
+            return Err(DbError::SymbolGraphRowShape {
+                path: graph.path.clone(),
+                reason: "source parse metadata identity or fact counts differ from the graph",
+            });
+        }
+        let savepoint = self.validated_savepoint()?;
+        let node_id = {
+            let mut delete_symbols =
+                savepoint.prepare_cached("DELETE FROM symbols WHERE path = ?1")?;
+            let mut delete_relations =
+                savepoint.prepare_cached("DELETE FROM symbol_relations WHERE path = ?1")?;
+            delete_symbols.execute([&graph.path])?;
+            delete_relations.execute([&graph.path])?;
+
+            let mut upsert_metadata = savepoint.prepare_cached(
+                "
+                INSERT INTO source_parse_metadata(
+                    path,
+                    language,
+                    source_parser,
+                    fact_parser,
+                    symbol_count,
+                    relation_count,
+                    updated_at
+                )
+                VALUES(?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP)
+                ON CONFLICT(path) DO UPDATE SET
+                    language = excluded.language,
+                    source_parser = excluded.source_parser,
+                    fact_parser = excluded.fact_parser,
+                    symbol_count = excluded.symbol_count,
+                    relation_count = excluded.relation_count,
+                    updated_at = CURRENT_TIMESTAMP
+                ",
+            )?;
+            upsert_metadata.execute(params![
                 metadata.path,
                 metadata.language.as_deref(),
                 metadata.parser.to_string(),
+                graph.parser.to_string(),
                 usize_to_i64(metadata.symbol_count),
                 usize_to_i64(metadata.relation_count),
-            ],
-        )?;
-        let node_id = transaction
-            .query_row(
-                "SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1",
-                [&graph.path],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        for symbol in &graph.symbols {
-            transaction.execute(
+            ])?;
+            let mut select_node = savepoint
+                .prepare_cached("SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1")?;
+            let node_id = select_node
+                .query_row([&graph.path], |row| row.get::<_, i64>(0))
+                .optional()?;
+
+            let mut insert_symbol = savepoint.prepare_cached(
                 "
                 INSERT INTO symbols(
                     path,
@@ -1007,7 +2404,9 @@ impl AtlasStore {
                 )
                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                 ",
-                params![
+            )?;
+            for symbol in &graph.symbols {
+                insert_symbol.execute(params![
                     symbol.path,
                     symbol.language.as_deref(),
                     symbol.name,
@@ -1020,11 +2419,10 @@ impl AtlasStore {
                     symbol.parent.as_deref(),
                     symbol.parser.to_string(),
                     symbol.detail.as_deref(),
-                ],
-            )?;
-        }
-        for relation in &graph.relations {
-            transaction.execute(
+                ])?;
+            }
+
+            let mut insert_relation = savepoint.prepare_cached(
                 "
                 INSERT INTO symbol_relations(
                     path,
@@ -1037,7 +2435,9 @@ impl AtlasStore {
                 )
                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
                 ",
-                params![
+            )?;
+            for relation in &graph.relations {
+                insert_relation.execute(params![
                     relation.path,
                     relation.source_name,
                     relation.target_name,
@@ -1045,17 +2445,18 @@ impl AtlasStore {
                     usize_to_i64(relation.line),
                     relation.context,
                     relation.parser.to_string(),
-                ],
-            )?;
-        }
+                ])?;
+            }
+            node_id
+        };
         if let Some(node_id) = node_id {
             replace_symbol_search_summary(
-                &transaction,
+                &savepoint,
                 node_id,
                 symbol_search_summary(graph).as_deref(),
             )?;
         }
-        transaction.commit()?;
+        savepoint.commit()?;
         Ok(())
     }
 
@@ -1068,15 +2469,20 @@ impl AtlasStore {
     ///
     /// Returns an error if the path does not exist or persistence fails.
     pub fn clear_source_index_for_path(&self, path: &str) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection
-            .execute("DELETE FROM symbols WHERE path = ?1", [path])?;
-        self.connection
-            .execute("DELETE FROM symbol_relations WHERE path = ?1", [path])?;
-        self.connection
-            .execute("DELETE FROM source_parse_metadata WHERE path = ?1", [path])?;
-        self.connection.execute(
-            "
+        self.with_validated_write(|connection| {
+            let node_id = self.node_id_for_path(path)?;
+            connection
+                .prepare_cached("DELETE FROM symbols WHERE path = ?1")?
+                .execute([path])?;
+            connection
+                .prepare_cached("DELETE FROM symbol_relations WHERE path = ?1")?
+                .execute([path])?;
+            connection
+                .prepare_cached("DELETE FROM source_parse_metadata WHERE path = ?1")?
+                .execute([path])?;
+            connection
+                .prepare_cached(
+                    "
             DELETE FROM summaries
             WHERE node_id = ?1
               AND (
@@ -1084,9 +2490,10 @@ impl AtlasStore {
                     OR (summary_level = 'search' AND subject = 'symbols')
                   )
             ",
-            [node_id],
-        )?;
-        Ok(())
+                )?
+                .execute([node_id])?;
+            Ok(())
+        })
     }
 
     /// Clear symbols and relations for one live file path while preserving node summaries.
@@ -1095,23 +2502,29 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn clear_symbol_graph_for_path(&self, path: &str) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection
-            .execute("DELETE FROM symbols WHERE path = ?1", [path])?;
-        self.connection
-            .execute("DELETE FROM symbol_relations WHERE path = ?1", [path])?;
-        self.connection
-            .execute("DELETE FROM source_parse_metadata WHERE path = ?1", [path])?;
-        self.connection.execute(
-            "
+        self.with_validated_write(|connection| {
+            let node_id = self.node_id_for_path(path)?;
+            connection
+                .prepare_cached("DELETE FROM symbols WHERE path = ?1")?
+                .execute([path])?;
+            connection
+                .prepare_cached("DELETE FROM symbol_relations WHERE path = ?1")?
+                .execute([path])?;
+            connection
+                .prepare_cached("DELETE FROM source_parse_metadata WHERE path = ?1")?
+                .execute([path])?;
+            connection
+                .prepare_cached(
+                    "
             DELETE FROM summaries
             WHERE node_id = ?1
               AND summary_level = 'search'
               AND subject = 'symbols'
             ",
-            [node_id],
-        )?;
-        Ok(())
+                )?
+                .execute([node_id])?;
+            Ok(())
+        })
     }
 
     /// Persist an observed one-line summary for an indexed node.
@@ -1120,9 +2533,11 @@ impl AtlasStore {
     ///
     /// Returns an error if the path does not exist or persistence fails.
     pub fn set_node_summary(&self, path: &str, summary: &str) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection.execute(
-            "
+        self.with_validated_write(|connection| {
+            let node_id = self.node_id_for_path(path)?;
+            connection
+                .prepare_cached(
+                    "
             INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
             VALUES(?1, 'node', '', ?2, CURRENT_TIMESTAMP)
             ON CONFLICT(node_id, summary_level, subject) DO UPDATE SET
@@ -1131,9 +2546,10 @@ impl AtlasStore {
                 summary = excluded.summary,
                 updated_at = CURRENT_TIMESTAMP
             ",
-            params![node_id, summary],
-        )?;
-        Ok(())
+                )?
+                .execute(params![node_id, summary])?;
+            Ok(())
+        })
     }
 
     /// Remove the observed node-level summary for an indexed node.
@@ -1142,17 +2558,20 @@ impl AtlasStore {
     ///
     /// Returns an error if the path does not exist or persistence fails.
     pub fn clear_node_summary(&self, path: &str) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection.execute(
-            "
+        self.with_validated_write(|connection| {
+            let node_id = self.node_id_for_path(path)?;
+            connection
+                .prepare_cached(
+                    "
             DELETE FROM summaries
             WHERE node_id = ?1
               AND summary_level = 'node'
               AND subject = ''
             ",
-            [node_id],
-        )?;
-        Ok(())
+                )?
+                .execute([node_id])?;
+            Ok(())
+        })
     }
 
     /// Load symbols filtered by optional file path and query.
@@ -1210,6 +2629,155 @@ impl AtlasStore {
         }
     }
 
+    /// Load one bounded deterministic symbol set for exact repository paths.
+    ///
+    /// The request uses indexed `symbols.path` predicates, chunks bindings
+    /// below the `SQLite` variable ceiling, and preserves the store's active
+    /// read snapshot. The service remains responsible for matching exact
+    /// declaration identities within these admitted owning paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a path/budget is invalid, cancellation or the
+    /// request deadline fires, a row is corrupt, or `SQLite` iteration fails.
+    pub fn load_symbols_for_paths_bounded(
+        &self,
+        paths: &[String],
+        budget: SymbolBatchReadBudget,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<SymbolBatchRead> {
+        let path_limit =
+            usize::try_from(budget.paths()).map_err(|source| DbError::InvalidCount {
+                field: "symbol batch paths",
+                value: i64::from(budget.paths()),
+                source,
+            })?;
+        let mut exact_paths = BTreeSet::new();
+        let mut reached_limit = None;
+        for path in paths {
+            if let Some(control) = control {
+                control.check(IndexWorkStage::RepositoryTraversal)?;
+            }
+            exact_paths.insert(path.clone());
+            if exact_paths.len() > path_limit {
+                exact_paths.pop_last();
+                reached_limit.get_or_insert(SymbolBatchReadLimit::Paths);
+            }
+        }
+        if exact_paths.is_empty() {
+            return Ok(SymbolBatchRead::default());
+        }
+        let exact_paths = exact_paths.into_iter().collect::<Vec<_>>();
+        let row_limit = usize::try_from(budget.rows()).map_err(|source| DbError::InvalidCount {
+            field: "symbol batch rows",
+            value: i64::from(budget.rows()),
+            source,
+        })?;
+        let mut symbols = Vec::new();
+        let mut decoded_bytes = 0_u64;
+        'chunks: for chunk in exact_paths.chunks(SYMBOL_BATCH_BIND_PATHS) {
+            if let Some(control) = control {
+                control.check(IndexWorkStage::RepositoryTraversal)?;
+            }
+            let remaining_rows = row_limit.saturating_sub(symbols.len());
+            if remaining_rows == 0 {
+                reached_limit.get_or_insert(SymbolBatchReadLimit::Rows);
+                break;
+            }
+            let placeholders = numbered_placeholders(1, chunk.len());
+            let limit_parameter = chunk.len().saturating_add(1);
+            let sql = format!(
+                "
+                SELECT
+                    path,
+                    language,
+                    name,
+                    kind,
+                    signature,
+                    line_start,
+                    line_end,
+                    parent,
+                    parser,
+                    detail,
+                    exported,
+                    documentation,
+                    length(CAST(path AS BLOB))
+                        + COALESCE(length(CAST(language AS BLOB)), 0)
+                        + length(CAST(name AS BLOB))
+                        + length(CAST(signature AS BLOB))
+                        + COALESCE(length(CAST(parent AS BLOB)), 0)
+                        + COALESCE(length(CAST(detail AS BLOB)), 0)
+                        + COALESCE(length(CAST(documentation AS BLOB)), 0)
+                FROM symbols
+                WHERE path IN ({placeholders})
+                ORDER BY path, line_start, name
+                LIMIT ?{limit_parameter}
+                "
+            );
+            let mut bindings = chunk.iter().cloned().map(Value::Text).collect::<Vec<_>>();
+            bindings.push(Value::Integer(usize_to_i64(
+                remaining_rows.saturating_add(1),
+            )));
+            with_sqlite_read_progress(
+                &self.connection,
+                control,
+                IndexWorkStage::RepositoryTraversal,
+                || {
+                    let mut statement = self.connection.prepare(&sql)?;
+                    let mut rows = statement.query(params_from_iter(bindings.iter()))?;
+                    while let Some(row) = rows.next()? {
+                        if let Some(control) = control {
+                            control.check(IndexWorkStage::RepositoryTraversal)?;
+                        }
+                        if symbols.len() >= row_limit {
+                            reached_limit.get_or_insert(SymbolBatchReadLimit::Rows);
+                            break;
+                        }
+                        let preflight_bytes = code_symbol_preflight_bytes(row)?;
+                        if decoded_bytes.saturating_add(preflight_bytes) > budget.decoded_bytes() {
+                            reached_limit.get_or_insert(SymbolBatchReadLimit::DecodedBytes);
+                            break;
+                        }
+                        let symbol = code_symbol_from_row(row)?;
+                        let row_bytes = code_symbol_decoded_bytes(&symbol)?;
+                        if decoded_bytes.saturating_add(row_bytes) > budget.decoded_bytes() {
+                            reached_limit.get_or_insert(SymbolBatchReadLimit::DecodedBytes);
+                            break;
+                        }
+                        decoded_bytes = decoded_bytes.saturating_add(row_bytes);
+                        symbols.push(symbol);
+                    }
+                    Ok(())
+                },
+            )?;
+            if matches!(
+                reached_limit,
+                Some(SymbolBatchReadLimit::Rows | SymbolBatchReadLimit::DecodedBytes)
+            ) {
+                break 'chunks;
+            }
+        }
+        symbols.sort_by(|left, right| {
+            (&left.path, left.line_start, &left.name, &left.signature).cmp(&(
+                &right.path,
+                right.line_start,
+                &right.name,
+                &right.signature,
+            ))
+        });
+        let symbols = symbols.into_boxed_slice().into_vec();
+        Ok(SymbolBatchRead {
+            work: SymbolBatchReadWork {
+                requested_paths: u32::try_from(exact_paths.len()).unwrap_or(u32::MAX),
+                returned_rows: u32::try_from(symbols.len()).unwrap_or(u32::MAX),
+                decoded_bytes,
+            },
+            rows: symbols,
+            truncated: reached_limit.is_some(),
+            reached_limit,
+        })
+    }
+
     /// Load symbols for a file and one or more exact kinds.
     ///
     /// # Errors
@@ -1229,7 +2797,7 @@ impl AtlasStore {
         let sql = format!(
             "
             SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
-            FROM symbols
+            FROM symbols INDEXED BY idx_symbols_path
             WHERE path = ?1 AND kind IN ({placeholders})
             ORDER BY path, line_start, name
             LIMIT {max_rows}
@@ -1251,8 +2819,10 @@ impl AtlasStore {
             return Ok(0);
         }
         let placeholders = numbered_placeholders(2, kinds.len());
-        let sql =
-            format!("SELECT COUNT(*) FROM symbols WHERE path = ?1 AND kind IN ({placeholders})");
+        let sql = format!(
+            "SELECT COUNT(*) FROM symbols INDEXED BY idx_symbols_path
+             WHERE path = ?1 AND kind IN ({placeholders})"
+        );
         let mut values = Vec::with_capacity(kinds.len() + 1);
         values.push(file.to_string());
         values.extend(kinds.iter().map(ToString::to_string));
@@ -1443,16 +3013,217 @@ impl AtlasStore {
     ///
     /// Returns an error if reading or enum conversion fails.
     pub fn load_nodes_by_paths(&self, paths: &[String]) -> DbResult<Vec<IndexedNode>> {
+        self.load_nodes_by_paths_controlled(paths, None)
+    }
+
+    /// Load existing nodes for exact repository paths in bounded cancellable batches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if cancellation fires or reading or enum conversion fails.
+    pub fn load_nodes_by_paths_controlled(
+        &self,
+        paths: &[String],
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<Vec<IndexedNode>> {
         let mut unique_paths = paths.to_vec();
         unique_paths.sort();
         unique_paths.dedup();
+        if unique_paths.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut nodes = Vec::new();
-        for path in unique_paths {
-            if let Some(node) = self.load_node_by_path(&path)? {
-                nodes.push(node);
-            }
+        for chunk in unique_paths.chunks(MAX_PURPOSE_CURATION_BATCH_ROWS) {
+            let hydrated = with_sqlite_read_progress(
+                &self.connection,
+                control,
+                IndexWorkStage::RepositoryTraversal,
+                || {
+                    let sql = load_nodes_by_paths_sql(chunk.len());
+                    let mut statement = self.connection.prepare(&sql)?;
+                    let rows = statement.query_map(params_from_iter(chunk), |row| {
+                        let kind_value: String = row.get(1)?;
+                        let source_value: String = row.get(9)?;
+                        let status_value: String = row.get(10)?;
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            kind_value,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<u64>>(5)?,
+                            row.get::<_, Option<i64>>(6)?,
+                            row.get::<_, Option<String>>(7)?,
+                            row.get::<_, Option<String>>(8)?,
+                            source_value,
+                            status_value,
+                            row.get::<_, Option<String>>(11)?,
+                        ))
+                    })?;
+                    let mut selected = Vec::new();
+                    for row in rows {
+                        selected.push(indexed_node_from_parts(row?)?);
+                    }
+                    Ok(selected)
+                },
+            )?;
+            nodes.extend(hydrated);
         }
         Ok(nodes)
+    }
+
+    /// Hydrate every exact purpose-owner path under one graph read envelope.
+    ///
+    /// Rows are returned in caller order. Unlike the compatibility path loader,
+    /// this graph-facing boundary evaluates every unique requested path in the
+    /// selected project and generation. Existing rows retain caller order;
+    /// absent ancestor candidates are represented by omission rather than a
+    /// partial-query failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for duplicate paths, a stale project or generation,
+    /// cancellation, corrupt node or purpose state, `SQLite`
+    /// failure, or any returned-row, decoded-byte, or hydrated-path budget
+    /// overrun. No partial batch is returned.
+    pub fn load_purpose_owner_nodes_by_paths_controlled(
+        &self,
+        project: ProjectInstanceId,
+        generation: IndexGeneration,
+        paths: &[String],
+        budget: RepositoryGraphReadBudget,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphReadBatch<IndexedNode>> {
+        if paths
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>()
+            .len()
+            != paths.len()
+        {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "purpose-owner hydration paths must be unique",
+            }
+            .into());
+        }
+        self.require_repository_graph_snapshot(project, generation)?;
+        let mut meter = repository_graph::RepositoryGraphReadMeter::new(budget, paths.len())?;
+        let path_count =
+            u32::try_from(paths.len()).map_err(|_source| GraphContractError::InvalidLimits {
+                reason: "purpose-owner hydration path count overflowed",
+            })?;
+        if path_count > budget.returned_rows() {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "purpose-owner paths exceed the return budget",
+            }
+            .into());
+        }
+        if path_count > budget.hydrated_paths() {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "purpose-owner paths exceed the hydration budget",
+            }
+            .into());
+        }
+        if paths.is_empty() {
+            return Ok(RepositoryGraphReadBatch {
+                rows: Vec::new(),
+                work: meter.finish(0)?,
+            });
+        }
+
+        let mut selected = HashMap::with_capacity(paths.len());
+        for chunk in paths.chunks(MAX_PURPOSE_CURATION_BATCH_ROWS) {
+            let hydrated = with_sqlite_read_progress(
+                &self.connection,
+                control,
+                IndexWorkStage::RepositoryTraversal,
+                || {
+                    let sql = load_nodes_by_paths_sql(chunk.len());
+                    let mut statement = self.connection.prepare(&sql)?;
+                    let mut rows = statement.query(params_from_iter(chunk))?;
+                    let mut nodes = Vec::new();
+                    while let Some(row) = rows.next()? {
+                        let parts = indexed_node_parts_from_sql_row(row)?;
+                        meter.record_decoded_bytes(indexed_node_parts_decoded_bytes(&parts)?)?;
+                        let node = indexed_node_from_parts(parts)?;
+                        meter.record_hydrated_path(&node.node.path)?;
+                        nodes.push(node);
+                    }
+                    Ok(nodes)
+                },
+            )?;
+            for node in hydrated {
+                let path = node.node.path.clone();
+                if selected.insert(path, node).is_some() {
+                    return Err(DbError::GraphRowShape {
+                        table: "nodes",
+                        reason: "purpose-owner hydration returned a duplicate path",
+                    });
+                }
+            }
+        }
+
+        let mut ordered = Vec::with_capacity(paths.len());
+        for path in paths {
+            if let Some(node) = selected.remove(path) {
+                ordered.push(node);
+            }
+        }
+        let work = meter.finish(ordered.len())?;
+        Ok(RepositoryGraphReadBatch {
+            rows: ordered,
+            work,
+        })
+    }
+
+    /// Load one bounded stale-safe purpose-curation batch for exact paths.
+    ///
+    /// The node hydration is one prepared set query regardless of row count.
+    /// Accepted purposes are intentionally omitted from curator work.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid task, oversized batch, changed project
+    /// binding, invalid persisted state, or failed `SQLite` read.
+    pub fn load_purpose_curation_batch(
+        &self,
+        task: &str,
+        paths: &[String],
+    ) -> DbResult<PurposeCurationBatch> {
+        let task = normalize_purpose_curation_task(task)?;
+        let mut unique_paths = paths.to_vec();
+        unique_paths.sort();
+        unique_paths.dedup();
+        if unique_paths.len() > MAX_PURPOSE_CURATION_BATCH_ROWS {
+            return Err(DbError::PurposeCurationBatchTooLarge {
+                requested: unique_paths.len(),
+                maximum: MAX_PURPOSE_CURATION_BATCH_ROWS,
+            });
+        }
+        let (project_instance_id, active_generation) =
+            self.purpose_curation_context(&self.connection)?;
+        let items = self
+            .load_nodes_by_paths(&unique_paths)?
+            .into_iter()
+            .filter(|node| {
+                matches!(
+                    node.purpose.status,
+                    PurposeStatus::Missing | PurposeStatus::Suggested
+                )
+            })
+            .map(|node| {
+                purpose_curation_candidate(project_instance_id, active_generation, &task, node)
+            })
+            .collect::<Vec<_>>();
+        let work_key =
+            purpose_curation_batch_work_key(project_instance_id, active_generation, &task, &items);
+        Ok(PurposeCurationBatch {
+            project_instance_id,
+            active_generation,
+            task,
+            work_key,
+            items,
+        })
     }
 
     /// Load symbol relations filtered by optional file path and query.
@@ -1632,7 +3403,7 @@ impl AtlasStore {
                         PARTITION BY target_name
                         ORDER BY path, line, source_name, target_name
                     ) AS target_row
-                FROM symbol_relations
+                FROM symbol_relations INDEXED BY idx_symbol_relations_target
                 WHERE kind = 'calls' AND target_name IN ({placeholders})
             )
             WHERE target_row <= ?{limit_placeholder}
@@ -1671,26 +3442,31 @@ impl AtlasStore {
         &self,
         terms: &[String],
         limit_per_term: usize,
-    ) -> DbResult<Vec<SymbolRelation>> {
+    ) -> DbResult<Vec<StoredImportRelation>> {
         let mut unique_terms = terms.to_vec();
         unique_terms.sort();
         unique_terms.dedup();
         let mut relations = Vec::new();
         for term in unique_terms.iter().filter(|term| !term.trim().is_empty()) {
-            let mut term_relations = self.query_relations(
+            let mut statement = self.connection.prepare_cached(
                 "
-                SELECT path, source_name, target_name, kind, line, context, parser
-                FROM symbol_relations
+                SELECT path, source_name, target_name, line
+                FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup
                 WHERE kind = 'imports' AND target_name LIKE ?1 ESCAPE '\\'
                 ORDER BY path, line, source_name, target_name
                 LIMIT ?2
                 ",
+            )?;
+            let rows = statement.query_map(
                 params![
                     sqlite_like_pattern(term),
                     usize_to_i64(limit_per_term.max(1))
                 ],
+                stored_import_relation_from_row,
             )?;
-            relations.append(&mut term_relations);
+            for row in rows {
+                relations.push(row?);
+            }
         }
         relations.sort_by(|left, right| {
             left.path
@@ -1703,9 +3479,38 @@ impl AtlasStore {
             left.path == right.path
                 && left.source_name == right.source_name
                 && left.target_name == right.target_name
-                && left.kind == right.kind
                 && left.line == right.line
         });
+        Ok(relations)
+    }
+
+    /// Load bounded import facts for one exact caller path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the covering indexed read fails.
+    pub fn load_import_relations_for_path(
+        &self,
+        path: &str,
+        limit: usize,
+    ) -> DbResult<Vec<StoredImportRelation>> {
+        let mut statement = self.connection.prepare_cached(
+            "
+            SELECT path, source_name, target_name, line
+            FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup
+            WHERE kind = 'imports' AND path = ?1
+            ORDER BY path, line, source_name, target_name
+            LIMIT ?2
+            ",
+        )?;
+        let rows = statement.query_map(
+            params![path, usize_to_i64(limit.max(1))],
+            stored_import_relation_from_row,
+        )?;
+        let mut relations = Vec::new();
+        for row in rows {
+            relations.push(row?);
+        }
         Ok(relations)
     }
 
@@ -1782,6 +3587,37 @@ impl AtlasStore {
         Ok(counts)
     }
 
+    /// Return exact paths with persisted parser metadata from one bounded path set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading or row decoding fails.
+    pub fn source_parse_metadata_paths_for_paths(
+        &self,
+        paths: &[String],
+    ) -> DbResult<HashSet<String>> {
+        let mut indexed = HashSet::new();
+        for chunk in paths.chunks(900) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let placeholders = numbered_placeholders(1, chunk.len());
+            let sql = format!(
+                "SELECT path FROM source_parse_metadata
+                 WHERE path IN ({placeholders})
+                 ORDER BY path"
+            );
+            let mut statement = self.connection.prepare(&sql)?;
+            let rows = statement.query_map(params_from_iter(chunk.iter()), |row| {
+                row.get::<_, String>(0)
+            })?;
+            for row in rows {
+                indexed.insert(row?);
+            }
+        }
+        Ok(indexed)
+    }
+
     /// Return distinct parser strategies that produced symbols for one path.
     ///
     /// # Errors
@@ -1806,6 +3642,126 @@ impl AtlasStore {
         Ok(parsers)
     }
 
+    /// Reconstruct persisted symbol graphs for exact repository paths in bounded batches.
+    ///
+    /// Paths without parser metadata are omitted. Any selected symbol or relation
+    /// without matching metadata, or any metadata count mismatch, fails the whole
+    /// operation instead of returning a partial graph set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for `SQLite` failures, invalid persisted counts or enums,
+    /// and inconsistent symbol-graph rows.
+    pub fn load_symbol_graphs_for_paths(&self, paths: &[String]) -> DbResult<Vec<SymbolGraph>> {
+        const PATHS_PER_QUERY: usize = 900;
+
+        let mut paths = paths.to_vec();
+        paths.sort();
+        paths.dedup();
+        let mut graphs = Vec::with_capacity(paths.len());
+        for chunk in paths.chunks(PATHS_PER_QUERY) {
+            let placeholders = numbered_placeholders(1, chunk.len());
+            let metadata_sql = format!(
+                "SELECT path, language, source_parser, fact_parser, symbol_count, relation_count
+                   FROM source_parse_metadata
+                  WHERE path IN ({placeholders})
+                  ORDER BY path"
+            );
+            let mut metadata_statement = self.connection.prepare(&metadata_sql)?;
+            let metadata_rows =
+                metadata_statement.query_map(params_from_iter(chunk.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                })?;
+            let mut staged = BTreeMap::new();
+            for row in metadata_rows {
+                let (path, language, source_parser, fact_parser, symbol_count, relation_count) =
+                    row?;
+                staged.insert(
+                    path.clone(),
+                    (
+                        SourceParseMetadata {
+                            path,
+                            language,
+                            parser: ParserKind::from_db(&source_parser),
+                            symbol_count: count_to_usize(
+                                "source_parse_metadata.symbol_count",
+                                symbol_count,
+                            )?,
+                            relation_count: count_to_usize(
+                                "source_parse_metadata.relation_count",
+                                relation_count,
+                            )?,
+                        },
+                        ParserKind::from_db(&fact_parser),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                );
+            }
+
+            let symbol_sql = format!(
+                "SELECT path, language, name, kind, signature, line_start, line_end,
+                        parent, parser, detail, exported, documentation
+                   FROM symbols
+                  WHERE path IN ({placeholders})
+                  ORDER BY path, line_start, line_end, name, kind"
+            );
+            for symbol in self.query_symbols(&symbol_sql, params_from_iter(chunk.iter()))? {
+                let path = symbol.path.clone();
+                let Some((_, _, symbols, _)) = staged.get_mut(&path) else {
+                    return Err(DbError::SymbolGraphRowShape {
+                        path,
+                        reason: "symbol rows require matching parser metadata",
+                    });
+                };
+                symbols.push(symbol);
+            }
+
+            let relation_sql = format!(
+                "SELECT path, source_name, target_name, kind, line, context, parser
+                   FROM symbol_relations
+                  WHERE path IN ({placeholders})
+                  ORDER BY path, line, source_name, target_name, kind"
+            );
+            for relation in self.query_relations(&relation_sql, params_from_iter(chunk.iter()))? {
+                let path = relation.path.clone();
+                let Some((_, _, _, relations)) = staged.get_mut(&path) else {
+                    return Err(DbError::SymbolGraphRowShape {
+                        path,
+                        reason: "relation rows require matching parser metadata",
+                    });
+                };
+                relations.push(relation);
+            }
+
+            for (path, (metadata, fact_parser, symbols, relations)) in staged {
+                if metadata.symbol_count != symbols.len()
+                    || metadata.relation_count != relations.len()
+                {
+                    return Err(DbError::SymbolGraphRowShape {
+                        path,
+                        reason: "parser metadata counts do not match persisted rows",
+                    });
+                }
+                graphs.push(SymbolGraph {
+                    path: metadata.path,
+                    language: metadata.language,
+                    parser: fact_parser,
+                    symbols,
+                    relations,
+                });
+            }
+        }
+        Ok(graphs)
+    }
+
     /// Load file-level parser metadata for one path.
     ///
     /// # Errors
@@ -1815,7 +3771,7 @@ impl AtlasStore {
         self.connection
             .query_row(
                 "
-                SELECT path, language, parser, symbol_count, relation_count
+                SELECT path, language, source_parser, symbol_count, relation_count
                 FROM source_parse_metadata
                 WHERE path = ?1
                 ",
@@ -1856,22 +3812,7 @@ impl AtlasStore {
         P: rusqlite::Params,
     {
         let mut statement = self.connection.prepare(sql)?;
-        let rows = statement.query_map(params, |row| {
-            Ok(CodeSymbol {
-                path: row.get(0)?,
-                language: row.get(1)?,
-                name: row.get(2)?,
-                kind: SymbolKind::from_db(&row.get::<_, String>(3)?),
-                signature: row.get(4)?,
-                line_start: i64_to_usize(row.get::<_, i64>(5)?),
-                line_end: i64_to_usize(row.get::<_, i64>(6)?),
-                parent: row.get(7)?,
-                parser: ParserKind::from_db(&row.get::<_, String>(8)?),
-                detail: row.get(9)?,
-                exported: row.get::<_, i64>(10)? != 0,
-                documentation: row.get(11)?,
-            })
-        })?;
+        let rows = statement.query_map(params, code_symbol_from_row)?;
         let mut symbols = Vec::new();
         for row in rows {
             symbols.push(row?);
@@ -1913,15 +3854,37 @@ impl AtlasStore {
         Ok(relations)
     }
 
+    /// Return whether any accepted agent-authored purpose can affect navigation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bounded indexed lookup fails.
+    pub fn has_agent_approved_purpose(&self) -> DbResult<bool> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM purposes INDEXED BY idx_purposes_status
+                    WHERE status = 'approved' AND source = 'agent'
+                    LIMIT 1
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     /// Persist a purpose for a path.
     ///
     /// # Errors
     ///
     /// Returns an error if the path does not exist or persistence fails.
     pub fn set_purpose(&self, path: &str, purpose: &str, source: PurposeSource) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection.execute(
-            "
+        self.with_validated_write(|connection| {
+            let node_id = self.node_id_for_path(path)?;
+            let changed = connection
+                .prepare_cached(
+                    "
             INSERT INTO purposes(node_id, purpose, source, status, updated_at)
             VALUES(?1, ?2, ?3, 'approved', CURRENT_TIMESTAMP)
             ON CONFLICT(node_id) DO UPDATE SET
@@ -1929,10 +3892,124 @@ impl AtlasStore {
                 source = excluded.source,
                 status = 'approved',
                 updated_at = CURRENT_TIMESTAMP
+            WHERE purposes.purpose <> excluded.purpose
+               OR purposes.source <> excluded.source
+               OR purposes.status <> 'approved'
             ",
-            params![node_id, purpose, source.to_string()],
-        )?;
-        Ok(())
+                )?
+                .execute(params![node_id, purpose, source.to_string()])?;
+            if changed > 0 {
+                advance_authored_purpose_revision(connection)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Return the accepted authored-purpose revision captured by this connection.
+    ///
+    /// Databases created before the revision contract have revision zero until
+    /// their first accepted purpose mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the metadata value is corrupt.
+    pub fn authored_purpose_revision(&self) -> DbResult<u64> {
+        load_authored_purpose_revision(&self.connection)
+    }
+
+    /// Approve one purpose only while its curator work and unapproved row are current.
+    ///
+    /// This path never changes an accepted purpose. Call [`Self::set_purpose`]
+    /// for a deliberate correction after an agent or user identifies one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid task input, binding/schema failure, or a
+    /// failed atomic `SQLite` transaction. Stale and accepted rows are returned
+    /// as typed non-error states.
+    pub fn conditionally_set_purpose(
+        &self,
+        task: &str,
+        path: &str,
+        work_key: &str,
+        state_token: &str,
+        purpose: &str,
+    ) -> DbResult<PurposeConditionalApplyState> {
+        let request = PurposeConditionalApplyRequest {
+            task: task.to_string(),
+            path: path.to_string(),
+            work_key: work_key.to_string(),
+            state_token: state_token.to_string(),
+            purpose: purpose.to_string(),
+        };
+        let mut results = self.conditionally_set_purposes(&[request])?;
+        Ok(results
+            .pop()
+            .map_or(PurposeConditionalApplyState::PathUnavailable, |result| {
+                result.state
+            }))
+    }
+
+    /// Apply a bounded stale-safe purpose-review batch in one writer transaction.
+    ///
+    /// Current-row lookup and conditional-update statements are cached and
+    /// reused for every item. A stale item leaves independent matching rows
+    /// eligible within the same host-owned batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid task input, oversized input, binding/schema
+    /// failure, or any failed statement/commit. A database error rolls back the
+    /// complete batch.
+    pub fn conditionally_set_purposes(
+        &self,
+        requests: &[PurposeConditionalApplyRequest],
+    ) -> DbResult<Vec<PurposeConditionalApplyResult>> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        if requests.len() > MAX_PURPOSE_CURATION_BATCH_ROWS {
+            return Err(DbError::PurposeCurationBatchTooLarge {
+                requested: requests.len(),
+                maximum: MAX_PURPOSE_CURATION_BATCH_ROWS,
+            });
+        }
+        let normalized = requests
+            .iter()
+            .map(|request| {
+                normalize_purpose_curation_task(&request.task).map(|task| {
+                    PurposeConditionalApplyRequest {
+                        task,
+                        path: request.path.clone(),
+                        work_key: request.work_key.clone(),
+                        state_token: request.state_token.clone(),
+                        purpose: request.purpose.clone(),
+                    }
+                })
+            })
+            .collect::<DbResult<Vec<_>>>()?;
+        self.with_validated_write(|connection| {
+            let (project_instance_id, active_generation) =
+                self.purpose_curation_context(connection)?;
+            let results = normalized
+                .iter()
+                .map(|request| {
+                    apply_conditional_purpose(
+                        connection,
+                        project_instance_id,
+                        active_generation,
+                        request,
+                    )
+                })
+                .collect::<DbResult<Vec<_>>>()?;
+            if results
+                .iter()
+                .any(|result| matches!(result.state, PurposeConditionalApplyState::Applied))
+            {
+                advance_authored_purpose_revision(connection)?;
+            }
+            Ok(results)
+        })
     }
 
     /// Persist a non-approved purpose suggestion for a path.
@@ -1941,30 +4018,38 @@ impl AtlasStore {
     ///
     /// Returns an error if the path does not exist or persistence fails.
     pub fn set_suggested_purpose(&self, path: &str, purpose: &str) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection.execute(
-            "
+        self.with_validated_write(|connection| {
+            let node_id = self.node_id_for_path(path)?;
+            connection
+                .prepare_cached(
+                    "
             INSERT INTO purposes(node_id, purpose, source, status, updated_at)
-            VALUES(?1, ?2, 'generated', 'suggested', CURRENT_TIMESTAMP)
+            VALUES(?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
             ON CONFLICT(node_id) DO UPDATE SET
                 purpose = excluded.purpose,
-                source = 'generated',
-                status = 'suggested',
+                source = excluded.source,
+                status = excluded.status,
                 updated_at = CURRENT_TIMESTAMP
+            WHERE purposes.status IN (?5, ?6)
             ",
-            params![node_id, purpose],
-        )?;
-        Ok(())
+                )?
+                .execute(params![
+                    node_id,
+                    purpose,
+                    PurposeSource::Generated.to_string(),
+                    PurposeStatus::Suggested.as_str(),
+                    PurposeStatus::Missing.as_str(),
+                    PurposeStatus::Suggested.as_str(),
+                ])?;
+            Ok(())
+        })
     }
 
     /// Load a node id for a repository path.
     fn node_id_for_path(&self, path: &str) -> DbResult<i64> {
         self.connection
-            .query_row(
-                "SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1",
-                [path],
-                |row| row.get::<_, i64>(0),
-            )
+            .prepare_cached("SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1")?
+            .query_row([path], |row| row.get::<_, i64>(0))
             .optional()?
             .ok_or_else(|| DbError::PathNotIndexed {
                 path: path.to_string(),
@@ -2087,6 +4172,10 @@ impl AtlasStore {
         offset: usize,
     ) -> DbResult<Vec<IndexedNode>> {
         let terms = normalize_query_terms(query);
+        let exact_query = normalize_exact_ranked_query(query);
+        let exact_name_enabled = !exact_query.is_empty() && !exact_query.contains('/');
+        let exact_name_pattern = format!("%/{}", sqlite_like_escape(&exact_query));
+        let reviewed_match_expression = reviewed_purpose_match_expression(terms.len());
         let score_expression = ranked_score_expression(terms.len());
         let mut sql = format!(
             "
@@ -2106,6 +4195,11 @@ impl AtlasStore {
                     p.source,
                     p.status,
                     s.summary,
+                    CASE WHEN lower(n.path) = ? THEN 1 ELSE 0 END AS exact_path,
+                    CASE WHEN ? = 1
+                              AND (lower(n.path) = ? OR lower(n.path) LIKE ? ESCAPE '\\')
+                         THEN 1 ELSE 0 END AS exact_name,
+                    {reviewed_match_expression} AS reviewed_purpose,
                     {score_expression} AS score
                 FROM nodes n
                 JOIN purposes p ON p.node_id = n.id
@@ -2119,9 +4213,18 @@ impl AtlasStore {
                   AND n.kind = ?
             "
         );
-        let mut values = Vec::new();
+        let mut values = vec![
+            Value::from(exact_query.clone()),
+            Value::from(i64::from(exact_name_enabled)),
+            Value::from(exact_query),
+            Value::from(exact_name_pattern),
+        ];
+        for term in &terms {
+            values.push(Value::from(sqlite_like_pattern(term)));
+        }
         for term in &terms {
             let pattern = sqlite_like_pattern(term);
+            values.push(Value::from(pattern.clone()));
             values.push(Value::from(pattern.clone()));
             values.push(Value::from(pattern.clone()));
             values.push(Value::from(pattern.clone()));
@@ -2138,8 +4241,8 @@ impl AtlasStore {
         sql.push_str(
             "
             )
-            WHERE score > 0
-            ORDER BY score DESC, path
+            WHERE score > 0 OR exact_path > 0 OR exact_name > 0 OR reviewed_purpose > 0
+            ORDER BY exact_path DESC, exact_name DESC, reviewed_purpose DESC, score DESC, path
             LIMIT ?
             OFFSET ?
             ",
@@ -2248,13 +4351,129 @@ impl AtlasStore {
         resolved_ids: &[String],
         query: &HealthQuery,
     ) -> DbResult<HealthFindingsPage> {
+        self.unresolved_health_findings_page_with_filter(
+            HealthResolutionFilter::Explicit(resolved_ids),
+            query,
+        )
+    }
+
+    /// Build a bounded page filtered by this store's durable resolutions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading fails or stored enum values are invalid.
+    pub fn unresolved_health_findings_page_current(
+        &self,
+        query: &HealthQuery,
+    ) -> DbResult<HealthFindingsPage> {
+        self.unresolved_health_findings_page_with_filter(HealthResolutionFilter::Stored, query)
+    }
+
+    /// Build the actionable missing/suggested purpose queue for one low-scope request.
+    ///
+    /// Accepted and legacy-stale purposes are excluded; deliberate accepted-purpose
+    /// correction remains owned by the explicit purpose-set/review path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if counting, paging, or stored-state conversion fails.
+    pub fn purpose_curation_findings_page_current(
+        &self,
+        query: &HealthQuery,
+    ) -> DbResult<HealthFindingsPage> {
+        let specs = &PURPOSE_HEALTH_SPECS[..2];
+        let unfiltered_total = specs.iter().try_fold(0_usize, |total, spec| {
+            self.count_purpose_status_findings(
+                *spec,
+                None,
+                HealthResolutionFilter::Stored,
+                HealthScope::all(),
+            )
+            .map(|count| total + count)
+        })?;
+        if query
+            .severity
+            .is_some_and(|severity| severity != Severity::Warning)
+        {
+            return Ok(HealthFindingsPage {
+                total: 0,
+                unfiltered_total,
+                returned: 0,
+                start_index: query.start_index,
+                limit: query.limit,
+                findings: Vec::new(),
+            });
+        }
+
+        let matching_specs = query.category.as_deref().map_or(specs, |category| {
+            specs
+                .iter()
+                .find(|spec| spec.category == category)
+                .map_or(&[][..], std::slice::from_ref)
+        });
+        let total = self.count_purpose_lifecycle_findings(
+            matching_specs,
+            query.path_prefix.as_deref(),
+            HealthResolutionFilter::Stored,
+            query.scope,
+        )?;
+        let findings = if query.summary_only {
+            Vec::new()
+        } else {
+            self.load_purpose_lifecycle_findings_page(
+                matching_specs,
+                query.path_prefix.as_deref(),
+                HealthResolutionFilter::Stored,
+                query.scope,
+                query.start_index,
+                query.limit,
+            )?
+        };
+        Ok(HealthFindingsPage {
+            total,
+            unfiltered_total,
+            returned: findings.len(),
+            start_index: query.start_index,
+            limit: query.limit,
+            findings,
+        })
+    }
+
+    /// Count all unresolved findings without materializing finding rows or resolution ids.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading fails or stored enum values are invalid.
+    pub fn unresolved_health_finding_count_current(&self) -> DbResult<usize> {
+        self.unresolved_health_findings_page_current(&HealthQuery {
+            start_index: 0,
+            limit: 0,
+            category: None,
+            severity: None,
+            path_prefix: None,
+            summary_only: true,
+            scope: HealthScope::all(),
+        })
+        .map(|page| page.total)
+    }
+
+    /// Build a bounded unresolved page with caller-owned or store-owned filtering.
+    fn unresolved_health_findings_page_with_filter(
+        &self,
+        resolution_filter: HealthResolutionFilter<'_>,
+        query: &HealthQuery,
+    ) -> DbResult<HealthFindingsPage> {
         let mut unfiltered_total = 0_usize;
         let mut total = 0_usize;
         let mut findings = Vec::new();
 
         for spec in PURPOSE_HEALTH_SPECS {
-            unfiltered_total +=
-                self.count_purpose_status_findings(spec, None, resolved_ids, HealthScope::all())?;
+            unfiltered_total += self.count_purpose_status_findings(
+                spec,
+                None,
+                resolution_filter,
+                HealthScope::all(),
+            )?;
         }
 
         let scope = query.scope;
@@ -2264,8 +4483,9 @@ impl AtlasStore {
                 .is_none_or(|severity| severity == Severity::Warning)
             {
                 self.count_purpose_lifecycle_findings(
+                    &PURPOSE_HEALTH_SPECS,
                     query.path_prefix.as_deref(),
-                    resolved_ids,
+                    resolution_filter,
                     scope,
                 )?
             } else {
@@ -2278,8 +4498,9 @@ impl AtlasStore {
                 let local_start = query.start_index.saturating_sub(total);
                 let local_limit = query.limit - findings.len();
                 findings.extend(self.load_purpose_lifecycle_findings_page(
+                    &PURPOSE_HEALTH_SPECS,
                     query.path_prefix.as_deref(),
-                    resolved_ids,
+                    resolution_filter,
                     scope,
                     local_start,
                     local_limit,
@@ -2295,7 +4516,7 @@ impl AtlasStore {
                 let matching_count = self.count_purpose_status_findings(
                     spec,
                     query.path_prefix.as_deref(),
-                    resolved_ids,
+                    resolution_filter,
                     scope,
                 )?;
                 if !query.summary_only
@@ -2307,7 +4528,7 @@ impl AtlasStore {
                     findings.extend(self.load_purpose_status_findings_page(
                         spec,
                         query.path_prefix.as_deref(),
-                        resolved_ids,
+                        resolution_filter,
                         scope,
                         local_start,
                         local_limit,
@@ -2326,7 +4547,7 @@ impl AtlasStore {
             let unfiltered_count = self.count_structural_health_findings(
                 category,
                 None,
-                resolved_ids,
+                resolution_filter,
                 unfiltered_scope,
             )?;
             unfiltered_total += unfiltered_count;
@@ -2336,7 +4557,7 @@ impl AtlasStore {
             let matching_count = self.count_structural_health_findings(
                 category,
                 query.path_prefix.as_deref(),
-                resolved_ids,
+                resolution_filter,
                 scope,
             )?;
             if !query.summary_only
@@ -2348,7 +4569,7 @@ impl AtlasStore {
                 findings.extend(self.load_structural_health_findings_page(
                     category,
                     query.path_prefix.as_deref(),
-                    resolved_ids,
+                    resolution_filter,
                     scope,
                     local_start,
                     local_limit,
@@ -2451,12 +4672,16 @@ impl AtlasStore {
     /// Count unresolved purpose lifecycle findings directly in `SQLite`.
     fn count_purpose_lifecycle_findings(
         &self,
+        specs: &[PurposeHealthSpec],
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
     ) -> DbResult<usize> {
+        if specs.is_empty() {
+            return Ok(0);
+        }
         let (where_clause, values) =
-            purpose_lifecycle_where_clause(path_prefix, resolved_ids, scope);
+            purpose_lifecycle_where_clause(specs, path_prefix, resolution_filter, scope);
         let sql = format!(
             "
             SELECT COUNT(*)
@@ -2474,17 +4699,18 @@ impl AtlasStore {
     /// Load one globally ordered purpose lifecycle page directly from `SQLite`.
     fn load_purpose_lifecycle_findings_page(
         &self,
+        specs: &[PurposeHealthSpec],
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
-        if limit == 0 {
+        if limit == 0 || specs.is_empty() {
             return Ok(Vec::new());
         }
         let (where_clause, mut values) =
-            purpose_lifecycle_where_clause(path_prefix, resolved_ids, scope);
+            purpose_lifecycle_where_clause(specs, path_prefix, resolution_filter, scope);
         let limit_placeholder = values.len() + 1;
         let offset_placeholder = values.len() + 2;
         values.push(Value::from(usize_to_i64(limit)));
@@ -2526,11 +4752,11 @@ impl AtlasStore {
         &self,
         spec: PurposeHealthSpec,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
     ) -> DbResult<usize> {
         let (where_clause, values) =
-            purpose_status_where_clause(spec, path_prefix, resolved_ids, scope);
+            purpose_status_where_clause(spec, path_prefix, resolution_filter, scope);
         let sql = format!(
             "
             SELECT COUNT(*)
@@ -2550,7 +4776,7 @@ impl AtlasStore {
         &self,
         spec: PurposeHealthSpec,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
         start_index: usize,
         limit: usize,
@@ -2559,7 +4785,7 @@ impl AtlasStore {
             return Ok(Vec::new());
         }
         let (where_clause, mut values) =
-            purpose_status_where_clause(spec, path_prefix, resolved_ids, scope);
+            purpose_status_where_clause(spec, path_prefix, resolution_filter, scope);
         let limit_placeholder = values.len() + 1;
         let offset_placeholder = values.len() + 2;
         values.push(Value::from(usize_to_i64(limit)));
@@ -2602,18 +4828,18 @@ impl AtlasStore {
         &self,
         category: &str,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
     ) -> DbResult<usize> {
         match category {
             CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED => {
-                self.count_agent_review_required_findings(path_prefix, resolved_ids, scope)
+                self.count_agent_review_required_findings(path_prefix, resolution_filter, scope)
             }
             CATEGORY_DUPLICATE_PURPOSE => {
-                self.count_duplicate_purpose_findings(path_prefix, resolved_ids, scope)
+                self.count_duplicate_purpose_findings(path_prefix, resolution_filter, scope)
             }
             CATEGORY_REPEATED_TEMPORARY_FOLDER => {
-                self.count_repeated_temp_folder_findings(path_prefix, resolved_ids, scope)
+                self.count_repeated_temp_folder_findings(path_prefix, resolution_filter, scope)
             }
             _ => Ok(0),
         }
@@ -2624,7 +4850,7 @@ impl AtlasStore {
         &self,
         category: &str,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
         start_index: usize,
         limit: usize,
@@ -2633,21 +4859,21 @@ impl AtlasStore {
             CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED => self
                 .load_agent_review_required_findings_page(
                     path_prefix,
-                    resolved_ids,
+                    resolution_filter,
                     scope,
                     start_index,
                     limit,
                 ),
             CATEGORY_DUPLICATE_PURPOSE => self.load_duplicate_purpose_findings_page(
                 path_prefix,
-                resolved_ids,
+                resolution_filter,
                 scope,
                 start_index,
                 limit,
             ),
             CATEGORY_REPEATED_TEMPORARY_FOLDER => self.load_repeated_temp_folder_findings_page(
                 path_prefix,
-                resolved_ids,
+                resolution_filter,
                 scope,
                 start_index,
                 limit,
@@ -2695,13 +4921,13 @@ impl AtlasStore {
     fn count_agent_review_required_findings(
         &self,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
     ) -> DbResult<usize> {
         let (where_clause, values) = structural_finding_where_clause(
             CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
             path_prefix,
-            resolved_ids,
+            resolution_filter,
             scope,
             1,
         );
@@ -2739,7 +4965,7 @@ impl AtlasStore {
     fn load_agent_review_required_findings_page(
         &self,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
         start_index: usize,
         limit: usize,
@@ -2750,7 +4976,7 @@ impl AtlasStore {
         let (where_clause, mut values) = structural_finding_where_clause(
             CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
             path_prefix,
-            resolved_ids,
+            resolution_filter,
             scope,
             1,
         );
@@ -2797,13 +5023,13 @@ impl AtlasStore {
     fn count_duplicate_purpose_findings(
         &self,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
     ) -> DbResult<usize> {
         let (where_clause, values) = structural_finding_where_clause(
             CATEGORY_DUPLICATE_PURPOSE,
             path_prefix,
-            resolved_ids,
+            resolution_filter,
             scope,
             1,
         );
@@ -2857,7 +5083,7 @@ impl AtlasStore {
     fn load_duplicate_purpose_findings_page(
         &self,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
         start_index: usize,
         limit: usize,
@@ -2868,7 +5094,7 @@ impl AtlasStore {
         let (where_clause, mut values) = structural_finding_where_clause(
             CATEGORY_DUPLICATE_PURPOSE,
             path_prefix,
-            resolved_ids,
+            resolution_filter,
             scope,
             1,
         );
@@ -2950,7 +5176,7 @@ impl AtlasStore {
     fn count_repeated_temp_folder_findings(
         &self,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
     ) -> DbResult<usize> {
         let mut total = 0_usize;
@@ -2958,7 +5184,7 @@ impl AtlasStore {
             total += self.count_repeated_temp_folder_bucket_findings(
                 bucket,
                 path_prefix,
-                resolved_ids,
+                resolution_filter,
                 scope,
             )?;
         }
@@ -2970,7 +5196,7 @@ impl AtlasStore {
         &self,
         bucket: &str,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
     ) -> DbResult<usize> {
         let exact = bucket.to_string();
@@ -2978,7 +5204,7 @@ impl AtlasStore {
         let (where_clause, mut filter_values) = structural_finding_where_clause(
             CATEGORY_REPEATED_TEMPORARY_FOLDER,
             path_prefix,
-            resolved_ids,
+            resolution_filter,
             scope,
             3,
         );
@@ -3021,7 +5247,7 @@ impl AtlasStore {
     fn load_repeated_temp_folder_findings_page(
         &self,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
         start_index: usize,
         limit: usize,
@@ -3035,7 +5261,7 @@ impl AtlasStore {
             let matching_count = self.count_repeated_temp_folder_bucket_findings(
                 bucket,
                 path_prefix,
-                resolved_ids,
+                resolution_filter,
                 scope,
             )?;
             if findings.len() < limit && total + matching_count > start_index {
@@ -3044,7 +5270,7 @@ impl AtlasStore {
                 findings.extend(self.load_repeated_temp_folder_bucket_findings_page(
                     bucket,
                     path_prefix,
-                    resolved_ids,
+                    resolution_filter,
                     scope,
                     local_start,
                     local_limit,
@@ -3063,7 +5289,7 @@ impl AtlasStore {
         &self,
         bucket: &str,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
         start_index: usize,
         limit: usize,
@@ -3076,7 +5302,7 @@ impl AtlasStore {
         let (where_clause, mut filter_values) = structural_finding_where_clause(
             CATEGORY_REPEATED_TEMPORARY_FOLDER,
             path_prefix,
-            resolved_ids,
+            resolution_filter,
             scope,
             3,
         );
@@ -3314,59 +5540,158 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn record_usage(&self, event: &UsageEvent) -> DbResult<()> {
-        self.connection.execute(
-            "
-            INSERT INTO usage_events(
-                session_id,
-                command,
-                path,
-                query,
-                estimated_tokens_without_projectatlas,
-                estimated_tokens_with_projectatlas,
-                estimated_tokens_saved,
-                token_savings_bucket,
-                provider,
-                model,
-                tokenizer_backend,
-                accuracy,
-                baseline_kind,
-                confidence,
-                calculation_trace,
-                accounting_layer,
-                estimate_method,
-                denominator_kind,
-                baseline_identity,
-                baseline_fingerprint,
-                dedupe_scope,
-                created_at
+        telemetry::validate_event(event, TelemetryRetentionPolicy::default())?;
+        let instance_id = self.library_usage_instance(&event.session_id, false)?;
+        match self.record_usage_for_instance(
+            instance_id,
+            UsageInstanceOwner::LibraryHandle,
+            event,
+            false,
+        ) {
+            Err(DbError::TelemetryInstanceInactive) => {
+                let replacement = self.library_usage_instance(&event.session_id, true)?;
+                self.record_usage_for_instance(
+                    replacement,
+                    UsageInstanceOwner::LibraryHandle,
+                    event,
+                    false,
+                )
+            }
+            Err(DbError::TelemetryBaselineCapacity) => {
+                let replacement = telemetry::generate_usage_instance_id()?;
+                self.seal_usage_instance(instance_id)?;
+                self.library_usage_instances
+                    .borrow_mut()
+                    .insert(event.session_id.clone(), Some(replacement));
+                self.record_usage_for_instance(
+                    replacement,
+                    UsageInstanceOwner::LibraryHandle,
+                    event,
+                    false,
+                )
+            }
+            result => result,
+        }
+    }
+
+    /// Return or rotate one bounded direct-library runtime instance per caller label.
+    fn library_usage_instance(
+        &self,
+        caller_label: &str,
+        rotate: bool,
+    ) -> DbResult<UsageInstanceId> {
+        let mut instances = self.library_usage_instances.borrow_mut();
+        if !rotate && let Some(instance) = instances.get(caller_label) {
+            return instance.ok_or(DbError::TelemetryIdentityUnavailable);
+        }
+        if !instances.contains_key(caller_label)
+            && instances.len() >= TelemetryRetentionPolicy::default().max_retained_labels
+        {
+            return Err(DbError::TelemetryInstanceCapacity);
+        }
+        let instance = telemetry::generate_usage_instance_id().ok();
+        instances.insert(caller_label.to_string(), instance);
+        instance.ok_or(DbError::TelemetryIdentityUnavailable)
+    }
+
+    /// Record a usage event for one bounded runtime or invocation instance.
+    ///
+    /// The internal instance is deliberately separate from the optional
+    /// caller-visible label carried by [`UsageEvent::session_id`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected binding changes, the instance is
+    /// inactive, a retention bound rejects the event, or `SQLite` cannot commit
+    /// the complete telemetry transaction.
+    pub fn record_usage_for_instance(
+        &self,
+        instance_id: UsageInstanceId,
+        owner: UsageInstanceOwner,
+        event: &UsageEvent,
+        seal_after_record: bool,
+    ) -> DbResult<()> {
+        let policy = TelemetryRetentionPolicy::default();
+        let project_instance_id = self
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        self.with_telemetry_connection(|connection| {
+            let transaction =
+                rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+            let operation = schema::validate_active_binding(
+                &transaction,
+                self.validated_project_root.as_deref(),
+                Some(project_instance_id),
             )
-            VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, CURRENT_TIMESTAMP)
-            ",
-            params![
-                event.session_id,
-                event.command,
-                event.path,
-                event.query,
-                event.estimated_tokens_without_projectatlas,
-                event.estimated_tokens_with_projectatlas,
-                event.estimated_tokens_saved,
-                event.token_savings_bucket,
-                event.provider,
-                event.model,
-                event.tokenizer_backend,
-                event.accuracy,
-                event.baseline_kind,
-                event.confidence,
-                event.calculation_trace,
-                event.accounting_layer,
-                event.estimate_method,
-                event.denominator_kind,
-                event.baseline_identity,
-                event.baseline_fingerprint,
-                event.dedupe_scope
-            ],
-        )?;
-        Ok(())
+            .and_then(|()| {
+                telemetry::record_usage_for_project(
+                    &transaction,
+                    project_instance_id,
+                    instance_id,
+                    owner,
+                    event,
+                    policy,
+                    seal_after_record,
+                )
+            });
+            match operation {
+                Ok(()) => transaction.commit().map_err(DbError::from),
+                Err(operation) => match transaction.rollback() {
+                    Ok(()) => Err(operation),
+                    Err(rollback) => Err(DbError::TransactionRollback {
+                        operation: Box::new(operation),
+                        rollback,
+                    }),
+                },
+            }?;
+            // The event is already committed. Passive maintenance remains
+            // observable through retention state and must never make callers
+            // retry a successfully persisted event.
+            drop(telemetry::maintain_after_commit_for_project(
+                connection,
+                project_instance_id,
+                policy,
+            ));
+            Ok(())
+        })
+    }
+
+    /// Seal one cleanly completed runtime or invocation instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected binding changed, the instance is
+    /// already inactive, or `SQLite` cannot commit the state transition.
+    pub fn seal_usage_instance(&self, instance_id: UsageInstanceId) -> DbResult<()> {
+        self.with_telemetry_connection(|connection| {
+            let transaction =
+                rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+            let operation = schema::validate_active_binding(
+                &transaction,
+                self.validated_project_root.as_deref(),
+                self.validated_project_instance_id,
+            )
+            .and_then(|()| telemetry::seal_usage_instance(&transaction, instance_id));
+            match operation {
+                Ok(()) => transaction.commit().map_err(Into::into),
+                Err(operation) => match transaction.rollback() {
+                    Ok(()) => Err(operation),
+                    Err(rollback) => Err(DbError::TransactionRollback {
+                        operation: Box::new(operation),
+                        rollback,
+                    }),
+                },
+            }
+        })
+    }
+
+    /// Return content-free bounded telemetry retention and maintenance state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persisted state is missing, corrupt, or cannot be read.
+    pub fn telemetry_retention_state(&self) -> DbResult<TelemetryRetentionState> {
+        telemetry::retention_state(&self.connection)
     }
 
     /// Load usage events.
@@ -3375,134 +5700,7 @@ impl AtlasStore {
     ///
     /// Returns an error if loading fails.
     pub fn usage_events(&self, session_id: Option<&str>) -> DbResult<Vec<UsageEvent>> {
-        let sql = if session_id.is_some() {
-            "
-            SELECT session_id, command, path, query, estimated_tokens_without_projectatlas,
-                   estimated_tokens_with_projectatlas, estimated_tokens_saved,
-                   token_savings_bucket, provider, model, tokenizer_backend,
-                   accuracy, baseline_kind, confidence, calculation_trace,
-                   accounting_layer, estimate_method, denominator_kind,
-                   baseline_identity, baseline_fingerprint, dedupe_scope
-            FROM usage_events
-            WHERE session_id = ?1
-            ORDER BY id
-            "
-        } else {
-            "
-            SELECT session_id, command, path, query, estimated_tokens_without_projectatlas,
-                   estimated_tokens_with_projectatlas, estimated_tokens_saved,
-                   token_savings_bucket, provider, model, tokenizer_backend,
-                   accuracy, baseline_kind, confidence, calculation_trace,
-                   accounting_layer, estimate_method, denominator_kind,
-                   baseline_identity, baseline_fingerprint, dedupe_scope
-            FROM usage_events
-            ORDER BY id
-            "
-        };
-        let mut statement = self.connection.prepare(sql)?;
-        let mapper = |row: &rusqlite::Row<'_>| {
-            Ok(UsageEvent {
-                session_id: row.get(0)?,
-                command: row.get(1)?,
-                path: row.get(2)?,
-                query: row.get(3)?,
-                estimated_tokens_without_projectatlas: row.get(4)?,
-                estimated_tokens_with_projectatlas: row.get(5)?,
-                estimated_tokens_saved: row.get(6)?,
-                token_savings_bucket: row.get(7)?,
-                provider: row.get(8)?,
-                model: row.get(9)?,
-                tokenizer_backend: row.get(10)?,
-                accuracy: row.get(11)?,
-                baseline_kind: row.get(12)?,
-                confidence: row.get(13)?,
-                calculation_trace: row.get(14)?,
-                accounting_layer: row.get(15)?,
-                estimate_method: row.get(16)?,
-                denominator_kind: row.get(17)?,
-                baseline_identity: row.get(18)?,
-                baseline_fingerprint: row.get(19)?,
-                dedupe_scope: row.get(20)?,
-            })
-        };
-        let rows = if let Some(session) = session_id {
-            statement.query_map([session], mapper)?
-        } else {
-            statement.query_map([], mapper)?
-        };
-        let mut events = Vec::new();
-        for row in rows {
-            events.push(row?);
-        }
-        Ok(events)
-    }
-
-    /// Load the narrow raw-event fields required for token accounting dedupe.
-    fn token_accounting_events(&self, session_id: Option<&str>) -> DbResult<Vec<UsageEvent>> {
-        let sql = if session_id.is_some() {
-            "
-            SELECT session_id, command, path, query,
-                   estimated_tokens_without_projectatlas,
-                   estimated_tokens_with_projectatlas,
-                   token_savings_bucket, baseline_kind, confidence,
-                   accounting_layer, denominator_kind,
-                   baseline_identity, baseline_fingerprint, dedupe_scope
-            FROM usage_events
-            WHERE session_id = ?1
-              AND estimated_tokens_without_projectatlas IS NOT NULL
-              AND estimated_tokens_with_projectatlas IS NOT NULL
-            ORDER BY id
-            "
-        } else {
-            "
-            SELECT session_id, command, path, query,
-                   estimated_tokens_without_projectatlas,
-                   estimated_tokens_with_projectatlas,
-                   token_savings_bucket, baseline_kind, confidence,
-                   accounting_layer, denominator_kind,
-                   baseline_identity, baseline_fingerprint, dedupe_scope
-            FROM usage_events
-            WHERE estimated_tokens_without_projectatlas IS NOT NULL
-              AND estimated_tokens_with_projectatlas IS NOT NULL
-            ORDER BY id
-            "
-        };
-        let mut statement = self.connection.prepare(sql)?;
-        let mapper = |row: &rusqlite::Row<'_>| {
-            Ok(UsageEvent {
-                session_id: row.get(0)?,
-                command: row.get(1)?,
-                path: row.get(2)?,
-                query: row.get(3)?,
-                estimated_tokens_without_projectatlas: row.get(4)?,
-                estimated_tokens_with_projectatlas: row.get(5)?,
-                estimated_tokens_saved: None,
-                token_savings_bucket: row.get(6)?,
-                provider: default_token_provider(),
-                model: default_token_model(),
-                tokenizer_backend: default_tokenizer_backend(),
-                accuracy: default_token_accuracy(),
-                baseline_kind: row.get(7)?,
-                confidence: row.get(8)?,
-                calculation_trace: default_token_trace(),
-                accounting_layer: row.get(9)?,
-                estimate_method: default_estimate_method(),
-                denominator_kind: row.get(10)?,
-                baseline_identity: row.get(11)?,
-                baseline_fingerprint: row.get(12)?,
-                dedupe_scope: row.get(13)?,
-            })
-        };
-        let rows = if let Some(session) = session_id {
-            statement.query_map([session], mapper)?
-        } else {
-            statement.query_map([], mapper)?
-        };
-        let mut events = Vec::new();
-        for row in rows {
-            events.push(row?);
-        }
-        Ok(events)
+        telemetry::usage_events(&self.connection, session_id)
     }
 
     /// Build a token overview.
@@ -3511,92 +5709,7 @@ impl AtlasStore {
     ///
     /// Returns an error if loading events fails.
     pub fn token_overview(&self, session_id: Option<&str>) -> DbResult<TokenOverview> {
-        let sql = if session_id.is_some() {
-            "
-            SELECT
-                token_savings_bucket,
-                provider,
-                model,
-                tokenizer_backend,
-                accuracy,
-                baseline_kind,
-                confidence,
-                accounting_layer,
-                estimate_method,
-                denominator_kind,
-                dedupe_scope,
-                COUNT(*),
-                TOTAL(estimated_tokens_without_projectatlas),
-                TOTAL(estimated_tokens_with_projectatlas)
-            FROM usage_events
-            WHERE session_id = ?1
-              AND estimated_tokens_without_projectatlas IS NOT NULL
-              AND estimated_tokens_with_projectatlas IS NOT NULL
-            GROUP BY token_savings_bucket, provider, model, tokenizer_backend,
-                     accuracy, baseline_kind, confidence, accounting_layer,
-                     estimate_method, denominator_kind, dedupe_scope
-            ORDER BY token_savings_bucket, accuracy, baseline_kind, confidence,
-                     accounting_layer, estimate_method, denominator_kind, dedupe_scope
-            "
-        } else {
-            "
-            SELECT
-                token_savings_bucket,
-                provider,
-                model,
-                tokenizer_backend,
-                accuracy,
-                baseline_kind,
-                confidence,
-                accounting_layer,
-                estimate_method,
-                denominator_kind,
-                dedupe_scope,
-                COUNT(*),
-                TOTAL(estimated_tokens_without_projectatlas),
-                TOTAL(estimated_tokens_with_projectatlas)
-            FROM usage_events
-            WHERE estimated_tokens_without_projectatlas IS NOT NULL
-              AND estimated_tokens_with_projectatlas IS NOT NULL
-            GROUP BY token_savings_bucket, provider, model, tokenizer_backend,
-                     accuracy, baseline_kind, confidence, accounting_layer,
-                     estimate_method, denominator_kind, dedupe_scope
-            ORDER BY token_savings_bucket, accuracy, baseline_kind, confidence,
-                     accounting_layer, estimate_method, denominator_kind, dedupe_scope
-            "
-        };
-        let mapper = |row: &rusqlite::Row<'_>| {
-            let calls = row.get::<_, i64>(11)?.max(0) as u128;
-            Ok(TokenBucketOverview::from_totals(
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                row.get(7)?,
-                row.get(8)?,
-                row.get(9)?,
-                row.get(10)?,
-                calls,
-                token_total_from_sql("estimated_tokens_without_projectatlas", row.get(12)?),
-                token_total_from_sql("estimated_tokens_with_projectatlas", row.get(13)?),
-            ))
-        };
-        let mut statement = self.connection.prepare(sql)?;
-        let rows = if let Some(session) = session_id {
-            statement.query_map([session], mapper)?
-        } else {
-            statement.query_map([], mapper)?
-        };
-        let mut buckets = Vec::new();
-        for row in rows {
-            buckets.push(row?);
-        }
-        let mut overview = TokenOverview::from_buckets(buckets);
-        overview.apply_accounting_from_events(&self.token_accounting_events(session_id)?);
-        Ok(overview)
+        telemetry::token_overview(&self.connection, session_id)
     }
 
     /// Build token trend aggregates grouped by day, week, month, or year.
@@ -3609,108 +5722,7 @@ impl AtlasStore {
         session_id: Option<&str>,
         window: TokenTrendWindow,
     ) -> DbResult<TokenTrendReport> {
-        let period_expr = token_trend_period_expression(window);
-        let sql = if session_id.is_some() {
-            format!(
-                "
-            SELECT
-                {period_expr} AS period,
-                token_savings_bucket,
-                provider,
-                model,
-                tokenizer_backend,
-                accuracy,
-                baseline_kind,
-                confidence,
-                accounting_layer,
-                estimate_method,
-                denominator_kind,
-                dedupe_scope,
-                COUNT(*),
-                TOTAL(estimated_tokens_without_projectatlas),
-                TOTAL(estimated_tokens_with_projectatlas)
-            FROM usage_events
-            WHERE session_id = ?1
-              AND estimated_tokens_without_projectatlas IS NOT NULL
-              AND estimated_tokens_with_projectatlas IS NOT NULL
-            GROUP BY period, token_savings_bucket, provider, model, tokenizer_backend,
-                     accuracy, baseline_kind, confidence, accounting_layer, estimate_method,
-                     denominator_kind, dedupe_scope
-            ORDER BY period, token_savings_bucket, accuracy, baseline_kind, confidence,
-                     accounting_layer, estimate_method, denominator_kind, dedupe_scope
-            "
-            )
-        } else {
-            format!(
-                "
-            SELECT
-                {period_expr} AS period,
-                token_savings_bucket,
-                provider,
-                model,
-                tokenizer_backend,
-                accuracy,
-                baseline_kind,
-                confidence,
-                accounting_layer,
-                estimate_method,
-                denominator_kind,
-                dedupe_scope,
-                COUNT(*),
-                TOTAL(estimated_tokens_without_projectatlas),
-                TOTAL(estimated_tokens_with_projectatlas)
-            FROM usage_events
-            WHERE estimated_tokens_without_projectatlas IS NOT NULL
-              AND estimated_tokens_with_projectatlas IS NOT NULL
-            GROUP BY period, token_savings_bucket, provider, model, tokenizer_backend,
-                     accuracy, baseline_kind, confidence, accounting_layer, estimate_method,
-                     denominator_kind, dedupe_scope
-            ORDER BY period, token_savings_bucket, accuracy, baseline_kind, confidence,
-                     accounting_layer, estimate_method, denominator_kind, dedupe_scope
-            "
-            )
-        };
-        let mapper = |row: &rusqlite::Row<'_>| {
-            let period = row.get::<_, String>(0)?;
-            let calls = row.get::<_, i64>(12)?.max(0) as u128;
-            let bucket = TokenBucketOverview::from_totals(
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                row.get(7)?,
-                row.get(8)?,
-                row.get(9)?,
-                row.get(10)?,
-                row.get(11)?,
-                calls,
-                token_total_from_sql("estimated_tokens_without_projectatlas", row.get(13)?),
-                token_total_from_sql("estimated_tokens_with_projectatlas", row.get(14)?),
-            );
-            Ok((period, bucket))
-        };
-        let mut statement = self.connection.prepare(&sql)?;
-        let rows = if let Some(session) = session_id {
-            statement.query_map([session], mapper)?
-        } else {
-            statement.query_map([], mapper)?
-        };
-        let mut buckets_by_period = BTreeMap::<String, Vec<TokenBucketOverview>>::new();
-        for row in rows {
-            let (period, bucket) = row?;
-            buckets_by_period.entry(period).or_default().push(bucket);
-        }
-        let periods = buckets_by_period
-            .into_iter()
-            .map(|(period, buckets)| TokenTrendPeriod::from_buckets(period, buckets))
-            .collect();
-        Ok(TokenTrendReport::new(
-            session_id.map(ToString::to_string),
-            window,
-            periods,
-        ))
+        telemetry::token_trends(&self.connection, session_id, window)
     }
 
     /// Mark a deterministic health finding as agent-resolved.
@@ -3719,16 +5731,16 @@ impl AtlasStore {
     ///
     /// Returns an error if the finding is not active or persistence fails.
     pub fn resolve_health_finding(&self, resolution: &HealthResolution) -> DbResult<()> {
-        let resolved_ids = self.resolved_health_ids()?;
-        if !self.active_health_finding_matches(&resolved_ids, resolution)? {
-            return Err(DbError::HealthFindingNotActive {
-                finding_id: resolution.finding_id.clone(),
-                category: resolution.category.clone(),
-                path: resolution.path.clone(),
-            });
-        }
-        self.connection.execute(
-            "
+        self.with_validated_write(|connection| {
+            if !self.active_health_finding_matches(resolution)? {
+                return Err(DbError::HealthFindingNotActive {
+                    finding_id: resolution.finding_id.clone(),
+                    category: resolution.category.clone(),
+                    path: resolution.path.clone(),
+                });
+            }
+            connection.execute(
+                "
             INSERT INTO health_resolutions(
                 finding_id,
                 category,
@@ -3747,38 +5759,32 @@ impl AtlasStore {
                 resolved_by = 'agent',
                 resolved_at = CURRENT_TIMESTAMP
             ",
-            params![
-                resolution.finding_id,
-                resolution.category,
-                resolution.path,
-                resolution.related_path,
-                resolution.rationale,
-            ],
-        )?;
-        Ok(())
+                params![
+                    resolution.finding_id,
+                    resolution.category,
+                    resolution.path,
+                    resolution.related_path,
+                    resolution.rationale,
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     /// Return whether the visible SQL health surface contains the exact finding.
-    fn active_health_finding_matches(
-        &self,
-        resolved_ids: &[String],
-        resolution: &HealthResolution,
-    ) -> DbResult<bool> {
+    fn active_health_finding_matches(&self, resolution: &HealthResolution) -> DbResult<bool> {
         const PAGE_SIZE: usize = 256;
         let mut start_index = 0_usize;
         loop {
-            let page = self.unresolved_health_findings_page(
-                resolved_ids,
-                &HealthQuery {
-                    start_index,
-                    limit: PAGE_SIZE,
-                    category: Some(resolution.category.clone()),
-                    severity: Some(Severity::Warning),
-                    path_prefix: Some(resolution.path.clone()),
-                    summary_only: false,
-                    scope: HealthScope::all(),
-                },
-            )?;
+            let page = self.unresolved_health_findings_page_current(&HealthQuery {
+                start_index,
+                limit: PAGE_SIZE,
+                category: Some(resolution.category.clone()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some(resolution.path.clone()),
+                summary_only: false,
+                scope: HealthScope::all(),
+            })?;
             if page.findings.iter().any(|finding| {
                 finding.id == resolution.finding_id
                     && finding.category == resolution.category
@@ -3812,58 +5818,39 @@ impl AtlasStore {
     }
 }
 
+/// Acquire the publication writer without waiting after exact input validation.
+fn begin_immediate_publication(connection: &Connection) -> DbResult<()> {
+    connection.busy_timeout(SQLITE_PUBLICATION_ACQUIRE_TIMEOUT)?;
+    let begin_result = connection.execute_batch("BEGIN IMMEDIATE");
+    let restore_result = connection.busy_timeout(SQLITE_BUSY_TIMEOUT);
+    match (begin_result, restore_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error.into()),
+        (Ok(()), Err(error)) => Err(schema::rollback_after_error(connection, error.into())),
+        (Err(operation), Err(restore)) => Err(DbError::PublicationAcquirePolicyRestore {
+            operation: Box::new(operation),
+            restore: Box::new(restore),
+        }),
+    }
+}
+
 /// Read the recorded project root without creating or migrating a database.
 ///
 /// # Errors
 ///
 /// Returns an error if `SQLite` cannot open or query the database read-only.
 pub fn read_project_root_read_only(path: &Path) -> DbResult<Option<String>> {
-    let uri = sqlite_immutable_read_uri(path);
-    let connection = Connection::open_with_flags(
-        uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )?;
-    let root = connection
-        .query_row(
-            "SELECT value FROM metadata WHERE key = 'project_root'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(root)
+    schema::read_project_root(path)
 }
 
-/// Build a read-only immutable `SQLite` URI for non-mutating metadata probes.
-fn sqlite_immutable_read_uri(path: &Path) -> String {
-    let normalized = normalize_native_path_display(path);
-    let uri_path = if normalized.as_bytes().get(1) == Some(&b':') {
-        format!("/{normalized}")
-    } else {
-        normalized
-    };
-    format!(
-        "file:{}?mode=ro&immutable=1",
-        sqlite_uri_escape_path(&uri_path)
-    )
-}
-
-/// Percent-escape a path component while preserving path separators and drive colons.
-fn sqlite_uri_escape_path(path: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut escaped = String::with_capacity(path.len());
-    for byte in path.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b':' | b'.' | b'-' | b'_' | b'~' => {
-                escaped.push(char::from(byte));
-            }
-            other => {
-                escaped.push('%');
-                escaped.push(char::from(HEX[usize::from(other >> 4)]));
-                escaped.push(char::from(HEX[usize::from(other & 0x0F)]));
-            }
-        }
-    }
-    escaped
+/// Verify the current project database schema, identity, and full integrity read-only.
+///
+/// # Errors
+///
+/// Returns an error when the database is missing, incompatible, corrupt, or belongs to another
+/// project root.
+pub fn verify_project_database(path: &Path, project_root: &Path) -> DbResult<()> {
+    schema::verify_current_integrity(path, Some(&normalize_native_path_display(project_root)))
 }
 
 /// Normalize a filesystem path stored in `SQLite` metadata.
@@ -3871,35 +5858,294 @@ fn normalize_metadata_path(path: &Path) -> String {
     normalize_native_path_display(path)
 }
 
-/// Upsert one scanned node into an existing transaction.
-fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
-    let existing = transaction
+/// Upsert one metadata value through the caller's active connection/transaction.
+fn set_metadata(connection: &Connection, key: &str, value: &str) -> DbResult<()> {
+    connection.execute(
+        "
+        INSERT INTO metadata(key, value)
+        VALUES(?1, ?2)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        ",
+        [key, value],
+    )?;
+    Ok(())
+}
+
+/// Load the accepted authored-purpose revision without scanning purpose rows.
+fn load_authored_purpose_revision(connection: &Connection) -> DbResult<u64> {
+    let value = connection
+        .prepare_cached("SELECT value FROM metadata WHERE key = ?1")?
+        .query_row([AUTHORED_PURPOSE_REVISION_KEY], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()?;
+    value.map_or(Ok(0), |value| {
+        value
+            .parse::<u64>()
+            .map_err(|source| DbError::InvalidInteger {
+                field: AUTHORED_PURPOSE_REVISION_KEY,
+                value,
+                source,
+            })
+    })
+}
+
+/// Advance the accepted authored-purpose revision in the caller's transaction.
+fn advance_authored_purpose_revision(connection: &Connection) -> DbResult<u64> {
+    let current = load_authored_purpose_revision(connection)?;
+    let revision = current
+        .checked_add(1)
+        .ok_or(DbError::IntegerMetadataOverflow {
+            field: AUTHORED_PURPOSE_REVISION_KEY,
+            value: current,
+        })?;
+    set_metadata(
+        connection,
+        AUTHORED_PURPOSE_REVISION_KEY,
+        &revision.to_string(),
+    )?;
+    Ok(revision)
+}
+
+/// Load the authoritative and projection revisions without scanning text rows.
+fn load_file_text_fts_revisions(connection: &Connection) -> DbResult<Option<(u64, u64)>> {
+    let (source, projection) = connection.query_row(
+        "
+        SELECT
+            (SELECT value FROM metadata WHERE key = ?1),
+            (SELECT value FROM metadata WHERE key = ?2)
+        ",
+        params![
+            FILE_TEXT_FTS_SOURCE_REVISION_KEY,
+            FILE_TEXT_FTS_PROJECTION_REVISION_KEY,
+        ],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        },
+    )?;
+    if source.is_none() && projection.is_none() {
+        return Ok(None);
+    }
+    let (Some(source), Some(projection)) = (source, projection) else {
+        return Err(DbError::FileTextFtsStateInvalid {
+            reason: "only one FTS revision is present",
+        });
+    };
+    let source_revision =
+        source
+            .parse::<u64>()
+            .map_err(|source_error| DbError::InvalidInteger {
+                field: FILE_TEXT_FTS_SOURCE_REVISION_KEY,
+                value: source,
+                source: source_error,
+            })?;
+    let projection_revision =
+        projection
+            .parse::<u64>()
+            .map_err(|source_error| DbError::InvalidInteger {
+                field: FILE_TEXT_FTS_PROJECTION_REVISION_KEY,
+                value: projection,
+                source: source_error,
+            })?;
+    Ok(Some((source_revision, projection_revision)))
+}
+
+/// Mark an authoritative text mutation before changing its FTS projection.
+fn begin_file_text_fts_update(connection: &Connection) -> DbResult<u64> {
+    let (source, projection) =
+        load_file_text_fts_revisions(connection)?.ok_or(DbError::FileTextFtsStateInvalid {
+            reason: "FTS revisions are missing",
+        })?;
+    if source != projection {
+        return Err(DbError::FileTextFtsStateInvalid {
+            reason: "an earlier FTS revision is incomplete",
+        });
+    }
+    let revision = source
+        .checked_add(1)
+        .ok_or(DbError::FileTextFtsStateInvalid {
+            reason: "FTS revision overflowed",
+        })?;
+    set_metadata(
+        connection,
+        FILE_TEXT_FTS_SOURCE_REVISION_KEY,
+        &revision.to_string(),
+    )?;
+    Ok(revision)
+}
+
+/// Publish the matching projection revision after every FTS mutation succeeds.
+fn complete_file_text_fts_update(connection: &Connection, revision: u64) -> DbResult<()> {
+    let (source, projection) =
+        load_file_text_fts_revisions(connection)?.ok_or(DbError::FileTextFtsStateInvalid {
+            reason: "FTS revisions disappeared during an update",
+        })?;
+    if source != revision || projection.checked_add(1) != Some(revision) {
+        return Err(DbError::FileTextFtsStateInvalid {
+            reason: "FTS revisions changed during an update",
+        });
+    }
+    set_metadata(
+        connection,
+        FILE_TEXT_FTS_PROJECTION_REVISION_KEY,
+        &revision.to_string(),
+    )
+}
+
+/// Persist one usage event in the immutable released schema-8 fixture shape.
+#[cfg(test)]
+fn record_released_schema_eight_usage_event(
+    connection: &Connection,
+    event: &UsageEvent,
+) -> DbResult<()> {
+    connection.execute(
+        "
+        INSERT INTO usage_events(
+            session_id,
+            command,
+            path,
+            query,
+            estimated_tokens_without_projectatlas,
+            estimated_tokens_with_projectatlas,
+            estimated_tokens_saved,
+            token_savings_bucket,
+            provider,
+            model,
+            tokenizer_backend,
+            accuracy,
+            baseline_kind,
+            confidence,
+            calculation_trace,
+            accounting_layer,
+            estimate_method,
+            denominator_kind,
+            baseline_identity,
+            baseline_fingerprint,
+            dedupe_scope,
+            created_at
+        )
+        VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, CURRENT_TIMESTAMP)
+        ",
+        params![
+            event.session_id,
+            event.command,
+            event.path,
+            event.query,
+            event.estimated_tokens_without_projectatlas,
+            event.estimated_tokens_with_projectatlas,
+            event.estimated_tokens_saved,
+            event.token_savings_bucket,
+            event.provider,
+            event.model,
+            event.tokenizer_backend,
+            event.accuracy,
+            event.baseline_kind,
+            event.confidence,
+            event.calculation_trace,
+            event.accounting_layer,
+            event.estimate_method,
+            event.denominator_kind,
+            event.baseline_identity,
+            event.baseline_fingerprint,
+            event.dedupe_scope
+        ],
+    )?;
+    Ok(())
+}
+
+/// Load durable publication metadata from one connection snapshot.
+fn load_index_publication(connection: &Connection) -> DbResult<Option<IndexPublication>> {
+    let row = connection
         .query_row(
             "
-            SELECT n.content_hash, p.status
-            FROM nodes n
-            LEFT JOIN purposes p ON p.node_id = n.id
-            WHERE n.path = ?1
+            SELECT state.value, fingerprint.value, generation.value
+            FROM metadata AS state
+            LEFT JOIN metadata AS fingerprint ON fingerprint.key = ?2
+            LEFT JOIN metadata AS generation ON generation.key = ?3
+            WHERE state.key = ?1
             ",
-            [&node.path],
+            params![
+                INDEX_PUBLICATION_STATE_KEY,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                INDEX_PUBLICATION_GENERATION_KEY,
+            ],
             |row| {
                 Ok((
-                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
                 ))
             },
         )
         .optional()?;
-    let content_changed = existing.as_ref().is_some_and(|(old_hash, _)| {
-        node.kind == NodeKind::File
-            && old_hash.is_some()
-            && node.content_hash.is_some()
-            && old_hash != &node.content_hash
-    });
-    let should_mark_stale = content_changed
-        && existing.as_ref().and_then(|(_, status)| status.as_deref())
-            == Some(PurposeStatus::Approved.as_str());
-    transaction.execute(
+    let Some((state, contract_fingerprint, generation)) = row else {
+        return Ok(None);
+    };
+    let generation = generation.map_or(Ok(IndexGeneration::ZERO), |value| {
+        value
+            .parse::<u64>()
+            .map(IndexGeneration::new)
+            .map_err(|source| DbError::InvalidInteger {
+                field: INDEX_PUBLICATION_GENERATION_KEY,
+                value,
+                source,
+            })
+    })?;
+    Ok(Some(IndexPublication {
+        state: IndexPublicationState::from_db(state)?,
+        contract_fingerprint,
+        generation,
+    }))
+}
+
+/// Mark every indexed node absent before a complete scan replacement.
+fn mark_all_scan_nodes_absent(connection: &Connection) -> DbResult<()> {
+    connection.execute("UPDATE nodes SET exists_now = 0", [])?;
+    Ok(())
+}
+
+/// Delete derived rows whose owning scan node remained absent.
+fn delete_absent_scan_projections(connection: &Connection) -> DbResult<()> {
+    let fts_revision = begin_file_text_fts_update(connection)?;
+    connection.execute(
+        "DELETE FROM symbol_relations WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
+        [],
+    )?;
+    connection.execute(
+        "DELETE FROM symbols WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
+        [],
+    )?;
+    connection.execute(
+        "DELETE FROM source_parse_metadata WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO file_text_fts(file_text_fts, rowid, content) \
+         SELECT 'delete', rowid, content FROM file_texts \
+         WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
+        [],
+    )?;
+    connection.execute(
+        "DELETE FROM file_texts WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
+        [],
+    )?;
+    complete_file_text_fts_update(connection, fts_revision)?;
+    Ok(())
+}
+
+/// Upsert scanned nodes through transaction-owned prepared statements.
+fn upsert_nodes(connection: &Connection, nodes: &[Node]) -> DbResult<()> {
+    let mut select_existing = connection.prepare_cached(
+        "
+        SELECT content_hash
+        FROM nodes
+        WHERE path = ?1
+        ",
+    )?;
+    let mut upsert_node = connection.prepare_cached(
         "
         INSERT INTO nodes(path, kind, parent_path, extension, language, size_bytes, mtime_ns, content_hash, exists_now)
         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
@@ -3915,7 +6161,35 @@ fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
             last_seen_at = CURRENT_TIMESTAMP,
             last_indexed_at = CURRENT_TIMESTAMP
         ",
-        params![
+    )?;
+    let mut select_node_id = connection.prepare_cached("SELECT id FROM nodes WHERE path = ?1")?;
+    let mut ensure_purpose = connection.prepare_cached(
+        "
+        INSERT INTO purposes(node_id, purpose, source, status)
+        VALUES(?1, NULL, 'missing', 'missing')
+        ON CONFLICT(node_id) DO NOTHING
+        ",
+    )?;
+    let mut upsert_summary = connection.prepare_cached(
+        "
+        INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
+        VALUES(?1, 'node', '', ?2, CURRENT_TIMESTAMP)
+        ON CONFLICT(node_id, summary_level, subject) DO UPDATE SET
+            summary = CASE WHEN ?3 THEN excluded.summary ELSE summaries.summary END,
+            updated_at = CURRENT_TIMESTAMP
+        ",
+    )?;
+    for node in nodes {
+        let existing = select_existing
+            .query_row([&node.path], |row| row.get::<_, Option<String>>(0))
+            .optional()?;
+        let content_changed = existing.as_ref().is_some_and(|old_hash| {
+            node.kind == NodeKind::File
+                && old_hash.is_some()
+                && node.content_hash.is_some()
+                && old_hash != &node.content_hash
+        });
+        upsert_node.execute(params![
             node.path,
             node.kind.to_string(),
             node.parent_path,
@@ -3924,67 +6198,15 @@ fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
             node.size_bytes,
             node.mtime_ns,
             node.content_hash
-        ],
-    )?;
-    let node_id = transaction.query_row(
-        "SELECT id FROM nodes WHERE path = ?1",
-        [&node.path],
-        |row| row.get::<_, i64>(0),
-    )?;
-    transaction.execute(
-        "
-        INSERT INTO purposes(node_id, purpose, source, status)
-        VALUES(?1, NULL, 'missing', 'missing')
-        ON CONFLICT(node_id) DO NOTHING
-        ",
-        [node_id],
-    )?;
-    let summary = generate_node_summary(node);
-    transaction.execute(
-        "
-        INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
-        VALUES(?1, 'node', '', ?2, CURRENT_TIMESTAMP)
-        ON CONFLICT(node_id, summary_level, subject) DO UPDATE SET
-            summary = CASE WHEN ?3 THEN excluded.summary ELSE summaries.summary END,
-            updated_at = CURRENT_TIMESTAMP
-        ",
-        params![node_id, summary, content_changed],
-    )?;
-    if should_mark_stale {
-        transaction.execute(
-            "
-            UPDATE purposes
-            SET status = 'stale',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE node_id = ?1
-            ",
-            [node_id],
-        )?;
+        ])?;
+        let node_id = select_node_id.query_row([&node.path], |row| row.get::<_, i64>(0))?;
+        ensure_purpose.execute([node_id])?;
+        upsert_summary.execute(params![
+            node_id,
+            generate_node_summary(node),
+            content_changed
+        ])?;
     }
-    Ok(())
-}
-
-/// Upsert one persisted UTF-8 source-text row for indexed search.
-fn upsert_file_text(transaction: &Transaction<'_>, text: &IndexedFileText) -> DbResult<()> {
-    transaction.execute(
-        "
-        INSERT INTO file_texts(path, content_hash, byte_count, line_count, content, updated_at)
-        VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
-        ON CONFLICT(path) DO UPDATE SET
-            content_hash = excluded.content_hash,
-            byte_count = excluded.byte_count,
-            line_count = excluded.line_count,
-            content = excluded.content,
-            updated_at = CURRENT_TIMESTAMP
-        ",
-        params![
-            text.path,
-            text.content_hash.as_deref(),
-            usize_to_i64(text.byte_count),
-            usize_to_i64(text.line_count),
-            text.content
-        ],
-    )?;
     Ok(())
 }
 
@@ -3992,21 +6214,322 @@ fn upsert_file_text(transaction: &Transaction<'_>, text: &IndexedFileText) -> Db
 fn file_text_from_row(row: &rusqlite::Row<'_>) -> DbResult<IndexedFileText> {
     let byte_count = count_to_usize("file_texts.byte_count", row.get::<_, i64>(2)?)?;
     let line_count = count_to_usize("file_texts.line_count", row.get::<_, i64>(3)?)?;
-    Ok(IndexedFileText {
+    let text = IndexedFileText {
         path: row.get(0)?,
         content_hash: row.get(1)?,
         byte_count,
         line_count,
         content: row.get(4)?,
+    };
+    validate_indexed_file_text(&text)?;
+    Ok(text)
+}
+
+/// Verify that persisted byte/line accounting matches authoritative content.
+fn validate_indexed_file_text(text: &IndexedFileText) -> DbResult<()> {
+    let actual_bytes = text.content.len();
+    if text.byte_count != actual_bytes {
+        return Err(DbError::FileTextMetadataMismatch {
+            path: text.path.clone(),
+            field: "byte_count",
+            recorded: text.byte_count,
+            actual: actual_bytes,
+        });
+    }
+    let actual_lines = text.content.lines().count();
+    if text.line_count != actual_lines {
+        return Err(DbError::FileTextMetadataMismatch {
+            path: text.path.clone(),
+            field: "line_count",
+            recorded: text.line_count,
+            actual: actual_lines,
+        });
+    }
+    Ok(())
+}
+
+/// Virtual-machine operations between bounded database-read progress checks.
+const SQLITE_READ_PROGRESS_OPS: i32 = 1_000;
+
+/// Deterministic observation of production `SQLite` progress boundaries for downstream tests.
+#[cfg(feature = "sqlite-progress-test-observer")]
+pub mod sqlite_progress_test_observer {
+    use projectatlas_core::IndexWorkStage;
+    use std::cell::RefCell;
+
+    /// One observable event emitted by the production `SQLite` read-progress boundary.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum SqliteReadProgressEvent {
+        /// A repository relation-family query entered after its live-control precheck.
+        RepositoryRelationFamilyQueryEntered,
+        /// A repository relation-family query returned from `SQLite`.
+        RepositoryRelationFamilyQueryExited,
+        /// `SQLite` invoked the production progress callback.
+        CallbackEntered {
+            /// Typed work stage owned by the guarded query.
+            stage: IndexWorkStage,
+        },
+        /// The production progress callback evaluated its control.
+        CallbackEvaluated {
+            /// Typed work stage owned by the guarded query.
+            stage: IndexWorkStage,
+            /// Whether the callback requested `SQLite` interruption.
+            interrupted: bool,
+        },
+    }
+
+    /// Thread-local callback used only while a downstream test owns observation.
+    type Observer = Box<dyn FnMut(SqliteReadProgressEvent)>;
+
+    thread_local! {
+        /// Observer scoped to the synchronous test thread running the SQLite connection.
+        static OBSERVER: RefCell<Option<Observer>> = RefCell::new(None);
+    }
+
+    /// Restores a prior nested observer on every return or unwind path.
+    struct ObserverGuard {
+        /// Observer replaced for the current scope.
+        previous: Option<Observer>,
+    }
+
+    impl Drop for ObserverGuard {
+        fn drop(&mut self) {
+            OBSERVER.with(|slot| {
+                drop(slot.replace(self.previous.take()));
+            });
+        }
+    }
+
+    /// Run one operation while observing its synchronous `SQLite` progress events.
+    pub fn observe_sqlite_read_progress<T>(
+        observer: impl FnMut(SqliteReadProgressEvent) + 'static,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        let previous = OBSERVER.with(|slot| slot.replace(Some(Box::new(observer))));
+        let _guard = ObserverGuard { previous };
+        operation()
+    }
+
+    /// Notify the current thread-local observer when one is installed.
+    pub(crate) fn notify(event: SqliteReadProgressEvent) {
+        OBSERVER.with(|slot| {
+            if let Some(observer) = slot.borrow_mut().as_mut() {
+                observer(event);
+            }
+        });
+    }
+}
+
+/// Clears a connection-local `SQLite` progress handler on every exit path.
+pub(crate) struct SqliteReadProgressGuard<'connection> {
+    /// Connection whose temporary progress callback is armed.
+    connection: &'connection Connection,
+    /// Whether this guard installed a callback that must be removed.
+    armed: bool,
+}
+
+impl<'connection> SqliteReadProgressGuard<'connection> {
+    /// Install one cooperative progress callback for the owning work stage.
+    pub(crate) fn new(
+        connection: &'connection Connection,
+        control: Option<&IndexWorkControl>,
+        stage: IndexWorkStage,
+    ) -> DbResult<Self> {
+        let armed = if let Some(control) = control {
+            control.check(stage)?;
+            let progress_control = control.clone();
+            connection.progress_handler(
+                SQLITE_READ_PROGRESS_OPS,
+                Some(move || {
+                    #[cfg(feature = "sqlite-progress-test-observer")]
+                    sqlite_progress_test_observer::notify(
+                        sqlite_progress_test_observer::SqliteReadProgressEvent::CallbackEntered {
+                            stage,
+                        },
+                    );
+                    let interrupted = progress_control.check(stage).is_err();
+                    #[cfg(feature = "sqlite-progress-test-observer")]
+                    sqlite_progress_test_observer::notify(
+                        sqlite_progress_test_observer::SqliteReadProgressEvent::CallbackEvaluated {
+                            stage,
+                            interrupted,
+                        },
+                    );
+                    interrupted
+                }),
+            );
+            true
+        } else {
+            false
+        };
+        Ok(Self { connection, armed })
+    }
+}
+
+impl Drop for SqliteReadProgressGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.connection.progress_handler(0, None::<fn() -> bool>);
+        }
+    }
+}
+
+/// Run one read with a temporary cooperative progress handler.
+pub(crate) fn with_sqlite_read_progress<T>(
+    connection: &Connection,
+    control: Option<&IndexWorkControl>,
+    stage: IndexWorkStage,
+    operation: impl FnOnce() -> DbResult<T>,
+) -> DbResult<T> {
+    let guard = SqliteReadProgressGuard::new(connection, control, stage)?;
+    let result = operation();
+    drop(guard);
+    if result.as_ref().is_err_and(|error| {
+        matches!(
+            error,
+            DbError::Sqlite(sqlite)
+                if sqlite.sqlite_error_code() == Some(ErrorCode::OperationInterrupted)
+        )
+    }) && let Some(control) = control
+    {
+        control.check(stage)?;
+    }
+    result
+}
+
+/// Run one text-index read through the shared bounded database-read guard.
+fn with_file_text_progress<T>(
+    connection: &Connection,
+    control: Option<&IndexWorkControl>,
+    operation: impl FnOnce() -> DbResult<T>,
+) -> DbResult<T> {
+    with_sqlite_read_progress(connection, control, IndexWorkStage::TextIndex, operation)
+}
+
+/// Enforce the single safe-token contract used by FTS candidate lookup.
+fn validate_file_text_fts_token(token: &str) -> DbResult<()> {
+    if token.len() < 3 {
+        return Err(DbError::FileTextFtsTokenUnsafe {
+            reason: "token is shorter than three ASCII bytes",
+        });
+    }
+    if !token.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Err(DbError::FileTextFtsTokenUnsafe {
+            reason: "token is not exclusively ASCII alphanumeric",
+        });
+    }
+    Ok(())
+}
+
+/// Normalize only the root/trailing-separator cases of an already-relative scope.
+fn normalized_file_text_path_prefix(path_prefix: Option<&str>) -> Option<&str> {
+    path_prefix
+        .map(|prefix| prefix.trim_end_matches('/'))
+        .filter(|prefix| !prefix.is_empty() && *prefix != ".")
+}
+
+/// Build one binary-collation range containing exactly a path's descendants.
+fn file_text_descendant_range(path_prefix: &str) -> (String, String) {
+    (format!("{path_prefix}/"), format!("{path_prefix}0"))
+}
+
+/// Decode one bounded page of FTS metadata candidates without source text.
+fn collect_file_text_fts_candidates(
+    rows: &mut rusqlite::Rows<'_>,
+    control: Option<&IndexWorkControl>,
+    candidates: &mut Vec<FileTextFtsCandidate>,
+) -> DbResult<()> {
+    while let Some(row) = rows.next()? {
+        if let Some(control) = control {
+            control.check(IndexWorkStage::TextIndex)?;
+        }
+        let path = row.get::<_, String>(0)?;
+        let bm25 = row.get::<_, f64>(4)?;
+        if !bm25.is_finite() {
+            return Err(DbError::FileTextFtsScoreInvalid { path });
+        }
+        candidates.push(FileTextFtsCandidate {
+            path,
+            content_hash: row.get(1)?,
+            byte_count: count_to_usize("file_texts.byte_count", row.get::<_, i64>(2)?)?,
+            line_count: count_to_usize("file_texts.line_count", row.get::<_, i64>(3)?)?,
+            bm25,
+        });
+    }
+    Ok(())
+}
+
+/// Decode persisted file metadata before the potentially large source column.
+fn file_text_metadata_from_row(row: &rusqlite::Row<'_>) -> DbResult<FileTextMetadata> {
+    Ok(FileTextMetadata {
+        path: row.get(0)?,
+        content_hash: row.get(1)?,
+        byte_count: count_to_usize("file_texts.byte_count", row.get::<_, i64>(2)?)?,
+        line_count: count_to_usize("file_texts.line_count", row.get::<_, i64>(3)?)?,
     })
 }
 
-/// Build an indexed node from the standard node select column order.
-fn indexed_node_from_sql_row(row: &rusqlite::Row<'_>) -> DbResult<IndexedNode> {
+/// Visit fallback rows with metadata-first admission and cooperative stops.
+fn visit_file_text_fallback_rows<A, V>(
+    rows: &mut rusqlite::Rows<'_>,
+    content_statement: &mut rusqlite::CachedStatement<'_>,
+    control: Option<&IndexWorkControl>,
+    admit: &mut A,
+    visitor: &mut V,
+) -> DbResult<()>
+where
+    A: FnMut(&FileTextMetadata) -> DbResult<FileTextAdmission>,
+    V: FnMut(IndexedFileText) -> DbResult<bool>,
+{
+    while let Some(row) = rows.next()? {
+        if let Some(control) = control {
+            control.check(IndexWorkStage::TextIndex)?;
+        }
+        let metadata = file_text_metadata_from_row(row)?;
+        match admit(&metadata)? {
+            FileTextAdmission::Skip => continue,
+            FileTextAdmission::Stop => return Ok(()),
+            FileTextAdmission::Read => {}
+        }
+        let content =
+            content_statement.query_row([&metadata.path], |content_row| content_row.get(0))?;
+        let text = IndexedFileText {
+            path: metadata.path,
+            content_hash: metadata.content_hash,
+            byte_count: metadata.byte_count,
+            line_count: metadata.line_count,
+            content,
+        };
+        validate_indexed_file_text(&text)?;
+        if !visitor(text)? {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// Raw standard node columns retained until typed enum validation succeeds.
+type IndexedNodeParts = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<u64>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+);
+
+/// Decode the standard node select column order without interpreting enums.
+fn indexed_node_parts_from_sql_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedNodeParts> {
     let kind_value: String = row.get(1)?;
     let source_value: String = row.get(9)?;
     let status_value: String = row.get(10)?;
-    indexed_node_from_parts((
+    Ok((
         row.get::<_, String>(0)?,
         kind_value,
         row.get::<_, Option<String>>(2)?,
@@ -4022,23 +6545,42 @@ fn indexed_node_from_sql_row(row: &rusqlite::Row<'_>) -> DbResult<IndexedNode> {
     ))
 }
 
+/// Build an indexed node from the standard node select column order.
+fn indexed_node_from_sql_row(row: &rusqlite::Row<'_>) -> DbResult<IndexedNode> {
+    indexed_node_from_parts(indexed_node_parts_from_sql_row(row)?)
+}
+
+/// Count exact variable-width payload and fixed scalar slots for one node row.
+fn indexed_node_parts_decoded_bytes(row: &IndexedNodeParts) -> DbResult<u64> {
+    let lengths = [
+        row.0.len(),
+        row.1.len(),
+        row.2.as_ref().map_or(0, String::len),
+        row.3.as_ref().map_or(0, String::len),
+        row.4.as_ref().map_or(0, String::len),
+        row.7.as_ref().map_or(0, String::len),
+        row.8.as_ref().map_or(0, String::len),
+        row.9.len(),
+        row.10.len(),
+        row.11.as_ref().map_or(0, String::len),
+    ];
+    let mut bytes = 16_u64;
+    for length in lengths {
+        let length =
+            u64::try_from(length).map_err(|_source| GraphContractError::InvalidLimits {
+                reason: "purpose-owner decoded field length overflowed",
+            })?;
+        bytes = bytes
+            .checked_add(length)
+            .ok_or(GraphContractError::InvalidLimits {
+                reason: "purpose-owner decoded row size overflowed",
+            })?;
+    }
+    Ok(bytes)
+}
+
 /// Build an indexed node from database row parts.
-fn indexed_node_from_parts(
-    row: (
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<u64>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        String,
-        String,
-        Option<String>,
-    ),
-) -> DbResult<IndexedNode> {
+fn indexed_node_from_parts(row: IndexedNodeParts) -> DbResult<IndexedNode> {
     let (
         path,
         kind_value,
@@ -4092,6 +6634,28 @@ fn normalize_query_terms(query: &str) -> Vec<String> {
         .collect()
 }
 
+/// Normalize the complete query used by exact path and basename admission tiers.
+fn normalize_exact_ranked_query(query: &str) -> String {
+    query.trim().replace('\\', "/").to_lowercase()
+}
+
+/// Build the reviewed-purpose admission predicate for normalized query terms.
+fn reviewed_purpose_match_expression(term_count: usize) -> String {
+    if term_count == 0 {
+        return "0".to_string();
+    }
+    let matches = std::iter::repeat_n(
+        "lower(COALESCE(p.purpose, '')) LIKE ? ESCAPE '\\'",
+        term_count,
+    )
+    .collect::<Vec<_>>()
+    .join(" OR ");
+    format!(
+        "CASE WHEN p.status = 'approved' AND p.source IN ('agent', 'human') \
+                    AND ({matches}) THEN 1 ELSE 0 END"
+    )
+}
+
 /// Build the SQL score expression for ranked node lookup.
 fn ranked_score_expression(term_count: usize) -> String {
     if term_count == 0 {
@@ -4100,7 +6664,10 @@ fn ranked_score_expression(term_count: usize) -> String {
     (0..term_count)
         .map(|_| {
             "(CASE WHEN lower(n.path) LIKE ? ESCAPE '\\' THEN 20 ELSE 0 END \
-             + CASE WHEN lower(COALESCE(p.purpose, '')) LIKE ? ESCAPE '\\' THEN 30 ELSE 0 END \
+             + CASE WHEN p.status = 'approved' AND p.source IN ('agent', 'human') \
+                          AND lower(COALESCE(p.purpose, '')) LIKE ? ESCAPE '\\' THEN 30 ELSE 0 END \
+             + CASE WHEN NOT (p.status = 'approved' AND p.source IN ('agent', 'human')) \
+                          AND lower(COALESCE(p.purpose, '')) LIKE ? ESCAPE '\\' THEN 2 ELSE 0 END \
              + CASE WHEN lower(COALESCE(s.summary, '')) LIKE ? ESCAPE '\\' THEN 10 ELSE 0 END \
              + CASE WHEN lower(COALESCE(symbol_summaries.summary, '')) LIKE ? ESCAPE '\\' THEN 25 ELSE 0 END)"
                 .to_string()
@@ -4129,31 +6696,33 @@ fn sqlite_like_escape(value: &str) -> String {
 
 /// Replace the denormalized symbol-name search summary for one file node.
 fn replace_symbol_search_summary(
-    transaction: &Transaction<'_>,
+    connection: &Connection,
     node_id: i64,
     summary: Option<&str>,
 ) -> DbResult<()> {
     if let Some(summary) = summary {
-        transaction.execute(
-            "
-            INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
-            VALUES(?1, 'search', 'symbols', ?2, CURRENT_TIMESTAMP)
-            ON CONFLICT(node_id, summary_level, subject) DO UPDATE SET
-                summary = excluded.summary,
-                updated_at = CURRENT_TIMESTAMP
-            ",
-            params![node_id, summary],
-        )?;
+        connection
+            .prepare_cached(
+                "
+                INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
+                VALUES(?1, 'search', 'symbols', ?2, CURRENT_TIMESTAMP)
+                ON CONFLICT(node_id, summary_level, subject) DO UPDATE SET
+                    summary = excluded.summary,
+                    updated_at = CURRENT_TIMESTAMP
+                ",
+            )?
+            .execute(params![node_id, summary])?;
     } else {
-        transaction.execute(
-            "
-            DELETE FROM summaries
-            WHERE node_id = ?1
-              AND summary_level = 'search'
-              AND subject = 'symbols'
-            ",
-            [node_id],
-        )?;
+        connection
+            .prepare_cached(
+                "
+                DELETE FROM summaries
+                WHERE node_id = ?1
+                  AND summary_level = 'search'
+                  AND subject = 'symbols'
+                ",
+            )?
+            .execute([node_id])?;
     }
     Ok(())
 }
@@ -4209,6 +6778,250 @@ fn parse_source(value: &str) -> DbResult<PurposeSource> {
     Ok(source)
 }
 
+/// Normalize a bounded host-owned task label used only for curator work identity.
+fn normalize_purpose_curation_task(task: &str) -> DbResult<String> {
+    let normalized = task.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return Err(DbError::PurposeCurationTaskInvalid {
+            reason: "task must not be blank",
+        });
+    }
+    if normalized.len() > MAX_PURPOSE_CURATION_TASK_BYTES {
+        return Err(DbError::PurposeCurationTaskInvalid {
+            reason: "task exceeds the UTF-8 byte limit",
+        });
+    }
+    if normalized.chars().any(char::is_control) {
+        return Err(DbError::PurposeCurationTaskInvalid {
+            reason: "task contains control characters",
+        });
+    }
+    Ok(normalized)
+}
+
+/// Load one current purpose row inside the caller's read or write snapshot.
+fn load_current_purpose_state(
+    connection: &Connection,
+    path: &str,
+) -> DbResult<Option<(i64, Purpose)>> {
+    let row = connection
+        .prepare_cached(
+            "
+            SELECT n.id, p.purpose, p.source, p.status
+            FROM nodes n
+            JOIN purposes p ON p.node_id = n.id
+            WHERE n.exists_now = 1 AND n.path = ?1
+            ",
+        )?
+        .query_row([path], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .optional()?;
+    row.map(|(node_id, purpose, source, status)| {
+        let source = parse_source(&source)?;
+        let status = PurposeStatus::from_db(&status).ok_or_else(|| DbError::InvalidEnum {
+            field: "purpose_status",
+            value: status,
+        })?;
+        Ok((
+            node_id,
+            Purpose {
+                path: path.to_string(),
+                purpose,
+                source,
+                status,
+            },
+        ))
+    })
+    .transpose()
+}
+
+/// Apply one queue item inside the caller's validated writer transaction.
+fn apply_conditional_purpose(
+    connection: &Connection,
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    request: &PurposeConditionalApplyRequest,
+) -> DbResult<PurposeConditionalApplyResult> {
+    let current = load_current_purpose_state(connection, &request.path)?;
+    let Some((node_id, current_purpose)) = current else {
+        return Ok(PurposeConditionalApplyResult {
+            path: request.path.clone(),
+            state: PurposeConditionalApplyState::PathUnavailable,
+            current_purpose: None,
+        });
+    };
+    if !matches!(
+        current_purpose.status,
+        PurposeStatus::Missing | PurposeStatus::Suggested
+    ) {
+        return Ok(PurposeConditionalApplyResult {
+            path: request.path.clone(),
+            state: PurposeConditionalApplyState::Accepted,
+            current_purpose: Some(current_purpose),
+        });
+    }
+    let current_work_key =
+        purpose_curation_item_work_key(project, generation, &request.task, &request.path);
+    let current_state_token = purpose_curation_state_token(&current_work_key, &current_purpose);
+    if current_work_key != request.work_key || current_state_token != request.state_token {
+        return Ok(PurposeConditionalApplyResult {
+            path: request.path.clone(),
+            state: PurposeConditionalApplyState::Stale,
+            current_purpose: Some(current_purpose),
+        });
+    }
+    let generation_sql =
+        i64::try_from(generation.get()).map_err(|_source| DbError::GraphCountOverflow {
+            field: "project_identity.active_generation",
+            value: generation.get(),
+        })?;
+    let changed = connection
+        .prepare_cached(
+            "
+            UPDATE purposes
+            SET purpose = ?2,
+                source = ?3,
+                status = ?4,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE node_id = ?1
+              AND status = ?5
+              AND source = ?6
+              AND purpose IS ?7
+              AND EXISTS (
+                  SELECT 1
+                  FROM nodes n
+                  JOIN project_identity pi ON pi.singleton = 1
+                  WHERE n.id = ?1
+                    AND n.exists_now = 1
+                    AND n.path = ?8
+                    AND pi.project_instance_id = ?9
+                    AND pi.active_generation = ?10
+              )
+            ",
+        )?
+        .execute(params![
+            node_id,
+            request.purpose,
+            PurposeSource::Agent.as_str(),
+            PurposeStatus::Approved.as_str(),
+            current_purpose.status.as_str(),
+            current_purpose.source.as_str(),
+            current_purpose.purpose,
+            request.path,
+            &project.as_bytes()[..],
+            generation_sql,
+        ])?;
+    if changed == 1 {
+        Ok(PurposeConditionalApplyResult {
+            path: request.path.clone(),
+            state: PurposeConditionalApplyState::Applied,
+            current_purpose: Some(Purpose {
+                path: request.path.clone(),
+                purpose: Some(request.purpose.clone()),
+                source: PurposeSource::Agent,
+                status: PurposeStatus::Approved,
+            }),
+        })
+    } else {
+        Ok(PurposeConditionalApplyResult {
+            path: request.path.clone(),
+            state: PurposeConditionalApplyState::Stale,
+            current_purpose: Some(current_purpose),
+        })
+    }
+}
+
+/// Construct one candidate with deterministic work and stale-state identities.
+fn purpose_curation_candidate(
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    task: &str,
+    node: IndexedNode,
+) -> PurposeCurationCandidate {
+    let work_key = purpose_curation_item_work_key(project, generation, task, &node.node.path);
+    let state_token = purpose_curation_state_token(&work_key, &node.purpose);
+    PurposeCurationCandidate {
+        node,
+        work_key,
+        state_token,
+    }
+}
+
+/// Derive one stable project/generation/task/path work identity.
+fn purpose_curation_item_work_key(
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    task: &str,
+    path: &str,
+) -> String {
+    digest_fields(
+        PURPOSE_CURATION_ITEM_KEY_DOMAIN,
+        &[
+            &project.as_bytes(),
+            &generation.get().to_le_bytes(),
+            task.as_bytes(),
+            path.as_bytes(),
+        ],
+    )
+}
+
+/// Bind conditional apply to the exact unapproved purpose row selected by the queue.
+fn purpose_curation_state_token(work_key: &str, purpose: &Purpose) -> String {
+    let purpose_presence = [u8::from(purpose.purpose.is_some())];
+    digest_fields(
+        PURPOSE_CURATION_STATE_TOKEN_DOMAIN,
+        &[
+            work_key.as_bytes(),
+            &purpose_presence,
+            purpose.purpose.as_deref().unwrap_or_default().as_bytes(),
+            purpose.source.as_str().as_bytes(),
+            purpose.status.as_str().as_bytes(),
+        ],
+    )
+}
+
+/// Derive a deterministic identity for one complete returned candidate set.
+fn purpose_curation_batch_work_key(
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    task: &str,
+    items: &[PurposeCurationCandidate],
+) -> String {
+    let mut hasher = Hasher::new();
+    digest_field(&mut hasher, PURPOSE_CURATION_BATCH_KEY_DOMAIN.as_bytes());
+    digest_field(&mut hasher, &project.as_bytes());
+    digest_field(&mut hasher, &generation.get().to_le_bytes());
+    digest_field(&mut hasher, task.as_bytes());
+    for item in items {
+        digest_field(&mut hasher, item.work_key.as_bytes());
+        digest_field(&mut hasher, item.state_token.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Hash length-delimited fields under one stable domain separator.
+fn digest_fields(domain: &str, fields: &[&[u8]]) -> String {
+    let mut hasher = Hasher::new();
+    digest_field(&mut hasher, domain.as_bytes());
+    for field in fields {
+        digest_field(&mut hasher, field);
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Append one unambiguous field to a deterministic digest.
+fn digest_field(hasher: &mut Hasher, value: &[u8]) {
+    let length = u64::try_from(value.len()).unwrap_or(u64::MAX);
+    hasher.update(&length.to_le_bytes());
+    hasher.update(value);
+}
+
 /// Convert an aggregate database count into a platform `usize`.
 fn count_to_usize(field: &'static str, value: i64) -> DbResult<usize> {
     usize::try_from(value).map_err(|source| DbError::InvalidCount {
@@ -4216,27 +7029,6 @@ fn count_to_usize(field: &'static str, value: i64) -> DbResult<usize> {
         value,
         source,
     })
-}
-
-/// Convert a `SQLite` REAL aggregate token total to a saturating wide integer.
-fn token_total_from_sql(_field: &'static str, value: f64) -> u128 {
-    if !value.is_finite() || value <= 0.0 {
-        0
-    } else if value >= u128::MAX as f64 {
-        u128::MAX
-    } else {
-        value.round() as u128
-    }
-}
-
-/// Return the `SQLite` period expression for one token trend window.
-fn token_trend_period_expression(window: TokenTrendWindow) -> &'static str {
-    match window {
-        TokenTrendWindow::Day => "substr(COALESCE(created_at, CURRENT_TIMESTAMP), 1, 10)",
-        TokenTrendWindow::Week => "strftime('%Y-W%W', COALESCE(created_at, CURRENT_TIMESTAMP))",
-        TokenTrendWindow::Month => "substr(COALESCE(created_at, CURRENT_TIMESTAMP), 1, 7)",
-        TokenTrendWindow::Year => "substr(COALESCE(created_at, CURRENT_TIMESTAMP), 1, 4)",
-    }
 }
 
 /// Convert a usize to i64 with saturation for database storage.
@@ -4249,9 +7041,124 @@ fn i64_to_usize(value: i64) -> usize {
     usize::try_from(value.max(0)).unwrap_or(usize::MAX)
 }
 
+/// Decode one persisted symbol row through the shared column contract.
+fn code_symbol_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSymbol> {
+    Ok(CodeSymbol {
+        path: row.get(0)?,
+        language: row.get(1)?,
+        name: row.get(2)?,
+        kind: SymbolKind::from_db(row.get_ref(3)?.as_str()?),
+        signature: row.get(4)?,
+        line_start: i64_to_usize(row.get::<_, i64>(5)?),
+        line_end: i64_to_usize(row.get::<_, i64>(6)?),
+        parent: row.get(7)?,
+        parser: ParserKind::from_db(row.get_ref(8)?.as_str()?),
+        detail: row.get(9)?,
+        exported: row.get::<_, i64>(10)? != 0,
+        documentation: row.get(11)?,
+    })
+}
+
+/// Read the exact owned-string byte floor before hydrating one symbol row.
+fn code_symbol_preflight_bytes(row: &rusqlite::Row<'_>) -> DbResult<u64> {
+    let string_bytes = row.get::<_, i64>(12)?;
+    let string_bytes = u64::try_from(string_bytes).map_err(|source| DbError::InvalidCount {
+        field: "symbol persisted field bytes",
+        value: string_bytes,
+        source,
+    })?;
+    let row_bytes = u64::try_from(std::mem::size_of::<CodeSymbol>()).map_err(|source| {
+        DbError::InvalidCount {
+            field: "symbol persisted field bytes",
+            value: i64::MAX,
+            source,
+        }
+    })?;
+    row_bytes.checked_add(string_bytes).ok_or_else(|| {
+        GraphContractError::InvalidLimits {
+            reason: "symbol persisted row bytes overflowed",
+        }
+        .into()
+    })
+}
+
+/// Decode the covering persisted import projection.
+fn stored_import_relation_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredImportRelation> {
+    Ok(StoredImportRelation {
+        path: row.get(0)?,
+        source_name: row.get(1)?,
+        target_name: row.get(2)?,
+        line: i64_to_usize(row.get::<_, i64>(3)?),
+    })
+}
+
+/// Count the retained Rust row plus its owned string allocation capacities.
+fn code_symbol_decoded_bytes(symbol: &CodeSymbol) -> DbResult<u64> {
+    let capacities = [
+        symbol.path.capacity(),
+        symbol.language.as_ref().map_or(0, String::capacity),
+        symbol.name.capacity(),
+        symbol.signature.capacity(),
+        symbol.documentation.as_ref().map_or(0, String::capacity),
+        symbol.parent.as_ref().map_or(0, String::capacity),
+        symbol.detail.as_ref().map_or(0, String::capacity),
+    ];
+    let mut bytes = u64::try_from(std::mem::size_of::<CodeSymbol>()).map_err(|source| {
+        DbError::InvalidCount {
+            field: "symbol decoded field bytes",
+            value: i64::MAX,
+            source,
+        }
+    })?;
+    for capacity in capacities {
+        let capacity = u64::try_from(capacity).map_err(|source| DbError::InvalidCount {
+            field: "symbol decoded field bytes",
+            value: i64::MAX,
+            source,
+        })?;
+        bytes = bytes
+            .checked_add(capacity)
+            .ok_or(GraphContractError::InvalidLimits {
+                reason: "symbol decoded row bytes overflowed",
+            })?;
+    }
+    Ok(bytes)
+}
+
 /// Wrap a query string for a SQL LIKE expression.
 fn like_query(query: &str) -> String {
     format!("%{query}%")
+}
+
+/// Build the single set-oriented query used to hydrate exact purpose-work paths.
+fn load_nodes_by_paths_sql(path_count: usize) -> String {
+    let placeholders = numbered_placeholders(1, path_count);
+    format!(
+        "
+        SELECT
+            n.path,
+            n.kind,
+            n.parent_path,
+            n.extension,
+            n.language,
+            n.size_bytes,
+            n.mtime_ns,
+            n.content_hash,
+            p.purpose,
+            p.source,
+            p.status,
+            s.summary
+        FROM nodes n
+        JOIN purposes p ON p.node_id = n.id
+        LEFT JOIN summaries s ON s.node_id = n.id
+            AND s.summary_level = 'node'
+            AND s.subject = ''
+        WHERE n.exists_now = 1 AND n.path IN ({placeholders})
+        ORDER BY n.path
+        "
+    )
 }
 
 /// Build numbered SQL placeholders starting at a caller-selected index.
@@ -4352,11 +7259,12 @@ fn agent_review_required_finding(path: String) -> HealthFinding {
 
 /// Build the shared SQL filter for globally ordered purpose lifecycle findings.
 fn purpose_lifecycle_where_clause(
+    specs: &[PurposeHealthSpec],
     path_prefix: Option<&str>,
-    resolved_ids: &[String],
+    resolution_filter: HealthResolutionFilter<'_>,
     scope: HealthScope,
 ) -> (String, Vec<Value>) {
-    let statuses = PURPOSE_HEALTH_SPECS
+    let statuses = specs
         .iter()
         .map(|spec| format!("'{}'", spec.status))
         .collect::<Vec<_>>()
@@ -4387,16 +7295,23 @@ fn purpose_lifecycle_where_clause(
         values.push(Value::from(sqlite_descendant_pattern(&prefix)));
     }
 
-    for spec in PURPOSE_HEALTH_SPECS {
-        let resolved_paths = resolved_purpose_paths(resolved_ids, spec.category);
-        if !resolved_paths.is_empty() {
-            clauses.push(format!(
-                "NOT (p.status = '{}' AND n.path IN ({}))",
-                spec.status,
-                numbered_placeholders(values.len() + 1, resolved_paths.len())
-            ));
-            values.extend(resolved_paths.into_iter().map(Value::from));
+    match resolution_filter {
+        HealthResolutionFilter::Explicit(resolved_ids) => {
+            for spec in specs {
+                let resolved_paths = resolved_purpose_paths(resolved_ids, spec.category);
+                if !resolved_paths.is_empty() {
+                    clauses.push(format!(
+                        "NOT (p.status = '{}' AND n.path IN ({}))",
+                        spec.status,
+                        numbered_placeholders(values.len() + 1, resolved_paths.len())
+                    ));
+                    values.extend(resolved_paths.into_iter().map(Value::from));
+                }
+            }
         }
+        HealthResolutionFilter::Stored => clauses.push(stored_resolution_filter_clause(
+            &purpose_lifecycle_finding_id_expression(specs, "n", "p"),
+        )),
     }
 
     (clauses.join(" AND "), values)
@@ -4406,7 +7321,7 @@ fn purpose_lifecycle_where_clause(
 fn purpose_status_where_clause(
     spec: PurposeHealthSpec,
     path_prefix: Option<&str>,
-    resolved_ids: &[String],
+    resolution_filter: HealthResolutionFilter<'_>,
     scope: HealthScope,
 ) -> (String, Vec<Value>) {
     let mut clauses = vec!["n.exists_now = 1".to_string(), "p.status = ?1".to_string()];
@@ -4432,13 +7347,21 @@ fn purpose_status_where_clause(
         values.push(Value::from(sqlite_descendant_pattern(&prefix)));
     }
 
-    let resolved_paths = resolved_purpose_paths(resolved_ids, spec.category);
-    if !resolved_paths.is_empty() {
-        clauses.push(format!(
-            "n.path NOT IN ({})",
-            numbered_placeholders(values.len() + 1, resolved_paths.len())
-        ));
-        values.extend(resolved_paths.into_iter().map(Value::from));
+    match resolution_filter {
+        HealthResolutionFilter::Explicit(resolved_ids) => {
+            let resolved_paths = resolved_purpose_paths(resolved_ids, spec.category);
+            if !resolved_paths.is_empty() {
+                clauses.push(format!(
+                    "n.path NOT IN ({})",
+                    numbered_placeholders(values.len() + 1, resolved_paths.len())
+                ));
+                values.extend(resolved_paths.into_iter().map(Value::from));
+            }
+        }
+        HealthResolutionFilter::Stored => clauses.push(stored_resolution_filter_clause(&format!(
+            "'{}:' || n.path || ':'",
+            spec.category
+        ))),
     }
 
     (clauses.join(" AND "), values)
@@ -4448,7 +7371,7 @@ fn purpose_status_where_clause(
 fn structural_finding_where_clause(
     category: &str,
     path_prefix: Option<&str>,
-    resolved_ids: &[String],
+    resolution_filter: HealthResolutionFilter<'_>,
     scope: HealthScope,
     first_placeholder: usize,
 ) -> (String, Vec<Value>) {
@@ -4482,13 +7405,20 @@ fn structural_finding_where_clause(
         placeholder += 4;
     }
 
-    let resolved_ids = resolved_ids_for_category(resolved_ids, category);
-    if !resolved_ids.is_empty() {
-        clauses.push(format!(
-            "('{category}:' || path || ':' || related_path) NOT IN ({})",
-            numbered_placeholders(placeholder, resolved_ids.len())
-        ));
-        values.extend(resolved_ids.into_iter().map(Value::from));
+    match resolution_filter {
+        HealthResolutionFilter::Explicit(resolved_ids) => {
+            let resolved_ids = resolved_ids_for_category(resolved_ids, category);
+            if !resolved_ids.is_empty() {
+                clauses.push(format!(
+                    "('{category}:' || path || ':' || related_path) NOT IN ({})",
+                    numbered_placeholders(placeholder, resolved_ids.len())
+                ));
+                values.extend(resolved_ids.into_iter().map(Value::from));
+            }
+        }
+        HealthResolutionFilter::Stored => clauses.push(stored_resolution_filter_clause(&format!(
+            "'{category}:' || path || ':' || related_path"
+        ))),
     }
 
     if clauses.is_empty() {
@@ -4496,6 +7426,29 @@ fn structural_finding_where_clause(
     } else {
         (format!("WHERE {}", clauses.join(" AND ")), values)
     }
+}
+
+/// Build the exact stored finding-id expression for mixed purpose lifecycle rows.
+fn purpose_lifecycle_finding_id_expression(
+    specs: &[PurposeHealthSpec],
+    node_alias: &str,
+    purpose_alias: &str,
+) -> String {
+    let category_cases = specs
+        .iter()
+        .map(|spec| format!("WHEN '{}' THEN '{}:'", spec.status, spec.category))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "(CASE {purpose_alias}.status {category_cases} ELSE '' END || {node_alias}.path || ':')"
+    )
+}
+
+/// Build an indexed anti-lookup against durable health resolutions.
+fn stored_resolution_filter_clause(finding_id_expression: &str) -> String {
+    format!(
+        "NOT EXISTS (SELECT 1 FROM health_resolutions hr WHERE hr.finding_id = {finding_id_expression})"
+    )
 }
 
 /// SQL expression for approved purposes that need agent review at the requested scope.
@@ -4670,13 +7623,15 @@ mod tests {
         TOKEN_ACCURACY_HEURISTIC, TOKEN_BASELINE_SELECTED_CANDIDATES,
         TOKEN_BUCKET_FULL_FILE_COMPRESSION, TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
         TOKEN_COMMAND_SEARCH, TOKEN_CONFIDENCE_INFERRED, TOKEN_DEDUPE_SCOPE_EVENT,
-        usage_from_estimates, usage_from_estimates_with_accounting, usage_from_text,
+        usage_from_estimates, usage_from_estimates_with_accounting,
+        usage_from_estimates_with_context, usage_from_text,
     };
     use projectatlas_core::{NodeKind, normalized_parent};
     use std::error::Error;
     use std::fmt::Debug;
     use std::fs;
     use std::io;
+    use std::time::Instant;
 
     #[test]
     fn stores_nodes_and_overview() -> Result<(), Box<dyn Error>> {
@@ -4723,8 +7678,621 @@ mod tests {
     }
 
     #[test]
+    fn validated_existing_database_paths_are_never_recreated() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+
+        let current_path = temp.path().join("current.db");
+        drop(AtlasStore::open(&current_path)?);
+        let (current, current_location) = schema::preflight(&current_path, None)?;
+        require_eq(
+            &current.state,
+            &SchemaState::Current,
+            "current preflight state",
+        )?;
+        fs::remove_file(&current_path)?;
+        if Connection::open_with_flags(
+            &current_path,
+            writable_open_flags(current.state, current_location.database_exists),
+        )
+        .is_ok()
+        {
+            return Err(io::Error::other("current database path was recreated").into());
+        }
+        require_eq(&current_path.exists(), &false, "current path stays absent")?;
+
+        let released_path = temp.path().join("released.db");
+        let released_root = temp.path().join("released-root");
+        write_released_schema_eight_compatibility_fixture(&released_path, &released_root)?;
+        let (released, released_location) = schema::preflight(&released_path, None)?;
+        require_eq(
+            &released.state,
+            &SchemaState::UpgradeRequired,
+            "released preflight state",
+        )?;
+        fs::remove_file(&released_path)?;
+        if Connection::open_with_flags(
+            &released_path,
+            writable_open_flags(released.state, released_location.database_exists),
+        )
+        .is_ok()
+        {
+            return Err(io::Error::other("released database path was recreated").into());
+        }
+        require_eq(
+            &released_path.exists(),
+            &false,
+            "released path stays absent",
+        )?;
+
+        let fresh_path = temp.path().join("fresh.db");
+        let (fresh, _) = schema::preflight(&fresh_path, None)?;
+        require_eq(&fresh.state, &SchemaState::Fresh, "fresh preflight state")?;
+        drop(AtlasStore::open(&fresh_path)?);
+        require_eq(&fresh_path.is_file(), &true, "fresh path is created")?;
+        drop(AtlasStore::open_read_only(&fresh_path)?);
+        Ok(())
+    }
+
+    #[test]
+    fn schema_upgrade_preserves_local_state_and_restarts_publication() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("projectatlas.db");
+        let root = temp.path().join("repository");
+        write_released_schema_eight_compatibility_fixture(&db_path, &root)?;
+        let database_before_read = fs::read(&db_path)?;
+
+        let Err(read_error) = AtlasStore::open_read_only(&db_path) else {
+            return Err(io::Error::other("schema-8 read-only open unexpectedly succeeded").into());
+        };
+        require_eq(
+            &matches!(
+                read_error,
+                DbError::SchemaVersion {
+                    found: PREVIOUS_SCHEMA_VERSION,
+                    expected: SCHEMA_VERSION,
+                }
+            ),
+            &true,
+            "schema-8 read-only rejection",
+        )?;
+        require_eq(
+            &fs::read(&db_path)?,
+            &database_before_read,
+            "read-only rejection leaves database unchanged",
+        )?;
+
+        let mut store = AtlasStore::open(&db_path)?;
+        let stored_schema = store.connection.query_row(
+            "SELECT value FROM metadata WHERE key = ?1",
+            [SCHEMA_VERSION_KEY],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &stored_schema,
+            &SCHEMA_VERSION.to_string(),
+            "upgraded schema version",
+        )?;
+        require_eq(
+            &store.project_root()?,
+            &Some(normalize_native_path_display(&root)),
+            "upgraded project root",
+        )?;
+        let node = store
+            .load_node_by_path("src/lib.rs")?
+            .ok_or_else(|| io::Error::other("upgraded source node missing"))?;
+        require_eq(
+            &node.node.content_hash,
+            &Some("hash-legacy".to_string()),
+            "upgraded source row",
+        )?;
+        require_eq(
+            &node.purpose.purpose,
+            &Some("Schema compatibility source".to_string()),
+            "upgraded purpose text",
+        )?;
+        require_eq(
+            &node.purpose.source,
+            &PurposeSource::Agent,
+            "upgraded purpose source",
+        )?;
+        require_eq(
+            &node.purpose.status,
+            &PurposeStatus::Approved,
+            "upgraded purpose review state",
+        )?;
+        require_eq(
+            &store.resolved_health_ids()?,
+            &vec!["schema-review".to_string()],
+            "upgraded authored review",
+        )?;
+        let custom_setting = store.connection.query_row(
+            "SELECT value FROM metadata WHERE key = 'custom_setting'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &custom_setting,
+            &"preserved".to_string(),
+            "upgraded compatible metadata",
+        )?;
+        let telemetry = store.token_overview(Some("schema-session"))?;
+        require_eq(&telemetry.calls, &1, "upgraded telemetry call count")?;
+        require_eq(
+            &telemetry.estimated_saved,
+            &80,
+            "upgraded telemetry savings",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &None,
+            "untrusted publication metadata invalidated",
+        )?;
+        let remaining_publication_keys = store.connection.query_row(
+            "SELECT COUNT(*) FROM metadata WHERE key IN (?1, ?2, ?3)",
+            params![
+                INDEX_PUBLICATION_STATE_KEY,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                INDEX_PUBLICATION_GENERATION_KEY,
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &remaining_publication_keys,
+            &0,
+            "all untrusted publication keys removed",
+        )?;
+
+        {
+            let mut publication = store.begin_index_publication("schema-9-contract")?;
+            write_test_projection(&mut publication, "fresh")?;
+            publication.complete()?;
+        }
+        require_test_projection(&store, 1, "fresh")?;
+        require_eq(
+            &store
+                .index_publication()?
+                .and_then(|publication| publication.contract_fingerprint),
+            &Some("schema-9-contract".to_string()),
+            "fresh publication contract",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn future_schema_rejection_preserves_source_and_authored_rows() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("projectatlas.db");
+        let root = temp.path().join("repository");
+        let future_schema = SCHEMA_VERSION + 1;
+        write_schema_compatibility_fixture(&db_path, &root, future_schema, "future")?;
+        let database_before = fs::read(&db_path)?;
+        let Err(open_error) = AtlasStore::open(&db_path) else {
+            return Err(
+                io::Error::other("future schema writable open unexpectedly succeeded").into(),
+            );
+        };
+        require_eq(
+            &matches!(
+                open_error,
+                DbError::SchemaVersion {
+                    found,
+                    expected: SCHEMA_VERSION,
+                } if found == future_schema
+            ),
+            &true,
+            "future schema rejection",
+        )?;
+        require_eq(
+            &fs::read(&db_path)?,
+            &database_before,
+            "future schema bytes remain unchanged",
+        )?;
+        let connection = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let stored_schema = connection.query_row(
+            "SELECT value FROM metadata WHERE key = ?1",
+            [SCHEMA_VERSION_KEY],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &stored_schema,
+            &future_schema.to_string(),
+            "future schema remains unchanged",
+        )?;
+        let stored_root = connection.query_row(
+            "SELECT value FROM metadata WHERE key = 'project_root'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &stored_root,
+            &normalize_native_path_display(&root),
+            "future project root remains unchanged",
+        )?;
+        let source_state = connection.query_row(
+            "
+            SELECT n.content_hash, p.purpose, p.source, p.status
+            FROM nodes AS n
+            JOIN purposes AS p ON p.node_id = n.id
+            WHERE n.path = 'src/lib.rs'
+            ",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?;
+        require_eq(
+            &source_state,
+            &(
+                Some("hash-future".to_string()),
+                Some("Schema compatibility source".to_string()),
+                PurposeSource::Agent.to_string(),
+                PurposeStatus::Approved.as_str().to_string(),
+            ),
+            "future source and purpose rows remain unchanged",
+        )?;
+        let review_rationale = connection.query_row(
+            "SELECT rationale FROM health_resolutions WHERE finding_id = 'schema-review'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &review_rationale,
+            &"Reviewed schema fixture".to_string(),
+            "future authored review remains unchanged",
+        )?;
+        let telemetry_state = connection.query_row(
+            "
+            SELECT COUNT(*), SUM(e.estimated_tokens_saved)
+            FROM usage_events AS e
+            JOIN usage_instances AS i USING(instance_row_id)
+            WHERE i.caller_label = 'schema-session'
+            ",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )?;
+        require_eq(
+            &telemetry_state,
+            &(1, Some(80)),
+            "future telemetry remains unchanged",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn projection_refresh_cannot_replace_publication_contract() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.begin_index_publication("contract-a")?.complete()?;
+
+        store
+            .begin_index_projection_refresh("contract-a")?
+            .complete()?;
+        require_eq(
+            &store.index_publication()?,
+            &Some(IndexPublication {
+                state: IndexPublicationState::Complete,
+                contract_fingerprint: Some("contract-a".to_string()),
+                generation: IndexGeneration::new(2),
+            }),
+            "matching projection refresh",
+        )?;
+
+        let publication = store.begin_index_projection_refresh("contract-a")?;
+        set_metadata(
+            &publication.connection,
+            INDEX_PUBLICATION_FINGERPRINT_KEY,
+            "contract-b",
+        )?;
+        let Err(mismatch) = publication.complete() else {
+            return Err(io::Error::other(
+                "projection refresh replaced the global publication contract",
+            )
+            .into());
+        };
+        if !matches!(mismatch, DbError::PublicationContractChanged) {
+            return Err(io::Error::other(format!(
+                "unexpected projection refresh mismatch: {mismatch}"
+            ))
+            .into());
+        }
+        require_eq(
+            &store.index_publication()?,
+            &Some(IndexPublication {
+                state: IndexPublicationState::Complete,
+                contract_fingerprint: Some("contract-a".to_string()),
+                generation: IndexGeneration::new(2),
+            }),
+            "mismatched projection refresh rolls back",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_snapshots_expose_only_complete_publications() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("projectatlas.db");
+        let independent_db_path = temp.path().join("independent.db");
+        let mut writer_a = AtlasStore::open(&db_path)?;
+        require_writable_connection_profile(&writer_a.connection)?;
+        {
+            let mut publication = writer_a.begin_index_publication("contract")?;
+            write_test_projection(&mut publication, "old")?;
+            publication.complete()?;
+        }
+        let mut writer_b = AtlasStore::open(&db_path)?;
+        let mut independent_writer = AtlasStore::open(&independent_db_path)?;
+        let old_reader = AtlasStore::open_read_only(&db_path)?;
+        require_read_connection_profile(&old_reader.connection)?;
+        if old_reader
+            .connection
+            .execute("DELETE FROM metadata", [])
+            .is_ok()
+        {
+            return Err(io::Error::other("read-only connection accepted a mutation").into());
+        }
+        require_test_projection(&old_reader, 1, "old")?;
+
+        {
+            let mut publication = writer_a.begin_index_publication("contract")?;
+            write_test_projection(&mut publication, "new")?;
+            require_test_projection(&old_reader, 1, "old")?;
+
+            let started = std::time::Instant::now();
+            let Err(contention) = writer_b.begin_index_publication("contract") else {
+                return Err(io::Error::other(
+                    "second writer entered an active publication transaction",
+                )
+                .into());
+            };
+            require_eq(
+                &matches!(
+                    contention,
+                    DbError::Sqlite(ref error)
+                        if matches!(
+                            error.sqlite_error_code(),
+                            Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+                        )
+                ),
+                &true,
+                "same-database writer contention",
+            )?;
+            require_eq(
+                &(started.elapsed() < Duration::from_secs(2)),
+                &true,
+                "fail-fast same-database writer acquisition",
+            )?;
+            let restored_busy_timeout =
+                writer_b
+                    .connection
+                    .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, u64>(0))?;
+            require_eq(
+                &u128::from(restored_busy_timeout),
+                &SQLITE_BUSY_TIMEOUT.as_millis(),
+                "ordinary busy timeout after failed publication acquisition",
+            )?;
+
+            independent_writer
+                .begin_index_publication("independent-contract")?
+                .complete()?;
+            require_eq(
+                &independent_writer
+                    .index_publication()?
+                    .ok_or_else(|| io::Error::other("independent publication missing"))?
+                    .generation,
+                &IndexGeneration::new(1),
+                "independent database generation",
+            )?;
+
+            drop(publication);
+        }
+        let rolled_back_reader = AtlasStore::open_read_only(&db_path)?;
+        require_test_projection(&rolled_back_reader, 1, "old")?;
+        rolled_back_reader.finish_index_read_snapshot()?;
+
+        {
+            let mut publication = writer_a.begin_index_publication("contract")?;
+            write_test_projection(&mut publication, "new")?;
+            publication.complete()?;
+        }
+        let restored_busy_timeout =
+            writer_a
+                .connection
+                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, u64>(0))?;
+        require_eq(
+            &u128::from(restored_busy_timeout),
+            &SQLITE_BUSY_TIMEOUT.as_millis(),
+            "ordinary busy timeout after successful publication acquisition",
+        )?;
+        require_test_projection(&old_reader, 1, "old")?;
+        let new_reader = AtlasStore::open_read_only(&db_path)?;
+        require_test_projection(&new_reader, 2, "new")?;
+        new_reader.finish_index_read_snapshot()?;
+        old_reader.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn authored_write_waits_for_the_existing_writer_before_validation() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &root)?;
+        store.replace_scan(&[test_file_node("src/lib.rs", "initial")])?;
+
+        let blocking_writer = Connection::open(&db_path)?;
+        blocking_writer.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+        blocking_writer.execute_batch("BEGIN IMMEDIATE")?;
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1_250));
+            blocking_writer.execute_batch("ROLLBACK")
+        });
+
+        let started = Instant::now();
+        store.set_purpose(
+            "src/lib.rs",
+            "Own the library source.",
+            PurposeSource::Agent,
+        )?;
+        let elapsed = started.elapsed();
+        release
+            .join()
+            .map_err(|_panic| io::Error::other("blocking writer thread panicked"))??;
+
+        require_eq(
+            &(elapsed >= Duration::from_secs(1)),
+            &true,
+            "authored write waited for the existing writer",
+        )?;
+        require_eq(
+            &(elapsed < SQLITE_BUSY_TIMEOUT),
+            &true,
+            "authored write stayed within the ordinary busy timeout",
+        )?;
+        require_eq(
+            &store
+                .load_node_by_path("src/lib.rs")?
+                .ok_or_else(|| io::Error::other("purpose node missing"))?
+                .purpose
+                .purpose,
+            &Some("Own the library source.".to_string()),
+            "purpose after bounded writer contention",
+        )
+    }
+
+    #[test]
+    fn writable_mutators_reject_an_active_read_snapshot() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open(&db_path)?;
+        store.replace_scan(&[test_file_node("src/lib.rs", "initial")])?;
+        store.begin_index_read_snapshot()?;
+
+        let Err(purpose_error) = store.set_purpose(
+            "src/lib.rs",
+            "Must not be written through a read snapshot.",
+            PurposeSource::Agent,
+        ) else {
+            return Err(io::Error::other("purpose wrote through a read snapshot").into());
+        };
+        require_eq(
+            &matches!(purpose_error, DbError::IndexReadSnapshotActive),
+            &true,
+            "read-snapshot purpose rejection",
+        )?;
+
+        let Err(scan_error) = store.replace_scan(&[]) else {
+            return Err(io::Error::other("scan wrote through a read snapshot").into());
+        };
+        require_eq(
+            &matches!(scan_error, DbError::IndexReadSnapshotActive),
+            &true,
+            "read-snapshot scan rejection",
+        )?;
+
+        store.finish_index_read_snapshot()?;
+        require_eq(
+            &store.load_node_by_path("src/lib.rs")?.is_some(),
+            &true,
+            "read-snapshot rejected writes preserved indexed state",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn stale_publication_base_is_rejected_before_batch_mutation() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("projectatlas.db");
+        let mut writer_a = AtlasStore::open(&db_path)?;
+        {
+            let mut publication =
+                writer_a.begin_index_publication_from("contract", IndexGeneration::ZERO)?;
+            write_test_projection(&mut publication, "base")?;
+            publication.complete()?;
+        }
+        let prepared_base = writer_a
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("prepared base publication missing"))?
+            .generation;
+
+        let incomplete_result = {
+            let mut publication =
+                writer_a.begin_index_publication_from("contract", prepared_base)?;
+            publication.begin_scan_replacement()?;
+            publication.complete()
+        };
+        if !matches!(incomplete_result, Err(DbError::ScanReplacementIncomplete)) {
+            return Err(io::Error::other(
+                "unfinished scan replacement was allowed to complete publication",
+            )
+            .into());
+        }
+        require_test_projection(&writer_a, 1, "base")?;
+
+        let mut writer_b = AtlasStore::open(&db_path)?;
+        {
+            let mut publication = writer_b.begin_index_publication("contract")?;
+            write_test_projection(&mut publication, "winner")?;
+            publication.complete()?;
+        }
+
+        let Err(conflict) = writer_a.begin_index_publication_from("contract", prepared_base) else {
+            return Err(io::Error::other("stale prepared publication was accepted").into());
+        };
+        require_eq(
+            &matches!(
+                conflict,
+                DbError::PublicationBaseGenerationChanged { expected, found }
+                    if expected == IndexGeneration::new(1)
+                        && found == IndexGeneration::new(2)
+            ),
+            &true,
+            "stale publication base conflict",
+        )?;
+        require_test_projection(&writer_a, 2, "winner")?;
+        require_eq(
+            &writer_a.load_symbols(Some("src/lib.rs"), None, 10)?.len(),
+            &1,
+            "rejected batch symbol row count",
+        )?;
+        require_eq(
+            &writer_a
+                .load_symbol_relations(Some("src/lib.rs"), None, 10)?
+                .len(),
+            &1,
+            "rejected batch relation row count",
+        )?;
+
+        let Err(zero_conflict) =
+            writer_a.begin_index_publication_from("contract", IndexGeneration::ZERO)
+        else {
+            return Err(io::Error::other("zero base matched an initialized store").into());
+        };
+        require_eq(
+            &matches!(
+                zero_conflict,
+                DbError::PublicationBaseGenerationChanged { expected, found }
+                    if expected == IndexGeneration::ZERO
+                        && found == IndexGeneration::new(2)
+            ),
+            &true,
+            "zero publication base conflict",
+        )?;
+        require_test_projection(&writer_a, 2, "winner")?;
+        Ok(())
+    }
+
+    #[test]
     fn records_token_overview() -> Result<(), Box<dyn Error>> {
-        let store = AtlasStore::in_memory()?;
+        let project = tempfile::tempdir()?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(project.path())?;
         let mut session_event = usage_from_estimates(
             "session",
             "outline",
@@ -4987,118 +8555,243 @@ mod tests {
             "zero baseline savings rate",
         )?;
 
-        for index in 0..3 {
-            store.connection.execute(
-                "
-                INSERT INTO usage_events(
-                    session_id,
-                    command,
-                    path,
-                    query,
-                    estimated_tokens_without_projectatlas,
-                    estimated_tokens_with_projectatlas,
-                    estimated_tokens_saved
-                )
-                VALUES(?1, 'large', NULL, NULL, ?2, 0, ?2)
-                ",
-                params![format!("large-{index}"), i64::MAX,],
-            )?;
-        }
-        let large = store.token_overview(None)?;
+        let large_project = tempfile::tempdir()?;
+        let mut large_store = AtlasStore::in_memory()?;
+        large_store.set_project_root(large_project.path())?;
+        let maximum_estimate = usize::try_from(i64::MAX)?;
+        large_store.record_usage(&usage_from_estimates(
+            "large-primary",
+            "large",
+            None,
+            None,
+            maximum_estimate,
+            0,
+        ))?;
+        let Err(overflow) = large_store.record_usage(&usage_from_estimates(
+            "large-rejected",
+            "large",
+            None,
+            None,
+            maximum_estimate,
+            0,
+        )) else {
+            return Err(io::Error::other("overflowing telemetry aggregate was committed").into());
+        };
+        require_eq(
+            &matches!(overflow, DbError::TelemetryIntegerOverflow { .. }),
+            &true,
+            "overflowing telemetry aggregate error",
+        )?;
+        let large = large_store.token_overview(Some("large-primary"))?;
         require_eq(
             &large.estimated_saved,
             &isize::MAX,
-            "large aggregate saturates without sqlite SUM overflow",
+            "largest accepted aggregate narrows at the public boundary",
+        )?;
+        require_eq(
+            &large_store.token_overview(Some("large-rejected"))?.calls,
+            &0,
+            "rejected aggregate left no partial report",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn direct_library_usage_rotates_at_baseline_capacity_without_reopening_the_old_scope()
+    -> Result<(), Box<dyn Error>> {
+        let project = tempfile::tempdir()?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(project.path())?;
+        let policy = TelemetryRetentionPolicy::default();
+        let label = "bounded-library-label";
+
+        for index in 0..policy.max_baselines_per_instance {
+            store.record_usage(&usage_from_estimates(
+                label,
+                "search",
+                None,
+                Some(format!("query-{index}")),
+                100,
+                20,
+            ))?;
+        }
+        let old_instance = store
+            .library_usage_instances
+            .borrow()
+            .get(label)
+            .copied()
+            .flatten()
+            .ok_or_else(|| io::Error::other("library instance was not retained"))?;
+
+        let boundary_event = usage_from_estimates(
+            label,
+            "search",
+            None,
+            Some("capacity-boundary".to_string()),
+            100,
+            20,
+        );
+        store.record_usage(&boundary_event)?;
+        let replacement = store
+            .library_usage_instances
+            .borrow()
+            .get(label)
+            .copied()
+            .flatten()
+            .ok_or_else(|| io::Error::other("replacement library instance was not retained"))?;
+        require_eq(
+            &(replacement != old_instance),
+            &true,
+            "capacity rotation created a new internal instance",
+        )?;
+        require_eq(
+            &store.connection.query_row(
+                "SELECT COUNT(*) FROM usage_instances WHERE state = 'sealed'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            &1,
+            "sealed predecessor instances",
+        )?;
+        require_eq(
+            &store.connection.query_row(
+                "SELECT COUNT(*) FROM usage_instances WHERE state = 'active'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            &1,
+            "active replacement instances",
+        )?;
+        require_eq(
+            &store.connection.query_row(
+                "SELECT COUNT(*) FROM usage_instance_baselines",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            &1,
+            "only replacement baseline witnesses remain",
+        )?;
+        require_eq(
+            &store.token_overview(Some(label))?.calls,
+            &(policy.max_baselines_per_instance + 1),
+            "caller-label report spans both bounded instances",
+        )?;
+        require_eq(
+            &store.token_overview(None)?.estimated_saved,
+            &(isize::try_from(policy.max_baselines_per_instance + 1)? * 80),
+            "global totals remain exact across rotation",
+        )?;
+        require_eq(
+            &matches!(
+                store.record_usage_for_instance(
+                    old_instance,
+                    UsageInstanceOwner::LibraryHandle,
+                    &boundary_event,
+                    false,
+                ),
+                Err(DbError::TelemetryInstanceInactive)
+            ),
+            &true,
+            "sealed predecessor cannot be reopened",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn rejected_library_labels_do_not_consume_the_bounded_identity_map()
+    -> Result<(), Box<dyn Error>> {
+        let project = tempfile::tempdir()?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(project.path())?;
+        let maximum = TelemetryRetentionPolicy::default().max_label_bytes;
+
+        for extra in 1..=4 {
+            let event =
+                usage_from_estimates(&"x".repeat(maximum + extra), "summary", None, None, 100, 20);
+            require_eq(
+                &matches!(
+                    store.record_usage(&event),
+                    Err(DbError::TelemetryFieldTooLarge {
+                        field: "session_id",
+                        ..
+                    })
+                ),
+                &true,
+                "oversized caller label rejection",
+            )?;
+        }
+        require_eq(
+            &store.library_usage_instances.borrow().len(),
+            &0,
+            "rejected labels retained no identity-map entries",
         )?;
         Ok(())
     }
 
     #[test]
     fn token_trends_group_usage_by_period_and_bucket() -> Result<(), Box<dyn Error>> {
-        let store = AtlasStore::in_memory()?;
-        for (session, created_at, bucket, baseline_kind, confidence, without, with) in [
+        let project = tempfile::tempdir()?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(project.path())?;
+        for (session, bucket, baseline_kind, confidence, without, with) in [
             (
                 "session",
-                "2026-06-01 00:00:00",
                 TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
                 "selected_candidates",
                 "inferred",
-                100_i64,
-                25_i64,
+                100_usize,
+                25_usize,
             ),
             (
                 "session",
-                "2026-06-10 00:00:00",
                 TOKEN_BUCKET_FULL_FILE_COMPRESSION,
                 "full_file",
                 "observed",
-                50_i64,
-                10_i64,
+                50_usize,
+                10_usize,
             ),
             (
                 "session",
-                "2026-07-01 00:00:00",
                 TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
                 "selected_candidates",
                 "inferred",
-                80_i64,
-                20_i64,
+                80_usize,
+                20_usize,
             ),
             (
                 "other",
-                "2026-06-03 00:00:00",
                 TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
                 "selected_candidates",
                 "inferred",
-                999_i64,
-                1_i64,
+                999_usize,
+                1_usize,
             ),
         ] {
-            store.connection.execute(
-                "
-                INSERT INTO usage_events(
-                    session_id,
-                    command,
-                    estimated_tokens_without_projectatlas,
-                    estimated_tokens_with_projectatlas,
-                    estimated_tokens_saved,
-                    token_savings_bucket,
-                    baseline_kind,
-                    confidence,
-                    created_at
-                )
-                VALUES(?1, 'trend', ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                ",
-                params![
-                    session,
-                    without,
-                    with,
-                    without - with,
-                    bucket,
-                    baseline_kind,
-                    confidence,
-                    created_at
-                ],
-            )?;
+            store.record_usage(&usage_from_estimates_with_context(
+                session,
+                "trend",
+                None,
+                None,
+                without,
+                with,
+                bucket,
+                baseline_kind,
+                confidence,
+            ))?;
         }
 
-        let trends = store.token_trends(Some("session"), TokenTrendWindow::Month)?;
-        require_eq(&trends.periods.len(), &2, "monthly periods")?;
-        require_eq(
-            &trends.periods[0].period,
-            &"2026-06".to_string(),
-            "first month",
-        )?;
-        require_eq(&trends.periods[0].calls, &2, "june call count")?;
+        let trends = store.token_trends(Some("session"), TokenTrendWindow::Day)?;
+        require_eq(&trends.periods.len(), &1, "current daily period")?;
+        require_eq(&trends.periods[0].calls, &3, "session trend call count")?;
         require_eq(
             &trends.periods[0].estimated_saved,
-            &115,
-            "june saved tokens",
+            &175,
+            "session trend saved tokens",
         )?;
         require_eq(
             &trends.periods[0].buckets.len(),
             &2,
-            "june preserves evidence buckets",
+            "trend preserves evidence buckets",
         )?;
         require_eq(
             &trends.periods[0].buckets[0].token_savings_bucket,
@@ -5110,17 +8803,14 @@ mod tests {
             &"observed".to_string(),
             "bucket confidence remains visible",
         )?;
-        require_eq(
-            &trends.periods[1].period,
-            &"2026-07".to_string(),
-            "second month",
-        )?;
-        require_eq(&trends.periods[1].calls, &1, "july call count")?;
+        let all_labels = store.token_trends(None, TokenTrendWindow::Day)?;
+        require_eq(&all_labels.periods.len(), &1, "all-label daily period")?;
+        require_eq(&all_labels.periods[0].calls, &4, "all-label trend calls")?;
         Ok(())
     }
 
     #[test]
-    fn token_trends_backfill_created_at_for_upgraded_databases() -> Result<(), Box<dyn Error>> {
+    fn unsupported_legacy_schema_is_refused_without_mutation() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let db_path = temp.path().join("legacy.db");
         {
@@ -5159,43 +8849,32 @@ mod tests {
             )?;
         }
 
-        let store = AtlasStore::open(&db_path)?;
-        let null_created_at = store.connection.query_row(
-            "SELECT COUNT(*) FROM usage_events WHERE created_at IS NULL OR created_at = ''",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
-        require_eq(&null_created_at, &0, "legacy created_at values backfilled")?;
-        store.record_usage(&usage_from_estimates(
-            "legacy-session",
-            "new-call",
-            None,
-            None,
-            50,
-            10,
-        ))?;
-        let null_created_at = store.connection.query_row(
-            "SELECT COUNT(*) FROM usage_events WHERE created_at IS NULL OR created_at = ''",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
-        require_eq(&null_created_at, &0, "new created_at values populated")?;
-        let trends = store.token_trends(Some("legacy-session"), TokenTrendWindow::Month)?;
-        require_eq(&trends.periods.is_empty(), &false, "trend periods exist")?;
+        let database_before = fs::read(&db_path)?;
+        let Err(open_error) = AtlasStore::open(&db_path) else {
+            return Err(io::Error::other("unsupported schema unexpectedly opened").into());
+        };
         require_eq(
-            &trends
-                .periods
-                .iter()
-                .any(|period| period.period.starts_with("1970")),
-            &false,
-            "upgraded telemetry does not aggregate under 1970",
+            &matches!(
+                open_error,
+                DbError::SchemaVersion {
+                    found: 7,
+                    expected: SCHEMA_VERSION,
+                }
+            ),
+            &true,
+            "unsupported schema rejection",
+        )?;
+        require_eq(
+            &fs::read(&db_path)?,
+            &database_before,
+            "unsupported schema bytes remain unchanged",
         )?;
         Ok(())
     }
 
     #[test]
     fn stores_project_root_in_metadata() -> Result<(), Box<dyn Error>> {
-        let store = AtlasStore::in_memory()?;
+        let mut store = AtlasStore::in_memory()?;
         store.set_project_root(Path::new("C:/workspace/example"))?;
         require_eq(
             &store.project_root()?,
@@ -5208,9 +8887,20 @@ mod tests {
             &Some("C:/workspace/example".to_string()),
             "windows extended project root metadata",
         )?;
-        store.set_project_root(Path::new(r"\\?\UNC\server\share\repo"))?;
+        let Err(rebind_error) = store.set_project_root(Path::new(r"\\?\UNC\server\share\repo"))
+        else {
+            return Err(io::Error::other("project identity was rebound implicitly").into());
+        };
         require_eq(
-            &store.project_root()?,
+            &matches!(rebind_error, DbError::ProjectRootMismatch { .. }),
+            &true,
+            "project identity rebind rejection",
+        )?;
+
+        let mut unc_store = AtlasStore::in_memory()?;
+        unc_store.set_project_root(Path::new(r"\\?\UNC\server\share\repo"))?;
+        require_eq(
+            &unc_store.project_root()?,
             &Some("//server/share/repo".to_string()),
             "windows unc project root metadata",
         )?;
@@ -5218,14 +8908,14 @@ mod tests {
     }
 
     #[test]
-    fn read_project_root_read_only_does_not_create_wal_sidecars() -> Result<(), Box<dyn Error>> {
+    fn read_project_root_read_only_does_not_change_database_bytes() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("repo with spaces");
         let atlas_dir = root.join(".projectatlas");
         fs::create_dir_all(&atlas_dir)?;
         let db_path = atlas_dir.join("projectatlas.db");
         {
-            let store = AtlasStore::open(&db_path)?;
+            let mut store = AtlasStore::open(&db_path)?;
             store.set_project_root(&root)?;
             store
                 .connection
@@ -5240,20 +8930,194 @@ mod tests {
                 Err(error) => return Err(error.into()),
             }
         }
-        let db_len_before = fs::metadata(&db_path)?.len();
+        let database_before = fs::read(&db_path)?;
 
         require_eq(
             &read_project_root_read_only(&db_path)?,
             &Some(normalize_native_path_display(&root)),
-            "immutable read-only project root",
+            "read-only project root",
         )?;
         require_eq(
-            &fs::metadata(&db_path)?.len(),
-            &db_len_before,
-            "immutable read-only DB length",
+            &fs::read(&db_path)?,
+            &database_before,
+            "read-only project-root database bytes",
         )?;
-        require_eq(&wal_path.exists(), &false, "read-only WAL sidecar")?;
-        require_eq(&shm_path.exists(), &false, "read-only SHM sidecar")?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_project_root_read_only_observes_active_wal_state() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo-Δ");
+        let atlas_dir = root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        let mut store = AtlasStore::open(&db_path)?;
+        store
+            .connection
+            .execute_batch("PRAGMA wal_autocheckpoint = 0")?;
+        store.set_project_root(&root)?;
+
+        require_eq(
+            &sqlite_sidecar_path(&db_path, "-wal").exists(),
+            &true,
+            "active WAL exists",
+        )?;
+        require_eq(
+            &read_project_root_read_only(&db_path)?,
+            &Some(normalize_native_path_display(&root)),
+            "WAL-aware read-only project root",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_telemetry_revalidates_project_identity_before_write() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        drop(AtlasStore::open_for_project(&db_path, &root)?);
+
+        let reader = AtlasStore::open_read_only_for_project(&db_path, &root)?;
+        reader.finish_index_read_snapshot()?;
+        AtlasStore::transition_project_root(&db_path, &root, ProjectRootTransition::Detach)?;
+
+        let event = usage_from_estimates(
+            "identity-race",
+            "summary",
+            Some("src/lib.rs".to_string()),
+            None,
+            100,
+            20,
+        );
+        let Err(error) = reader.record_usage(&event) else {
+            return Err(io::Error::other("telemetry wrote through replaced identity").into());
+        };
+        require_eq(
+            &matches!(error, DbError::ProjectRootTransitionChanged { .. }),
+            &true,
+            "telemetry project identity recheck",
+        )?;
+        let current = AtlasStore::open_read_only_for_project(&db_path, &root)?;
+        require_eq(
+            &current.token_overview(Some("identity-race"))?.calls,
+            &0,
+            "telemetry refused after identity replacement",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn telemetry_contention_uses_ancillary_busy_budget() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        drop(AtlasStore::open_for_project(&db_path, &root)?);
+
+        let reader = AtlasStore::open_read_only_for_project(&db_path, &root)?;
+        let writer = Connection::open(&db_path)?;
+        writer.execute_batch("BEGIN IMMEDIATE")?;
+        let started = Instant::now();
+        let result = reader.record_usage(&usage_from_estimates(
+            "contended",
+            "overview",
+            None,
+            None,
+            100,
+            20,
+        ));
+        let elapsed = started.elapsed();
+        writer.execute_batch("ROLLBACK")?;
+
+        let Err(error) = result else {
+            return Err(
+                io::Error::other("contended telemetry write unexpectedly succeeded").into(),
+            );
+        };
+        require_eq(
+            &error.is_write_unavailable(),
+            &true,
+            "contended telemetry error kind",
+        )?;
+        require_eq(
+            &(elapsed < Duration::from_millis(500)),
+            &true,
+            "ancillary telemetry busy latency",
+        )?;
+        require_eq(
+            &reader.token_overview(Some("contended"))?.calls,
+            &0,
+            "contended telemetry rollback",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_telemetry_does_not_recreate_a_removed_database() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        drop(AtlasStore::open_for_project(&db_path, &root)?);
+
+        let reader = AtlasStore::open_read_only_for_project(&db_path, &root)?;
+        fs::remove_file(&db_path)?;
+        let event = usage_from_estimates(
+            "removed-database",
+            "summary",
+            Some("src/lib.rs".to_string()),
+            None,
+            100,
+            20,
+        );
+        if reader.record_usage(&event).is_ok() {
+            return Err(io::Error::other("telemetry reopened a removed database").into());
+        }
+        require_eq(
+            &db_path.exists(),
+            &false,
+            "telemetry must not recreate a removed database",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_store_opens_checkpointed_wal_without_existing_sidecars()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo with spaces");
+        let atlas_dir = root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        {
+            let mut store = AtlasStore::open(&db_path)?;
+            store.set_project_root(&root)?;
+            store
+                .connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        }
+        for sidecar_path in [
+            sqlite_sidecar_path(&db_path, "-wal"),
+            sqlite_sidecar_path(&db_path, "-shm"),
+        ] {
+            match fs::remove_file(sidecar_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        let store = AtlasStore::open_read_only(&db_path)?;
+        require_eq(
+            &store.project_root()?,
+            &Some(normalize_native_path_display(&root)),
+            "read-only checkpointed project root",
+        )?;
+        store.finish_index_read_snapshot()?;
         Ok(())
     }
 
@@ -5288,7 +9152,7 @@ mod tests {
     }
 
     #[test]
-    fn approved_purpose_becomes_stale_when_file_hash_changes() -> Result<(), Box<dyn Error>> {
+    fn approved_purpose_survives_incremental_file_hash_changes() -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::in_memory()?;
         store.replace_scan(&[test_file_node("src/main.rs", "hash-a")])?;
         store.set_purpose(
@@ -5300,11 +9164,16 @@ mod tests {
 
         let node = store
             .load_node_by_path("src/main.rs")?
-            .ok_or_else(|| io::Error::other("stale node missing"))?;
+            .ok_or_else(|| io::Error::other("changed node missing"))?;
         require_eq(
             &node.purpose.status,
-            &PurposeStatus::Stale,
+            &PurposeStatus::Approved,
             "changed approved file purpose status",
+        )?;
+        require_eq(
+            &node.purpose.agent_reviewed(),
+            &true,
+            "changed approved file remains agent reviewed",
         )?;
         Ok(())
     }
@@ -5379,6 +9248,43 @@ mod tests {
             &cleared_gradle_files.len(),
             &0,
             "cleared symbol-ranked file count",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn ranked_node_admission_preserves_dominant_tiers_before_candidate_cap()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let mut nodes = vec![
+            test_file_node("needle", "hash-exact"),
+            test_file_node("deep/needle", "hash-name"),
+            test_file_node("reviewed.rs", "hash-reviewed"),
+        ];
+        nodes.extend(
+            (0..130).map(|index| test_file_node(&format!("weak/needle-{index:03}.rs"), "hash")),
+        );
+        store.replace_scan(&nodes)?;
+        store.set_purpose(
+            "reviewed.rs",
+            "Own needle responsibility",
+            PurposeSource::Agent,
+        )?;
+        for index in 0..130 {
+            let path = format!("weak/needle-{index:03}.rs");
+            store.set_suggested_purpose(&path, "Generated needle suggestion")?;
+            store.set_node_summary(&path, "Observed needle summary")?;
+        }
+
+        let selected = store.load_ranked_nodes("needle", NodeKind::File, None, 100, 0)?;
+        require_eq(&selected.len(), &100, "bounded adversarial candidate count")?;
+        require_eq(
+            &selected[..3]
+                .iter()
+                .map(|node| node.node.path.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["needle", "deep/needle", "reviewed.rs"],
+            "pre-cap exact path basename and reviewed-purpose admission",
         )?;
         Ok(())
     }
@@ -5544,18 +9450,15 @@ mod tests {
             rationale: "Resolved for pagination regression.".to_string(),
         })?;
 
-        let page = store.unresolved_health_findings_page(
-            &store.resolved_health_ids()?,
-            &HealthQuery {
-                start_index: 0,
-                limit: 2,
-                category: Some("missing-purpose".to_string()),
-                severity: Some(Severity::Warning),
-                path_prefix: Some("src".to_string()),
-                summary_only: false,
-                scope: HealthScope::all(),
-            },
-        )?;
+        let page = store.unresolved_health_findings_page_current(&HealthQuery {
+            start_index: 0,
+            limit: 2,
+            category: Some("missing-purpose".to_string()),
+            severity: Some(Severity::Warning),
+            path_prefix: Some("src".to_string()),
+            summary_only: false,
+            scope: HealthScope::all(),
+        })?;
 
         require_eq(&page.total, &3, "filtered unresolved missing total")?;
         require_eq(&page.returned, &2, "returned unresolved missing rows")?;
@@ -5568,6 +9471,88 @@ mod tests {
             &vec!["src/a.rs", "src/c.rs"],
             "resolved row skipped before limit",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn stored_health_resolution_filter_stays_indexed_and_bind_bounded() -> Result<(), Box<dyn Error>>
+    {
+        const HISTORICAL_RESOLUTIONS: usize = 1_500;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(root.join("src"))?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        store.replace_scan(&[test_file_node("src/current.rs", "hash-current")])?;
+        {
+            let transaction = store.connection.transaction()?;
+            {
+                let mut statement = transaction.prepare(
+                    "
+                    INSERT INTO health_resolutions(
+                        finding_id, category, path, related_path, rationale, resolved_by
+                    )
+                    VALUES(?1, 'missing-purpose', ?2, NULL, 'historical', 'agent')
+                    ",
+                )?;
+                for index in 0..HISTORICAL_RESOLUTIONS {
+                    let path = format!("removed/{index}.rs");
+                    statement.execute(params![finding_id("missing-purpose", &path, None), path])?;
+                }
+            }
+            transaction.commit()?;
+        }
+
+        drop(store);
+        let store = AtlasStore::open_read_only_for_project(&database, &root)?;
+        let page = store.unresolved_health_findings_page_current(&HealthQuery {
+            start_index: 0,
+            limit: 2,
+            category: Some("missing-purpose".to_string()),
+            severity: Some(Severity::Warning),
+            path_prefix: Some("src".to_string()),
+            summary_only: false,
+            scope: HealthScope::all(),
+        })?;
+        require_eq(&page.total, &1, "current unresolved total")?;
+        require_eq(
+            &page.findings[0].path,
+            &"src/current.rs".to_string(),
+            "current unresolved path",
+        )?;
+
+        let (where_clause, values) = purpose_status_where_clause(
+            PURPOSE_HEALTH_SPECS[0],
+            None,
+            HealthResolutionFilter::Stored,
+            HealthScope::all(),
+        );
+        require_eq(&values.len(), &1, "stored filter bind count")?;
+        let plan_sql = format!(
+            "EXPLAIN QUERY PLAN
+             SELECT COUNT(*)
+             FROM nodes n
+             JOIN purposes p ON p.node_id = n.id
+             WHERE {where_clause}"
+        );
+        let mut statement = store.connection.prepare(&plan_sql)?;
+        let rows = statement.query_map(params_from_iter(values), |row| row.get::<_, String>(3))?;
+        let mut plan = Vec::new();
+        for row in rows {
+            plan.push(row?);
+        }
+        if !plan.iter().any(|detail| {
+            detail.contains("health_resolutions")
+                && detail.contains("finding_id")
+                && detail.contains("SEARCH")
+        }) {
+            return Err(io::Error::other(format!(
+                "stored resolution anti-lookup did not use the finding-id index: {plan:?}"
+            ))
+            .into());
+        }
+        store.finish_index_read_snapshot()?;
         Ok(())
     }
 
@@ -5837,6 +9822,14 @@ mod tests {
             "Reviewed Cargo manifest.",
             PurposeSource::Agent,
         )?;
+        store.connection.execute(
+            "UPDATE purposes
+                SET status = 'stale'
+              WHERE node_id IN (
+                  SELECT id FROM nodes WHERE path IN ('src/helper.rs', 'Cargo.toml')
+              )",
+            [],
+        )?;
         store.replace_scan(&[
             test_file_node("src/helper.rs", "hash-b"),
             test_file_node("Cargo.toml", "hash-cargo-new"),
@@ -5955,7 +9948,7 @@ mod tests {
         store.connection.execute(
             "
             UPDATE purposes
-            SET source = 'human'
+            SET source = 'human', status = 'stale'
             WHERE node_id = (SELECT id FROM nodes WHERE path = 'src/helper.rs')
             ",
             [],
@@ -5995,6 +9988,12 @@ mod tests {
             "src/imported.rs",
             "Imported helper implementation.",
             PurposeSource::Imported,
+        )?;
+        store.connection.execute(
+            "UPDATE purposes
+                SET status = 'stale'
+              WHERE node_id = (SELECT id FROM nodes WHERE path = 'src/imported.rs')",
+            [],
         )?;
         store.replace_scan(&[
             test_file_node("src/imported.rs", "hash-b"),
@@ -6323,13 +10322,70 @@ mod tests {
         )?;
         require_eq(
             &changed.purpose.status,
-            &PurposeStatus::Stale,
-            "changed file purpose becomes stale",
+            &PurposeStatus::Approved,
+            "changed file purpose stays approved",
         )?;
 
         store.replace_scan(&[test_folder_node("."), test_folder_node("src")])?;
         let removed = store.load_nodes_by_paths(&["src/main.rs".to_string()])?;
         require_eq(&removed.is_empty(), &true, "removed file is inactive")?;
+
+        let dormant = store.connection.query_row(
+            "SELECT n.exists_now, p.purpose, p.status
+               FROM nodes AS n
+               JOIN purposes AS p ON p.node_id = n.id
+              WHERE n.path = 'src/main.rs'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        require_eq(
+            &dormant,
+            &(
+                0,
+                Some("Agent-reviewed Rust entry point".to_string()),
+                PurposeStatus::Approved.as_str().to_string(),
+            ),
+            "removed file keeps a dormant approved purpose",
+        )?;
+
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("src"),
+            test_file_node("src/renamed.rs", "hash-b"),
+        ])?;
+        let renamed = store
+            .load_node_by_path("src/renamed.rs")?
+            .ok_or_else(|| io::Error::other("renamed path missing"))?;
+        require_eq(
+            &renamed.purpose.status,
+            &PurposeStatus::Missing,
+            "rename does not transfer approval",
+        )?;
+
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("src"),
+            test_file_node("src/main.rs", "hash-c"),
+        ])?;
+        let reactivated = store
+            .load_node_by_path("src/main.rs")?
+            .ok_or_else(|| io::Error::other("reactivated path missing"))?;
+        require_eq(
+            &reactivated.purpose.purpose,
+            &Some("Agent-reviewed Rust entry point".to_string()),
+            "exact-path reactivation restores the dormant purpose",
+        )?;
+        require_eq(
+            &reactivated.purpose.status,
+            &PurposeStatus::Approved,
+            "exact-path reactivation restores approval",
+        )?;
         Ok(())
     }
 
@@ -6363,7 +10419,7 @@ mod tests {
             &[IndexedFileText {
                 path: "src/main.rs".to_string(),
                 content_hash: Some("hash-a".to_string()),
-                byte_count: 12,
+                byte_count: "needle old\n".len(),
                 line_count: 1,
                 content: "needle old\n".to_string(),
             }],
@@ -6391,14 +10447,14 @@ mod tests {
                 IndexedFileText {
                     path: "src/a.rs".to_string(),
                     content_hash: Some("hash-a".to_string()),
-                    byte_count: 14,
+                    byte_count: "needle first\n".len(),
                     line_count: 1,
                     content: "needle first\n".to_string(),
                 },
                 IndexedFileText {
                     path: "src/b.rs".to_string(),
                     content_hash: Some("hash-b".to_string()),
-                    byte_count: 15,
+                    byte_count: "needle second\n".len(),
                     line_count: 1,
                     content: "needle second\n".to_string(),
                 },
@@ -6411,6 +10467,745 @@ mod tests {
             Ok(false)
         })?;
         require_eq(&visited, &vec!["src/a.rs".to_string()], "early stop rows")?;
+        Ok(())
+    }
+
+    #[test]
+    fn file_text_fts_candidates_are_bounded_scoped_safe_and_metadata_only()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+            test_file_node("tests/c.rs", "hash-c"),
+        ])?;
+        store.replace_file_texts_for_paths(
+            &[
+                "src/a.rs".to_string(),
+                "src/b.rs".to_string(),
+                "tests/c.rs".to_string(),
+            ],
+            &[
+                IndexedFileText {
+                    path: "src/a.rs".to_string(),
+                    content_hash: Some("hash-a".to_string()),
+                    byte_count: 13,
+                    line_count: 1,
+                    content: "needle alpha\n".to_string(),
+                },
+                IndexedFileText {
+                    path: "src/b.rs".to_string(),
+                    content_hash: Some("hash-b".to_string()),
+                    byte_count: 19,
+                    line_count: 1,
+                    content: "prefixneedlesuffix\n".to_string(),
+                },
+                IndexedFileText {
+                    path: "tests/c.rs".to_string(),
+                    content_hash: Some("hash-c".to_string()),
+                    byte_count: 32,
+                    line_count: 1,
+                    content: "needle gamma AND NOT NEAR terms\n".to_string(),
+                },
+            ],
+        )?;
+
+        let bounded = store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token: "needle",
+                path_prefix: None,
+                limit: 1,
+            },
+            None,
+        )?;
+        require_eq(&bounded.candidates.len(), &1, "bounded FTS row count")?;
+        require_eq(&bounded.overflow, &true, "bounded FTS overflow")?;
+        require(
+            bounded.candidates[0].bm25.is_finite(),
+            "FTS rank was non-finite",
+        )?;
+        let zero_limit = store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token: "needle",
+                path_prefix: None,
+                limit: 0,
+            },
+            None,
+        )?;
+        require_eq(
+            &zero_limit,
+            &FileTextFtsPage {
+                candidates: Vec::new(),
+                overflow: true,
+            },
+            "zero-limit FTS overflow",
+        )?;
+
+        let scoped = store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token: "needle",
+                path_prefix: Some("src/"),
+                limit: 10,
+            },
+            None,
+        )?;
+        require_eq(
+            &scoped
+                .candidates
+                .iter()
+                .map(|candidate| candidate.path.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["src/a.rs", "src/b.rs"],
+            "path-scoped FTS rank order",
+        )?;
+        let exact_path = store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token: "needle",
+                path_prefix: Some("src/a.rs"),
+                limit: 10,
+            },
+            None,
+        )?;
+        require_eq(
+            &exact_path.candidates[0].path,
+            &"src/a.rs".to_string(),
+            "exact-path FTS scope",
+        )?;
+        for reserved_token in ["AND", "NOT", "NEAR"] {
+            let reserved = store.query_file_text_fts_candidates(
+                &FileTextFtsQuery {
+                    literal_token: reserved_token,
+                    path_prefix: Some("tests/c.rs"),
+                    limit: 10,
+                },
+                None,
+            )?;
+            require_eq(
+                &reserved.candidates.len(),
+                &1,
+                "quoted FTS reserved-token candidate",
+            )?;
+        }
+        let mut plan_statement = store.connection.prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT f.path, f.content_hash, f.byte_count, f.line_count, bm25(file_text_fts)
+             FROM file_text_fts
+             JOIN file_texts AS f ON f.rowid = file_text_fts.rowid
+             WHERE file_text_fts MATCH ?1
+             ORDER BY bm25(file_text_fts), f.path
+             LIMIT ?2",
+        )?;
+        let plan_details = plan_statement
+            .query_map(params!["needle", 11], |row| row.get::<_, String>(3))?
+            .collect::<Result<Vec<_>, _>>()?;
+        require(
+            plan_details
+                .iter()
+                .any(|detail| detail.contains("VIRTUAL TABLE INDEX")),
+            "FTS candidate query did not use the virtual-table index",
+        )?;
+        require(
+            plan_details
+                .iter()
+                .any(|detail| detail.contains("INTEGER PRIMARY KEY")),
+            "FTS candidate query did not hydrate metadata by file_texts rowid",
+        )?;
+
+        for unsafe_token in ["ab", "foo_bar", "needle\" OR content:*", "néedle"] {
+            let result = store.query_file_text_fts_candidates(
+                &FileTextFtsQuery {
+                    literal_token: unsafe_token,
+                    path_prefix: None,
+                    limit: 10,
+                },
+                None,
+            );
+            require(
+                matches!(result, Err(DbError::FileTextFtsTokenUnsafe { .. })),
+                "unsafe FTS token was accepted",
+            )?;
+        }
+        let over_cap = store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token: "needle",
+                path_prefix: None,
+                limit: MAX_FILE_TEXT_FTS_CANDIDATES + 1,
+            },
+            None,
+        );
+        require(
+            matches!(over_cap, Err(DbError::FileTextFtsCandidateLimit { .. })),
+            "over-cap FTS request was accepted",
+        )?;
+
+        store.connection.execute(
+            "UPDATE file_texts SET content = x'80' WHERE path = 'src/a.rs'",
+            [],
+        )?;
+        let metadata_only = store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token: "needle",
+                path_prefix: Some("src/a.rs"),
+                limit: 1,
+            },
+            None,
+        )?;
+        require_eq(
+            &metadata_only.candidates[0].byte_count,
+            &13,
+            "metadata-only candidate byte count",
+        )?;
+        require(
+            store.load_file_text("src/a.rs").is_err(),
+            "content corruption fixture did not prove candidate pre-hydration",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn file_text_fts_mutations_are_atomic_and_state_reports_identity_drift()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[test_file_node("src/main.rs", "hash-a")])?;
+        let invalid_metadata = IndexedFileText {
+            path: "src/main.rs".to_string(),
+            content_hash: Some("hash-invalid".to_string()),
+            byte_count: 0,
+            line_count: 1,
+            content: "not empty\n".to_string(),
+        };
+        require(
+            matches!(
+                store.replace_file_texts_for_paths(
+                    std::slice::from_ref(&invalid_metadata.path),
+                    std::slice::from_ref(&invalid_metadata),
+                ),
+                Err(DbError::FileTextMetadataMismatch {
+                    field: "byte_count",
+                    ..
+                })
+            ),
+            "invalid file-text byte metadata was accepted",
+        )?;
+        require_eq(
+            &store.load_file_text(&invalid_metadata.path)?,
+            &None,
+            "invalid metadata write rollback",
+        )?;
+        let invalid_line_count = IndexedFileText {
+            byte_count: invalid_metadata.content.len(),
+            line_count: 0,
+            ..invalid_metadata.clone()
+        };
+        require(
+            matches!(
+                store.replace_file_texts_for_paths(
+                    std::slice::from_ref(&invalid_line_count.path),
+                    std::slice::from_ref(&invalid_line_count),
+                ),
+                Err(DbError::FileTextMetadataMismatch {
+                    field: "line_count",
+                    ..
+                })
+            ),
+            "invalid file-text line metadata was accepted",
+        )?;
+        let original = IndexedFileText {
+            path: "src/main.rs".to_string(),
+            content_hash: Some("hash-a".to_string()),
+            byte_count: "needle old\n".len(),
+            line_count: 1,
+            content: "needle old\n".to_string(),
+        };
+        store.replace_file_texts_for_paths(
+            std::slice::from_ref(&original.path),
+            std::slice::from_ref(&original),
+        )?;
+        require_eq(
+            &store.file_text_fts_state()?,
+            &FileTextFtsState {
+                source_rows: 1,
+                indexed_rows: 1,
+                synchronized: true,
+            },
+            "initial FTS synchronization state",
+        )?;
+
+        store.connection.execute_batch(
+            "CREATE TRIGGER fail_file_text_insert
+             BEFORE INSERT ON file_texts
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected file-text failure');
+             END;",
+        )?;
+        let replacement = IndexedFileText {
+            path: original.path.clone(),
+            content_hash: Some("hash-b".to_string()),
+            byte_count: 11,
+            line_count: 1,
+            content: "beacon new\n".to_string(),
+        };
+        require(
+            store
+                .replace_file_texts_for_paths(
+                    std::slice::from_ref(&replacement.path),
+                    std::slice::from_ref(&replacement),
+                )
+                .is_err(),
+            "fault-injected replacement unexpectedly committed",
+        )?;
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_file_text_insert")?;
+        require_eq(
+            &store.load_file_text(&original.path)?,
+            &Some(original.clone()),
+            "rolled-back authoritative text",
+        )?;
+        require_eq(
+            &store
+                .query_file_text_fts_candidates(
+                    &FileTextFtsQuery {
+                        literal_token: "needle",
+                        path_prefix: None,
+                        limit: 10,
+                    },
+                    None,
+                )?
+                .candidates
+                .len(),
+            &1,
+            "rolled-back FTS document",
+        )?;
+        require_eq(
+            &store.file_text_fts_state()?.synchronized,
+            &true,
+            "rollback FTS synchronization",
+        )?;
+
+        store.replace_file_texts_for_paths(
+            std::slice::from_ref(&replacement.path),
+            std::slice::from_ref(&replacement),
+        )?;
+        require_eq(
+            &store
+                .query_file_text_fts_candidates(
+                    &FileTextFtsQuery {
+                        literal_token: "needle",
+                        path_prefix: None,
+                        limit: 10,
+                    },
+                    None,
+                )?
+                .candidates
+                .len(),
+            &0,
+            "replaced token removed from FTS",
+        )?;
+        require_eq(
+            &store
+                .query_file_text_fts_candidates(
+                    &FileTextFtsQuery {
+                        literal_token: "beacon",
+                        path_prefix: None,
+                        limit: 10,
+                    },
+                    None,
+                )?
+                .candidates
+                .len(),
+            &1,
+            "replacement token added to FTS",
+        )?;
+
+        store.connection.execute(
+            "INSERT INTO file_text_fts(file_text_fts, rowid, content)
+             SELECT 'delete', rowid, content FROM file_texts WHERE path = ?1",
+            [&replacement.path],
+        )?;
+        require_eq(
+            &store.file_text_fts_state()?,
+            &FileTextFtsState {
+                source_rows: 1,
+                indexed_rows: 0,
+                synchronized: false,
+            },
+            "desynchronized FTS identity state",
+        )?;
+        store.connection.execute(
+            "INSERT INTO file_text_fts(file_text_fts) VALUES('rebuild')",
+            [],
+        )?;
+        let (source_revision, projection_revision) =
+            load_file_text_fts_revisions(&store.connection)?.ok_or_else(|| {
+                io::Error::other("FTS revisions disappeared after synchronized writes")
+            })?;
+        require_eq(
+            &source_revision,
+            &projection_revision,
+            "synchronized FTS revisions",
+        )?;
+        set_metadata(
+            &store.connection,
+            FILE_TEXT_FTS_PROJECTION_REVISION_KEY,
+            &projection_revision.saturating_sub(1).to_string(),
+        )?;
+        require_eq(
+            &store.file_text_fts_ready()?,
+            &false,
+            "incomplete FTS revision readiness",
+        )?;
+        set_metadata(
+            &store.connection,
+            FILE_TEXT_FTS_PROJECTION_REVISION_KEY,
+            &source_revision.to_string(),
+        )?;
+        require_eq(
+            &store.file_text_fts_ready()?,
+            &true,
+            "restored FTS revision readiness",
+        )?;
+        store.mark_paths_absent(&["src".to_string()])?;
+        require_eq(
+            &store.file_text_fts_state()?,
+            &FileTextFtsState {
+                source_rows: 0,
+                indexed_rows: 0,
+                synchronized: true,
+            },
+            "absent-path FTS synchronization",
+        )?;
+
+        store.replace_scan(&[test_file_node("src/main.rs", "hash-c")])?;
+        let rescanned = IndexedFileText {
+            path: "src/main.rs".to_string(),
+            content_hash: Some("hash-c".to_string()),
+            byte_count: 13,
+            line_count: 1,
+            content: "rescan token\n".to_string(),
+        };
+        store.replace_file_texts_for_paths(
+            std::slice::from_ref(&rescanned.path),
+            std::slice::from_ref(&rescanned),
+        )?;
+        store.replace_scan(&[])?;
+        require_eq(
+            &store.file_text_fts_state()?,
+            &FileTextFtsState {
+                source_rows: 0,
+                indexed_rows: 0,
+                synchronized: true,
+            },
+            "full-scan deletion FTS synchronization",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn file_text_fts_migration_backfills_existing_text_and_survives_reopen()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("project");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("atlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        store.replace_scan(&[test_file_node("src/main.rs", "hash-a")])?;
+        store.replace_file_texts_for_paths(
+            &["src/main.rs".to_string()],
+            &[IndexedFileText {
+                path: "src/main.rs".to_string(),
+                content_hash: Some("hash-a".to_string()),
+                byte_count: 17,
+                line_count: 1,
+                content: "migration needle\n".to_string(),
+            }],
+        )?;
+        store.connection.execute_batch("DROP TABLE file_text_fts")?;
+        store.connection.execute(
+            "DELETE FROM metadata WHERE key IN (?1, ?2)",
+            params![
+                FILE_TEXT_FTS_SOURCE_REVISION_KEY,
+                FILE_TEXT_FTS_PROJECTION_REVISION_KEY,
+            ],
+        )?;
+        set_metadata(
+            &store.connection,
+            SCHEMA_VERSION_KEY,
+            &crate::schema::COVERAGE_DISCOVERY_SCHEMA_VERSION.to_string(),
+        )?;
+        drop(store);
+
+        let migrated = AtlasStore::open_for_project(&database, &root)?;
+        require_eq(
+            &migrated.file_text_fts_state()?,
+            &FileTextFtsState {
+                source_rows: 1,
+                indexed_rows: 1,
+                synchronized: true,
+            },
+            "migrated FTS synchronization state",
+        )?;
+        require_eq(
+            &migrated
+                .query_file_text_fts_candidates(
+                    &FileTextFtsQuery {
+                        literal_token: "needle",
+                        path_prefix: None,
+                        limit: 10,
+                    },
+                    None,
+                )?
+                .candidates[0]
+                .path,
+            &"src/main.rs".to_string(),
+            "migrated FTS backfill candidate",
+        )?;
+        drop(migrated);
+
+        let reopened = AtlasStore::open_read_only_for_project(&database, &root)?;
+        require_eq(
+            &reopened.file_text_fts_state()?.synchronized,
+            &true,
+            "reopened FTS synchronization",
+        )?;
+        require_eq(
+            &reopened
+                .query_file_text_fts_candidates(
+                    &FileTextFtsQuery {
+                        literal_token: "migration",
+                        path_prefix: Some("src"),
+                        limit: 1,
+                    },
+                    None,
+                )?
+                .candidates
+                .len(),
+            &1,
+            "reopened FTS candidate count",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_read_progress_interrupts_active_repository_traversal_and_clears_handler()
+    -> Result<(), Box<dyn Error>> {
+        let store = AtlasStore::in_memory()?;
+        let control = IndexWorkControl::with_deadline(
+            projectatlas_core::IndexCancellation::new(),
+            Instant::now() + std::time::Duration::from_millis(50),
+        );
+        let interrupted = with_sqlite_read_progress(
+            &store.connection,
+            Some(&control),
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                store
+                    .connection
+                    .query_row(
+                        "WITH RECURSIVE numbers(value) AS (
+                             VALUES(1)
+                             UNION ALL
+                             SELECT value + 1 FROM numbers WHERE value < 100000000
+                         )
+                         SELECT SUM(value) FROM numbers",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(DbError::from)
+            },
+        );
+        require(
+            matches!(
+                interrupted,
+                Err(DbError::IndexWork(IndexWorkFailure::DeadlineExceeded {
+                    stage: IndexWorkStage::RepositoryTraversal
+                }))
+            ),
+            "active SQLite traversal was not interrupted with its typed deadline",
+        )?;
+        require_eq(
+            &store
+                .connection
+                .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?,
+            &1,
+            "cleared repository traversal progress handler",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn fallback_admission_precedes_content_decode_and_clears_progress_handlers()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[test_file_node("src/good.rs", "hash-good")])?;
+        store.replace_file_texts_for_paths(
+            &["src/good.rs".to_string()],
+            &[IndexedFileText {
+                path: "src/good.rs".to_string(),
+                content_hash: Some("hash-good".to_string()),
+                byte_count: 12,
+                line_count: 1,
+                content: "needle good\n".to_string(),
+            }],
+        )?;
+        store.connection.execute(
+            "INSERT INTO file_texts(path, content_hash, byte_count, line_count, content)
+             VALUES('src/bad.rs', 'hash-bad', 1, 1, x'80')",
+            [],
+        )?;
+
+        let mut admitted = Vec::new();
+        let mut visited = Vec::new();
+        store.visit_file_texts_for_fallback(
+            Some("src"),
+            None,
+            |metadata| {
+                admitted.push(metadata.path.clone());
+                Ok(if metadata.path == "src/bad.rs" {
+                    FileTextAdmission::Skip
+                } else {
+                    FileTextAdmission::Read
+                })
+            },
+            |text| {
+                visited.push(text.path);
+                Ok(true)
+            },
+        )?;
+        require_eq(
+            &admitted,
+            &vec!["src/bad.rs".to_string(), "src/good.rs".to_string()],
+            "fallback metadata admission rows",
+        )?;
+        require_eq(
+            &visited,
+            &vec!["src/good.rs".to_string()],
+            "fallback decoded rows",
+        )?;
+        let mut scoped_plan = store.connection.prepare(&format!(
+            "EXPLAIN QUERY PLAN {FILE_TEXT_FALLBACK_SCOPED_METADATA_SQL}"
+        ))?;
+        let scoped_plan_details = scoped_plan
+            .query_map(params!["src", "src/", "src0"], |row| {
+                row.get::<_, String>(3)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        require(
+            scoped_plan_details
+                .iter()
+                .any(|detail| detail.contains("SEARCH file_texts USING INDEX"))
+                && scoped_plan_details
+                    .iter()
+                    .all(|detail| !detail.contains("SCAN file_texts")),
+            "path-scoped fallback did not use bounded binary index ranges",
+        )?;
+        let mut scoped_opcodes = store
+            .connection
+            .prepare(&format!("EXPLAIN {FILE_TEXT_FALLBACK_SCOPED_METADATA_SQL}"))?;
+        let scoped_opcode_rows = scoped_opcodes
+            .query_map(params!["src", "src/", "src0"], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        require(
+            scoped_opcode_rows
+                .iter()
+                .all(|(opcode, column)| opcode != "Column" || *column != 4),
+            "fallback metadata cursor read source content before admission",
+        )?;
+        require(
+            store
+                .visit_file_texts_for_fallback(
+                    Some("src/bad.rs"),
+                    None,
+                    |_| Ok(FileTextAdmission::Read),
+                    |_| Ok(true),
+                )
+                .is_err(),
+            "invalid source content decoded without error",
+        )?;
+
+        let success_cancellation = projectatlas_core::IndexCancellation::new();
+        let success_control = IndexWorkControl::new(success_cancellation.clone(), None);
+        store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token: "needle",
+                path_prefix: None,
+                limit: 10,
+            },
+            Some(&success_control),
+        )?;
+        success_cancellation.cancel();
+        let recursive_sum = store.connection.query_row(
+            "WITH RECURSIVE numbers(value) AS (
+                 VALUES(1) UNION ALL SELECT value + 1 FROM numbers WHERE value < 5000
+             ) SELECT SUM(value) FROM numbers",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &recursive_sum,
+            &12_502_500,
+            "cleared success progress handler",
+        )?;
+
+        let cancellation = projectatlas_core::IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        let mut rows_seen = 0;
+        let cancelled = store.visit_file_texts_for_fallback(
+            Some("src"),
+            Some(&control),
+            |_| {
+                rows_seen += 1;
+                cancellation.cancel();
+                Ok(FileTextAdmission::Skip)
+            },
+            |_| Ok(true),
+        );
+        require_eq(&rows_seen, &1, "rows before fallback cancellation")?;
+        require(
+            matches!(
+                cancelled,
+                Err(DbError::IndexWork(IndexWorkFailure::Cancelled {
+                    stage: IndexWorkStage::TextIndex
+                }))
+            ),
+            "fallback cancellation was not typed",
+        )?;
+        let post_error_sum = store.connection.query_row(
+            "WITH RECURSIVE numbers(value) AS (
+                 VALUES(1) UNION ALL SELECT value + 1 FROM numbers WHERE value < 5000
+             ) SELECT SUM(value) FROM numbers",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &post_error_sum,
+            &12_502_500,
+            "cleared error progress handler",
+        )?;
+
+        let expired = IndexWorkControl::with_deadline(
+            projectatlas_core::IndexCancellation::new(),
+            Instant::now(),
+        );
+        let deadline = store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token: "needle",
+                path_prefix: None,
+                limit: 10,
+            },
+            Some(&expired),
+        );
+        require(
+            matches!(
+                deadline,
+                Err(DbError::IndexWork(IndexWorkFailure::DeadlineExceeded {
+                    stage: IndexWorkStage::TextIndex
+                }))
+            ),
+            "FTS deadline was not typed",
+        )?;
         Ok(())
     }
 
@@ -6450,6 +11245,49 @@ mod tests {
             &nodes[0].purpose.status,
             &PurposeStatus::Approved,
             "agent-approved status",
+        )?;
+        store.set_suggested_purpose("src/main.rs", "Late generated suggestion")?;
+        let nodes = store.load_nodes()?;
+        require_eq(
+            &nodes[0].purpose.purpose,
+            &Some("Application entry point".to_string()),
+            "approved purpose survives a late suggestion",
+        )?;
+        require_eq(
+            &nodes[0].purpose.source,
+            &PurposeSource::Agent,
+            "approved purpose source survives a late suggestion",
+        )?;
+        require_eq(
+            &nodes[0].purpose.status,
+            &PurposeStatus::Approved,
+            "approved purpose status survives a late suggestion",
+        )?;
+
+        store.connection.execute(
+            "
+            UPDATE purposes
+            SET status = ?1
+            WHERE node_id = (SELECT id FROM nodes WHERE path = ?2)
+            ",
+            params![PurposeStatus::Stale.as_str(), "src/main.rs"],
+        )?;
+        store.set_suggested_purpose("src/main.rs", "Later generated suggestion")?;
+        let nodes = store.load_nodes()?;
+        require_eq(
+            &nodes[0].purpose.purpose,
+            &Some("Application entry point".to_string()),
+            "stale reviewed purpose survives a late suggestion",
+        )?;
+        require_eq(
+            &nodes[0].purpose.source,
+            &PurposeSource::Agent,
+            "stale reviewed source survives a late suggestion",
+        )?;
+        require_eq(
+            &nodes[0].purpose.status,
+            &PurposeStatus::Stale,
+            "stale reviewed status survives a late suggestion",
         )?;
         Ok(())
     }
@@ -6515,14 +11353,504 @@ mod tests {
         let nodes = store.load_nodes()?;
         require_eq(
             &nodes[0].purpose.status,
-            &PurposeStatus::Stale,
-            "changed reviewed purpose becomes stale",
+            &PurposeStatus::Approved,
+            "changed reviewed purpose stays approved",
         )?;
         require_eq(
             &nodes[0].purpose.agent_reviewed(),
-            &false,
-            "stale purpose is not agent reviewed",
+            &true,
+            "changed approved purpose remains agent reviewed",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn purpose_curation_batch_coalesces_current_unapproved_rows() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("project");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        store.replace_scan(&[
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+            test_file_node("src/accepted.rs", "hash-accepted"),
+        ])?;
+        store.set_suggested_purpose("src/b.rs", "Generated B suggestion")?;
+        store.set_purpose("src/accepted.rs", "Accepted purpose", PurposeSource::Agent)?;
+
+        let selected = vec![
+            "src/b.rs".to_string(),
+            "src/a.rs".to_string(),
+            "src/a.rs".to_string(),
+            "src/accepted.rs".to_string(),
+        ];
+        let first = store.load_purpose_curation_batch(" issue   308 ", &selected)?;
+        let second = store.load_purpose_curation_batch(
+            "issue 308",
+            &selected.iter().rev().cloned().collect::<Vec<_>>(),
+        )?;
+        require_eq(&first.task, &"issue 308".to_string(), "normalized task")?;
+        require_eq(&first.work_key, &second.work_key, "deterministic batch key")?;
+        require_eq(&first.items, &second.items, "deterministic candidate rows")?;
+        require_eq(&first.items.len(), &2, "coalesced unapproved row count")?;
+        require_eq(
+            &first
+                .items
+                .iter()
+                .map(|item| item.node.node.path.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["src/a.rs", "src/b.rs"],
+            "sorted actionable paths",
+        )?;
+        require_eq(
+            &first
+                .items
+                .iter()
+                .all(|item| item.work_key.len() == 64 && item.state_token.len() == 64),
+            &true,
+            "bounded opaque item identities",
+        )?;
+
+        let page = store.purpose_curation_findings_page_current(&HealthQuery {
+            start_index: 0,
+            limit: 20,
+            category: None,
+            severity: Some(Severity::Warning),
+            path_prefix: None,
+            summary_only: false,
+            scope: HealthScope::all(),
+        })?;
+        require_eq(&page.total, &2, "actionable queue count")?;
+        require_eq(
+            &page
+                .findings
+                .iter()
+                .any(|finding| finding.path == "src/accepted.rs"),
+            &false,
+            "accepted purpose omitted from automatic curation",
+        )?;
+
+        store.set_purpose(
+            "src/accepted.rs",
+            "Deliberately corrected purpose",
+            PurposeSource::Agent,
+        )?;
+        let corrected = store
+            .load_node_by_path("src/accepted.rs")?
+            .ok_or_else(|| io::Error::other("corrected purpose path disappeared"))?;
+        require_eq(
+            &corrected.purpose.purpose,
+            &Some("Deliberately corrected purpose".to_string()),
+            "explicit accepted-purpose correction",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn conditional_purpose_batch_is_atomic_and_rejects_changed_work() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("project");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let nodes = vec![
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+            test_file_node("src/changed.rs", "hash-changed"),
+            test_file_node("src/accepted.rs", "hash-accepted"),
+            test_file_node("src/generation.rs", "hash-generation"),
+            test_file_node("src/rollback-a.rs", "hash-rollback-a"),
+            test_file_node("src/rollback-b.rs", "hash-rollback-b"),
+        ];
+        store.replace_scan(&nodes)?;
+        store.set_suggested_purpose("src/b.rs", "Generated B suggestion")?;
+        store.set_suggested_purpose("src/changed.rs", "Original suggestion")?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &0,
+            "suggestions do not advance authored-purpose revision",
+        )?;
+        let task = "issue-308-purpose-curation";
+
+        let apply_batch = store
+            .load_purpose_curation_batch(task, &["src/a.rs".to_string(), "src/b.rs".to_string()])?;
+        let requests = apply_batch
+            .items
+            .iter()
+            .map(|candidate| {
+                conditional_purpose_request(
+                    task,
+                    candidate,
+                    &format!("Reviewed {}", candidate.node.node.path),
+                )
+            })
+            .collect::<Vec<_>>();
+        let applied = store.conditionally_set_purposes(&requests)?;
+        require_eq(
+            &applied
+                .iter()
+                .map(|result| result.state)
+                .collect::<Vec<_>>(),
+            &vec![
+                PurposeConditionalApplyState::Applied,
+                PurposeConditionalApplyState::Applied,
+            ],
+            "one-transaction batch outcomes",
+        )?;
+        require_eq(
+            &applied.iter().all(|result| {
+                result.current_purpose.as_ref().is_some_and(|purpose| {
+                    purpose.status == PurposeStatus::Approved
+                        && purpose.source == PurposeSource::Agent
+                })
+            }),
+            &true,
+            "applied transaction-owned purpose metadata",
+        )?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &1,
+            "one accepted batch advances one authored-purpose revision",
+        )?;
+
+        let changed = store
+            .load_purpose_curation_batch(task, &["src/changed.rs".to_string()])?
+            .items
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::other("changed candidate missing"))?;
+        store.set_suggested_purpose("src/changed.rs", "Concurrent suggestion")?;
+        let changed_result = store
+            .conditionally_set_purposes(&[conditional_purpose_request(
+                task,
+                &changed,
+                "Stale curator answer",
+            )])?
+            .pop()
+            .ok_or_else(|| io::Error::other("changed conditional result missing"))?;
+        require_eq(
+            &changed_result.state,
+            &PurposeConditionalApplyState::Stale,
+            "changed suggestion state",
+        )?;
+        require_eq(
+            &changed_result
+                .current_purpose
+                .as_ref()
+                .map(|purpose| (purpose.status, purpose.source, purpose.purpose.as_deref())),
+            &Some((
+                PurposeStatus::Suggested,
+                PurposeSource::Generated,
+                Some("Concurrent suggestion"),
+            )),
+            "stale transaction-owned purpose metadata",
+        )?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &1,
+            "stale conditional purpose leaves revision unchanged",
+        )?;
+
+        let accepted = store
+            .load_purpose_curation_batch(task, &["src/accepted.rs".to_string()])?
+            .items
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::other("accepted candidate missing"))?;
+        store.set_purpose(
+            "src/accepted.rs",
+            "Concurrent accepted purpose",
+            PurposeSource::Agent,
+        )?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &2,
+            "explicit accepted correction advances the authored-purpose revision",
+        )?;
+        store.set_purpose(
+            "src/accepted.rs",
+            "Concurrent accepted purpose",
+            PurposeSource::Agent,
+        )?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &2,
+            "identical accepted purpose leaves the authored-purpose revision unchanged",
+        )?;
+        let accepted_result = store
+            .conditionally_set_purposes(&[conditional_purpose_request(
+                task,
+                &accepted,
+                "Stale curator overwrite",
+            )])?
+            .pop()
+            .ok_or_else(|| io::Error::other("accepted conditional result missing"))?;
+        require_eq(
+            &accepted_result.state,
+            &PurposeConditionalApplyState::Accepted,
+            "accepted concurrent state",
+        )?;
+        require_eq(
+            &accepted_result
+                .current_purpose
+                .as_ref()
+                .map(|purpose| (purpose.status, purpose.source, purpose.purpose.as_deref())),
+            &Some((
+                PurposeStatus::Approved,
+                PurposeSource::Agent,
+                Some("Concurrent accepted purpose"),
+            )),
+            "accepted transaction-owned purpose metadata",
+        )?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &2,
+            "accepted conditional no-op leaves revision unchanged",
+        )?;
+
+        let unavailable_result = store
+            .conditionally_set_purposes(&[PurposeConditionalApplyRequest {
+                task: task.to_string(),
+                path: "src/unavailable.rs".to_string(),
+                work_key: "unavailable-work".to_string(),
+                state_token: "unavailable-state".to_string(),
+                purpose: "Unavailable purpose".to_string(),
+            }])?
+            .pop()
+            .ok_or_else(|| io::Error::other("unavailable conditional result missing"))?;
+        require_eq(
+            &unavailable_result.state,
+            &PurposeConditionalApplyState::PathUnavailable,
+            "unavailable path state",
+        )?;
+        require_eq(
+            &unavailable_result.current_purpose,
+            &None,
+            "unavailable transaction-owned purpose metadata",
+        )?;
+
+        let generation = store
+            .load_purpose_curation_batch(task, &["src/generation.rs".to_string()])?
+            .items
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::other("generation candidate missing"))?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("project identity missing"))?;
+        {
+            let mut publication = store.begin_index_publication("purpose-curation-test")?;
+            publication.begin_scan_replacement()?;
+            publication.upsert_scan_node_batch(&nodes)?;
+            publication.finish_scan_replacement()?;
+            publication.replace_repository_graph(project, &[], &[], &[], &[])?;
+            publication.complete()?;
+        }
+        let generation_state = store.conditionally_set_purpose(
+            task,
+            "src/generation.rs",
+            &generation.work_key,
+            &generation.state_token,
+            "Prior-generation answer",
+        )?;
+        require_eq(
+            &generation_state,
+            &PurposeConditionalApplyState::Stale,
+            "generation-bound state",
+        )?;
+
+        let current = store.load_nodes_by_paths(&[
+            "src/changed.rs".to_string(),
+            "src/accepted.rs".to_string(),
+            "src/generation.rs".to_string(),
+        ])?;
+        let purposes = current
+            .iter()
+            .map(|node| {
+                (
+                    node.node.path.as_str(),
+                    node.purpose.purpose.as_deref(),
+                    node.purpose.status,
+                )
+            })
+            .collect::<Vec<_>>();
+        require_eq(
+            &purposes,
+            &vec![
+                (
+                    "src/accepted.rs",
+                    Some("Concurrent accepted purpose"),
+                    PurposeStatus::Approved,
+                ),
+                (
+                    "src/changed.rs",
+                    Some("Concurrent suggestion"),
+                    PurposeStatus::Suggested,
+                ),
+                ("src/generation.rs", None, PurposeStatus::Missing),
+            ],
+            "conflicting rows remain untouched",
+        )?;
+
+        let rollback_batch = store.load_purpose_curation_batch(
+            task,
+            &[
+                "src/rollback-a.rs".to_string(),
+                "src/rollback-b.rs".to_string(),
+            ],
+        )?;
+        let rollback_requests = rollback_batch
+            .items
+            .iter()
+            .map(|candidate| {
+                conditional_purpose_request(
+                    task,
+                    candidate,
+                    &format!("Reviewed {}", candidate.node.node.path),
+                )
+            })
+            .collect::<Vec<_>>();
+        store.connection.execute_batch(
+            "
+            CREATE TEMP TRIGGER abort_second_conditional_purpose_update
+            BEFORE UPDATE ON purposes
+            WHEN OLD.node_id = (
+                SELECT id FROM nodes WHERE path = 'src/rollback-b.rs'
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'forced conditional purpose rollback');
+            END;
+            ",
+        )?;
+        if store.conditionally_set_purposes(&rollback_requests).is_ok() {
+            return Err(io::Error::other("injected conditional batch failure succeeded").into());
+        }
+        drop(store);
+        let reopened = AtlasStore::open_for_project(&database, &root)?;
+        let rolled_back = reopened.load_nodes_by_paths(&[
+            "src/rollback-a.rs".to_string(),
+            "src/rollback-b.rs".to_string(),
+        ])?;
+        require_eq(
+            &rolled_back
+                .iter()
+                .map(|node| node.purpose.status)
+                .collect::<Vec<_>>(),
+            &vec![PurposeStatus::Missing, PurposeStatus::Missing],
+            "failed conditional batch rolled back after reopen",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_purpose_curators_cannot_overwrite_the_winner() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("project");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        store.replace_scan(&[test_file_node("src/main.rs", "hash-main")])?;
+        let candidate = store
+            .load_purpose_curation_batch("concurrent-curators", &["src/main.rs".to_string()])?
+            .items
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::other("concurrent candidate missing"))?;
+        drop(store);
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for purpose in ["First reviewed purpose", "Second reviewed purpose"] {
+            let database = database.clone();
+            let root = root.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            let candidate = candidate.clone();
+            handles.push(std::thread::spawn(move || {
+                let store = AtlasStore::open_for_project(&database, &root)?;
+                barrier.wait();
+                store.conditionally_set_purpose(
+                    "concurrent-curators",
+                    "src/main.rs",
+                    &candidate.work_key,
+                    &candidate.state_token,
+                    purpose,
+                )
+            }));
+        }
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_panic| io::Error::other("curator thread panicked"))?
+                    .map_err(io::Error::other)
+            })
+            .collect::<Result<Vec<_>, io::Error>>()?;
+        require_eq(
+            &outcomes
+                .iter()
+                .filter(|state| **state == PurposeConditionalApplyState::Applied)
+                .count(),
+            &1,
+            "single concurrent winner",
+        )?;
+        require_eq(
+            &outcomes
+                .iter()
+                .filter(|state| **state == PurposeConditionalApplyState::Accepted)
+                .count(),
+            &1,
+            "accepted concurrent loser",
+        )?;
+
+        let reopened = AtlasStore::open_for_project(&database, &root)?;
+        let node = reopened
+            .load_node_by_path("src/main.rs")?
+            .ok_or_else(|| io::Error::other("concurrent path disappeared"))?;
+        require_eq(
+            &node.purpose.status,
+            &PurposeStatus::Approved,
+            "persisted concurrent winner status",
+        )?;
+        require_eq(
+            &matches!(
+                node.purpose.purpose.as_deref(),
+                Some("First reviewed purpose" | "Second reviewed purpose")
+            ),
+            &true,
+            "persisted concurrent winner value",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn purpose_curation_hydration_uses_existing_unique_indexes() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+        ])?;
+        let sql = format!("EXPLAIN QUERY PLAN {}", load_nodes_by_paths_sql(2));
+        let mut statement = store.connection.prepare(&sql)?;
+        let details = statement
+            .query_map(params!["src/a.rs", "src/b.rs"], |row| {
+                row.get::<_, String>(3)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let plan = details.join("\n");
+        require_eq(
+            &plan.contains("SEARCH n USING INDEX sqlite_autoindex_nodes_"),
+            &true,
+            "unique path index query plan",
+        )?;
+        require_eq(
+            &plan.contains("SEARCH p USING INTEGER PRIMARY KEY"),
+            &true,
+            "purpose primary-key query plan",
+        )?;
+        require_eq(&plan.contains("SCAN n"), &false, "no node-table scan")?;
         Ok(())
     }
 
@@ -6554,6 +11882,21 @@ mod tests {
             &nodes[0].purpose.status,
             &PurposeStatus::Missing,
             "summary update does not approve purpose",
+        )?;
+        require_eq(
+            &store.has_agent_approved_purpose()?,
+            &false,
+            "missing purpose does not activate graph hydration",
+        )?;
+        store.set_purpose(
+            "src/lib.rs",
+            "Owns the library entry points.",
+            PurposeSource::Agent,
+        )?;
+        require_eq(
+            &store.has_agent_approved_purpose()?,
+            &true,
+            "agent-approved purpose activates graph hydration",
         )?;
         Ok(())
     }
@@ -6607,6 +11950,569 @@ mod tests {
             &symbols[0].documentation,
             &Some("Run the application.".to_string()),
             "documentation metadata",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn import_alias_lookup_uses_kind_first_covering_index() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/main.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: Vec::new(),
+            relations: vec![
+                SymbolRelation {
+                    path: "src/main.rs".to_string(),
+                    source_name: "main".to_string(),
+                    target_name: "use crate::service::run".to_string(),
+                    kind: RelationKind::Imports,
+                    line: 1,
+                    context: "use crate::service::run;".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+                SymbolRelation {
+                    path: "src/main.rs".to_string(),
+                    source_name: "main".to_string(),
+                    target_name: "use crate::other::Thing".to_string(),
+                    kind: RelationKind::Imports,
+                    line: 2,
+                    context: "use crate::other::Thing;".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+            ],
+        })?;
+
+        let relations =
+            store.load_import_relations_matching_targets(&["service".to_string()], 10)?;
+        require_eq(&relations.len(), &1, "matched import relation count")?;
+        require_eq(
+            &store
+                .load_import_relations_for_path("src/main.rs", 10)?
+                .len(),
+            &2,
+            "exact-path import relation count",
+        )?;
+        let mut statement = store.connection.prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT path, source_name, target_name, line
+             FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup
+             WHERE kind = 'imports' AND target_name LIKE '%service%' ESCAPE '\\'
+             ORDER BY path, line, source_name, target_name
+             LIMIT 10",
+        )?;
+        let plan = statement
+            .query_map([], |row| row.get::<_, String>(3))?
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        require(
+            plan.contains(
+                "SEARCH symbol_relations USING COVERING INDEX idx_symbol_import_alias_lookup (kind=?)",
+            ),
+            &format!("import alias lookup missed kind-first covering index: {plan}"),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn file_scoped_symbol_kind_lookup_uses_path_index() -> Result<(), Box<dyn Error>> {
+        let store = AtlasStore::in_memory()?;
+        for sql in [
+            "EXPLAIN QUERY PLAN
+             SELECT path, language, name, kind, signature, line_start, line_end,
+                    parent, parser, detail, exported, documentation
+             FROM symbols INDEXED BY idx_symbols_path
+             WHERE path = 'src/lib.rs' AND kind IN ('function')
+             ORDER BY path, line_start, name
+             LIMIT 25",
+            "EXPLAIN QUERY PLAN
+             SELECT COUNT(*) FROM symbols INDEXED BY idx_symbols_path
+             WHERE path = 'src/lib.rs' AND kind IN ('function')",
+        ] {
+            let mut statement = store.connection.prepare(sql)?;
+            let plan = statement
+                .query_map([], |row| row.get::<_, String>(3))?
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n");
+            require(
+                plan.contains("SEARCH symbols USING INDEX idx_symbols_path (path=?)"),
+                &format!("file-scoped symbol lookup missed exact-path index: {plan}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_source_parse_and_fact_parser_provenance_independently()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open(&database)?;
+        let graph = SymbolGraph {
+            path: "src/optional.lang".to_string(),
+            language: Some("optional-language".to_string()),
+            parser: ParserKind::Fallback,
+            symbols: vec![CodeSymbol {
+                path: "src/optional.lang".to_string(),
+                language: Some("optional-language".to_string()),
+                name: "entry".to_string(),
+                kind: SymbolKind::Function,
+                signature: "entry()".to_string(),
+                exported: false,
+                documentation: None,
+                line_start: 1,
+                line_end: 1,
+                parent: None,
+                parser: ParserKind::Fallback,
+                detail: None,
+            }],
+            relations: vec![SymbolRelation {
+                path: "src/optional.lang".to_string(),
+                source_name: "entry".to_string(),
+                target_name: "helper".to_string(),
+                kind: RelationKind::Calls,
+                line: 1,
+                context: "entry()".to_string(),
+                parser: ParserKind::Fallback,
+            }],
+        };
+        let metadata = SourceParseMetadata {
+            path: graph.path.clone(),
+            language: graph.language.clone(),
+            parser: ParserKind::TreeSitter,
+            symbol_count: graph.symbols.len(),
+            relation_count: graph.relations.len(),
+        };
+
+        store.replace_symbol_graph_with_metadata(&graph, &metadata)?;
+
+        let stored_metadata = store
+            .load_source_parse_metadata(&graph.path)?
+            .ok_or_else(|| io::Error::other("missing independent source parse metadata"))?;
+        let symbols = store.load_symbols(Some(&graph.path), Some("entry"), 10)?;
+        let relations = store.load_symbol_relations(Some(&graph.path), Some("helper"), 10)?;
+        require_eq(
+            &stored_metadata.parser,
+            &ParserKind::TreeSitter,
+            "grammar-backed source parser",
+        )?;
+        require_eq(
+            &symbols[0].parser,
+            &ParserKind::Fallback,
+            "fallback symbol provenance",
+        )?;
+        require_eq(
+            &relations[0].parser,
+            &ParserKind::Fallback,
+            "fallback relation provenance",
+        )?;
+
+        let invalid_metadata = SourceParseMetadata {
+            symbol_count: 0,
+            ..metadata
+        };
+        let Err(error) = store.replace_symbol_graph_with_metadata(&graph, &invalid_metadata) else {
+            return Err(io::Error::other("mismatched explicit metadata was accepted").into());
+        };
+        if !matches!(error, DbError::SymbolGraphRowShape { .. }) {
+            return Err(io::Error::other(format!(
+                "mismatched explicit metadata returned the wrong error: {error}"
+            ))
+            .into());
+        }
+
+        let empty_graph = SymbolGraph {
+            path: "src/empty.optional".to_string(),
+            language: Some("optional-language".to_string()),
+            parser: ParserKind::Fallback,
+            symbols: Vec::new(),
+            relations: Vec::new(),
+        };
+        let empty_metadata = SourceParseMetadata {
+            path: empty_graph.path.clone(),
+            language: empty_graph.language.clone(),
+            parser: ParserKind::TreeSitter,
+            symbol_count: 0,
+            relation_count: 0,
+        };
+        store.replace_symbol_graph_with_metadata(&empty_graph, &empty_metadata)?;
+        drop(store);
+
+        let reader = AtlasStore::open_read_only(&database)?;
+        let reopened_metadata = reader
+            .load_source_parse_metadata(&graph.path)?
+            .ok_or_else(|| io::Error::other("missing reopened source parse metadata"))?;
+        let metadata_paths = reader.source_parse_metadata_paths_for_paths(&[
+            "src/missing.optional".to_string(),
+            empty_graph.path.clone(),
+            graph.path.clone(),
+            graph.path.clone(),
+        ])?;
+        let reopened_graphs =
+            reader.load_symbol_graphs_for_paths(&[graph.path.clone(), empty_graph.path.clone()])?;
+        require_eq(
+            &reopened_metadata.parser,
+            &ParserKind::TreeSitter,
+            "reopened source parser provenance",
+        )?;
+        require_eq(
+            &metadata_paths,
+            &HashSet::from([graph.path.clone(), empty_graph.path.clone()]),
+            "batched source parse metadata paths",
+        )?;
+        require_eq(
+            &reopened_graphs,
+            &vec![empty_graph, graph],
+            "reopened fact graph provenance",
+        )?;
+        reader.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn reconstructs_exact_symbol_graph_batches_from_disk_and_fails_closed()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open(&db_path)?;
+        store.replace_scan(&[
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+        ])?;
+        let graph = SymbolGraph {
+            path: "src/a.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![CodeSymbol {
+                path: "src/a.rs".to_string(),
+                language: Some("rust".to_string()),
+                name: "owner".to_string(),
+                kind: SymbolKind::Function,
+                signature: "fn owner()".to_string(),
+                exported: true,
+                documentation: None,
+                line_start: 1,
+                line_end: 2,
+                parent: None,
+                parser: ParserKind::TreeSitter,
+                detail: Some("function_item".to_string()),
+            }],
+            relations: vec![SymbolRelation {
+                path: "src/a.rs".to_string(),
+                source_name: "owner".to_string(),
+                target_name: "dependency".to_string(),
+                kind: RelationKind::Calls,
+                line: 2,
+                context: "dependency()".to_string(),
+                parser: ParserKind::TreeSitter,
+            }],
+        };
+        store.replace_symbol_graph(&graph)?;
+        let empty_graph = SymbolGraph {
+            path: "src/b.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: Vec::new(),
+            relations: Vec::new(),
+        };
+        store.replace_symbol_graph(&empty_graph)?;
+        drop(store);
+
+        let reader = AtlasStore::open_read_only(&db_path)?;
+        let loaded = reader.load_symbol_graphs_for_paths(&[
+            "src/b.rs".to_string(),
+            "src/a.rs".to_string(),
+            "src/a.rs".to_string(),
+            "src/missing.rs".to_string(),
+        ])?;
+        require_eq(
+            &loaded,
+            &vec![graph, empty_graph],
+            "batched symbol graph round trip",
+        )?;
+        for (table, expected_index) in [
+            (
+                "source_parse_metadata",
+                "sqlite_autoindex_source_parse_metadata_1",
+            ),
+            ("symbols", "idx_symbols_path"),
+            ("symbol_relations", "idx_symbol_relations_path"),
+        ] {
+            let sql = format!(
+                "EXPLAIN QUERY PLAN SELECT path FROM {table}
+                  WHERE path IN ('src/a.rs', 'src/b.rs')"
+            );
+            let mut statement = reader.connection.prepare(&sql)?;
+            let plan = statement
+                .query_map([], |row| row.get::<_, String>(3))?
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n");
+            if !plan.contains(expected_index) {
+                return Err(io::Error::other(format!(
+                    "{table} batch lookup missed {expected_index}: {plan}"
+                ))
+                .into());
+            }
+        }
+        reader.finish_index_read_snapshot()?;
+        drop(reader);
+
+        let writer = AtlasStore::open(&db_path)?;
+        writer.connection.execute(
+            "UPDATE source_parse_metadata SET symbol_count = 2 WHERE path = 'src/a.rs'",
+            [],
+        )?;
+        let Err(error) = writer.load_symbol_graphs_for_paths(&["src/a.rs".to_string()]) else {
+            return Err(io::Error::other("metadata count corruption was accepted").into());
+        };
+        if !matches!(error, DbError::SymbolGraphRowShape { .. }) {
+            return Err(io::Error::other(format!(
+                "metadata count corruption returned the wrong error: {error}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_symbol_batch_streams_exact_paths_and_uses_path_index() -> Result<(), Box<dyn Error>>
+    {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+        ])?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/a.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![
+                batch_test_symbol("src/a.rs", "alpha", 1, 32),
+                batch_test_symbol("src/a.rs", "beta", 2, 32),
+            ],
+            relations: Vec::new(),
+        })?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/b.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![batch_test_symbol("src/b.rs", "gamma", 1, 32)],
+            relations: Vec::new(),
+        })?;
+
+        let complete = store.load_symbols_for_paths_bounded(
+            &[
+                "src/b.rs".to_string(),
+                "src/a.rs".to_string(),
+                "src/a.rs".to_string(),
+            ],
+            SymbolBatchReadBudget::new(2, 3, MAX_SYMBOL_BATCH_DECODED_BYTES)?,
+            None,
+        )?;
+        require_eq(
+            &complete
+                .rows
+                .iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["alpha", "beta", "gamma"],
+            "deterministic exact-path symbol order",
+        )?;
+        require_eq(&complete.truncated, &false, "complete symbol batch")?;
+        require_eq(&complete.reached_limit, &None, "complete batch limit")?;
+        require_eq(&complete.work.requested_paths, &2, "unique admitted paths")?;
+        require_eq(&complete.work.returned_rows, &3, "complete returned rows")?;
+
+        let row_limited = store.load_symbols_for_paths_bounded(
+            &["src/b.rs".to_string(), "src/a.rs".to_string()],
+            SymbolBatchReadBudget::new(2, 1, MAX_SYMBOL_BATCH_DECODED_BYTES)?,
+            None,
+        )?;
+        require_eq(
+            &row_limited.reached_limit,
+            &Some(SymbolBatchReadLimit::Rows),
+            "row-bound classification",
+        )?;
+        require_eq(&row_limited.rows.len(), &1, "row-bound retained rows")?;
+
+        let byte_limited = store.load_symbols_for_paths_bounded(
+            &["src/a.rs".to_string()],
+            SymbolBatchReadBudget::new(1, 3, 1)?,
+            None,
+        )?;
+        require_eq(
+            &byte_limited.reached_limit,
+            &Some(SymbolBatchReadLimit::DecodedBytes),
+            "decoded-byte-bound classification",
+        )?;
+        require_eq(
+            &byte_limited.rows.len(),
+            &0,
+            "tiny byte budget retained no partial row",
+        )?;
+        require_eq(
+            &byte_limited.work.decoded_bytes,
+            &0,
+            "tiny byte budget retained no row payload",
+        )?;
+
+        let gamma_bytes = code_symbol_decoded_bytes(&complete.rows[2])?;
+        let exact_byte_boundary = store.load_symbols_for_paths_bounded(
+            &["src/b.rs".to_string()],
+            SymbolBatchReadBudget::new(1, 1, gamma_bytes)?,
+            None,
+        )?;
+        require_eq(
+            &exact_byte_boundary.rows.len(),
+            &1,
+            "exact decoded-byte boundary retained the complete row",
+        )?;
+        require_eq(
+            &exact_byte_boundary.work.decoded_bytes,
+            &gamma_bytes,
+            "exact decoded-byte boundary accounting",
+        )?;
+
+        let oversized_signature =
+            "x".repeat(usize::try_from(MAX_SYMBOL_BATCH_DECODED_BYTES)?.saturating_add(1));
+        store.connection.execute(
+            "UPDATE symbols SET signature = ?1, line_start = 'invalid' WHERE path = 'src/b.rs'",
+            [&oversized_signature],
+        )?;
+        let oversized_row = store.load_symbols_for_paths_bounded(
+            &["src/b.rs".to_string()],
+            SymbolBatchReadBudget::new(1, 1, MAX_SYMBOL_BATCH_DECODED_BYTES)?,
+            None,
+        )?;
+        require_eq(
+            &oversized_row.reached_limit,
+            &Some(SymbolBatchReadLimit::DecodedBytes),
+            "oversized persisted row was rejected before hydration",
+        )?;
+        require_eq(
+            &oversized_row.rows.len(),
+            &0,
+            "oversized persisted row retained no allocation",
+        )?;
+        store.connection.execute(
+            "UPDATE symbols SET signature = 'fn gamma()', line_start = 1 WHERE path = 'src/b.rs'",
+            [],
+        )?;
+
+        let many_paths = (0..65)
+            .rev()
+            .map(|index| format!("generated/{index:04}.rs"))
+            .collect::<Vec<_>>();
+        for index in 0..65 {
+            let path = format!("generated/{index:04}.rs");
+            store.replace_symbol_graph(&SymbolGraph {
+                path: path.clone(),
+                language: Some("rust".to_string()),
+                parser: ParserKind::TreeSitter,
+                symbols: vec![batch_test_symbol(
+                    &path,
+                    &format!("generated_{index:04}"),
+                    1,
+                    0,
+                )],
+                relations: Vec::new(),
+            })?;
+        }
+        let path_limited = store.load_symbols_for_paths_bounded(
+            &many_paths,
+            SymbolBatchReadBudget::new(
+                MAX_SYMBOL_BATCH_PATHS,
+                MAX_SYMBOL_BATCH_ROWS,
+                MAX_SYMBOL_BATCH_DECODED_BYTES,
+            )?,
+            None,
+        )?;
+        require_eq(
+            &path_limited.reached_limit,
+            &Some(SymbolBatchReadLimit::Paths),
+            "path-bound classification",
+        )?;
+        require_eq(
+            &path_limited.work.requested_paths,
+            &MAX_SYMBOL_BATCH_PATHS,
+            "bounded path admission",
+        )?;
+        require_eq(
+            &path_limited.rows.len(),
+            &usize::try_from(MAX_SYMBOL_BATCH_PATHS)?,
+            "all admitted paths loaded across binding chunks",
+        )?;
+        require(
+            path_limited
+                .rows
+                .iter()
+                .any(|symbol| symbol.name == "generated_0063"),
+            "last deterministically admitted path was not loaded",
+        )?;
+        require(
+            path_limited
+                .rows
+                .iter()
+                .all(|symbol| symbol.name != "generated_0064"),
+            "path outside the deterministic admission set was loaded",
+        )?;
+
+        let expired = IndexWorkControl::with_deadline(
+            projectatlas_core::IndexCancellation::new(),
+            Instant::now(),
+        );
+        let expired_result = store.load_symbols_for_paths_bounded(
+            &["src/a.rs".to_string()],
+            SymbolBatchReadBudget::new(1, 3, MAX_SYMBOL_BATCH_DECODED_BYTES)?,
+            Some(&expired),
+        );
+        require(
+            matches!(
+                expired_result,
+                Err(DbError::IndexWork(IndexWorkFailure::DeadlineExceeded {
+                    stage: IndexWorkStage::RepositoryTraversal
+                }))
+            ),
+            "expired symbol control returned a partial batch instead of a typed error",
+        )?;
+
+        let mut plan_statement = store.connection.prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT
+                 path,
+                 language,
+                 name,
+                 kind,
+                 signature,
+                 line_start,
+                 line_end,
+                 parent,
+                 parser,
+                 detail,
+                 exported,
+                 documentation,
+                 length(CAST(path AS BLOB))
+                     + COALESCE(length(CAST(language AS BLOB)), 0)
+                     + length(CAST(name AS BLOB))
+                     + length(CAST(signature AS BLOB))
+                     + COALESCE(length(CAST(parent AS BLOB)), 0)
+                     + COALESCE(length(CAST(detail AS BLOB)), 0)
+                     + COALESCE(length(CAST(documentation AS BLOB)), 0)
+             FROM symbols
+             WHERE path IN (?1, ?2)
+             ORDER BY path, line_start, name
+             LIMIT ?3",
+        )?;
+        let plan = plan_statement
+            .query_map(params!["src/a.rs", "src/b.rs", 4], |row| {
+                row.get::<_, String>(3)
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        require(
+            plan.contains("idx_symbols_path"),
+            &format!("bounded symbol batch missed idx_symbols_path: {plan}"),
         )?;
         Ok(())
     }
@@ -6681,6 +12587,31 @@ mod tests {
             .count();
         require_eq(&alpha_count, &2, "alpha per-target limit")?;
         require_eq(&beta_count, &1, "beta preserved despite alpha skew")?;
+        let mut statement = store.connection.prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT path, source_name, target_name, kind, line, context, parser
+             FROM (
+                 SELECT path, source_name, target_name, kind, line, context, parser,
+                     ROW_NUMBER() OVER (
+                         PARTITION BY target_name
+                         ORDER BY path, line, source_name, target_name
+                     ) AS target_row
+                 FROM symbol_relations INDEXED BY idx_symbol_relations_target
+                 WHERE kind = 'calls' AND target_name IN ('alpha', 'beta')
+             )
+             WHERE target_row <= 2
+             ORDER BY path, line, source_name, target_name",
+        )?;
+        let plan = statement
+            .query_map([], |row| row.get::<_, String>(3))?
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        require(
+            plan.contains(
+                "SEARCH symbol_relations USING INDEX idx_symbol_relations_target (target_name=?)",
+            ),
+            &format!("call target lookup missed exact-target index: {plan}"),
+        )?;
         Ok(())
     }
 
@@ -6828,6 +12759,135 @@ mod tests {
         Ok(())
     }
 
+    /// Write released schema-8 source, authored, telemetry, and publication state.
+    fn write_released_schema_eight_compatibility_fixture(
+        db_path: &Path,
+        root: &Path,
+    ) -> Result<(), Box<dyn Error>> {
+        let connection = Connection::open(db_path)?;
+        schema::create_released_schema_eight(&connection)?;
+        schema::configure_writable(&connection)?;
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+        let write_result = (|| -> DbResult<()> {
+            set_metadata(
+                &connection,
+                PROJECT_ROOT_KEY,
+                &normalize_native_path_display(root),
+            )?;
+            set_metadata(&connection, "custom_setting", "preserved")?;
+            set_metadata(&connection, INDEX_PUBLICATION_STATE_KEY, "complete")?;
+            set_metadata(
+                &connection,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                "untrusted-contract",
+            )?;
+            set_metadata(&connection, INDEX_PUBLICATION_GENERATION_KEY, "7")?;
+            connection.execute_batch(
+                "
+                INSERT INTO nodes(
+                    id, path, kind, parent_path, extension, language,
+                    size_bytes, mtime_ns, content_hash
+                )
+                VALUES(1, 'src/lib.rs', 'file', 'src', '.rs', 'rust', 12, 10, 'hash-legacy');
+
+                INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+                VALUES(1, 'Schema compatibility source', 'agent', 'approved', 'agent');
+
+                INSERT INTO summaries(node_id, summary_level, subject, summary)
+                VALUES(1, 'node', '', 'released schema source');
+
+                INSERT INTO file_texts(path, content_hash, byte_count, line_count, content)
+                VALUES('src/lib.rs', 'hash-legacy', 6, 1, 'legacy');
+                ",
+            )?;
+            connection.execute(
+                "
+                INSERT INTO health_resolutions(
+                    finding_id, category, path, rationale
+                )
+                VALUES('schema-review', ?1, 'src/lib.rs', 'Reviewed schema fixture')
+                ",
+                [CATEGORY_DUPLICATE_PURPOSE],
+            )?;
+            record_released_schema_eight_usage_event(
+                &connection,
+                &usage_from_estimates(
+                    "schema-session",
+                    "summary",
+                    Some("src/lib.rs".to_string()),
+                    None,
+                    100,
+                    20,
+                ),
+            )
+        })();
+        match write_result {
+            Ok(()) => connection.execute_batch("COMMIT")?,
+            Err(error) => {
+                if let Err(rollback) = connection.execute_batch("ROLLBACK") {
+                    return Err(DbError::TransactionRollback {
+                        operation: Box::new(error),
+                        rollback,
+                    }
+                    .into());
+                }
+                return Err(error.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Write representative source, authored, telemetry, and publication state at one schema.
+    fn write_schema_compatibility_fixture(
+        db_path: &Path,
+        root: &Path,
+        schema_version: i64,
+        label: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::open(db_path)?;
+        store.set_project_root(root)?;
+        {
+            let mut publication = store.begin_index_publication("untrusted-contract")?;
+            write_test_projection(&mut publication, label)?;
+            publication.complete()?;
+        }
+        store.set_purpose(
+            "src/lib.rs",
+            "Schema compatibility source",
+            PurposeSource::Agent,
+        )?;
+        store.connection.execute(
+            "
+            INSERT INTO health_resolutions(
+                finding_id,
+                category,
+                path,
+                rationale
+            )
+            VALUES('schema-review', ?1, 'src/lib.rs', 'Reviewed schema fixture')
+            ",
+            [CATEGORY_DUPLICATE_PURPOSE],
+        )?;
+        store.record_usage(&usage_from_estimates(
+            "schema-session",
+            "summary",
+            Some("src/lib.rs".to_string()),
+            None,
+            100,
+            20,
+        ))?;
+        set_metadata(&store.connection, "custom_setting", "preserved")?;
+        set_metadata(
+            &store.connection,
+            SCHEMA_VERSION_KEY,
+            &schema_version.to_string(),
+        )?;
+        store
+            .connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        Ok(())
+    }
+
     /// Build a representative Rust file node for store tests.
     fn test_file_node(path: &str, hash: &str) -> Node {
         Node {
@@ -6840,6 +12900,188 @@ mod tests {
             mtime_ns: Some(10),
             content_hash: Some(hash.to_string()),
         }
+    }
+
+    /// Build one persisted symbol with configurable retained payload.
+    fn batch_test_symbol(
+        path: &str,
+        name: &str,
+        line_start: usize,
+        documentation_bytes: usize,
+    ) -> CodeSymbol {
+        CodeSymbol {
+            path: path.to_string(),
+            language: Some("rust".to_string()),
+            name: name.to_string(),
+            kind: SymbolKind::Function,
+            signature: format!("fn {name}()"),
+            exported: false,
+            documentation: Some("d".repeat(documentation_bytes)),
+            line_start,
+            line_end: line_start.saturating_add(1),
+            parent: None,
+            parser: ParserKind::TreeSitter,
+            detail: Some("function_item".to_string()),
+        }
+    }
+
+    /// Copy one selected queue candidate into the public conditional-write contract.
+    fn conditional_purpose_request(
+        task: &str,
+        candidate: &PurposeCurationCandidate,
+        purpose: &str,
+    ) -> PurposeConditionalApplyRequest {
+        PurposeConditionalApplyRequest {
+            task: task.to_string(),
+            path: candidate.node.node.path.clone(),
+            work_key: candidate.work_key.clone(),
+            state_token: candidate.state_token.clone(),
+            purpose: purpose.to_string(),
+        }
+    }
+
+    /// Replace every source-derived projection used by publication tests.
+    fn write_test_projection(store: &mut AtlasStore, label: &str) -> DbResult<()> {
+        let path = "src/lib.rs";
+        let hash = format!("hash-{label}");
+        store.replace_scan(&[test_file_node(path, &hash)])?;
+        store.replace_file_texts_for_paths(
+            &[path.to_string()],
+            &[IndexedFileText {
+                path: path.to_string(),
+                content_hash: Some(hash),
+                byte_count: label.len(),
+                line_count: 1,
+                content: label.to_string(),
+            }],
+        )?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: path.to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![CodeSymbol {
+                path: path.to_string(),
+                language: Some("rust".to_string()),
+                name: format!("{label}_symbol"),
+                kind: SymbolKind::Function,
+                signature: format!("fn {label}_symbol()"),
+                exported: true,
+                documentation: None,
+                line_start: 1,
+                line_end: 1,
+                parent: None,
+                parser: ParserKind::TreeSitter,
+                detail: Some("function_item".to_string()),
+            }],
+            relations: vec![SymbolRelation {
+                path: path.to_string(),
+                source_name: format!("{label}_symbol"),
+                target_name: format!("{label}_target"),
+                kind: RelationKind::Calls,
+                line: 1,
+                context: format!("{label}_target();"),
+                parser: ParserKind::TreeSitter,
+            }],
+        })?;
+        store.set_node_summary(path, &format!("{label} summary"))?;
+        Ok(())
+    }
+
+    /// Assert that one snapshot exposes a coherent projection generation.
+    fn require_test_projection(
+        store: &AtlasStore,
+        generation: u64,
+        label: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let path = "src/lib.rs";
+        let publication = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("publication missing"))?;
+        require_eq(
+            &publication.generation,
+            &IndexGeneration::new(generation),
+            "publication generation",
+        )?;
+        let node = store
+            .load_node_by_path(path)?
+            .ok_or_else(|| io::Error::other("projection node missing"))?;
+        require_eq(
+            &node.node.content_hash,
+            &Some(format!("hash-{label}")),
+            "projection node hash",
+        )?;
+        require_eq(
+            &node.summary,
+            &Some(format!("{label} summary")),
+            "projection node summary",
+        )?;
+        let text = store
+            .load_file_text(path)?
+            .ok_or_else(|| io::Error::other("projection text missing"))?;
+        require_eq(&text.content, &label.to_string(), "projection text")?;
+        let symbols = store.load_symbols(Some(path), None, 10)?;
+        require_eq(
+            &symbols.first().map(|symbol| symbol.name.as_str()),
+            &Some(format!("{label}_symbol")).as_deref(),
+            "projection symbol",
+        )?;
+        let relations = store.load_symbol_relations(Some(path), None, 10)?;
+        require_eq(
+            &relations
+                .first()
+                .map(|relation| relation.target_name.as_str()),
+            &Some(format!("{label}_target")).as_deref(),
+            "projection relation",
+        )?;
+        let metadata = store
+            .load_source_parse_metadata(path)?
+            .ok_or_else(|| io::Error::other("projection parse metadata missing"))?;
+        require_eq(&metadata.symbol_count, &1, "projection symbol metadata")?;
+        require_eq(&metadata.relation_count, &1, "projection relation metadata")?;
+        Ok(())
+    }
+
+    /// Assert the connection settings required for every production writer.
+    fn require_writable_connection_profile(connection: &Connection) -> Result<(), Box<dyn Error>> {
+        let foreign_keys =
+            connection.pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))?;
+        require_eq(&foreign_keys, &1, "writable foreign-key enforcement")?;
+        require_wal_profile(connection)?;
+        let synchronous =
+            connection.pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))?;
+        require_eq(&synchronous, &2, "writable FULL synchronous mode")?;
+        require_busy_timeout(connection)
+    }
+
+    /// Assert the connection settings required for every production reader.
+    fn require_read_connection_profile(connection: &Connection) -> Result<(), Box<dyn Error>> {
+        let query_only =
+            connection.pragma_query_value(None, "query_only", |row| row.get::<_, i64>(0))?;
+        require_eq(&query_only, &1, "read query-only mode")?;
+        require_wal_profile(connection)?;
+        require_busy_timeout(connection)
+    }
+
+    /// Assert that a connection observes the selected durable journal mode.
+    fn require_wal_profile(connection: &Connection) -> Result<(), Box<dyn Error>> {
+        let journal_mode =
+            connection.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))?;
+        require_eq(
+            &journal_mode.to_ascii_lowercase(),
+            &"wal".to_string(),
+            "WAL journal mode",
+        )
+    }
+
+    /// Assert the bounded contention wait shared by ordinary connections.
+    fn require_busy_timeout(connection: &Connection) -> Result<(), Box<dyn Error>> {
+        let busy_timeout =
+            connection.pragma_query_value(None, "busy_timeout", |row| row.get::<_, u64>(0))?;
+        require_eq(
+            &u128::from(busy_timeout),
+            &SQLITE_BUSY_TIMEOUT.as_millis(),
+            "bounded connection busy timeout",
+        )
     }
 
     /// Build a representative folder node for store tests.
@@ -6875,6 +13117,15 @@ mod tests {
             .iter()
             .map(|finding| finding.path.as_str())
             .collect()
+    }
+
+    /// Require a test condition without panicking.
+    fn require(condition: bool, message: &str) -> Result<(), Box<dyn Error>> {
+        if condition {
+            Ok(())
+        } else {
+            Err(io::Error::other(message).into())
+        }
     }
 
     /// Require two test values to be equal without panicking.

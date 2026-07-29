@@ -18,7 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
 
       - name: Read version
         id: version
@@ -55,6 +57,25 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Resolve clean optional-parser handoff
+        id: parser_pack
+        if: steps.release.outputs.eligible == 'true' && steps.tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          promotion_sha="$(git rev-parse HEAD^2)"
+          if [[ "$(git rev-parse 'HEAD^{tree}')" != "$(git rev-parse "$promotion_sha^{tree}")" ]]; then
+            echo "Main promotion tree differs from its verified dev parent" >&2
+            exit 1
+          fi
+          parser_pack_run_id="$(
+            python3 .github/scripts/resolve-optional-parser-handoff.py \
+              --repository "$GITHUB_REPOSITORY" \
+              --promotion-sha "$promotion_sha"
+          )"
+          echo "run_id=$parser_pack_run_id" >> "$GITHUB_OUTPUT"
+
       - name: Dispatch release workflow
         if: steps.release.outputs.eligible == 'true' && steps.tag.outputs.exists == 'false'
         env:
@@ -62,4 +83,5 @@ jobs:
         run: |
           gh workflow run release.yml \
             --ref main \
-            --field version="v${{ steps.version.outputs.version }}"
+            --field version="v${{ steps.version.outputs.version }}" \
+            --field parser_pack_run_id="${{ steps.parser_pack.outputs.run_id }}"

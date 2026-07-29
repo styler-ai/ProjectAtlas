@@ -1,5 +1,6 @@
 [package]
 name = "projectatlas-cli"
+default-run = "projectatlas"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,41 +10,133 @@ homepage.workspace = true
 [[bin]]
 name = "projectatlas"
 path = "src/main.rs"
+required-features = ["cli-core"]
+
+[[bin]]
+name = "projectatlas-parser-worker"
+path = "src/parser_worker.rs"
+required-features = ["optional-parser-worker"]
+
+[[bin]]
+name = "optional_parser_pack_release"
+path = "src/bin/optional_parser_pack_release.rs"
+required-features = ["optional-parser-supervisor"]
+
+[[test]]
+name = "parser_supervisor_adversarial"
+path = "tests/parser_supervisor_adversarial.rs"
+harness = false
+required-features = ["optional-parser-supervisor"]
+
+[features]
+default = ["cli"]
+cli = [
+    "cli-core",
+    "derived-snapshot",
+    "optional-parser-supervisor",
+]
+cli-core = [
+    "dep:blake3",
+    "dep:clap",
+    "dep:cssparser",
+    "dep:getrandom",
+    "dep:jsonc-parser",
+    "dep:notify",
+    "dep:pulldown-cmark",
+    "dep:projectatlas-db",
+    "dep:projectatlas-fs",
+    "dep:projectatlas-service",
+    "dep:projectatlas-symbols",
+    "dep:ratatui",
+    "dep:rayon",
+    "dep:regex",
+    "dep:rmcp",
+    "dep:scraper",
+    "dep:tempfile",
+    "dep:tiktoken",
+    "dep:tokio",
+    "dep:toml",
+    "dep:toml_edit",
+    "dep:toon-format",
+    "dep:yaml-rust2",
+]
+derived-snapshot = [
+    "dep:tar",
+    "dep:tempfile",
+    "dep:zstd",
+]
+derived-snapshot-signatures = [
+    "derived-snapshot",
+    "dep:ed25519-dalek",
+]
+optional-parser-supervisor = [
+    "dep:getrandom",
+    "dep:nix",
+    "dep:tar",
+    "dep:tempfile",
+    "dep:zstd",
+]
+optional-parser-worker = [
+    "optional-parser-supervisor",
+    "dep:landlock",
+    "dep:libloading",
+    "dep:seccompiler",
+    "dep:tree-sitter",
+    "dep:tree-sitter-language",
+    "dep:tree-sitter-language-pack",
+]
 
 [dependencies]
+getrandom = { workspace = true, optional = true }
 projectatlas-core.workspace = true
-projectatlas-db.workspace = true
-projectatlas-fs.workspace = true
-projectatlas-service.workspace = true
-projectatlas-symbols.workspace = true
-blake3.workspace = true
-clap.workspace = true
-cssparser.workspace = true
-jsonc-parser.workspace = true
-notify.workspace = true
-pulldown-cmark.workspace = true
-rayon.workspace = true
-ratatui.workspace = true
-regex.workspace = true
-rmcp.workspace = true
-scraper.workspace = true
+projectatlas-db = { workspace = true, optional = true }
+projectatlas-fs = { workspace = true, optional = true }
+projectatlas-service = { workspace = true, optional = true }
+projectatlas-symbols = { workspace = true, optional = true }
+blake3 = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+cssparser = { workspace = true, optional = true }
+ed25519-dalek = { workspace = true, optional = true }
+jsonc-parser = { workspace = true, optional = true }
+notify = { workspace = true, optional = true }
+pulldown-cmark = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
+ratatui = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+rmcp = { workspace = true, optional = true }
+scraper = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
-tiktoken.workspace = true
-tokio.workspace = true
-toml.workspace = true
-toml_edit.workspace = true
-toon-format.workspace = true
-yaml-rust2.workspace = true
+tiktoken = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+toml_edit = { workspace = true, optional = true }
+toon-format = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+tree-sitter = { workspace = true, optional = true }
+tree-sitter-language-pack = { workspace = true, optional = true }
+yaml-rust2 = { workspace = true, optional = true }
+zstd = { workspace = true, optional = true }
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+landlock = { workspace = true, optional = true }
+libloading = { workspace = true, optional = true }
+nix = { workspace = true, optional = true }
+seccompiler = { workspace = true, optional = true }
+tree-sitter-language = { workspace = true, optional = true }
 
 [dev-dependencies]
-assert_cmd = "2.0"
-predicates = "3.1"
+assert_cmd.workspace = true
+predicates.workspace = true
+rusqlite.workspace = true
 rmcp = { workspace = true, features = ["client"] }
 serde_json.workspace = true
-sha2.workspace = true
+tar.workspace = true
 tempfile.workspace = true
+zstd.workspace = true
 
 [lints]
 workspace = true
