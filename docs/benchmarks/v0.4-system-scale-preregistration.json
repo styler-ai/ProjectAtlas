@@ -67,7 +67,7 @@
   ],
   "candidate": {
     "required_version": "0.4.0",
-    "runtime_sha256": "df057255b8ffb972d23695e11678d74cfc7b431a84dd023e0b2bdb9cc6b164af",
+    "runtime_sha256": "e8708723434a428b6a59d80f60d9c7e707d9b8e3f04cea52dc51a0aacfbf3b4a",
     "mcp_tools_sha256": "0c21ea673bdb9cdff48203a274db04fbaccb888bd362407d46fc1bcc0e506b28",
     "skill_path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
     "skill_sha256": "208af75344199e1ad70ebf8e00f1f07e3879ece043e5f3ce79b8723de00d5547",
