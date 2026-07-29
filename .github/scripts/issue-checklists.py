@@ -49,6 +49,10 @@ EXACT_HEAD_NEGATION_RE = re.compile(
     r"|"
     r"\bno\s+exact[- ]head\b"
     r"|"
+    r"\bneed\s+not\b[^.\n!?]{0,120}\bexact[- ]head\b"
+    r"|"
+    r"\bexact[- ]head\b[^.\n!?]{0,120}\bneed\s+not\b"
+    r"|"
     r"\b(?:rather than|instead of|independent(?:ly)? of)\b"
     r"[^.\n!?]{0,120}\bexact[- ]head\b"
     r"|"
@@ -928,6 +932,8 @@ Mitigations:
         "Proof should not require exact-head identity.",
         "Proof cannot require exact-head identity.",
         "Proof does not require exact-head identity.",
+        "Exact-head proof need not be rerun.",
+        "Proof need not require exact-head identity.",
     ]:
         assert not requires_exact_head_proof(negative_modal)
     assert not requires_exact_head_proof(
