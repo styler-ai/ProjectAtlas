@@ -459,13 +459,16 @@ pinned VS Code setup on a tracked non-UTF-8 source file.
 
 Manual review found all 42 produced answers substantively correct. Nine
 answers had invalid temporary-root citation targets, leaving a 33/42 final
-manual result: 11/15 for v0.4, 11/12 for frozen v0.3.26, and 11/15 for plain.
-V0.4 reduced median net navigation context 19.2–19.8% against v0.3.26 on the
-small tasks. On the medium task it used 5.3% less median net context, 47.1%
-more median calls, and took 29.5% longer including setup. It could not be
-compared with v0.3.26 on huge source. Plain navigation used the least context
-on every corpus. V0.4's huge setup cost a median 759.5 seconds, 2,361.8 MiB
-peak RSS, and 3,809.5 MiB persistent storage before the agent task.
+manual result: 11/15 for v0.4, 8/12 for frozen v0.3.26, and 14/15 for plain.
+Against v0.3.26 on the small tasks, v0.4 used 15.4–33.3% fewer median calls and
+18.3–20.2% less median net navigation context. On the medium task it used
+31.2% more median calls, 41% more median net context, and took 92.9% longer
+including setup, while selecting 33.3% more productive files and making 33.3%
+fewer broad reads. It could not be compared with v0.3.26 on huge source. Plain
+navigation used the least context on every corpus. Against plain on huge
+source, v0.4 used 120% more median calls and 189.7% more median net context,
+after a 733.5-second setup with 2,361 MiB peak RSS and 3,809.4 MiB persistent
+storage.
 
 The reviewed report publishes absolute values, median and observed-maximum
 percentage comparisons, all tool calls and visits, gross versus fully charged
