@@ -44,7 +44,7 @@ EXACT_HEAD_REQUIREMENT_RE = re.compile(
 )
 EXACT_HEAD_NEGATION_RE = re.compile(
     r"(?i)(?:"
-    r"\b(?:is|are)\s+not\s+(?:required|needed|used|accepted)\b"
+    r"\b(?:is|are)\s+not\s+(?:required|needed|used|accepted|mandatory|allowed|permitted)\b"
     r"[^.\n!?]{0,120}\bexact[- ]head\b"
     r"|"
     r"\bno\s+exact[- ]head\b"
@@ -68,7 +68,8 @@ EXACT_HEAD_NEGATION_RE = re.compile(
     r"[^.\n!?]{0,120}\bexact[- ]head\b"
     r"|"
     r"\bexact[- ]head\b[^.\n!?]{0,120}"
-    r"\b(?:is|are)?\s*(?:not|no longer)\s+(?:required|used|needed|accepted)\b"
+    r"\b(?:is|are)?\s*(?:not|no longer)\s+"
+    r"(?:required|used|needed|accepted|mandatory|allowed|permitted)\b"
     r")"
 )
 EXACT_HEAD_SHARED_NEGATION_RE = re.compile(
@@ -932,6 +933,9 @@ Mitigations:
         "Proof should not require exact-head identity.",
         "Proof cannot require exact-head identity.",
         "Proof does not require exact-head identity.",
+        "Exact-head proof is not mandatory.",
+        "Exact-head proof is not allowed.",
+        "Exact-head proof is not permitted.",
         "Exact-head proof need not be rerun.",
         "Proof need not require exact-head identity.",
     ]:
