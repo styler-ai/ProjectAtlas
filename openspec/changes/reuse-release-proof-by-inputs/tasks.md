@@ -16,6 +16,6 @@
 
 ## 4. Verification
 
-- [ ] 4.1 Add focused positive, negative, mixed-clause, negative-modal, pagination, unknown-input, cross-platform/toolchain, and artifact-tampering tests for classification and reuse.
-- [ ] 4.2 Add hosted end-to-end proof that a checklist-only promotion reuses valid expensive artifacts and a behavior-relevant change invalidates them.
-- [ ] 4.3 Update the release architecture view and runbook, then verify the simpler path on a non-production release candidate.
+- [x] 4.1 Add focused positive, negative, mixed-clause, negative-modal, pagination, unknown-input, cross-platform/toolchain, and artifact-tampering tests for classification and reuse.
+- [x] 4.2 Add hosted end-to-end proof that a checklist-only promotion reuses valid expensive artifacts and a behavior-relevant change invalidates them.
+- [x] 4.3 Update the release architecture view and runbook, then verify the simpler path on a non-production release candidate.
