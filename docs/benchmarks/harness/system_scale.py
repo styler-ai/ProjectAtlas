@@ -3226,7 +3226,7 @@ def forced_termination_quiescence(
             "--db",
             str(database),
             "scan",
-            ".",
+            str(source_root),
         ],
         cwd=source_root,
         env=env,
@@ -3242,6 +3242,7 @@ def forced_termination_quiescence(
         return {
             "passed": False,
             "reason": "scan completed before cancellation could be requested",
+            "returncode": process.returncode,
             "known_processes": len(known),
         }
     requested = time.perf_counter()

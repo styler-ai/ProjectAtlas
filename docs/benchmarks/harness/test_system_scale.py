@@ -355,6 +355,27 @@ class SystemScaleHarnessTests(unittest.TestCase):
                     )
                 )
 
+    def test_forced_termination_scans_the_explicit_source_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source_root = root / "source"
+            source_root.mkdir()
+            process = mock.Mock(pid=123, returncode=0)
+            process.poll.return_value = 0
+            with mock.patch.object(
+                system_scale.subprocess, "Popen", return_value=process
+            ) as popen:
+                result = system_scale.forced_termination_quiescence(
+                    Path("projectatlas"),
+                    source_root,
+                    root / "work",
+                    {},
+                    5,
+                )
+
+            self.assertEqual(popen.call_args.args[0][-2:], ["scan", str(source_root)])
+            self.assertEqual(result["returncode"], 0)
+
     def test_measurement_input_lock_fails_closed_on_path_or_digest_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
