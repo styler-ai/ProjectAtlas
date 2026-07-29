@@ -122,6 +122,7 @@ impl DerivedGraphSnapshot {
             usize_to_u64(encoded.len())?,
             MAX_DERIVED_SNAPSHOT_JSON_BYTES,
         )?;
+        require_decode_budget(&encoded)?;
         Ok(encoded)
     }
 

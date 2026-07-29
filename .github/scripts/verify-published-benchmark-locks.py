@@ -30,9 +30,12 @@ PUBLICATIONS = (
 )
 CANDIDATE_INPUT_PATHS = (
     ".cargo",
+    ".github/scripts",
+    ".github/workflows",
     "Cargo.lock",
     "Cargo.toml",
     "crates",
+    "packaging",
     "plugins/projectatlas",
     "rust-toolchain.toml",
 )
@@ -153,7 +156,10 @@ def candidate_input_status(source_identity: object) -> tuple[str | None, str | N
         timeout=120,
     )
     if compared.returncode == 1:
-        return "historical", "candidate runtime, MCP, skill, or plugin inputs changed"
+        return (
+            "historical",
+            "candidate runtime, packaging, workflow, MCP, skill, or plugin inputs changed",
+        )
     if compared.returncode != 0:
         return "unavailable", "candidate-owned inputs could not be compared"
     return None, None
@@ -252,6 +258,9 @@ def self_test() -> None:
     assert candidate_source_revision({"checkout_head": "a" * 40}) == "a" * 40
     assert candidate_source_revision({"checkout_head": "not-a-revision"}) is None
     assert candidate_source_revision(None) is None
+    assert {".github/scripts", ".github/workflows", "packaging"} <= set(
+        CANDIDATE_INPUT_PATHS
+    )
     missing_preregistration, status = publication_status(
         "missing-preregistration", "", "", "__missing-preregistration.json", ""
     )
