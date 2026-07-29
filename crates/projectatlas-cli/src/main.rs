@@ -20,7 +20,8 @@ use projectatlas_cli::optional_parser_lifecycle::{
     OptionalParserPackLifecycle, OptionalParserPackLifecycleError,
 };
 use projectatlas_core::graph::{
-    ConfidenceClass, GraphEntityKey, GraphLimits, GraphRelationKind, RepositoryFilePath,
+    ConfidenceClass, GraphEntityKey, GraphLimits, GraphRelationKind, LogicalRelation,
+    RepositoryFilePath,
 };
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
@@ -4111,6 +4112,14 @@ fn build_token_calibration(
 
 /// Load the tiny optional atlas preview through existing indexed relation-family reads.
 fn load_token_atlas_preview(store: &AtlasStore) -> TokenAtlasPreview {
+    let Some((relations, truncated)) = load_token_atlas_relations(store) else {
+        return TokenAtlasPreview::unavailable();
+    };
+    TokenAtlasPreview::from_relations(&relations, truncated)
+}
+
+/// Load the bounded resolved-relation input owned by the optional atlas preview.
+fn load_token_atlas_relations(store: &AtlasStore) -> Option<(Vec<LogicalRelation>, bool)> {
     const RELATIONS_PER_FAMILY: u32 = 128;
     const ADJACENCY_ROWS_PER_ROUND: usize = 512;
     const ADJACENCY_ROUNDS: usize = 2;
@@ -4129,7 +4138,7 @@ fn load_token_atlas_preview(store: &AtlasStore) -> TokenAtlasPreview {
             RepositoryGraphRelationQuery::Family { relation },
             RELATIONS_PER_FAMILY,
         ) else {
-            return TokenAtlasPreview::unavailable();
+            return None;
         };
         truncated |= page.truncated;
         relations.extend(page.rows);
@@ -4186,7 +4195,7 @@ fn load_token_atlas_preview(store: &AtlasStore) -> TokenAtlasPreview {
                 u32::try_from(page_limit).unwrap_or(1),
                 None,
             ) else {
-                return TokenAtlasPreview::unavailable();
+                return None;
             };
             truncated |= page.truncated;
             for row in page.rows {
@@ -4206,7 +4215,7 @@ fn load_token_atlas_preview(store: &AtlasStore) -> TokenAtlasPreview {
         }
         frontier = next.into_values().take(ADJACENCY_FRONTIER_MAX).collect();
     }
-    TokenAtlasPreview::from_relations(&relations, truncated)
+    Some((relations, truncated))
 }
 
 /// Render root diagnostics as compact TOON.
@@ -4420,19 +4429,24 @@ mod tests {
     };
     use super::{
         Cli, CliError, Command, GraphRelationKind, OutputFormat, SearchRetrievalMode,
-        SearchRetrievalModeArg, ServiceError, build_runtime_info, render_cli_error,
-        render_token_dashboard, serialized_output, token_atlas_network_relation, truthy_env,
+        SearchRetrievalModeArg, ServiceError, build_runtime_info, load_token_atlas_relations,
+        render_cli_error, render_token_dashboard, serialized_output, token_atlas_network_relation,
+        truthy_env,
     };
     #[cfg(feature = "optional-parser-supervisor")]
     use super::{OptionalParserPackLifecycleError, ParserPackCommand};
     use clap::Parser as _;
     use notify::EventKind;
+    use projectatlas_core::graph::{
+        Completeness, ConfidenceClass, EntitySelector, GraphEntity, LogicalRelation,
+        RelationResolution, RepositoryFilePath,
+    };
     use projectatlas_core::symbols::{
         CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
     };
     use projectatlas_core::telemetry::TokenOverview;
-    use projectatlas_core::{Node, NodeKind, normalize_native_path_display};
-    use projectatlas_db::{AtlasStore, DbError};
+    use projectatlas_core::{IndexGeneration, Node, NodeKind, normalize_native_path_display};
+    use projectatlas_db::{AtlasStore, DbError, RepositoryGraphDirection};
     use projectatlas_fs::ScanOptions;
     use rmcp::model::{CallToolRequestParams, ClientInfo};
     use rmcp::{ClientHandler, ServiceExt};
@@ -5223,6 +5237,104 @@ mod tests {
         assert!(token_atlas_network_relation(GraphRelationKind::Legacy(
             RelationKind::Imports,
         )));
+    }
+
+    #[test]
+    fn token_atlas_loader_excludes_sqlite_containment_adjacency() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("token-atlas-loader");
+        fs::create_dir_all(root.join("src"))?;
+        for path in ["src/a.rs", "src/b.rs", "src/c.rs"] {
+            fs::write(root.join(path), "pub fn item() {}\n")?;
+        }
+        let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("token atlas fixture project identity is missing")?;
+        let generation = IndexGeneration::new(1);
+        let entity = |path: &str| {
+            Ok::<_, Box<dyn Error>>(GraphEntity::new(
+                project,
+                EntitySelector::File {
+                    path: RepositoryFilePath::new(Path::new(path))?,
+                },
+                generation,
+            )?)
+        };
+        let source = entity("src/a.rs")?;
+        let network_target = entity("src/b.rs")?;
+        let contained_target = entity("src/c.rs")?;
+        let calls = LogicalRelation::new(
+            &source,
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            RelationResolution::resolved(&network_target)?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )?;
+        let contains = LogicalRelation::new(
+            &source,
+            GraphRelationKind::Legacy(RelationKind::Contains),
+            RelationResolution::resolved(&contained_target)?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )?;
+        let node = |path: &str, kind: NodeKind, hash: Option<&str>| {
+            let is_file = kind == NodeKind::File;
+            Node {
+                path: path.to_string(),
+                kind,
+                parent_path: is_file.then(|| "src".to_string()),
+                extension: is_file.then(|| ".rs".to_string()),
+                language: is_file.then(|| "rust".to_string()),
+                size_bytes: is_file.then_some(17),
+                mtime_ns: is_file.then_some(1),
+                content_hash: hash.map(str::to_string),
+            }
+        };
+        let nodes = [
+            node("src", NodeKind::Folder, None),
+            node("src/a.rs", NodeKind::File, Some("a")),
+            node("src/b.rs", NodeKind::File, Some("b")),
+            node("src/c.rs", NodeKind::File, Some("c")),
+        ];
+        let mut publication = store.begin_index_publication("token-atlas-loader")?;
+        publication.begin_scan_replacement()?;
+        publication.upsert_scan_node_batch(&nodes)?;
+        publication.finish_scan_replacement()?;
+        publication.replace_repository_graph(
+            project,
+            &[source.clone(), network_target, contained_target],
+            &[calls, contains],
+            &[],
+            &[],
+        )?;
+        publication.complete()?;
+
+        let raw = store.repository_graph_adjacency_page(
+            &[source.key().clone()],
+            RepositoryGraphDirection::Outbound,
+            None,
+            16,
+            None,
+        )?;
+        assert!(raw.rows.iter().any(|row| {
+            row.detail.relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
+        }));
+        let (relations, _) = load_token_atlas_relations(&store)
+            .ok_or("token atlas relation loader unexpectedly failed")?;
+        assert!(
+            relations.iter().any(|relation| {
+                relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+            })
+        );
+        assert!(
+            relations
+                .iter()
+                .all(|relation| token_atlas_network_relation(relation.kind()))
+        );
+        Ok(())
     }
 
     #[test]
