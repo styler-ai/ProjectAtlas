@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc" viewBox="0 0 600 340">
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc" viewBox="0 0 660 340">
   <title id="title">Representative ProjectAtlas candidate-context audit</title>
   <desc id="desc">Donut chart showing that compact ProjectAtlas payloads omitted 99.8 percent of a modeled candidate-read baseline across 142 calls in a 679-file application.</desc>
   <style>
