@@ -83,7 +83,7 @@ pub(crate) enum TokenDashboardTheme {
     Dark,
     /// Light dashboard theme for light terminal backgrounds.
     Light,
-    /// Preserve the terminal background while retaining semantic accents.
+    /// Preserve the terminal background and foreground while retaining semantic accents.
     Terminal,
 }
 
@@ -2675,7 +2675,7 @@ fn themed_color(color: Color) -> Color {
         TokenDashboardTheme::Dark => color,
         TokenDashboardTheme::Light => remap_to_light_theme(color),
         TokenDashboardTheme::Terminal => match color {
-            THEME_BG | THEME_PANEL => Color::Reset,
+            THEME_BG | THEME_PANEL | THEME_TEXT | THEME_MUTED | THEME_INK_WHITE => Color::Reset,
             _ => color,
         },
     }
@@ -3117,6 +3117,18 @@ mod tests {
         assert!(
             !overview_terminal.contains("48;2;5;16;25"),
             "terminal overview theme must preserve the terminal background inside panels"
+        );
+        let terminal_neutral_roles = super::with_token_theme(TokenDashboardTheme::Terminal, || {
+            (
+                super::themed_color(super::THEME_TEXT),
+                super::themed_color(super::THEME_MUTED),
+                super::themed_color(THEME_INK_WHITE),
+            )
+        });
+        assert_eq!(
+            terminal_neutral_roles,
+            (Color::Reset, Color::Reset, Color::Reset),
+            "terminal overview theme must use the terminal foreground for neutral text"
         );
 
         let report = sample_trend_report();
