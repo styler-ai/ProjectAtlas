@@ -11,4 +11,4 @@
 ## 3. Safety and Verification
 
 - [x] 3.1 Cover unlocked mirror, already-current inherited PATH, fresh-host convergence, locked-process survival, no process termination, and unchanged generated-config/registry verification.
-- [ ] 3.2 Run focused Windows installer trust/E2E tests, script syntax/static checks, affected Rust check/clippy/test/doc gates, OpenSpec validation, IssueOps, and live review-feedback reconciliation.
+- [x] 3.2 Run focused Windows installer trust/E2E tests, script syntax/static checks, affected Rust check/clippy/test/doc gates, OpenSpec validation, IssueOps, and live review-feedback reconciliation.
