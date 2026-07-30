@@ -87,6 +87,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::process::{Command as StdCommand, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TrySendError};
@@ -101,8 +102,10 @@ pub(crate) const DEFAULT_HEALTH_LIMIT: usize = 50;
 pub(crate) const MAX_HEALTH_LIMIT: usize = 200;
 /// Maximum JSON bytes read for one CLI purpose-review batch.
 pub(crate) const MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES: u64 = 2 * 1_024 * 1_024;
-/// Maximum Git config bytes inspected while classifying a source root.
-const MAX_GIT_CONFIG_BYTES: u64 = 1_024 * 1_024;
+/// Maximum output retained from one effective Git config query.
+const MAX_GIT_CONFIG_QUERY_OUTPUT_BYTES: usize = 64 * 1_024;
+/// Maximum time allowed for one effective Git config query.
+const GIT_CONFIG_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Default whole-operation deadline when no narrower parser limit is supplied.
 const DEFAULT_INDEX_WORK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -1976,80 +1979,104 @@ fn is_bare_git_control_root(root: &Path) -> Result<bool, CliError> {
         return Ok(true);
     }
 
-    let mut bytes = Vec::new();
-    fs::File::open(&config)
+    effective_git_config_bare_setting(&control_root, &config)
+        .map(|bare| bare.unwrap_or(control_root == root))
+}
+
+/// Query Git's effective local `core.bare` value, including configured includes.
+fn effective_git_config_bare_setting(
+    control_root: &Path,
+    config: &Path,
+) -> Result<Option<bool>, CliError> {
+    let mut child = StdCommand::new("git")
+        .arg("--git-dir")
+        .arg(normalize_native_path_display(control_root))
+        .args([
+            "config",
+            "--local",
+            "--includes",
+            "--get",
+            "--bool",
+            "core.bare",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|source| CliError::Io {
-            path: config.clone(),
-            source,
-        })?
-        .take(MAX_GIT_CONFIG_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|source| CliError::Io {
-            path: config.clone(),
+            path: config.to_path_buf(),
             source,
         })?;
-    if bytes.len() as u64 > MAX_GIT_CONFIG_BYTES {
+    let deadline = Instant::now() + GIT_CONFIG_QUERY_TIMEOUT;
+    loop {
+        match child.try_wait().map_err(|source| CliError::Io {
+            path: config.to_path_buf(),
+            source,
+        })? {
+            Some(_) => break,
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            None => {
+                child.kill().map_err(|source| CliError::Io {
+                    path: config.to_path_buf(),
+                    source,
+                })?;
+                child.wait().map_err(|source| CliError::Io {
+                    path: config.to_path_buf(),
+                    source,
+                })?;
+                return Err(CliError::Io {
+                    path: config.to_path_buf(),
+                    source: io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "effective Git config query exceeded its deadline",
+                    ),
+                });
+            }
+        }
+    }
+    let output = child.wait_with_output().map_err(|source| CliError::Io {
+        path: config.to_path_buf(),
+        source,
+    })?;
+    if output.stdout.len().saturating_add(output.stderr.len()) > MAX_GIT_CONFIG_QUERY_OUTPUT_BYTES {
         return Err(CliError::Io {
-            path: config,
+            path: config.to_path_buf(),
             source: io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Git config exceeds the root-classification byte limit",
+                "effective Git config query exceeded its output bound",
             ),
         });
     }
-    let text = std::str::from_utf8(&bytes).map_err(|source| CliError::Io {
-        path: config.clone(),
-        source: io::Error::new(io::ErrorKind::InvalidData, source),
-    })?;
-    git_config_bare_setting(text)
-        .map(|bare| bare.unwrap_or(control_root == root))
-        .map_err(|source| CliError::Io {
-            path: config,
-            source,
-        })
-}
-
-/// Read the last explicit `core.bare` boolean from one bounded Git config.
-fn git_config_bare_setting(config: &str) -> io::Result<Option<bool>> {
-    let mut in_core = false;
-    let mut bare = None;
-    for raw_line in config.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-        if let Some(section) = line
-            .strip_prefix('[')
-            .and_then(|remainder| remainder.split_once(']'))
-            .map(|(section, _)| section.trim())
-        {
-            in_core = section.eq_ignore_ascii_case("core");
-            continue;
-        }
-        if !in_core {
-            continue;
-        }
-        let (key, value) = line.split_once('=').unwrap_or((line, "true"));
-        if !key.trim().eq_ignore_ascii_case("bare") {
-            continue;
-        }
-        let value = value
-            .split_ascii_whitespace()
-            .next()
-            .unwrap_or_default()
-            .trim_matches('"');
-        bare = Some(match value.to_ascii_lowercase().as_str() {
-            "true" | "yes" | "on" | "1" => true,
-            "" | "false" | "no" | "off" | "0" => false,
-            _ => {
-                return Err(io::Error::new(
+    if output.status.success() {
+        return match std::str::from_utf8(&output.stdout)
+            .map(str::trim)
+            .map_err(|source| CliError::Io {
+                path: config.to_path_buf(),
+                source: io::Error::new(io::ErrorKind::InvalidData, source),
+            })? {
+            "true" => Ok(Some(true)),
+            "false" => Ok(Some(false)),
+            value => Err(CliError::Io {
+                path: config.to_path_buf(),
+                source: io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "Git core.bare is not a valid boolean",
-                ));
-            }
-        });
+                    format!("Git returned invalid core.bare value {value:?}"),
+                ),
+            }),
+        };
     }
-    Ok(bare)
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    Err(CliError::Io {
+        path: config.to_path_buf(),
+        source: io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "effective Git config query failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ),
+    })
 }
 
 /// Load map configuration for purpose import during scan.

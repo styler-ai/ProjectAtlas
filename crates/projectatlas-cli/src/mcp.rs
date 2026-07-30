@@ -4529,10 +4529,13 @@ impl ProjectAtlasMcpServer {
 
     /// Read the active MCP project state.
     fn active_project_state(&self) -> Result<McpProjectState, CliError> {
-        self.project_state
+        let state = self
+            .project_state
             .read()
             .map(|state| state.clone())
-            .map_err(|_poisoned| CliError::Mcp(MCP_PROJECT_STATE_LOCK_POISONED.to_string()))
+            .map_err(|_poisoned| CliError::Mcp(MCP_PROJECT_STATE_LOCK_POISONED.to_string()))?;
+        canonical_source_project_root(&state.root)?;
+        Ok(state)
     }
 
     /// Replace the active MCP project state.
@@ -7358,6 +7361,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
     use std::io;
+    use std::process::Command as StdCommand;
     use std::time::{Duration, Instant};
 
     fn require(condition: bool, message: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -8577,6 +8581,45 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn bare_startup_and_root_set_preserve_worktree_required_without_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let bare = temp.path().join("repository.git");
+        let output = StdCommand::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare)
+            .output()?;
+        require(output.status.success(), "git init --bare failed")?;
+        let db_path = bare.join(".projectatlas").join("projectatlas.db");
+        let server =
+            ProjectAtlasMcpServer::new(db_path, None, "mcp-bare-root-test".to_string(), false);
+
+        let Err(error) = server.active_project_state() else {
+            return Err(io::Error::other("bare MCP startup state was exposed as active").into());
+        };
+        if !matches!(error, CliError::WorktreeRequired(_)) {
+            return Err(io::Error::other(format!(
+                "bare MCP startup did not preserve typed worktree_required state: {error:?}"
+            ))
+            .into());
+        }
+
+        let response = server.atlas_root_set(Parameters(AtlasRootSetParams {
+            root: bare.to_string_lossy().to_string(),
+            transition: None,
+            nearest_project: None,
+        }));
+        require(
+            response.contains("worktree_required"),
+            "atlas_root_set did not reject a bare Git control root",
+        )?;
+        require(
+            !bare.join(".projectatlas").exists(),
+            "bare MCP startup or root-set refusal created project state",
+        )
     }
 
     #[test]

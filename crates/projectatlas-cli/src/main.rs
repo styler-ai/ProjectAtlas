@@ -60,8 +60,8 @@ use runtime::{
     MAX_HEALTH_LIMIT, MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel,
     PurposeReviewRequest, ScanRuntimePlan, SettingsReport, SymbolBuildOptions,
     UsageRuntimeInstance, WatchStatusReport, absolute_path, build_settings_report,
-    byte_count_to_tokens, canonical_project_root, config_root_mismatch_error,
-    default_mcp_project_root, defaultable_cli_project_root,
+    byte_count_to_tokens, canonical_project_root, canonical_source_project_root,
+    config_root_mismatch_error, default_mcp_project_root, defaultable_cli_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     index_work_control, init_config_path, init_path_status, lint_database_if_present,
     next_step_report, next_step_report_payload, normalized_folder_filter,
@@ -3128,6 +3128,7 @@ fn bind_project_root(
     transition: RootTransition,
     nearest_project: bool,
 ) -> Result<RootReport, CliError> {
+    let root = canonical_source_project_root(root)?;
     if !root.is_dir() {
         return Err(CliError::InvalidInput(format!(
             "project root {} is not a directory",
@@ -3136,12 +3137,16 @@ fn bind_project_root(
     }
     let atlas_dir = root.join(".projectatlas");
     let db_path = atlas_dir.join("projectatlas.db");
-    let config_path = init_config_path(root, None);
+    let config_path = init_config_path(&root, None);
     if config_path.exists() {
         let config = load_atlas_config(Some(&config_path))?;
         let config_root = canonical_project_root(&config.root)?;
         if config_root != root {
-            return Err(config_root_mismatch_error(&config_path, &config_root, root));
+            return Err(config_root_mismatch_error(
+                &config_path,
+                &config_root,
+                &root,
+            ));
         }
     }
 
@@ -3152,13 +3157,13 @@ fn bind_project_root(
         ));
     }
     if !database_exists {
-        init_project_with_config(root, Some(&config_path))?;
+        init_project_with_config(&root, Some(&config_path))?;
     }
-    let transition_result = AtlasStore::transition_project_root(&db_path, root, transition.into())
+    let transition_result = AtlasStore::transition_project_root(&db_path, &root, transition.into())
         .map_err(runtime::project_store_error)?;
     let configuration_result: Result<(), CliError> = (|| {
         if database_exists {
-            init_project_with_config(root, Some(&config_path))?;
+            init_project_with_config(&root, Some(&config_path))?;
         }
 
         write_mcp_config_file(

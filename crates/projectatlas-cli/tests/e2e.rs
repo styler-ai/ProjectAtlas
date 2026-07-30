@@ -2998,12 +2998,39 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
     drop(main_store);
     let main_before_linked_operations = mcp_database_snapshot(&main_db)?;
 
+    let linked_atlas_dir = linked.join(ATLAS_DIR_NAME);
+    fs::create_dir(&linked_atlas_dir)?;
+    let linked_db = linked_atlas_dir.join("projectatlas.db");
+    let connection = Connection::open(&linked_db)?;
+    connection.execute_batch(include_str!(
+        "../../projectatlas-db/tests/fixtures/released-schema-8-evolved.sql"
+    ))?;
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES ('schema_version', '8')",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES ('project_root', ?1)",
+        [&linked_root_text],
+    )?;
+    drop(connection);
+
     Command::cargo_bin("projectatlas")?
         .current_dir(&linked)
         .args(["--format", "json", "scan", "."])
         .assert()
         .success();
-    let linked_db = linked.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let migrated: String = Connection::open(&linked_db)?.query_row(
+        "SELECT value FROM metadata WHERE key = 'schema_version'",
+        [],
+        |row| row.get(0),
+    )?;
+    if migrated != "16" {
+        return Err(io::Error::other(format!(
+            "linked first-write scan did not migrate its released schema: {migrated}"
+        ))
+        .into());
+    }
     let linked_after_first_write = AtlasStore::open_for_project(&linked_db, &linked)?;
     if linked_after_first_write
         .load_node_by_path("src/feature_only.rs")?
@@ -3318,7 +3345,10 @@ fn bare_git_root_returns_typed_worktree_guidance_without_state() -> Result<(), B
             io::Error::other("common Git directory refusal created ProjectAtlas state").into(),
         );
     }
-    git_success(&manager, &["config", "core.bare", "true"])?;
+    let included_config = temp.path().join("included-bare.config");
+    fs::write(&included_config, "[core]\n\tbare = true\n")?;
+    let included_config = included_config.to_string_lossy().to_string();
+    git_success(&manager, &["config", "include.path", &included_config])?;
 
     for selected in [&bare, &manager] {
         let init = Command::cargo_bin("projectatlas")?
@@ -3342,6 +3372,27 @@ fn bare_git_root_returns_typed_worktree_guidance_without_state() -> Result<(), B
         if selected.join(ATLAS_DIR_NAME).exists() {
             return Err(io::Error::other(format!(
                 "bare-root refusal created ProjectAtlas state: {}",
+                selected.display()
+            ))
+            .into());
+        }
+
+        let root_set = Command::cargo_bin("projectatlas")?
+            .args(["--format", "json", "root", "set"])
+            .arg(selected)
+            .output()?;
+        if root_set.status.success() {
+            return Err(io::Error::other(format!(
+                "root set bound a bare Git control root: {}",
+                selected.display()
+            ))
+            .into());
+        }
+        let root_set_error: Value = serde_json::from_slice(&root_set.stderr)?;
+        require_json_string(&root_set_error, &["error", "kind"], "worktree_required")?;
+        if selected.join(ATLAS_DIR_NAME).exists() {
+            return Err(io::Error::other(format!(
+                "bare root-set refusal created ProjectAtlas state: {}",
                 selected.display()
             ))
             .into());

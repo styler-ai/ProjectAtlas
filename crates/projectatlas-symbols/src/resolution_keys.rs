@@ -419,10 +419,16 @@ pub fn derive_resolution_keys_with_context(
     let package = package.map(GraphIdentityText::new).transpose()?;
 
     let source_scopes = canonical_source_scopes(&graph.path);
+    let configured_source_scopes =
+        if provider_owner == SemanticProviderOwner::EcmaScript && package.is_some() {
+            canonical_configured_source_scopes(&graph.path)
+        } else {
+            Vec::new()
+        };
     let emits_source_module_keys = semantic::emits_source_module_keys(graph);
     let mut source_keys = Vec::new();
     if emits_source_module_keys {
-        source_keys.reserve(source_scopes.len());
+        source_keys.reserve(source_scopes.len() + configured_source_scopes.len());
         for scope in &source_scopes {
             source_keys.push(canonical_key(
                 project,
@@ -434,18 +440,18 @@ pub fn derive_resolution_keys_with_context(
                 RelationKind::Imports,
                 scope,
             )?);
-            if provider_owner == SemanticProviderOwner::EcmaScript && package.is_some() {
-                source_keys.push(canonical_key(
-                    project,
-                    ResolutionKeyDomain::Module,
-                    &provider,
-                    &language,
-                    None,
-                    None,
-                    RelationKind::Imports,
-                    scope,
-                )?);
-            }
+        }
+        for scope in &configured_source_scopes {
+            source_keys.push(canonical_key(
+                project,
+                ResolutionKeyDomain::Module,
+                &provider,
+                &language,
+                None,
+                None,
+                RelationKind::Imports,
+                scope,
+            )?);
         }
     }
     let source_keys = bounded_keys(source_keys, "source", 0)?;
@@ -497,21 +503,29 @@ pub fn derive_resolution_keys_with_context(
                         Some(GraphRelationKind::from_legacy(RelationKind::Calls)),
                         &identity,
                     ));
-                    if provider_owner == SemanticProviderOwner::EcmaScript
-                        && package.is_some()
-                        && scope.is_some()
-                    {
-                        keys.push(CanonicalResolutionKey::new(
-                            project,
-                            ResolutionKeyDomain::Declaration,
-                            &provider,
-                            &language,
-                            None,
-                            scope.as_ref(),
-                            Some(GraphRelationKind::from_legacy(RelationKind::Calls)),
-                            &identity,
-                        ));
-                    }
+                }
+                let mut configured_scopes = configured_source_scopes.clone();
+                if let Some(parent) = symbol.parent.as_deref() {
+                    configured_scopes.extend(
+                        configured_source_scopes
+                            .iter()
+                            .map(|scope| format!("{scope}/{parent}")),
+                    );
+                    configured_scopes.sort();
+                    configured_scopes.dedup();
+                }
+                for scope in configured_scopes {
+                    let scope = GraphIdentityText::new(scope)?;
+                    keys.push(CanonicalResolutionKey::new(
+                        project,
+                        ResolutionKeyDomain::Declaration,
+                        &provider,
+                        &language,
+                        None,
+                        Some(&scope),
+                        Some(GraphRelationKind::from_legacy(RelationKind::Calls)),
+                        &identity,
+                    ));
                 }
             }
             _ => {}
@@ -812,6 +826,18 @@ fn canonical_source_scopes(path: &str) -> Vec<String> {
     let mut scopes = source_stems_for_path(path);
     scopes.extend(module_aliases_for_path(path));
     normalize_scopes(scopes, normalize_repository_scope)
+}
+
+/// Return only repository-exact scopes used by configured ECMAScript targets.
+fn canonical_configured_source_scopes(path: &str) -> Vec<String> {
+    let mut scopes = source_stems_for_path(path)
+        .into_iter()
+        .map(|scope| normalize_repository_scope(&scope))
+        .filter(|scope| !scope.is_empty())
+        .collect::<Vec<_>>();
+    scopes.sort();
+    scopes.dedup();
+    scopes
 }
 
 /// Normalize, expand, sort, and deduplicate candidate scopes.
@@ -1292,6 +1318,62 @@ mod tests {
             .iter()
             .any(|keys| keys_intersect(keys, extension_target_projection.source_keys())),
             "configured extension target did not reuse extensionless source keys",
+        )?;
+
+        let root_configured = ConfiguredModuleResolution::new(vec![EcmaScriptModuleConfig::new(
+            "tsconfig.json",
+            EcmaScriptConfigKind::TypeScript,
+            Some(String::new()),
+            Vec::new(),
+        )?])?;
+        let root_context = ResolutionProjectionContext::with_configured_modules(&root_configured);
+        let root_target = extract_symbol_graph(
+            "controller.ts",
+            Some("typescript"),
+            "export function useController() { return 'root'; }\n",
+        );
+        let nested_same_name = extract_symbol_graph(
+            "packages/app/src/controller.ts",
+            Some("typescript"),
+            "export function useController() { return 'nested'; }\n",
+        );
+        let root_caller = extract_symbol_graph(
+            "page.ts",
+            Some("typescript"),
+            "import { useController } from 'controller';\nexport const value = useController();\n",
+        );
+        let root_target_projection = derive_resolution_keys(project, Some("shared"), &root_target)?;
+        let nested_projection = derive_resolution_keys(project, Some("nested"), &nested_same_name)?;
+        let root_caller_projection =
+            derive_resolution_keys_with_context(project, Some("app"), &root_caller, root_context)?;
+        let configured_imports =
+            relation_keys_of_kind(&root_caller, &root_caller_projection, RelationKind::Imports);
+        require(
+            configured_imports
+                .iter()
+                .any(|keys| keys_intersect(keys, root_target_projection.source_keys())),
+            "root baseUrl import did not resolve its repository-exact target",
+        )?;
+        require(
+            configured_imports
+                .iter()
+                .all(|keys| !keys_intersect(keys, nested_projection.source_keys())),
+            "root baseUrl import also matched a nested basename alias",
+        )?;
+        let configured_call = relation_keys(&root_caller, &root_caller_projection, "useController");
+        require(
+            keys_intersect(
+                configured_call,
+                symbol_keys(&root_target, &root_target_projection, "useController"),
+            ),
+            "root baseUrl call did not resolve its repository-exact declaration",
+        )?;
+        require(
+            !keys_intersect(
+                configured_call,
+                symbol_keys(&nested_same_name, &nested_projection, "useController"),
+            ),
+            "root baseUrl call also matched a nested basename alias",
         )?;
         Ok(())
     }
