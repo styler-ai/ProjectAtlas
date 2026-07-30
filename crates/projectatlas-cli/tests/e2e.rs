@@ -3328,6 +3328,15 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
     fs::write(&verified_runtime, "@exit /b 0\r\n")?;
     let hanging_runtime = temp.path().join("hanging-projectatlas.cmd");
     fs::write(&hanging_runtime, "@echo off\r\n:probe\r\ngoto probe\r\n")?;
+    let flooding_runtime = temp.path().join("flooding-projectatlas.cmd");
+    let mut flooding_script = String::from("@echo off\r\n");
+    let flood_line = "x".repeat(1_024);
+    for _ in 0..1_024 {
+        writeln!(flooding_script, "echo {flood_line}")?;
+        writeln!(flooding_script, "echo {flood_line} 1>&2")?;
+    }
+    flooding_script.push_str(":probe\r\ngoto probe\r\n");
+    fs::write(&flooding_runtime, flooding_script)?;
 
     let installer = workspace_root()?
         .join("plugins")
@@ -3387,6 +3396,14 @@ $probe.Stop()
 if ($probe.Elapsed -gt [TimeSpan]::FromSeconds(10)) {
     throw "Nonreturning runtime probe exceeded its bounded tolerance: $($probe.Elapsed)"
 }
+$probe = [Diagnostics.Stopwatch]::StartNew()
+if (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_FLOODING_RUNTIME $null) {
+    throw "Output-flooding runtime was accepted"
+}
+$probe.Stop()
+if ($probe.Elapsed -gt [TimeSpan]::FromSeconds(4)) {
+    throw "Output-flooding runtime reached the timeout instead of the live byte limit: $($probe.Elapsed)"
+}
 "#,
         ])
         .env("PROJECTATLAS_TEST_INSTALLER", installer)
@@ -3394,6 +3411,7 @@ if ($probe.Elapsed -gt [TimeSpan]::FromSeconds(10)) {
         .env("PROJECTATLAS_TEST_USER_BIN", &user_bin)
         .env("PROJECTATLAS_TEST_VERIFIED_RUNTIME", &verified_runtime)
         .env("PROJECTATLAS_TEST_HANGING_RUNTIME", &hanging_runtime)
+        .env("PROJECTATLAS_TEST_FLOODING_RUNTIME", &flooding_runtime)
         .output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(

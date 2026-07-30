@@ -101,6 +101,7 @@ function Invoke-ProjectAtlasRuntimeInfo {
     $probeId = [Guid]::NewGuid().ToString("N")
     $standardOutput = Join-Path ([IO.Path]::GetTempPath()) "projectatlas-runtime-probe-$probeId.stdout"
     $standardError = Join-Path ([IO.Path]::GetTempPath()) "projectatlas-runtime-probe-$probeId.stderr"
+    $probeFiles = @($standardOutput, $standardError)
     $process = $null
     try {
         $process = Start-Process `
@@ -112,19 +113,35 @@ function Invoke-ProjectAtlasRuntimeInfo {
             -RedirectStandardError $standardError
         # Windows PowerShell 5 can lose a fast child's exit code unless its handle is opened first.
         [void]$process.Handle
-        if (-not $process.WaitForExit($probeTimeoutMs)) {
-            $process.Kill()
-            $process.WaitForExit()
-            return $null
+        $probeClock = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            $exited = $process.WaitForExit(25)
+            $outputLimitExceeded = $false
+            foreach ($probeFile in $probeFiles) {
+                if ((Test-Path -LiteralPath $probeFile) `
+                    -and (Get-Item -LiteralPath $probeFile).Length -gt $maximumOutputBytes) {
+                    $outputLimitExceeded = $true
+                    break
+                }
+            }
+            if ($outputLimitExceeded -or (-not $exited -and $probeClock.ElapsedMilliseconds -ge $probeTimeoutMs)) {
+                if (-not $exited) {
+                    $process.Kill()
+                    [void]$process.WaitForExit($probeTimeoutMs)
+                }
+                return $null
+            }
         }
+        while (-not $exited)
         $process.WaitForExit()
         $process.Refresh()
         if ($process.ExitCode -ne 0) {
             return $null
         }
-        $outputFile = Get-Item -LiteralPath $standardOutput -ErrorAction Stop
-        if ($outputFile.Length -gt $maximumOutputBytes) {
-            return $null
+        foreach ($probeFile in $probeFiles) {
+            if ((Get-Item -LiteralPath $probeFile -ErrorAction Stop).Length -gt $maximumOutputBytes) {
+                return $null
+            }
         }
         $runtimeJson = Get-Content -Raw -LiteralPath $standardOutput
         $payload = $runtimeJson | ConvertFrom-Json
@@ -135,6 +152,10 @@ function Invoke-ProjectAtlasRuntimeInfo {
     }
     finally {
         if ($process) {
+            if (-not $process.HasExited) {
+                $process.Kill()
+                [void]$process.WaitForExit($probeTimeoutMs)
+            }
             $process.Dispose()
         }
         Remove-Item -LiteralPath $standardOutput, $standardError -Force -ErrorAction SilentlyContinue
@@ -1234,13 +1255,16 @@ else {
     }
     $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
 
-    $futureProcessPathReady = Set-ProjectAtlasPathPrecedence $projectAtlas
+    Set-ProjectAtlasProcessPathPrecedence $projectAtlas
 }
 Invoke-Checked $projectAtlas @("--format", "json", "runtime-info") | Out-Null
 Confirm-ProjectAtlasBareCommandResolution $projectAtlas $ProjectAtlasVersion
 $verifiedRuntimePath = Get-NormalizedPathEntry $projectAtlas
 $stableMirrorPath = Get-NormalizedPathEntry (Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin\projectatlas.exe")
 Quarantine-ProjectAtlasStaleShims $projectAtlas $ProjectAtlasVersion
+if (-not $RuntimePath) {
+    $futureProcessPathReady = Set-ProjectAtlasPathPrecedence $projectAtlas
+}
 Write-ProjectAtlasPathShadowReport $projectAtlas $ProjectAtlasVersion
 $effectiveInheritedProjectAtlasPath = $inheritedProjectAtlasPath
 if ([string]::IsNullOrWhiteSpace($effectiveInheritedProjectAtlasPath) -or -not (Test-Path -LiteralPath $effectiveInheritedProjectAtlasPath)) {
@@ -1330,7 +1354,7 @@ Write-Output "Project-local OpenCode MCP config written: $opencodeConfigPath"
 Write-Output "Claude Code ProjectAtlas integration verified through generated MCP config; restart Claude Code if an older session cached previous instructions."
 Write-Output "OpenCode ProjectAtlas integration verified through generated MCP config; restart OpenCode if an older session cached previous instructions."
 if ($hostRestartRequired) {
-    Write-Warning "Existing host restart required: the inherited bare 'projectatlas' command remains stale, but a restarted Codex or shell will inherit the persisted verified runtime. The runtime and generated MCP configs are already ready through the verified absolute runtime."
+    Write-Warning "Existing host restart required: the inherited bare 'projectatlas' command remains stale, but the verified runtime is first on the persisted fresh-process PATH. Restart the environment-owning Windows launcher or terminal session, then start a new Codex or shell; restarting only a child of an unchanged launcher can retain stale PATH. The runtime and generated MCP configs are already ready through the verified absolute runtime."
 }
 elseif ($hostRepairRequired) {
     Write-Warning "Existing host bare CLI is not ready, and restart alone will not repair it because this installation could not make the verified runtime the first bare command for a fresh process. Unlock or remove the stale command and rerun this installer, or configure $(Split-Path -Parent $projectAtlas) first on PATH. The runtime and generated MCP configs are ready through the verified absolute runtime."

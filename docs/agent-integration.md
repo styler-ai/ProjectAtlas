@@ -189,7 +189,9 @@ bare command, follow its reported remedy: restart when the verified runtime was
 persisted and resolves first in the effective fresh Machine-plus-User PATH, or
 unlock/remove the stale command and rerun when persistence was skipped or a
 Machine PATH entry still shadows it. Generated MCP configs remain usable through
-their verified absolute runtime.
+their verified absolute runtime. On Windows, restart the environment-owning
+launcher or terminal session before starting a new Codex or shell; restarting
+only a child of an unchanged launcher can retain its stale process PATH.
 
 When `codex` is available, installers also inspect the official
 `projectatlas` Codex marketplace and `codex mcp get projectatlas`. If the
