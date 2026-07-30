@@ -38,6 +38,8 @@ use projectatlas_core::language::{
     LanguageRegistryReport, SymbolParserOwner, accepted_language_capability_digest,
     language_capability, language_registry_digest, language_registry_report,
 };
+#[cfg(all(test, feature = "optional-parser-supervisor"))]
+use projectatlas_core::optional_parser_pack::OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION;
 use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::relation_capabilities::{
     RelationFamilyInventoryReport, relation_family_inventory_report,
@@ -9460,7 +9462,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
                 "schema_version": 1,
                 "pack_id": "broad-parser",
                 "selected": {
-                    "projectatlas_version": "0.4.0",
+                    "projectatlas_version": OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION,
                     "artifact": "a".repeat(64),
                 }
             }))?,

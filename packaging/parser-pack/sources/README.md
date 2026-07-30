@@ -21,7 +21,7 @@ library, export, ABI, dependency, and fixture result.
 The snapshot is input evidence, not a support claim. A language becomes
 advertised grammar-backed capability only after the generated logical manifest
 and both accepted optional-pack artifacts pass their independent gates. macOS
-keeps ProjectAtlas's complete built-in parser surface but has no v0.4.0 optional-
+keeps ProjectAtlas's complete built-in parser surface but has no v0.4 optional-
 pack artifact because the accepted containment contract cannot be proved there.
 Built-in ProjectAtlas parser owners always retain precedence.
 

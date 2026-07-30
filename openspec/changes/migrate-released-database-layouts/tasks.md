@@ -12,4 +12,4 @@
 ## 3. Public Boundaries and Verification
 
 - [x] 3.1 Cover read-only upgrade-required/no-write behavior and real CLI `init`/`scan` migration behavior for both released schema-8 layouts.
-- [ ] 3.2 Run focused database/CLI tests, `cargo fmt --check`, workspace check/clippy/test/doc gates, OpenSpec validation, IssueOps, and live review-feedback reconciliation.
+- [x] 3.2 Run focused database/CLI tests, `cargo fmt --check`, workspace check/clippy/test/doc gates, OpenSpec validation, IssueOps, and live review-feedback reconciliation.

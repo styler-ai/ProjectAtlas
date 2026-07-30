@@ -12,4 +12,4 @@
 ## 3. Recursive Coverage and Verification
 
 - [x] 3.1 Cover deep eligible folders, ignore-before-descent, repository `/.worktrees/` defense-in-depth policy, branch-only clean/dirty/add/edit/delete/switch behavior, sibling/common-Git exclusion without ignore, and unrelated nested-Git compatibility on Windows and Linux.
-- [ ] 3.2 Run focused filesystem/CLI/MCP/E2E tests, `cargo fmt --check`, workspace check/clippy/test/doc gates, OpenSpec validation, IssueOps, and live review-feedback reconciliation.
+- [x] 3.2 Run focused filesystem/CLI/MCP/E2E tests, `cargo fmt --check`, workspace check/clippy/test/doc gates, OpenSpec validation, IssueOps, and live review-feedback reconciliation.
