@@ -2,6 +2,7 @@
 //! Shared runtime orchestration for the `ProjectAtlas` CLI and MCP adapters.
 
 mod graph_projection;
+mod module_resolution;
 #[cfg(feature = "optional-parser-supervisor")]
 mod optional_parser_runtime;
 mod source_observation;
@@ -6470,6 +6471,10 @@ pub(crate) fn watch_path_requires_full_scan(root: &Path, path: &Path) -> bool {
         || relative.ends_with("/.git")
         || relative == ".git/info/exclude"
         || relative.ends_with("/.git/info/exclude")
+        || matches!(
+            relative.rsplit('/').next(),
+            Some("tsconfig.json" | "jsconfig.json")
+        )
         || index_policy_path(relative.as_str())
 }
 

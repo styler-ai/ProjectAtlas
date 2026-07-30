@@ -14161,6 +14161,351 @@ fn normal_reads_do_not_serve_offline_stale_index_state() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn configured_module_aliases_resolve_across_adapters_and_refresh_atomically()
+-> Result<(), Box<dyn Error>> {
+    const ALTERNATE_DIR_NAME: &str = "alternate";
+    const CONTROLLER_TS_FILE: &str = "controller.ts";
+    const JS_DIR_NAME: &str = "js";
+    const TS_CONFIG: &str = r#"{
+  // JSONC is the native compiler configuration format.
+  "compilerOptions": {
+    "baseUrl": "src",
+    "paths": {
+      "@/*": ["*"],
+    },
+  },
+}
+"#;
+    const JS_CONFIG: &str = r#"{
+  "compilerOptions": {
+    "baseUrl": "../src",
+    "paths": {
+      "@/*": ["*"]
+    }
+  }
+}
+"#;
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("configured-module-aliases");
+    let source = repo.join(SRC_DIR_NAME);
+    let js_source = repo.join(JS_DIR_NAME).join(SRC_DIR_NAME);
+    fs::create_dir_all(&source)?;
+    fs::create_dir_all(&js_source)?;
+    let db = temp.path().join("configured-module-aliases.db");
+    let ts_config = repo.join("tsconfig.json");
+    let js_config = repo.join(JS_DIR_NAME).join("jsconfig.json");
+    fs::write(&ts_config, TS_CONFIG)?;
+    fs::write(&js_config, JS_CONFIG)?;
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"configured-shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+    fs::write(
+        repo.join(JS_DIR_NAME).join("Cargo.toml"),
+        "[package]\nname = \"configured-app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+    fs::write(
+        source.join(CONTROLLER_TS_FILE),
+        "export function useController(): string { return \"ok\"; }\n",
+    )?;
+    fs::write(
+        source.join("Page.vue"),
+        "<script setup lang=\"ts\">\nimport { useController } from \"@/controller\";\nconst value = useController();\n</script>\n<template><div>{{ value }}</div></template>\n",
+    )?;
+    fs::write(
+        source.join("js-controller.js"),
+        "export function useJsController() { return \"ok\"; }\n",
+    )?;
+    fs::write(
+        js_source.join("js-page.js"),
+        "import { useJsController } from \"@/js-controller\";\nexport const value = useJsController();\n",
+    )?;
+    run_scan(&repo, &db)?;
+
+    let ts_file = detailed_relation_payload(&repo, &db, "src/controller.ts", None, "inbound")?;
+    assert_detailed_resolution(&ts_file, 1, "resolved")?;
+    let ts_symbol = detailed_relation_payload(
+        &repo,
+        &db,
+        "src/controller.ts",
+        Some("useController"),
+        "inbound",
+    )?;
+    assert_detailed_resolution(&ts_symbol, 1, "resolved")?;
+    let js_file = detailed_relation_payload(&repo, &db, "src/js-controller.js", None, "inbound")?;
+    assert_detailed_resolution(&js_file, 1, "resolved")?;
+    let js_symbol = detailed_relation_payload(
+        &repo,
+        &db,
+        "src/js-controller.js",
+        Some("useJsController"),
+        "inbound",
+    )?;
+    assert_detailed_resolution(&js_symbol, 1, "resolved")?;
+    let js_outbound =
+        detailed_relation_payload(&repo, &db, "js/src/js-page.js", Some("value"), "outbound")?;
+    assert_detailed_resolution(&js_outbound, 1, "resolved")?;
+
+    let impact = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "--format",
+            "json",
+            "symbols",
+            "relations",
+            "--view",
+            "analysis",
+            "--analysis-mode",
+            "impact",
+            "--vcs",
+            "working-tree",
+            "--include-dead-code",
+            "--file",
+            "src/controller.ts",
+            "--symbol",
+            "useController",
+            "--direction",
+            "inbound",
+            "--depth",
+            "2",
+            "--limit",
+            "50",
+        ])
+        .output()?;
+    if !impact.status.success() {
+        return Err(io::Error::other(format!(
+            "configured alias impact analysis failed: {}",
+            String::from_utf8_lossy(&impact.stderr)
+        ))
+        .into());
+    }
+    let impact: Value = serde_json::from_slice(&impact.stdout)?;
+    let dead_code_nodes = impact
+        .pointer("/symbol_relations/findings")
+        .and_then(Value::as_array)
+        .and_then(|findings| {
+            findings
+                .iter()
+                .find(|finding| finding.get("kind").and_then(Value::as_str) == Some("dead_code"))
+        })
+        .and_then(|finding| finding.get("nodes"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("impact analysis omitted typed dead-code findings"))?;
+    if dead_code_nodes.iter().any(|node| {
+        node.pointer("/node/entity/selector/symbol/name")
+            .and_then(Value::as_str)
+            == Some("useController")
+    }) {
+        return Err(io::Error::other(
+            "configured alias target was presented as a dead-code candidate",
+        )
+        .into());
+    }
+
+    let messages = vec![
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"configured-module-e2e","version":"0.1.0"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "atlas_symbol_relations",
+                "arguments": {
+                    "view": "detailed",
+                    "file": "src/controller.ts",
+                    "direction": "inbound",
+                    "limit": 10
+                }
+            }
+        })
+        .to_string(),
+    ];
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let stdout = run_mcp_stdio_with_env(
+        &executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+    )?;
+    let mcp = mcp_tool_text(&stdout, 2)?;
+    for expected in ["status: resolved", "value: 1", "src/controller.ts"] {
+        if !mcp.contains(expected) {
+            return Err(io::Error::other(format!(
+                "configured alias MCP result omitted {expected:?}: {mcp}"
+            ))
+            .into());
+        }
+    }
+
+    fs::create_dir_all(source.join(ALTERNATE_DIR_NAME))?;
+    fs::write(
+        source.join(ALTERNATE_DIR_NAME).join(CONTROLLER_TS_FILE),
+        "export function useController(): string { return \"alternate\"; }\n",
+    )?;
+    fs::write(
+        &ts_config,
+        r#"{"compilerOptions":{"baseUrl":"src","paths":{"@/*":["alternate/*"]}}}"#,
+    )?;
+    run_watch_once(&repo, &db)?;
+    assert_detailed_resolution(
+        &detailed_relation_payload(&repo, &db, "src/controller.ts", None, "inbound")?,
+        0,
+        "resolved",
+    )?;
+    assert_detailed_resolution(
+        &detailed_relation_payload(&repo, &db, "src/alternate/controller.ts", None, "inbound")?,
+        1,
+        "resolved",
+    )?;
+
+    fs::remove_file(&ts_config)?;
+    run_watch_once(&repo, &db)?;
+    assert_detailed_resolution(
+        &detailed_relation_payload(&repo, &db, "src/alternate/controller.ts", None, "inbound")?,
+        0,
+        "resolved",
+    )?;
+    let unresolved = detailed_relation_payload(&repo, &db, "src/Page.vue", None, "outbound")?;
+    assert_detailed_resolution(&unresolved, 2, "unresolved")?;
+
+    let pending_ts_config = repo.join("tsconfig.pending.json");
+    fs::write(&pending_ts_config, TS_CONFIG)?;
+    fs::rename(&pending_ts_config, &ts_config)?;
+    run_watch_once(&repo, &db)?;
+    assert_detailed_resolution(
+        &detailed_relation_payload(&repo, &db, "src/controller.ts", None, "inbound")?,
+        1,
+        "resolved",
+    )?;
+    fs::rename(&ts_config, &pending_ts_config)?;
+    run_watch_once(&repo, &db)?;
+    assert_detailed_resolution(
+        &detailed_relation_payload(&repo, &db, "src/controller.ts", None, "inbound")?,
+        0,
+        "resolved",
+    )?;
+    fs::remove_file(&pending_ts_config)?;
+
+    let generation_before_failure = AtlasStore::open(&db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("configured alias publication is missing"))?
+        .generation;
+    fs::write(
+        &js_config,
+        r#"{"compilerOptions":{"baseUrl":"src","paths":["invalid"]}}"#,
+    )?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--db")
+        .arg(&db)
+        .args(["watch", ".", "--once"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("field 'paths' must be an object"));
+    fs::write(&js_config, JS_CONFIG)?;
+    let generation_after_failure = AtlasStore::open(&db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("configured alias publication disappeared"))?
+        .generation;
+    if generation_after_failure != generation_before_failure {
+        return Err(io::Error::other(
+            "malformed compiler configuration advanced the published generation",
+        )
+        .into());
+    }
+    assert_detailed_resolution(
+        &detailed_relation_payload(
+            &repo,
+            &db,
+            "src/js-controller.js",
+            Some("useJsController"),
+            "inbound",
+        )?,
+        1,
+        "resolved",
+    )?;
+    Ok(())
+}
+
+fn detailed_relation_payload(
+    repo: &Path,
+    db: &Path,
+    file: &str,
+    symbol: Option<&str>,
+    direction: &str,
+) -> Result<Value, Box<dyn Error>> {
+    let mut command = Command::cargo_bin("projectatlas")?;
+    command
+        .current_dir(repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--db")
+        .arg(db)
+        .args([
+            "--format",
+            "json",
+            "symbols",
+            "relations",
+            "--view",
+            "detailed",
+            "--file",
+            file,
+            "--direction",
+            direction,
+            "--limit",
+            "50",
+        ]);
+    if let Some(symbol) = symbol {
+        command.args(["--symbol", symbol]);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "configured alias relation query failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+fn assert_detailed_resolution(
+    payload: &Value,
+    expected_total: usize,
+    expected_resolution: &str,
+) -> Result<(), Box<dyn Error>> {
+    require_json_usize(
+        payload,
+        &["symbol_relations", "total", "value"],
+        expected_total,
+    )?;
+    let rows = payload
+        .pointer("/symbol_relations/rows")
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("detailed relation rows are missing"))?;
+    if rows.iter().any(|row| {
+        row.pointer("/relation/resolution/status")
+            .and_then(Value::as_str)
+            != Some(expected_resolution)
+    }) {
+        return Err(io::Error::other(format!(
+            "relation rows did not all retain {expected_resolution:?}: {rows:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn dependency_aware_refresh_re_resolves_unchanged_inbound_callers() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
