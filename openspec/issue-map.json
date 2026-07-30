@@ -18,6 +18,7 @@
     "harden-project-path-types": 294,
     "enhance-projectatlas-init-first-run": 305,
     "fix-token-tui-reference-visual-regression": 304,
+    "isolate-linked-worktree-atlases": 382,
     "match-token-impact-reference-tui": 302,
     "persist-agent-project-context": {
       "contract": "checklist-v1",

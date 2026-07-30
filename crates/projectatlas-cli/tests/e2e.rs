@@ -45,6 +45,7 @@ use projectatlas_db::{
     AtlasStore, HealthResolution, IndexedFileText, PlannerStatisticsPolicy, PlannerStatisticsState,
     RepositoryGraphRelationQuery, TelemetryCheckpointState,
 };
+use projectatlas_fs::{FsError, ScanOptions, scan_repo};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
@@ -82,6 +83,10 @@ const INSTALLER_RS_FILE_NAME: &str = "installer.rs";
 const LIB_RS_FILE_NAME: &str = "lib.rs";
 const SCANNED_RS_FILE_NAME: &str = "scanned.rs";
 const GIT_DIR_NAME: &str = ".git";
+const MAIN_CHECKOUT_DIR_NAME: &str = "main-checkout";
+const LINKED_CHECKOUTS_DIR_NAME: &str = "branches";
+const FEATURE_ONLY_RS_FILE_NAME: &str = "feature_only.rs";
+const ALTERNATE_ONLY_RS_FILE_NAME: &str = "alternate_only.rs";
 const OUTSIDE_CANARY_FILE_NAME: &str = "outside-canary.txt";
 const PARENT_CANARY_FILE_NAME: &str = "parent-canary.txt";
 const ATLAS_DIR_NAME: &str = ".projectatlas";
@@ -2460,6 +2465,556 @@ fn init_bootstrap_creates_db_scan_report_and_host_configs() -> Result<(), Box<dy
 }
 
 #[test]
+fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Result<(), Box<dyn Error>>
+{
+    const DEEP_DIR_NAME: &str = "deep";
+    const ELIGIBLE_DIR_NAME: &str = "eligible";
+    const IGNORED_TREE_DIR_NAME: &str = "ignored-tree";
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(MAIN_CHECKOUT_DIR_NAME);
+    fs::create_dir(&repo)?;
+    git_success(&repo, &["init"])?;
+    git_success(&repo, &["config", "user.name", "ProjectAtlas Test"])?;
+    git_success(
+        &repo,
+        &["config", "user.email", "projectatlas@example.invalid"],
+    )?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(
+        repo.join(SRC_DIR_NAME)
+            .join(DEEP_DIR_NAME)
+            .join(ELIGIBLE_DIR_NAME),
+    )?;
+    fs::create_dir_all(repo.join(IGNORED_TREE_DIR_NAME).join(DEEP_DIR_NAME))?;
+    fs::write(repo.join(".gitignore"), ".projectatlas/\n/ignored-tree/\n")?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn main_checkout_marker() {}\n",
+    )?;
+    fs::write(
+        repo.join(SRC_DIR_NAME)
+            .join(DEEP_DIR_NAME)
+            .join(ELIGIBLE_DIR_NAME)
+            .join("nested.rs"),
+        "pub fn deeply_nested_marker() {}\n",
+    )?;
+    fs::write(
+        repo.join(IGNORED_TREE_DIR_NAME)
+            .join(DEEP_DIR_NAME)
+            .join("ignored.rs"),
+        "pub fn ignored_nested_marker() {}\n",
+    )?;
+    git_success(&repo, &["add", "."])?;
+    git_success(&repo, &["commit", "-m", "main fixture"])?;
+
+    let submodule_source = temp.path().join("submodule-source");
+    fs::create_dir(&submodule_source)?;
+    git_success(&submodule_source, &["init"])?;
+    git_success(
+        &submodule_source,
+        &["config", "user.name", "ProjectAtlas Test"],
+    )?;
+    git_success(
+        &submodule_source,
+        &["config", "user.email", "projectatlas@example.invalid"],
+    )?;
+    fs::create_dir(submodule_source.join(SRC_DIR_NAME))?;
+    fs::write(
+        submodule_source.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn nested_submodule_marker() {}\n",
+    )?;
+    git_success(&submodule_source, &["add", "."])?;
+    git_success(&submodule_source, &["commit", "-m", "submodule fixture"])?;
+    let submodule_output = git_command_for_root(&repo)
+        .args(["-c", "protocol.file.allow=always", "submodule", "add"])
+        .arg(&submodule_source)
+        .arg("vendor/submodule")
+        .output()?;
+    if !submodule_output.status.success() {
+        return Err(io::Error::other(format!(
+            "git submodule add failed: {}{}",
+            String::from_utf8_lossy(&submodule_output.stdout),
+            String::from_utf8_lossy(&submodule_output.stderr)
+        ))
+        .into());
+    }
+    git_success(&repo, &["commit", "-m", "add submodule fixture"])?;
+
+    let linked = repo.join(LINKED_CHECKOUTS_DIR_NAME).join("feature");
+    let worktree_output = git_command_for_root(&repo)
+        .args(["worktree", "add", "-b", "feature"])
+        .arg(&linked)
+        .output()?;
+    if !worktree_output.status.success() {
+        return Err(io::Error::other(format!(
+            "git worktree add failed: {}{}",
+            String::from_utf8_lossy(&worktree_output.stdout),
+            String::from_utf8_lossy(&worktree_output.stderr)
+        ))
+        .into());
+    }
+    fs::write(
+        linked.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn linked_feature_marker() {}\n",
+    )?;
+    fs::write(
+        linked.join(SRC_DIR_NAME).join(FEATURE_ONLY_RS_FILE_NAME),
+        "pub fn feature_only_marker() {}\n",
+    )?;
+    git_success(&linked, &["add", "."])?;
+    git_success(&linked, &["commit", "-m", "feature fixture"])?;
+    let linked_ignore = git_command_for_root(&repo)
+        .args(["check-ignore", "--quiet", "--no-index"])
+        .arg(format!(
+            "{LINKED_CHECKOUTS_DIR_NAME}/feature/{SRC_DIR_NAME}/{FEATURE_ONLY_RS_FILE_NAME}"
+        ))
+        .status()?;
+    if linked_ignore.success() {
+        return Err(io::Error::other(
+            "real-worktree fixture unexpectedly relied on a worktree-container ignore rule",
+        )
+        .into());
+    }
+    if linked_ignore.code() != Some(1) {
+        return Err(io::Error::other(format!(
+            "git check-ignore could not verify the unignored worktree fixture: {linked_ignore}"
+        ))
+        .into());
+    }
+
+    let missing_read = Command::cargo_bin("projectatlas")?
+        .current_dir(&linked)
+        .args(["--format", "json", "overview"])
+        .output()?;
+    if missing_read.status.success() {
+        return Err(io::Error::other("uninitialized worktree overview succeeded").into());
+    }
+    let missing_error: Value = serde_json::from_slice(&missing_read.stderr)?;
+    require_json_string(&missing_error, &["error", "kind"], "init_required")?;
+    require_json_string(&missing_error, &["error", "next", "command"], "init")?;
+    let linked_root = linked.canonicalize()?;
+    let linked_root_text = projectatlas_core::normalize_native_path_display(&linked_root);
+    require_json_string(
+        &missing_error,
+        &["error", "next", "project_path"],
+        &linked_root_text,
+    )?;
+    if linked.join(ATLAS_DIR_NAME).exists() {
+        return Err(io::Error::other("read-only init_required probe created project state").into());
+    }
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "scan", "."])
+        .assert()
+        .success();
+    let main_db = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let main_store = AtlasStore::open_for_project(&main_db, &repo)?;
+    if main_store
+        .load_nodes()?
+        .iter()
+        .any(|node| node.node.path.starts_with("branches/feature"))
+    {
+        return Err(io::Error::other("main atlas admitted the registered linked worktree").into());
+    }
+    if main_store.load_node_by_path("src/lib.rs")?.is_none() {
+        return Err(io::Error::other("main atlas omitted main source").into());
+    }
+    if main_store
+        .load_node_by_path("src/deep/eligible/nested.rs")?
+        .is_none()
+        || main_store
+            .load_node_by_path("vendor/submodule/src/lib.rs")?
+            .is_none()
+    {
+        return Err(io::Error::other(
+            "main atlas omitted deep eligible source or nested submodule source",
+        )
+        .into());
+    }
+    if main_store
+        .load_nodes()?
+        .iter()
+        .any(|node| node.node.path.starts_with("ignored-tree"))
+    {
+        return Err(io::Error::other("main atlas descended into an ignored subtree").into());
+    }
+    let main_identity = main_store
+        .project_instance_id()?
+        .ok_or_else(|| io::Error::other("main project identity missing"))?;
+    if main_store.repository_graph_generation()?.is_none()
+        || main_store
+            .load_symbols(Some("src/lib.rs"), None, 20)?
+            .iter()
+            .all(|symbol| symbol.name != "main_checkout_marker")
+    {
+        return Err(io::Error::other("main scan omitted symbol or graph publication").into());
+    }
+    main_store.set_purpose(
+        "src/lib.rs",
+        "Main checkout Rust library.",
+        PurposeSource::Agent,
+    )?;
+    drop(main_store);
+    let main_before_linked_operations = mcp_database_snapshot(&main_db)?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&linked)
+        .args(["--format", "json", "scan", "."])
+        .assert()
+        .success();
+    let linked_db = linked.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let linked_after_first_write = AtlasStore::open_for_project(&linked_db, &linked)?;
+    if linked_after_first_write
+        .load_node_by_path("src/feature_only.rs")?
+        .is_none()
+        || linked_after_first_write
+            .load_nodes()?
+            .iter()
+            .any(|node| node.node.path.contains("main-checkout"))
+    {
+        return Err(io::Error::other(
+            "linked first-write scan crossed its selected source boundary",
+        )
+        .into());
+    }
+    drop(linked_after_first_write);
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&linked)
+        .args(["--format", "json", "init"])
+        .assert()
+        .success();
+    for file_name in [
+        "config.toml",
+        "projectatlas.mcp.json",
+        "projectatlas.claude.mcp.json",
+        "projectatlas.opencode.json",
+    ] {
+        if !linked.join(ATLAS_DIR_NAME).join(file_name).is_file() {
+            return Err(io::Error::other(format!(
+                "linked-worktree init omitted local {file_name}"
+            ))
+            .into());
+        }
+    }
+    let linked_store = AtlasStore::open_for_project(&linked_db, &linked)?;
+    if linked_store
+        .load_node_by_path("src/feature_only.rs")?
+        .is_none()
+        || linked_store
+            .load_nodes()?
+            .iter()
+            .any(|node| node.node.path.contains("main-checkout"))
+    {
+        return Err(io::Error::other("linked atlas crossed its selected source root").into());
+    }
+    let linked_identity = linked_store
+        .project_instance_id()?
+        .ok_or_else(|| io::Error::other("linked project identity missing"))?;
+    if main_identity == linked_identity {
+        return Err(io::Error::other("linked worktrees shared one project identity").into());
+    }
+    if linked_store.repository_graph_generation()?.is_none()
+        || linked_store
+            .load_symbols(Some("src/lib.rs"), None, 20)?
+            .iter()
+            .all(|symbol| symbol.name != "linked_feature_marker")
+    {
+        return Err(io::Error::other(
+            "linked init omitted worktree-local symbol or graph publication",
+        )
+        .into());
+    }
+    linked_store.set_purpose(
+        "src/lib.rs",
+        "Feature worktree Rust library.",
+        PurposeSource::Agent,
+    )?;
+    drop(linked_store);
+    let main_purpose = AtlasStore::open_for_project(&main_db, &repo)?
+        .load_node_by_path("src/lib.rs")?
+        .ok_or_else(|| io::Error::other("main source missing after purpose write"))?;
+    let linked_purpose = AtlasStore::open_for_project(&linked_db, &linked)?
+        .load_node_by_path("src/lib.rs")?
+        .ok_or_else(|| io::Error::other("linked source missing after purpose write"))?;
+    if main_purpose.purpose.purpose.as_deref() != Some("Main checkout Rust library.")
+        || linked_purpose.purpose.purpose.as_deref() != Some("Feature worktree Rust library.")
+    {
+        return Err(io::Error::other("worktree-local purposes crossed databases").into());
+    }
+
+    let mcp_config = mcp_config_for_harness(&linked, &linked_db, "mcp-json")?;
+    let mcp_cwd = json_string_at(&mcp_config, &["mcpServers", "projectatlas", "cwd"])?;
+    if Path::new(mcp_cwd).canonicalize()? != linked_root {
+        return Err(io::Error::other(format!(
+            "linked MCP config selected the wrong working directory: {mcp_cwd}"
+        ))
+        .into());
+    }
+    let linked_summary = json_summary_command(&linked, &linked_db, "src/lib.rs")?;
+    require_json_contains(
+        &linked_summary,
+        &["content_summary"],
+        "linked_feature_marker",
+    )?;
+
+    git_success(&linked, &["switch", "-c", "alternate"])?;
+    fs::remove_file(linked.join(SRC_DIR_NAME).join(FEATURE_ONLY_RS_FILE_NAME))?;
+    fs::write(
+        linked.join(SRC_DIR_NAME).join(ALTERNATE_ONLY_RS_FILE_NAME),
+        "pub fn alternate_only_marker() {}\n",
+    )?;
+    fs::write(
+        linked.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn linked_alternate_marker() {}\n",
+    )?;
+    git_success(&linked, &["add", "-A"])?;
+    git_success(&linked, &["commit", "-m", "alternate fixture"])?;
+    run_watch_once(&linked, &linked_db)?;
+    let switched = AtlasStore::open_for_project(&linked_db, &linked)?;
+    if switched.load_node_by_path("src/feature_only.rs")?.is_some()
+        || switched
+            .load_node_by_path("src/alternate_only.rs")?
+            .is_none()
+    {
+        return Err(io::Error::other("branch-switch refresh published mixed branch state").into());
+    }
+    drop(switched);
+
+    fs::remove_file(linked.join(SRC_DIR_NAME).join(ALTERNATE_ONLY_RS_FILE_NAME))?;
+    fs::write(
+        linked.join(SRC_DIR_NAME).join("dirty_only.rs"),
+        "pub fn dirty_only_marker() {}\n",
+    )?;
+    fs::write(
+        linked.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn linked_dirty_marker() {}\n",
+    )?;
+    run_watch_once(&linked, &linked_db)?;
+    let dirty = AtlasStore::open_for_project(&linked_db, &linked)?;
+    let dirty_library = dirty
+        .load_node_by_path("src/lib.rs")?
+        .ok_or_else(|| io::Error::other("dirty refresh omitted linked library"))?;
+    if dirty.project_instance_id()? != Some(linked_identity)
+        || dirty.repository_graph_generation()?.is_none()
+        || dirty_library.purpose.purpose.as_deref() != Some("Feature worktree Rust library.")
+        || dirty.load_node_by_path("src/alternate_only.rs")?.is_some()
+        || dirty.load_node_by_path("src/dirty_only.rs")?.is_none()
+        || dirty
+            .load_symbols(Some("src/lib.rs"), None, 20)?
+            .iter()
+            .all(|symbol| symbol.name != "linked_dirty_marker")
+    {
+        return Err(io::Error::other("dirty refresh did not publish exact worktree state").into());
+    }
+    drop(dirty);
+    let dirty_summary = json_summary_command(&linked, &linked_db, "src/lib.rs")?;
+    require_json_contains(&dirty_summary, &["content_summary"], "linked_dirty_marker")?;
+
+    let (command, args) = mcp_command_and_args(&mcp_config)?;
+    let messages = vec![
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-worktree-e2e","version":"0.1.0"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_search","arguments":{"project_path":linked_root_text,"pattern":"linked_dirty_marker"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_search","arguments":{"project_path":projectatlas_core::normalize_native_path_display(repo.canonicalize()?),"pattern":"main_checkout_marker"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_search","arguments":{"project_path":projectatlas_core::normalize_native_path_display(linked.canonicalize()?),"pattern":"linked_dirty_marker"}}}).to_string(),
+    ];
+    let stdout = run_mcp_stdio(&command, &linked, &args, &messages)?;
+    for id in [2, 4] {
+        let text = mcp_tool_text(&stdout, id)?;
+        if !text.contains("linked_dirty_marker") || text.contains("main_checkout_marker") {
+            return Err(io::Error::other(format!(
+                "interleaved linked-worktree MCP read {id} crossed databases: {text}"
+            ))
+            .into());
+        }
+    }
+    let main_text = mcp_tool_text(&stdout, 3)?;
+    if !main_text.contains("main_checkout_marker") || main_text.contains("linked_dirty_marker") {
+        return Err(io::Error::other(format!(
+            "interleaved main-worktree MCP read crossed databases: {main_text}"
+        ))
+        .into());
+    }
+    let main_after_linked_operations = mcp_database_snapshot(&main_db)?;
+    if main_after_linked_operations.authoritative != main_before_linked_operations.authoritative
+        || main_after_linked_operations.authored_purposes
+            != main_before_linked_operations.authored_purposes
+        || main_after_linked_operations.project_instance_id
+            != main_before_linked_operations.project_instance_id
+        || main_after_linked_operations.generation != main_before_linked_operations.generation
+        || main_after_linked_operations.purpose_revision
+            != main_before_linked_operations.purpose_revision
+        || main_after_linked_operations.publication_state
+            != main_before_linked_operations.publication_state
+    {
+        return Err(io::Error::other(
+            "linked init, scan, branch, dirty, watch, or MCP operations changed main authoritative state",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn scan_refuses_unverified_registered_worktree_boundary_before_publication()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(MAIN_CHECKOUT_DIR_NAME);
+    fs::create_dir(&repo)?;
+    git_success(&repo, &["init"])?;
+    git_success(&repo, &["config", "user.name", "ProjectAtlas Test"])?;
+    git_success(
+        &repo,
+        &["config", "user.email", "projectatlas@example.invalid"],
+    )?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn main_checkout_marker() {}\n",
+    )?;
+    git_success(&repo, &["add", "."])?;
+    git_success(&repo, &["commit", "-m", "main fixture"])?;
+
+    let linked = repo.join(LINKED_CHECKOUTS_DIR_NAME).join("feature");
+    let worktree_output = git_command_for_root(&repo)
+        .args(["worktree", "add", "-b", "feature"])
+        .arg(&linked)
+        .output()?;
+    if !worktree_output.status.success() {
+        return Err(io::Error::other(format!(
+            "git worktree add failed: {}{}",
+            String::from_utf8_lossy(&worktree_output.stdout),
+            String::from_utf8_lossy(&worktree_output.stderr)
+        ))
+        .into());
+    }
+    let registration = fs::read_dir(repo.join(GIT_DIR_NAME).join("worktrees"))?
+        .next()
+        .transpose()?
+        .ok_or_else(|| io::Error::other("linked-worktree registration missing"))?;
+    let registration_gitdir = registration.path().join("gitdir");
+    let registered_git_control = fs::read_to_string(&registration_gitdir)?;
+    if Path::new(registered_git_control.trim()).canonicalize()?
+        != linked.join(GIT_DIR_NAME).canonicalize()?
+    {
+        return Err(io::Error::other("fixture selected the wrong worktree registration").into());
+    }
+    fs::write(&registration_gitdir, "unverified-worktree-root")?;
+    if !matches!(
+        scan_repo(&repo, &ScanOptions::default()),
+        Err(FsError::RepositoryBoundary { .. })
+    ) {
+        return Err(io::Error::other(
+            "filesystem scan did not classify the unverified worktree boundary",
+        )
+        .into());
+    }
+
+    let scan = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "scan", "."])
+        .output()?;
+    if scan.status.success() {
+        return Err(io::Error::other("scan accepted an unverified worktree boundary").into());
+    }
+    let error: Value = serde_json::from_slice(&scan.stderr)?;
+    require_json_string(&error, &["error", "kind"], "verification_incomplete")?;
+    require_json_string(
+        &error,
+        &["error", "verification_incomplete", "reason"],
+        "policy_unavailable",
+    )?;
+
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    if database.is_file() {
+        let store = AtlasStore::open_for_project(&database, &repo)?;
+        if !store.load_nodes()?.is_empty() || store.repository_graph_generation()?.is_some() {
+            return Err(io::Error::other(
+                "unverified worktree boundary published a database generation",
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn bare_git_root_returns_typed_worktree_guidance_without_state() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let bare = temp.path().join("repository.git");
+    let output = StdCommand::new("git")
+        .args(["init", "--bare"])
+        .arg(&bare)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "git init --bare failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+
+    let manager = temp.path().join("repository-manager");
+    fs::create_dir(&manager)?;
+    git_success(&manager, &["init"])?;
+    git_success(&manager, &["config", "core.bare", "true"])?;
+
+    for selected in [&bare, &manager] {
+        let init = Command::cargo_bin("projectatlas")?
+            .current_dir(selected)
+            .args(["--format", "json", "init"])
+            .output()?;
+        if init.status.success() {
+            return Err(io::Error::other(format!(
+                "bare Git control root initialized as source: {}",
+                selected.display()
+            ))
+            .into());
+        }
+        let error: Value = serde_json::from_slice(&init.stderr)?;
+        require_json_string(&error, &["error", "kind"], "worktree_required")?;
+        require_json_contains(
+            &error,
+            &["error", "message"],
+            "select a checked-out worktree",
+        )?;
+        if selected.join(ATLAS_DIR_NAME).exists() {
+            return Err(io::Error::other(format!(
+                "bare-root refusal created ProjectAtlas state: {}",
+                selected.display()
+            ))
+            .into());
+        }
+    }
+
+    let lookalike = temp.path().join("git-control-lookalike");
+    fs::create_dir(&lookalike)?;
+    fs::create_dir(lookalike.join("objects"))?;
+    fs::create_dir_all(lookalike.join("refs").join("heads"))?;
+    fs::write(lookalike.join("HEAD"), "ref: refs/heads/main\n")?;
+    fs::write(
+        lookalike.join("config"),
+        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n",
+    )?;
+    let lookalike_init = Command::cargo_bin("projectatlas")?
+        .current_dir(&lookalike)
+        .args(["--format", "json", "init", "--no-scan"])
+        .output()?;
+    if !lookalike_init.status.success() {
+        return Err(io::Error::other(format!(
+            "non-Git structural lookalike was rejected as a bare control root: {}{}",
+            String::from_utf8_lossy(&lookalike_init.stdout),
+            String::from_utf8_lossy(&lookalike_init.stderr)
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn init_no_scan_preserves_existing_config_and_is_idempotent() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
@@ -3292,6 +3847,7 @@ fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<
     for required in [
         "For task-directed work in an existing indexed repository",
         "On first use in each distinct project root",
+        "If a read-only call returns `init_required`, execute its exact `atlas_init` next call for the returned `project_path`",
         "Every project root owns its own `.projectatlas/projectatlas.db`",
         "**Fresh existing index:** make no indexing call",
         "**Changed files:** use `atlas_watch_once`",
@@ -3537,6 +4093,26 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
     {
         return Err(io::Error::other(
             "local ProjectAtlas purpose-review batches must stay ignored",
+        )
+        .into());
+    }
+    if !gitignore.lines().any(|line| line == "/.worktrees/") {
+        return Err(io::Error::other(
+            "project-local linked worktrees must stay ignored as defense in depth",
+        )
+        .into());
+    }
+    let ignored_worktree_probe = git_command_for_root(&workspace_root)
+        .args([
+            "check-ignore",
+            "--quiet",
+            "--no-index",
+            ".worktrees/projectatlas-boundary-probe/src/lib.rs",
+        ])
+        .status()?;
+    if !ignored_worktree_probe.success() {
+        return Err(io::Error::other(
+            "Git did not apply the root /.worktrees/ defense-in-depth policy",
         )
         .into());
     }
@@ -14295,6 +14871,19 @@ fn git_command_for_root(root: &Path) -> StdCommand {
         command.env_remove(variable);
     }
     command
+}
+
+fn git_success(root: &Path, arguments: &[&str]) -> Result<(), Box<dyn Error>> {
+    let output = git_command_for_root(root).args(arguments).output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "git {arguments:?} failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
+    .into())
 }
 
 #[test]
