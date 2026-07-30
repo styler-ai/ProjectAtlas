@@ -2915,11 +2915,15 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "$inheritedProjectAtlasCommand = Get-Command projectatlas",
         "$stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData",
         "$inheritedSynchronizedMirrorReady = $stableMirrorSynchronized",
-        "$hostRestartRequired = -not $inheritedCommandReady -and -not $inheritedSynchronizedMirrorReady",
+        "$futureProcessPathReady = Set-ProjectAtlasPathPrecedence",
+        "$parentCliReady = $inheritedCommandReady -or $inheritedSynchronizedMirrorReady",
+        "$hostRestartRequired = -not $parentCliReady -and $futureProcessPathReady",
         "ProjectAtlas readiness: runtime_mcp_configs_ready=",
         "installer_cli_ready=",
+        "parent_cli_ready=",
         "host_restart_required=",
         "Existing host restart required:",
+        "restart alone will not repair it",
         "Resolve-ProjectAtlasCodexCommand",
         "Update-ProjectAtlasCodexPlugin",
         "PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE",
@@ -4811,7 +4815,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .into());
         }
         if !installer_output_text.trim_end().ends_with(
-            "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true host_restart_required=false",
+            "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=true host_restart_required=false",
         ) || installer_output_text.contains("Existing host restart required:")
         {
             return Err(io::Error::other(format!(
@@ -5015,12 +5019,13 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
         }
         if !stale_output.status.success()
             || !stale_output_text.trim_end().ends_with(
-                "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true host_restart_required=true",
+                "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=false host_restart_required=false",
             )
-            || !stale_output_text.contains("Existing host restart required:")
+            || stale_output_text.contains("Existing host restart required:")
+            || !stale_output_text.contains("restart alone will not repair it")
         {
             return Err(io::Error::other(format!(
-                "installer did not report restart for the unchanged stale parent mirror\n{stale_output_text}"
+                "installer did not report repair-required state for the unchanged stale parent mirror\n{stale_output_text}"
             ))
             .into());
         }
@@ -5107,7 +5112,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
         );
         if !post_quarantine_output.status.success()
             || !post_quarantine_text.trim_end().ends_with(
-                "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true host_restart_required=false",
+                "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=true host_restart_required=false",
             )
             || post_quarantine_text.contains("Existing host restart required:")
         {
@@ -6226,7 +6231,7 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         .into());
     }
     if !installer_output_text.trim_end().ends_with(
-        "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true host_restart_required=false",
+        "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=true host_restart_required=false",
     ) || installer_output_text.contains("Existing host restart required:")
     {
         return Err(io::Error::other(format!(
@@ -6320,12 +6325,13 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
     );
     if !stale_parent_install.status.success()
         || !stale_parent_install_text.trim_end().ends_with(
-            "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true host_restart_required=true",
+            "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=false host_restart_required=false",
         )
-        || !stale_parent_install_text.contains("Existing host restart required:")
+        || stale_parent_install_text.contains("Existing host restart required:")
+        || !stale_parent_install_text.contains("restart alone will not repair it")
     {
         return Err(io::Error::other(format!(
-            "installer misstated readiness when the synchronized mirror was absent from the unchanged parent PATH\n{stale_parent_install_text}"
+            "installer misstated repair requirements when the synchronized mirror was absent from the unchanged parent PATH\n{stale_parent_install_text}"
         ))
         .into());
     }

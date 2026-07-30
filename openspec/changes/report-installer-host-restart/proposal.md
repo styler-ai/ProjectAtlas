@@ -5,7 +5,7 @@ When Windows locks the stable LocalAppData mirror, the installer safely uses the
 ## What Changes
 
 - Distinguish verified runtime/MCP readiness, installer-process CLI readiness, and parent-host restart requirement.
-- Emit an unambiguous, testable restart-required state when the stable mirror remains locked and only future User PATH state is current.
+- Emit an unambiguous, testable restart-required state only when future User PATH is current; otherwise report that restart alone cannot repair the stale parent command.
 - Preserve versioned runtime installation, absolute generated MCP configs, Codex MCP registration, and fresh-host PATH precedence.
 - Add a Windows parent/installer-child/later-sibling regression test plus unlocked and no-process-termination controls.
 
@@ -21,7 +21,7 @@ None.
 
 ## Impact
 
-- The shipped PowerShell installer and its Windows installer integration tests.
+- The shipped PowerShell installer, its Windows installer integration tests, and matching operator guidance.
 - Installer messages/state only; Rust runtime, SQLite, MCP request schemas, and generated config shapes remain unchanged.
 
 ## Non-Goals

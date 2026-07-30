@@ -164,7 +164,9 @@ downloading a release or mutating PATH: use `-RuntimePath <path-to-projectatlas>
 on PowerShell or `PROJECTATLAS_RUNTIME_PATH=<path-to-projectatlas>` with the
 POSIX installer. The supplied binary is still verified through
 `projectatlas --format json runtime-info`, including version pinning when
-`PROJECTATLAS_VERSION` is set.
+`PROJECTATLAS_VERSION` is set. Because this mode does not persist PATH, a stale
+parent bare command is reported as requiring unlock/removal and an installer
+rerun; restarting that parent alone cannot repair it.
 
 Installer updates preserve project-local atlas state by default. They rewrite
 generated MCP configs and managed runtime binaries, but they do not delete
@@ -183,7 +185,10 @@ stale Python, npm, or Cargo shim can still affect bare `projectatlas` commands
 in another shell until PATH order is fixed or the obsolete shim is removed.
 The installer makes its own active process prefer the verified runtime on
 Windows, Linux, and macOS; if a parent host process still cannot resolve the
-bare command, restart that host or use the generated absolute MCP config.
+bare command, follow its reported remedy: restart when the verified runtime was
+persisted for future processes, or unlock/remove the stale command and rerun
+when persistence was intentionally skipped. Generated MCP configs remain usable
+through their verified absolute runtime.
 
 When `codex` is available, installers also inspect the official
 `projectatlas` Codex marketplace and `codex mcp get projectatlas`. If the

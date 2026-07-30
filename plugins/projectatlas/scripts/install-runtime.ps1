@@ -282,19 +282,20 @@ function Set-ProjectAtlasPathPrecedence {
     Set-ProjectAtlasProcessPathPrecedence $FilePath
     $runtimeDir = Split-Path -Parent $FilePath
     if (-not $runtimeDir) {
-        return
+        return $false
     }
 
     $normalizedRuntimeDir = Get-NormalizedPathEntry $runtimeDir
 
     if (Test-Truthy $env:PROJECTATLAS_SKIP_USER_PATH_UPDATE) {
-        return
+        return $false
     }
 
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $userEntries = Split-PathList $userPath
     $userEntries = @($userEntries | Where-Object { (Get-NormalizedPathEntry $_) -ne $normalizedRuntimeDir })
     [Environment]::SetEnvironmentVariable("Path", ((@($runtimeDir) + $userEntries) -join ";"), "User")
+    return $true
 }
 
 function Confirm-ProjectAtlasBareCommandResolution {
@@ -1140,6 +1141,7 @@ Assert-ProjectAtlasDirectPath $atlasDir "ProjectAtlas project state directory"
 $inheritedProcessPath = $env:Path
 $inheritedProjectAtlasCommand = Get-Command projectatlas -ErrorAction SilentlyContinue | Select-Object -First 1
 $inheritedProjectAtlasPath = if ($inheritedProjectAtlasCommand) { $inheritedProjectAtlasCommand.Source } else { $null }
+$futureProcessPathReady = $false
 
 if ($RuntimePath) {
     $projectAtlas = (Resolve-Path $RuntimePath).Path
@@ -1183,7 +1185,7 @@ else {
     }
     $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
 
-    Set-ProjectAtlasPathPrecedence $projectAtlas
+    $futureProcessPathReady = Set-ProjectAtlasPathPrecedence $projectAtlas
 }
 Invoke-Checked $projectAtlas @("--format", "json", "runtime-info") | Out-Null
 Confirm-ProjectAtlasBareCommandResolution $projectAtlas $ProjectAtlasVersion
@@ -1212,7 +1214,9 @@ $installerProjectAtlasCommand = Get-Command projectatlas -ErrorAction SilentlyCo
 $installerProjectAtlasPath = if ($installerProjectAtlasCommand) { $installerProjectAtlasCommand.Source } else { $null }
 $installerCliReady = -not [string]::IsNullOrWhiteSpace($installerProjectAtlasPath) `
     -and (Get-NormalizedPathEntry $installerProjectAtlasPath) -eq $verifiedRuntimePath
-$hostRestartRequired = -not $inheritedCommandReady -and -not $inheritedSynchronizedMirrorReady
+$parentCliReady = $inheritedCommandReady -or $inheritedSynchronizedMirrorReady
+$hostRestartRequired = -not $parentCliReady -and $futureProcessPathReady
+$hostRepairRequired = -not $parentCliReady -and -not $futureProcessPathReady
 
 Assert-ProjectAtlasDirectPath $atlasDir "ProjectAtlas project state directory"
 New-Item -ItemType Directory -Force -Path $atlasDir | Out-Null
@@ -1277,6 +1281,9 @@ Write-Output "Project-local OpenCode MCP config written: $opencodeConfigPath"
 Write-Output "Claude Code ProjectAtlas integration verified through generated MCP config; restart Claude Code if an older session cached previous instructions."
 Write-Output "OpenCode ProjectAtlas integration verified through generated MCP config; restart OpenCode if an older session cached previous instructions."
 if ($hostRestartRequired) {
-    Write-Warning "Existing host restart required: the inherited bare 'projectatlas' command will not resolve a current verified runtime from the unchanged parent environment. The runtime and generated MCP configs are ready through the verified absolute runtime; restart Codex or the shell before relying on bare projectatlas from that host."
+    Write-Warning "Existing host restart required: the inherited bare 'projectatlas' command remains stale, but a restarted Codex or shell will inherit the persisted verified runtime. The runtime and generated MCP configs are already ready through the verified absolute runtime."
 }
-Write-Output "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=$($installerCliReady.ToString().ToLowerInvariant()) host_restart_required=$($hostRestartRequired.ToString().ToLowerInvariant())"
+elseif ($hostRepairRequired) {
+    Write-Warning "Existing host bare CLI is not ready, and restart alone will not repair it because this installation did not persist the verified runtime for future processes. Unlock or remove the stale command and rerun this installer, or configure $(Split-Path -Parent $projectAtlas) first on PATH. The runtime and generated MCP configs are ready through the verified absolute runtime."
+}
+Write-Output "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=$($installerCliReady.ToString().ToLowerInvariant()) parent_cli_ready=$($parentCliReady.ToString().ToLowerInvariant()) host_restart_required=$($hostRestartRequired.ToString().ToLowerInvariant())"
