@@ -2956,6 +2956,7 @@ fn bare_git_root_returns_typed_worktree_guidance_without_state() -> Result<(), B
         ))
         .into());
     }
+    git_success(&bare, &["config", "--unset", "core.bare"])?;
 
     let manager = temp.path().join("repository-manager");
     fs::create_dir(&manager)?;

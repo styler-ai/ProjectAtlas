@@ -2000,14 +2000,16 @@ fn is_bare_git_control_root(root: &Path) -> Result<bool, CliError> {
         path: config.clone(),
         source: io::Error::new(io::ErrorKind::InvalidData, source),
     })?;
-    git_config_declares_bare(text).map_err(|source| CliError::Io {
-        path: config,
-        source,
-    })
+    git_config_bare_setting(text)
+        .map(|bare| bare.unwrap_or(control_root == root))
+        .map_err(|source| CliError::Io {
+            path: config,
+            source,
+        })
 }
 
 /// Read the last explicit `core.bare` boolean from one bounded Git config.
-fn git_config_declares_bare(config: &str) -> io::Result<bool> {
+fn git_config_bare_setting(config: &str) -> io::Result<Option<bool>> {
     let mut in_core = false;
     let mut bare = None;
     for raw_line in config.lines() {
@@ -2046,7 +2048,7 @@ fn git_config_declares_bare(config: &str) -> io::Result<bool> {
             }
         });
     }
-    Ok(bare.unwrap_or(false))
+    Ok(bare)
 }
 
 /// Load map configuration for purpose import during scan.

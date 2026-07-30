@@ -45,6 +45,8 @@ const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const HASH_BUFFER_BYTES: usize = 8_192;
 /// Maximum linked-worktree `.git` pointer bytes inspected for policy discovery.
 const GIT_DIRECTORY_POINTER_MAX_BYTES: u64 = 64 * 1_024;
+/// Maximum linked-worktree registrations inspected for one repository.
+const MAX_REGISTERED_WORKTREES: usize = 1_024;
 
 /// Filesystem scanner errors.
 #[derive(Debug, Error)]
@@ -678,12 +680,28 @@ pub fn git_global_excludes_path() -> Option<PathBuf> {
 /// Returns an error when the root cannot be canonicalized or a linked-worktree
 /// pointer cannot be inspected within its declared bound.
 pub fn source_selection_policy_paths(root: &Path) -> FsResult<Vec<PathBuf>> {
+    let control = IndexWorkControl::new(IndexCancellation::new(), Some(DEFAULT_SCAN_TIMEOUT));
+    source_selection_policy_paths_controlled(root, &control)
+}
+
+/// Return bounded external source-selection inputs under one shared work control.
+///
+/// # Errors
+///
+/// Returns an error when policy discovery is canceled, exceeds its deadline or
+/// registration bound, or cannot validate a linked-worktree pointer.
+pub fn source_selection_policy_paths_controlled(
+    root: &Path,
+    control: &IndexWorkControl,
+) -> FsResult<Vec<PathBuf>> {
+    control.check(IndexWorkStage::RepositoryTraversal)?;
     let root = root.canonicalize().map_err(|source| FsError::Io {
         path: root.to_path_buf(),
         source,
     })?;
     let mut paths = BTreeSet::new();
     for ancestor in root.ancestors() {
+        control.check(IndexWorkStage::RepositoryTraversal)?;
         paths.insert(ancestor.join(".gitignore"));
         paths.insert(ancestor.join(".ignore"));
         let git = ancestor.join(".git");
@@ -752,7 +770,8 @@ pub fn source_selection_policy_paths(root: &Path) -> FsResult<Vec<PathBuf>> {
         paths.insert(registrations.clone());
         match fs::read_dir(&registrations) {
             Ok(entries) => {
-                for entry in entries {
+                for (index, entry) in entries.enumerate() {
+                    check_registered_worktree(control, index)?;
                     let entry = entry.map_err(|source| FsError::RepositoryBoundary {
                         path: registrations.clone(),
                         source,
@@ -849,8 +868,8 @@ fn linked_worktree_excluded_prefixes(
         }
     };
     let mut prefixes = BTreeSet::new();
-    for entry in entries {
-        control.check(IndexWorkStage::RepositoryTraversal)?;
+    for (index, entry) in entries.enumerate() {
+        check_registered_worktree(control, index)?;
         let entry = entry.map_err(|source| FsError::RepositoryBoundary {
             path: registrations.clone(),
             source,
@@ -937,6 +956,22 @@ fn linked_worktree_excluded_prefixes(
         }
     }
     Ok(prefixes.into_iter().collect())
+}
+
+/// Admit one bounded registered-worktree policy entry.
+fn check_registered_worktree(control: &IndexWorkControl, index: usize) -> FsResult<()> {
+    control.check(IndexWorkStage::RepositoryTraversal)?;
+    let observed = index.saturating_add(1);
+    if observed > MAX_REGISTERED_WORKTREES {
+        return Err(IndexWorkFailure::resource_limit(
+            IndexWorkStage::RepositoryTraversal,
+            IndexWorkResource::Entries,
+            u64::try_from(MAX_REGISTERED_WORKTREES).unwrap_or(u64::MAX),
+            u64::try_from(observed).unwrap_or(u64::MAX),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Resolve the common Git directory for a repository or linked-worktree root.
@@ -1465,6 +1500,34 @@ mod tests {
             "expired repository scan did not return the typed deadline",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn registered_worktree_inventory_is_controlled_and_bounded() {
+        let cancellation = IndexCancellation::new();
+        cancellation.cancel();
+        let canceled = check_registered_worktree(&IndexWorkControl::new(cancellation, None), 0);
+        assert!(matches!(
+            canceled,
+            Err(FsError::IndexWork(IndexWorkFailure::Cancelled {
+                stage: IndexWorkStage::RepositoryTraversal
+            }))
+        ));
+
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        assert!(check_registered_worktree(&control, MAX_REGISTERED_WORKTREES - 1).is_ok());
+        assert!(matches!(
+            check_registered_worktree(&control, MAX_REGISTERED_WORKTREES),
+            Err(FsError::IndexWork(
+                IndexWorkFailure::ResourceLimitExceeded {
+                    stage: IndexWorkStage::RepositoryTraversal,
+                    resource: IndexWorkResource::Entries,
+                    limit,
+                    observed
+                }
+            )) if limit == MAX_REGISTERED_WORKTREES as u64
+                && observed == MAX_REGISTERED_WORKTREES as u64 + 1
+        ));
     }
 
     #[test]

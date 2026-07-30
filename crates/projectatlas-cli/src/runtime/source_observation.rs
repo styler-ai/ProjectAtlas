@@ -798,7 +798,7 @@ fn source_policy_witness(
         plan.publication_contract_fingerprint().as_bytes(),
     );
     hash_field(&mut hasher, "root", plan.root.to_string_lossy().as_bytes());
-    for path in source_policy_paths(plan)? {
+    for path in source_policy_paths(plan, control)? {
         control.check(IndexWorkStage::Publication)?;
         hash_field(&mut hasher, "path", path.to_string_lossy().as_bytes());
         match path.symlink_metadata() {
@@ -830,8 +830,11 @@ fn source_policy_witness(
 }
 
 /// Collect every scanner policy input whose state contributes to source selection.
-fn source_policy_paths(plan: &ScanRuntimePlan) -> Result<Vec<PathBuf>, CliError> {
-    let mut paths = projectatlas_fs::source_selection_policy_paths(&plan.root)
+fn source_policy_paths(
+    plan: &ScanRuntimePlan,
+    control: &IndexWorkControl,
+) -> Result<Vec<PathBuf>, CliError> {
+    let mut paths = projectatlas_fs::source_selection_policy_paths_controlled(&plan.root, control)
         .map_err(|source| source_inspection_error(&plan.root, source))?;
     if let Some(config) = plan.selected_config_path.as_ref() {
         paths.push(config.clone());
