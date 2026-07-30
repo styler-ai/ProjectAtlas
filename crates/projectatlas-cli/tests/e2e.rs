@@ -12861,7 +12861,7 @@ fn configured_module_aliases_resolve_across_adapters_and_refresh_atomically()
 "#;
     const JS_CONFIG: &str = r#"{
   "compilerOptions": {
-    "baseUrl": "src",
+    "baseUrl": "../src",
     "paths": {
       "@/*": ["*"]
     }
@@ -12880,6 +12880,14 @@ fn configured_module_aliases_resolve_across_adapters_and_refresh_atomically()
     fs::write(&ts_config, TS_CONFIG)?;
     fs::write(&js_config, JS_CONFIG)?;
     fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"configured-shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+    fs::write(
+        repo.join(JS_DIR_NAME).join("Cargo.toml"),
+        "[package]\nname = \"configured-app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+    fs::write(
         source.join(CONTROLLER_TS_FILE),
         "export function useController(): string { return \"ok\"; }\n",
     )?;
@@ -12888,7 +12896,7 @@ fn configured_module_aliases_resolve_across_adapters_and_refresh_atomically()
         "<script setup lang=\"ts\">\nimport { useController } from \"@/controller\";\nconst value = useController();\n</script>\n<template><div>{{ value }}</div></template>\n",
     )?;
     fs::write(
-        js_source.join("js-controller.js"),
+        source.join("js-controller.js"),
         "export function useJsController() { return \"ok\"; }\n",
     )?;
     fs::write(
@@ -12907,17 +12915,19 @@ fn configured_module_aliases_resolve_across_adapters_and_refresh_atomically()
         "inbound",
     )?;
     assert_detailed_resolution(&ts_symbol, 1, "resolved")?;
-    let js_file =
-        detailed_relation_payload(&repo, &db, "js/src/js-controller.js", None, "inbound")?;
+    let js_file = detailed_relation_payload(&repo, &db, "src/js-controller.js", None, "inbound")?;
     assert_detailed_resolution(&js_file, 1, "resolved")?;
     let js_symbol = detailed_relation_payload(
         &repo,
         &db,
-        "js/src/js-controller.js",
+        "src/js-controller.js",
         Some("useJsController"),
         "inbound",
     )?;
     assert_detailed_resolution(&js_symbol, 1, "resolved")?;
+    let js_outbound =
+        detailed_relation_payload(&repo, &db, "js/src/js-page.js", Some("value"), "outbound")?;
+    assert_detailed_resolution(&js_outbound, 1, "resolved")?;
 
     let impact = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -13050,6 +13060,24 @@ fn configured_module_aliases_resolve_across_adapters_and_refresh_atomically()
     let unresolved = detailed_relation_payload(&repo, &db, "src/Page.vue", None, "outbound")?;
     assert_detailed_resolution(&unresolved, 2, "unresolved")?;
 
+    let pending_ts_config = repo.join("tsconfig.pending.json");
+    fs::write(&pending_ts_config, TS_CONFIG)?;
+    fs::rename(&pending_ts_config, &ts_config)?;
+    run_watch_once(&repo, &db)?;
+    assert_detailed_resolution(
+        &detailed_relation_payload(&repo, &db, "src/controller.ts", None, "inbound")?,
+        1,
+        "resolved",
+    )?;
+    fs::rename(&ts_config, &pending_ts_config)?;
+    run_watch_once(&repo, &db)?;
+    assert_detailed_resolution(
+        &detailed_relation_payload(&repo, &db, "src/controller.ts", None, "inbound")?,
+        0,
+        "resolved",
+    )?;
+    fs::remove_file(&pending_ts_config)?;
+
     let generation_before_failure = AtlasStore::open(&db)?
         .index_publication()?
         .ok_or_else(|| io::Error::other("configured alias publication is missing"))?
@@ -13082,7 +13110,7 @@ fn configured_module_aliases_resolve_across_adapters_and_refresh_atomically()
         &detailed_relation_payload(
             &repo,
             &db,
-            "js/src/js-controller.js",
+            "src/js-controller.js",
             Some("useJsController"),
             "inbound",
         )?,

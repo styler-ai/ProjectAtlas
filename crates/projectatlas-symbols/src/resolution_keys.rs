@@ -434,6 +434,18 @@ pub fn derive_resolution_keys_with_context(
                 RelationKind::Imports,
                 scope,
             )?);
+            if provider_owner == SemanticProviderOwner::EcmaScript && package.is_some() {
+                source_keys.push(canonical_key(
+                    project,
+                    ResolutionKeyDomain::Module,
+                    &provider,
+                    &language,
+                    None,
+                    None,
+                    RelationKind::Imports,
+                    scope,
+                )?);
+            }
         }
     }
     let source_keys = bounded_keys(source_keys, "source", 0)?;
@@ -485,6 +497,21 @@ pub fn derive_resolution_keys_with_context(
                         Some(GraphRelationKind::from_legacy(RelationKind::Calls)),
                         &identity,
                     ));
+                    if provider_owner == SemanticProviderOwner::EcmaScript
+                        && package.is_some()
+                        && scope.is_some()
+                    {
+                        keys.push(CanonicalResolutionKey::new(
+                            project,
+                            ResolutionKeyDomain::Declaration,
+                            &provider,
+                            &language,
+                            None,
+                            scope.as_ref(),
+                            Some(GraphRelationKind::from_legacy(RelationKind::Calls)),
+                            &identity,
+                        ));
+                    }
                 }
             }
             _ => {}
@@ -531,6 +558,7 @@ pub fn derive_resolution_keys_with_context(
             RelationKind::Imports if semantic::supports_source_dependencies(provider_owner) => {
                 import_dependency_keys(
                     project,
+                    provider_owner,
                     &provider,
                     &language,
                     package.as_ref(),
@@ -542,6 +570,7 @@ pub fn derive_resolution_keys_with_context(
             RelationKind::Calls if semantic::supports_source_dependencies(provider_owner) => {
                 call_dependency_keys(
                     project,
+                    provider_owner,
                     &provider,
                     &language,
                     package.as_ref(),
@@ -622,6 +651,7 @@ fn cached_import_scopes<'a>(
 /// Derive canonical module-target keys for import references.
 fn import_dependency_keys(
     project: ProjectInstanceId,
+    provider_owner: SemanticProviderOwner,
     provider: &GraphIdentityText,
     language: &GraphIdentityText,
     package: Option<&GraphIdentityText>,
@@ -632,6 +662,7 @@ fn import_dependency_keys(
     let mut keys = Vec::new();
     for reference in references {
         let scopes = cached_import_scopes(import_scopes, caller_path, reference);
+        let package = dependency_package(provider_owner, reference, package);
         for scope in scopes {
             keys.push(canonical_key(
                 project,
@@ -651,6 +682,7 @@ fn import_dependency_keys(
 /// Derive canonical declaration keys for one call, including local aliases.
 fn call_dependency_keys(
     project: ProjectInstanceId,
+    provider_owner: SemanticProviderOwner,
     provider: &GraphIdentityText,
     language: &GraphIdentityText,
     package: Option<&GraphIdentityText>,
@@ -669,6 +701,7 @@ fn call_dependency_keys(
                 continue;
             };
             let scopes = cached_import_scopes(import_scopes, caller_path, reference);
+            let package = dependency_package(provider_owner, reference, package);
             for scope in scopes {
                 let scoped_parent;
                 let scope = if remainder.is_some()
@@ -712,6 +745,22 @@ fn call_dependency_keys(
         RelationKind::Calls,
         identity,
     )?])
+}
+
+/// Configured ECMAScript targets are repository paths, so caller Cargo
+/// ownership must not prevent them from matching a sibling package export.
+fn dependency_package<'a>(
+    provider_owner: SemanticProviderOwner,
+    reference: &ImportReference,
+    package: Option<&'a GraphIdentityText>,
+) -> Option<&'a GraphIdentityText> {
+    if provider_owner == SemanticProviderOwner::EcmaScript
+        && !(reference.module().starts_with("./") || reference.module().starts_with("../"))
+    {
+        None
+    } else {
+        package
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1170,7 +1219,7 @@ mod tests {
                 _ => "typescript",
             };
             let caller = extract_symbol_graph(caller_path, Some(caller_language), caller_source);
-            let target_projection = derive_resolution_keys(project, Some("app"), &target)?;
+            let target_projection = derive_resolution_keys(project, Some("shared"), &target)?;
             let caller_projection =
                 derive_resolution_keys_with_context(project, Some("app"), &caller, context)?;
             let imports = relation_keys_of_kind(&caller, &caller_projection, RelationKind::Imports);

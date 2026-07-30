@@ -42,7 +42,7 @@ pub(super) fn load_configured_module_resolution(
     }
 
     let mut total_bytes = 0_u64;
-    let mut total_mappings = 0_usize;
+    let mut total_mappings = 0_u64;
     let mut configs = Vec::with_capacity(config_nodes.len());
     for (index, (node, kind)) in config_nodes.into_iter().enumerate() {
         check_config_work(control, index)?;
@@ -54,14 +54,12 @@ pub(super) fn load_configured_module_resolution(
                 size,
             ));
         }
-        total_bytes = total_bytes.saturating_add(size);
-        if total_bytes > MAX_MODULE_CONFIG_TOTAL_BYTES {
-            return Err(module_config_resource_limit(
-                IndexWorkResource::SourceBytes,
-                MAX_MODULE_CONFIG_TOTAL_BYTES,
-                total_bytes,
-            ));
-        }
+        claim_module_config_total(
+            &mut total_bytes,
+            size,
+            MAX_MODULE_CONFIG_TOTAL_BYTES,
+            IndexWorkResource::SourceBytes,
+        )?;
         let native_path = root.join(repo_path_to_native(&node.path));
         let bytes = match read_source_bytes_controlled(
             &native_path,
@@ -103,14 +101,12 @@ pub(super) fn load_configured_module_resolution(
                 ))
             })?;
         let config = decode_config(node.path.as_str(), kind, &value, control)?;
-        total_mappings = total_mappings.saturating_add(config.1);
-        if total_mappings > MAX_CONFIGURED_MODULE_MAPPINGS {
-            return Err(module_config_resource_limit(
-                IndexWorkResource::RelationRows,
-                MAX_CONFIGURED_MODULE_MAPPINGS,
-                total_mappings,
-            ));
-        }
+        claim_module_config_total(
+            &mut total_mappings,
+            u64::try_from(config.1).unwrap_or(u64::MAX),
+            u64::try_from(MAX_CONFIGURED_MODULE_MAPPINGS).unwrap_or(u64::MAX),
+            IndexWorkResource::RelationRows,
+        )?;
         configs.push(config.0);
     }
     ConfiguredModuleResolution::new(configs)
@@ -254,6 +250,21 @@ fn check_config_work(control: &IndexWorkControl, index: usize) -> Result<(), Cli
     Ok(())
 }
 
+/// Admit aggregate compiler-configuration work without saturating past its bound.
+fn claim_module_config_total(
+    total: &mut u64,
+    added: u64,
+    limit: u64,
+    resource: IndexWorkResource,
+) -> Result<(), CliError> {
+    let observed = total.saturating_add(added);
+    if observed > limit {
+        return Err(module_config_resource_limit(resource, limit, observed));
+    }
+    *total = observed;
+    Ok(())
+}
+
 /// Translate configured-module bounds into the runtime's typed limit failure.
 fn module_config_resource_limit(
     resource: IndexWorkResource,
@@ -271,13 +282,41 @@ fn module_config_resource_limit(
 
 #[cfg(test)]
 mod tests {
-    use super::{CliError, decode_config, normalize_repository_target};
-    use projectatlas_core::{
-        IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
+    use super::{
+        CliError, MAX_MODULE_CONFIG_FILE_BYTES, MAX_MODULE_CONFIG_TOTAL_BYTES,
+        claim_module_config_total, decode_config, load_configured_module_resolution,
+        normalize_repository_target,
     };
-    use projectatlas_symbols::EcmaScriptConfigKind;
+    use projectatlas_core::{
+        IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkResource, IndexWorkStage,
+        Node, NodeKind,
+    };
+    use projectatlas_symbols::{
+        EcmaScriptConfigKind, MAX_CONFIGURED_MODULE_CONFIGS, MAX_CONFIGURED_MODULE_MAPPINGS,
+        MAX_CONFIGURED_MODULE_TARGETS,
+    };
     use serde_json::json;
     use std::error::Error;
+    use std::fs;
+    use std::path::Path;
+    use std::time::Instant;
+
+    fn config_node(path: &str, content: &[u8]) -> Node {
+        Node {
+            path: path.to_string(),
+            kind: NodeKind::File,
+            parent_path: Path::new(path)
+                .parent()
+                .and_then(Path::to_str)
+                .filter(|parent| !parent.is_empty())
+                .map(ToString::to_string),
+            extension: Some(".json".to_string()),
+            language: Some("json".to_string()),
+            size_bytes: Some(u64::try_from(content.len()).unwrap_or(u64::MAX)),
+            mtime_ns: Some(1),
+            content_hash: Some(blake3::hash(content).to_hex().to_string()),
+        }
+    }
 
     #[test]
     fn direct_json_config_is_normalized_without_leaving_the_repository()
@@ -341,5 +380,118 @@ mod tests {
                 stage: IndexWorkStage::SymbolParsing
             }))
         ));
+    }
+
+    #[test]
+    #[allow(clippy::panic_in_result_fn)]
+    fn configured_module_loader_enforces_deadline_currentness_and_bounds()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let content = br#"{"compilerOptions":{"paths":{"@/*":["src/*"]}}}"#;
+        fs::write(temp.path().join("tsconfig.json"), content)?;
+        let node = config_node("tsconfig.json", content);
+
+        let expired = IndexWorkControl::with_deadline(IndexCancellation::new(), Instant::now());
+        assert!(matches!(
+            load_configured_module_resolution(temp.path(), std::slice::from_ref(&node), &expired),
+            Err(CliError::IndexWork(IndexWorkFailure::DeadlineExceeded {
+                stage: IndexWorkStage::SymbolParsing
+            }))
+        ));
+
+        let mut changed = node.clone();
+        changed.content_hash = Some(blake3::hash(b"other").to_hex().to_string());
+        assert!(
+            load_configured_module_resolution(
+                temp.path(),
+                &[changed],
+                &IndexWorkControl::new(IndexCancellation::new(), None),
+            )
+            .is_err()
+        );
+
+        let mut oversized = node;
+        oversized.size_bytes = Some(MAX_MODULE_CONFIG_FILE_BYTES + 1);
+        assert!(matches!(
+            load_configured_module_resolution(
+                temp.path(),
+                &[oversized],
+                &IndexWorkControl::new(IndexCancellation::new(), None),
+            ),
+            Err(CliError::IndexWork(
+                IndexWorkFailure::ResourceLimitExceeded {
+                    resource: IndexWorkResource::SourceBytes,
+                    ..
+                }
+            ))
+        ));
+
+        let excessive_configs = (0..=MAX_CONFIGURED_MODULE_CONFIGS)
+            .map(|index| config_node(&format!("config-{index}/tsconfig.json"), content))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            load_configured_module_resolution(
+                temp.path(),
+                &excessive_configs,
+                &IndexWorkControl::new(IndexCancellation::new(), None),
+            ),
+            Err(CliError::IndexWork(
+                IndexWorkFailure::ResourceLimitExceeded {
+                    resource: IndexWorkResource::Entries,
+                    ..
+                }
+            ))
+        ));
+
+        let mut total = MAX_MODULE_CONFIG_TOTAL_BYTES;
+        assert!(matches!(
+            claim_module_config_total(
+                &mut total,
+                1,
+                MAX_MODULE_CONFIG_TOTAL_BYTES,
+                IndexWorkResource::SourceBytes,
+            ),
+            Err(CliError::IndexWork(
+                IndexWorkFailure::ResourceLimitExceeded {
+                    resource: IndexWorkResource::SourceBytes,
+                    ..
+                }
+            ))
+        ));
+        let mut mappings = u64::try_from(MAX_CONFIGURED_MODULE_MAPPINGS).unwrap_or(u64::MAX);
+        assert!(matches!(
+            claim_module_config_total(
+                &mut mappings,
+                1,
+                u64::try_from(MAX_CONFIGURED_MODULE_MAPPINGS).unwrap_or(u64::MAX),
+                IndexWorkResource::RelationRows,
+            ),
+            Err(CliError::IndexWork(
+                IndexWorkFailure::ResourceLimitExceeded {
+                    resource: IndexWorkResource::RelationRows,
+                    ..
+                }
+            ))
+        ));
+
+        let excessive_targets = (0..=MAX_CONFIGURED_MODULE_TARGETS)
+            .map(|index| format!("src/{index}/*"))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            decode_config(
+                "tsconfig.json",
+                EcmaScriptConfigKind::TypeScript,
+                &json!({"compilerOptions":{"paths":{"@/*": excessive_targets}}}),
+                &IndexWorkControl::new(IndexCancellation::new(), None),
+            ),
+            Err(CliError::IndexWork(
+                IndexWorkFailure::ResourceLimitExceeded {
+                    resource: IndexWorkResource::RelationRows,
+                    ..
+                }
+            ))
+        ));
+
+        Ok(())
     }
 }
