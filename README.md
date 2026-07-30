@@ -133,7 +133,7 @@ Full benchmark campaigns are manual-only and run only when explicitly requested.
 | Language and relation coverage | [Language support](https://styler-ai.github.io/ProjectAtlas/language-support/) · [Relation support](https://styler-ai.github.io/ProjectAtlas/relation-support/) |
 | Token methodology and large-app audit | [Token-savings audit](docs/benchmarks/large-application-token-savings.md) |
 | System, database, indexing, navigation, and packaging design | [Architecture](docs/projectatlas-3-architecture.md) |
-| Published site and Rust API docs | [ProjectAtlas Pages](https://styler-ai.github.io/ProjectAtlas/) |
+| Published site and Rust API docs | [ProjectAtlas Pages](https://styler-ai.github.io/ProjectAtlas/) · [CLI/runtime crate](https://styler-ai.github.io/ProjectAtlas/projectatlas/) |
 
 ## License
 
