@@ -11030,6 +11030,81 @@ mod tests {
             &1,
             "cleared repository traversal progress handler",
         )?;
+        store
+            .connection
+            .execute("CREATE TEMP TABLE follow_up(value INTEGER NOT NULL)", [])?;
+        store
+            .connection
+            .execute("INSERT INTO follow_up(value) VALUES(1)", [])?;
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite-progress-test-observer")]
+    #[test]
+    fn sqlite_read_progress_propagates_cancellation_during_an_active_batch()
+    -> Result<(), Box<dyn Error>> {
+        use crate::sqlite_progress_test_observer::{
+            SqliteReadProgressEvent, observe_sqlite_read_progress,
+        };
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let store = AtlasStore::in_memory()?;
+        let cancellation = projectatlas_core::IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        let callback_seen = Rc::new(Cell::new(false));
+        let cancelled = observe_sqlite_read_progress(
+            {
+                let callback_seen = Rc::clone(&callback_seen);
+                move |event| {
+                    if matches!(
+                        event,
+                        SqliteReadProgressEvent::CallbackEntered {
+                            stage: IndexWorkStage::RepositoryTraversal
+                        }
+                    ) {
+                        callback_seen.set(true);
+                        cancellation.cancel();
+                    }
+                }
+            },
+            || {
+                with_sqlite_read_progress(
+                    &store.connection,
+                    Some(&control),
+                    IndexWorkStage::RepositoryTraversal,
+                    || {
+                        store
+                            .connection
+                            .query_row(
+                                "WITH RECURSIVE numbers(value) AS (
+                                     VALUES(1)
+                                     UNION ALL
+                                     SELECT value + 1 FROM numbers WHERE value < 100000000
+                                 )
+                                 SELECT SUM(value) FROM numbers",
+                                [],
+                                |row| row.get::<_, i64>(0),
+                            )
+                            .map_err(DbError::from)
+                    },
+                )
+            },
+        );
+        require(
+            callback_seen.get()
+                && matches!(
+                    cancelled,
+                    Err(DbError::IndexWork(IndexWorkFailure::Cancelled {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    }))
+                ),
+            "active SQLite batch did not propagate typed cancellation",
+        )?;
+        store.connection.execute(
+            "CREATE TEMP TABLE cancellation_follow_up(value INTEGER)",
+            [],
+        )?;
         Ok(())
     }
 

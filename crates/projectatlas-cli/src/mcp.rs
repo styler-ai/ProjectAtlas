@@ -36,9 +36,9 @@ use crate::{
     AgentErrorKind, CliError, DEFAULT_FILE_SUMMARY_LIMIT, DatabaseFilesystemErrorPayload,
     HarnessConfig, OutputFormat, RootTransition, RuntimeInfoReport, SearchRetrievalModeArg,
     build_harness_mcp_config_report, build_parity_report, build_root_report, build_runtime_info,
-    database_filesystem_error_payload, finalize_coverage_output, render_code_slice,
-    render_file_summary, render_parity_report, render_root_report, render_runtime_info,
-    render_search_report, render_watch_status,
+    controlled_named_output, database_filesystem_error_payload, finalize_coverage_output,
+    render_code_slice, render_file_summary, render_parity_report, render_root_report,
+    render_runtime_info, render_search_report, render_watch_status,
 };
 use projectatlas_core::graph::{
     Completeness, ConfidenceClass, CoverageRecord, EntitySelector, ExternalSelector,
@@ -5218,6 +5218,31 @@ impl ProjectAtlasMcpServer {
         Ok(audited)
     }
 
+    /// Prefix one controlled analysis payload with selected root/DB metadata.
+    fn with_selected_project_audit_controlled(
+        state: &McpProjectState,
+        routed_project: bool,
+        toon: String,
+        control: &IndexWorkControl,
+    ) -> Result<String, CliError> {
+        control.check(projectatlas_core::IndexWorkStage::RepositoryTraversal)?;
+        if !routed_project {
+            return Ok(toon);
+        }
+        let prefix = controlled_named_output(
+            OutputFormat::Toon,
+            MCP_PAYLOAD_SELECTED_PROJECT,
+            &Self::project_state_payload(state),
+            control,
+        )?;
+        let mut audited = String::with_capacity(prefix.len() + 1 + toon.len());
+        audited.push_str(&prefix);
+        audited.push('\n');
+        audited.push_str(&toon);
+        control.check(projectatlas_core::IndexWorkStage::RepositoryTraversal)?;
+        Ok(audited)
+    }
+
     /// Return a path parameter or the selected project root.
     fn path_or_project_root(
         state: &McpProjectState,
@@ -6482,11 +6507,17 @@ impl ProjectAtlasMcpServer {
                 SymbolRelationStores::Single(store) => {
                     let draft = load_relation_analysis(store, &query, Some(control))?;
                     draft
-                        .fit_output(|report| {
-                            Self::with_selected_project_audit(
+                        .fit_output(|report, control| {
+                            Self::with_selected_project_audit_controlled(
                                 state,
                                 routed_project,
-                                Self::encode_named_payload(MCP_PAYLOAD_SYMBOL_RELATIONS, report)?,
+                                controlled_named_output(
+                                    OutputFormat::Toon,
+                                    MCP_PAYLOAD_SYMBOL_RELATIONS,
+                                    report,
+                                    control,
+                                )?,
+                                control,
                             )
                         })?
                         .1
@@ -6494,11 +6525,17 @@ impl ProjectAtlasMcpServer {
                 SymbolRelationStores::Federated(stores) => {
                     let draft = load_federated_relation_analysis(stores, &query, Some(control))?;
                     draft
-                        .fit_output(|report| {
-                            Self::with_selected_project_audit(
+                        .fit_output(|report, control| {
+                            Self::with_selected_project_audit_controlled(
                                 state,
                                 routed_project,
-                                Self::encode_named_payload(MCP_PAYLOAD_SYMBOL_RELATIONS, report)?,
+                                controlled_named_output(
+                                    OutputFormat::Toon,
+                                    MCP_PAYLOAD_SYMBOL_RELATIONS,
+                                    report,
+                                    control,
+                                )?,
+                                control,
                             )
                         })?
                         .1
@@ -7278,7 +7315,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
     use std::io;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn require(condition: bool, message: &str) -> Result<(), Box<dyn std::error::Error>> {
         if condition {
@@ -8300,6 +8337,17 @@ mod tests {
             "MCP relation analysis omitted its closed mode, findings, work, or reusable next call",
         )?;
 
+        let state = ProjectAtlasMcpServer::project_state_from_root(Path::new(project_path))?;
+        let publication_before = ProjectAtlasMcpServer::open_read_store(&state)?
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("MCP impact fixture publication missing"))?;
+        let task_records_before = server
+            .task_registry
+            .read()
+            .map_err(|_poisoned| io::Error::other("task registry lock poisoned"))?
+            .records
+            .len();
+        let impact_started = Instant::now();
         let impact = server.atlas_symbol_relations_response(
             &AtlasSymbolRelationsParams {
                 project_path: Some(project_path.to_string()),
@@ -8309,17 +8357,77 @@ mod tests {
                 symbol: Some("first".to_string()),
                 direction: Some("outbound".to_string()),
                 depth: Some(2),
-                limit: Some(50),
+                limit: Some(8),
+                edge_limit: Some(8),
+                node_limit: Some(16),
+                visited_limit: Some(16),
+                occurrence_total_limit: Some(16),
+                intermediate_bytes: Some(128 * 1_024),
+                deadline_ms: Some(1_000),
+                output_bytes: Some(64 * 1_024),
                 analysis_mode: Some("impact".to_string()),
                 vcs: Some("working_tree".to_string()),
+                include_dead_code: Some(true),
                 ..AtlasSymbolRelationsParams::default()
             },
             None,
         );
+        let impact_elapsed = impact_started.elapsed();
         require(
-            impact.contains("mode: impact")
+            impact_elapsed <= Duration::from_secs(5)
+                && impact.contains("mode: impact")
                 && (impact.contains("state: available") || impact.contains("state: unavailable")),
-            "MCP impact analysis omitted its closed mode or typed VCS state",
+            "MCP impact analysis exceeded its elapsed tolerance or omitted typed mode/VCS state",
+        )?;
+        let impact_value: serde_json::Value = toon_format::decode_default(&impact)?;
+        let impact_report = impact_value
+            .get(MCP_PAYLOAD_SYMBOL_RELATIONS)
+            .ok_or_else(|| io::Error::other("MCP impact response omitted its envelope"))?;
+        let bounded_work = [
+            ("/returned", 8_u64),
+            ("/work/relations/inspected_edges", 8),
+            ("/work/relations/active_nodes", 16),
+            ("/work/relations/visited_nodes", 16),
+            ("/work/analyzed_nodes", 16),
+            ("/work/analyzed_edges", 8),
+            ("/work/peak_intermediate_bytes", 128 * 1_024),
+            ("/work/rendered_output_bytes", 64 * 1_024),
+        ];
+        require(
+            impact.len() <= 64 * 1_024
+                && bounded_work.iter().all(|(path, limit)| {
+                    impact_report
+                        .pointer(path)
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some_and(|observed| observed <= *limit)
+                }),
+            "MCP impact analysis crossed or omitted a declared row/node/edge/visited/intermediate/output budget",
+        )?;
+        require(
+            ProjectAtlasMcpServer::open_read_store(&state)?
+                .index_publication()?
+                .as_ref()
+                == Some(&publication_before)
+                && server
+                    .task_registry
+                    .read()
+                    .map_err(|_poisoned| io::Error::other("task registry lock poisoned"))?
+                    .records
+                    .len()
+                    == task_records_before,
+            "read-only MCP impact analysis changed publication or retained a task record",
+        )?;
+        let follow_up_started = Instant::now();
+        let follow_up = server.atlas_overview_response(
+            AtlasProjectParams {
+                project_path: Some(project_path.to_string()),
+            },
+            None,
+        );
+        require(
+            follow_up_started.elapsed() <= Duration::from_secs(2)
+                && follow_up.contains("overview:"),
+            "immediate MCP follow-up read was not responsive after bounded impact analysis",
         )?;
 
         let trace = server.atlas_symbol_relations_response(
