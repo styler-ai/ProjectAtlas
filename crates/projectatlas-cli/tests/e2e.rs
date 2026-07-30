@@ -3343,18 +3343,12 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
     let hanging_runtime = temp.path().join("hanging-projectatlas.cmd");
     fs::write(&hanging_runtime, "@echo off\r\n:probe\r\ngoto probe\r\n")?;
     let flooding_runtime = temp.path().join("flooding-projectatlas.cmd");
-    let flood_line = "x".repeat(1_024);
-    let flooding_script = format!(
-        "@echo off\r\n:probe\r\necho {flood_line}\r\necho {flood_line} 1>&2\r\ngoto probe\r\n"
-    );
-    fs::write(&flooding_runtime, flooding_script)?;
-    let owned_tree_runtime = temp.path().join("owned-tree-projectatlas.cmd");
-    let owned_tree_child_pid = temp.path().join("owned-tree-child.pid");
+    let flood_child_pid = temp.path().join("flood-child.pid");
     let probe_temp = temp.path().join("runtime-probe-temp");
     fs::create_dir_all(&probe_temp)?;
     fs::write(
-        &owned_tree_runtime,
-        "@echo off\r\npowershell -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_OWNED_TREE_CHILD_PID; while ($true) { Start-Sleep -Milliseconds 25 }\"\r\n",
+        &flooding_runtime,
+        "@echo off\r\npowershell -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID; $chunk = -join ('x' * 131072); while ($true) { [Console]::Out.Write($chunk); [Console]::Error.Write($chunk) }\"\r\n",
     )?;
     let nonnumeric_runtime = temp.path().join("nonnumeric-projectatlas.cmd");
     fs::write(
@@ -3480,26 +3474,23 @@ $probe.Stop()
 if ($probe.Elapsed -gt [TimeSpan]::FromSeconds(4)) {
     throw "Output-flooding runtime reached the timeout instead of the live byte limit: $($probe.Elapsed)"
 }
-$ownedChildPid = $null
+$floodChildPid = $null
 try {
-    if (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_OWNED_TREE_RUNTIME $null) {
-        throw "Wrapper-child runtime was accepted"
+    if (-not (Test-Path -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID)) {
+        throw "Output-flooding runtime did not report its child process"
     }
-    if (-not (Test-Path -LiteralPath $env:PROJECTATLAS_TEST_OWNED_TREE_CHILD_PID)) {
-        throw "Wrapper-child runtime did not report its child process"
-    }
-    $ownedChildPid = [int](Get-Content -Raw -LiteralPath $env:PROJECTATLAS_TEST_OWNED_TREE_CHILD_PID)
+    $floodChildPid = [int](Get-Content -Raw -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID)
     $childDeadline = [DateTime]::UtcNow.AddSeconds(2)
     do {
-        $ownedChild = Get-Process -Id $ownedChildPid -ErrorAction SilentlyContinue
-        if (-not $ownedChild) {
+        $floodChild = Get-Process -Id $floodChildPid -ErrorAction SilentlyContinue
+        if (-not $floodChild) {
             break
         }
         Start-Sleep -Milliseconds 25
     }
     while ([DateTime]::UtcNow -lt $childDeadline)
-    if ($ownedChild) {
-        throw "Bounded runtime probe left its owned child process alive: $ownedChildPid"
+    if ($floodChild) {
+        throw "Bounded runtime probe left its owned child process alive: $floodChildPid"
     }
     $leftoverProbeFiles = @(
         Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
@@ -3512,8 +3503,8 @@ try {
     }
 }
 finally {
-    if ($ownedChildPid -and (Get-Process -Id $ownedChildPid -ErrorAction SilentlyContinue)) {
-        & (Join-Path $env:SystemRoot "System32\taskkill.exe") /PID $ownedChildPid /T /F | Out-Null
+    if ($floodChildPid -and (Get-Process -Id $floodChildPid -ErrorAction SilentlyContinue)) {
+        & (Join-Path $env:SystemRoot "System32\taskkill.exe") /PID $floodChildPid /T /F | Out-Null
     }
 }
 foreach ($invalidRuntime in @(
@@ -3574,11 +3565,7 @@ finally {
         .env("PROJECTATLAS_TEST_VERIFIED_RUNTIME", &verified_runtime)
         .env("PROJECTATLAS_TEST_HANGING_RUNTIME", &hanging_runtime)
         .env("PROJECTATLAS_TEST_FLOODING_RUNTIME", &flooding_runtime)
-        .env("PROJECTATLAS_TEST_OWNED_TREE_RUNTIME", &owned_tree_runtime)
-        .env(
-            "PROJECTATLAS_TEST_OWNED_TREE_CHILD_PID",
-            &owned_tree_child_pid,
-        )
+        .env("PROJECTATLAS_TEST_FLOOD_CHILD_PID", &flood_child_pid)
         .env("TEMP", &probe_temp)
         .env("TMP", &probe_temp)
         .env("PROJECTATLAS_TEST_NONNUMERIC_RUNTIME", &nonnumeric_runtime)
