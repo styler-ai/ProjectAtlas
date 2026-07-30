@@ -122,6 +122,8 @@ The plugin no longer ships a PATH-based fallback `.mcp.json`. Registering a plug
 host process may not see PATH changes made by the runtime installer. Use the generated project-local
 configs instead; they are version-guarded and point at the verified runtime by absolute path.
 
+### Runtime installation and repair
+
 Use `projectatlas --format json runtime-info` as the compatibility probe. It reports runtime identity
 and capabilities without creating `.projectatlas` or touching the project-local database.
 
@@ -164,7 +166,9 @@ downloading a release or mutating PATH: use `-RuntimePath <path-to-projectatlas>
 on PowerShell or `PROJECTATLAS_RUNTIME_PATH=<path-to-projectatlas>` with the
 POSIX installer. The supplied binary is still verified through
 `projectatlas --format json runtime-info`, including version pinning when
-`PROJECTATLAS_VERSION` is set.
+`PROJECTATLAS_VERSION` is set. Because this mode does not persist PATH, a stale
+parent bare command is reported as requiring unlock/removal and an installer
+rerun; restarting that parent alone cannot repair it.
 
 Installer updates preserve project-local atlas state by default. They rewrite
 generated MCP configs and managed runtime binaries, but they do not delete
@@ -183,7 +187,13 @@ stale Python, npm, or Cargo shim can still affect bare `projectatlas` commands
 in another shell until PATH order is fixed or the obsolete shim is removed.
 The installer makes its own active process prefer the verified runtime on
 Windows, Linux, and macOS; if a parent host process still cannot resolve the
-bare command, restart that host or use the generated absolute MCP config.
+bare command, follow its reported remedy: restart when the verified runtime was
+persisted and resolves first in the effective fresh Machine-plus-User PATH, or
+unlock/remove the stale command and rerun when persistence was skipped or a
+Machine PATH entry still shadows it. Generated MCP configs remain usable through
+their verified absolute runtime. On Windows, restart the environment-owning
+launcher or terminal session before starting a new Codex or shell; restarting
+only a child of an unchanged launcher can retain its stale process PATH.
 
 When `codex` is available, installers also inspect the official
 `projectatlas` Codex marketplace and `codex mcp get projectatlas`. If the
@@ -324,6 +334,8 @@ Default sequence for coding tasks:
 8. Run health/lint/tests.
 9. Report tokens only when requested.
 
+### Token reporting and human TUI
+
 Token savings estimate context that ProjectAtlas prevented the agent from wasting: wrong-folder exploration,
 wrong-file opens, and unnecessary full-code reads avoided by the session-brief -> returned next call
 -> exact-slice funnel. Agent and MCP surfaces stay structured TOON; Ratatui terminal charts belong only to the
@@ -376,12 +388,11 @@ summary/outline/slice replacements are stronger evidence than search-modeled
 file reads avoided; aggregate bucket-only reports must stay `not_recorded`
 instead of inventing whole-file-read counts.
 
-The TUI keeps those file-read sources as separate proportional bars. Beneath
-them, broad folder walks skipped and candidate files not opened each use two
-different denominators: activity share is the row's persisted source steps
-divided by all reconciled source steps, while token impact is the row's avoided
-tokens divided by reconciled `tokens_avoided`. The exact source ledger below the
-charts uses the same rows, counts, and token allocation.
+The TUI keeps the observed summary/slice and search-modeled file-read sources as
+separate proportional bars. Broad folder walks skipped and candidate files not
+opened remain in the exact source ledger and contribute to the navigation
+composition total rather than adding standalone bar panels. The ledger and
+composition use the same persisted rows, counts, and token allocation.
 
 For freshness, treat `projectatlas watch` as the steady-state updater for local editing sessions. Line slices
 validate against SQLite and then read the current file from disk. Symbol slices also read current disk content,
@@ -403,7 +414,8 @@ The ProjectAtlas plugin package includes:
 
 The generated project-local files are the supported MCP registration path because they contain absolute runtime and project paths.
 Checked-in templates must not be enabled with a bare `projectatlas` command.
-ProjectAtlas does not ship a native OpenCode JavaScript/TypeScript plugin; OpenCode integration is the local MCP server config shape.
+The current ProjectAtlas release uses the generated project-local MCP config for OpenCode.
+An installable `opencode plugin` package is separate distribution work.
 
 ## Lint and CI
 

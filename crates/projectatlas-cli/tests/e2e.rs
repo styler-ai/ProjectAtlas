@@ -107,6 +107,7 @@ const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
     "GIT_COMMON_DIR",
 ];
 const OPENSPEC_DIR_NAME: &str = "openspec";
+const AGENT_INTEGRATION_DOC_FILE_NAME: &str = "agent-integration.md";
 const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
 const CARGO_LOCK_FILE_NAME: &str = "Cargo.lock";
 const CODEX_CONFIG_DIR: &str = ".codex";
@@ -119,8 +120,11 @@ const FAKE_CODEX_SKILL_CONTENT: &str = "# ProjectAtlas\n";
 const FAKE_PATH_DIR: &str = "fake-path";
 const IGNORED_FIXTURE_DIR: &str = "ignored-dir";
 const ISOLATED_HOME_DIR: &str = "isolated-home";
+const NPM_SHIM_DIR: &str = "npm";
 #[cfg(windows)]
 const WINDOWS_SYSTEM32_DIR: &str = "System32";
+#[cfg(windows)]
+static WINDOWS_RELEASE_ASSET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(feature = "optional-parser-supervisor")]
 const OPTIONAL_PARSER_ARCHIVE_ENV: &str = "PROJECTATLAS_OPTIONAL_PARSER_ARCHIVE";
 #[cfg(feature = "optional-parser-supervisor")]
@@ -2964,8 +2968,11 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             .join("ci.yml"),
     )?;
     let readme = fs::read_to_string(workspace_root.join("README.md"))?;
-    let agent_integration =
-        fs::read_to_string(workspace_root.join("docs").join("agent-integration.md"))?;
+    let agent_integration = fs::read_to_string(
+        workspace_root
+            .join("docs")
+            .join(AGENT_INTEGRATION_DOC_FILE_NAME),
+    )?;
     let architecture = fs::read_to_string(
         workspace_root
             .join("docs")
@@ -3011,6 +3018,23 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
 
     for required in [
         "Convert-ProjectAtlasVersionTag",
+        "Initialize-ProjectAtlasRuntimeProbe",
+        "CreateSuspended",
+        "ExtendedStartupInfoPresent",
+        "ProcThreadAttributeHandleList",
+        "JobObjectLimitKillOnJobClose",
+        "InitializeProcThreadAttributeList",
+        "UpdateProcThreadAttribute",
+        "DeleteProcThreadAttributeList",
+        "CreateJobObject",
+        "SetInformationJobObject",
+        "AssignProcessToJobObject",
+        "ResumeThread",
+        "TerminateJobObject",
+        "RuntimeProbeProcess]::Start",
+        r#"String.Equals(extension, ".ps1""#,
+        r#"String.Equals(extension, ".cmd""#,
+        r"Environment.SpecialFolder.System",
         "$runtime.version -eq $expectedRuntimeVersion",
         "Sync-ProjectAtlasRuntimeToLocalAppData",
         "Get-ReleaseRuntimeInstallPath",
@@ -3018,9 +3042,27 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "ProjectAtlas LocalAppData mirror skipped",
         "PROJECTATLAS_SKIP_USER_PATH_UPDATE",
         "Set-ProjectAtlasProcessPathPrecedence",
+        "Test-ProjectAtlasBareCommandResolutionOnPath",
+        r#"[Environment]::SetEnvironmentVariable("Path""#,
+        r#"[Environment]::GetEnvironmentVariable("Path", "Machine")"#,
+        "$freshProcessPath = @($machinePath, $futureUserPath) -join \";\"",
+        "Test-ProjectAtlasBareCommandResolutionOnPath $freshProcessPath $FilePath",
         "Confirm-ProjectAtlasBareCommandResolution",
         "Active process resolves bare projectatlas to verified runtime",
         "Restart Codex or the shell",
+        "$inheritedProjectAtlasCommand = Get-Command projectatlas",
+        "$stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData",
+        "$inheritedSynchronizedMirrorReady = $stableMirrorSynchronized",
+        "$futureProcessPathReady = Set-ProjectAtlasPathPrecedence",
+        "$parentCliReady = $inheritedCommandReady -or $inheritedSynchronizedMirrorReady",
+        "$hostRestartRequired = -not $parentCliReady -and $futureProcessPathReady",
+        "ProjectAtlas readiness: runtime_mcp_configs_ready=",
+        "installer_cli_ready=",
+        "parent_cli_ready=",
+        "host_restart_required=",
+        "Existing host restart required:",
+        "restart alone will not repair it",
+        "first bare command for a fresh process",
         "Resolve-ProjectAtlasCodexCommand",
         "Update-ProjectAtlasCodexPlugin",
         "PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE",
@@ -3062,6 +3104,20 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         if !powershell_installer.contains(required) {
             return Err(io::Error::other(format!(
                 "PowerShell installer is missing runtime version guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for forbidden in [
+        "Stop-Process",
+        "Suspend-Process",
+        "PROCESS_TERMINATE",
+        "Win32_Process",
+        r"System32\taskkill.exe",
+    ] {
+        if powershell_installer.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "PowerShell installer must not use broad process control, found {forbidden:?}"
             ))
             .into());
         }
@@ -3230,6 +3286,18 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         )
         .into());
     }
+    for required in [
+        "windows_installer_fresh_path_probe_respects_machine_precedence",
+        "PROJECTATLAS_TEST_DISPOSABLE_RUNNER: ${{ runner.environment }}",
+        "PROJECTATLAS_TEST_PERSIST_USER_PATH: \"1\"",
+    ] {
+        if !e2e_smoke.contains(required) {
+            return Err(io::Error::other(format!(
+                "Windows CI smoke must exercise persisted User PATH through a fresh process; missing {required:?}"
+            ))
+            .into());
+        }
+    }
     if !e2e_smoke
         .contains("windows_release_binary_installer_repairs_stale_mirror_without_registering_it")
     {
@@ -3252,17 +3320,16 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
     }
     if opencode_native_plugin_dir.exists() {
         return Err(io::Error::other(
-            "ProjectAtlas OpenCode support is an MCP config template, not a native OpenCode plugin directory",
+            "the current ProjectAtlas release uses generated OpenCode MCP config and must not ship an unverified plugin directory",
         )
         .into());
     }
-    if !readme.contains("OpenCode MCP config template")
-        || !agent_integration
-            .contains("ProjectAtlas does not ship a native OpenCode JavaScript/TypeScript plugin")
-        || !architecture.contains("not a native OpenCode JavaScript/TypeScript plugin")
+    if !agent_integration
+        .contains("An installable `opencode plugin` package is separate distribution work.")
+        || !architecture.contains("`opencode plugin` package is separate distribution work")
     {
         return Err(io::Error::other(
-            "docs must distinguish Claude Code plugin packaging from OpenCode MCP config support",
+            "docs must distinguish current generated OpenCode MCP config support from future plugin packaging",
         )
         .into());
     }
@@ -3278,7 +3345,6 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         }
     }
     for (document_name, document) in [
-        ("README.md", readme.as_str()),
         ("docs/agent-integration.md", agent_integration.as_str()),
         (
             "plugins/projectatlas/skills/projectatlas/SKILL.md",
@@ -3303,6 +3369,17 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
                 ))
                 .into());
             }
+        }
+    }
+    for required in [
+        "codex plugin add projectatlas --marketplace projectatlas",
+        "docs/agent-integration.md",
+    ] {
+        if !readme.contains(required) {
+            return Err(io::Error::other(format!(
+                "README must keep concise install guidance and link its detailed owner; missing {required:?}"
+            ))
+            .into());
         }
     }
     let windows_release_smoke = workflow_job_block(&release_workflow, "installer-smoke-windows")?;
@@ -3389,6 +3466,352 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         &["mcp", "projectatlas", "cwd"],
         "/absolute/path/to/project",
     )?;
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let machine_bin = temp.path().join("machine-bin");
+    let user_bin = temp.path().join("user-bin");
+    fs::create_dir_all(&machine_bin)?;
+    fs::create_dir_all(&user_bin)?;
+    fs::write(machine_bin.join("projectatlas.cmd"), "@exit /b 0\r\n")?;
+    let verified_runtime = user_bin.join("projectatlas.cmd");
+    fs::write(&verified_runtime, "@exit /b 0\r\n")?;
+    let hanging_runtime = temp.path().join("hanging-projectatlas.cmd");
+    fs::write(&hanging_runtime, "@echo off\r\n:probe\r\ngoto probe\r\n")?;
+    let flooding_runtime = temp.path().join("flooding-projectatlas.cmd");
+    let flood_child_pid = temp.path().join("flood-child.pid");
+    let probe_temp = temp.path().join("runtime-probe-temp");
+    fs::create_dir_all(&probe_temp)?;
+    fs::write(
+        &flooding_runtime,
+        "@echo off\r\npowershell -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID; $chunk = -join ('x' * 131072); while ($true) { [Console]::Out.Write($chunk); [Console]::Error.Write($chunk) }\"\r\n",
+    )?;
+    let async_runtime = temp.path().join("async-projectatlas.cmd");
+    let async_child_pid = temp.path().join("async-child.pid");
+    fs::write(
+        &async_runtime,
+        "@echo off\r\nstart \"\" /b powershell -NoLogo -NoProfile -NonInteractive -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_ASYNC_CHILD_PID; while ($true) { Start-Sleep -Seconds 60 }\"\r\nfor /L %%i in (1,1,200) do (\r\n  if exist \"%PROJECTATLAS_TEST_ASYNC_CHILD_PID%\" goto child_started\r\n  powershell -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Milliseconds 10\"\r\n)\r\nexit /b 2\r\n:child_started\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\nexit /b 0\r\n",
+    )?;
+    let powershell_runtime = temp.path().join("projectatlas.ps1");
+    fs::write(
+        &powershell_runtime,
+        "[Console]::Out.WriteLine('{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}')\r\n",
+    )?;
+    let command_host_dir = temp.path().join("command & (safe) !^");
+    fs::create_dir(&command_host_dir)?;
+    let command_host_runtime = command_host_dir.join("projectatlas.cmd");
+    fs::write(
+        &command_host_runtime,
+        "@echo off\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\n",
+    )?;
+    let nonnumeric_runtime = temp.path().join("nonnumeric-projectatlas.cmd");
+    fs::write(
+        &nonnumeric_runtime,
+        "@echo off\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":\"invalid\",\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\n",
+    )?;
+    let out_of_range_runtime = temp.path().join("out-of-range-projectatlas.cmd");
+    fs::write(
+        &out_of_range_runtime,
+        "@echo off\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":\"999999999999999999999\",\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\n",
+    )?;
+    let unpinned_runtime = temp.path().join("unpinned-runtime-version.txt");
+    fs::write(&unpinned_runtime, "0.4.1")?;
+    let local_app_data = temp.path().join("local-app-data");
+    let stable_runtime = local_app_data
+        .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
+        .join("bin")
+        .join("projectatlas.exe");
+    fs::create_dir_all(
+        stable_runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("stable runtime parent missing"))?,
+    )?;
+    fs::write(&stable_runtime, "0.4.0")?;
+
+    let installer = workspace_root()?
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    let output = StdCommand::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            r#"
+$ErrorActionPreference = "Stop"
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    $env:PROJECTATLAS_TEST_INSTALLER,
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -ne 0) {
+    throw ($errors | Out-String)
+}
+$names = @(
+    "Convert-ProjectAtlasVersionTag",
+    "Get-NormalizedPathEntry",
+    "Initialize-ProjectAtlasRuntimeProbe",
+    "Invoke-ProjectAtlasRuntimeInfo",
+    "Set-ProjectAtlasPathPrecedence",
+    "Set-ProjectAtlasProcessPathPrecedence",
+    "Split-PathList",
+    "Sync-ProjectAtlasRuntimeToLocalAppData",
+    "Test-ProjectAtlasBareCommandResolutionOnPath",
+    "Test-ProjectAtlasRuntime",
+    "Test-Truthy"
+)
+$functions = $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] `
+        -and $names -contains $node.Name
+}, $true)
+foreach ($name in $names) {
+    $definition = $functions | Where-Object Name -eq $name | Select-Object -First 1
+    if (-not $definition) {
+        throw "Installer function not found: $name"
+    }
+    Invoke-Expression $definition.Extent.Text
+}
+$machineFirst = "$env:PROJECTATLAS_TEST_MACHINE_BIN;$env:PROJECTATLAS_TEST_USER_BIN"
+$userFirst = "$env:PROJECTATLAS_TEST_USER_BIN;$env:PROJECTATLAS_TEST_MACHINE_BIN"
+if (Test-ProjectAtlasBareCommandResolutionOnPath $machineFirst $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME) {
+    throw "Machine PATH shadow was incorrectly classified as restart-recoverable"
+}
+if (-not (Test-ProjectAtlasBareCommandResolutionOnPath $userFirst $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME)) {
+    throw "Verified runtime first on PATH was not classified as restart-recoverable"
+}
+if ($env:PROJECTATLAS_TEST_PERSIST_USER_PATH -eq "1") {
+    if ($env:PROJECTATLAS_TEST_DISPOSABLE_RUNNER -ne "github-hosted") {
+        throw "Persisted User PATH test requires a disposable GitHub-hosted runner"
+    }
+    $originalUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $originalProcessPath = $env:Path
+    try {
+        if (-not (Set-ProjectAtlasPathPrecedence $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME)) {
+            throw "Persisted User PATH was not classified as fresh-host ready"
+        }
+        $persistedUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+        $env:Path = @($machinePath, $persistedUserPath) -join ";"
+        $freshChildPath = & powershell -NoProfile -Command `
+            "(Get-Command projectatlas -ErrorAction Stop).Source"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Fresh child could not resolve projectatlas from persisted User PATH"
+        }
+        if ((Get-NormalizedPathEntry $freshChildPath) -ne `
+            (Get-NormalizedPathEntry $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME)) {
+            throw "Fresh child resolved '$freshChildPath' instead of the persisted verified runtime"
+        }
+    }
+    finally {
+        $env:Path = $originalProcessPath
+        [Environment]::SetEnvironmentVariable("Path", $originalUserPath, "User")
+    }
+}
+$probe = [Diagnostics.Stopwatch]::StartNew()
+if (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_HANGING_RUNTIME $null) {
+    throw "Nonreturning runtime was accepted"
+}
+$probe.Stop()
+if ($probe.Elapsed -gt [TimeSpan]::FromSeconds(10)) {
+    throw "Nonreturning runtime probe exceeded its bounded tolerance: $($probe.Elapsed)"
+}
+$probe = [Diagnostics.Stopwatch]::StartNew()
+if (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_FLOODING_RUNTIME $null) {
+    throw "Output-flooding runtime was accepted"
+}
+$probe.Stop()
+if ($probe.Elapsed -gt [TimeSpan]::FromSeconds(4)) {
+    throw "Output-flooding runtime reached the timeout instead of the live byte limit: $($probe.Elapsed)"
+}
+$floodChildPid = $null
+try {
+    if (-not (Test-Path -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID)) {
+        throw "Output-flooding runtime did not report its child process"
+    }
+    $floodChildPid = [int](Get-Content -Raw -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID)
+    $childDeadline = [DateTime]::UtcNow.AddSeconds(2)
+    do {
+        $floodChild = Get-Process -Id $floodChildPid -ErrorAction SilentlyContinue
+        if (-not $floodChild) {
+            break
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    while ([DateTime]::UtcNow -lt $childDeadline)
+    if ($floodChild) {
+        throw "Bounded runtime probe left its owned child process alive: $floodChildPid"
+    }
+    $leftoverProbeFiles = @(
+        Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
+            -Filter "projectatlas-runtime-probe-*" `
+            -File |
+        Select-Object -ExpandProperty FullName
+    )
+    if ($leftoverProbeFiles.Count -ne 0) {
+        throw "Bounded runtime probe left temporary files: $($leftoverProbeFiles -join ', ')"
+    }
+}
+finally {
+    if ($floodChildPid -and (Get-Process -Id $floodChildPid -ErrorAction SilentlyContinue)) {
+        & (Join-Path $env:SystemRoot "System32\taskkill.exe") /PID $floodChildPid /T /F | Out-Null
+    }
+}
+$canary = Start-Process `
+    -FilePath (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe") `
+    -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "while (`$true) { Start-Sleep -Seconds 60 }") `
+    -WindowStyle Hidden `
+    -PassThru
+$asyncChildPid = $null
+try {
+    if (-not (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_ASYNC_RUNTIME $null)) {
+        throw "Runtime with an asynchronously exiting launcher was rejected"
+    }
+    if (-not (Test-Path -LiteralPath $env:PROJECTATLAS_TEST_ASYNC_CHILD_PID)) {
+        throw "Asynchronous launcher did not report its child process"
+    }
+    $asyncChildPid = [int](Get-Content -Raw -LiteralPath $env:PROJECTATLAS_TEST_ASYNC_CHILD_PID)
+    $childDeadline = [DateTime]::UtcNow.AddSeconds(2)
+    do {
+        $asyncChild = Get-Process -Id $asyncChildPid -ErrorAction SilentlyContinue
+        if (-not $asyncChild) {
+            break
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    while ([DateTime]::UtcNow -lt $childDeadline)
+    if ($asyncChild) {
+        throw "Contained job left its asynchronously spawned child alive: $asyncChildPid"
+    }
+    if ($canary.HasExited) {
+        throw "Contained job terminated the unrelated canary process"
+    }
+    if (-not (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_POWERSHELL_RUNTIME $null)) {
+        throw "PowerShell ProjectAtlas shim was not dispatched through PowerShell"
+    }
+    if (-not (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_COMMAND_HOST_RUNTIME $null)) {
+        throw "Command shim path was not safely quoted for cmd.exe"
+    }
+    $leftoverProbeFiles = @(
+        Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
+            -Filter "projectatlas-runtime-probe-*" `
+            -File |
+        Select-Object -ExpandProperty FullName
+    )
+    if ($leftoverProbeFiles.Count -ne 0) {
+        throw "Contained probe left temporary files: $($leftoverProbeFiles -join ', ')"
+    }
+}
+finally {
+    if ($asyncChildPid) {
+        $asyncChild = Get-Process -Id $asyncChildPid -ErrorAction SilentlyContinue
+        if ($asyncChild) {
+            $asyncChild.Kill()
+            [void]$asyncChild.WaitForExit(2000)
+        }
+    }
+    if (-not $canary.HasExited) {
+        $canary.Kill()
+        [void]$canary.WaitForExit(2000)
+    }
+    $canary.Dispose()
+}
+foreach ($invalidRuntime in @(
+    $env:PROJECTATLAS_TEST_NONNUMERIC_RUNTIME,
+    $env:PROJECTATLAS_TEST_OUT_OF_RANGE_RUNTIME
+)) {
+    if (Test-ProjectAtlasRuntime $invalidRuntime $null) {
+        throw "Runtime with invalid major_version was accepted: $invalidRuntime"
+    }
+}
+function Get-ProjectAtlasRuntimeVersion {
+    param([string]$FilePath)
+    if (-not (Test-Path -LiteralPath $FilePath)) {
+        return $null
+    }
+    return (Get-Content -Raw -LiteralPath $FilePath).Trim()
+}
+function Test-ProjectAtlasRuntime {
+    param([string]$FilePath, [string]$ExpectedVersion)
+    if (-not (Test-Path -LiteralPath $FilePath)) {
+        return $false
+    }
+    if ($script:ProjectAtlasTestForceStaleTarget `
+        -and (Get-NormalizedPathEntry $FilePath) -eq (Get-NormalizedPathEntry $env:PROJECTATLAS_TEST_STABLE_RUNTIME)) {
+        return $false
+    }
+    $actualVersion = Get-ProjectAtlasRuntimeVersion $FilePath
+    $expectedRuntimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
+    return -not $expectedRuntimeVersion -or $actualVersion -eq $expectedRuntimeVersion
+}
+if (-not (Sync-ProjectAtlasRuntimeToLocalAppData $env:PROJECTATLAS_TEST_UNPINNED_RUNTIME $null)) {
+    throw "Unpinned runtime did not synchronize its exact version"
+}
+if ((Get-ProjectAtlasRuntimeVersion $env:PROJECTATLAS_TEST_STABLE_RUNTIME) -ne "0.4.1") {
+    throw "Unpinned synchronization accepted an older stable mirror"
+}
+Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_STABLE_RUNTIME -Value "0.4.0"
+$script:ProjectAtlasTestForceStaleTarget = $true
+$stableLock = [IO.File]::Open(
+    $env:PROJECTATLAS_TEST_STABLE_RUNTIME,
+    [IO.FileMode]::Open,
+    [IO.FileAccess]::Read,
+    [IO.FileShare]::None
+)
+try {
+    if (Sync-ProjectAtlasRuntimeToLocalAppData $env:PROJECTATLAS_TEST_UNPINNED_RUNTIME $null) {
+        throw "Locked older stable mirror was reported synchronized"
+    }
+}
+finally {
+    $stableLock.Dispose()
+}
+"#,
+        ])
+        .env("PROJECTATLAS_TEST_INSTALLER", installer)
+        .env("PROJECTATLAS_TEST_MACHINE_BIN", &machine_bin)
+        .env("PROJECTATLAS_TEST_USER_BIN", &user_bin)
+        .env("PROJECTATLAS_TEST_VERIFIED_RUNTIME", &verified_runtime)
+        .env("PROJECTATLAS_TEST_HANGING_RUNTIME", &hanging_runtime)
+        .env("PROJECTATLAS_TEST_FLOODING_RUNTIME", &flooding_runtime)
+        .env("PROJECTATLAS_TEST_FLOOD_CHILD_PID", &flood_child_pid)
+        .env("PROJECTATLAS_TEST_ASYNC_RUNTIME", &async_runtime)
+        .env("PROJECTATLAS_TEST_ASYNC_CHILD_PID", &async_child_pid)
+        .env(
+            "PROJECTATLAS_TEST_POWERSHELL_RUNTIME",
+            &powershell_runtime,
+        )
+        .env(
+            "PROJECTATLAS_TEST_COMMAND_HOST_RUNTIME",
+            &command_host_runtime,
+        )
+        .env("TEMP", &probe_temp)
+        .env("TMP", &probe_temp)
+        .env("PROJECTATLAS_TEST_NONNUMERIC_RUNTIME", &nonnumeric_runtime)
+        .env(
+            "PROJECTATLAS_TEST_OUT_OF_RANGE_RUNTIME",
+            &out_of_range_runtime,
+        )
+        .env("PROJECTATLAS_TEST_UNPINNED_RUNTIME", &unpinned_runtime)
+        .env("PROJECTATLAS_TEST_STABLE_RUNTIME", &stable_runtime)
+        .env("LOCALAPPDATA", &local_app_data)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "fresh Windows PATH probe failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -3521,18 +3944,83 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
         .into());
     }
     let readme = fs::read_to_string(workspace_root.join("README.md"))?;
+    let agent_integration = fs::read_to_string(
+        workspace_root
+            .join("docs")
+            .join(AGENT_INTEGRATION_DOC_FILE_NAME),
+    )?;
+    let public_docs_index = fs::read_to_string(workspace_root.join("docs").join("index.md"))?;
     let gitignore = fs::read_to_string(workspace_root.join(".gitignore"))?;
     for required in [
-        "Rust-native local code index and atlas",
-        "complete SQLite-backed index",
-        "fast local SQLite index",
+        "Rust-native, high-performance local repository intelligence",
+        "persistent SQLite map",
+        "native Rust CLI and MCP server",
+        "purposes identify the responsible area",
+        "graph relationships reveal connected code",
+        "compact summaries and outlines",
+        "exact source slices provide the final evidence",
+        "docs/design/ani-mascot-reference.png",
+        "docs/agent-integration.md#runtime-installation-and-repair",
+        "docs/agent-integration.md#token-reporting-and-human-tui",
+        "docs/agent-integration.md#mcp-tool-sequence",
     ] {
         if !readme.contains(required) {
             return Err(io::Error::other(format!(
-                "README must present ProjectAtlas as a complete local code index; missing {required:?}"
+                "README must retain the consolidated Rust-native agent-first positioning; missing {required:?}"
             ))
             .into());
         }
+    }
+    for required in [
+        "### Runtime installation and repair",
+        "### Token reporting and human TUI",
+        "remain in the exact source ledger",
+        "rather than adding standalone bar panels",
+    ] {
+        if !agent_integration.contains(required) {
+            return Err(io::Error::other(format!(
+                "agent integration guide must own the linked setup and TUI behavior; missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "separate proportional bars for observed and modeled file reads avoided",
+        "retained in the exact source ledger and navigation composition",
+        "at wide terminal sizes, a bounded Atlas map",
+    ] {
+        if !public_docs_index.contains(required) {
+            return Err(io::Error::other(format!(
+                "public docs index must match the live token TUI; missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    for historical in ["frozen v0.3.26", "plain control", "3.9 times the median"] {
+        if readme.contains(historical) {
+            return Err(io::Error::other(format!(
+                "README must not restore the historical navigation comparison {historical:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "projectatlas token --view tui",
+        "docs/assets/token-impact-tui.png",
+    ] {
+        if !readme.contains(required) {
+            return Err(io::Error::other(format!(
+                "README must show the human TUI product example; missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    let readme_words = readme.split_whitespace().count();
+    if readme_words > 1_400 {
+        return Err(io::Error::other(format!(
+            "README landing page regressed into an operator-manual wall of text: {readme_words} words"
+        ))
+        .into());
     }
     for (workflow_name, workflow) in [("ci", &ci_workflow), ("release", &release_workflow)] {
         let verify = workflow_job_block(workflow, "verify")?;
@@ -4796,6 +5284,14 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
     )?;
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
     fs::copy(&runtime, &stable_runtime)?;
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let stable_runtime_dir = stable_runtime
+        .parent()
+        .ok_or_else(|| io::Error::other("stable runtime parent missing"))?;
+    let parent_path = std::env::join_paths(
+        std::iter::once(stable_runtime_dir.to_path_buf())
+            .chain(std::env::split_paths(&inherited_path)),
+    )?;
 
     let db = atlas_dir.join("projectatlas.db");
     let mut locked_runtime = StdCommand::new(&stable_runtime)
@@ -4815,9 +5311,12 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
         ))
         .into());
     }
+    let mut current_lock_reaped = false;
+    let mut stale_lock_process = None;
 
     let test_result = (|| -> Result<(), Box<dyn Error>> {
         let release_archive = create_windows_release_archive(temp.path(), &runtime)?;
+        let release_asset_guard = lock_windows_release_asset_tests();
         let (release_base_url, release_server) = serve_release_assets(&release_archive, None)?;
         let workspace_root = workspace_root()?;
         let installer = workspace_root
@@ -4830,7 +5329,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .arg("-ExecutionPolicy")
             .arg("Bypass")
             .arg("-File")
-            .arg(installer)
+            .arg(&installer)
             .arg("-ProjectRoot")
             .arg(&repo)
             .arg("-ProjectAtlasVersion")
@@ -4842,6 +5341,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .env("USERPROFILE", &isolated_home)
             .env("APPDATA", &app_data)
             .env("LOCALAPPDATA", &local_app_data)
+            .env("PATH", &parent_path)
             .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
             .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
             .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
@@ -4858,6 +5358,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             io::Error::other(format!("release asset test server panicked: {message}"))
         })?;
         server_result?;
+        drop(release_asset_guard);
         let installer_output_text = format!(
             "{}\n{}",
             String::from_utf8_lossy(&output.stdout),
@@ -4869,28 +5370,26 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             ))
             .into());
         }
-        let normalized_installer_output = installer_output_text
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        for required in [
-            "ProjectAtlas LocalAppData mirror skipped",
-            "Close any running ProjectAtlas or Codex session using that file",
-            "then rerun this installer",
-            "Codex MCP and generated configs continue to use verified",
-        ] {
-            if !normalized_installer_output.contains(required) {
-                return Err(io::Error::other(format!(
-                    "installer did not provide locked LocalAppData mirror guidance {required:?}\n{installer_output_text}"
-                ))
-                .into());
-            }
+        if installer_output_text.contains("ProjectAtlas LocalAppData mirror skipped") {
+            return Err(io::Error::other(format!(
+                "installer tried to replace an already-current locked stable mirror\n{installer_output_text}"
+            ))
+            .into());
         }
         if !installer_output_text
             .contains("Active process resolves bare projectatlas to verified runtime")
         {
             return Err(io::Error::other(format!(
                 "installer did not make its active process prefer the verified runtime\n{installer_output_text}"
+            ))
+            .into());
+        }
+        if !installer_output_text.trim_end().ends_with(
+            "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=true host_restart_required=false",
+        ) || installer_output_text.contains("Existing host restart required:")
+        {
+            return Err(io::Error::other(format!(
+                "installer misstated readiness for the already-current locked stable mirror\n{installer_output_text}"
             ))
             .into());
         }
@@ -4908,6 +5407,43 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             ))
             .into());
         }
+        if let Some(status) = locked_runtime.try_wait()? {
+            return Err(io::Error::other(format!(
+                "installer terminated the owned process holding the stable mirror lock: {status}"
+            ))
+            .into());
+        }
+
+        let sibling_output = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg(
+                "$command = Get-Command projectatlas -ErrorAction Stop; Write-Output $command.Source; & projectatlas --require-version $env:PROJECTATLAS_VERSION --format json runtime-info",
+            )
+            .env("PATH", &parent_path)
+            .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        let sibling_stdout = String::from_utf8_lossy(&sibling_output.stdout);
+        if !sibling_output.status.success() {
+            return Err(io::Error::other(format!(
+                "later sibling from the unchanged parent failed:\n{sibling_stdout}\n{}",
+                String::from_utf8_lossy(&sibling_output.stderr)
+            ))
+            .into());
+        }
+        let sibling_command = sibling_stdout
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .ok_or_else(|| {
+                io::Error::other("later sibling did not report its bare command path")
+            })?;
+        require_same_executable(
+            sibling_command.trim(),
+            &stable_runtime,
+            "unchanged parent sibling",
+        )?;
+
         let fake_codex_calls = fs::read_to_string(&fake_codex_log)?;
         if !fake_codex_calls.contains("mcp add projectatlas --")
             || !fake_codex_calls.contains(versioned_runtime.to_string_lossy().as_ref())
@@ -5001,21 +5537,242 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .into());
         }
 
+        locked_runtime.kill()?;
+        locked_runtime.wait()?;
+        current_lock_reaped = true;
+        fs::write(&stable_runtime, b"stale ProjectAtlas stable mirror")?;
+        stale_lock_process = Some(spawn_exclusive_file_lock(&stable_runtime)?);
+
+        let stale_output = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&installer)
+            .arg("-ProjectRoot")
+            .arg(&repo)
+            .arg("-ProjectAtlasVersion")
+            .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+            .arg("-RuntimePath")
+            .arg(&versioned_runtime)
+            .env("HOME", &isolated_home)
+            .env("USERPROFILE", &isolated_home)
+            .env("APPDATA", &app_data)
+            .env("LOCALAPPDATA", &local_app_data)
+            .env("PATH", &parent_path)
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+            .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        let stale_output_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&stale_output.stdout),
+            String::from_utf8_lossy(&stale_output.stderr)
+        );
+        let normalized_stale_output = stale_output_text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for required in [
+            "ProjectAtlas LocalAppData mirror skipped",
+            "Close any running ProjectAtlas or Codex session using that file",
+            "then rerun this installer",
+            "Codex MCP and generated configs continue to use verified",
+        ] {
+            if !normalized_stale_output.contains(required) {
+                return Err(io::Error::other(format!(
+                    "installer did not provide stale locked-mirror guidance {required:?}\n{stale_output_text}"
+                ))
+                .into());
+            }
+        }
+        if !stale_output.status.success()
+            || !stale_output_text.trim_end().ends_with(
+                "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=false host_restart_required=false",
+            )
+            || stale_output_text.contains("Existing host restart required:")
+            || !stale_output_text.contains("restart alone will not repair it")
+        {
+            return Err(io::Error::other(format!(
+                "installer did not report repair-required state for the unchanged stale parent mirror\n{stale_output_text}"
+            ))
+            .into());
+        }
+        if let Some(status) = stale_lock_process
+            .as_mut()
+            .ok_or_else(|| io::Error::other("stale mirror lock process missing"))?
+            .try_wait()?
+        {
+            return Err(io::Error::other(format!(
+                "installer terminated the owned stale-mirror lock process: {status}"
+            ))
+            .into());
+        }
+        let stale_sibling = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg(
+                "$command = Get-Command projectatlas -ErrorAction Stop; Write-Output $command.Source; try { & projectatlas --require-version $env:PROJECTATLAS_VERSION --format json runtime-info; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Error $_; exit 1 }",
+            )
+            .env("PATH", &parent_path)
+            .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        let stale_sibling_stdout = String::from_utf8_lossy(&stale_sibling.stdout);
+        if stale_sibling.status.success() {
+            return Err(io::Error::other(format!(
+                "unchanged stale parent unexpectedly resolved a current bare runtime\n{stale_sibling_stdout}"
+            ))
+            .into());
+        }
+        let stale_sibling_command = stale_sibling_stdout
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .ok_or_else(|| io::Error::other("stale sibling did not report its command path"))?;
+        require_same_executable(
+            stale_sibling_command.trim(),
+            &stable_runtime,
+            "stale unchanged parent sibling",
+        )?;
+
+        let versioned_runtime_dir = versioned_runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("versioned runtime parent missing"))?;
+        let known_stale_shim = app_data.join(NPM_SHIM_DIR).join("projectatlas.cmd");
+        let known_stale_shim_dir = known_stale_shim
+            .parent()
+            .ok_or_else(|| io::Error::other("known stale shim parent missing"))?;
+        fs::create_dir_all(known_stale_shim_dir)?;
+        fs::write(
+            &known_stale_shim,
+            "@echo off\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.0.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\n",
+        )?;
+        let fresh_host_path = std::env::join_paths(
+            std::iter::once(known_stale_shim_dir.to_path_buf())
+                .chain(std::iter::once(versioned_runtime_dir.to_path_buf()))
+                .chain(std::env::split_paths(&parent_path)),
+        )?;
+        let post_quarantine_output = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&installer)
+            .arg("-ProjectRoot")
+            .arg(&repo)
+            .arg("-ProjectAtlasVersion")
+            .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+            .arg("-RuntimePath")
+            .arg(&versioned_runtime)
+            .env("HOME", &isolated_home)
+            .env("USERPROFILE", &isolated_home)
+            .env("APPDATA", &app_data)
+            .env("LOCALAPPDATA", &local_app_data)
+            .env("PATH", &fresh_host_path)
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+            .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        let post_quarantine_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&post_quarantine_output.stdout),
+            String::from_utf8_lossy(&post_quarantine_output.stderr)
+        );
+        if !post_quarantine_output.status.success()
+            || !post_quarantine_text.trim_end().ends_with(
+                "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=true host_restart_required=false",
+            )
+            || post_quarantine_text.contains("Existing host restart required:")
+        {
+            return Err(io::Error::other(format!(
+                "installer did not recognize the current runtime exposed after stale-shim quarantine\n{post_quarantine_text}"
+            ))
+            .into());
+        }
+        let known_stale_quarantine = stale_shim_quarantine_path(&known_stale_shim, "0.0.1");
+        if known_stale_shim.exists()
+            || !known_stale_quarantine.exists()
+            || !post_quarantine_text.contains("Quarantined stale ProjectAtlas shim")
+        {
+            return Err(io::Error::other(format!(
+                "installer did not quarantine the inherited stale shim before deriving restart state\n{post_quarantine_text}"
+            ))
+            .into());
+        }
+        if let Some(status) = stale_lock_process
+            .as_mut()
+            .ok_or_else(|| io::Error::other("stale mirror lock process missing"))?
+            .try_wait()?
+        {
+            return Err(io::Error::other(format!(
+                "post-quarantine install terminated the owned lock process: {status}"
+            ))
+            .into());
+        }
+        let fresh_sibling_output = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg(
+                "$command = Get-Command projectatlas -ErrorAction Stop; Write-Output $command.Source; & projectatlas --require-version $env:PROJECTATLAS_VERSION --format json runtime-info",
+            )
+            .env("PATH", &fresh_host_path)
+            .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        let fresh_sibling_stdout = String::from_utf8_lossy(&fresh_sibling_output.stdout);
+        if !fresh_sibling_output.status.success() {
+            return Err(io::Error::other(format!(
+                "fresh sibling failed to use the persisted runtime precedence:\n{fresh_sibling_stdout}\n{}",
+                String::from_utf8_lossy(&fresh_sibling_output.stderr)
+            ))
+            .into());
+        }
+        let fresh_sibling_command = fresh_sibling_stdout
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .ok_or_else(|| {
+                io::Error::other("fresh sibling did not report its bare command path")
+            })?;
+        require_same_executable(
+            fresh_sibling_command.trim(),
+            &versioned_runtime,
+            "fresh parent sibling",
+        )?;
+
         Ok(())
     })();
 
-    let kill_result = locked_runtime.kill();
-    let wait_result = locked_runtime.wait();
-    if let Err(error) = kill_result
-        && test_result.is_ok()
-        && error.kind() != io::ErrorKind::InvalidInput
-    {
-        return Err(error.into());
+    if !current_lock_reaped {
+        let kill_result = locked_runtime.kill();
+        let wait_result = locked_runtime.wait();
+        if let Err(error) = kill_result
+            && test_result.is_ok()
+            && error.kind() != io::ErrorKind::InvalidInput
+        {
+            return Err(error.into());
+        }
+        if let Err(error) = wait_result
+            && test_result.is_ok()
+        {
+            return Err(error.into());
+        }
     }
-    if let Err(error) = wait_result
-        && test_result.is_ok()
-    {
-        return Err(error.into());
+    if let Some(process) = stale_lock_process.as_mut() {
+        let kill_result = process.kill();
+        let wait_result = process.wait();
+        if let Err(error) = kill_result
+            && test_result.is_ok()
+            && error.kind() != io::ErrorKind::InvalidInput
+        {
+            return Err(error.into());
+        }
+        if let Err(error) = wait_result
+            && test_result.is_ok()
+        {
+            return Err(error.into());
+        }
     }
     test_result
 }
@@ -5168,7 +5925,7 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         isolated_home
             .join("AppData")
             .join("Roaming")
-            .join("npm")
+            .join(NPM_SHIM_DIR)
             .join("projectatlas.cmd")
     } else {
         isolated_home
@@ -5957,6 +6714,14 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
             .ok_or_else(|| io::Error::other("stable runtime parent missing"))?,
     )?;
     fs::write(&stable_runtime, b"stale 0.3.10 stable mirror")?;
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let stable_runtime_dir = stable_runtime
+        .parent()
+        .ok_or_else(|| io::Error::other("stable runtime parent missing"))?;
+    let parent_path = std::env::join_paths(
+        std::iter::once(stable_runtime_dir.to_path_buf())
+            .chain(std::env::split_paths(&inherited_path)),
+    )?;
 
     let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = isolated_home.join("codex.cmd");
@@ -5967,6 +6732,7 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
 
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
     let release_archive = create_windows_release_archive(temp.path(), &runtime)?;
+    let release_asset_guard = lock_windows_release_asset_tests();
     let (release_base_url, release_server) = serve_release_assets(&release_archive, None)?;
     let workspace_root = workspace_root()?;
     let installer = workspace_root
@@ -5979,7 +6745,7 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         .arg("-ExecutionPolicy")
         .arg("Bypass")
         .arg("-File")
-        .arg(installer)
+        .arg(&installer)
         .arg("-ProjectRoot")
         .arg(&repo)
         .arg("-ProjectAtlasVersion")
@@ -5991,6 +6757,7 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         .env("USERPROFILE", &isolated_home)
         .env("APPDATA", &app_data)
         .env("LOCALAPPDATA", &local_app_data)
+        .env("PATH", &parent_path)
         .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
         .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
         .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
@@ -6007,6 +6774,7 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         io::Error::other(format!("release asset test server panicked: {message}"))
     })?;
     server_result?;
+    drop(release_asset_guard);
     let installer_output_text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -6032,6 +6800,15 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         ))
         .into());
     }
+    if !installer_output_text.trim_end().ends_with(
+        "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=true host_restart_required=false",
+    ) || installer_output_text.contains("Existing host restart required:")
+    {
+        return Err(io::Error::other(format!(
+            "installer did not report full readiness after synchronizing the unlocked mirror\n{installer_output_text}"
+        ))
+        .into());
+    }
     for runtime_path in [&versioned_runtime, &stable_runtime] {
         let runtime_info = StdCommand::new(runtime_path)
             .arg("--require-version")
@@ -6049,6 +6826,110 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
             .into());
         }
     }
+    let sibling_output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-Command")
+        .arg(
+            "$command = Get-Command projectatlas -ErrorAction Stop; Write-Output $command.Source; & projectatlas --require-version $env:PROJECTATLAS_VERSION --format json runtime-info",
+        )
+        .env("PATH", &parent_path)
+        .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .output()?;
+    let sibling_stdout = String::from_utf8_lossy(&sibling_output.stdout);
+    if !sibling_output.status.success() {
+        return Err(io::Error::other(format!(
+            "unchanged sibling failed after the stable mirror synchronized:\n{sibling_stdout}\n{}",
+            String::from_utf8_lossy(&sibling_output.stderr)
+        ))
+        .into());
+    }
+    let sibling_command = sibling_stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| {
+            io::Error::other("synchronized sibling did not report its bare command path")
+        })?;
+    require_same_executable(
+        sibling_command.trim(),
+        &stable_runtime,
+        "synchronized parent sibling",
+    )?;
+
+    let stale_parent_bin = temp.path().join("stale-parent-bin");
+    fs::create_dir_all(&stale_parent_bin)?;
+    let stale_parent_runtime = stale_parent_bin.join("projectatlas.cmd");
+    fs::write(
+        &stale_parent_runtime,
+        "@echo off\r\necho {\"version\":\"0.3.26\"}\r\nexit /b 0\r\n",
+    )?;
+    let stale_parent_path = std::env::join_paths(
+        std::iter::once(stale_parent_bin).chain(std::env::split_paths(&inherited_path)),
+    )?;
+    let stale_parent_install = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(&installer)
+        .arg("-ProjectRoot")
+        .arg(&repo)
+        .arg("-ProjectAtlasVersion")
+        .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+        .arg("-RuntimePath")
+        .arg(&versioned_runtime)
+        .env("HOME", &isolated_home)
+        .env("USERPROFILE", &isolated_home)
+        .env("APPDATA", &app_data)
+        .env("LOCALAPPDATA", &local_app_data)
+        .env("PATH", &stale_parent_path)
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+        .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .output()?;
+    let stale_parent_install_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&stale_parent_install.stdout),
+        String::from_utf8_lossy(&stale_parent_install.stderr)
+    );
+    if !stale_parent_install.status.success()
+        || !stale_parent_install_text.trim_end().ends_with(
+            "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=false host_restart_required=false",
+        )
+        || stale_parent_install_text.contains("Existing host restart required:")
+        || !stale_parent_install_text.contains("restart alone will not repair it")
+    {
+        return Err(io::Error::other(format!(
+            "installer misstated repair requirements when the synchronized mirror was absent from the unchanged parent PATH\n{stale_parent_install_text}"
+        ))
+        .into());
+    }
+    let stale_sibling_output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-Command")
+        .arg(
+            "$command = Get-Command projectatlas -ErrorAction Stop; Write-Output $command.Source; & projectatlas --format json runtime-info",
+        )
+        .env("PATH", &stale_parent_path)
+        .output()?;
+    let stale_sibling_stdout = String::from_utf8_lossy(&stale_sibling_output.stdout);
+    if !stale_sibling_output.status.success() || !stale_sibling_stdout.contains("0.3.26") {
+        return Err(io::Error::other(format!(
+            "unchanged stale sibling did not demonstrate its stale bare-command resolution:\n{stale_sibling_stdout}\n{}",
+            String::from_utf8_lossy(&stale_sibling_output.stderr)
+        ))
+        .into());
+    }
+    let stale_sibling_command = stale_sibling_stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| io::Error::other("stale sibling did not report its bare command path"))?;
+    require_same_executable(
+        stale_sibling_command.trim(),
+        &stale_parent_runtime,
+        "stale parent sibling",
+    )?;
 
     let codex_config = read_json_file(&atlas_dir.join("projectatlas.mcp.json"))?;
     require_same_executable(
@@ -6095,6 +6976,7 @@ fn windows_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Bo
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
     let release_archive = create_windows_release_archive(temp.path(), &runtime)?;
     let wrong_hash = "0".repeat(64);
+    let release_asset_guard = lock_windows_release_asset_tests();
     let (release_base_url, release_server) =
         serve_release_assets(&release_archive, Some(wrong_hash.as_str()))?;
     let workspace_root = workspace_root()?;
@@ -6135,6 +7017,7 @@ fn windows_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Bo
         io::Error::other(format!("release asset test server panicked: {message}"))
     })?;
     server_result?;
+    drop(release_asset_guard);
     let installer_output_text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -6191,6 +7074,7 @@ fn windows_release_binary_only_rejects_invalid_runtime_without_fallback()
         b"this is not a valid ProjectAtlas Windows executable",
     )?;
     let release_archive = create_windows_release_archive(temp.path(), &invalid_runtime)?;
+    let release_asset_guard = lock_windows_release_asset_tests();
     let (release_base_url, release_server) = serve_release_assets(&release_archive, None)?;
     let workspace_root = workspace_root()?;
     let installer = workspace_root
@@ -6230,6 +7114,7 @@ fn windows_release_binary_only_rejects_invalid_runtime_without_fallback()
         io::Error::other(format!("release asset test server panicked: {message}"))
     })?;
     server_result?;
+    drop(release_asset_guard);
     let installer_output_text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -20423,6 +21308,42 @@ fn create_posix_release_archive(
         .into());
     }
     Ok(archive)
+}
+
+/// Serialize Windows installer tests while their release-asset server is active.
+#[cfg(windows)]
+fn lock_windows_release_asset_tests() -> std::sync::MutexGuard<'static, ()> {
+    match WINDOWS_RELEASE_ASSET_TEST_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Start one owned `PowerShell` process that holds an exclusive read lock.
+#[cfg(windows)]
+fn spawn_exclusive_file_lock(path: &Path) -> Result<Child, Box<dyn Error>> {
+    let mut child = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-Command")
+        .arg(
+            "$ErrorActionPreference='Stop'; $stream=[System.IO.File]::Open($env:PROJECTATLAS_TEST_LOCK_PATH,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::None); [Console]::Out.WriteLine('locked'); [Console]::Out.Flush(); try { Start-Sleep -Seconds 300 } finally { $stream.Dispose() }",
+        )
+        .env("PROJECTATLAS_TEST_LOCK_PATH", path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("exclusive lock process stdout missing"))?;
+    let mut ready = String::new();
+    BufReader::new(stdout).read_line(&mut ready)?;
+    if ready.trim() != "locked" {
+        drop(child.kill());
+        drop(child.wait());
+        return Err(io::Error::other("exclusive lock process did not become ready").into());
+    }
+    Ok(child)
 }
 
 /// Serve local release archive and checksum requests for installer smoke tests.

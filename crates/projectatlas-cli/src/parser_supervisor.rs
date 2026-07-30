@@ -5608,7 +5608,9 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             )));
         }
 
-        let healthy = case("healthy", ExpectedFailure::Io)?;
+        let mut healthy = case("healthy", ExpectedFailure::Io)?;
+        healthy.deadline = Duration::from_secs(5);
+        healthy.no_progress = Duration::from_secs(2);
         let evidence = operate(peer, &healthy).map_err(|error| {
             io::Error::other(format!(
                 "healthy restart after {} failed: {error:?}",
