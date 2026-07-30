@@ -19,6 +19,7 @@
     "enhance-projectatlas-init-first-run": 305,
     "fix-token-tui-reference-visual-regression": 304,
     "match-token-impact-reference-tui": 302,
+    "migrate-released-database-layouts": 379,
     "persist-agent-project-context": {
       "contract": "checklist-v1",
       "primary_issue": 314,

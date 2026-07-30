@@ -12,7 +12,6 @@ use projectatlas_cli::parser_supervisor::{
 };
 #[cfg(all(debug_assertions, feature = "optional-parser-supervisor"))]
 use projectatlas_core::IndexCancellation;
-use projectatlas_core::PurposeSource;
 use projectatlas_core::graph::{
     Completeness, ConfidenceClass, CoverageRecord, CoverageScope, CoverageState, EntitySelector,
     ExtendedRelationKind, ExternalSelector, GraphEntity, GraphIdentityText, GraphLimitKind,
@@ -41,6 +40,7 @@ use projectatlas_core::symbols::{
 use projectatlas_core::telemetry::{
     READ_AVOIDANCE_CONFIDENCE_MODELED, READ_AVOIDANCE_SCOPE, usage_from_estimates,
 };
+use projectatlas_core::{PurposeSource, normalize_native_path_display};
 use projectatlas_db::{
     AtlasStore, HealthResolution, IndexedFileText, PlannerStatisticsPolicy, PlannerStatisticsState,
     RepositoryGraphRelationQuery, TelemetryCheckpointState,
@@ -2245,20 +2245,38 @@ fn settings_rejects_untrusted_publication_with_retained_text() -> Result<(), Box
 
 #[test]
 fn settings_reports_supported_predecessor_without_migration() -> Result<(), Box<dyn Error>> {
+    for (label, schema) in [
+        (
+            "fresh-v0.3.26",
+            include_str!("../../projectatlas-db/tests/fixtures/released-schema-8.sql"),
+        ),
+        (
+            "evolved-v0.3.11-to-v0.3.26",
+            include_str!("../../projectatlas-db/tests/fixtures/released-schema-8-evolved.sql"),
+        ),
+    ] {
+        assert_settings_reports_supported_predecessor_without_migration(label, schema)?;
+    }
+    Ok(())
+}
+
+/// Verify settings reports one released predecessor layout without writing it.
+fn assert_settings_reports_supported_predecessor_without_migration(
+    label: &str,
+    schema: &str,
+) -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&atlas_dir)?;
     let db_path = atlas_dir.join("projectatlas.db");
     let connection = Connection::open(&db_path)?;
-    connection.execute_batch(include_str!(
-        "../../projectatlas-db/tests/fixtures/released-schema-8.sql"
-    ))?;
+    connection.execute_batch(schema)?;
     connection.execute(
         "INSERT INTO metadata(key, value) VALUES ('schema_version', '8')",
         [],
     )?;
-    let project_root = repo.to_string_lossy().into_owned();
+    let project_root = normalize_native_path_display(fs::canonicalize(&repo)?);
     connection.execute(
         "INSERT INTO metadata(key, value) VALUES ('project_root', ?1)",
         [project_root],
@@ -2272,7 +2290,7 @@ fn settings_reports_supported_predecessor_without_migration() -> Result<(), Box<
         .output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
-            "settings failed for a supported predecessor: {}",
+            "settings failed for {label}: {}",
             String::from_utf8_lossy(&output.stderr)
         ))
         .into());
@@ -2294,7 +2312,10 @@ fn settings_reports_supported_predecessor_without_migration() -> Result<(), Box<
         || !settings.get("index").is_some_and(Value::is_null)
         || !settings.get("telemetry").is_some_and(Value::is_null)
     {
-        return Err(io::Error::other("settings misstated the supported predecessor").into());
+        return Err(io::Error::other(format!(
+            "settings misstated the supported predecessor {label}"
+        ))
+        .into());
     }
     if settings
         .get("search")
@@ -2306,10 +2327,102 @@ fn settings_reports_supported_predecessor_without_migration() -> Result<(), Box<
         return Err(io::Error::other("predecessor settings overstated lexical readiness").into());
     }
     if fs::read(&db_path)? != bytes_before {
-        return Err(
-            io::Error::other("settings migrated or mutated the predecessor database").into(),
-        );
+        return Err(io::Error::other(format!(
+            "settings migrated or mutated the predecessor database {label}"
+        ))
+        .into());
     }
+    Ok(())
+}
+
+#[test]
+fn init_and_scan_migrate_both_released_schema_layouts() -> Result<(), Box<dyn Error>> {
+    for (label, schema) in [
+        (
+            "fresh-v0.3.26",
+            include_str!("../../projectatlas-db/tests/fixtures/released-schema-8.sql"),
+        ),
+        (
+            "evolved-v0.3.11-to-v0.3.26",
+            include_str!("../../projectatlas-db/tests/fixtures/released-schema-8-evolved.sql"),
+        ),
+    ] {
+        for command in ["init", "scan"] {
+            assert_cli_migrates_released_schema_layout(label, schema, command)?;
+        }
+    }
+    Ok(())
+}
+
+/// Verify one public writable command migrates one released predecessor layout.
+fn assert_cli_migrates_released_schema_layout(
+    label: &str,
+    schema: &str,
+    command: &str,
+) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn indexed() {}\n",
+    )?;
+    let db_path = atlas_dir.join("projectatlas.db");
+    let project_root = normalize_native_path_display(fs::canonicalize(&repo)?);
+    let connection = Connection::open(&db_path)?;
+    connection.execute_batch(schema)?;
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES ('schema_version', '8')",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES ('project_root', ?1)",
+        [&project_root],
+    )?;
+    drop(connection);
+
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", command])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "{command} failed to migrate {label}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let connection = Connection::open(&db_path)?;
+    let (stored_version, stored_root): (String, String) = connection.query_row(
+        "SELECT
+             (SELECT value FROM metadata WHERE key = 'schema_version'),
+             (SELECT value FROM metadata WHERE key = 'project_root')",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if stored_version != "16" || stored_root != project_root {
+        return Err(io::Error::other(format!(
+            "{command} did not preserve and migrate {label}: version={stored_version}, root={stored_root}"
+        ))
+        .into());
+    }
+    drop(connection);
+
+    let verify = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "root", "verify"])
+        .output()?;
+    if !verify.status.success() {
+        return Err(io::Error::other(format!(
+            "root verify failed after {command} migrated {label}: {}",
+            String::from_utf8_lossy(&verify.stderr)
+        ))
+        .into());
+    }
+    let report: Value = serde_json::from_slice(&verify.stdout)?;
+    require_json_bool(&report, &["verified"], true)?;
     Ok(())
 }
 
