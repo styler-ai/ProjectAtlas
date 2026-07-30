@@ -24,6 +24,7 @@
     "isolate-linked-worktree-atlases": 382,
     "match-token-impact-reference-tui": 302,
     "migrate-released-database-layouts": 379,
+    "pin-sql-fixture-line-endings": 401,
     "persist-agent-project-context": {
       "contract": "checklist-v1",
       "primary_issue": 314,
