@@ -3426,6 +3426,7 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
             .join("docs")
             .join(AGENT_INTEGRATION_DOC_FILE_NAME),
     )?;
+    let public_docs_index = fs::read_to_string(workspace_root.join("docs").join("index.md"))?;
     let gitignore = fs::read_to_string(workspace_root.join(".gitignore"))?;
     for required in [
         "Rust-native, high-performance local repository intelligence",
@@ -3456,6 +3457,18 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
         if !agent_integration.contains(required) {
             return Err(io::Error::other(format!(
                 "agent integration guide must own the linked setup and TUI behavior; missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "separate proportional bars for observed and modeled file reads avoided",
+        "retained in the exact source ledger and navigation composition",
+        "at wide terminal sizes, a bounded Atlas map",
+    ] {
+        if !public_docs_index.contains(required) {
+            return Err(io::Error::other(format!(
+                "public docs index must match the live token TUI; missing {required:?}"
             ))
             .into());
         }

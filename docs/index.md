@@ -6,7 +6,7 @@ agent-facing context.
 
 For normal MCP work, call one compact `atlas_session_brief`, follow its returned next call, and read exact source only after the target is known. Overview, folders, and files remain the manual or unavailable-brief fallback.
 
-`projectatlas token --view tui` opens the human Ratatui token impact dashboard with the reconciled saved-token equation; observed and modeled file reads avoided; broad-folder-walk and candidate-open activity and token-impact bars; the exact source ledger; calibration notes; and status hints. Benchmark comparisons remain in structured CLI/MCP output and never add TUI rows. Add `--theme light` for light terminal color schemes. Ani remains documented as the ProjectAtlas mascot asset, but mascot rendering is deferred from the token TUI for now.
+`projectatlas token --view tui` opens the human Ratatui token impact dashboard with the reconciled saved-token equation; separate proportional bars for observed and modeled file reads avoided; broad folder walks skipped and candidate files not opened retained in the exact source ledger and navigation composition; calibration notes; status hints; and, at wide terminal sizes, a bounded Atlas map. Benchmark comparisons remain in structured CLI/MCP output and never add TUI rows. Add `--theme light` for light terminal color schemes. Ani remains documented as the ProjectAtlas mascot asset, but mascot rendering is deferred from the token TUI for now.
 
 ## Public docs surfaces
 
