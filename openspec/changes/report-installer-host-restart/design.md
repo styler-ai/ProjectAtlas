@@ -7,7 +7,7 @@ On Windows, an old ProjectAtlas process can lock `%LOCALAPPDATA%\ProjectAtlas\bi
 **Goals:**
 
 - Report runtime/generated-config readiness separately from inherited parent-host bare CLI readiness.
-- Require a restart only when the unchanged parent remains stale and the installer persisted the verified runtime for future processes.
+- Require a restart only when the unchanged parent remains stale and the effective fresh Machine-plus-User PATH resolves the persisted verified runtime.
 - Report unlock/removal plus installer rerun when the parent remains stale and future PATH persistence was intentionally skipped.
 - Keep future User PATH and absolute MCP behavior correct.
 - Model parent, installer child, and later sibling process behavior on Windows.
@@ -32,7 +32,7 @@ Make `Sync-ProjectAtlasRuntimeToLocalAppData` report whether the stable mirror i
 
 ### Emit one explicit final readiness record
 
-After the runtime and generated absolute MCP configs are verified, emit a deterministic line containing `runtime_mcp_configs_ready`, `installer_cli_ready`, `parent_cli_ready`, and `host_restart_required`. Optional global Codex registry repair keeps its existing separate success, skip, or warning output and is not folded into the generated-config readiness field. When restart is required, emit one clear warning explaining that the persisted future PATH becomes effective after restart. When `-RuntimePath` or `PROJECTATLAS_SKIP_USER_PATH_UPDATE=1` intentionally avoids persistence, emit `parent_cli_ready=false`, `host_restart_required=false`, and explicit unlock/removal plus rerun guidance instead of promising restart recovery. Normal unlocked installation reports the parent ready without a restart.
+After the runtime and generated absolute MCP configs are verified, emit a deterministic line containing `runtime_mcp_configs_ready`, `installer_cli_ready`, `parent_cli_ready`, and `host_restart_required`. Optional global Codex registry repair keeps its existing separate success, skip, or warning output and is not folded into the generated-config readiness field. When restart is required, emit one clear warning explaining that the effective fresh Machine-plus-User PATH selects the persisted runtime. Resolve that fresh path without executing the command; persisting User PATH alone is insufficient because an earlier Machine PATH command can still shadow it. When persistence is skipped or the reconstructed fresh environment remains stale, emit `parent_cli_ready=false`, `host_restart_required=false`, and explicit unlock/removal plus rerun guidance instead of promising restart recovery. Normal unlocked installation reports the parent ready without a restart.
 
 This avoids a new object/schema while remaining machine-testable in PowerShell and release logs.
 
@@ -42,6 +42,7 @@ This avoids a new object/schema while remaining machine-testable in PowerShell a
 - **Locked mirror becomes a hard install failure** → Keep absolute runtime/MCP success authoritative and report partial host readiness with exit code zero.
 - **Tests accidentally mutate the developer environment** → Use temporary LocalAppData/User-profile state, fake Codex, scoped PATH, and an owned lock process.
 - **A process is killed to make the test pass** → The test owns and closes only its fixture lock process; production installer contains no termination path.
+- **User PATH persistence is mistaken for fresh-host readiness** → Resolve the command against Machine PATH followed by the updated User PATH and require exact verified-runtime identity.
 
 ## Migration Plan
 

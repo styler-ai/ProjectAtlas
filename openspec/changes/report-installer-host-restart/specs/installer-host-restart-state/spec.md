@@ -31,11 +31,15 @@ The Windows installer SHALL distinguish verified versioned runtime plus generate
 - **WHEN** `-RuntimePath` is supplied or User PATH persistence is intentionally skipped and the unchanged parent still resolves a stale command
 - **THEN** the installer emits `parent_cli_ready=false` and `host_restart_required=false`, explains that restart alone cannot repair the parent, and requires the stale command to be unlocked or removed before rerunning the installer
 
+#### Scenario: Machine PATH shadows persisted User PATH
+- **WHEN** the verified runtime is persisted at the front of User PATH but a stale bare command resolves earlier from Machine PATH
+- **THEN** the installer resolves the effective fresh Machine-plus-User environment without executing the command, emits `parent_cli_ready=false` and `host_restart_required=false`, and requires repair instead of promising restart recovery
+
 ### Requirement: Future and absolute host integration remains correct
 The installer SHALL keep the verified versioned runtime first in persisted User PATH for genuinely fresh processes and SHALL keep Codex MCP plus generated Codex, Claude Code, and OpenCode configs pinned to the verified absolute runtime, database, config, and version guard.
 
 #### Scenario: Fresh host after partial readiness
-- **WHEN** a new host starts from the User and Machine environment after a locked-mirror installation that persisted the verified runtime
+- **WHEN** a new host starts from the Machine and User environment after a locked-mirror installation whose reconstructed fresh PATH selected the persisted verified runtime
 - **THEN** bare `projectatlas` resolves the verified runtime and no restart requirement remains
 
 #### Scenario: Existing host uses MCP before restart

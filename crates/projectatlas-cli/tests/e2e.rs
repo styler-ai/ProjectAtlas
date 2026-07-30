@@ -2908,7 +2908,11 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "ProjectAtlas LocalAppData mirror skipped",
         "PROJECTATLAS_SKIP_USER_PATH_UPDATE",
         "Set-ProjectAtlasProcessPathPrecedence",
+        "Test-ProjectAtlasBareCommandResolutionOnPath",
         r#"[Environment]::SetEnvironmentVariable("Path""#,
+        r#"[Environment]::GetEnvironmentVariable("Path", "Machine")"#,
+        "$freshProcessPath = @($machinePath, $futureUserPath) -join \";\"",
+        "Test-ProjectAtlasBareCommandResolutionOnPath $freshProcessPath $FilePath",
         "Confirm-ProjectAtlasBareCommandResolution",
         "Active process resolves bare projectatlas to verified runtime",
         "Restart Codex or the shell",
@@ -2924,6 +2928,7 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "host_restart_required=",
         "Existing host restart required:",
         "restart alone will not repair it",
+        "first bare command for a fresh process",
         "Resolve-ProjectAtlasCodexCommand",
         "Update-ProjectAtlasCodexPlugin",
         "PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE",
@@ -3307,6 +3312,83 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         &["mcp", "projectatlas", "cwd"],
         "/absolute/path/to/project",
     )?;
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let machine_bin = temp.path().join("machine-bin");
+    let user_bin = temp.path().join("user-bin");
+    fs::create_dir_all(&machine_bin)?;
+    fs::create_dir_all(&user_bin)?;
+    fs::write(machine_bin.join("projectatlas.cmd"), "@exit /b 0\r\n")?;
+    let verified_runtime = user_bin.join("projectatlas.cmd");
+    fs::write(&verified_runtime, "@exit /b 0\r\n")?;
+
+    let installer = workspace_root()?
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    let output = StdCommand::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            r#"
+$ErrorActionPreference = "Stop"
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    $env:PROJECTATLAS_TEST_INSTALLER,
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -ne 0) {
+    throw ($errors | Out-String)
+}
+$names = @(
+    "Get-NormalizedPathEntry",
+    "Test-ProjectAtlasBareCommandResolutionOnPath"
+)
+$functions = $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] `
+        -and $names -contains $node.Name
+}, $true)
+foreach ($name in $names) {
+    $definition = $functions | Where-Object Name -eq $name | Select-Object -First 1
+    if (-not $definition) {
+        throw "Installer function not found: $name"
+    }
+    Invoke-Expression $definition.Extent.Text
+}
+$machineFirst = "$env:PROJECTATLAS_TEST_MACHINE_BIN;$env:PROJECTATLAS_TEST_USER_BIN"
+$userFirst = "$env:PROJECTATLAS_TEST_USER_BIN;$env:PROJECTATLAS_TEST_MACHINE_BIN"
+if (Test-ProjectAtlasBareCommandResolutionOnPath $machineFirst $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME) {
+    throw "Machine PATH shadow was incorrectly classified as restart-recoverable"
+}
+if (-not (Test-ProjectAtlasBareCommandResolutionOnPath $userFirst $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME)) {
+    throw "Verified runtime first on PATH was not classified as restart-recoverable"
+}
+"#,
+        ])
+        .env("PROJECTATLAS_TEST_INSTALLER", installer)
+        .env("PROJECTATLAS_TEST_MACHINE_BIN", &machine_bin)
+        .env("PROJECTATLAS_TEST_USER_BIN", &user_bin)
+        .env("PROJECTATLAS_TEST_VERIFIED_RUNTIME", &verified_runtime)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "fresh Windows PATH probe failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
     Ok(())
 }
 

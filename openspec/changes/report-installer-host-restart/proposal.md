@@ -5,7 +5,7 @@ When Windows locks the stable LocalAppData mirror, the installer safely uses the
 ## What Changes
 
 - Distinguish verified runtime/MCP readiness, installer-process CLI readiness, and parent-host restart requirement.
-- Emit an unambiguous, testable restart-required state only when future User PATH is current; otherwise report that restart alone cannot repair the stale parent command.
+- Emit an unambiguous, testable restart-required state only when the effective fresh Machine-plus-User PATH resolves the verified runtime; otherwise report that restart alone cannot repair the stale parent command.
 - Preserve versioned runtime installation, absolute generated MCP configs, Codex MCP registration, and fresh-host PATH precedence.
 - Add a Windows parent/installer-child/later-sibling regression test plus unlocked and no-process-termination controls.
 

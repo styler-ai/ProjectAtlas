@@ -186,9 +186,10 @@ in another shell until PATH order is fixed or the obsolete shim is removed.
 The installer makes its own active process prefer the verified runtime on
 Windows, Linux, and macOS; if a parent host process still cannot resolve the
 bare command, follow its reported remedy: restart when the verified runtime was
-persisted for future processes, or unlock/remove the stale command and rerun
-when persistence was intentionally skipped. Generated MCP configs remain usable
-through their verified absolute runtime.
+persisted and resolves first in the effective fresh Machine-plus-User PATH, or
+unlock/remove the stale command and rerun when persistence was skipped or a
+Machine PATH entry still shadows it. Generated MCP configs remain usable through
+their verified absolute runtime.
 
 When `codex` is available, installers also inspect the official
 `projectatlas` Codex marketplace and `codex mcp get projectatlas`. If the

@@ -275,6 +275,23 @@ function Set-ProjectAtlasProcessPathPrecedence {
     $env:Path = (@($runtimeDir) + $processEntries) -join ";"
 }
 
+function Test-ProjectAtlasBareCommandResolutionOnPath {
+    param(
+        [string]$PathValue,
+        [string]$VerifiedPath
+    )
+    $installerProcessPath = $env:Path
+    try {
+        $env:Path = [Environment]::ExpandEnvironmentVariables($PathValue)
+        $command = Get-Command projectatlas -ErrorAction SilentlyContinue | Select-Object -First 1
+        return $command `
+            -and (Get-NormalizedPathEntry $command.Source) -eq (Get-NormalizedPathEntry $VerifiedPath)
+    }
+    finally {
+        $env:Path = $installerProcessPath
+    }
+}
+
 function Set-ProjectAtlasPathPrecedence {
     param(
         [string]$FilePath
@@ -294,8 +311,11 @@ function Set-ProjectAtlasPathPrecedence {
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $userEntries = Split-PathList $userPath
     $userEntries = @($userEntries | Where-Object { (Get-NormalizedPathEntry $_) -ne $normalizedRuntimeDir })
-    [Environment]::SetEnvironmentVariable("Path", ((@($runtimeDir) + $userEntries) -join ";"), "User")
-    return $true
+    $futureUserPath = (@($runtimeDir) + $userEntries) -join ";"
+    [Environment]::SetEnvironmentVariable("Path", $futureUserPath, "User")
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $freshProcessPath = @($machinePath, $futureUserPath) -join ";"
+    return (Test-ProjectAtlasBareCommandResolutionOnPath $freshProcessPath $FilePath)
 }
 
 function Confirm-ProjectAtlasBareCommandResolution {
@@ -1284,6 +1304,6 @@ if ($hostRestartRequired) {
     Write-Warning "Existing host restart required: the inherited bare 'projectatlas' command remains stale, but a restarted Codex or shell will inherit the persisted verified runtime. The runtime and generated MCP configs are already ready through the verified absolute runtime."
 }
 elseif ($hostRepairRequired) {
-    Write-Warning "Existing host bare CLI is not ready, and restart alone will not repair it because this installation did not persist the verified runtime for future processes. Unlock or remove the stale command and rerun this installer, or configure $(Split-Path -Parent $projectAtlas) first on PATH. The runtime and generated MCP configs are ready through the verified absolute runtime."
+    Write-Warning "Existing host bare CLI is not ready, and restart alone will not repair it because this installation could not make the verified runtime the first bare command for a fresh process. Unlock or remove the stale command and rerun this installer, or configure $(Split-Path -Parent $projectAtlas) first on PATH. The runtime and generated MCP configs are ready through the verified absolute runtime."
 }
 Write-Output "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=$($installerCliReady.ToString().ToLowerInvariant()) parent_cli_ready=$($parentCliReady.ToString().ToLowerInvariant()) host_restart_required=$($hostRestartRequired.ToString().ToLowerInvariant())"
