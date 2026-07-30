@@ -9,6 +9,7 @@
     "centralize-cargo-dependency-management": 316,
     "close-mcp-cli-parity": 281,
     "complete-v040-release-readiness": 311,
+    "consolidate-projectatlas-landing-page": 381,
     "converge-claude-code-installer": 278,
     "converge-opencode-installer": 279,
     "delegate-bulk-purpose-curation": 301,
@@ -40,6 +41,7 @@
     "reuse-release-proof-by-inputs": 366,
     "reuse-unchanged-ci-build-layers": 341,
     "show-agent-efficiency-dashboard": 340,
-    "simplify-token-tui-dashboard": 296
+    "simplify-token-tui-dashboard": 296,
+    "stabilize-parser-recovery-harness": 391
   }
 }
