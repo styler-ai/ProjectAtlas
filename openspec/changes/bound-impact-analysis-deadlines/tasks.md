@@ -12,4 +12,4 @@
 ## 3. Adapter and Release Verification
 
 - [x] 3.1 Add real MCP and CLI elapsed-tolerance tests, immediate follow-up responsiveness, no partial authoritative mutation, and declared row/node/edge/visited/intermediate/output budget coverage.
-- [ ] 3.2 Run focused service/database/CLI/MCP tests, `cargo fmt --check`, workspace check/clippy/test/doc gates, OpenSpec validation, IssueOps, and live review-feedback reconciliation.
+- [x] 3.2 Run focused service/database/CLI/MCP tests, `cargo fmt --check`, workspace check/clippy/test/doc gates, OpenSpec validation, IssueOps, and live review-feedback reconciliation.
