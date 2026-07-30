@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <strong>A Rust-native local code index and atlas for coding agents.</strong><br>
-  It gives Codex, Claude Code, OpenCode, and other MCP-capable agents a complete SQLite-backed index before they spend context reading the wrong files.
+  <strong>Rust-native, high-performance local repository intelligence for coding agents and large codebases.</strong><br>
+  A persistent SQLite map guides Codex, Claude Code, OpenCode, and other MCP-capable agents to the right code before they spend context reading the wrong files.
 </p>
 
 <p align="center">
@@ -16,13 +16,13 @@
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
-ProjectAtlas is the missing local code index between "agent, fix this repo" and "agent, please do not open half the codebase first."
+## About
 
-It keeps a fast local SQLite index of folders, files, one-line purposes, deterministic content summaries, symbols, relations, search text, health findings, and token telemetry. The agent starts with the indexed atlas, narrows to the right folder and file, then escalates to outlines, symbols, or exact source slices only when correctness needs real code.
+ProjectAtlas is a native Rust CLI and MCP server that keeps a project-local map of folders, files, reviewed purposes, deterministic summaries, symbols, graph relationships, searchable text, health findings, and token telemetry. `.gitignore`-aware scanning, BLAKE3 hashing, SQLite storage, filesystem watching, and compact TOON output keep repeated repository orientation local and fast.
 
-Ani is the ProjectAtlas mascot. The versioned design references live in [`docs/design/ani-mascot-reference.png`](docs/design/ani-mascot-reference.png), [`docs/design/projectatlas-mascot-clean-transparent.svg`](docs/design/projectatlas-mascot-clean-transparent.svg), and [`docs/design/token-impact-tui-reference.png`](docs/design/token-impact-tui-reference.png).
+The map is deliberately agent-first: purposes identify the responsible area, graph relationships reveal connected code, compact summaries and outlines explain the selected files, and exact source slices provide the final evidence. Agents narrow before they read broadly.
 
-No required `.purpose` files. No source-header tax. No hosted index. The project lives beside your repo in `.projectatlas/`, returns compact TOON by default, and runs as a native Rust CLI plus MCP server.
+No required `.purpose` files. No source-header tax. No hosted index or credentials. Project state lives beside the repository in `.projectatlas/`.
 
 ## Quickstart
 
@@ -51,9 +51,9 @@ codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.4.0
 
 Then tell Codex: "Use ProjectAtlas for this repo."
 
-That is the intended path. The plugin gives the agent the workflow skill, native runtime installer, and MCP config templates. The agent does the rest: install or verify the runtime, index the repo, keep the atlas fresh, start each task with one compact session brief, follow its ranked next call, and read exact source only after the target is known.
+That is the intended path. The plugin supplies the version-matched workflow skill, native runtime installer, and MCP configuration templates.
 
-## What Happens Next
+## Agent Workflow
 
 ProjectAtlas is intentionally agent-first. In normal use you should not have to memorize command syntax.
 
@@ -69,31 +69,12 @@ The agent follows this loop:
 
 For active sessions, the agent can run the watcher so file edits continuously refresh the database. For cleanup sessions, it can ask ProjectAtlas for missing purposes, stale metadata, duplicate folder roles, and structure drift.
 
-## What It Saves
+## Representative Token Estimate
 
-The final v0.4 navigation campaign retained all 45 preregistered trials:
-ProjectAtlas v0.4 completed 15/15, frozen v0.3.26 completed 12/15 and failed all
-three pinned VS Code setups, and the plain control completed 15/15. The final
-manual result was 30/42 citation-valid answers: all 42 were substantively
-correct, but twelve used malformed temporary-root citation targets (12/15 for
-v0.4, 9/12 for frozen v0.3.26, and 9/15 for plain). Against v0.3.26 on the
-three small tasks, v0.4 used 18.8–38.5% fewer median calls and 18.7–19.7% less
-median net navigation context. On the medium task it used one more median call,
-3.9 times the median net context, and took 53.6% longer including setup. Plain
-navigation used the least context at every measured scale. Against plain on
-huge source, v0.4 used two more median calls and 4.75 times the median net
-context after a 731.3-second setup. See the
-[reviewed report](docs/benchmarks/v0.4-agent-navigation-evaluation.md) and
-[published 45-trial result](docs/benchmarks/v0.4-agent-navigation-results.json).
-Full system-scale and agent-navigation campaigns are manual-only publications,
-not standard CI or release gates; an input-incompatible result is labeled
-historical or unavailable unless a user explicitly requests a new campaign.
-
-The token-overview record below is intentionally a separate representative
-large-application audit, not a marketing constant or the controlled
-counterfactual above. Its savings rate depends on repository size, how often
-the agent asks for orientation, and how much source ProjectAtlas prevents the
-agent from opening.
+The token-overview record below is a representative large-application audit,
+not a marketing constant, provider billing total, or universal savings claim.
+Its result depends on repository size, how often the agent asks for orientation,
+and how much source ProjectAtlas prevents the agent from opening.
 
 The estimate is:
 
@@ -134,9 +115,9 @@ Sizing intuition:
 
 | Workload shape | What usually happens |
 | --- | --- |
-| Small repo, few lookups | Savings are real but modest because there is less wrong code to avoid. |
-| Medium repo, repeated feature work | Savings grow when folder and file purpose prevent wrong-file reads. |
-| Large repo, many exploratory lookups | Savings can become very high because each lookup avoids broad candidate sets and repeated full-file reads. |
+| Small repo, few lookups | Less source exists to avoid, so estimated differences are usually smaller. |
+| Medium repo, repeated feature work | Repeated orientation creates more opportunities to avoid wrong-file reads. |
+| Large repo, many exploratory lookups | Broad candidate sets make narrowing effects larger in this audit model. |
 
 ## Expected Large-Repo Latency
 
@@ -162,35 +143,9 @@ Warm CLI reads from that audit stayed around 160-166 ms:
 | `token` | ~161 ms |
 | `overview` | ~166 ms |
 
-For a comparable large application, the practical expectation is that warm orientation commands stay comfortably sub-second and usually feel like ordinary CLI reads. The scan/build step can take longer, but the agent should not pay that full cost for every lookup; it should use `watch` or `watch --once` to keep the database fresh and then read from the indexed atlas.
+In this audited application, warm orientation commands stayed comfortably sub-second. These values are not a universal latency guarantee: hardware, repository shape, database state, and command bounds all matter. The scan/build step can take longer, but the agent should not pay that full cost for every lookup; it should use `watch` or `watch --once` to keep the database fresh and then read from the indexed atlas.
 
 Token reports expose bucket, baseline, and confidence metadata so observed full-file compression is not silently mixed with modeled navigation savings. That is deliberate: normal agent orientation stays local, fast, and credential-free.
-
-## The Funnel
-
-ProjectAtlas teaches agents this order:
-
-```text
-one compact session brief with purpose + graph evidence
-  -> returned summary, search, relation, health, or slice call
-  -> follow returned selectors without rediscovery
-  -> smallest exact source slice
-```
-
-For manual CLI work or brief fallback, use `overview` → `folders` → `files` → `summary` → `slice`.
-
-Most agent waste happens before code is edited: broad search, wrong folder, wrong file, full-file reads too early. ProjectAtlas makes "where should I look?" cheap enough that agents ask it first.
-
-## Core Ideas
-
-- `folder_purpose`: why this folder exists.
-- `file_purpose`: why this file exists.
-- `content_summary`: what currently appears inside the file.
-- `atlas_session_brief`: one compact task-oriented startup result with ranked candidates and ready next calls.
-- `summary`: the detailed file-intelligence command: purpose, summary, parser status, symbols, imports, calls, counts, and line context.
-- `slice`: exact source after the target is known.
-- `watch`: continuous local refresh while files change.
-- `token`: estimated context saved by the atlas-first workflow.
 
 ## CLI Reference
 
@@ -220,9 +175,7 @@ non-source scaffolding when missing, initializes `.projectatlas/projectatlas.db`
 project-local MCP configs for Codex/generic MCP, Claude Code, and OpenCode, and returns the purpose-curation handoff.
 Use `projectatlas scan` later when you want an explicit refresh.
 
-## Manual Funnel
-
-This is the explicit CLI fallback for humans, automation, or a host without `atlas_session_brief`:
+The explicit CLI fallback for humans, automation, or a host without `atlas_session_brief` is:
 
 ```bash
 projectatlas overview
@@ -314,7 +267,7 @@ ProjectAtlas exposes the same indexed capabilities through CLI and MCP; the comp
 | --- | --- | --- |
 | Select project | `projectatlas --db <repo>/.projectatlas/projectatlas.db ...` | `atlas_set_project_path` / per-call `project_path` |
 | Refresh state | `projectatlas scan` / `projectatlas watch --once` | `atlas_scan` / `atlas_watch_once` |
-| Start a task | Use the manual funnel below | `atlas_session_brief` with `compact: true`, then its returned call |
+| Start a task | `overview` → `folders` → `files` → `summary` → `slice` | `atlas_session_brief` with `compact: true`, then its returned call |
 | Understand shape | `projectatlas overview` | `atlas_overview` |
 | Pick an area | `projectatlas folders <query>` | `atlas_folders` |
 | Pick files | `projectatlas files <query> --folder <path>` | `atlas_files` |
@@ -325,12 +278,6 @@ ProjectAtlas exposes the same indexed capabilities through CLI and MCP; the comp
 | Find cleanup work | `projectatlas health-check --source-only --limit <n>` | `atlas_health` |
 | Curate purposes | `projectatlas purpose queue --limit <n>` / `projectatlas purpose set <path> "<purpose>"` / `projectatlas purpose review --from-file <json> --apply` | `atlas_purpose_queue` / `atlas_purpose_set` / `atlas_purpose_review` |
 | Report savings | `projectatlas token` | `atlas_token_report` |
-
-## Why Rust
-
-Because this sits in the agent hot path.
-
-ProjectAtlas scans with `.gitignore` awareness, hashes files with BLAKE3, stores state in SQLite, watches changes with `notify`, filters paths with `globset`, emits TOON for compact context, and parses symbols through Rust-native adapters. The point is not "Rust because Rust." The point is fast local repository intelligence that agents can call repeatedly without turning orientation into the expensive step.
 
 ## Release Quality
 

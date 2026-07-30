@@ -3410,13 +3410,25 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
     let readme = fs::read_to_string(workspace_root.join("README.md"))?;
     let gitignore = fs::read_to_string(workspace_root.join(".gitignore"))?;
     for required in [
-        "Rust-native local code index and atlas",
-        "complete SQLite-backed index",
-        "fast local SQLite index",
+        "Rust-native, high-performance local repository intelligence",
+        "persistent SQLite map",
+        "native Rust CLI and MCP server",
+        "purposes identify the responsible area",
+        "graph relationships reveal connected code",
+        "compact summaries and outlines",
+        "exact source slices provide the final evidence",
     ] {
         if !readme.contains(required) {
             return Err(io::Error::other(format!(
-                "README must present ProjectAtlas as a complete local code index; missing {required:?}"
+                "README must retain the consolidated Rust-native agent-first positioning; missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    for historical in ["frozen v0.3.26", "plain control", "3.9 times the median"] {
+        if readme.contains(historical) {
+            return Err(io::Error::other(format!(
+                "README must not restore the historical navigation comparison {historical:?}"
             ))
             .into());
         }
