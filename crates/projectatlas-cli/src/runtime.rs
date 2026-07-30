@@ -1970,17 +1970,11 @@ fn is_bare_git_control_root(root: &Path) -> Result<bool, CliError> {
     if !structurally_git {
         return Ok(false);
     }
-    if control_root == root
-        && root
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .is_some_and(|name| name.eq_ignore_ascii_case(".git"))
-    {
+    if control_root == root {
         return Ok(true);
     }
 
-    effective_git_config_bare_setting(&control_root, &config)
-        .map(|bare| bare.unwrap_or(control_root == root))
+    effective_git_config_bare_setting(&control_root, &config).map(|bare| bare.unwrap_or(false))
 }
 
 /// Query Git's effective local `core.bare` value, including configured includes.

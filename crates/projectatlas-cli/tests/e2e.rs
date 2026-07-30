@@ -3308,7 +3308,7 @@ fn scan_refuses_unverified_registered_worktree_boundary_before_publication()
 }
 
 #[test]
-fn bare_git_root_returns_typed_worktree_guidance_without_state() -> Result<(), Box<dyn Error>> {
+fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let bare = temp.path().join("repository.git");
     let output = StdCommand::new("git")
@@ -3350,7 +3350,24 @@ fn bare_git_root_returns_typed_worktree_guidance_without_state() -> Result<(), B
     let included_config = included_config.to_string_lossy().to_string();
     git_success(&manager, &["config", "include.path", &included_config])?;
 
-    for selected in [&bare, &manager] {
+    let separate_worktree = temp.path().join("separate-worktree");
+    let separate_control = temp.path().join("separate-control");
+    fs::create_dir(&separate_worktree)?;
+    let output = StdCommand::new("git")
+        .args(["init", "--quiet", "--separate-git-dir"])
+        .arg(&separate_control)
+        .arg(&separate_worktree)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "git init --separate-git-dir failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+
+    for selected in [&bare, &manager, &separate_control] {
         let init = Command::cargo_bin("projectatlas")?
             .current_dir(selected)
             .args(["--format", "json", "init"])
@@ -3412,13 +3429,18 @@ fn bare_git_root_returns_typed_worktree_guidance_without_state() -> Result<(), B
         .current_dir(&lookalike)
         .args(["--format", "json", "init", "--no-scan"])
         .output()?;
-    if !lookalike_init.status.success() {
-        return Err(io::Error::other(format!(
-            "non-Git structural lookalike was rejected as a bare control root: {}{}",
-            String::from_utf8_lossy(&lookalike_init.stdout),
-            String::from_utf8_lossy(&lookalike_init.stderr)
-        ))
+    if lookalike_init.status.success() {
+        return Err(io::Error::other(
+            "structurally complete Git control lookalike initialized as source",
+        )
         .into());
+    }
+    let lookalike_error: Value = serde_json::from_slice(&lookalike_init.stderr)?;
+    require_json_string(&lookalike_error, &["error", "kind"], "worktree_required")?;
+    if lookalike.join(ATLAS_DIR_NAME).exists() {
+        return Err(
+            io::Error::other("structural control-root refusal created ProjectAtlas state").into(),
+        );
     }
     Ok(())
 }
