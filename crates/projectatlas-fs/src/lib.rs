@@ -45,6 +45,8 @@ const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const HASH_BUFFER_BYTES: usize = 8_192;
 /// Maximum linked-worktree `.git` pointer bytes inspected for policy discovery.
 const GIT_DIRECTORY_POINTER_MAX_BYTES: u64 = 64 * 1_024;
+/// Maximum linked-worktree registrations inspected for one repository.
+const MAX_REGISTERED_WORKTREES: usize = 1_024;
 
 /// Filesystem scanner errors.
 #[derive(Debug, Error)]
@@ -63,6 +65,14 @@ pub enum FsError {
     /// The supplied root is not a directory.
     #[error("scan root is not a directory: {0:?}")]
     RootNotDirectory(PathBuf),
+    /// A Git worktree boundary could not be validated safely.
+    #[error("repository boundary could not be validated for {path:?}: {source}")]
+    RepositoryBoundary {
+        /// Git control path involved in the boundary failure.
+        path: PathBuf,
+        /// Source boundary error.
+        source: io::Error,
+    },
     /// Cooperative indexing work was canceled or exceeded a declared bound.
     #[error("{0}")]
     IndexWork(#[from] IndexWorkFailure),
@@ -116,6 +126,40 @@ impl ScanOptions {
         }
         has_excluded_directory_component(relative_path, self)
             || has_excluded_path_prefix(relative_path, self)
+    }
+}
+
+/// Canonical selected root plus its resolved repository exclusion policy.
+#[derive(Clone, Debug)]
+pub struct RootScanPolicy {
+    /// Canonical selected source root.
+    root: PathBuf,
+    /// Caller options extended with repository-derived exclusions.
+    options: ScanOptions,
+}
+
+impl RootScanPolicy {
+    /// Discover bounded repository policy once for one selected scan root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the root is invalid, repository boundary metadata
+    /// cannot be validated, or cooperative work has stopped.
+    pub fn discover(
+        root: &Path,
+        options: &ScanOptions,
+        control: &IndexWorkControl,
+    ) -> FsResult<Self> {
+        control.check(IndexWorkStage::RepositoryTraversal)?;
+        if !root.is_dir() {
+            return Err(FsError::RootNotDirectory(root.to_path_buf()));
+        }
+        let root = root.canonicalize().map_err(|source| FsError::Io {
+            path: root.to_path_buf(),
+            source,
+        })?;
+        let options = scan_options_for_root(&root, options, control)?;
+        Ok(Self { root, options })
     }
 }
 
@@ -325,14 +369,9 @@ pub fn scan_repo_controlled_with_work(
     limits: ScanLimits,
     control: &IndexWorkControl,
 ) -> FsResult<ScanOutcome> {
-    control.check(IndexWorkStage::RepositoryTraversal)?;
-    if !root.is_dir() {
-        return Err(FsError::RootNotDirectory(root.to_path_buf()));
-    }
-    let root = root.canonicalize().map_err(|source| FsError::Io {
-        path: root.to_path_buf(),
-        source,
-    })?;
+    let policy = RootScanPolicy::discover(root, options, control)?;
+    let root = policy.root;
+    let options = policy.options;
     let mut builder = WalkBuilder::new(&root);
     builder
         .hidden(false)
@@ -451,12 +490,26 @@ pub fn scan_path_controlled(
     limits: ScanLimits,
     control: &IndexWorkControl,
 ) -> FsResult<Option<Node>> {
+    let policy = RootScanPolicy::discover(root, options, control)?;
+    scan_path_with_policy_controlled(&policy, path, limits, control)
+}
+
+/// Scan one path using repository policy already resolved for the selected root.
+///
+/// # Errors
+///
+/// Returns an error when path canonicalization or metadata reads fail,
+/// cancellation or the deadline is observed, or a scan limit is exceeded.
+pub fn scan_path_with_policy_controlled(
+    policy: &RootScanPolicy,
+    path: &Path,
+    limits: ScanLimits,
+    control: &IndexWorkControl,
+) -> FsResult<Option<Node>> {
     let budget = ScanBudget::new(limits, control.clone());
     budget.claim_entry()?;
-    let root = root.canonicalize().map_err(|source| FsError::Io {
-        path: root.to_path_buf(),
-        source,
-    })?;
+    let root = &policy.root;
+    let options = &policy.options;
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -467,7 +520,7 @@ pub fn scan_path_controlled(
         return Ok(None);
     }
     let symlink_checked_absolute = path_for_symlink_component_check(&absolute)?;
-    if path_has_symlink_component(&root, &symlink_checked_absolute)? {
+    if path_has_symlink_component(root, &symlink_checked_absolute)? {
         control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
     }
@@ -477,15 +530,15 @@ pub fn scan_path_controlled(
             path: symlink_checked_absolute.clone(),
             source,
         })?;
-    if !absolute.starts_with(&root) {
+    if !absolute.starts_with(root) {
         control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
     }
-    if gitignore_excludes_path(&root, &absolute)? || should_skip_path(&root, &absolute, options) {
+    if gitignore_excludes_path(root, &absolute)? || should_skip_path(root, &absolute, options) {
         control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
     }
-    let node = scanned_node(&root, &absolute, options, &budget)?;
+    let node = scanned_node(root, &absolute, options, &budget)?;
     control.check(IndexWorkStage::ScanFinalization)?;
     Ok(node)
 }
@@ -627,12 +680,28 @@ pub fn git_global_excludes_path() -> Option<PathBuf> {
 /// Returns an error when the root cannot be canonicalized or a linked-worktree
 /// pointer cannot be inspected within its declared bound.
 pub fn source_selection_policy_paths(root: &Path) -> FsResult<Vec<PathBuf>> {
+    let control = IndexWorkControl::new(IndexCancellation::new(), Some(DEFAULT_SCAN_TIMEOUT));
+    source_selection_policy_paths_controlled(root, &control)
+}
+
+/// Return bounded external source-selection inputs under one shared work control.
+///
+/// # Errors
+///
+/// Returns an error when policy discovery is canceled, exceeds its deadline or
+/// registration bound, or cannot validate a linked-worktree pointer.
+pub fn source_selection_policy_paths_controlled(
+    root: &Path,
+    control: &IndexWorkControl,
+) -> FsResult<Vec<PathBuf>> {
+    control.check(IndexWorkStage::RepositoryTraversal)?;
     let root = root.canonicalize().map_err(|source| FsError::Io {
         path: root.to_path_buf(),
         source,
     })?;
     let mut paths = BTreeSet::new();
     for ancestor in root.ancestors() {
+        control.check(IndexWorkStage::RepositoryTraversal)?;
         paths.insert(ancestor.join(".gitignore"));
         paths.insert(ancestor.join(".ignore"));
         let git = ancestor.join(".git");
@@ -696,6 +765,29 @@ pub fn source_selection_policy_paths(root: &Path) -> FsResult<Vec<PathBuf>> {
     if let Some(global_excludes) = git_global_excludes_path() {
         paths.insert(global_excludes);
     }
+    if let Some(common_git_dir) = common_git_directory(&root)? {
+        let registrations = common_git_dir.join("worktrees");
+        paths.insert(registrations.clone());
+        match fs::read_dir(&registrations) {
+            Ok(entries) => {
+                for (index, entry) in entries.enumerate() {
+                    check_registered_worktree(control, index)?;
+                    let entry = entry.map_err(|source| FsError::RepositoryBoundary {
+                        path: registrations.clone(),
+                        source,
+                    })?;
+                    paths.insert(entry.path().join("gitdir"));
+                }
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(FsError::RepositoryBoundary {
+                    path: registrations,
+                    source,
+                });
+            }
+        }
+    }
     Ok(paths.into_iter().collect())
 }
 
@@ -741,6 +833,262 @@ fn read_git_directory_pointer(
     } else {
         base.join(value)
     }))
+}
+
+/// Add registered in-root sibling worktrees to the existing prefix policy.
+fn scan_options_for_root(
+    root: &Path,
+    options: &ScanOptions,
+    control: &IndexWorkControl,
+) -> FsResult<ScanOptions> {
+    let mut options = options.clone();
+    options
+        .exclude_path_prefixes
+        .extend(linked_worktree_excluded_prefixes(root, control)?);
+    Ok(options)
+}
+
+/// Return registered sibling worktrees physically nested beneath the selected root.
+fn linked_worktree_excluded_prefixes(
+    root: &Path,
+    control: &IndexWorkControl,
+) -> FsResult<Vec<String>> {
+    let Some(common_git_dir) = common_git_directory(root)? else {
+        return Ok(Vec::new());
+    };
+    let registrations = common_git_dir.join("worktrees");
+    let entries = match fs::read_dir(&registrations) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(FsError::RepositoryBoundary {
+                path: registrations,
+                source,
+            });
+        }
+    };
+    let mut prefixes = BTreeSet::new();
+    for (index, entry) in entries.enumerate() {
+        check_registered_worktree(control, index)?;
+        let entry = entry.map_err(|source| FsError::RepositoryBoundary {
+            path: registrations.clone(),
+            source,
+        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|source| FsError::RepositoryBoundary {
+                path: entry.path(),
+                source,
+            })?;
+        if !file_type.is_dir() {
+            return Err(FsError::RepositoryBoundary {
+                path: entry.path(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "registered worktree metadata entry is not a directory",
+                ),
+            });
+        }
+        let gitdir_path = entry.path().join("gitdir");
+        let git_control_path = read_repository_boundary_pointer(
+            &gitdir_path,
+            &entry.path(),
+            "registered worktree gitdir",
+        )?
+        .ok_or_else(|| FsError::RepositoryBoundary {
+            path: gitdir_path.clone(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "registered worktree gitdir is missing",
+            ),
+        })?;
+        let git_control_path =
+            git_control_path
+                .canonicalize()
+                .map_err(|source| FsError::RepositoryBoundary {
+                    path: gitdir_path.clone(),
+                    source,
+                })?;
+        let git_control_metadata =
+            fs::metadata(&git_control_path).map_err(|source| FsError::RepositoryBoundary {
+                path: gitdir_path.clone(),
+                source,
+            })?;
+        if !git_control_metadata.is_file()
+            || git_control_path.file_name().and_then(|name| name.to_str()) != Some(".git")
+        {
+            return Err(FsError::RepositoryBoundary {
+                path: gitdir_path,
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "registered worktree gitdir does not address a .git control file",
+                ),
+            });
+        }
+        let worktree_root = git_control_path
+            .parent()
+            .ok_or_else(|| FsError::RepositoryBoundary {
+                path: gitdir_path.clone(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "registered worktree gitdir has no checkout parent",
+                ),
+            })?
+            .canonicalize()
+            .map_err(|source| FsError::RepositoryBoundary {
+                path: gitdir_path,
+                source,
+            })?;
+        if common_git_directory(&worktree_root)?.as_ref() != Some(&common_git_dir) {
+            return Err(FsError::RepositoryBoundary {
+                path: git_control_path,
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "registered worktree does not resolve to the selected common Git directory",
+                ),
+            });
+        }
+        if worktree_root != root && worktree_root.starts_with(root) {
+            let prefix = normalize_repo_path(root, &worktree_root).map_err(FsError::Core)?;
+            if prefix != "." {
+                prefixes.insert(prefix);
+            }
+        }
+    }
+    Ok(prefixes.into_iter().collect())
+}
+
+/// Admit one bounded registered-worktree policy entry.
+fn check_registered_worktree(control: &IndexWorkControl, index: usize) -> FsResult<()> {
+    control.check(IndexWorkStage::RepositoryTraversal)?;
+    let observed = index.saturating_add(1);
+    if observed > MAX_REGISTERED_WORKTREES {
+        return Err(IndexWorkFailure::resource_limit(
+            IndexWorkStage::RepositoryTraversal,
+            IndexWorkResource::Entries,
+            u64::try_from(MAX_REGISTERED_WORKTREES).unwrap_or(u64::MAX),
+            u64::try_from(observed).unwrap_or(u64::MAX),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Resolve the common Git directory for a repository or linked-worktree root.
+fn common_git_directory(root: &Path) -> FsResult<Option<PathBuf>> {
+    let git = root.join(".git");
+    let metadata = match fs::metadata(&git) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(FsError::RepositoryBoundary { path: git, source });
+        }
+    };
+    if metadata.is_dir() {
+        return git
+            .canonicalize()
+            .map(Some)
+            .map_err(|source| FsError::RepositoryBoundary { path: git, source });
+    }
+    if !metadata.is_file() {
+        return Err(FsError::RepositoryBoundary {
+            path: git,
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "repository .git control path is neither a file nor a directory",
+            ),
+        });
+    }
+    if metadata.len() > GIT_DIRECTORY_POINTER_MAX_BYTES {
+        return Err(FsError::RepositoryBoundary {
+            path: git,
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "linked-worktree .git pointer exceeds the policy-input limit",
+            ),
+        });
+    }
+    let value = fs::read_to_string(&git).map_err(|source| FsError::RepositoryBoundary {
+        path: git.clone(),
+        source,
+    })?;
+    let git_dir = value
+        .trim()
+        .strip_prefix("gitdir:")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| FsError::RepositoryBoundary {
+            path: git.clone(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "linked-worktree .git pointer is malformed",
+            ),
+        })?;
+    let git_dir = Path::new(git_dir);
+    let git_dir = if git_dir.is_absolute() {
+        git_dir.to_path_buf()
+    } else {
+        root.join(git_dir)
+    };
+    let git_dir = git_dir
+        .canonicalize()
+        .map_err(|source| FsError::RepositoryBoundary {
+            path: git.clone(),
+            source,
+        })?;
+    let common_dir_pointer = git_dir.join("commondir");
+    let common_dir = read_repository_boundary_pointer(
+        &common_dir_pointer,
+        &git_dir,
+        "linked-worktree commondir",
+    )?
+    .unwrap_or(git_dir);
+    common_dir
+        .canonicalize()
+        .map(Some)
+        .map_err(|source| FsError::RepositoryBoundary {
+            path: common_dir_pointer,
+            source,
+        })
+}
+
+/// Read a Git boundary pointer while preserving a typed boundary failure.
+fn read_repository_boundary_pointer(
+    path: &Path,
+    base: &Path,
+    description: &str,
+) -> FsResult<Option<PathBuf>> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(FsError::RepositoryBoundary {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    if !metadata.is_file() {
+        return Err(FsError::RepositoryBoundary {
+            path: path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} is not a file"),
+            ),
+        });
+    }
+    match read_git_directory_pointer(path, base, description) {
+        Ok(Some(value)) => Ok(Some(value)),
+        Ok(None) => Err(FsError::RepositoryBoundary {
+            path: path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} is empty"),
+            ),
+        }),
+        Err(FsError::Io { path, source }) => Err(FsError::RepositoryBoundary { path, source }),
+        Err(other) => Err(other),
+    }
 }
 
 /// Resolve the current user's home directory without adding a platform helper dependency.
@@ -1070,6 +1418,7 @@ mod tests {
     use super::*;
     use std::error::Error;
     use std::io;
+    use std::process::Command;
     use std::time::Instant;
 
     /// Reader that requests cancellation after yielding its first non-empty chunk.
@@ -1091,6 +1440,23 @@ mod tests {
             }
             Ok(count)
         }
+    }
+
+    /// Run one Git command inside a test repository.
+    fn run_git(repo: &Path, arguments: &[&str]) -> Result<(), Box<dyn Error>> {
+        let output = Command::new("git")
+            .current_dir(repo)
+            .args(arguments)
+            .output()?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(io::Error::other(format!(
+            "git {arguments:?} failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into())
     }
 
     #[test]
@@ -1134,6 +1500,34 @@ mod tests {
             "expired repository scan did not return the typed deadline",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn registered_worktree_inventory_is_controlled_and_bounded() {
+        let cancellation = IndexCancellation::new();
+        cancellation.cancel();
+        let canceled = check_registered_worktree(&IndexWorkControl::new(cancellation, None), 0);
+        assert!(matches!(
+            canceled,
+            Err(FsError::IndexWork(IndexWorkFailure::Cancelled {
+                stage: IndexWorkStage::RepositoryTraversal
+            }))
+        ));
+
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        assert!(check_registered_worktree(&control, MAX_REGISTERED_WORKTREES - 1).is_ok());
+        assert!(matches!(
+            check_registered_worktree(&control, MAX_REGISTERED_WORKTREES),
+            Err(FsError::IndexWork(
+                IndexWorkFailure::ResourceLimitExceeded {
+                    stage: IndexWorkStage::RepositoryTraversal,
+                    resource: IndexWorkResource::Entries,
+                    limit,
+                    observed
+                }
+            )) if limit == MAX_REGISTERED_WORKTREES as u64
+                && observed == MAX_REGISTERED_WORKTREES as u64 + 1
+        ));
     }
 
     #[test]
@@ -1268,6 +1662,8 @@ mod tests {
         fs::write(common_git_dir.join("info").join("exclude"), "ignored.rs\n")?;
 
         let canonical_repo = repo.canonicalize()?;
+        let canonical_common_git_dir = common_git_dir.canonicalize()?;
+        let canonical_worktree_git_dir = worktree_git_dir.canonicalize()?;
         let paths = source_selection_policy_paths(&repo)?;
 
         require(
@@ -1289,6 +1685,104 @@ mod tests {
         require(
             paths.contains(&common_git_dir.join("info").join("exclude")),
             "policy inventory omitted the common Git exclude file",
+        )?;
+        require(
+            paths.contains(&canonical_common_git_dir.join("worktrees")),
+            "policy inventory omitted the registered-worktree directory",
+        )?;
+        require(
+            paths.contains(&canonical_worktree_git_dir.join("gitdir")),
+            "policy inventory omitted the registered-worktree root pointer",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn scan_excludes_registered_in_root_worktree_without_an_ignore_rule()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo)?;
+        run_git(&repo, &["init"])?;
+        run_git(&repo, &["config", "user.name", "ProjectAtlas Test"])?;
+        run_git(
+            &repo,
+            &["config", "user.email", "projectatlas@example.invalid"],
+        )?;
+        fs::create_dir(repo.join("src"))?;
+        fs::write(repo.join("src").join("main.rs"), "fn main_checkout() {}\n")?;
+        run_git(&repo, &["add", "."])?;
+        run_git(&repo, &["commit", "-m", "fixture"])?;
+
+        let linked = repo.join("linked-checkout");
+        let output = Command::new("git")
+            .current_dir(&repo)
+            .args(["worktree", "add", "-b", "linked-branch"])
+            .arg(&linked)
+            .output()?;
+        require(
+            output.status.success(),
+            &format!(
+                "git worktree add failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
+        fs::write(
+            linked.join("src").join("branch_only.rs"),
+            "fn linked_branch_only() {}\n",
+        )?;
+
+        let nested_repo = repo.join("vendor").join("unrelated");
+        fs::create_dir_all(nested_repo.join("src"))?;
+        run_git(&nested_repo, &["init"])?;
+        fs::write(
+            nested_repo.join("src").join("lib.rs"),
+            "fn unrelated_nested_repo() {}\n",
+        )?;
+        require(
+            !repo.join(".gitignore").exists(),
+            "fixture unexpectedly depended on a worktree-container ignore rule",
+        )?;
+
+        let nodes = scan_repo(&repo, &ScanOptions::default())?;
+        require_path(&nodes, "src/main.rs")?;
+        reject_path(&nodes, "linked-checkout")?;
+        reject_path(&nodes, "linked-checkout/src/branch_only.rs")?;
+        require_path(&nodes, "vendor/unrelated/src/lib.rs")?;
+
+        let single = scan_path(
+            &repo,
+            &linked.join("src").join("branch_only.rs"),
+            &ScanOptions::default(),
+        )?;
+        require(
+            single.is_none(),
+            "single-path refresh crossed a registered sibling worktree boundary",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn scan_fails_typed_when_registered_worktree_boundary_is_unreadable()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        let registration = repo.join(".git").join("worktrees").join("missing");
+        fs::create_dir_all(&registration)?;
+        fs::write(
+            registration.join("gitdir"),
+            repo.join("missing-worktree")
+                .join(".git")
+                .display()
+                .to_string(),
+        )?;
+        fs::write(repo.join("source.rs"), "fn source() {}\n")?;
+
+        let result = scan_repo(&repo, &ScanOptions::default());
+        require(
+            matches!(result, Err(FsError::RepositoryBoundary { .. })),
+            "uncertain registered worktree boundary did not fail with the typed error",
         )?;
         Ok(())
     }

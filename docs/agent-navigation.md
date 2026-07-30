@@ -3,7 +3,7 @@
 ## Status
 
 This document defines the implemented agent-navigation contract for
-ProjectAtlas 0.4.0. ProjectAtlas 0.3.26 provides the baseline workflow
+ProjectAtlas v0.4. ProjectAtlas 0.3.26 provides the baseline workflow
 described below. Automatic read freshness, normalized graph publication,
 purpose-plus-connection enrichment, direct relationship navigation, and closed
 analysis views are current v0.4 behavior. The representative task-7.3 forward

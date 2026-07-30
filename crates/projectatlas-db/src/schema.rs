@@ -7,6 +7,7 @@ use crate::sqlite_profile::{
 use crate::{DbError, DbResult};
 use projectatlas_core::graph::ProjectInstanceId;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use std::fmt;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -47,6 +48,12 @@ pub(crate) const INDEX_PUBLICATION_GENERATION_KEY: &str = "index_publication_gen
 pub(crate) const FILE_TEXT_FTS_SOURCE_REVISION_KEY: &str = "file_text_fts_source_revision";
 /// Metadata key for the latest transactionally synchronized FTS revision.
 pub(crate) const FILE_TEXT_FTS_PROJECTION_REVISION_KEY: &str = "file_text_fts_projection_revision";
+/// Maximum bytes retained for a schema object label in an incompatibility error.
+const SCHEMA_DIAGNOSTIC_OBJECT_MAX_BYTES: usize = 256;
+/// Maximum bytes retained for each schema contract value in an incompatibility error.
+const SCHEMA_DIAGNOSTIC_VALUE_MAX_BYTES: usize = 2 * 1024;
+/// Marker appended when a schema diagnostic exceeds its field bound.
+const SCHEMA_DIAGNOSTIC_TRUNCATION_SUFFIX: &str = "...";
 
 /// Released schema state accepted by the storage owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -256,11 +263,27 @@ static COVERAGE_DISCOVERY_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> 
 /// Immutable physical schema emitted by the released 0.3.26 runtime.
 #[cfg(test)]
 const RELEASED_SCHEMA_EIGHT_SQL: &str = include_str!("../tests/fixtures/released-schema-8.sql");
+/// Physical schema produced by the released v0.3.11-to-v0.3.26 upgrade path.
+#[cfg(test)]
+const EVOLVED_RELEASED_SCHEMA_EIGHT_SQL: &str =
+    include_str!("../tests/fixtures/released-schema-8-evolved.sql");
 
 /// Create the historical released schema without consulting current DDL.
 #[cfg(test)]
 pub(crate) fn create_released_schema_eight(connection: &Connection) -> DbResult<()> {
-    connection.execute_batch(RELEASED_SCHEMA_EIGHT_SQL)?;
+    create_schema_eight_fixture(connection, RELEASED_SCHEMA_EIGHT_SQL)
+}
+
+/// Create the schema-8 layout evolved through released v0.3 migrations.
+#[cfg(test)]
+pub(crate) fn create_evolved_released_schema_eight(connection: &Connection) -> DbResult<()> {
+    create_schema_eight_fixture(connection, EVOLVED_RELEASED_SCHEMA_EIGHT_SQL)
+}
+
+/// Create one captured released schema-8 fixture.
+#[cfg(test)]
+fn create_schema_eight_fixture(connection: &Connection, schema: &str) -> DbResult<()> {
+    connection.execute_batch(schema)?;
     set_metadata(
         connection,
         SCHEMA_VERSION_KEY,
@@ -1392,32 +1415,19 @@ fn schema_state(connection: &Connection) -> DbResult<SchemaState> {
             if user_objects == 0 {
                 return Ok(SchemaState::Fresh);
             }
-            return Err(DbError::SchemaShape {
-                object: "metadata".to_string(),
-                expected: "table".to_string(),
-                found: "missing".to_string(),
-            });
+            return Err(schema_shape_error("metadata", &"table", &"missing"));
         }
         Some("table") => {}
         Some(found) => {
-            return Err(DbError::SchemaShape {
-                object: "metadata".to_string(),
-                expected: "table".to_string(),
-                found: found.to_string(),
-            });
+            return Err(schema_shape_error("metadata", &"table", &found));
         }
     }
     let found = stored_schema_version(connection)?;
     match found {
         SCHEMA_VERSION => Ok(SchemaState::Current),
-        PREVIOUS_SCHEMA_VERSION
-        | PUBLICATION_SCHEMA_VERSION
-        | GRAPH_SCHEMA_VERSION
-        | TELEMETRY_SCHEMA_VERSION
-        | RESOLUTION_SCHEMA_VERSION
-        | PARSER_PROVENANCE_SCHEMA_VERSION
-        | COVERAGE_DISCOVERY_SCHEMA_VERSION
-        | LEXICAL_SCHEMA_VERSION => Ok(SchemaState::UpgradeRequired),
+        supported if migration_steps_remaining(supported).is_some() => {
+            Ok(SchemaState::UpgradeRequired)
+        }
         _ => Err(DbError::SchemaVersion {
             found,
             expected: SCHEMA_VERSION,
@@ -1596,29 +1606,40 @@ fn validate_integrity(connection: &Connection) -> DbResult<()> {
     Ok(())
 }
 
-/// Validate the exact tables, columns, constraints, and required indexes without repair DDL.
+/// Validate tables, columns, constraints, and required indexes without repair DDL.
 fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResult<()> {
-    if state == SchemaState::UpgradeRequired
-        && stored_schema_version(connection)? == LEXICAL_SCHEMA_VERSION
-    {
+    let stored_version =
+        (state == SchemaState::UpgradeRequired).then(|| stored_schema_version(connection));
+    let stored_version = stored_version.transpose()?;
+    if stored_version == Some(LEXICAL_SCHEMA_VERSION) {
         return validate_disposable_graph_predecessor_shape(connection);
     }
     let expected = match state {
         SchemaState::Current => schema_contract()?,
-        SchemaState::UpgradeRequired => match stored_schema_version(connection)? {
-            PREVIOUS_SCHEMA_VERSION | PUBLICATION_SCHEMA_VERSION => predecessor_schema_contract()?,
-            GRAPH_SCHEMA_VERSION => graph_predecessor_schema_contract()?,
-            TELEMETRY_SCHEMA_VERSION => telemetry_predecessor_schema_contract()?,
-            RESOLUTION_SCHEMA_VERSION => resolution_predecessor_schema_contract()?,
-            PARSER_PROVENANCE_SCHEMA_VERSION => parser_provenance_predecessor_schema_contract()?,
-            COVERAGE_DISCOVERY_SCHEMA_VERSION => coverage_discovery_predecessor_schema_contract()?,
-            found => {
-                return Err(DbError::SchemaVersion {
-                    found,
-                    expected: SCHEMA_VERSION,
-                });
+        SchemaState::UpgradeRequired => {
+            match stored_version.ok_or(DbError::SchemaPostcondition {
+                expected: SCHEMA_VERSION,
+            })? {
+                PREVIOUS_SCHEMA_VERSION | PUBLICATION_SCHEMA_VERSION => {
+                    predecessor_schema_contract()?
+                }
+                GRAPH_SCHEMA_VERSION => graph_predecessor_schema_contract()?,
+                TELEMETRY_SCHEMA_VERSION => telemetry_predecessor_schema_contract()?,
+                RESOLUTION_SCHEMA_VERSION => resolution_predecessor_schema_contract()?,
+                PARSER_PROVENANCE_SCHEMA_VERSION => {
+                    parser_provenance_predecessor_schema_contract()?
+                }
+                COVERAGE_DISCOVERY_SCHEMA_VERSION => {
+                    coverage_discovery_predecessor_schema_contract()?
+                }
+                found => {
+                    return Err(DbError::SchemaVersion {
+                        found,
+                        expected: SCHEMA_VERSION,
+                    });
+                }
             }
-        },
+        }
         SchemaState::Fresh => {
             return Err(DbError::SchemaPostcondition {
                 expected: SCHEMA_VERSION,
@@ -1626,7 +1647,13 @@ fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResul
         }
     };
     let found = read_schema_contract(connection)?;
-    if expected.tables != found.tables {
+    let released_schema_eight = stored_version == Some(PREVIOUS_SCHEMA_VERSION);
+    let tables_match = if released_schema_eight {
+        released_schema_tables_match(&expected.tables, &found.tables)
+    } else {
+        expected.tables == found.tables
+    };
+    if !tables_match {
         return Err(schema_shape_error(
             "tables",
             &expected.tables,
@@ -1646,13 +1673,14 @@ fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResul
             .iter()
             .find(|index| index.name == required.name)
         else {
-            return Err(DbError::SchemaShape {
-                object: required.name.clone(),
-                expected: format!("{required:?}"),
-                found: "missing".to_string(),
-            });
+            return Err(schema_shape_error(&required.name, required, &"missing"));
         };
-        if actual != required {
+        let index_matches = if released_schema_eight {
+            released_schema_index_matches(required, actual)
+        } else {
+            actual == required
+        };
+        if !index_matches {
             return Err(schema_shape_error(&required.name, required, actual));
         }
     }
@@ -1662,15 +1690,133 @@ fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResul
         .filter(|index| !expected.indexes.iter().any(|item| item.name == index.name))
     {
         if !is_compatible_extension_index(extra) {
-            return Err(DbError::SchemaShape {
-                object: extra.name.clone(),
-                expected: "optional non-unique full index over declared columns".to_string(),
-                found: format!("{extra:?}"),
-            });
+            return Err(schema_shape_error(
+                &extra.name,
+                &"optional non-unique full index over declared columns",
+                extra,
+            ));
         }
     }
     validate_extension_objects(connection)?;
     Ok(())
+}
+
+/// Compare released schema-8 tables by named semantics rather than physical order.
+fn released_schema_tables_match(expected: &[TableContract], found: &[TableContract]) -> bool {
+    expected.len() == found.len()
+        && expected.iter().zip(found).all(|(required, actual)| {
+            required.name == actual.name
+                && canonical_table_definition(&required.definition)
+                    .zip(canonical_table_definition(&actual.definition))
+                    .is_some_and(|(required, actual)| required == actual)
+                && required.columns.len() == actual.columns.len()
+                && required.columns.iter().all(|required_column| {
+                    actual.columns.iter().any(|actual_column| {
+                        released_schema_column_matches(required_column, actual_column)
+                    })
+                })
+        })
+}
+
+/// Compare one released column while ignoring only its physical table ordinal.
+fn released_schema_column_matches(expected: &ColumnContract, found: &ColumnContract) -> bool {
+    expected.name == found.name
+        && expected.declared_type == found.declared_type
+        && expected.not_null == found.not_null
+        && expected.default_value == found.default_value
+        && expected.primary_key_position == found.primary_key_position
+        && expected.hidden == found.hidden
+}
+
+/// Compare one released index through named key references instead of table ordinals.
+fn released_schema_index_matches(expected: &IndexContract, found: &IndexContract) -> bool {
+    expected.table == found.table
+        && expected.name == found.name
+        && expected.unique == found.unique
+        && expected.origin == found.origin
+        && expected.partial == found.partial
+        && expected.columns.len() == found.columns.len()
+        && expected
+            .columns
+            .iter()
+            .zip(&found.columns)
+            .all(|(required, actual)| {
+                required.sequence == actual.sequence
+                    && required.name == actual.name
+                    && required.descending == actual.descending
+                    && required.collation == actual.collation
+                    && required.key == actual.key
+                    && (required.name.is_some() || required.column_id == actual.column_id)
+            })
+}
+
+/// Canonicalize top-level table clauses while preserving each exact constraint.
+fn canonical_table_definition(definition: &str) -> Option<(String, Vec<String>, String)> {
+    let open = definition.find('(')?;
+    let close = definition.rfind(')')?;
+    if close <= open {
+        return None;
+    }
+    let mut clauses = top_level_sql_clauses(&definition[open + 1..close])?;
+    clauses.sort();
+    Some((
+        normalize_sql_fragment(&definition[..open]),
+        clauses,
+        normalize_sql_fragment(&definition[close + 1..]),
+    ))
+}
+
+/// Split one table body on commas outside nested expressions and quoted values.
+fn top_level_sql_clauses(body: &str) -> Option<Vec<String>> {
+    let mut clauses = Vec::new();
+    let mut start = 0;
+    let mut depth = 0_u32;
+    let mut quote = None;
+    let mut characters = body.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
+        if let Some(end_quote) = quote {
+            if character == end_quote {
+                if characters
+                    .peek()
+                    .is_some_and(|(_, next)| *next == end_quote)
+                {
+                    characters.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' | '`' => quote = Some(character),
+            '[' => quote = Some(']'),
+            '(' => depth = depth.checked_add(1)?,
+            ')' => depth = depth.checked_sub(1)?,
+            ',' if depth == 0 => {
+                let clause = normalize_sql_fragment(&body[start..index]);
+                if clause.is_empty() {
+                    return None;
+                }
+                clauses.push(clause);
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() || depth != 0 {
+        return None;
+    }
+    let final_clause = normalize_sql_fragment(&body[start..]);
+    if final_clause.is_empty() {
+        return None;
+    }
+    clauses.push(final_clause);
+    Some(clauses)
+}
+
+/// Normalize incidental whitespace inside one SQLite-owned schema fragment.
+fn normalize_sql_fragment(fragment: &str) -> String {
+    fragment.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Validate schema 15 outside objects introduced or rebuilt by its migration.
@@ -1747,11 +1893,7 @@ fn validate_disposable_graph_predecessor_shape(connection: &Connection) -> DbRes
             .iter()
             .find(|index| index.name == required.name)
         else {
-            return Err(DbError::SchemaShape {
-                object: required.name.clone(),
-                expected: format!("{required:?}"),
-                found: "missing".to_string(),
-            });
+            return Err(schema_shape_error(&required.name, required, &"missing"));
         };
         if actual != required {
             return Err(schema_shape_error(&required.name, required, actual));
@@ -1763,11 +1905,11 @@ fn validate_disposable_graph_predecessor_shape(connection: &Connection) -> DbRes
             .any(|expected| expected.name == index.name)
     }) {
         if !is_compatible_extension_index(extra) {
-            return Err(DbError::SchemaShape {
-                object: extra.name.clone(),
-                expected: "optional non-unique full index over declared columns".to_string(),
-                found: format!("{extra:?}"),
-            });
+            return Err(schema_shape_error(
+                &extra.name,
+                &"optional non-unique full index over declared columns",
+                extra,
+            ));
         }
     }
     validate_extension_objects(connection)
@@ -2040,15 +2182,82 @@ fn validate_extension_objects(connection: &Connection) -> DbResult<()> {
         match kind.as_str() {
             "table" | "index" => {}
             _ => {
-                return Err(DbError::SchemaShape {
-                    object: name,
-                    expected: "contract table or compatible non-unique index".to_string(),
-                    found: format!("{kind} on {table} with definition {sql:?}"),
-                });
+                return Err(schema_shape_error(
+                    &name,
+                    &"contract table or compatible non-unique index",
+                    &(kind.as_str(), table.as_str(), sql.as_deref()),
+                ));
             }
         }
     }
     Ok(())
+}
+
+/// Retain only the bounded prefix of one formatted schema diagnostic.
+struct BoundedSchemaDiagnostic {
+    /// Retained formatted prefix.
+    value: String,
+    /// Maximum UTF-8 bytes retained after the truncation marker is appended.
+    max_bytes: usize,
+    /// Whether formatting exceeded the configured byte ceiling.
+    truncated: bool,
+}
+
+impl BoundedSchemaDiagnostic {
+    /// Create one empty diagnostic field with a fixed byte ceiling.
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            value: String::new(),
+            max_bytes,
+            truncated: false,
+        }
+    }
+
+    /// Append the truncation marker without splitting a UTF-8 code point.
+    fn finish(mut self) -> String {
+        if !self.truncated {
+            return self.value;
+        }
+        let target = self
+            .max_bytes
+            .saturating_sub(SCHEMA_DIAGNOSTIC_TRUNCATION_SUFFIX.len());
+        let mut boundary = target.min(self.value.len());
+        while !self.value.is_char_boundary(boundary) {
+            boundary = boundary.saturating_sub(1);
+        }
+        self.value.truncate(boundary);
+        self.value.push_str(SCHEMA_DIAGNOSTIC_TRUNCATION_SUFFIX);
+        self.value
+    }
+}
+
+impl fmt::Write for BoundedSchemaDiagnostic {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        if self.truncated {
+            return Err(fmt::Error);
+        }
+        let remaining = self.max_bytes.saturating_sub(self.value.len());
+        if value.len() <= remaining {
+            self.value.push_str(value);
+            return Ok(());
+        }
+        let mut boundary = remaining;
+        while !value.is_char_boundary(boundary) {
+            boundary = boundary.saturating_sub(1);
+        }
+        self.value.push_str(&value[..boundary]);
+        self.truncated = true;
+        Err(fmt::Error)
+    }
+}
+
+/// Format one schema diagnostic without first allocating its complete representation.
+fn bounded_schema_diagnostic(max_bytes: usize, arguments: fmt::Arguments<'_>) -> String {
+    let mut output = BoundedSchemaDiagnostic::new(max_bytes);
+    if fmt::write(&mut output, arguments).is_err() {
+        output.truncated = true;
+    }
+    output.finish()
 }
 
 /// Build one readable typed schema mismatch.
@@ -2058,9 +2267,18 @@ fn schema_shape_error(
     found: &impl std::fmt::Debug,
 ) -> DbError {
     DbError::SchemaShape {
-        object: object.to_string(),
-        expected: format!("{expected:?}"),
-        found: format!("{found:?}"),
+        object: bounded_schema_diagnostic(
+            SCHEMA_DIAGNOSTIC_OBJECT_MAX_BYTES,
+            format_args!("{object}"),
+        ),
+        expected: bounded_schema_diagnostic(
+            SCHEMA_DIAGNOSTIC_VALUE_MAX_BYTES,
+            format_args!("{expected:?}"),
+        ),
+        found: bounded_schema_diagnostic(
+            SCHEMA_DIAGNOSTIC_VALUE_MAX_BYTES,
+            format_args!("{found:?}"),
+        ),
     }
 }
 
@@ -2138,11 +2356,54 @@ mod tests {
     use projectatlas_core::telemetry::{
         TokenOverview, TokenTrendPeriod, TokenTrendWindow, UsageEvent,
     };
+    use rusqlite::types::Value;
     use std::error::Error;
     use std::fs;
     use std::io;
     use std::sync::{Arc, Barrier};
     use std::thread;
+
+    /// Complete logical snapshot of the durable schema-8 state used by rollback tests.
+    #[derive(Debug, PartialEq)]
+    struct ReleasedSchemaDurableState {
+        metadata: Vec<Vec<Value>>,
+        nodes: Vec<Vec<Value>>,
+        purposes: Vec<Vec<Value>>,
+        summaries: Vec<Vec<Value>>,
+        health_resolutions: Vec<Vec<Value>>,
+        file_texts: Vec<Vec<Value>>,
+        usage_events: Vec<Vec<Value>>,
+    }
+
+    /// Read every column from the durable tables in deterministic key order.
+    fn released_schema_durable_state(
+        connection: &Connection,
+    ) -> DbResult<ReleasedSchemaDurableState> {
+        Ok(ReleasedSchemaDurableState {
+            metadata: query_all_values(connection, "SELECT * FROM metadata ORDER BY key")?,
+            nodes: query_all_values(connection, "SELECT * FROM nodes ORDER BY id")?,
+            purposes: query_all_values(connection, "SELECT * FROM purposes ORDER BY node_id")?,
+            summaries: query_all_values(connection, "SELECT * FROM summaries ORDER BY id")?,
+            health_resolutions: query_all_values(
+                connection,
+                "SELECT * FROM health_resolutions ORDER BY finding_id",
+            )?,
+            file_texts: query_all_values(connection, "SELECT * FROM file_texts ORDER BY path")?,
+            usage_events: query_all_values(connection, "SELECT * FROM usage_events ORDER BY id")?,
+        })
+    }
+
+    /// Read one deterministic result set without weakening its `SQLite` value types.
+    fn query_all_values(connection: &Connection, sql: &str) -> DbResult<Vec<Vec<Value>>> {
+        let mut statement = connection.prepare(sql)?;
+        let column_count = statement.column_count();
+        let rows = statement.query_map([], |row| {
+            (0..column_count)
+                .map(|column| row.get::<_, Value>(column))
+                .collect::<Result<Vec<_>, _>>()
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
 
     #[test]
     fn incompatible_database_preflight_preserves_durable_state() -> Result<(), Box<dyn Error>> {
@@ -2162,8 +2423,19 @@ mod tests {
         let Err(malformed_error) = AtlasStore::open(&malformed_path) else {
             return Err(io::Error::other("metadata view unexpectedly opened").into());
         };
-        if !matches!(malformed_error, DbError::SchemaShape { .. }) {
+        let DbError::SchemaShape {
+            object,
+            expected,
+            found,
+        } = &malformed_error
+        else {
             return Err(io::Error::other("metadata view returned the wrong error").into());
+        };
+        if object.len() > SCHEMA_DIAGNOSTIC_OBJECT_MAX_BYTES
+            || expected.len() > SCHEMA_DIAGNOSTIC_VALUE_MAX_BYTES
+            || found.len() > SCHEMA_DIAGNOSTIC_VALUE_MAX_BYTES
+        {
+            return Err(io::Error::other("metadata view returned an unbounded diagnostic").into());
         }
         let Err(root_error) = read_project_root(&malformed_path) else {
             return Err(io::Error::other("unvalidated metadata selected a project root").into());
@@ -2286,6 +2558,142 @@ mod tests {
                 .into());
             }
             require_unchanged(temp.path(), &db_path, &database_before, &inventory_before)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn released_schema_eight_layouts_are_admitted_without_mutation() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let layouts: [(&str, fn(&Connection) -> DbResult<()>); 2] = [
+            ("fresh-v0.3.26", create_released_schema_eight),
+            (
+                "evolved-v0.3.11-to-v0.3.26",
+                create_evolved_released_schema_eight,
+            ),
+        ];
+        for (label, create) in layouts {
+            let case = temp.path().join(label);
+            fs::create_dir_all(&case)?;
+            let root = case.join("repository");
+            fs::create_dir_all(&root)?;
+            let db_path = case.join("projectatlas.db");
+            let connection = Connection::open(&db_path)?;
+            create(&connection)?;
+            set_metadata(
+                &connection,
+                PROJECT_ROOT_KEY,
+                &normalize_native_path_display(&root),
+            )?;
+            drop(connection);
+            let database_before = fs::read(&db_path)?;
+            let inventory_before = directory_entry_names(&case)?;
+
+            let (preflight, _) = preflight(&db_path, Some(&normalize_native_path_display(&root)))?;
+            if preflight.state != SchemaState::UpgradeRequired
+                || preflight.schema_version != Some(PREVIOUS_SCHEMA_VERSION)
+            {
+                return Err(io::Error::other(format!(
+                    "{label} did not report a supported predecessor"
+                ))
+                .into());
+            }
+            require_unchanged(&case, &db_path, &database_before, &inventory_before)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn evolved_released_schema_drift_is_refused_without_mutation() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let oversized_constraint = format!(
+            "    command TEXT NOT NULL CHECK(command <> '{}'),\n",
+            "x".repeat(SCHEMA_DIAGNOSTIC_VALUE_MAX_BYTES * 16)
+        );
+        let cases = [
+            (
+                "missing-column",
+                "    model TEXT NOT NULL DEFAULT 'unknown',\n",
+                String::new(),
+            ),
+            (
+                "renamed-column",
+                "    model TEXT NOT NULL DEFAULT 'unknown',\n",
+                "    model_name TEXT NOT NULL DEFAULT 'unknown',\n".to_string(),
+            ),
+            (
+                "extra-column",
+                "    model TEXT NOT NULL DEFAULT 'unknown',\n",
+                "    model TEXT NOT NULL DEFAULT 'unknown',\n    extra_metric TEXT,\n".to_string(),
+            ),
+            (
+                "changed-default",
+                "    model TEXT NOT NULL DEFAULT 'unknown',\n",
+                "    model TEXT NOT NULL DEFAULT 'other',\n".to_string(),
+            ),
+            (
+                "changed-index-column",
+                "CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(session_id);",
+                "CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(command);"
+                    .to_string(),
+            ),
+            (
+                "added-check-constraint",
+                "    command TEXT NOT NULL,\n",
+                "    command TEXT NOT NULL CHECK(command <> ''),\n".to_string(),
+            ),
+            (
+                "oversized-check-constraint",
+                "    command TEXT NOT NULL,\n",
+                oversized_constraint,
+            ),
+        ];
+        for (label, needle, replacement) in cases {
+            let case = temp.path().join(label);
+            fs::create_dir_all(&case)?;
+            let root = case.join("repository");
+            fs::create_dir_all(&root)?;
+            let db_path = case.join("projectatlas.db");
+            write_evolved_schema_lookalike(&db_path, &root, needle, &replacement)?;
+            let database_before = fs::read(&db_path)?;
+            let inventory_before = directory_entry_names(&case)?;
+
+            let Err(error) = preflight(&db_path, Some(&normalize_native_path_display(&root)))
+            else {
+                return Err(io::Error::other(format!(
+                    "{label} evolved schema unexpectedly passed preflight"
+                ))
+                .into());
+            };
+            let DbError::SchemaShape {
+                object,
+                expected,
+                found,
+            } = &error
+            else {
+                return Err(io::Error::other(format!(
+                    "{label} evolved schema returned the wrong error: {error}"
+                ))
+                .into());
+            };
+            if object.len() > SCHEMA_DIAGNOSTIC_OBJECT_MAX_BYTES
+                || expected.len() > SCHEMA_DIAGNOSTIC_VALUE_MAX_BYTES
+                || found.len() > SCHEMA_DIAGNOSTIC_VALUE_MAX_BYTES
+            {
+                return Err(io::Error::other(format!(
+                    "{label} evolved schema returned an unbounded diagnostic"
+                ))
+                .into());
+            }
+            if label == "oversized-check-constraint"
+                && !found.ends_with(SCHEMA_DIAGNOSTIC_TRUNCATION_SUFFIX)
+            {
+                return Err(io::Error::other(
+                    "oversized evolved schema diagnostic was not truncated",
+                )
+                .into());
+            }
+            require_unchanged(&case, &db_path, &database_before, &inventory_before)?;
         }
         Ok(())
     }
@@ -3504,6 +3912,50 @@ mod tests {
     }
 
     #[test]
+    fn released_schema_layouts_reject_wrong_root_without_migration_or_rebinding()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let layouts: [(&str, fn(&Path, &Path) -> Result<(), Box<dyn Error>>); 2] = [
+            ("fresh-v0.3.26", write_schema_eight_fixture),
+            (
+                "evolved-v0.3.11-to-v0.3.26",
+                write_evolved_schema_eight_fixture,
+            ),
+        ];
+        for (label, write_fixture) in layouts {
+            let case = temp.path().join(label);
+            let root = case.join("root-a");
+            let other = case.join("root-b");
+            fs::create_dir_all(&root)?;
+            fs::create_dir_all(&other)?;
+            let db_path = case.join("projectatlas.db");
+            write_fixture(&db_path, &root)?;
+            let database_before = fs::read(&db_path)?;
+            let inventory_before = directory_entry_names(&case)?;
+
+            let Err(error) = AtlasStore::open_for_project(&db_path, &other) else {
+                return Err(io::Error::other(format!(
+                    "{label} wrong root unexpectedly migrated or rebound the database"
+                ))
+                .into());
+            };
+            match error {
+                DbError::ProjectRootMismatch { expected, found }
+                    if expected == normalize_native_path_display(&other)
+                        && found == normalize_native_path_display(&root) => {}
+                other => {
+                    return Err(io::Error::other(format!(
+                        "{label} wrong root returned the wrong error: {other}"
+                    ))
+                    .into());
+                }
+            }
+            require_unchanged(&case, &db_path, &database_before, &inventory_before)?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn root_bound_open_rejects_rebind_without_mutation() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("root-a");
@@ -3648,12 +4100,41 @@ mod tests {
     #[test]
     fn released_schema_malformed_telemetry_rolls_back_unchanged_and_retries()
     -> Result<(), Box<dyn Error>> {
+        let layouts: [(&str, fn(&Path, &Path) -> Result<(), Box<dyn Error>>); 2] = [
+            ("fresh-v0.3.26", write_schema_eight_fixture),
+            (
+                "evolved-v0.3.11-to-v0.3.26",
+                write_evolved_schema_eight_fixture,
+            ),
+        ];
+        for (label, write_fixture) in layouts {
+            assert_released_schema_malformed_telemetry_rolls_back(label, write_fixture)?;
+        }
+        Ok(())
+    }
+
+    /// Verify one released layout rolls back a late migration failure and retries.
+    fn assert_released_schema_malformed_telemetry_rolls_back(
+        label: &str,
+        write_fixture: fn(&Path, &Path) -> Result<(), Box<dyn Error>>,
+    ) -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("repository");
         fs::create_dir_all(&root)?;
         let db_path = temp.path().join("projectatlas.db");
-        write_schema_eight_fixture(&db_path, &root)?;
+        write_fixture(&db_path, &root)?;
+        let independent_dir = temp.path().join("independent");
+        let independent_root = independent_dir.join("repository");
+        fs::create_dir_all(&independent_root)?;
+        let independent_db = independent_dir.join("projectatlas.db");
+        write_evolved_schema_eight_fixture(&independent_db, &independent_root)?;
+        let independent_connection = Connection::open(&independent_db)?;
+        seed_released_schema_durable_state(&independent_connection)?;
+        drop(independent_connection);
+        let independent_bytes = fs::read(&independent_db)?;
+        let independent_inventory = directory_entry_names(&independent_dir)?;
         let connection = Connection::open(&db_path)?;
+        seed_released_schema_durable_state(&connection)?;
         connection.execute(
             "INSERT INTO usage_events(
                  session_id, command,
@@ -3664,6 +4145,7 @@ mod tests {
              ) VALUES('legacy', 'summary', 100, 10, 90, 'not-a-timestamp')",
             [],
         )?;
+        let durable_before = released_schema_durable_state(&connection)?;
         drop(connection);
 
         let Err(error) = AtlasStore::open_for_project(&db_path, &root) else {
@@ -3673,10 +4155,16 @@ mod tests {
         };
         if !matches!(error, DbError::InvalidEnum { .. }) {
             return Err(io::Error::other(format!(
-                "malformed released telemetry returned the wrong error: {error}"
+                "{label} malformed released telemetry returned the wrong error: {error}"
             ))
             .into());
         }
+        require_unchanged(
+            &independent_dir,
+            &independent_db,
+            &independent_bytes,
+            &independent_inventory,
+        )?;
 
         let normalized_root = normalize_native_path_display(&root);
         let (preflight, _) = preflight(&db_path, Some(&normalized_root))?;
@@ -3689,38 +4177,8 @@ mod tests {
             );
         }
         let connection = Connection::open(&db_path)?;
-        let preserved = connection.query_row(
-            "SELECT
-                 (SELECT value FROM metadata WHERE key = ?1),
-                 COUNT(*), MIN(command), MIN(created_at),
-                 MIN(estimated_tokens_without_projectatlas),
-                 MIN(estimated_tokens_with_projectatlas),
-                 MIN(estimated_tokens_saved)
-             FROM usage_events",
-            [INDEX_PUBLICATION_STATE_KEY],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
-                ))
-            },
-        )?;
-        if preserved
-            != (
-                "complete".to_string(),
-                1,
-                "summary".to_string(),
-                "not-a-timestamp".to_string(),
-                100,
-                10,
-                90,
-            )
-        {
+        let durable_after = released_schema_durable_state(&connection)?;
+        if durable_after != durable_before {
             return Err(
                 io::Error::other("failed released-schema migration changed durable state").into(),
             );
@@ -3740,11 +4198,13 @@ mod tests {
                 .query_row("SELECT COUNT(*) FROM usage_events", [], |row| {
                     row.get::<_, i64>(0)
                 })?;
-        if events != 1 {
+        if events != 2 {
             return Err(
                 io::Error::other("released-schema retry did not preserve telemetry").into(),
             );
         }
+        drop(store);
+        verify_current_integrity(&db_path, Some(&normalized_root))?;
         Ok(())
     }
 
@@ -4520,8 +4980,25 @@ mod tests {
 
     /// Write a released schema-8 fixture with publication metadata.
     fn write_schema_eight_fixture(db_path: &Path, root: &Path) -> Result<(), Box<dyn Error>> {
+        write_released_schema_eight_fixture(db_path, root, create_released_schema_eight)
+    }
+
+    /// Write an evolved released schema-8 fixture with publication metadata.
+    fn write_evolved_schema_eight_fixture(
+        db_path: &Path,
+        root: &Path,
+    ) -> Result<(), Box<dyn Error>> {
+        write_released_schema_eight_fixture(db_path, root, create_evolved_released_schema_eight)
+    }
+
+    /// Write one captured released schema-8 fixture with publication metadata.
+    fn write_released_schema_eight_fixture(
+        db_path: &Path,
+        root: &Path,
+        create_schema: fn(&Connection) -> DbResult<()>,
+    ) -> Result<(), Box<dyn Error>> {
         let connection = Connection::open(db_path)?;
-        create_released_schema_eight(&connection)?;
+        create_schema(&connection)?;
         set_metadata(
             &connection,
             PROJECT_ROOT_KEY,
@@ -4535,6 +5012,41 @@ mod tests {
         )?;
         set_metadata(&connection, INDEX_PUBLICATION_GENERATION_KEY, "7")?;
         connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        Ok(())
+    }
+
+    /// Seed representative durable rows for released-schema rollback coverage.
+    fn seed_released_schema_durable_state(connection: &Connection) -> DbResult<()> {
+        set_metadata(connection, "custom_setting", "preserved")?;
+        connection.execute_batch(
+            "
+            INSERT INTO nodes(
+                id, path, kind, parent_path, extension, language,
+                size_bytes, mtime_ns, content_hash
+            )
+            VALUES(1, 'src/lib.rs', 'file', 'src', '.rs', 'rust', 12, 10, 'hash-legacy');
+
+            INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+            VALUES(1, 'Schema compatibility source', 'agent', 'approved', 'agent');
+
+            INSERT INTO summaries(node_id, summary_level, subject, summary)
+            VALUES(1, 'node', '', 'released schema source');
+
+            INSERT INTO health_resolutions(finding_id, category, path, rationale)
+            VALUES('schema-review', 'purpose', 'src/lib.rs', 'Reviewed schema fixture');
+
+            INSERT INTO file_texts(path, content_hash, byte_count, line_count, content)
+            VALUES('src/lib.rs', 'hash-legacy', 6, 1, 'legacy');
+
+            INSERT INTO usage_events(
+                session_id, command,
+                estimated_tokens_without_projectatlas,
+                estimated_tokens_with_projectatlas,
+                estimated_tokens_saved
+            )
+            VALUES('retained', 'files', 40, 10, 30);
+            ",
+        )?;
         Ok(())
     }
 
@@ -4556,6 +5068,28 @@ mod tests {
             SCHEMA_VERSION_KEY,
             &PREVIOUS_SCHEMA_VERSION.to_string(),
         )?;
+        set_metadata(
+            &connection,
+            PROJECT_ROOT_KEY,
+            &normalize_native_path_display(root),
+        )?;
+        drop(connection);
+        Ok(())
+    }
+
+    /// Write one evolved released schema whose DDL differs in one semantic way.
+    fn write_evolved_schema_lookalike(
+        db_path: &Path,
+        root: &Path,
+        needle: &str,
+        replacement: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let ddl = EVOLVED_RELEASED_SCHEMA_EIGHT_SQL.replacen(needle, replacement, 1);
+        if ddl == EVOLVED_RELEASED_SCHEMA_EIGHT_SQL {
+            return Err(io::Error::other("evolved schema replacement did not match").into());
+        }
+        let connection = Connection::open(db_path)?;
+        create_schema_eight_fixture(&connection, &ddl)?;
         set_metadata(
             &connection,
             PROJECT_ROOT_KEY,

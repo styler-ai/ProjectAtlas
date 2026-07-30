@@ -1,3 +1,4 @@
+use super::analysis_test_observer::{AnalysisPhaseEvent, observe_analysis_phase};
 use super::*;
 use projectatlas_core::graph::{
     CoverageRecord, CoverageScope, GraphIdentityText, LogicalRelation, RelationResolution,
@@ -5,10 +6,35 @@ use projectatlas_core::graph::{
 };
 use projectatlas_core::symbols::{ParserKind, SymbolGraph, SymbolKind};
 use projectatlas_core::{IndexGeneration, Node, NodeKind, PurposeSource};
+use std::cell::Cell;
 use std::error::Error;
 use std::fs;
 use std::io;
 use std::num::NonZeroU32;
+use std::rc::Rc;
+
+fn cancel_at_analysis_phase<T>(
+    phase: AnalysisPhaseEvent,
+    cancellation: IndexCancellation,
+    operation: impl FnOnce() -> T,
+) -> Result<T, Box<dyn Error>> {
+    let seen = Rc::new(Cell::new(false));
+    let observer_seen = Rc::clone(&seen);
+    let result = observe_analysis_phase(
+        move |event| {
+            if event == phase {
+                observer_seen.set(true);
+                cancellation.cancel();
+            }
+        },
+        operation,
+    );
+    require(
+        seen.get(),
+        "the deterministic analysis phase hook was not reached",
+    )?;
+    Ok(result)
+}
 
 #[test]
 fn analysis_uses_real_graph_rows_dependency_sccs_and_resumable_output() -> Result<(), Box<dyn Error>>
@@ -16,11 +42,11 @@ fn analysis_uses_real_graph_rows_dependency_sccs_and_resumable_output() -> Resul
     let (_temp, store) = analysis_store()?;
     let query = analysis_query(RelationAnalysisMode::Architecture)?;
     let draft = load_relation_analysis(&store, &query, None)?;
-    let original_report_bytes = serialized_bytes(&draft.report)?;
-    let (report, encoded) = draft.fit_output::<_, ServiceError, _>(|report| {
+    let original_report_bytes = serialized_bytes_controlled(&draft.report, None)?;
+    let (report, encoded) = draft.fit_output::<_, ServiceError, _>(|report, _control| {
         serde_json::to_vec(report).map_err(ServiceError::from)
     })?;
-    let fitted_report_bytes = serialized_bytes(&report)?;
+    let fitted_report_bytes = serialized_bytes_controlled(&report, None)?;
     require(
         report.work.rendered_output_bytes == encoded.len() as u64,
         "analysis did not account exact rendered adapter bytes",
@@ -74,7 +100,7 @@ fn analysis_uses_real_graph_rows_dependency_sccs_and_resumable_output() -> Resul
     let mut fitted_prefix = None;
     for padding_per_finding in (512..=16 * 1024).step_by(512) {
         let draft = load_relation_analysis(&store, &query, None)?;
-        let result = draft.fit_output::<_, ServiceError, _>(|report| {
+        let result = draft.fit_output::<_, ServiceError, _>(|report, _control| {
             let mut bytes = serde_json::to_vec(report).map_err(ServiceError::from)?;
             bytes.resize(
                 bytes
@@ -111,7 +137,7 @@ fn analysis_uses_real_graph_rows_dependency_sccs_and_resumable_output() -> Resul
     resumed.relations.cursor = Some(cursor.clone());
     let resumed = load_relation_analysis(&store, &resumed, None)?;
     let (resumed, _) = resumed
-        .fit_output::<_, ServiceError, _>(|report| {
+        .fit_output::<_, ServiceError, _>(|report, _control| {
             serde_json::to_vec(report).map_err(ServiceError::from)
         })
         .map_err(|error| io::Error::other(format!("resumed fit failed: {error}")))?;
@@ -134,7 +160,7 @@ fn analysis_uses_real_graph_rows_dependency_sccs_and_resumable_output() -> Resul
     )?;
 
     let zero_prefix = load_relation_analysis(&store, &query, None)?
-        .fit_output::<_, ServiceError, _>(|report| {
+        .fit_output::<_, ServiceError, _>(|report, _control| {
             if report.findings.is_empty() {
                 serde_json::to_vec(report).map_err(ServiceError::from)
             } else {
@@ -160,7 +186,7 @@ fn analysis_uses_real_graph_rows_dependency_sccs_and_resumable_output() -> Resul
     let draft = load_relation_analysis(&store, &query, None)?;
     require(
         draft
-            .fit_output::<_, ServiceError, Vec<u8>>(|_report| Ok(vec![b'x'; 70 * 1024]))
+            .fit_output::<_, ServiceError, Vec<u8>>(|_report, _control| Ok(vec![b'x'; 70 * 1024]))
             .is_err(),
         "analysis accepted an oversized empty adapter envelope",
     )?;
@@ -177,7 +203,7 @@ fn analysis_uses_real_graph_rows_dependency_sccs_and_resumable_output() -> Resul
     let mut memory_prefix = None;
     for padding_per_finding in (256..=8 * 1024).step_by(256) {
         let draft = load_relation_analysis(&store, &memory_bounded, None)?;
-        let result = draft.fit_output::<_, ServiceError, _>(|report| {
+        let result = draft.fit_output::<_, ServiceError, _>(|report, _control| {
             let mut bytes = serde_json::to_vec(report).map_err(ServiceError::from)?;
             bytes.resize(
                 bytes
@@ -225,7 +251,7 @@ fn analysis_uses_real_graph_rows_dependency_sccs_and_resumable_output() -> Resul
         IndexWorkControl::with_deadline(IndexCancellation::new(), Instant::now());
     require(
         expired_render
-            .fit_output::<_, ServiceError, _>(|report| {
+            .fit_output::<_, ServiceError, _>(|report, _control| {
                 serde_json::to_vec(report).map_err(ServiceError::from)
             })
             .err()
@@ -237,7 +263,7 @@ fn analysis_uses_real_graph_rows_dependency_sccs_and_resumable_output() -> Resul
     cancelled_render.control.cancel();
     require(
         cancelled_render
-            .fit_output::<_, ServiceError, _>(|report| {
+            .fit_output::<_, ServiceError, _>(|report, _control| {
                 serde_json::to_vec(report).map_err(ServiceError::from)
             })
             .err()
@@ -253,8 +279,8 @@ fn impact_walks_dependency_dependents_but_not_contains_or_references() -> Result
     let (_temp, store) = analysis_store()?;
     let query = analysis_query(RelationAnalysisMode::Architecture)?;
     let relations = load_detailed_relations(&store, &query.relations, None)?;
-    let nodes = collect_nodes(&relations);
-    let mut edges = collect_report_edges(&relations);
+    let nodes = collect_nodes(&relations, None)?;
+    let mut edges = collect_report_edges(&relations, None)?;
     let closure = close_induced_edges(
         &store,
         &query,
@@ -298,6 +324,266 @@ fn impact_walks_dependency_dependents_but_not_contains_or_references() -> Result
         !impacted.contains("tools/c.rs"),
         "containment/reference relation was treated as dependency impact",
     )?;
+    Ok(())
+}
+
+#[test]
+fn impact_dead_code_control_releases_each_bounded_phase() -> Result<(), Box<dyn Error>> {
+    let (temp, read_store) = analysis_store()?;
+    drop(read_store);
+    let root = temp.path().join("analysis-service");
+    let database = root.join("projectatlas.db");
+    let store = AtlasStore::open_for_project(&database, &root)?;
+    let query = exact_symbol_impact_query("src/a.rs", "d_unused", "fn d_unused()")?;
+    let setup_control =
+        IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(5)));
+    let relations = load_detailed_relations(&store, &query.relations, Some(&setup_control))?;
+    let nodes = collect_nodes(&relations, Some(&setup_control))?;
+    let mut edges = collect_report_edges(&relations, Some(&setup_control))?;
+    let closure = close_induced_edges(
+        &store,
+        &query,
+        &relations.work,
+        Instant::now() + Duration::from_secs(5),
+        &nodes,
+        &mut edges,
+        Some(&setup_control),
+    )?;
+    require(closure.complete, "dead-code fixture closure was incomplete")?;
+
+    let discovery_cancellation = IndexCancellation::new();
+    let discovery_control =
+        IndexWorkControl::new(discovery_cancellation.clone(), Some(Duration::from_secs(5)));
+    let mut discovery_work = SupplementalWork::default();
+    let discovery = cancel_at_analysis_phase(
+        AnalysisPhaseEvent::DeadCodeDiscovery,
+        discovery_cancellation,
+        || {
+            impact_findings(
+                &store,
+                &nodes,
+                &edges,
+                true,
+                true,
+                &VcsImpact::NotRequested,
+                &[],
+                &query,
+                64 * 1024,
+                &mut discovery_work,
+                Some(&discovery_control),
+            )
+        },
+    )?;
+    require(
+        matches!(
+            discovery,
+            Err(ServiceError::Db(DbError::IndexWork(
+                projectatlas_core::IndexWorkFailure::Cancelled {
+                    stage: IndexWorkStage::RepositoryTraversal
+                }
+            )))
+        ),
+        "dead-code discovery continued after deterministic in-phase cancellation",
+    )?;
+
+    let traversal_cancellation = IndexCancellation::new();
+    let traversal_control =
+        IndexWorkControl::new(traversal_cancellation.clone(), Some(Duration::from_secs(5)));
+    let mut traversal_edges = collect_report_edges(&relations, None)?;
+    let traversal = cancel_at_analysis_phase(
+        AnalysisPhaseEvent::Traversal,
+        traversal_cancellation,
+        || {
+            close_induced_edges(
+                &store,
+                &query,
+                &relations.work,
+                Instant::now() + Duration::from_secs(5),
+                &nodes,
+                &mut traversal_edges,
+                Some(&traversal_control),
+            )
+        },
+    )?;
+    require(
+        matches!(
+            traversal,
+            Err(ServiceError::Db(DbError::IndexWork(
+                projectatlas_core::IndexWorkFailure::Cancelled {
+                    stage: IndexWorkStage::RepositoryTraversal
+                }
+            )))
+        ),
+        "impact traversal continued after deterministic in-phase cancellation",
+    )?;
+
+    let hydration_cancellation = IndexCancellation::new();
+    let hydration_control =
+        IndexWorkControl::new(hydration_cancellation.clone(), Some(Duration::from_secs(5)));
+    let hydration = cancel_at_analysis_phase(
+        AnalysisPhaseEvent::SymbolHydration,
+        hydration_cancellation,
+        || load_admitted_symbols(&store, &nodes, 64 * 1024, Some(&hydration_control)),
+    )?;
+    require(
+        matches!(
+            hydration,
+            Err(ServiceError::Db(DbError::IndexWork(
+                projectatlas_core::IndexWorkFailure::Cancelled {
+                    stage: IndexWorkStage::RepositoryTraversal
+                }
+            )))
+        ),
+        "symbol hydration continued after deterministic in-phase cancellation",
+    )?;
+
+    let composition_cancellation = IndexCancellation::new();
+    let composition_control = IndexWorkControl::new(
+        composition_cancellation.clone(),
+        Some(Duration::from_secs(5)),
+    );
+    let composition = cancel_at_analysis_phase(
+        AnalysisPhaseEvent::Composition,
+        composition_cancellation,
+        || load_relation_analysis(&store, &query, Some(&composition_control)),
+    )?;
+    require(
+        matches!(
+            composition,
+            Err(ServiceError::Db(DbError::IndexWork(
+                projectatlas_core::IndexWorkFailure::Cancelled {
+                    stage: IndexWorkStage::RepositoryTraversal
+                }
+            )))
+        ),
+        "analysis composition continued after deterministic in-phase cancellation",
+    )?;
+
+    let output_cancellation = IndexCancellation::new();
+    let output_control =
+        IndexWorkControl::new(output_cancellation.clone(), Some(Duration::from_secs(5)));
+    let output_draft = load_relation_analysis(&store, &query, Some(&output_control))?;
+    let output = cancel_at_analysis_phase(
+        AnalysisPhaseEvent::OutputRendering,
+        output_cancellation,
+        || {
+            output_draft.fit_output::<_, ServiceError, _>(|report, _control| {
+                serde_json::to_vec(report).map_err(ServiceError::from)
+            })
+        },
+    )?;
+    require(
+        matches!(
+            output,
+            Err(ServiceError::Db(DbError::IndexWork(
+                projectatlas_core::IndexWorkFailure::Cancelled {
+                    stage: IndexWorkStage::RepositoryTraversal
+                }
+            )))
+        ),
+        "output rendering continued after deterministic in-phase cancellation",
+    )?;
+
+    let publication_before = store
+        .index_publication()?
+        .ok_or("analysis publication missing")?;
+    let successful = IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(5)));
+    let (report, _encoded) = load_relation_analysis(&store, &query, Some(&successful))?
+        .fit_output::<_, ServiceError, _>(|report, _control| {
+        serde_json::to_vec(report).map_err(ServiceError::from)
+    })?;
+    require(
+        report.findings.iter().any(|finding| {
+            finding.kind == AnalysisFindingKind::DeadCode
+                && finding.status == AnalysisStatus::Candidate
+        }) && report.work.analyzed_nodes <= query.relations.budget.nodes()
+            && report.work.analyzed_edges <= query.relations.budget.edges()
+            && report.work.peak_intermediate_bytes <= query.relations.budget.intermediate_bytes()
+            && report.work.rendered_output_bytes
+                <= u64::from(query.relations.budget.output_bytes()),
+        "successful dead-code control changed findings or crossed aggregate limits",
+    )?;
+    require(
+        store.index_publication()?.as_ref() == Some(&publication_before),
+        "read-only impact analysis changed the authoritative publication",
+    )?;
+
+    require(
+        store.project_instance_id()?.is_some(),
+        "immediate follow-up read failed after terminal control",
+    )
+}
+
+#[test]
+fn leaf_and_larger_impact_entrypoints_share_every_terminal_phase() -> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store()?;
+    let queries = [
+        exact_symbol_impact_query("src/a.rs", "d_unused", "fn d_unused()")?,
+        exact_symbol_impact_query("src/a.rs", "a_long", "fn a_long()")?,
+    ];
+    for query in queries {
+        for phase in [
+            AnalysisPhaseEvent::DeadCodeDiscovery,
+            AnalysisPhaseEvent::Traversal,
+            AnalysisPhaseEvent::SymbolHydration,
+            AnalysisPhaseEvent::Composition,
+        ] {
+            let cancellation = IndexCancellation::new();
+            let control = IndexWorkControl::new(cancellation.clone(), Some(Duration::from_secs(5)));
+            let result = cancel_at_analysis_phase(phase, cancellation, || {
+                load_relation_analysis(&store, &query, Some(&control))
+            })?;
+            require(
+                matches!(
+                    result,
+                    Err(ServiceError::Db(DbError::IndexWork(
+                        projectatlas_core::IndexWorkFailure::Cancelled {
+                            stage: IndexWorkStage::RepositoryTraversal
+                        }
+                    )))
+                ),
+                "impact entrypoint continued after deterministic phase cancellation",
+            )?;
+        }
+
+        let cancellation = IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), Some(Duration::from_secs(5)));
+        let draft = load_relation_analysis(&store, &query, Some(&control))?;
+        let output =
+            cancel_at_analysis_phase(AnalysisPhaseEvent::OutputRendering, cancellation, || {
+                draft.fit_output::<_, ServiceError, _>(|report, control| {
+                    serialized_bytes_controlled(report, Some(control))
+                        .map(|bytes| bytes.to_le_bytes().to_vec())
+                })
+            })?;
+        require(
+            matches!(
+                output,
+                Err(ServiceError::Db(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::Cancelled {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    }
+                )))
+            ),
+            "impact entrypoint continued after output cancellation",
+        )?;
+
+        let successful =
+            IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(5)));
+        let (report, _) = load_relation_analysis(&store, &query, Some(&successful))?
+            .fit_output::<_, ServiceError, _>(|report, control| {
+                serialized_bytes_controlled(report, Some(control))
+                    .map(|bytes| bytes.to_le_bytes().to_vec())
+            })?;
+        require(
+            report.mode == RelationAnalysisMode::Impact
+                && report.work.analyzed_nodes <= query.relations.budget.nodes()
+                && report.work.analyzed_edges <= query.relations.budget.edges()
+                && report.work.peak_intermediate_bytes
+                    <= query.relations.budget.intermediate_bytes(),
+            "non-expired impact entrypoint crossed its aggregate control",
+        )?;
+    }
     Ok(())
 }
 
@@ -416,9 +702,10 @@ fn analysis_modes_are_closed_and_partial_evidence_stays_inconclusive() -> Result
         Some(Instant::now()),
         false,
     )?;
-    let (deadline_limited, _) = deadline_limited.fit_output::<_, ServiceError, _>(|report| {
-        serde_json::to_vec(report).map_err(ServiceError::from)
-    })?;
+    let (deadline_limited, _) =
+        deadline_limited.fit_output::<_, ServiceError, _>(|report, _control| {
+            serde_json::to_vec(report).map_err(ServiceError::from)
+        })?;
     require(
         deadline_limited.truncated
             && deadline_limited
@@ -487,7 +774,7 @@ fn closure_preserves_late_resolution_gaps_and_symbol_findings() -> Result<(), Bo
     late_gap.include_cycles = false;
     let first_page = load_detailed_relations(&store, &late_gap.relations, None)?;
     require(
-        first_page.continuation.is_some() && resolution_gap_findings(&first_page).is_empty(),
+        first_page.continuation.is_some() && resolution_gap_findings(&first_page, None)?.is_empty(),
         "fixture did not place the ambiguous relation after the first detailed page",
     )?;
     let report = fitted_report(&store, &late_gap)?;
@@ -521,10 +808,10 @@ fn closure_preserves_late_resolution_gaps_and_symbol_findings() -> Result<(), Bo
             file: RepositoryFilePath::new(Path::new(anchor))?,
         };
         let relations = load_detailed_relations(&store, &query.relations, None)?;
-        for (key, node) in collect_nodes(&relations) {
+        for (key, node) in collect_nodes(&relations, None)? {
             nodes.entry(key).or_insert(node);
         }
-        edges.extend(collect_report_edges(&relations));
+        edges.extend(collect_report_edges(&relations, None)?);
     }
     for (path, name, signature) in [
         ("src/a.rs", "a_long", "fn a_long()"),
@@ -539,10 +826,10 @@ fn closure_preserves_late_resolution_gaps_and_symbol_findings() -> Result<(), Bo
             signature: Some(signature.to_string()),
         };
         let relations = load_detailed_relations(&store, &query.relations, None)?;
-        for (key, node) in collect_nodes(&relations) {
+        for (key, node) in collect_nodes(&relations, None)? {
             nodes.entry(key).or_insert(node);
         }
-        edges.extend(collect_report_edges(&relations));
+        edges.extend(collect_report_edges(&relations, None)?);
     }
     let mut work = SupplementalWork::default();
     let structural = structural_findings(&store, &nodes, &edges, true, 64 * 1024, &mut work, None)?;
@@ -824,7 +1111,7 @@ fn vcs_zero_intersection_cursor_freshness_and_shared_budget_are_explicit()
 
     let draft = load_relation_analysis(&store, &impact, None)?;
     let prefix = draft
-        .fit_output::<_, ServiceError, _>(|report| {
+        .fit_output::<_, ServiceError, _>(|report, _control| {
             if report.findings.is_empty() {
                 serde_json::to_vec(report).map_err(ServiceError::from)
             } else {
@@ -850,8 +1137,8 @@ fn vcs_zero_intersection_cursor_freshness_and_shared_budget_are_explicit()
 
     let exact = exact_symbol_impact_query("src/a.rs", "d_unused", "fn d_unused()")?;
     let relations = load_detailed_relations(&store, &exact.relations, None)?;
-    let nodes = collect_nodes(&relations);
-    let mut edges = collect_report_edges(&relations);
+    let nodes = collect_nodes(&relations, None)?;
+    let mut edges = collect_report_edges(&relations, None)?;
     let closure = close_induced_edges(
         &store,
         &exact,
@@ -956,7 +1243,7 @@ fn fitted_report(
     query: &RelationAnalysisQuery,
 ) -> Result<RelationAnalysisReport, Box<dyn Error>> {
     let draft = load_relation_analysis(store, query, None)?;
-    let (report, _encoded) = draft.fit_output::<_, ServiceError, _>(|report| {
+    let (report, _encoded) = draft.fit_output::<_, ServiceError, _>(|report, _control| {
         serde_json::to_vec(report).map_err(ServiceError::from)
     })?;
     Ok(report)

@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.0"><img alt="release" src="https://img.shields.io/badge/release-v0.4.0-blue"></a>
+  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.1"><img alt="release" src="https://img.shields.io/badge/release-v0.4.1-blue"></a>
   <img alt="rust" src="https://img.shields.io/badge/Rust-2024-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
@@ -31,7 +31,7 @@ No required `.purpose` files. No source-header tax. No hosted index or credentia
 The Codex plugin is the recommended path:
 
 ```bash
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.4.0
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.4.1
 codex plugin add projectatlas --marketplace projectatlas
 ```
 
@@ -40,8 +40,8 @@ Then tell Codex: **“Use ProjectAtlas for this repo.”**
 | Route | When to use it |
 | --- | --- |
 | Codex plugin | Recommended agent setup; supplies the version-matched skill, native runtime installer, and MCP templates. |
-| [Native release](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.0) | Install a verified prebuilt binary without Rust/Cargo. |
-| Cargo | `cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.4.0 projectatlas-cli --locked` |
+| [Native release](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.1) | Install a verified prebuilt binary without Rust/Cargo. |
+| Cargo | `cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.4.1 projectatlas-cli --locked` |
 | Claude Code / OpenCode | Run the native installer, then `projectatlas init`; it writes their version-matched project-local MCP configs. |
 
 Initialize each repository once:
@@ -115,7 +115,7 @@ Warm indexed CLI reads in the same audit stayed around 160–166 ms. Repository 
 
 ## Release Quality
 
-`v0.4.0` ships through the full release matrix:
+`v0.4.1` ships through the full release matrix:
 
 - Rust format, check, clippy, dependency policy, tests, doctests, and rustdoc.
 - Linux x64, Windows x64, macOS x64, and macOS arm64 native packages.
