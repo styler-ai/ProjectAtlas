@@ -1,5 +1,6 @@
 //! Canonical import facts and resolution-key projection for extracted symbol graphs.
 
+use crate::ConfiguredModuleResolution;
 use crate::semantic;
 use blake3::Hasher;
 use projectatlas_core::graph::{
@@ -15,7 +16,7 @@ use std::fmt;
 /// Maximum canonical keys emitted for one source, symbol, or relation fact.
 pub const MAX_RESOLUTION_KEYS_PER_FACT: usize = 64;
 /// Version of the currently implemented semantic relation-resolution contract.
-pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 2;
+pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 3;
 
 /// Return a deterministic digest of the live semantic resolution-key contract.
 ///
@@ -135,6 +136,25 @@ pub struct ResolutionKeyProjection {
     symbols: Vec<SymbolResolutionKeys>,
     /// Canonical dependencies associated with relation facts.
     relations: Vec<RelationResolutionKeys>,
+}
+
+/// Repository configuration supplied to provider-owned semantic projection.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ResolutionProjectionContext<'a> {
+    /// Validated configured-module snapshot, when the runtime supplied one.
+    configured_modules: Option<&'a ConfiguredModuleResolution>,
+}
+
+impl<'a> ResolutionProjectionContext<'a> {
+    /// Construct a projection context with one validated configured-module snapshot.
+    #[must_use]
+    pub const fn with_configured_modules(
+        configured_modules: &'a ConfiguredModuleResolution,
+    ) -> Self {
+        Self {
+            configured_modules: Some(configured_modules),
+        }
+    }
 }
 
 impl ResolutionKeyProjection {
@@ -356,6 +376,26 @@ pub fn derive_resolution_keys(
     package: Option<&str>,
     graph: &SymbolGraph,
 ) -> Result<ResolutionKeyProjection, ResolutionProjectionError> {
+    derive_resolution_keys_with_context(
+        project,
+        package,
+        graph,
+        ResolutionProjectionContext::default(),
+    )
+}
+
+/// Derive bounded canonical keys with explicit repository module configuration.
+///
+/// # Errors
+///
+/// Returns an error when a graph identity is invalid or one parser fact exceeds
+/// the bounded canonical-key fan-out.
+pub fn derive_resolution_keys_with_context(
+    project: ProjectInstanceId,
+    package: Option<&str>,
+    graph: &SymbolGraph,
+    context: ResolutionProjectionContext<'_>,
+) -> Result<ResolutionKeyProjection, ResolutionProjectionError> {
     let Some(provider_owner) = semantic::provider_for_graph(graph) else {
         return Ok(ResolutionKeyProjection {
             source: Vec::new(),
@@ -484,6 +524,7 @@ pub fn derive_resolution_keys(
                     package.as_ref(),
                     &relation.path,
                     &parsed_imports[relation_index],
+                    context,
                 )?
             }
             RelationKind::Calls if semantic::supports_source_dependencies(provider_owner) => {
@@ -496,6 +537,7 @@ pub fn derive_resolution_keys(
                     &relation.path,
                     &relation.target_name,
                     &aliases,
+                    context,
                 )?
             }
             RelationKind::DependsOn if semantic::supports_package_dependencies(provider_owner) => {
@@ -536,10 +578,16 @@ fn import_dependency_keys(
     package: Option<&GraphIdentityText>,
     caller_path: &str,
     references: &[ImportReference],
+    context: ResolutionProjectionContext<'_>,
 ) -> Result<Vec<CanonicalResolutionKey>, ResolutionProjectionError> {
     let mut keys = Vec::new();
     for reference in references {
-        let scopes = semantic::import_scopes(provider_owner, caller_path, reference);
+        let scopes = semantic::import_scopes(
+            provider_owner,
+            caller_path,
+            reference,
+            context.configured_modules,
+        );
         for scope in &scopes {
             keys.push(canonical_key(
                 project,
@@ -566,6 +614,7 @@ fn call_dependency_keys(
     caller_path: &str,
     target: &str,
     aliases: &BTreeMap<&str, Vec<&ImportReference>>,
+    context: ResolutionProjectionContext<'_>,
 ) -> Result<Vec<CanonicalResolutionKey>, ResolutionProjectionError> {
     let (prefix, remainder) = split_qualified_target(target);
     let alias = prefix.unwrap_or(target).trim();
@@ -576,7 +625,12 @@ fn call_dependency_keys(
             let Some(identity) = identity else {
                 continue;
             };
-            let mut scopes = semantic::import_scopes(provider_owner, caller_path, reference);
+            let mut scopes = semantic::import_scopes(
+                provider_owner,
+                caller_path,
+                reference,
+                context.configured_modules,
+            );
             if remainder.is_some()
                 && let Some(imported_parent) = reference.imported()
             {
@@ -747,11 +801,15 @@ pub(super) fn strip_known_source_extension(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ImportReference, ImportSyntax, RelationKind, ResolutionProjectionError,
-        SEMANTIC_RESOLUTION_CONTRACT_VERSION, derive_resolution_keys, parse_import_references,
-        resolve_relative_import_path, semantic_resolution_contract_digest,
+        ImportReference, ImportSyntax, RelationKind, ResolutionProjectionContext,
+        ResolutionProjectionError, SEMANTIC_RESOLUTION_CONTRACT_VERSION, derive_resolution_keys,
+        derive_resolution_keys_with_context, parse_import_references, resolve_relative_import_path,
+        semantic_resolution_contract_digest,
     };
-    use crate::extract_symbol_graph;
+    use crate::{
+        ConfiguredModuleResolution, EcmaScriptConfigKind, EcmaScriptModuleConfig,
+        EcmaScriptPathMapping, extract_symbol_graph,
+    };
     use projectatlas_core::graph::{CanonicalResolutionKey, ProjectInstanceId};
     use projectatlas_core::symbols::SymbolGraph;
     use std::error::Error;
@@ -776,7 +834,7 @@ mod tests {
         const PRE_MODULE_CALLBACK_DIGEST: &str =
             "487625adf2f9ec76f98034d4ef5667e707960b6b8afd280b213021cb64a0f10f";
         let first = semantic_resolution_contract_digest();
-        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 2);
+        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 3);
         assert_eq!(first.len(), 64);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(first, semantic_resolution_contract_digest());
@@ -996,6 +1054,155 @@ mod tests {
             "read",
             &python_caller,
             &["reader.read"],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn configured_aliases_share_file_and_declaration_keys_across_ecmascript_hosts()
+    -> Result<(), Box<dyn Error>> {
+        let project = project_id(21)?;
+        let configured = ConfiguredModuleResolution::new(vec![
+            EcmaScriptModuleConfig::new(
+                "tsconfig.json",
+                EcmaScriptConfigKind::TypeScript,
+                Some("src".to_string()),
+                vec![
+                    EcmaScriptPathMapping::new("@/*", vec!["src/*".to_string()])?,
+                    EcmaScriptPathMapping::new("@index/*", vec!["src/*/index.ts".to_string()])?,
+                ],
+            )?,
+            EcmaScriptModuleConfig::new(
+                "jsconfig.json",
+                EcmaScriptConfigKind::JavaScript,
+                Some("src".to_string()),
+                vec![EcmaScriptPathMapping::new(
+                    "@/*",
+                    vec!["src/*".to_string()],
+                )?],
+            )?,
+        ])?;
+        let context = ResolutionProjectionContext::with_configured_modules(&configured);
+
+        for (target_path, language, target_source, caller_path, caller_source) in [
+            (
+                "src/controller.ts",
+                "typescript",
+                "export function useController(): string { return 'ok'; }\n",
+                "src/page.ts",
+                "import { useController } from '@/controller';\nexport const value = useController();\n",
+            ),
+            (
+                "src/controller.ts",
+                "typescript",
+                "export function useController(): string { return 'ok'; }\n",
+                "src/page.tsx",
+                "import { useController } from '@/controller';\nexport function Page() { useController(); return <div />; }\n",
+            ),
+            (
+                "src/controller.js",
+                "javascript",
+                "export function useController() { return 'ok'; }\n",
+                "src/page.jsx",
+                "import { useController } from '@/controller';\nexport function Page() { useController(); return <div />; }\n",
+            ),
+            (
+                "src/controller.ts",
+                "typescript",
+                "export function useController(): string { return 'ok'; }\n",
+                "src/Page.vue",
+                "<script setup lang=\"ts\">\nimport { useController } from '@/controller';\nconst value = useController();\n</script>\n<template><div>{{ value }}</div></template>\n",
+            ),
+        ] {
+            let target = extract_symbol_graph(target_path, Some(language), target_source);
+            let caller_extension = std::path::Path::new(caller_path)
+                .extension()
+                .and_then(std::ffi::OsStr::to_str);
+            let caller_language = match caller_extension {
+                Some(extension) if extension.eq_ignore_ascii_case("vue") => "vue",
+                Some(extension)
+                    if extension.eq_ignore_ascii_case("js")
+                        || extension.eq_ignore_ascii_case("jsx") =>
+                {
+                    "javascript"
+                }
+                Some(extension) if extension.eq_ignore_ascii_case("tsx") => "tsx",
+                _ => "typescript",
+            };
+            let caller = extract_symbol_graph(caller_path, Some(caller_language), caller_source);
+            let target_projection = derive_resolution_keys(project, Some("app"), &target)?;
+            let caller_projection =
+                derive_resolution_keys_with_context(project, Some("app"), &caller, context)?;
+            let imports = relation_keys_of_kind(&caller, &caller_projection, RelationKind::Imports);
+            require(
+                imports
+                    .iter()
+                    .any(|keys| keys_intersect(keys, target_projection.source_keys())),
+                "configured import did not share the target file key",
+            )?;
+            require(
+                keys_intersect(
+                    relation_keys(&caller, &caller_projection, "useController"),
+                    symbol_keys(&target, &target_projection, "useController"),
+                ),
+                "configured call did not share the target declaration key",
+            )?;
+        }
+
+        let index_target = extract_symbol_graph(
+            "src/tools/index.ts",
+            Some("typescript"),
+            "export function useTool() { return 'ok'; }\n",
+        );
+        let index_caller = extract_symbol_graph(
+            "src/index-page.ts",
+            Some("typescript"),
+            "import { useTool } from '@index/tools';\nexport const value = useTool();\n",
+        );
+        let index_target_projection = derive_resolution_keys(project, Some("app"), &index_target)?;
+        let index_caller_projection =
+            derive_resolution_keys_with_context(project, Some("app"), &index_caller, context)?;
+        require(
+            relation_keys_of_kind(
+                &index_caller,
+                &index_caller_projection,
+                RelationKind::Imports,
+            )
+            .iter()
+            .any(|keys| keys_intersect(keys, index_target_projection.source_keys())),
+            "configured index target did not reuse package-entry source keys",
+        )?;
+        require(
+            keys_intersect(
+                relation_keys(&index_caller, &index_caller_projection, "useTool"),
+                symbol_keys(&index_target, &index_target_projection, "useTool"),
+            ),
+            "configured index target did not reuse declaration keys",
+        )?;
+
+        let extension_caller = extract_symbol_graph(
+            "src/extension-page.ts",
+            Some("typescript"),
+            "import { useController } from '@/controller.ts';\nexport const value = useController();\n",
+        );
+        let extension_target = extract_symbol_graph(
+            "src/controller.ts",
+            Some("typescript"),
+            "export function useController(): string { return 'ok'; }\n",
+        );
+        let extension_caller_projection =
+            derive_resolution_keys_with_context(project, Some("app"), &extension_caller, context)?;
+        let extension_target_projection =
+            derive_resolution_keys(project, Some("app"), &extension_target)?;
+        require(
+            relation_keys_of_kind(
+                &extension_caller,
+                &extension_caller_projection,
+                RelationKind::Imports,
+            )
+            .iter()
+            .any(|keys| keys_intersect(keys, extension_target_projection.source_keys())),
+            "configured extension target did not reuse extensionless source keys",
         )?;
         Ok(())
     }

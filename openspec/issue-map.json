@@ -31,6 +31,7 @@
       ]
     },
     "publish-rustdoc-readme-links": 300,
+    "resolve-configured-module-aliases": 385,
     "reuse-release-proof-by-inputs": 366,
     "reuse-unchanged-ci-build-layers": 341,
     "show-agent-efficiency-dashboard": 340,
