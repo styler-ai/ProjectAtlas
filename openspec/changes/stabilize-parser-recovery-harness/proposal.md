@@ -5,7 +5,7 @@ The Windows adversarial parser gate applied its 500 ms hostile-stall allowance t
 ## What Changes
 
 - Give only the post-failure healthy recovery probe a platform-tolerant no-progress allowance.
-- Preserve the short hostile-case budgets, exact typed failures, single launch attempt, and existing absolute test deadline.
+- Preserve the short hostile-case budgets, exact typed failures, single launch attempt, and existing deadline for each attempt.
 - Keep all production parser deadlines, protocol, containment, cancellation, and cleanup behavior unchanged.
 - Require repeated Windows adversarial success plus ordinary cross-platform CI.
 

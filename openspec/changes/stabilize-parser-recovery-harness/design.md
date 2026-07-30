@@ -7,7 +7,7 @@ The adversarial parser-supervisor harness uses a short no-progress budget to kee
 **Goals:**
 
 - Separate the healthy recovery allowance from hostile-case stall budgets.
-- Preserve one healthy launch attempt and the existing absolute test deadline.
+- Preserve one healthy launch attempt and its existing two-second deadline.
 - Retain exact hostile failure classification, containment, and cleanup coverage.
 
 **Non-Goals:**
@@ -18,7 +18,7 @@ The adversarial parser-supervisor harness uses a short no-progress budget to kee
 ## Decisions
 
 - Override only the existing healthy recovery case's no-progress value.
-- Set the recovery allowance to the harness's existing absolute deadline, so the premature cutoff is removed without extending total test time.
+- Set the recovery allowance to the healthy attempt's existing deadline, so the premature cutoff is removed without lengthening that attempt.
 - Keep the existing adversarial suite as the owning verification surface.
 
 ## Risks / Trade-offs
