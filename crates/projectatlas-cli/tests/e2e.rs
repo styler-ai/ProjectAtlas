@@ -107,6 +107,7 @@ const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
     "GIT_COMMON_DIR",
 ];
 const OPENSPEC_DIR_NAME: &str = "openspec";
+const AGENT_INTEGRATION_DOC_FILE_NAME: &str = "agent-integration.md";
 const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
 const CARGO_LOCK_FILE_NAME: &str = "Cargo.lock";
 const CODEX_CONFIG_DIR: &str = ".codex";
@@ -2851,8 +2852,11 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             .join("ci.yml"),
     )?;
     let readme = fs::read_to_string(workspace_root.join("README.md"))?;
-    let agent_integration =
-        fs::read_to_string(workspace_root.join("docs").join("agent-integration.md"))?;
+    let agent_integration = fs::read_to_string(
+        workspace_root
+            .join("docs")
+            .join(AGENT_INTEGRATION_DOC_FILE_NAME),
+    )?;
     let architecture = fs::read_to_string(
         workspace_root
             .join("docs")
@@ -3139,17 +3143,16 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
     }
     if opencode_native_plugin_dir.exists() {
         return Err(io::Error::other(
-            "ProjectAtlas OpenCode support is an MCP config template, not a native OpenCode plugin directory",
+            "the current ProjectAtlas release uses generated OpenCode MCP config and must not ship an unverified plugin directory",
         )
         .into());
     }
-    if !readme.contains("OpenCode MCP config template")
-        || !agent_integration
-            .contains("ProjectAtlas does not ship a native OpenCode JavaScript/TypeScript plugin")
-        || !architecture.contains("not a native OpenCode JavaScript/TypeScript plugin")
+    if !agent_integration
+        .contains("An installable `opencode plugin` package is separate distribution work.")
+        || !architecture.contains("`opencode plugin` package is separate distribution work")
     {
         return Err(io::Error::other(
-            "docs must distinguish Claude Code plugin packaging from OpenCode MCP config support",
+            "docs must distinguish current generated OpenCode MCP config support from future plugin packaging",
         )
         .into());
     }
@@ -3165,7 +3168,6 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         }
     }
     for (document_name, document) in [
-        ("README.md", readme.as_str()),
         ("docs/agent-integration.md", agent_integration.as_str()),
         (
             "plugins/projectatlas/skills/projectatlas/SKILL.md",
@@ -3190,6 +3192,17 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
                 ))
                 .into());
             }
+        }
+    }
+    for required in [
+        "codex plugin add projectatlas --marketplace projectatlas",
+        "docs/agent-integration.md",
+    ] {
+        if !readme.contains(required) {
+            return Err(io::Error::other(format!(
+                "README must keep concise install guidance and link its detailed owner; missing {required:?}"
+            ))
+            .into());
         }
     }
     let windows_release_smoke = workflow_job_block(&release_workflow, "installer-smoke-windows")?;
@@ -3408,18 +3421,83 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
         .into());
     }
     let readme = fs::read_to_string(workspace_root.join("README.md"))?;
+    let agent_integration = fs::read_to_string(
+        workspace_root
+            .join("docs")
+            .join(AGENT_INTEGRATION_DOC_FILE_NAME),
+    )?;
+    let public_docs_index = fs::read_to_string(workspace_root.join("docs").join("index.md"))?;
     let gitignore = fs::read_to_string(workspace_root.join(".gitignore"))?;
     for required in [
-        "Rust-native local code index and atlas",
-        "complete SQLite-backed index",
-        "fast local SQLite index",
+        "Rust-native, high-performance local repository intelligence",
+        "persistent SQLite map",
+        "native Rust CLI and MCP server",
+        "purposes identify the responsible area",
+        "graph relationships reveal connected code",
+        "compact summaries and outlines",
+        "exact source slices provide the final evidence",
+        "docs/design/ani-mascot-reference.png",
+        "docs/agent-integration.md#runtime-installation-and-repair",
+        "docs/agent-integration.md#token-reporting-and-human-tui",
+        "docs/agent-integration.md#mcp-tool-sequence",
     ] {
         if !readme.contains(required) {
             return Err(io::Error::other(format!(
-                "README must present ProjectAtlas as a complete local code index; missing {required:?}"
+                "README must retain the consolidated Rust-native agent-first positioning; missing {required:?}"
             ))
             .into());
         }
+    }
+    for required in [
+        "### Runtime installation and repair",
+        "### Token reporting and human TUI",
+        "remain in the exact source ledger",
+        "rather than adding standalone bar panels",
+    ] {
+        if !agent_integration.contains(required) {
+            return Err(io::Error::other(format!(
+                "agent integration guide must own the linked setup and TUI behavior; missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "separate proportional bars for observed and modeled file reads avoided",
+        "retained in the exact source ledger and navigation composition",
+        "at wide terminal sizes, a bounded Atlas map",
+    ] {
+        if !public_docs_index.contains(required) {
+            return Err(io::Error::other(format!(
+                "public docs index must match the live token TUI; missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    for historical in ["frozen v0.3.26", "plain control", "3.9 times the median"] {
+        if readme.contains(historical) {
+            return Err(io::Error::other(format!(
+                "README must not restore the historical navigation comparison {historical:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "projectatlas token --view tui",
+        "docs/assets/token-impact-tui.png",
+    ] {
+        if !readme.contains(required) {
+            return Err(io::Error::other(format!(
+                "README must show the human TUI product example; missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    let readme_words = readme.split_whitespace().count();
+    if readme_words > 1_400 {
+        return Err(io::Error::other(format!(
+            "README landing page regressed into an operator-manual wall of text: {readme_words} words"
+        ))
+        .into());
     }
     for (workflow_name, workflow) in [("ci", &ci_workflow), ("release", &release_workflow)] {
         let verify = workflow_job_block(workflow, "verify")?;

@@ -2,15 +2,16 @@
   <title id="title">ProjectAtlas token savings benchmark bar chart</title>
   <desc id="desc">Bar chart for 142 benchmark calls: without ProjectAtlas 221.1 million estimated tokens, with ProjectAtlas 0.4 million estimated tokens, estimated saved 220.7 million tokens.</desc>
   <style>
-    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24292f; }
-    .muted { fill: #57606a; font-size: 15px; }
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #f0f6fc; }
+    .background { fill: #0d1117; stroke: #30363d; }
+    .muted { fill: #8c959f; font-size: 15px; }
     .label { font-size: 18px; font-weight: 600; }
     .value { font-size: 17px; font-weight: 600; }
-    .track { fill: #d0d7de; }
-    .without { fill: #cf222e; }
-    .with { fill: #1a7f37; }
-    .saved { fill: #0969da; }
+    .track { fill: #30363d; }
+    .without { fill: #f85149; }
+    .with { fill: #3fb950; }
   </style>
+  <rect x="1" y="1" width="858" height="228" rx="10" class="background" />
   <text x="24" y="34" class="label">Benchmark token path, 142 agent calls</text>
   <text x="24" y="58" class="muted">Linear scale. The ProjectAtlas payload is the thin green bar because it is 0.19% of the baseline.</text>
 
