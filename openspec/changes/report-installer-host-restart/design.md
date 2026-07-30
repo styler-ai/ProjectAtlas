@@ -14,7 +14,7 @@ On Windows, an old ProjectAtlas process can lock `%LOCALAPPDATA%\ProjectAtlas\bi
 
 **Non-Goals:**
 
-- Mutating or terminating the parent host, terminals, Codex, or ProjectAtlas processes.
+- Mutating or terminating any pre-existing parent host, terminal, Codex, or ProjectAtlas process. The installer may terminate only the exact runtime-info probe child it started after that probe exceeds its time or output bound.
 - Failing a usable absolute-runtime/MCP installation solely because the parent must restart.
 - Adding a general installer result protocol or changing Rust/MCP schemas.
 
@@ -41,7 +41,7 @@ This avoids a new object/schema while remaining machine-testable in PowerShell a
 - **Restart is reported when the parent was already correct** → Compare the effective post-quarantine sibling path from the captured parent PATH, not merely the mirror outcome.
 - **Locked mirror becomes a hard install failure** → Keep absolute runtime/MCP success authoritative and report partial host readiness with exit code zero.
 - **Tests accidentally mutate the developer environment** → Use temporary LocalAppData/User-profile state, fake Codex, scoped PATH, and an owned lock process.
-- **A process is killed to make the test pass** → The test owns and closes only its fixture lock process; production installer contains no termination path.
+- **A pre-existing process is killed to make the test pass** → The test owns and closes only its fixture lock process; the installer terminates only the exact runtime-info probe child it started after a probe bound is exceeded.
 - **User PATH persistence is mistaken for fresh-host readiness** → Resolve the command against Machine PATH followed by the updated User PATH and require exact verified-runtime identity.
 
 ## Migration Plan

@@ -3337,6 +3337,29 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
     }
     flooding_script.push_str(":probe\r\ngoto probe\r\n");
     fs::write(&flooding_runtime, flooding_script)?;
+    let nonnumeric_runtime = temp.path().join("nonnumeric-projectatlas.cmd");
+    fs::write(
+        &nonnumeric_runtime,
+        "@echo off\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":\"invalid\",\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\n",
+    )?;
+    let out_of_range_runtime = temp.path().join("out-of-range-projectatlas.cmd");
+    fs::write(
+        &out_of_range_runtime,
+        "@echo off\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":\"999999999999999999999\",\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\n",
+    )?;
+    let unpinned_runtime = temp.path().join("unpinned-runtime-version.txt");
+    fs::write(&unpinned_runtime, "0.4.1")?;
+    let local_app_data = temp.path().join("local-app-data");
+    let stable_runtime = local_app_data
+        .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
+        .join("bin")
+        .join("projectatlas.exe");
+    fs::create_dir_all(
+        stable_runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("stable runtime parent missing"))?,
+    )?;
+    fs::write(&stable_runtime, "0.4.0")?;
 
     let installer = workspace_root()?
         .join("plugins")
@@ -3365,6 +3388,7 @@ $names = @(
     "Convert-ProjectAtlasVersionTag",
     "Get-NormalizedPathEntry",
     "Invoke-ProjectAtlasRuntimeInfo",
+    "Sync-ProjectAtlasRuntimeToLocalAppData",
     "Test-ProjectAtlasBareCommandResolutionOnPath",
     "Test-ProjectAtlasRuntime"
 )
@@ -3404,6 +3428,56 @@ $probe.Stop()
 if ($probe.Elapsed -gt [TimeSpan]::FromSeconds(4)) {
     throw "Output-flooding runtime reached the timeout instead of the live byte limit: $($probe.Elapsed)"
 }
+foreach ($invalidRuntime in @(
+    $env:PROJECTATLAS_TEST_NONNUMERIC_RUNTIME,
+    $env:PROJECTATLAS_TEST_OUT_OF_RANGE_RUNTIME
+)) {
+    if (Test-ProjectAtlasRuntime $invalidRuntime $null) {
+        throw "Runtime with invalid major_version was accepted: $invalidRuntime"
+    }
+}
+function Get-ProjectAtlasRuntimeVersion {
+    param([string]$FilePath)
+    if (-not (Test-Path -LiteralPath $FilePath)) {
+        return $null
+    }
+    return (Get-Content -Raw -LiteralPath $FilePath).Trim()
+}
+function Test-ProjectAtlasRuntime {
+    param([string]$FilePath, [string]$ExpectedVersion)
+    if (-not (Test-Path -LiteralPath $FilePath)) {
+        return $false
+    }
+    if ($script:ProjectAtlasTestForceStaleTarget `
+        -and (Get-NormalizedPathEntry $FilePath) -eq (Get-NormalizedPathEntry $env:PROJECTATLAS_TEST_STABLE_RUNTIME)) {
+        return $false
+    }
+    $actualVersion = Get-ProjectAtlasRuntimeVersion $FilePath
+    $expectedRuntimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
+    return -not $expectedRuntimeVersion -or $actualVersion -eq $expectedRuntimeVersion
+}
+if (-not (Sync-ProjectAtlasRuntimeToLocalAppData $env:PROJECTATLAS_TEST_UNPINNED_RUNTIME $null)) {
+    throw "Unpinned runtime did not synchronize its exact version"
+}
+if ((Get-ProjectAtlasRuntimeVersion $env:PROJECTATLAS_TEST_STABLE_RUNTIME) -ne "0.4.1") {
+    throw "Unpinned synchronization accepted an older stable mirror"
+}
+Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_STABLE_RUNTIME -Value "0.4.0"
+$script:ProjectAtlasTestForceStaleTarget = $true
+$stableLock = [IO.File]::Open(
+    $env:PROJECTATLAS_TEST_STABLE_RUNTIME,
+    [IO.FileMode]::Open,
+    [IO.FileAccess]::Read,
+    [IO.FileShare]::None
+)
+try {
+    if (Sync-ProjectAtlasRuntimeToLocalAppData $env:PROJECTATLAS_TEST_UNPINNED_RUNTIME $null) {
+        throw "Locked older stable mirror was reported synchronized"
+    }
+}
+finally {
+    $stableLock.Dispose()
+}
 "#,
         ])
         .env("PROJECTATLAS_TEST_INSTALLER", installer)
@@ -3412,6 +3486,14 @@ if ($probe.Elapsed -gt [TimeSpan]::FromSeconds(4)) {
         .env("PROJECTATLAS_TEST_VERIFIED_RUNTIME", &verified_runtime)
         .env("PROJECTATLAS_TEST_HANGING_RUNTIME", &hanging_runtime)
         .env("PROJECTATLAS_TEST_FLOODING_RUNTIME", &flooding_runtime)
+        .env("PROJECTATLAS_TEST_NONNUMERIC_RUNTIME", &nonnumeric_runtime)
+        .env(
+            "PROJECTATLAS_TEST_OUT_OF_RANGE_RUNTIME",
+            &out_of_range_runtime,
+        )
+        .env("PROJECTATLAS_TEST_UNPINNED_RUNTIME", &unpinned_runtime)
+        .env("PROJECTATLAS_TEST_STABLE_RUNTIME", &stable_runtime)
+        .env("LOCALAPPDATA", &local_app_data)
         .output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(

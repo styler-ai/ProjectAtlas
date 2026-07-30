@@ -171,10 +171,14 @@ function Test-ProjectAtlasRuntime {
     if (-not $runtime) {
         return $false
     }
+    $majorVersion = 0
+    if (-not [int]::TryParse([string]$runtime.major_version, [ref]$majorVersion)) {
+        return $false
+    }
     $expectedRuntimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
     $versionMatches = -not $expectedRuntimeVersion -or $runtime.version -eq $expectedRuntimeVersion
     return $runtime.project -eq "ProjectAtlas" `
-        -and [int]$runtime.major_version -ge 3 `
+        -and $majorVersion -ge 3 `
         -and @($runtime.capabilities) -contains "mcp" `
         -and $runtime.text_format -eq "TOON" `
         -and $versionMatches
@@ -396,13 +400,17 @@ function Sync-ProjectAtlasRuntimeToLocalAppData {
         [string]$FilePath,
         [string]$ExpectedVersion
     )
-    if (-not (Test-ProjectAtlasRuntime $FilePath $ExpectedVersion)) {
+    $synchronizationVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
+    if (-not $synchronizationVersion) {
+        $synchronizationVersion = Convert-ProjectAtlasVersionTag (Get-ProjectAtlasRuntimeVersion $FilePath)
+    }
+    if (-not $synchronizationVersion -or -not (Test-ProjectAtlasRuntime $FilePath $synchronizationVersion)) {
         return $false
     }
     $installDir = Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin"
     New-Item -ItemType Directory -Force -Path $installDir | Out-Null
     $target = Join-Path $installDir "projectatlas.exe"
-    if (Test-ProjectAtlasRuntime $target $ExpectedVersion) {
+    if (Test-ProjectAtlasRuntime $target $synchronizationVersion) {
         return $true
     }
     if ((Get-NormalizedPathEntry $FilePath) -ne (Get-NormalizedPathEntry $target)) {
@@ -414,7 +422,7 @@ function Sync-ProjectAtlasRuntimeToLocalAppData {
             return $false
         }
     }
-    return (Test-ProjectAtlasRuntime $target $ExpectedVersion)
+    return (Test-ProjectAtlasRuntime $target $synchronizationVersion)
 }
 
 function Find-ProjectAtlas {

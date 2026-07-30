@@ -26,7 +26,7 @@ None.
 
 ## Non-Goals
 
-- Mutating another process's environment or terminating ProjectAtlas, Codex, terminals, or unrelated processes.
+- Mutating another process's environment or terminating any pre-existing ProjectAtlas, Codex, terminal, or unrelated process. The installer may terminate only the exact runtime-info probe child it started after that probe exceeds its time or output bound.
 - Treating a locked stable mirror as failure when the verified runtime and MCP integration are ready.
 - Replacing absolute version-guarded MCP paths with bare command resolution.
 - Adding a cross-platform installer result framework for this Windows-specific parent-process fact.
