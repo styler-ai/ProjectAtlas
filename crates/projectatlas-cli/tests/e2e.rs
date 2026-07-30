@@ -137,8 +137,8 @@ const SKILL_FILE_NAME: &str = "SKILL.md";
 const MCP_CONTRACT_EXECUTABLE_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE";
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 const MCP_CONTRACT_METADATA_CANARY: &str = "mcp_contract_metadata_canary";
-const MCP_V040_TOOLS_SHA256: &str =
-    "0c21ea673bdb9cdff48203a274db04fbaccb888bd362407d46fc1bcc0e506b28";
+const MCP_V041_TOOLS_SHA256: &str =
+    "26674d7134973a8f5abdb870a29db6d11e19d4287ec20add04f08653e50dec73";
 const AGENT_EFFICIENCY_BENCHMARK_PATH: &str =
     "../../docs/benchmarks/v0.4-agent-navigation-results.json";
 const AGENT_EFFICIENCY_PARTIAL_FILE: &str = "partial.json";
@@ -8146,6 +8146,34 @@ fn json_values_equivalent(left: &Value, right: &Value) -> bool {
 }
 
 #[test]
+fn mcp_tools_list_exposes_self_contained_codex_input_schemas_without_index_state()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    let database = atlas_dir.join("projectatlas.db");
+    let executable = mcp_contract_executable();
+
+    let inventory = run_mcp_contract_inventory(&executable, &repo, &database)?;
+    let response = mcp_response(&inventory, 2)?;
+    let tools = response
+        .get("result")
+        .and_then(|result| result.get("tools"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("MCP tools/list response omitted tools"))?;
+    assert_codex_bridge_compatible_input_schemas(tools)?;
+
+    if database.exists() || fs::read_dir(&atlas_dir)?.next().is_some() {
+        return Err(io::Error::other(
+            "tools/list created project index state while advertising schemas",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn agent_efficiency_cli_mcp_contract_is_typed_read_only_and_isolated() -> Result<(), Box<dyn Error>>
 {
     let temp = tempfile::tempdir()?;
@@ -10006,6 +10034,7 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
         .and_then(|result| result.get("tools"))
         .and_then(Value::as_array)
         .ok_or_else(|| io::Error::other("MCP contract tools/list omitted tools"))?;
+    assert_codex_bridge_compatible_input_schemas(tools)?;
     let tools_by_name = mcp_tools_by_name(tools)?;
     let advertised_names = tools_by_name.keys().copied().collect::<BTreeSet<_>>();
     let case_names = cases.iter().map(|case| case.name).collect::<BTreeSet<_>>();
@@ -10016,9 +10045,9 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
         .into());
     }
     let tools_digest = sha256_hex(&serde_json::to_vec(tools)?);
-    if tools_digest != MCP_V040_TOOLS_SHA256 {
+    if tools_digest != MCP_V041_TOOLS_SHA256 {
         return Err(io::Error::other(format!(
-            "frozen v0.4.0 MCP inventory/schema digest drifted: expected {MCP_V040_TOOLS_SHA256}, found {tools_digest}"
+            "frozen v0.4.1 MCP inventory/schema digest drifted: expected {MCP_V041_TOOLS_SHA256}, found {tools_digest}"
         ))
         .into());
     }
@@ -10181,6 +10210,11 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
             "atlas_purpose_set",
             serde_json::json!({"project_path": repo_argument, "path": "../parent-canary.txt", "purpose": "Must not escape."}),
             "project",
+        ),
+        (
+            "atlas_purpose_review",
+            serde_json::json!({"project_path": repo_argument, "apply": false, "items": [{}]}),
+            "missing field `path`",
         ),
     ] {
         assert_mcp_contract_failure_no_mutation(
@@ -19084,11 +19118,15 @@ fn assert_legacy_mcp_surface_compatible(stdout: &str) -> Result<(), Box<dyn Erro
             ))
             .into());
         }
+        let baseline_schema = baseline_tool
+            .get("inputSchema")
+            .ok_or_else(|| io::Error::other(format!("baseline schema missing for {name}")))?;
+        let normalized_schema = (name == "atlas_purpose_review")
+            .then(|| inline_legacy_purpose_review_item_schema(baseline_schema))
+            .transpose()?;
         assert_json_contract_subset(
             &format!("{name}.inputSchema"),
-            baseline_tool
-                .get("inputSchema")
-                .ok_or_else(|| io::Error::other(format!("baseline schema missing for {name}")))?,
+            normalized_schema.as_ref().unwrap_or(baseline_schema),
             current_tool
                 .get("inputSchema")
                 .ok_or_else(|| io::Error::other(format!("current schema missing for {name}")))?,
@@ -19127,6 +19165,148 @@ fn mcp_tools_by_name(tools: &[Value]) -> Result<BTreeMap<&str, &Value>, Box<dyn 
         }
     }
     Ok(indexed)
+}
+
+/// Require the concrete JSON Schema subset consumed by the supported Codex bridge.
+fn assert_codex_bridge_compatible_input_schemas(tools: &[Value]) -> Result<(), Box<dyn Error>> {
+    let tools_by_name = mcp_tools_by_name(tools)?;
+    for (name, tool) in &tools_by_name {
+        let schema = tool
+            .get("inputSchema")
+            .ok_or_else(|| io::Error::other(format!("{name} omitted inputSchema")))?;
+        assert_no_local_schema_references(&format!("{name}.inputSchema"), schema)?;
+    }
+
+    let item_schema = tools_by_name
+        .get("atlas_purpose_review")
+        .and_then(|tool| tool.get("inputSchema"))
+        .and_then(|schema| schema.pointer("/properties/items/items"))
+        .ok_or_else(|| io::Error::other("atlas_purpose_review omitted its item schema"))?;
+    if item_schema.get("type").and_then(Value::as_str) != Some("object") {
+        return Err(io::Error::other(format!(
+            "atlas_purpose_review item schema is not a concrete object: {item_schema}"
+        ))
+        .into());
+    }
+    let required = item_schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    if required != BTreeSet::from(["path"]) {
+        return Err(io::Error::other(format!(
+            "atlas_purpose_review item required fields drifted: {required:?}"
+        ))
+        .into());
+    }
+    let properties = item_schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("atlas_purpose_review item omitted properties"))?;
+    for (name, expected_type) in [
+        ("path", "string"),
+        ("purpose", "string"),
+        ("confirm_existing", "boolean"),
+        ("task", "string"),
+        ("work_key", "string"),
+        ("state_token", "string"),
+    ] {
+        let property = properties.get(name).ok_or_else(|| {
+            io::Error::other(format!(
+                "atlas_purpose_review item omitted property {name:?}"
+            ))
+        })?;
+        if !schema_declares_type(property, expected_type) {
+            return Err(io::Error::other(format!(
+                "atlas_purpose_review item property {name:?} omitted type {expected_type:?}: {property}"
+            ))
+            .into());
+        }
+    }
+    if required_members_present(item_schema, &serde_json::json!({}))
+        || !required_members_present(item_schema, &serde_json::json!({"path": "src/lib.rs"}))
+    {
+        return Err(io::Error::other(
+            "atlas_purpose_review item schema does not make missing path host-rejectable",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Reject bridge-sensitive local definitions or references anywhere in an input schema.
+fn assert_no_local_schema_references(path: &str, value: &Value) -> Result<(), Box<dyn Error>> {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                if key == "$defs"
+                    || key == "$ref"
+                        && child
+                            .as_str()
+                            .is_some_and(|reference| reference.starts_with("#/$defs/"))
+                {
+                    return Err(io::Error::other(format!(
+                        "Codex-facing schema retained local reference member {path}.{key}"
+                    ))
+                    .into());
+                }
+                assert_no_local_schema_references(&format!("{path}.{key}"), child)?;
+            }
+        }
+        Value::Array(values) => {
+            for (index, child) in values.iter().enumerate() {
+                assert_no_local_schema_references(&format!("{path}[{index}]"), child)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Return whether one field schema admits the expected JSON primitive type.
+fn schema_declares_type(schema: &Value, expected: &str) -> bool {
+    schema.get("type").is_some_and(|value| match value {
+        Value::String(value) => value == expected,
+        Value::Array(values) => values.iter().any(|value| value.as_str() == Some(expected)),
+        _ => false,
+    })
+}
+
+/// Apply the advertised required-object members to one host-side candidate.
+fn required_members_present(schema: &Value, candidate: &Value) -> bool {
+    let Some(candidate) = candidate.as_object() else {
+        return false;
+    };
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .all(|required| candidate.contains_key(required))
+}
+
+/// Normalize the one frozen v0.3.26 nested schema whose representation is now inline.
+fn inline_legacy_purpose_review_item_schema(schema: &Value) -> Result<Value, Box<dyn Error>> {
+    let mut schema = schema.clone();
+    let object = schema
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("legacy purpose-review schema is not an object"))?;
+    let definitions = object
+        .remove("$defs")
+        .and_then(|value| value.as_object().cloned())
+        .ok_or_else(|| io::Error::other("legacy purpose-review schema omitted $defs"))?;
+    let item = definitions
+        .get("AtlasPurposeReviewItem")
+        .cloned()
+        .ok_or_else(|| io::Error::other("legacy purpose-review item definition is missing"))?;
+    let item_schema = schema
+        .pointer_mut("/properties/items/items")
+        .ok_or_else(|| io::Error::other("legacy purpose-review item reference is missing"))?;
+    *item_schema = item;
+    Ok(schema)
 }
 
 /// Capture bounded logical rows so WAL/page-layout changes do not masquerade as product state.

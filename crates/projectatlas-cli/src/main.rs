@@ -676,6 +676,7 @@ enum PurposeLintLevelArg {
     ValueEnum,
     schemars::JsonSchema,
 )]
+#[schemars(inline)]
 #[serde(rename_all = "lowercase")]
 enum SearchRetrievalModeArg {
     /// Correctness-authoritative lexical search.
@@ -720,6 +721,7 @@ enum IgnoreKind {
 #[derive(
     Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum, schemars::JsonSchema,
 )]
+#[schemars(inline)]
 #[serde(rename_all = "snake_case")]
 enum RootTransition {
     /// Initialize a missing binding or verify an identical existing binding.
