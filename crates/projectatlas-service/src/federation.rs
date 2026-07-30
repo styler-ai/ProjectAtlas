@@ -332,16 +332,22 @@ impl FederatedAnalysisDraft {
     /// cursor cannot be wrapped, or the empty federated envelope is oversized.
     pub fn fit_output<F, E, O>(self, mut encode: F) -> Result<(FederatedAnalysisReport, O), E>
     where
-        F: FnMut(&FederatedAnalysisReport) -> Result<O, E>,
+        F: FnMut(&FederatedAnalysisReport, &IndexWorkControl) -> Result<O, E>,
         E: From<ServiceError>,
         O: AsRef<[u8]>,
     {
         let context = self.context;
-        let (primary, encoded) = self.primary.fit_output(|primary| {
-            let report = context.analysis_report(primary.clone()).map_err(E::from)?;
-            encode(&report)
+        let control = self.primary.control().clone();
+        let (primary, encoded) = self.primary.fit_output(|primary, control| {
+            let report = context
+                .analysis_report(primary.clone(), Some(control))
+                .map_err(E::from)?;
+            encode(&report, control)
         })?;
-        let report = context.analysis_report(primary).map_err(E::from)?;
+        check_control(Some(&control)).map_err(E::from)?;
+        let report = context
+            .analysis_report(primary, Some(&control))
+            .map_err(E::from)?;
         Ok((report, encoded))
     }
 }
@@ -406,7 +412,9 @@ impl FederatedContext {
     fn analysis_report(
         &self,
         mut primary: RelationAnalysisReport,
+        control: Option<&IndexWorkControl>,
     ) -> ServiceResult<FederatedAnalysisReport> {
+        check_control(control)?;
         primary.continuation = wrap_continuation(
             primary.continuation.as_deref(),
             &self.cursor_participants,
@@ -414,6 +422,7 @@ impl FederatedContext {
         )?;
         let mut reached_limits = primary.reached_limits.clone();
         for limit in &self.rendezvous_limits {
+            check_control(control)?;
             push_limit(&mut reached_limits, *limit);
         }
         let mut work = self.base_work.clone();
@@ -428,6 +437,7 @@ impl FederatedContext {
             primary.continuation.as_deref(),
             self.budget,
         )?;
+        check_control(control)?;
         Ok(FederatedAnalysisReport {
             participants: self.participants.clone(),
             truncated: primary.truncated || !self.rendezvous_limits.is_empty(),
@@ -1257,8 +1267,9 @@ mod tests {
                 .is_empty(),
             "federated analysis retained temporary rendezvous identities through output fitting",
         )?;
-        let (analysis, _) =
-            analysis.fit_output(|report| serde_json::to_vec(report).map_err(ServiceError::from))?;
+        let (analysis, _) = analysis.fit_output(|report, _control| {
+            serde_json::to_vec(report).map_err(ServiceError::from)
+        })?;
         require(
             analysis.rendezvous.len() == 2
                 && analysis
@@ -1304,8 +1315,9 @@ mod tests {
             },
             None,
         )?;
-        let (inbound_analysis, _) = inbound_analysis
-            .fit_output(|report| serde_json::to_vec(report).map_err(ServiceError::from))?;
+        let (inbound_analysis, _) = inbound_analysis.fit_output(|report, _control| {
+            serde_json::to_vec(report).map_err(ServiceError::from)
+        })?;
         require(
             inbound_analysis.rendezvous.is_empty()
                 && inbound_analysis.work.rendezvous_database_rows == 0,

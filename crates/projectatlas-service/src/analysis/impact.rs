@@ -57,6 +57,7 @@ pub(super) fn impact_findings(
     supplemental_work: &mut SupplementalWork,
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<Vec<AnalysisFinding>> {
+    check_control(control)?;
     let mut findings = if query.include_dead_code {
         dead_code_findings(
             store,
@@ -72,17 +73,21 @@ pub(super) fn impact_findings(
         Vec::new()
     };
     if let VcsImpact::Available { .. } = vcs {
-        let changed = changed_paths.iter().cloned().collect::<BTreeSet<_>>();
-        let seeds = nodes
-            .iter()
-            .filter_map(|(key, node)| {
-                entity_path(&node.entity)
-                    .is_some_and(|path| changed.contains(path))
-                    .then_some(key.clone())
-            })
-            .collect::<Vec<_>>();
+        let mut changed = BTreeSet::new();
+        for path in changed_paths {
+            check_control(control)?;
+            changed.insert(path.clone());
+        }
+        let mut seeds = Vec::new();
+        for (key, node) in nodes {
+            check_control(control)?;
+            if entity_path(&node.entity).is_some_and(|path| changed.contains(path)) {
+                seeds.push(key.clone());
+            }
+        }
         let mut reverse = BTreeMap::<String, Vec<String>>::new();
         for edge in edges.iter().filter(|edge| dependency_relation(edge.kind)) {
+            check_control(control)?;
             reverse
                 .entry(edge.target.clone())
                 .or_default()
@@ -91,16 +96,19 @@ pub(super) fn impact_findings(
         let mut distance = BTreeMap::<String, u32>::new();
         let mut queue = VecDeque::new();
         for seed in seeds {
+            check_control(control)?;
             distance.insert(seed.clone(), 0);
             queue.push_back(seed);
         }
         while let Some(target) = queue.pop_front() {
+            check_control(control)?;
             let next_distance = distance
                 .get(&target)
                 .copied()
                 .unwrap_or_default()
                 .saturating_add(1);
             for dependent in reverse.get(&target).into_iter().flatten() {
+                check_control(control)?;
                 if !distance.contains_key(dependent) {
                     distance.insert(dependent.clone(), next_distance);
                     queue.push_back(dependent.clone());
@@ -127,6 +135,7 @@ pub(super) fn impact_findings(
             });
         }
         for (key, hops) in distance {
+            check_control(control)?;
             findings.push(AnalysisFinding {
                 kind: AnalysisFindingKind::Impact,
                 status: AnalysisStatus::Candidate,
@@ -151,6 +160,7 @@ pub(super) fn impact_findings(
             evidence: None,
         });
     }
+    check_control(control)?;
     Ok(findings)
 }
 
@@ -165,6 +175,7 @@ fn dead_code_findings(
     supplemental_work: &mut SupplementalWork,
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<Vec<AnalysisFinding>> {
+    check_control(control)?;
     if !scope_complete {
         return Ok(vec![AnalysisFinding {
             kind: AnalysisFindingKind::DeadCode,
@@ -176,6 +187,11 @@ fn dead_code_findings(
             evidence: None,
         }]);
     }
+    #[cfg(test)]
+    super::analysis_test_observer::notify(
+        super::analysis_test_observer::AnalysisPhaseEvent::DeadCodeDiscovery,
+    );
+    check_control(control)?;
     let symbols = load_admitted_symbols(store, nodes, symbol_byte_budget, control)?;
     supplemental_work.hydrated_symbols = supplemental_work
         .hydrated_symbols
@@ -201,28 +217,34 @@ fn dead_code_findings(
             evidence: None,
         }]);
     }
-    let indegree = usage_indegrees(nodes, edges);
-    let candidate = nodes
-        .iter()
-        .find(|(_, node)| entity_matches_anchor(&node.entity, anchor))
-        .and_then(|(key, node)| {
-            (indegree.get(key).copied().unwrap_or_default() == 0).then_some((key, node))
-        })
-        .and_then(|(key, node)| {
-            let (path, name, kind, parent, signature) = symbol_identity(&node.entity)?;
-            symbols
-                .rows_for_path(path)
-                .is_some_and(|rows| {
-                    rows.iter().any(|symbol| {
-                        !symbol.exported
-                            && symbol.name == name
-                            && symbol.kind == kind
-                            && symbol.parent.as_deref() == parent
-                            && symbol.signature == signature
-                    })
-                })
-                .then_some(key.clone())
-        });
+    let indegree = usage_indegrees(nodes, edges, control)?;
+    let mut candidate = None;
+    for (key, node) in nodes {
+        check_control(control)?;
+        if !entity_matches_anchor(&node.entity, anchor)
+            || indegree.get(key).copied().unwrap_or_default() != 0
+        {
+            continue;
+        }
+        let Some((path, name, kind, parent, signature)) = symbol_identity(&node.entity) else {
+            continue;
+        };
+        if let Some(rows) = symbols.rows_for_path(path) {
+            for symbol in rows {
+                check_control(control)?;
+                if !symbol.exported
+                    && symbol.name == name
+                    && symbol.kind == kind
+                    && symbol.parent.as_deref() == parent
+                    && symbol.signature == signature
+                {
+                    candidate = Some(key.clone());
+                    break;
+                }
+            }
+        }
+        break;
+    }
     drop(symbols);
     check_control(control)?;
     Ok(candidate.map_or_else(Vec::new, |key| {
@@ -281,14 +303,20 @@ struct GitPathNormalizationError {
 }
 
 /// Digest the normalized changed-path set for cursor freshness.
-pub(super) fn digest_vcs_paths(paths: &[String]) -> [u8; 32] {
+pub(super) fn digest_vcs_paths(
+    paths: &[String],
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<[u8; 32]> {
+    check_control(control)?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"projectatlas:analysis-vcs:v1\0");
     for path in paths {
+        check_control(control)?;
         hasher.update(path.as_bytes());
         hasher.update(&[0]);
     }
-    *hasher.finalize().as_bytes()
+    check_control(control)?;
+    Ok(*hasher.finalize().as_bytes())
 }
 
 /// Load one bounded normalized changed-path set from Git.
@@ -374,7 +402,7 @@ pub(super) fn load_vcs_paths(
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     match run_git(command, command_budget, deadline, control) {
-        Ok(output) => match parse_git_paths(&selection, &output, command_budget) {
+        Ok(output) => match parse_git_paths(&selection, &output, command_budget, control) {
             Ok(normalized) => LoadedVcs {
                 report: VcsImpact::Available {
                     selection,
@@ -609,14 +637,27 @@ fn parse_git_paths(
     selection: &GitImpactSelection,
     output: &GitCommandOutput,
     byte_limit: u64,
+    control: Option<&IndexWorkControl>,
 ) -> Result<NormalizedGitPaths, GitPathNormalizationError> {
     let mut paths = Vec::new();
     let mut peak_bytes = output.stream_peak_bytes;
+    if let Err(error) = check_control(control) {
+        return Err(GitPathNormalizationError {
+            reason: error.to_string(),
+            peak_bytes,
+        });
+    }
     for raw in output
         .stdout
         .split(|byte| *byte == 0)
         .filter(|row| !row.is_empty())
     {
+        if let Err(error) = check_control(control) {
+            return Err(GitPathNormalizationError {
+                reason: error.to_string(),
+                peak_bytes,
+            });
+        }
         let raw = if matches!(selection, GitImpactSelection::WorkingTree) {
             raw.get(3..).ok_or_else(|| GitPathNormalizationError {
                 reason: "git status row was malformed".to_string(),
@@ -656,8 +697,26 @@ fn parse_git_paths(
             });
         }
     }
+    if let Err(error) = check_control(control) {
+        return Err(GitPathNormalizationError {
+            reason: error.to_string(),
+            peak_bytes,
+        });
+    }
     paths.sort();
+    if let Err(error) = check_control(control) {
+        return Err(GitPathNormalizationError {
+            reason: error.to_string(),
+            peak_bytes,
+        });
+    }
     paths.dedup();
+    if let Err(error) = check_control(control) {
+        return Err(GitPathNormalizationError {
+            reason: error.to_string(),
+            peak_bytes,
+        });
+    }
     Ok(NormalizedGitPaths { paths, peak_bytes })
 }
 

@@ -114,7 +114,7 @@ tiktoken = "3.5.1"
 tokio = { version = "1.48", features = ["io-std", "macros", "rt-multi-thread", "time"] }
 toml = "0.8"
 toml_edit = "0.22"
-toon-format = { version = "0.5.0", default-features = false }
+toon-format = { version = "0.5.0", default-features = false, features = ["json_stream"] }
 tree-sitter = "=0.26.9"
 tree-sitter-c = "=0.24.2"
 tree-sitter-c-sharp = "=0.23.5"

@@ -47,7 +47,7 @@ use projectatlas_db::{
 };
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -637,6 +637,7 @@ fn detailed_relation_cli_bounds_the_exact_json_envelope() -> Result<(), Box<dyn 
         .into());
     }
 
+    let impact_started = Instant::now();
     let impact = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .env("PROJECTATLAS_NO_TELEMETRY", "1")
@@ -656,13 +657,29 @@ fn detailed_relation_cli_bounds_the_exact_json_envelope() -> Result<(), Box<dyn 
             "--depth",
             "2",
             "--limit",
-            "50",
+            "8",
+            "--edge-limit",
+            "8",
+            "--node-limit",
+            "16",
+            "--visited-limit",
+            "16",
+            "--occurrence-total-limit",
+            "16",
+            "--intermediate-bytes",
+            "131072",
+            "--deadline-ms",
+            "1000",
+            "--output-bytes",
+            "65536",
             "--analysis-mode",
             "impact",
             "--vcs",
             "working-tree",
+            "--include-dead-code",
         ])
         .output()?;
+    let impact_elapsed = impact_started.elapsed();
     if !impact.status.success() {
         return Err(io::Error::other(format!(
             "public impact analysis CLI failed: {}",
@@ -670,8 +687,41 @@ fn detailed_relation_cli_bounds_the_exact_json_envelope() -> Result<(), Box<dyn 
         ))
         .into());
     }
+    if impact_elapsed > Duration::from_secs(5) {
+        return Err(io::Error::other(format!(
+            "bounded impact CLI exceeded its elapsed tolerance: {impact_elapsed:?}"
+        ))
+        .into());
+    }
     let impact_payload: Value = serde_json::from_slice(&impact.stdout)?;
     require_json_string(&impact_payload, &["symbol_relations", "mode"], "impact")?;
+    require_json_usize(
+        &impact_payload,
+        &["symbol_relations", "work", "rendered_output_bytes"],
+        impact.stdout.len(),
+    )?;
+    let bounded_work = [
+        ("/symbol_relations/returned", 8_u64),
+        ("/symbol_relations/work/relations/inspected_edges", 8),
+        ("/symbol_relations/work/relations/active_nodes", 16),
+        ("/symbol_relations/work/relations/visited_nodes", 16),
+        ("/symbol_relations/work/analyzed_nodes", 16),
+        ("/symbol_relations/work/analyzed_edges", 8),
+        ("/symbol_relations/work/peak_intermediate_bytes", 131_072),
+    ];
+    if impact.stdout.len() > 65_536
+        || bounded_work.iter().any(|(path, limit)| {
+            impact_payload
+                .pointer(path)
+                .and_then(Value::as_u64)
+                .is_none_or(|observed| observed > *limit)
+        })
+    {
+        return Err(io::Error::other(
+            "bounded impact CLI crossed a declared row/node/edge/visited/intermediate/output budget",
+        )
+        .into());
+    }
     if !matches!(
         impact_payload.pointer("/symbol_relations/vcs/state"),
         Some(Value::String(state)) if state == "available" || state == "unavailable"
@@ -788,6 +838,179 @@ fn detailed_relation_cli_bounds_the_exact_json_envelope() -> Result<(), Box<dyn 
             "analysis trace requires an exact file or symbol target",
         ));
     Ok(())
+}
+
+#[test]
+fn impact_analysis_deadline_and_mcp_cancellation_release_resources() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("bounded-impact-adapters");
+    let source_dir = repo.join(SRC_DIR_NAME);
+    fs::create_dir_all(&source_dir)?;
+    let mut source = String::from("pub fn entry() { leaf(); }\nfn leaf() {}\n");
+    for index in 0..12_000 {
+        writeln!(source, "fn unused_{index}() {{}}")?;
+    }
+    fs::write(source_dir.join("lib.rs"), source)?;
+
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let scan = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "json", "scan"])
+        .output()?;
+    if !scan.status.success() {
+        return Err(io::Error::other(format!(
+            "bounded impact fixture scan failed: {}",
+            String::from_utf8_lossy(&scan.stderr)
+        ))
+        .into());
+    }
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let before = mcp_database_snapshot(&database)?;
+    let common_cli_args = [
+        "--format",
+        "json",
+        "symbols",
+        "relations",
+        "--view",
+        "analysis",
+        "--file",
+        "src/lib.rs",
+        "--symbol",
+        "entry",
+        "--direction",
+        "outbound",
+        "--depth",
+        "2",
+        "--limit",
+        "1000",
+        "--edge-limit",
+        "10000",
+        "--node-limit",
+        "10000",
+        "--visited-limit",
+        "10000",
+        "--occurrence-total-limit",
+        "20000",
+        "--intermediate-bytes",
+        "33554432",
+        "--deadline-ms",
+        "1",
+        "--output-bytes",
+        "1048576",
+        "--analysis-mode",
+        "impact",
+        "--vcs",
+        "working-tree",
+        "--include-dead-code",
+    ];
+    let cli_started = Instant::now();
+    let expired = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(common_cli_args)
+        .output()?;
+    if expired.status.success()
+        || cli_started.elapsed() > Duration::from_secs(5)
+        || !String::from_utf8_lossy(&expired.stderr)
+            .to_ascii_lowercase()
+            .contains("deadline")
+        || mcp_database_snapshot(&database)? != before
+    {
+        return Err(io::Error::other(format!(
+            "CLI deadline was not typed, prompt, and read-only: status={:?} elapsed={:?} stderr={}",
+            expired.status.code(),
+            cli_started.elapsed(),
+            String::from_utf8_lossy(&expired.stderr)
+        ))
+        .into());
+    }
+    let follow_up = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "json", "overview"])
+        .output()?;
+    if !follow_up.status.success() {
+        return Err(io::Error::other("CLI deadline blocked the immediate overview").into());
+    }
+    Connection::open(&database)?.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")?;
+
+    let impact_arguments = |deadline_ms| {
+        json!({
+            "view": "analysis",
+            "analysis_mode": "impact",
+            "vcs": "working_tree",
+            "file": "src/lib.rs",
+            "symbol": "entry",
+            "direction": "outbound",
+            "depth": 2,
+            "limit": 1000,
+            "edge_limit": 20000,
+            "node_limit": 10000,
+            "visited_limit": 10000,
+            "occurrence_total_limit": 20000,
+            "intermediate_bytes": 33_554_432,
+            "deadline_ms": deadline_ms,
+            "output_bytes": 1_048_576,
+            "include_dead_code": true
+        })
+    };
+    let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+    let mcp_started = Instant::now();
+    let deadline_text = session.call_tool("atlas_symbol_relations", &impact_arguments(1_u64))?;
+    let deadline_payload: Value = toon_format::decode_default(&deadline_text)?;
+    if mcp_started.elapsed() > Duration::from_secs(5)
+        || deadline_payload
+            .pointer("/error/kind")
+            .and_then(Value::as_str)
+            != Some("error")
+        || !deadline_payload
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.to_ascii_lowercase().contains("deadline"))
+        || mcp_database_snapshot(&database)? != before
+    {
+        return Err(io::Error::other(format!(
+            "MCP deadline was not typed, prompt, and read-only: elapsed={:?} payload={deadline_payload}",
+            mcp_started.elapsed()
+        ))
+        .into());
+    }
+    session.call_tool("atlas_overview", &json!({}))?;
+    Connection::open(&database)?.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")?;
+
+    let request_id = session.start_request(
+        "tools/call",
+        &json!({
+            "name": "atlas_symbol_relations",
+            "arguments": impact_arguments(5_000_u64)
+        }),
+    )?;
+    thread::sleep(Duration::from_millis(1));
+    session.notify(
+        "notifications/cancelled",
+        &json!({"requestId": request_id, "reason": "bounded impact contract"}),
+    )?;
+    let canceled = session.wait_for_response(request_id, "tools/call")?;
+    let canceled_text = canceled
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("canceled MCP analysis returned no text"))?;
+    let canceled_payload: Value = toon_format::decode_default(canceled_text)?;
+    if !canceled_payload
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .is_some_and(|message| message.to_ascii_lowercase().contains("cancel"))
+        || mcp_database_snapshot(&database)? != before
+    {
+        return Err(io::Error::other(format!(
+            "MCP cancellation was not typed and read-only: {canceled_payload}"
+        ))
+        .into());
+    }
+    session.call_tool("atlas_overview", &json!({}))?;
+    Connection::open(&database)?.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")?;
+    session.shutdown()
 }
 
 #[cfg(feature = "optional-parser-supervisor")]
@@ -19780,6 +20003,12 @@ impl McpContractSession {
 
     /// Send one request and wait for its matching response under a fixed deadline.
     fn request(&mut self, method: &str, params: &Value) -> Result<Value, Box<dyn Error>> {
+        let request_id = self.start_request(method, params)?;
+        self.wait_for_response(request_id, method)
+    }
+
+    /// Send one request and return its id before waiting for the response.
+    fn start_request(&mut self, method: &str, params: &Value) -> Result<u64, Box<dyn Error>> {
         let request_id = self.next_request_id;
         self.next_request_id = self
             .next_request_id
@@ -19791,6 +20020,15 @@ impl McpContractSession {
             "method": method,
             "params": params
         }))?;
+        Ok(request_id)
+    }
+
+    /// Wait for one previously sent request under the contract deadline.
+    fn wait_for_response(
+        &mut self,
+        request_id: u64,
+        method: &str,
+    ) -> Result<Value, Box<dyn Error>> {
         let deadline = Instant::now()
             .checked_add(Duration::from_secs(10))
             .ok_or_else(|| io::Error::other("MCP contract response deadline overflowed"))?;

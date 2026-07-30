@@ -2,6 +2,67 @@
 
 mod impact;
 
+#[cfg(test)]
+mod analysis_test_observer {
+    use std::cell::RefCell;
+
+    /// Named production phase reached by one synchronous analysis request.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) enum AnalysisPhaseEvent {
+        /// Induced relationship closure is about to traverse its first bounded frontier.
+        Traversal,
+        /// Admitted symbol hydration is about to enter bounded storage work.
+        SymbolHydration,
+        /// Topology and finding composition is about to retain aggregate output state.
+        Composition,
+        /// Optional dead-code candidate discovery has entered complete-scope work.
+        DeadCodeDiscovery,
+        /// Adapter-specific output fitting has begun under the retained request control.
+        OutputRendering,
+    }
+
+    /// Thread-local callback used only while one unit test owns observation.
+    type Observer = Box<dyn FnMut(AnalysisPhaseEvent)>;
+
+    thread_local! {
+        /// Observer scoped to the synchronous analysis test thread.
+        static OBSERVER: RefCell<Option<Observer>> = RefCell::new(None);
+    }
+
+    /// Restores a prior nested observer on every return or unwind path.
+    struct ObserverGuard {
+        /// Observer replaced for the current scope.
+        previous: Option<Observer>,
+    }
+
+    impl Drop for ObserverGuard {
+        fn drop(&mut self) {
+            OBSERVER.with(|slot| {
+                drop(slot.replace(self.previous.take()));
+            });
+        }
+    }
+
+    /// Run one operation while observing named production analysis phases.
+    pub(super) fn observe_analysis_phase<T>(
+        observer: impl FnMut(AnalysisPhaseEvent) + 'static,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        let previous = OBSERVER.with(|slot| slot.replace(Some(Box::new(observer))));
+        let _guard = ObserverGuard { previous };
+        operation()
+    }
+
+    /// Notify the current thread-local observer when one is installed.
+    pub(super) fn notify(event: AnalysisPhaseEvent) {
+        OBSERVER.with(|slot| {
+            if let Some(observer) = slot.borrow_mut().as_mut() {
+                observer(event);
+            }
+        });
+    }
+}
+
 use super::relations::{
     ExternalRelationIdentity, external_relation_identities, load_detailed_relations,
 };
@@ -293,6 +354,11 @@ impl RelationAnalysisDraft {
         &self.report
     }
 
+    /// Borrow the exact request control retained through output rendering.
+    pub(super) const fn control(&self) -> &IndexWorkControl {
+        &self.control
+    }
+
     /// Move the call-scoped rendezvous identities out before output fitting.
     pub(super) fn take_external_relation_identities(
         &mut self,
@@ -308,12 +374,15 @@ impl RelationAnalysisDraft {
     /// envelope exceeds the declared output or aggregate intermediate ceiling.
     pub fn fit_output<F, E, O>(self, mut encode: F) -> Result<(RelationAnalysisReport, O), E>
     where
-        F: FnMut(&RelationAnalysisReport) -> Result<O, E>,
+        F: FnMut(&RelationAnalysisReport, &IndexWorkControl) -> Result<O, E>,
         E: From<ServiceError>,
         O: AsRef<[u8]>,
     {
         check_control(Some(&self.control)).map_err(E::from)?;
-        let original_report_bytes = serialized_bytes(&self.report).map_err(E::from)?;
+        #[cfg(test)]
+        analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::OutputRendering);
+        let original_report_bytes =
+            serialized_bytes_controlled(&self.report, Some(&self.control)).map_err(E::from)?;
         let construction_peak = self.report.work.peak_intermediate_bytes;
         let mut low = 0;
         let mut high = self.report.findings.len();
@@ -355,7 +424,7 @@ impl RelationAnalysisDraft {
                 );
             }
             check_control(Some(&self.control)).map_err(E::from)?;
-            let mut encoded = encode(&candidate)?;
+            let mut encoded = encode(&candidate, &self.control)?;
             check_control(Some(&self.control)).map_err(E::from)?;
             let mut stable = false;
             for _ in 0..8 {
@@ -365,7 +434,9 @@ impl RelationAnalysisDraft {
                         "analysis rendered byte count overflowed: {source}"
                     )))
                 })?;
-                let candidate_report_bytes = serialized_bytes(&candidate).map_err(E::from)?;
+                let candidate_report_bytes =
+                    serialized_bytes_controlled(&candidate, Some(&self.control))
+                        .map_err(E::from)?;
                 let fitting_peak = original_report_bytes
                     .checked_add(candidate_report_bytes)
                     .and_then(|bytes| bytes.checked_add(rendered))
@@ -384,7 +455,7 @@ impl RelationAnalysisDraft {
                 candidate.work.rendered_output_bytes = rendered;
                 candidate.work.peak_intermediate_bytes = peak;
                 drop(encoded);
-                encoded = encode(&candidate)?;
+                encoded = encode(&candidate, &self.control)?;
                 check_control(Some(&self.control)).map_err(E::from)?;
             }
             if !stable {
@@ -626,7 +697,8 @@ fn load_relation_analysis_with_closure_deadline(
     } else {
         BTreeSet::new()
     };
-    let external_relation_identity_bytes = serialized_bytes(&external_relation_identities)?;
+    let external_relation_identity_bytes =
+        serialized_bytes_controlled(&external_relation_identities, control)?;
     let cursor_snapshot = AnalysisCursorSnapshot {
         project: relations.anchor.entity.key().project(),
         generation: relations.generation,
@@ -641,8 +713,8 @@ fn load_relation_analysis_with_closure_deadline(
         });
     }
     check_control(control)?;
-    let mut nodes = collect_nodes(&relations);
-    let mut edges = collect_report_edges(&relations);
+    let mut nodes = collect_nodes(&relations, control)?;
+    let mut edges = collect_report_edges(&relations, control)?;
     let mut closure_query = query.clone();
     closure_query.relations = relation_query;
     let closure = close_induced_edges(
@@ -654,8 +726,10 @@ fn load_relation_analysis_with_closure_deadline(
         &mut edges,
         control,
     )?;
+    check_control(control)?;
     let evidence_complete = relation_evidence_complete(&relations, &nodes, &edges, query, &closure);
     let dead_code_scope_complete = dead_code_scope_complete(&relations, query);
+    check_control(control)?;
     let vcs_load = if query.mode == RelationAnalysisMode::Impact {
         let selection = query.vcs.clone().unwrap_or(GitImpactSelection::WorkingTree);
         load_vcs_paths(
@@ -680,7 +754,8 @@ fn load_relation_analysis_with_closure_deadline(
     };
     let vcs = vcs_load.report;
     let vcs_digest = (query.mode == RelationAnalysisMode::Impact)
-        .then(|| digest_vcs_paths(&vcs_load.changed_paths));
+        .then(|| digest_vcs_paths(&vcs_load.changed_paths, control))
+        .transpose()?;
     if decoded_cursor
         .as_ref()
         .is_some_and(|cursor| cursor.vcs_digest != vcs_digest)
@@ -698,13 +773,17 @@ fn load_relation_analysis_with_closure_deadline(
             .saturating_add(external_relation_identity_bytes),
     );
     let projection_allowance = analysis_allowance.saturating_sub(vcs_load.retained_bytes);
+    #[cfg(test)]
+    analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::Composition);
     let mut topology_bytes =
-        serde_json::to_vec(&(nodes.values().collect::<Vec<_>>(), &edges))?.len() as u64;
-    let mut gaps = resolution_gap_findings(&relations);
+        serialized_bytes_controlled(&(nodes.values().collect::<Vec<_>>(), &edges), control)?;
+    let mut gaps = resolution_gap_findings(&relations, control)?;
     gaps.extend(closure.resolution_gaps.iter().cloned());
+    check_control(control)?;
     gaps.sort_by(|left, right| resolution_gap_identity(left).cmp(resolution_gap_identity(right)));
     gaps.dedup_by(|left, right| resolution_gap_identity(left) == resolution_gap_identity(right));
-    let gap_bytes = serde_json::to_vec(&gaps)?.len() as u64;
+    check_control(control)?;
+    let gap_bytes = serialized_bytes_controlled(&gaps, control)?;
     let projection_safe = topology_bytes.saturating_add(gap_bytes) <= projection_allowance;
     let mut findings = if projection_safe {
         gaps
@@ -717,7 +796,7 @@ fn load_relation_analysis_with_closure_deadline(
         edges.clear();
         nodes.retain(|_, node| node.entity.key() == relations.anchor.entity.key());
         topology_bytes =
-            serde_json::to_vec(&(nodes.values().collect::<Vec<_>>(), &edges))?.len() as u64;
+            serialized_bytes_controlled(&(nodes.values().collect::<Vec<_>>(), &edges), control)?;
         vec![AnalysisFinding {
             kind: AnalysisFindingKind::Component,
             status: AnalysisStatus::Inconclusive,
@@ -727,7 +806,7 @@ fn load_relation_analysis_with_closure_deadline(
             evidence: None,
         }]
     };
-    let initial_finding_bytes = serde_json::to_vec(&findings)?.len() as u64;
+    let initial_finding_bytes = serialized_bytes_controlled(&findings, control)?;
     let symbol_byte_budget = projection_allowance
         .saturating_sub(topology_bytes)
         .saturating_sub(initial_finding_bytes);
@@ -764,19 +843,20 @@ fn load_relation_analysis_with_closure_deadline(
     let generated_finding_count = u32::try_from(findings.len()).map_err(|_overflow| {
         ServiceError::InvalidInput("analysis finding count overflowed".to_string())
     })?;
-    let mut finding_bytes = serde_json::to_vec(&findings)?.len() as u64;
+    let mut finding_bytes = serialized_bytes_controlled(&findings, control)?;
     supplemental_work.retained_composition_bytes = vcs_load
         .retained_bytes
         .saturating_add(topology_bytes)
         .saturating_add(finding_bytes);
     while supplemental_work.retained_composition_bytes > analysis_allowance && findings.len() > 1 {
+        check_control(control)?;
         findings.pop();
         supplemental_work.composition_truncated = true;
         push_limit(
             &mut supplemental_work.reached_limits,
             GraphLimitKind::IntermediateBytes,
         );
-        finding_bytes = serde_json::to_vec(&findings)?.len() as u64;
+        finding_bytes = serialized_bytes_controlled(&findings, control)?;
         supplemental_work.retained_composition_bytes = vcs_load
             .retained_bytes
             .saturating_add(topology_bytes)
@@ -789,7 +869,7 @@ fn load_relation_analysis_with_closure_deadline(
             &mut supplemental_work.reached_limits,
             GraphLimitKind::IntermediateBytes,
         );
-        finding_bytes = serde_json::to_vec(&findings)?.len() as u64;
+        finding_bytes = serialized_bytes_controlled(&findings, control)?;
         supplemental_work.retained_composition_bytes = vcs_load
             .retained_bytes
             .saturating_add(topology_bytes)
@@ -892,6 +972,7 @@ fn load_relation_analysis_with_closure_deadline(
         findings,
     };
     nodes.clear();
+    check_control(control)?;
     Ok(RelationAnalysisDraft {
         report,
         output_bytes: query.relations.budget.output_bytes(),
@@ -1064,10 +1145,14 @@ fn encode_analysis_cursor(
 }
 
 /// Collect unique non-external nodes from a detailed relation page.
-fn collect_nodes(report: &DetailedRelationReport) -> BTreeMap<String, DetailedRelationNode> {
+fn collect_nodes(
+    report: &DetailedRelationReport,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<BTreeMap<String, DetailedRelationNode>> {
     let mut nodes = BTreeMap::new();
     insert_node(&mut nodes, &report.anchor);
     for row in &report.rows {
+        check_control(control)?;
         insert_node(&mut nodes, &row.source);
         if let Some(target) = &row.target {
             insert_node(&mut nodes, target);
@@ -1076,22 +1161,25 @@ fn collect_nodes(report: &DetailedRelationReport) -> BTreeMap<String, DetailedRe
             insert_node(&mut nodes, node);
         }
     }
-    nodes
+    Ok(nodes)
 }
 
 /// Project unresolved and ambiguous relation rows into typed findings.
-fn resolution_gap_findings(report: &DetailedRelationReport) -> Vec<AnalysisFinding> {
-    report
-        .rows
-        .iter()
-        .filter(|row| {
-            matches!(
-                row.relation.resolution(),
-                RelationResolution::Ambiguous { .. } | RelationResolution::Unresolved { .. }
-            )
-        })
-        .map(|row| resolution_gap_finding(&row.relation, &row.source))
-        .collect()
+fn resolution_gap_findings(
+    report: &DetailedRelationReport,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<Vec<AnalysisFinding>> {
+    let mut findings = Vec::new();
+    for row in &report.rows {
+        check_control(control)?;
+        if matches!(
+            row.relation.resolution(),
+            RelationResolution::Ambiguous { .. } | RelationResolution::Unresolved { .. }
+        ) {
+            findings.push(resolution_gap_finding(&row.relation, &row.source));
+        }
+    }
+    Ok(findings)
 }
 
 /// Build one exact resolution-gap finding from a detailed relation row.
@@ -1173,12 +1261,18 @@ fn insert_node(nodes: &mut BTreeMap<String, DetailedRelationNode>, node: &Detail
 }
 
 /// Collect local edges from one detailed relation page.
-fn collect_report_edges(report: &DetailedRelationReport) -> Vec<LocalEdge> {
-    report
-        .rows
-        .iter()
-        .filter_map(|row| local_edge(&row.relation, &row.source.entity, row.target.as_ref()))
-        .collect()
+fn collect_report_edges(
+    report: &DetailedRelationReport,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<Vec<LocalEdge>> {
+    let mut edges = Vec::new();
+    for row in &report.rows {
+        check_control(control)?;
+        if let Some(edge) = local_edge(&row.relation, &row.source.entity, row.target.as_ref()) {
+            edges.push(edge);
+        }
+    }
+    Ok(edges)
 }
 
 /// Convert a resolved local relation row into an algorithm edge.
@@ -1231,11 +1325,16 @@ fn close_induced_edges(
         induced_scope_closed: query.relations.direction == RelationDirection::Outbound,
         ..ClosureWork::default()
     };
-    let keys = nodes
-        .values()
-        .map(|node| node.entity.key().clone())
-        .collect::<Vec<_>>();
-    let known = nodes.keys().cloned().collect::<BTreeSet<_>>();
+    let mut keys = Vec::with_capacity(nodes.len());
+    let mut known = BTreeSet::new();
+    for (key, node) in nodes {
+        check_control(control)?;
+        keys.push(node.entity.key().clone());
+        known.insert(key.clone());
+    }
+    #[cfg(test)]
+    analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::Traversal);
+    check_control(control)?;
     for chunk in keys.chunks(MAX_REPOSITORY_GRAPH_FRONTIER) {
         let mut continuation: Option<RepositoryGraphAdjacencyContinuation> = None;
         loop {
@@ -1299,6 +1398,7 @@ fn close_induced_edges(
                 })?;
             work.decoded_bytes = work.decoded_bytes.saturating_add(read.work.decoded_bytes);
             for row in read.page.rows {
+                check_control(control)?;
                 if !analysis_relation_matches(&row.detail.relation, &query.relations) {
                     continue;
                 }
@@ -1808,11 +1908,14 @@ fn load_admitted_symbols(
             complete: !path_truncated,
             rows_retained: 0,
             retained_bytes: 0,
-            peak_bytes: symbol_path_request_bytes(&paths)?,
+            peak_bytes: symbol_path_request_bytes(&paths, control)?,
             reached_limits,
         });
     }
-    let grouping_reserve = symbol_hydration_reserve_bytes(&paths)?;
+    #[cfg(test)]
+    analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::SymbolHydration);
+    check_control(control)?;
+    let grouping_reserve = symbol_hydration_reserve_bytes(&paths, control)?;
     let decoded_byte_limit = byte_limit.saturating_sub(grouping_reserve);
     if decoded_byte_limit == 0 {
         push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
@@ -1822,7 +1925,7 @@ fn load_admitted_symbols(
             complete: false,
             rows_retained: 0,
             retained_bytes: 0,
-            peak_bytes: symbol_path_request_bytes(&paths)?,
+            peak_bytes: symbol_path_request_bytes(&paths, control)?,
             reached_limits,
         });
     }
@@ -1844,12 +1947,12 @@ fn load_admitted_symbols(
         }
         None => {}
     }
-    let ranges = symbol_path_ranges(&read.rows);
+    let ranges = symbol_path_ranges(&read.rows, control)?;
     let retained_bytes = read
         .work
         .decoded_bytes
-        .saturating_add(symbol_range_index_bytes(&ranges)?);
-    let peak_bytes = retained_bytes.saturating_add(symbol_path_request_bytes(&paths)?);
+        .saturating_add(symbol_range_index_bytes(&ranges, control)?);
+    let peak_bytes = retained_bytes.saturating_add(symbol_path_request_bytes(&paths, control)?);
     Ok(AdmittedSymbols {
         rows: read.rows,
         ranges,
@@ -1862,12 +1965,17 @@ fn load_admitted_symbols(
 }
 
 /// Build sorted non-overlapping exact-path ranges over sorted symbol rows.
-fn symbol_path_ranges(rows: &[CodeSymbol]) -> Vec<SymbolPathRange> {
+fn symbol_path_ranges(
+    rows: &[CodeSymbol],
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<Vec<SymbolPathRange>> {
     let mut ranges = Vec::new();
     let mut start = 0;
     while start < rows.len() {
+        check_control(control)?;
         let mut end = start.saturating_add(1);
         while end < rows.len() && rows[end].path == rows[start].path {
+            check_control(control)?;
             end = end.saturating_add(1);
         }
         ranges.push(SymbolPathRange {
@@ -1877,41 +1985,65 @@ fn symbol_path_ranges(rows: &[CodeSymbol]) -> Vec<SymbolPathRange> {
         });
         start = end;
     }
-    ranges.into_boxed_slice().into_vec()
+    Ok(ranges.into_boxed_slice().into_vec())
 }
 
 /// Count serialized request-path and worst-case path-range auxiliaries.
-fn symbol_hydration_reserve_bytes(paths: &[String]) -> ServiceResult<u64> {
-    let ranges = paths
-        .iter()
-        .map(|path| SymbolPathRange {
+fn symbol_hydration_reserve_bytes(
+    paths: &[String],
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    let mut ranges = Vec::with_capacity(paths.len());
+    for path in paths {
+        check_control(control)?;
+        ranges.push(SymbolPathRange {
             path: path.clone(),
             start: 0,
             end: 0,
-        })
-        .collect::<Vec<_>>();
-    Ok(symbol_path_request_bytes(paths)?.saturating_add(serialized_bytes(&ranges)?))
+        });
+    }
+    Ok(symbol_path_request_bytes(paths, control)?
+        .saturating_add(serialized_bytes_controlled(&ranges, control)?))
 }
 
 /// Count serialized-equivalent request-path bytes.
-fn symbol_path_request_bytes(paths: &[String]) -> ServiceResult<u64> {
-    serialized_bytes(paths)
+fn symbol_path_request_bytes(
+    paths: &[String],
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    serialized_bytes_controlled(paths, control)
 }
 
 /// Count serialized-equivalent retained path-range bytes.
-fn symbol_range_index_bytes(ranges: &[SymbolPathRange]) -> ServiceResult<u64> {
-    serialized_bytes(ranges)
+fn symbol_range_index_bytes(
+    ranges: &[SymbolPathRange],
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    serialized_bytes_controlled(ranges, control)
 }
 
-#[derive(Default)]
 /// Allocation-free serialized-equivalent byte counter.
-struct SerializedByteCounter {
+struct SerializedByteCounter<'a> {
     /// Bytes that the serializer would write.
     bytes: u64,
+    /// Shared request control checked between serializer writes.
+    control: Option<&'a IndexWorkControl>,
+    /// Whether serialization stopped on cancellation or deadline.
+    interrupted: bool,
 }
 
-impl Write for SerializedByteCounter {
+impl Write for SerializedByteCounter<'_> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if self
+            .control
+            .is_some_and(|control| control.check(IndexWorkStage::RepositoryTraversal).is_err())
+        {
+            self.interrupted = true;
+            // `Write::write_all` retries `Interrupted` indefinitely. Use a
+            // non-retriable transport error and translate it back to the
+            // control's typed terminal failure after serialization returns.
+            return Err(io::Error::other("analysis serialization interrupted"));
+        }
         self.bytes = self
             .bytes
             .checked_add(u64::try_from(buffer.len()).unwrap_or(u64::MAX))
@@ -1924,10 +2056,22 @@ impl Write for SerializedByteCounter {
     }
 }
 
-/// Measure one bounded auxiliary value without retaining an encoding.
-fn serialized_bytes<T: Serialize + ?Sized>(value: &T) -> ServiceResult<u64> {
-    let mut counter = SerializedByteCounter::default();
-    serde_json::to_writer(&mut counter, value)?;
+/// Measure one bounded value while retaining the request deadline and cancellation.
+fn serialized_bytes_controlled<T: Serialize + ?Sized>(
+    value: &T,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    let mut counter = SerializedByteCounter {
+        bytes: 0,
+        control,
+        interrupted: false,
+    };
+    let result = serde_json::to_writer(&mut counter, value);
+    if counter.interrupted {
+        check_control(control)?;
+    }
+    result?;
+    check_control(control)?;
     Ok(counter.bytes)
 }
 
@@ -2141,18 +2285,21 @@ fn degrees(
 fn usage_indegrees(
     nodes: &BTreeMap<String, DetailedRelationNode>,
     edges: &[LocalEdge],
-) -> BTreeMap<String, usize> {
-    let mut values = nodes
-        .keys()
-        .map(|key| (key.clone(), 0))
-        .collect::<BTreeMap<_, _>>();
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<BTreeMap<String, usize>> {
+    let mut values = BTreeMap::new();
+    for key in nodes.keys() {
+        check_control(control)?;
+        values.insert(key.clone(), 0);
+    }
     for edge in edges
         .iter()
         .filter(|edge| edge.kind != GraphRelationKind::Legacy(RelationKind::Contains))
     {
+        check_control(control)?;
         *values.entry(edge.target.clone()).or_default() += 1;
     }
-    values
+    Ok(values)
 }
 
 /// Project selected canonical identities into reusable analysis nodes.
