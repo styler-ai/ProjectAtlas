@@ -19236,7 +19236,7 @@ fn assert_codex_bridge_compatible_input_schemas(tools: &[Value]) -> Result<(), B
         let schema = tool
             .get("inputSchema")
             .ok_or_else(|| io::Error::other(format!("{name} omitted inputSchema")))?;
-        assert_no_local_schema_references(&format!("{name}.inputSchema"), schema)?;
+        assert_self_contained_input_schema(&format!("{name}.inputSchema"), schema)?;
     }
 
     let item_schema = tools_by_name
@@ -19298,33 +19298,41 @@ fn assert_codex_bridge_compatible_input_schemas(tools: &[Value]) -> Result<(), B
     Ok(())
 }
 
-/// Reject bridge-sensitive local definitions or references anywhere in an input schema.
-fn assert_no_local_schema_references(path: &str, value: &Value) -> Result<(), Box<dyn Error>> {
+/// Reject definitions or references anywhere in a self-contained input schema.
+fn assert_self_contained_input_schema(path: &str, value: &Value) -> Result<(), Box<dyn Error>> {
     match value {
         Value::Object(object) => {
             for (key, child) in object {
-                if key == "$defs"
-                    || key == "$ref"
-                        && child
-                            .as_str()
-                            .is_some_and(|reference| reference.starts_with("#/$defs/"))
-                {
+                if matches!(key.as_str(), "$defs" | "definitions" | "$ref") {
                     return Err(io::Error::other(format!(
-                        "Codex-facing schema retained local reference member {path}.{key}"
+                        "Codex-facing schema retained reference member {path}.{key}"
                     ))
                     .into());
                 }
-                assert_no_local_schema_references(&format!("{path}.{key}"), child)?;
+                assert_self_contained_input_schema(&format!("{path}.{key}"), child)?;
             }
         }
         Value::Array(values) => {
             for (index, child) in values.iter().enumerate() {
-                assert_no_local_schema_references(&format!("{path}[{index}]"), child)?;
+                assert_self_contained_input_schema(&format!("{path}[{index}]"), child)?;
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+#[test]
+fn codex_schema_audit_rejects_every_definition_and_reference_form() {
+    for schema in [
+        serde_json::json!({"$ref": "#/properties/value"}),
+        serde_json::json!({"items": {"$ref": "#/definitions/Value"}}),
+        serde_json::json!({"$ref": "https://example.invalid/schema.json"}),
+        serde_json::json!({"$defs": {"Value": {"type": "string"}}}),
+        serde_json::json!({"definitions": {"Value": {"type": "string"}}}),
+    ] {
+        assert!(assert_self_contained_input_schema("fixture", &schema).is_err());
+    }
 }
 
 /// Return whether one field schema admits the expected JSON primitive type.
