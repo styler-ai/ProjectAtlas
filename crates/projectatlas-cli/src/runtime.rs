@@ -1966,6 +1966,14 @@ fn is_bare_git_control_root(root: &Path) -> Result<bool, CliError> {
     if !structurally_git {
         return Ok(false);
     }
+    if control_root == root
+        && root
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case(".git"))
+    {
+        return Ok(true);
+    }
 
     let mut bytes = Vec::new();
     fs::File::open(&config)

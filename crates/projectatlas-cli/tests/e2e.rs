@@ -2960,6 +2960,23 @@ fn bare_git_root_returns_typed_worktree_guidance_without_state() -> Result<(), B
     let manager = temp.path().join("repository-manager");
     fs::create_dir(&manager)?;
     git_success(&manager, &["init"])?;
+    let common_git_dir = manager.join(".git");
+    let common_dir_init = Command::cargo_bin("projectatlas")?
+        .current_dir(&common_git_dir)
+        .args(["--format", "json", "init"])
+        .output()?;
+    if common_dir_init.status.success() {
+        return Err(
+            io::Error::other("main checkout common Git directory initialized as source").into(),
+        );
+    }
+    let common_dir_error: Value = serde_json::from_slice(&common_dir_init.stderr)?;
+    require_json_string(&common_dir_error, &["error", "kind"], "worktree_required")?;
+    if common_git_dir.join(ATLAS_DIR_NAME).exists() {
+        return Err(
+            io::Error::other("common Git directory refusal created ProjectAtlas state").into(),
+        );
+    }
     git_success(&manager, &["config", "core.bare", "true"])?;
 
     for selected in [&bare, &manager] {
