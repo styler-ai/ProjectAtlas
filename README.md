@@ -60,6 +60,8 @@ projectatlas token --view tui
 
 [![ProjectAtlas token-impact TUI showing estimated tokens avoided, file reads avoided, measured and modeled navigation work, savings composition, source rows, and a bounded Atlas map](docs/assets/token-impact-tui.png)](docs/assets/token-impact-tui.png)
 
+Compare the live dashboard with the [versioned TUI design reference](docs/design/token-impact-tui-reference.png).
+
 The TUI is a local snapshot, not provider billing data. It combines the reconciled token estimate, observed and modeled navigation work, source attribution, calibration status, and—at wide terminal sizes—a bounded live map from resolved repository relations. Rerun the command to refresh it; use `--theme light` for light terminals or `--theme terminal` to preserve the terminal background.
 
 Read the [token methodology](docs/benchmarks/large-application-token-savings.md) or the [TUI and agent-integration guide](docs/agent-integration.md#token-reporting-and-human-tui) for the detailed accounting and theme controls.
@@ -130,6 +132,7 @@ Full benchmark campaigns are manual-only and run only when explicitly requested.
 | Scan, ignore, purpose, and runtime settings | [Configuration](docs/configuration.md) |
 | Human CLI workflow | [Workflow](docs/workflow.md) |
 | Formats and compact agent output | [Format](docs/format.md) |
+| Structural summaries | [Structural summaries](docs/structural-summaries.md) |
 | Language and relation coverage | [Language support](https://styler-ai.github.io/ProjectAtlas/language-support/) · [Relation support](https://styler-ai.github.io/ProjectAtlas/relation-support/) |
 | Token methodology and large-app audit | [Token-savings audit](docs/benchmarks/large-application-token-savings.md) |
 | System, database, indexing, navigation, and packaging design | [Architecture](docs/projectatlas-3-architecture.md) |
