@@ -3326,6 +3326,8 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
     fs::write(machine_bin.join("projectatlas.cmd"), "@exit /b 0\r\n")?;
     let verified_runtime = user_bin.join("projectatlas.cmd");
     fs::write(&verified_runtime, "@exit /b 0\r\n")?;
+    let hanging_runtime = temp.path().join("hanging-projectatlas.cmd");
+    fs::write(&hanging_runtime, "@echo off\r\n:probe\r\ngoto probe\r\n")?;
 
     let installer = workspace_root()?
         .join("plugins")
@@ -3351,8 +3353,11 @@ if ($errors.Count -ne 0) {
     throw ($errors | Out-String)
 }
 $names = @(
+    "Convert-ProjectAtlasVersionTag",
     "Get-NormalizedPathEntry",
-    "Test-ProjectAtlasBareCommandResolutionOnPath"
+    "Invoke-ProjectAtlasRuntimeInfo",
+    "Test-ProjectAtlasBareCommandResolutionOnPath",
+    "Test-ProjectAtlasRuntime"
 )
 $functions = $ast.FindAll({
     param($node)
@@ -3374,12 +3379,21 @@ if (Test-ProjectAtlasBareCommandResolutionOnPath $machineFirst $env:PROJECTATLAS
 if (-not (Test-ProjectAtlasBareCommandResolutionOnPath $userFirst $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME)) {
     throw "Verified runtime first on PATH was not classified as restart-recoverable"
 }
+$probe = [Diagnostics.Stopwatch]::StartNew()
+if (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_HANGING_RUNTIME $null) {
+    throw "Nonreturning runtime was accepted"
+}
+$probe.Stop()
+if ($probe.Elapsed -gt [TimeSpan]::FromSeconds(10)) {
+    throw "Nonreturning runtime probe exceeded its bounded tolerance: $($probe.Elapsed)"
+}
 "#,
         ])
         .env("PROJECTATLAS_TEST_INSTALLER", installer)
         .env("PROJECTATLAS_TEST_MACHINE_BIN", &machine_bin)
         .env("PROJECTATLAS_TEST_USER_BIN", &user_bin)
         .env("PROJECTATLAS_TEST_VERIFIED_RUNTIME", &verified_runtime)
+        .env("PROJECTATLAS_TEST_HANGING_RUNTIME", &hanging_runtime)
         .output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(

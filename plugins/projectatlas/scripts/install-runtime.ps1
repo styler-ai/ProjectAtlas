@@ -89,53 +89,82 @@ function Convert-ProjectAtlasVersionTag {
     return $Version.Trim().TrimStart("v")
 }
 
-function Test-ProjectAtlasRuntime {
-    param(
-        [string]$FilePath,
-        [string]$ExpectedVersion
-    )
-    if (-not $FilePath -or -not (Test-Path -LiteralPath $FilePath)) {
-        return $false
-    }
-    try {
-        $runtimeJson = & $FilePath --format json runtime-info 2>$null | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            return $false
-        }
-        $payload = $runtimeJson | ConvertFrom-Json
-        $runtime = if ($payload.runtime) { $payload.runtime } else { $payload }
-        $expectedRuntimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
-        $versionMatches = -not $expectedRuntimeVersion -or $runtime.version -eq $expectedRuntimeVersion
-        return $runtime.project -eq "ProjectAtlas" `
-            -and [int]$runtime.major_version -ge 3 `
-            -and @($runtime.capabilities) -contains "mcp" `
-            -and $runtime.text_format -eq "TOON" `
-            -and $versionMatches
-    }
-    catch {
-        return $false
-    }
-}
-
-function Get-ProjectAtlasRuntimeVersion {
+function Invoke-ProjectAtlasRuntimeInfo {
     param(
         [string]$FilePath
     )
     if (-not $FilePath -or -not (Test-Path -LiteralPath $FilePath)) {
         return $null
     }
+    $probeTimeoutMs = 5000
+    $maximumOutputBytes = 1024 * 1024
+    $probeId = [Guid]::NewGuid().ToString("N")
+    $standardOutput = Join-Path ([IO.Path]::GetTempPath()) "projectatlas-runtime-probe-$probeId.stdout"
+    $standardError = Join-Path ([IO.Path]::GetTempPath()) "projectatlas-runtime-probe-$probeId.stderr"
+    $process = $null
     try {
-        $runtimeJson = & $FilePath --format json runtime-info 2>$null | Out-String
-        if ($LASTEXITCODE -ne 0) {
+        $process = Start-Process `
+            -FilePath $FilePath `
+            -ArgumentList @("--format", "json", "runtime-info") `
+            -WindowStyle Hidden `
+            -PassThru `
+            -RedirectStandardOutput $standardOutput `
+            -RedirectStandardError $standardError
+        # Windows PowerShell 5 can lose a fast child's exit code unless its handle is opened first.
+        [void]$process.Handle
+        if (-not $process.WaitForExit($probeTimeoutMs)) {
+            $process.Kill()
+            $process.WaitForExit()
             return $null
         }
+        $process.WaitForExit()
+        $process.Refresh()
+        if ($process.ExitCode -ne 0) {
+            return $null
+        }
+        $outputFile = Get-Item -LiteralPath $standardOutput -ErrorAction Stop
+        if ($outputFile.Length -gt $maximumOutputBytes) {
+            return $null
+        }
+        $runtimeJson = Get-Content -Raw -LiteralPath $standardOutput
         $payload = $runtimeJson | ConvertFrom-Json
-        $runtime = if ($payload.runtime) { $payload.runtime } else { $payload }
-        return $runtime.version
+        return $(if ($payload.runtime) { $payload.runtime } else { $payload })
     }
     catch {
         return $null
     }
+    finally {
+        if ($process) {
+            $process.Dispose()
+        }
+        Remove-Item -LiteralPath $standardOutput, $standardError -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-ProjectAtlasRuntime {
+    param(
+        [string]$FilePath,
+        [string]$ExpectedVersion
+    )
+    $runtime = Invoke-ProjectAtlasRuntimeInfo $FilePath
+    if (-not $runtime) {
+        return $false
+    }
+    $expectedRuntimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
+    $versionMatches = -not $expectedRuntimeVersion -or $runtime.version -eq $expectedRuntimeVersion
+    return $runtime.project -eq "ProjectAtlas" `
+        -and [int]$runtime.major_version -ge 3 `
+        -and @($runtime.capabilities) -contains "mcp" `
+        -and $runtime.text_format -eq "TOON" `
+        -and $versionMatches
+}
+
+function Get-ProjectAtlasRuntimeVersion {
+    param(
+        [string]$FilePath
+    )
+    $runtime = Invoke-ProjectAtlasRuntimeInfo $FilePath
+    return $(if ($runtime) { $runtime.version } else { $null })
 }
 
 function Get-KnownProjectAtlasShimPaths {
