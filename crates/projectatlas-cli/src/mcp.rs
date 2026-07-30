@@ -1226,6 +1226,7 @@ struct AtlasPurposeSetParams {
 
 /// MCP payload for one batch purpose review item.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[schemars(inline)]
 struct AtlasPurposeReviewItem {
     /// Indexed repository-relative path.
     path: String,
