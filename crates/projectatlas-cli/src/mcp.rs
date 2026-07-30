@@ -9,18 +9,19 @@ use crate::atlas_map::{
 #[cfg(test)]
 use crate::runtime::run_scan_pipeline;
 use crate::runtime::{
-    DEFAULT_HEALTH_LIMIT, INDEX_WORKER_SAFE_CEILING, IndexProjectMismatch, IndexRefreshRequired,
-    IndexVerificationIncomplete, InitBootstrapOptions, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES,
-    PurposeCuratorHandoff, PurposeLintLevel, PurposeReviewRequest, ScanRuntimePlan,
-    SourceObservationRegistry, SymbolBuildOptions, UsageRuntimeInstance, VerifiedReadOutcome,
-    VerifiedReadStamp, build_settings_report, byte_count_to_tokens, canonical_project_root,
+    DEFAULT_HEALTH_LIMIT, INDEX_WORKER_SAFE_CEILING, IndexInitRequired, IndexProjectMismatch,
+    IndexRefreshRequired, IndexVerificationIncomplete, InitBootstrapOptions, MAX_HEALTH_LIMIT,
+    MAX_SYMBOL_FILE_BYTES, ProjectWorktreeRequired, PurposeCuratorHandoff, PurposeLintLevel,
+    PurposeReviewRequest, ScanRuntimePlan, SourceObservationRegistry, SymbolBuildOptions,
+    UsageRuntimeInstance, VerifiedReadOutcome, VerifiedReadStamp, build_settings_report,
+    byte_count_to_tokens, canonical_project_root, canonical_source_project_root,
     config_root_mismatch_error, default_mcp_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
-    index_work_control, init_config_path, lint_database_if_present, next_step_report,
-    next_step_report_payload, normalized_folder_filter, open_atlas_store_for_project,
-    open_atlas_store_read_only_for_project, open_federated_atlas_stores_for_project,
-    purpose_curation_page, purpose_curator_handoff, ranked_file_nodes_with_reasons,
-    ranked_folder_nodes_with_reasons, read_indexed_file_content,
+    index_init_required, index_work_control, init_config_path, lint_database_if_present,
+    next_step_report, next_step_report_payload, normalized_folder_filter,
+    open_atlas_store_for_project, open_atlas_store_read_only_for_project,
+    open_federated_atlas_stores_for_project, purpose_curation_page, purpose_curator_handoff,
+    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
     render_health_page, render_purpose_curation_page, render_purpose_review_report,
     reset_index_files, review_purposes, run_init_bootstrap, run_scan_pipeline_controlled,
@@ -36,9 +37,9 @@ use crate::{
     AgentErrorKind, CliError, DEFAULT_FILE_SUMMARY_LIMIT, DatabaseFilesystemErrorPayload,
     HarnessConfig, OutputFormat, RootTransition, RuntimeInfoReport, SearchRetrievalModeArg,
     build_harness_mcp_config_report, build_parity_report, build_root_report, build_runtime_info,
-    database_filesystem_error_payload, finalize_coverage_output, render_code_slice,
-    render_file_summary, render_parity_report, render_root_report, render_runtime_info,
-    render_search_report, render_watch_status,
+    controlled_named_output, database_filesystem_error_payload, finalize_coverage_output,
+    render_code_slice, render_file_summary, render_parity_report, render_root_report,
+    render_runtime_info, render_search_report, render_watch_status,
 };
 use projectatlas_core::graph::{
     Completeness, ConfidenceClass, CoverageRecord, EntitySelector, ExternalSelector,
@@ -242,9 +243,6 @@ const MCP_SETTINGS_RESPONSE_LIMIT_SUFFIX: &str = "-byte diagnostic limit";
 const MCP_SOURCE_TOKEN_BASELINE_LIMIT: usize = 128;
 /// Default MCP config server key.
 const MCP_DEFAULT_CONFIG_SERVER_NAME: &str = "projectatlas";
-/// Missing-index recovery guidance for MCP tools.
-const MISSING_INDEX_GUIDANCE: &str =
-    "run atlas_scan with project_path or atlas_set_project_path first";
 /// Recovery guidance when a path names a subfolder rather than another selected root.
 const SELECTED_ROOT_ASSERTION_GUIDANCE: &str = "pass project_path or call atlas_set_project_path for another repository, or use normal filesystem tools such as Get-Content or rg for files inside the selected project";
 /// Recovery guidance when a path escapes the selected `ProjectAtlas` root.
@@ -1226,6 +1224,7 @@ struct AtlasPurposeSetParams {
 
 /// MCP payload for one batch purpose review item.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[schemars(inline)]
 struct AtlasPurposeReviewItem {
     /// Indexed repository-relative path.
     path: String,
@@ -1625,6 +1624,12 @@ struct McpErrorPayload {
     /// Bounded local-source mismatch details when refresh is required.
     #[serde(skip_serializing_if = "Option::is_none")]
     refresh_required: Option<IndexRefreshRequired>,
+    /// Exact selected-root initialization handoff.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    init_required: Option<IndexInitRequired>,
+    /// Bare/common Git root selection diagnostic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worktree_required: Option<ProjectWorktreeRequired>,
     /// Bounded source/policy diagnostic when verification cannot complete.
     #[serde(skip_serializing_if = "Option::is_none")]
     verification_incomplete: Option<IndexVerificationIncomplete>,
@@ -1639,13 +1644,13 @@ struct McpErrorPayload {
     search_capability: Option<crate::SearchCapabilityErrorPayload>,
     /// Reusable recovery call when refresh is required.
     #[serde(skip_serializing_if = "Option::is_none")]
-    next: Option<McpRefreshNextCall>,
+    next: Option<McpNextCall>,
 }
 
-/// Direct recovery selector for a stale index.
+/// Direct MCP recovery selector.
 #[derive(Debug, Serialize)]
-struct McpRefreshNextCall {
-    /// Existing MCP tool that safely refreshes the selected project.
+struct McpNextCall {
+    /// Existing MCP tool that safely recovers the selected project.
     tool: &'static str,
     /// Canonical project root for per-call isolation.
     project_path: String,
@@ -2721,8 +2726,8 @@ struct McpCompactBriefRecommendation {
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum McpBriefRecommendationKind {
-    /// Refresh or create the `ProjectAtlas` index.
-    Scan,
+    /// Initialize the selected project-local atlas.
+    Init,
     /// Inspect the already-ranked file summary.
     Summary,
     /// Search the index when ranking has no directly navigable file.
@@ -3179,11 +3184,7 @@ impl ProjectAtlasMcpServer {
     /// Open the durable index through one root-bound read snapshot.
     fn open_read_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
         if !state.db_path.exists() {
-            return Err(CliError::InvalidInput(format!(
-                "ProjectAtlas index '{}' is missing for selected project root '{}'; {MISSING_INDEX_GUIDANCE}",
-                state.db_path.display(),
-                state.root.display()
-            )));
+            return Err(index_init_required(&state.root, &state.db_path));
         }
         open_atlas_store_read_only_for_project(&state.db_path, &state.root)
     }
@@ -3227,11 +3228,7 @@ impl ProjectAtlasMcpServer {
         F: FnMut(&AtlasStore, VerifiedReadStamp, &IndexWorkControl) -> Result<T, CliError>,
     {
         if !state.db_path.is_file() {
-            return Err(CliError::InvalidInput(format!(
-                "ProjectAtlas index '{}' is missing for selected project root '{}'; {MISSING_INDEX_GUIDANCE}",
-                state.db_path.display(),
-                state.root.display()
-            )));
+            return Err(index_init_required(&state.root, &state.db_path));
         }
         let control =
             index_work_control(&SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None));
@@ -3328,11 +3325,7 @@ impl ProjectAtlasMcpServer {
     /// Open an existing selected-project index for purpose or health mutation.
     fn open_existing_mut_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
         if !state.db_path.is_file() {
-            return Err(CliError::InvalidInput(format!(
-                "ProjectAtlas index '{}' is missing for selected project root '{}'; {MISSING_INDEX_GUIDANCE}",
-                state.db_path.display(),
-                state.root.display()
-            )));
+            return Err(index_init_required(&state.root, &state.db_path));
         }
         Self::open_mut_store(state)
     }
@@ -3740,6 +3733,7 @@ impl ProjectAtlasMcpServer {
         let purpose_limit = Self::brief_limit(params.purpose_limit);
         let project = Self::selected_project_capability(&state);
         if !state.db_path.exists() {
+            let init_project_path = Some(normalize_native_path_display(&state.root));
             return Ok(McpSessionBrief {
                 project,
                 policy: self.brief_policy(),
@@ -3753,7 +3747,7 @@ impl ProjectAtlasMcpServer {
                     items: Vec::new(),
                 },
                 purpose_handoff: None,
-                recommendations: Self::missing_index_recommendations(params.project_path),
+                recommendations: Self::missing_index_recommendations(init_project_path),
                 limits: McpBriefLimits {
                     folder_limit,
                     file_limit,
@@ -4094,8 +4088,8 @@ impl ProjectAtlasMcpServer {
     fn missing_index_recommendations(project_path: Option<String>) -> Vec<McpBriefRecommendation> {
         vec![
             McpBriefRecommendation {
-                kind: McpBriefRecommendationKind::Scan,
-                target: MCP_TOOL_ATLAS_SCAN.to_string(),
+                kind: McpBriefRecommendationKind::Init,
+                target: MCP_TOOL_ATLAS_INIT.to_string(),
                 reason: MCP_BRIEF_REASON_SELECTED_INDEX_MISSING.to_string(),
                 arguments: Self::project_path_arguments(project_path.clone()),
             },
@@ -4535,10 +4529,13 @@ impl ProjectAtlasMcpServer {
 
     /// Read the active MCP project state.
     fn active_project_state(&self) -> Result<McpProjectState, CliError> {
-        self.project_state
+        let state = self
+            .project_state
             .read()
             .map(|state| state.clone())
-            .map_err(|_poisoned| CliError::Mcp(MCP_PROJECT_STATE_LOCK_POISONED.to_string()))
+            .map_err(|_poisoned| CliError::Mcp(MCP_PROJECT_STATE_LOCK_POISONED.to_string()))?;
+        canonical_source_project_root(&state.root)?;
+        Ok(state)
     }
 
     /// Replace the active MCP project state.
@@ -4867,7 +4864,7 @@ impl ProjectAtlasMcpServer {
         root: &Path,
         validation: McpConfigValidation,
     ) -> Result<McpProjectState, CliError> {
-        let root = canonical_project_root(root)?;
+        let root = canonical_source_project_root(root)?;
         if !root.is_dir() {
             return Err(CliError::InvalidInput(format!(
                 "project path '{}' is not a directory",
@@ -5218,6 +5215,31 @@ impl ProjectAtlasMcpServer {
         Ok(audited)
     }
 
+    /// Prefix one controlled analysis payload with selected root/DB metadata.
+    fn with_selected_project_audit_controlled(
+        state: &McpProjectState,
+        routed_project: bool,
+        toon: String,
+        control: &IndexWorkControl,
+    ) -> Result<String, CliError> {
+        control.check(projectatlas_core::IndexWorkStage::RepositoryTraversal)?;
+        if !routed_project {
+            return Ok(toon);
+        }
+        let prefix = controlled_named_output(
+            OutputFormat::Toon,
+            MCP_PAYLOAD_SELECTED_PROJECT,
+            &Self::project_state_payload(state),
+            control,
+        )?;
+        let mut audited = String::with_capacity(prefix.len() + 1 + toon.len());
+        audited.push_str(&prefix);
+        audited.push('\n');
+        audited.push_str(&toon);
+        control.check(projectatlas_core::IndexWorkStage::RepositoryTraversal)?;
+        Ok(audited)
+    }
+
     /// Return a path parameter or the selected project root.
     fn path_or_project_root(
         state: &McpProjectState,
@@ -5319,12 +5341,39 @@ impl ProjectAtlasMcpServer {
         let (
             kind,
             refresh_required,
+            init_required,
+            worktree_required,
             verification_incomplete,
             project_mismatch,
             database_filesystem,
             search_capability,
             next,
         ) = match error {
+            CliError::InitRequired(report) => (
+                AgentErrorKind::InitRequired,
+                None,
+                Some(report.as_ref().clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(McpNextCall {
+                    tool: MCP_TOOL_ATLAS_INIT,
+                    project_path: report.project_root.clone(),
+                }),
+            ),
+            CliError::WorktreeRequired(report) => (
+                AgentErrorKind::WorktreeRequired,
+                None,
+                None,
+                Some(report.as_ref().clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
             CliError::RefreshRequired(report) => (
                 AgentErrorKind::RefreshRequired,
                 Some(report.as_ref().clone()),
@@ -5332,13 +5381,17 @@ impl ProjectAtlasMcpServer {
                 None,
                 None,
                 None,
-                Some(McpRefreshNextCall {
+                None,
+                None,
+                Some(McpNextCall {
                     tool: MCP_TOOL_ATLAS_WATCH_ONCE,
                     project_path: report.project_root.clone(),
                 }),
             ),
             CliError::VerificationIncomplete(report) => (
                 AgentErrorKind::VerificationIncomplete,
+                None,
+                None,
                 None,
                 Some(report.as_ref().clone()),
                 None,
@@ -5348,6 +5401,8 @@ impl ProjectAtlasMcpServer {
             ),
             CliError::ProjectMismatch(report) => (
                 AgentErrorKind::ProjectMismatch,
+                None,
+                None,
                 None,
                 None,
                 Some(report.as_ref().clone()),
@@ -5365,6 +5420,8 @@ impl ProjectAtlasMcpServer {
                 None,
                 None,
                 None,
+                None,
+                None,
                 Some(crate::SearchCapabilityErrorPayload {
                     requested_mode: *requested_mode,
                     state,
@@ -5373,10 +5430,22 @@ impl ProjectAtlasMcpServer {
                 None,
             ),
             _ => database_filesystem_error_payload(error).map_or(
-                (AgentErrorKind::Error, None, None, None, None, None, None),
+                (
+                    AgentErrorKind::Error,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
                 |(kind, database_filesystem)| {
                     (
                         kind,
+                        None,
+                        None,
                         None,
                         None,
                         None,
@@ -5392,6 +5461,8 @@ impl ProjectAtlasMcpServer {
                 kind,
                 message: error.to_string(),
                 refresh_required,
+                init_required,
+                worktree_required,
                 verification_incomplete,
                 project_mismatch,
                 database_filesystem,
@@ -6482,11 +6553,17 @@ impl ProjectAtlasMcpServer {
                 SymbolRelationStores::Single(store) => {
                     let draft = load_relation_analysis(store, &query, Some(control))?;
                     draft
-                        .fit_output(|report| {
-                            Self::with_selected_project_audit(
+                        .fit_output(|report, control| {
+                            Self::with_selected_project_audit_controlled(
                                 state,
                                 routed_project,
-                                Self::encode_named_payload(MCP_PAYLOAD_SYMBOL_RELATIONS, report)?,
+                                controlled_named_output(
+                                    OutputFormat::Toon,
+                                    MCP_PAYLOAD_SYMBOL_RELATIONS,
+                                    report,
+                                    control,
+                                )?,
+                                control,
                             )
                         })?
                         .1
@@ -6494,11 +6571,17 @@ impl ProjectAtlasMcpServer {
                 SymbolRelationStores::Federated(stores) => {
                     let draft = load_federated_relation_analysis(stores, &query, Some(control))?;
                     draft
-                        .fit_output(|report| {
-                            Self::with_selected_project_audit(
+                        .fit_output(|report, control| {
+                            Self::with_selected_project_audit_controlled(
                                 state,
                                 routed_project,
-                                Self::encode_named_payload(MCP_PAYLOAD_SYMBOL_RELATIONS, report)?,
+                                controlled_named_output(
+                                    OutputFormat::Toon,
+                                    MCP_PAYLOAD_SYMBOL_RELATIONS,
+                                    report,
+                                    control,
+                                )?,
+                                control,
                             )
                         })?
                         .1
@@ -7278,7 +7361,8 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
     use std::io;
-    use std::time::Duration;
+    use std::process::Command as StdCommand;
+    use std::time::{Duration, Instant};
 
     fn require(condition: bool, message: &str) -> Result<(), Box<dyn std::error::Error>> {
         if condition {
@@ -8300,6 +8384,17 @@ mod tests {
             "MCP relation analysis omitted its closed mode, findings, work, or reusable next call",
         )?;
 
+        let state = ProjectAtlasMcpServer::project_state_from_root(Path::new(project_path))?;
+        let publication_before = ProjectAtlasMcpServer::open_read_store(&state)?
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("MCP impact fixture publication missing"))?;
+        let task_records_before = server
+            .task_registry
+            .read()
+            .map_err(|_poisoned| io::Error::other("task registry lock poisoned"))?
+            .records
+            .len();
+        let impact_started = Instant::now();
         let impact = server.atlas_symbol_relations_response(
             &AtlasSymbolRelationsParams {
                 project_path: Some(project_path.to_string()),
@@ -8309,17 +8404,77 @@ mod tests {
                 symbol: Some("first".to_string()),
                 direction: Some("outbound".to_string()),
                 depth: Some(2),
-                limit: Some(50),
+                limit: Some(8),
+                edge_limit: Some(8),
+                node_limit: Some(16),
+                visited_limit: Some(16),
+                occurrence_total_limit: Some(16),
+                intermediate_bytes: Some(128 * 1_024),
+                deadline_ms: Some(1_000),
+                output_bytes: Some(64 * 1_024),
                 analysis_mode: Some("impact".to_string()),
                 vcs: Some("working_tree".to_string()),
+                include_dead_code: Some(true),
                 ..AtlasSymbolRelationsParams::default()
             },
             None,
         );
+        let impact_elapsed = impact_started.elapsed();
         require(
-            impact.contains("mode: impact")
+            impact_elapsed <= Duration::from_secs(5)
+                && impact.contains("mode: impact")
                 && (impact.contains("state: available") || impact.contains("state: unavailable")),
-            "MCP impact analysis omitted its closed mode or typed VCS state",
+            "MCP impact analysis exceeded its elapsed tolerance or omitted typed mode/VCS state",
+        )?;
+        let impact_value: serde_json::Value = toon_format::decode_default(&impact)?;
+        let impact_report = impact_value
+            .get(MCP_PAYLOAD_SYMBOL_RELATIONS)
+            .ok_or_else(|| io::Error::other("MCP impact response omitted its envelope"))?;
+        let bounded_work = [
+            ("/returned", 8_u64),
+            ("/work/relations/inspected_edges", 8),
+            ("/work/relations/active_nodes", 16),
+            ("/work/relations/visited_nodes", 16),
+            ("/work/analyzed_nodes", 16),
+            ("/work/analyzed_edges", 8),
+            ("/work/peak_intermediate_bytes", 128 * 1_024),
+            ("/work/rendered_output_bytes", 64 * 1_024),
+        ];
+        require(
+            impact.len() <= 64 * 1_024
+                && bounded_work.iter().all(|(path, limit)| {
+                    impact_report
+                        .pointer(path)
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some_and(|observed| observed <= *limit)
+                }),
+            "MCP impact analysis crossed or omitted a declared row/node/edge/visited/intermediate/output budget",
+        )?;
+        require(
+            ProjectAtlasMcpServer::open_read_store(&state)?
+                .index_publication()?
+                .as_ref()
+                == Some(&publication_before)
+                && server
+                    .task_registry
+                    .read()
+                    .map_err(|_poisoned| io::Error::other("task registry lock poisoned"))?
+                    .records
+                    .len()
+                    == task_records_before,
+            "read-only MCP impact analysis changed publication or retained a task record",
+        )?;
+        let follow_up_started = Instant::now();
+        let follow_up = server.atlas_overview_response(
+            AtlasProjectParams {
+                project_path: Some(project_path.to_string()),
+            },
+            None,
+        );
+        require(
+            follow_up_started.elapsed() <= Duration::from_secs(2)
+                && follow_up.contains("overview:"),
+            "immediate MCP follow-up read was not responsive after bounded impact analysis",
         )?;
 
         let trace = server.atlas_symbol_relations_response(
@@ -8429,6 +8584,45 @@ mod tests {
     }
 
     #[test]
+    fn bare_startup_and_root_set_preserve_worktree_required_without_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let bare = temp.path().join("repository.git");
+        let output = StdCommand::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare)
+            .output()?;
+        require(output.status.success(), "git init --bare failed")?;
+        let db_path = bare.join(".projectatlas").join("projectatlas.db");
+        let server =
+            ProjectAtlasMcpServer::new(db_path, None, "mcp-bare-root-test".to_string(), false);
+
+        let Err(error) = server.active_project_state() else {
+            return Err(io::Error::other("bare MCP startup state was exposed as active").into());
+        };
+        if !matches!(error, CliError::WorktreeRequired(_)) {
+            return Err(io::Error::other(format!(
+                "bare MCP startup did not preserve typed worktree_required state: {error:?}"
+            ))
+            .into());
+        }
+
+        let response = server.atlas_root_set(Parameters(AtlasRootSetParams {
+            root: bare.to_string_lossy().to_string(),
+            transition: None,
+            nearest_project: None,
+        }));
+        require(
+            response.contains("worktree_required"),
+            "atlas_root_set did not reject a bare Git control root",
+        )?;
+        require(
+            !bare.join(".projectatlas").exists(),
+            "bare MCP startup or root-set refusal created project state",
+        )
+    }
+
+    #[test]
     fn selected_project_config_cannot_redirect_root() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let repo_a = temp.path().join("repo-a");
@@ -8501,8 +8695,16 @@ mod tests {
             return Err(io::Error::other("missing index opened unexpectedly").into());
         };
         require(
-            error.to_string().contains("index"),
-            "missing index error did not mention index",
+            matches!(error, CliError::InitRequired(_)),
+            "missing index did not return typed init_required state",
+        )?;
+        let payload = ProjectAtlasMcpServer::encode_error_payload(&error);
+        require(
+            payload.contains("kind: init_required")
+                && payload.contains("init_required:")
+                && payload.contains("tool: atlas_init")
+                && payload.contains(&normalize_native_path_display(&repo)),
+            "missing index payload did not contain the exact atlas_init recovery call",
         )?;
         require(
             !repo.join(".projectatlas").exists(),
@@ -8622,9 +8824,12 @@ mod tests {
         )?;
         require(
             brief.recommendations.iter().any(|recommendation| {
-                matches!(recommendation.kind, McpBriefRecommendationKind::Scan)
+                matches!(recommendation.kind, McpBriefRecommendationKind::Init)
+                    && recommendation.target == MCP_TOOL_ATLAS_INIT
+                    && recommendation.arguments.get(MCP_BRIEF_ARG_PROJECT_PATH)
+                        == Some(&serde_json::json!(normalize_native_path_display(&repo)))
             }),
-            "missing-index brief did not recommend scan",
+            "missing-index brief did not recommend atlas_init for the exact selected root",
         )?;
         require(
             !repo.join(".projectatlas").exists(),

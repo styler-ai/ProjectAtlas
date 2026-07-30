@@ -2,6 +2,7 @@
 //! Shared runtime orchestration for the `ProjectAtlas` CLI and MCP adapters.
 
 mod graph_projection;
+mod module_resolution;
 #[cfg(feature = "optional-parser-supervisor")]
 mod optional_parser_runtime;
 mod source_observation;
@@ -37,6 +38,8 @@ use projectatlas_core::language::{
     LanguageRegistryReport, SymbolParserOwner, accepted_language_capability_digest,
     language_capability, language_registry_digest, language_registry_report,
 };
+#[cfg(all(test, feature = "optional-parser-supervisor"))]
+use projectatlas_core::optional_parser_pack::OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION;
 use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::relation_capabilities::{
     RelationFamilyInventoryReport, relation_family_inventory_report,
@@ -65,8 +68,9 @@ use projectatlas_db::{
     validate_database_location,
 };
 use projectatlas_fs::{
-    FsError, ScanLimits, ScanOptions, gitignore_excludes_path, scan_path_controlled, scan_repo,
-    scan_repo_controlled, scan_repo_controlled_with_work,
+    FsError, RootScanPolicy, ScanLimits, ScanOptions, gitignore_excludes_path,
+    scan_path_with_policy_controlled, scan_repo, scan_repo_controlled,
+    scan_repo_controlled_with_work,
 };
 use projectatlas_service::{
     CoverageDiscoveryReport, FederatedInputWork, FederatedStore, FilePathMatcher,
@@ -85,6 +89,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::process::{Command as StdCommand, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TrySendError};
@@ -99,6 +104,10 @@ pub(crate) const DEFAULT_HEALTH_LIMIT: usize = 50;
 pub(crate) const MAX_HEALTH_LIMIT: usize = 200;
 /// Maximum JSON bytes read for one CLI purpose-review batch.
 pub(crate) const MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES: u64 = 2 * 1_024 * 1_024;
+/// Maximum output retained from one effective Git config query.
+const MAX_GIT_CONFIG_QUERY_OUTPUT_BYTES: usize = 64 * 1_024;
+/// Maximum time allowed for one effective Git config query.
+const GIT_CONFIG_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Default whole-operation deadline when no narrower parser limit is supplied.
 const DEFAULT_INDEX_WORK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -250,6 +259,10 @@ const INDEX_DERIVATION_CONTRACT_VERSION: &str = "2";
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum IndexReadStatus {
+    /// The selected project has not been initialized.
+    InitRequired,
+    /// A bare/common Git directory was selected instead of a source worktree.
+    WorktreeRequired,
     /// Current saved local source differs from the durable index.
     RefreshRequired,
     /// Current saved local source could not be inspected completely.
@@ -337,6 +350,26 @@ pub(crate) enum IndexVerificationReason {
     PublicationContractMismatch,
 }
 
+/// Typed first-use handoff for one selected project root.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct IndexInitRequired {
+    /// Canonical selected project root that needs initialization.
+    pub(crate) project_root: String,
+    /// Project-local durable index path that initialization will create.
+    pub(crate) database: String,
+    /// Stable first-use state for adapters.
+    pub(crate) status: IndexReadStatus,
+}
+
+/// Typed refusal when a bare/common Git directory is selected as source.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct ProjectWorktreeRequired {
+    /// Canonical bare/common Git directory that was selected.
+    pub(crate) project_root: String,
+    /// Stable source-selection state for adapters.
+    pub(crate) status: IndexReadStatus,
+}
+
 /// Bounded typed report returned before a stale indexed read can execute.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct IndexRefreshRequired {
@@ -402,6 +435,26 @@ impl fmt::Display for IndexRefreshRequired {
             formatter,
             "refresh_required: {} indexed path(s) differ from current local source; run `projectatlas watch --once` or `atlas_watch_once` before retrying",
             self.changed
+        )
+    }
+}
+
+impl fmt::Display for IndexInitRequired {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "init_required: ProjectAtlas index '{}' is missing for selected project root '{}'; run `projectatlas init` from that exact root or call `atlas_init` with that exact `project_path`",
+            self.database, self.project_root
+        )
+    }
+}
+
+impl fmt::Display for ProjectWorktreeRequired {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "worktree_required: '{}' is a bare/common Git directory without checked-out source; select a checked-out worktree and initialize that exact root",
+            self.project_root
         )
     }
 }
@@ -1163,6 +1216,15 @@ fn publication_input_error(root: &Path, source: CliError) -> CliError {
 fn source_inspection_error(root: &Path, source: FsError) -> CliError {
     match source {
         FsError::IndexWork(failure) => failure.into(),
+        FsError::RepositoryBoundary { .. } => {
+            CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+                project_root: normalize_native_path_display(root),
+                status: IndexReadStatus::VerificationIncomplete,
+                reason: IndexVerificationReason::PolicyUnavailable,
+                scope: IndexRefreshScope::Full,
+                message: source.to_string(),
+            }))
+        }
         other => CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
             project_root: normalize_native_path_display(root),
             status: IndexReadStatus::VerificationIncomplete,
@@ -1420,7 +1482,7 @@ impl ScanRuntimePlan {
         purpose_limits: PurposeImportLimits,
     ) -> Result<Self, CliError> {
         control.check(IndexWorkStage::Publication)?;
-        let root = canonical_project_root(path)?;
+        let root = canonical_source_project_root(path)?;
         let selected_config_path = selected_scan_import_config_path(config_path, &root)?;
         let config = if let Some(path) = selected_config_path.as_deref() {
             let mut complete_paths = BTreeSet::new();
@@ -1842,6 +1904,177 @@ pub(crate) fn canonical_project_root(root: &Path) -> Result<PathBuf, CliError> {
     })
 }
 
+/// Return a canonical checked-out source root, rejecting bare Git control roots.
+pub(crate) fn canonical_source_project_root(root: &Path) -> Result<PathBuf, CliError> {
+    let root = canonical_project_root(root)?;
+    if is_bare_git_control_root(&root)? {
+        return Err(CliError::WorktreeRequired(Box::new(
+            ProjectWorktreeRequired {
+                project_root: normalize_native_path_display(&root),
+                status: IndexReadStatus::WorktreeRequired,
+            },
+        )));
+    }
+    Ok(root)
+}
+
+/// Return a typed, non-mutating first-use handoff for one selected root.
+pub(crate) fn index_init_required(root: &Path, database: &Path) -> CliError {
+    CliError::InitRequired(Box::new(IndexInitRequired {
+        project_root: normalize_native_path_display(root),
+        database: normalize_native_path_display(database),
+        status: IndexReadStatus::InitRequired,
+    }))
+}
+
+/// Recognize a bare repository or selected common Git control directory.
+fn is_bare_git_control_root(root: &Path) -> Result<bool, CliError> {
+    let git = root.join(".git");
+    let control_root = match fs::metadata(&git) {
+        Ok(metadata) if metadata.is_file() => return Ok(false),
+        Ok(metadata) if metadata.is_dir() => git,
+        Ok(_) => return Ok(false),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => root.to_path_buf(),
+        Err(source) => {
+            return Err(CliError::Io { path: git, source });
+        }
+    };
+    let head = control_root.join("HEAD");
+    let config = control_root.join("config");
+    let objects = control_root.join("objects");
+    let refs = control_root.join("refs");
+    for path in [&head, &config, &objects, &refs] {
+        if !path.try_exists().map_err(|source| CliError::Io {
+            path: path.clone(),
+            source,
+        })? {
+            return Ok(false);
+        }
+    }
+    let structurally_git = fs::metadata(&head)
+        .map_err(|source| CliError::Io { path: head, source })?
+        .is_file()
+        && fs::metadata(&config)
+            .map_err(|source| CliError::Io {
+                path: config.clone(),
+                source,
+            })?
+            .is_file()
+        && fs::metadata(&objects)
+            .map_err(|source| CliError::Io {
+                path: objects,
+                source,
+            })?
+            .is_dir()
+        && fs::metadata(&refs)
+            .map_err(|source| CliError::Io { path: refs, source })?
+            .is_dir();
+    if !structurally_git {
+        return Ok(false);
+    }
+    if control_root == root {
+        return Ok(true);
+    }
+
+    effective_git_config_bare_setting(&control_root, &config).map(|bare| bare.unwrap_or(false))
+}
+
+/// Query Git's effective local `core.bare` value, including configured includes.
+fn effective_git_config_bare_setting(
+    control_root: &Path,
+    config: &Path,
+) -> Result<Option<bool>, CliError> {
+    let mut child = StdCommand::new("git")
+        .arg("--git-dir")
+        .arg(normalize_native_path_display(control_root))
+        .args([
+            "config",
+            "--local",
+            "--includes",
+            "--get",
+            "--bool",
+            "core.bare",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| CliError::Io {
+            path: config.to_path_buf(),
+            source,
+        })?;
+    let deadline = Instant::now() + GIT_CONFIG_QUERY_TIMEOUT;
+    loop {
+        match child.try_wait().map_err(|source| CliError::Io {
+            path: config.to_path_buf(),
+            source,
+        })? {
+            Some(_) => break,
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            None => {
+                child.kill().map_err(|source| CliError::Io {
+                    path: config.to_path_buf(),
+                    source,
+                })?;
+                child.wait().map_err(|source| CliError::Io {
+                    path: config.to_path_buf(),
+                    source,
+                })?;
+                return Err(CliError::Io {
+                    path: config.to_path_buf(),
+                    source: io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "effective Git config query exceeded its deadline",
+                    ),
+                });
+            }
+        }
+    }
+    let output = child.wait_with_output().map_err(|source| CliError::Io {
+        path: config.to_path_buf(),
+        source,
+    })?;
+    if output.stdout.len().saturating_add(output.stderr.len()) > MAX_GIT_CONFIG_QUERY_OUTPUT_BYTES {
+        return Err(CliError::Io {
+            path: config.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "effective Git config query exceeded its output bound",
+            ),
+        });
+    }
+    if output.status.success() {
+        return match std::str::from_utf8(&output.stdout)
+            .map(str::trim)
+            .map_err(|source| CliError::Io {
+                path: config.to_path_buf(),
+                source: io::Error::new(io::ErrorKind::InvalidData, source),
+            })? {
+            "true" => Ok(Some(true)),
+            "false" => Ok(Some(false)),
+            value => Err(CliError::Io {
+                path: config.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Git returned invalid core.bare value {value:?}"),
+                ),
+            }),
+        };
+    }
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    Err(CliError::Io {
+        path: config.to_path_buf(),
+        source: io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "effective Git config query failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ),
+    })
+}
+
 /// Load map configuration for purpose import during scan.
 pub(crate) fn load_scan_import_config(
     config_path: Option<&Path>,
@@ -1932,7 +2165,7 @@ pub(crate) fn run_init_bootstrap(
     config_path: Option<&Path>,
     options: &InitBootstrapOptions,
 ) -> Result<InitSetupReport, CliError> {
-    let root = canonical_project_root(root)?;
+    let root = canonical_source_project_root(root)?;
     let project_dir = root.join(".projectatlas");
     let config_file = init_config_path(&root, config_path);
     let nonsource_file = project_dir.join("projectatlas-nonsource-files.toon");
@@ -2105,9 +2338,9 @@ pub(crate) fn default_mcp_project_root(
 ) -> Result<PathBuf, CliError> {
     if let Some(config_path) = config_path {
         let config = load_atlas_config(Some(config_path))?;
-        let config_root = canonical_project_root(&config.root)?;
+        let config_root = canonical_source_project_root(&config.root)?;
         if let Some(db_root) = project_root_from_db_path(db) {
-            let db_root = canonical_project_root(&db_root)?;
+            let db_root = canonical_source_project_root(&db_root)?;
             if config_root != db_root {
                 return Err(config_root_mismatch_error(
                     config_path,
@@ -2121,16 +2354,16 @@ pub(crate) fn default_mcp_project_root(
     if db.exists()
         && let Some(project_root) = read_project_root_read_only(db)?
     {
-        return canonical_project_root(Path::new(&project_root));
+        return canonical_source_project_root(Path::new(&project_root));
     }
     if let Some(project_root) = project_root_from_db_path(db) {
-        return canonical_project_root(&project_root);
+        return canonical_source_project_root(&project_root);
     }
     let current_dir = std::env::current_dir().map_err(|source| CliError::Io {
         path: PathBuf::from("."),
         source,
     })?;
-    canonical_project_root(&current_dir)
+    canonical_source_project_root(&current_dir)
 }
 
 /// Resolve a CLI repository-root argument, using indexed state for the default `.`.
@@ -2209,7 +2442,8 @@ fn stage_full_index_publication(
         &plan.scan_options,
         ScanLimits::default(),
         control,
-    )?;
+    )
+    .map_err(|source| source_inspection_error(&plan.root, source))?;
     control.check(IndexWorkStage::Publication)?;
     let purpose_import = import_legacy_purposes
         .then(|| plan.purpose_import_snapshot_controlled(&nodes, control))
@@ -6470,6 +6704,10 @@ pub(crate) fn watch_path_requires_full_scan(root: &Path, path: &Path) -> bool {
         || relative.ends_with("/.git")
         || relative == ".git/info/exclude"
         || relative.ends_with("/.git/info/exclude")
+        || matches!(
+            relative.rsplit('/').next(),
+            Some("tsconfig.json" | "jsconfig.json")
+        )
         || index_policy_path(relative.as_str())
 }
 
@@ -6670,19 +6908,22 @@ pub(crate) fn refresh_index_for_changes_controlled(
     let mut nodes = Vec::new();
     let mut absent_paths = Vec::new();
     let mut source_bytes = 0_u64;
+    let scan_policy = RootScanPolicy::discover(root, &plan.scan_options, control)
+        .map_err(|source| source_inspection_error(root, source))?;
     for path in sorted_watch_paths(&changes.paths) {
         control.check(IndexWorkStage::RepositoryTraversal)?;
         match path.try_exists() {
             Ok(true) => {
                 let remaining_source_bytes =
                     MAX_INCREMENTAL_SOURCE_BYTES.saturating_sub(source_bytes);
-                if let Some(node) = scan_path_controlled(
-                    root,
+                if let Some(node) = scan_path_with_policy_controlled(
+                    &scan_policy,
                     &path,
-                    &plan.scan_options,
                     ScanLimits::new(1, remaining_source_bytes, 1),
                     control,
-                )? {
+                )
+                .map_err(|source| source_inspection_error(root, source))?
+                {
                     source_bytes = source_bytes
                         .checked_add(node.size_bytes.unwrap_or_default())
                         .ok_or_else(|| {
@@ -9221,7 +9462,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
                 "schema_version": 1,
                 "pack_id": "broad-parser",
                 "selected": {
-                    "projectatlas_version": "0.4.0",
+                    "projectatlas_version": OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION,
                     "artifact": "a".repeat(64),
                 }
             }))?,

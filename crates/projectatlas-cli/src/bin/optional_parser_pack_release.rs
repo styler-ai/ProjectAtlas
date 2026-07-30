@@ -8,7 +8,7 @@ use projectatlas_cli::parser_supervisor::{
 };
 #[cfg(test)]
 use projectatlas_core::optional_parser_pack::{
-    OPTIONAL_PARSER_PACK_LINUX_MEMORY_PROBE_BYTES,
+    OPTIONAL_PARSER_PACK_LINUX_MEMORY_PROBE_BYTES, OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION,
     OPTIONAL_PARSER_PACK_WINDOWS_MINIMUM_MEMORY_PROBE_BYTES, ParserPackMemoryControl,
     ParserPackMemoryProbe,
 };
@@ -1586,8 +1586,8 @@ mod tests {
     fn test_candidate() -> ToolResult<ParserPackCandidateIdentity> {
         Ok(ParserPackCandidateIdentity {
             projectatlas_revision: SourceRevision::new("1".repeat(40))?,
-            cargo_package_version: "0.4.0".to_owned(),
-            intended_release_version: "0.4.0".to_owned(),
+            cargo_package_version: OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION.to_owned(),
+            intended_release_version: OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION.to_owned(),
             cargo_lock_sha256: Sha256Digest::new("2".repeat(64))?,
             rustc_release: "1.93.0".to_owned(),
             rustc_commit_hash: "3".repeat(40),
@@ -1607,7 +1607,7 @@ mod tests {
         Ok(OptionalParserPackArtifactManifest {
             schema_version: OPTIONAL_PARSER_PACK_ARTIFACT_SCHEMA_VERSION,
             pack_id: "projectatlas-broad-parser".to_owned(),
-            projectatlas_version: "0.4.0".to_owned(),
+            projectatlas_version: OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION.to_owned(),
             platform: TEST_PLATFORM,
             candidate: test_candidate()?,
             accepted_manifest_sha256: Sha256Digest::new("4".repeat(64))?,

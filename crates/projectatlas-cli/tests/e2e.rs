@@ -12,7 +12,6 @@ use projectatlas_cli::parser_supervisor::{
 };
 #[cfg(all(debug_assertions, feature = "optional-parser-supervisor"))]
 use projectatlas_core::IndexCancellation;
-use projectatlas_core::PurposeSource;
 use projectatlas_core::graph::{
     Completeness, ConfidenceClass, CoverageRecord, CoverageScope, CoverageState, EntitySelector,
     ExtendedRelationKind, ExternalSelector, GraphEntity, GraphIdentityText, GraphLimitKind,
@@ -41,13 +40,15 @@ use projectatlas_core::symbols::{
 use projectatlas_core::telemetry::{
     READ_AVOIDANCE_CONFIDENCE_MODELED, READ_AVOIDANCE_SCOPE, usage_from_estimates,
 };
+use projectatlas_core::{PurposeSource, normalize_native_path_display};
 use projectatlas_db::{
     AtlasStore, HealthResolution, IndexedFileText, PlannerStatisticsPolicy, PlannerStatisticsState,
     RepositoryGraphRelationQuery, TelemetryCheckpointState,
 };
+use projectatlas_fs::{FsError, ScanOptions, scan_repo};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -82,6 +83,10 @@ const INSTALLER_RS_FILE_NAME: &str = "installer.rs";
 const LIB_RS_FILE_NAME: &str = "lib.rs";
 const SCANNED_RS_FILE_NAME: &str = "scanned.rs";
 const GIT_DIR_NAME: &str = ".git";
+const MAIN_CHECKOUT_DIR_NAME: &str = "main-checkout";
+const LINKED_CHECKOUTS_DIR_NAME: &str = "branches";
+const FEATURE_ONLY_RS_FILE_NAME: &str = "feature_only.rs";
+const ALTERNATE_ONLY_RS_FILE_NAME: &str = "alternate_only.rs";
 const OUTSIDE_CANARY_FILE_NAME: &str = "outside-canary.txt";
 const PARENT_CANARY_FILE_NAME: &str = "parent-canary.txt";
 const ATLAS_DIR_NAME: &str = ".projectatlas";
@@ -107,6 +112,7 @@ const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
     "GIT_COMMON_DIR",
 ];
 const OPENSPEC_DIR_NAME: &str = "openspec";
+const AGENT_INTEGRATION_DOC_FILE_NAME: &str = "agent-integration.md";
 const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
 const CARGO_LOCK_FILE_NAME: &str = "Cargo.lock";
 const CODEX_CONFIG_DIR: &str = ".codex";
@@ -119,8 +125,11 @@ const FAKE_CODEX_SKILL_CONTENT: &str = "# ProjectAtlas\n";
 const FAKE_PATH_DIR: &str = "fake-path";
 const IGNORED_FIXTURE_DIR: &str = "ignored-dir";
 const ISOLATED_HOME_DIR: &str = "isolated-home";
+const NPM_SHIM_DIR: &str = "npm";
 #[cfg(windows)]
 const WINDOWS_SYSTEM32_DIR: &str = "System32";
+#[cfg(windows)]
+static WINDOWS_RELEASE_ASSET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(feature = "optional-parser-supervisor")]
 const OPTIONAL_PARSER_ARCHIVE_ENV: &str = "PROJECTATLAS_OPTIONAL_PARSER_ARCHIVE";
 #[cfg(feature = "optional-parser-supervisor")]
@@ -137,8 +146,8 @@ const SKILL_FILE_NAME: &str = "SKILL.md";
 const MCP_CONTRACT_EXECUTABLE_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE";
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 const MCP_CONTRACT_METADATA_CANARY: &str = "mcp_contract_metadata_canary";
-const MCP_V040_TOOLS_SHA256: &str =
-    "0c21ea673bdb9cdff48203a274db04fbaccb888bd362407d46fc1bcc0e506b28";
+const MCP_V041_TOOLS_SHA256: &str =
+    "26674d7134973a8f5abdb870a29db6d11e19d4287ec20add04f08653e50dec73";
 const AGENT_EFFICIENCY_BENCHMARK_PATH: &str =
     "../../docs/benchmarks/v0.4-agent-navigation-results.json";
 const AGENT_EFFICIENCY_PARTIAL_FILE: &str = "partial.json";
@@ -633,6 +642,7 @@ fn detailed_relation_cli_bounds_the_exact_json_envelope() -> Result<(), Box<dyn 
         .into());
     }
 
+    let impact_started = Instant::now();
     let impact = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .env("PROJECTATLAS_NO_TELEMETRY", "1")
@@ -652,13 +662,29 @@ fn detailed_relation_cli_bounds_the_exact_json_envelope() -> Result<(), Box<dyn 
             "--depth",
             "2",
             "--limit",
-            "50",
+            "8",
+            "--edge-limit",
+            "8",
+            "--node-limit",
+            "16",
+            "--visited-limit",
+            "16",
+            "--occurrence-total-limit",
+            "16",
+            "--intermediate-bytes",
+            "131072",
+            "--deadline-ms",
+            "1000",
+            "--output-bytes",
+            "65536",
             "--analysis-mode",
             "impact",
             "--vcs",
             "working-tree",
+            "--include-dead-code",
         ])
         .output()?;
+    let impact_elapsed = impact_started.elapsed();
     if !impact.status.success() {
         return Err(io::Error::other(format!(
             "public impact analysis CLI failed: {}",
@@ -666,8 +692,41 @@ fn detailed_relation_cli_bounds_the_exact_json_envelope() -> Result<(), Box<dyn 
         ))
         .into());
     }
+    if impact_elapsed > Duration::from_secs(5) {
+        return Err(io::Error::other(format!(
+            "bounded impact CLI exceeded its elapsed tolerance: {impact_elapsed:?}"
+        ))
+        .into());
+    }
     let impact_payload: Value = serde_json::from_slice(&impact.stdout)?;
     require_json_string(&impact_payload, &["symbol_relations", "mode"], "impact")?;
+    require_json_usize(
+        &impact_payload,
+        &["symbol_relations", "work", "rendered_output_bytes"],
+        impact.stdout.len(),
+    )?;
+    let bounded_work = [
+        ("/symbol_relations/returned", 8_u64),
+        ("/symbol_relations/work/relations/inspected_edges", 8),
+        ("/symbol_relations/work/relations/active_nodes", 16),
+        ("/symbol_relations/work/relations/visited_nodes", 16),
+        ("/symbol_relations/work/analyzed_nodes", 16),
+        ("/symbol_relations/work/analyzed_edges", 8),
+        ("/symbol_relations/work/peak_intermediate_bytes", 131_072),
+    ];
+    if impact.stdout.len() > 65_536
+        || bounded_work.iter().any(|(path, limit)| {
+            impact_payload
+                .pointer(path)
+                .and_then(Value::as_u64)
+                .is_none_or(|observed| observed > *limit)
+        })
+    {
+        return Err(io::Error::other(
+            "bounded impact CLI crossed a declared row/node/edge/visited/intermediate/output budget",
+        )
+        .into());
+    }
     if !matches!(
         impact_payload.pointer("/symbol_relations/vcs/state"),
         Some(Value::String(state)) if state == "available" || state == "unavailable"
@@ -784,6 +843,179 @@ fn detailed_relation_cli_bounds_the_exact_json_envelope() -> Result<(), Box<dyn 
             "analysis trace requires an exact file or symbol target",
         ));
     Ok(())
+}
+
+#[test]
+fn impact_analysis_deadline_and_mcp_cancellation_release_resources() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("bounded-impact-adapters");
+    let source_dir = repo.join(SRC_DIR_NAME);
+    fs::create_dir_all(&source_dir)?;
+    let mut source = String::from("pub fn entry() { leaf(); }\nfn leaf() {}\n");
+    for index in 0..12_000 {
+        writeln!(source, "fn unused_{index}() {{}}")?;
+    }
+    fs::write(source_dir.join("lib.rs"), source)?;
+
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let scan = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "json", "scan"])
+        .output()?;
+    if !scan.status.success() {
+        return Err(io::Error::other(format!(
+            "bounded impact fixture scan failed: {}",
+            String::from_utf8_lossy(&scan.stderr)
+        ))
+        .into());
+    }
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let before = mcp_database_snapshot(&database)?;
+    let common_cli_args = [
+        "--format",
+        "json",
+        "symbols",
+        "relations",
+        "--view",
+        "analysis",
+        "--file",
+        "src/lib.rs",
+        "--symbol",
+        "entry",
+        "--direction",
+        "outbound",
+        "--depth",
+        "2",
+        "--limit",
+        "1000",
+        "--edge-limit",
+        "10000",
+        "--node-limit",
+        "10000",
+        "--visited-limit",
+        "10000",
+        "--occurrence-total-limit",
+        "20000",
+        "--intermediate-bytes",
+        "33554432",
+        "--deadline-ms",
+        "1",
+        "--output-bytes",
+        "1048576",
+        "--analysis-mode",
+        "impact",
+        "--vcs",
+        "working-tree",
+        "--include-dead-code",
+    ];
+    let cli_started = Instant::now();
+    let expired = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(common_cli_args)
+        .output()?;
+    if expired.status.success()
+        || cli_started.elapsed() > Duration::from_secs(5)
+        || !String::from_utf8_lossy(&expired.stderr)
+            .to_ascii_lowercase()
+            .contains("deadline")
+        || mcp_database_snapshot(&database)? != before
+    {
+        return Err(io::Error::other(format!(
+            "CLI deadline was not typed, prompt, and read-only: status={:?} elapsed={:?} stderr={}",
+            expired.status.code(),
+            cli_started.elapsed(),
+            String::from_utf8_lossy(&expired.stderr)
+        ))
+        .into());
+    }
+    let follow_up = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "json", "overview"])
+        .output()?;
+    if !follow_up.status.success() {
+        return Err(io::Error::other("CLI deadline blocked the immediate overview").into());
+    }
+    Connection::open(&database)?.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")?;
+
+    let impact_arguments = |deadline_ms| {
+        json!({
+            "view": "analysis",
+            "analysis_mode": "impact",
+            "vcs": "working_tree",
+            "file": "src/lib.rs",
+            "symbol": "entry",
+            "direction": "outbound",
+            "depth": 2,
+            "limit": 1000,
+            "edge_limit": 20000,
+            "node_limit": 10000,
+            "visited_limit": 10000,
+            "occurrence_total_limit": 20000,
+            "intermediate_bytes": 33_554_432,
+            "deadline_ms": deadline_ms,
+            "output_bytes": 1_048_576,
+            "include_dead_code": true
+        })
+    };
+    let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+    let mcp_started = Instant::now();
+    let deadline_text = session.call_tool("atlas_symbol_relations", &impact_arguments(1_u64))?;
+    let deadline_payload: Value = toon_format::decode_default(&deadline_text)?;
+    if mcp_started.elapsed() > Duration::from_secs(5)
+        || deadline_payload
+            .pointer("/error/kind")
+            .and_then(Value::as_str)
+            != Some("error")
+        || !deadline_payload
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.to_ascii_lowercase().contains("deadline"))
+        || mcp_database_snapshot(&database)? != before
+    {
+        return Err(io::Error::other(format!(
+            "MCP deadline was not typed, prompt, and read-only: elapsed={:?} payload={deadline_payload}",
+            mcp_started.elapsed()
+        ))
+        .into());
+    }
+    session.call_tool("atlas_overview", &json!({}))?;
+    Connection::open(&database)?.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")?;
+
+    let request_id = session.start_request(
+        "tools/call",
+        &json!({
+            "name": "atlas_symbol_relations",
+            "arguments": impact_arguments(5_000_u64)
+        }),
+    )?;
+    thread::sleep(Duration::from_millis(1));
+    session.notify(
+        "notifications/cancelled",
+        &json!({"requestId": request_id, "reason": "bounded impact contract"}),
+    )?;
+    let canceled = session.wait_for_response(request_id, "tools/call")?;
+    let canceled_text = canceled
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("canceled MCP analysis returned no text"))?;
+    let canceled_payload: Value = toon_format::decode_default(canceled_text)?;
+    if !canceled_payload
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .is_some_and(|message| message.to_ascii_lowercase().contains("cancel"))
+        || mcp_database_snapshot(&database)? != before
+    {
+        return Err(io::Error::other(format!(
+            "MCP cancellation was not typed and read-only: {canceled_payload}"
+        ))
+        .into());
+    }
+    session.call_tool("atlas_overview", &json!({}))?;
+    Connection::open(&database)?.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")?;
+    session.shutdown()
 }
 
 #[cfg(feature = "optional-parser-supervisor")]
@@ -2245,20 +2477,38 @@ fn settings_rejects_untrusted_publication_with_retained_text() -> Result<(), Box
 
 #[test]
 fn settings_reports_supported_predecessor_without_migration() -> Result<(), Box<dyn Error>> {
+    for (label, schema) in [
+        (
+            "fresh-v0.3.26",
+            include_str!("../../projectatlas-db/tests/fixtures/released-schema-8.sql"),
+        ),
+        (
+            "evolved-v0.3.11-to-v0.3.26",
+            include_str!("../../projectatlas-db/tests/fixtures/released-schema-8-evolved.sql"),
+        ),
+    ] {
+        assert_settings_reports_supported_predecessor_without_migration(label, schema)?;
+    }
+    Ok(())
+}
+
+/// Verify settings reports one released predecessor layout without writing it.
+fn assert_settings_reports_supported_predecessor_without_migration(
+    label: &str,
+    schema: &str,
+) -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&atlas_dir)?;
     let db_path = atlas_dir.join("projectatlas.db");
     let connection = Connection::open(&db_path)?;
-    connection.execute_batch(include_str!(
-        "../../projectatlas-db/tests/fixtures/released-schema-8.sql"
-    ))?;
+    connection.execute_batch(schema)?;
     connection.execute(
         "INSERT INTO metadata(key, value) VALUES ('schema_version', '8')",
         [],
     )?;
-    let project_root = repo.to_string_lossy().into_owned();
+    let project_root = normalize_native_path_display(fs::canonicalize(&repo)?);
     connection.execute(
         "INSERT INTO metadata(key, value) VALUES ('project_root', ?1)",
         [project_root],
@@ -2272,7 +2522,7 @@ fn settings_reports_supported_predecessor_without_migration() -> Result<(), Box<
         .output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
-            "settings failed for a supported predecessor: {}",
+            "settings failed for {label}: {}",
             String::from_utf8_lossy(&output.stderr)
         ))
         .into());
@@ -2294,7 +2544,10 @@ fn settings_reports_supported_predecessor_without_migration() -> Result<(), Box<
         || !settings.get("index").is_some_and(Value::is_null)
         || !settings.get("telemetry").is_some_and(Value::is_null)
     {
-        return Err(io::Error::other("settings misstated the supported predecessor").into());
+        return Err(io::Error::other(format!(
+            "settings misstated the supported predecessor {label}"
+        ))
+        .into());
     }
     if settings
         .get("search")
@@ -2306,10 +2559,102 @@ fn settings_reports_supported_predecessor_without_migration() -> Result<(), Box<
         return Err(io::Error::other("predecessor settings overstated lexical readiness").into());
     }
     if fs::read(&db_path)? != bytes_before {
-        return Err(
-            io::Error::other("settings migrated or mutated the predecessor database").into(),
-        );
+        return Err(io::Error::other(format!(
+            "settings migrated or mutated the predecessor database {label}"
+        ))
+        .into());
     }
+    Ok(())
+}
+
+#[test]
+fn init_and_scan_migrate_both_released_schema_layouts() -> Result<(), Box<dyn Error>> {
+    for (label, schema) in [
+        (
+            "fresh-v0.3.26",
+            include_str!("../../projectatlas-db/tests/fixtures/released-schema-8.sql"),
+        ),
+        (
+            "evolved-v0.3.11-to-v0.3.26",
+            include_str!("../../projectatlas-db/tests/fixtures/released-schema-8-evolved.sql"),
+        ),
+    ] {
+        for command in ["init", "scan"] {
+            assert_cli_migrates_released_schema_layout(label, schema, command)?;
+        }
+    }
+    Ok(())
+}
+
+/// Verify one public writable command migrates one released predecessor layout.
+fn assert_cli_migrates_released_schema_layout(
+    label: &str,
+    schema: &str,
+    command: &str,
+) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn indexed() {}\n",
+    )?;
+    let db_path = atlas_dir.join("projectatlas.db");
+    let project_root = normalize_native_path_display(fs::canonicalize(&repo)?);
+    let connection = Connection::open(&db_path)?;
+    connection.execute_batch(schema)?;
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES ('schema_version', '8')",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES ('project_root', ?1)",
+        [&project_root],
+    )?;
+    drop(connection);
+
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", command])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "{command} failed to migrate {label}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let connection = Connection::open(&db_path)?;
+    let (stored_version, stored_root): (String, String) = connection.query_row(
+        "SELECT
+             (SELECT value FROM metadata WHERE key = 'schema_version'),
+             (SELECT value FROM metadata WHERE key = 'project_root')",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if stored_version != "16" || stored_root != project_root {
+        return Err(io::Error::other(format!(
+            "{command} did not preserve and migrate {label}: version={stored_version}, root={stored_root}"
+        ))
+        .into());
+    }
+    drop(connection);
+
+    let verify = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "root", "verify"])
+        .output()?;
+    if !verify.status.success() {
+        return Err(io::Error::other(format!(
+            "root verify failed after {command} migrated {label}: {}",
+            String::from_utf8_lossy(&verify.stderr)
+        ))
+        .into());
+    }
+    let report: Value = serde_json::from_slice(&verify.stdout)?;
+    require_json_bool(&report, &["verified"], true)?;
     Ok(())
 }
 
@@ -2456,6 +2801,647 @@ fn init_bootstrap_creates_db_scan_report_and_host_configs() -> Result<(), Box<dy
         return Err(io::Error::other("projectatlas.db was not created").into());
     }
 
+    Ok(())
+}
+
+#[test]
+fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Result<(), Box<dyn Error>>
+{
+    const DEEP_DIR_NAME: &str = "deep";
+    const ELIGIBLE_DIR_NAME: &str = "eligible";
+    const IGNORED_TREE_DIR_NAME: &str = "ignored-tree";
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(MAIN_CHECKOUT_DIR_NAME);
+    fs::create_dir(&repo)?;
+    git_success(&repo, &["init"])?;
+    git_success(&repo, &["config", "user.name", "ProjectAtlas Test"])?;
+    git_success(
+        &repo,
+        &["config", "user.email", "projectatlas@example.invalid"],
+    )?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(
+        repo.join(SRC_DIR_NAME)
+            .join(DEEP_DIR_NAME)
+            .join(ELIGIBLE_DIR_NAME),
+    )?;
+    fs::create_dir_all(repo.join(IGNORED_TREE_DIR_NAME).join(DEEP_DIR_NAME))?;
+    fs::write(repo.join(".gitignore"), ".projectatlas/\n/ignored-tree/\n")?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn main_checkout_marker() {}\n",
+    )?;
+    fs::write(
+        repo.join(SRC_DIR_NAME)
+            .join(DEEP_DIR_NAME)
+            .join(ELIGIBLE_DIR_NAME)
+            .join("nested.rs"),
+        "pub fn deeply_nested_marker() {}\n",
+    )?;
+    fs::write(
+        repo.join(IGNORED_TREE_DIR_NAME)
+            .join(DEEP_DIR_NAME)
+            .join("ignored.rs"),
+        "pub fn ignored_nested_marker() {}\n",
+    )?;
+    git_success(&repo, &["add", "."])?;
+    git_success(&repo, &["commit", "-m", "main fixture"])?;
+
+    let submodule_source = temp.path().join("submodule-source");
+    fs::create_dir(&submodule_source)?;
+    git_success(&submodule_source, &["init"])?;
+    git_success(
+        &submodule_source,
+        &["config", "user.name", "ProjectAtlas Test"],
+    )?;
+    git_success(
+        &submodule_source,
+        &["config", "user.email", "projectatlas@example.invalid"],
+    )?;
+    fs::create_dir(submodule_source.join(SRC_DIR_NAME))?;
+    fs::write(
+        submodule_source.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn nested_submodule_marker() {}\n",
+    )?;
+    git_success(&submodule_source, &["add", "."])?;
+    git_success(&submodule_source, &["commit", "-m", "submodule fixture"])?;
+    let submodule_output = git_command_for_root(&repo)
+        .args(["-c", "protocol.file.allow=always", "submodule", "add"])
+        .arg(&submodule_source)
+        .arg("vendor/submodule")
+        .output()?;
+    if !submodule_output.status.success() {
+        return Err(io::Error::other(format!(
+            "git submodule add failed: {}{}",
+            String::from_utf8_lossy(&submodule_output.stdout),
+            String::from_utf8_lossy(&submodule_output.stderr)
+        ))
+        .into());
+    }
+    git_success(&repo, &["commit", "-m", "add submodule fixture"])?;
+
+    let linked = repo.join(LINKED_CHECKOUTS_DIR_NAME).join("feature");
+    let worktree_output = git_command_for_root(&repo)
+        .args(["worktree", "add", "-b", "feature"])
+        .arg(&linked)
+        .output()?;
+    if !worktree_output.status.success() {
+        return Err(io::Error::other(format!(
+            "git worktree add failed: {}{}",
+            String::from_utf8_lossy(&worktree_output.stdout),
+            String::from_utf8_lossy(&worktree_output.stderr)
+        ))
+        .into());
+    }
+    fs::write(
+        linked.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn linked_feature_marker() {}\n",
+    )?;
+    fs::write(
+        linked.join(SRC_DIR_NAME).join(FEATURE_ONLY_RS_FILE_NAME),
+        "pub fn feature_only_marker() {}\n",
+    )?;
+    git_success(&linked, &["add", "."])?;
+    git_success(&linked, &["commit", "-m", "feature fixture"])?;
+    let linked_ignore = git_command_for_root(&repo)
+        .args(["check-ignore", "--quiet", "--no-index"])
+        .arg(format!(
+            "{LINKED_CHECKOUTS_DIR_NAME}/feature/{SRC_DIR_NAME}/{FEATURE_ONLY_RS_FILE_NAME}"
+        ))
+        .status()?;
+    if linked_ignore.success() {
+        return Err(io::Error::other(
+            "real-worktree fixture unexpectedly relied on a worktree-container ignore rule",
+        )
+        .into());
+    }
+    if linked_ignore.code() != Some(1) {
+        return Err(io::Error::other(format!(
+            "git check-ignore could not verify the unignored worktree fixture: {linked_ignore}"
+        ))
+        .into());
+    }
+
+    let missing_read = Command::cargo_bin("projectatlas")?
+        .current_dir(&linked)
+        .args(["--format", "json", "overview"])
+        .output()?;
+    if missing_read.status.success() {
+        return Err(io::Error::other("uninitialized worktree overview succeeded").into());
+    }
+    let missing_error: Value = serde_json::from_slice(&missing_read.stderr)?;
+    require_json_string(&missing_error, &["error", "kind"], "init_required")?;
+    require_json_string(&missing_error, &["error", "next", "command"], "init")?;
+    let linked_root = linked.canonicalize()?;
+    let linked_root_text = projectatlas_core::normalize_native_path_display(&linked_root);
+    require_json_string(
+        &missing_error,
+        &["error", "next", "project_path"],
+        &linked_root_text,
+    )?;
+    if linked.join(ATLAS_DIR_NAME).exists() {
+        return Err(io::Error::other("read-only init_required probe created project state").into());
+    }
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "scan", "."])
+        .assert()
+        .success();
+    let main_db = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let main_store = AtlasStore::open_for_project(&main_db, &repo)?;
+    if main_store
+        .load_nodes()?
+        .iter()
+        .any(|node| node.node.path.starts_with("branches/feature"))
+    {
+        return Err(io::Error::other("main atlas admitted the registered linked worktree").into());
+    }
+    if main_store.load_node_by_path("src/lib.rs")?.is_none() {
+        return Err(io::Error::other("main atlas omitted main source").into());
+    }
+    if main_store
+        .load_node_by_path("src/deep/eligible/nested.rs")?
+        .is_none()
+        || main_store
+            .load_node_by_path("vendor/submodule/src/lib.rs")?
+            .is_none()
+    {
+        return Err(io::Error::other(
+            "main atlas omitted deep eligible source or nested submodule source",
+        )
+        .into());
+    }
+    if main_store
+        .load_nodes()?
+        .iter()
+        .any(|node| node.node.path.starts_with("ignored-tree"))
+    {
+        return Err(io::Error::other("main atlas descended into an ignored subtree").into());
+    }
+    let main_identity = main_store
+        .project_instance_id()?
+        .ok_or_else(|| io::Error::other("main project identity missing"))?;
+    if main_store.repository_graph_generation()?.is_none()
+        || main_store
+            .load_symbols(Some("src/lib.rs"), None, 20)?
+            .iter()
+            .all(|symbol| symbol.name != "main_checkout_marker")
+    {
+        return Err(io::Error::other("main scan omitted symbol or graph publication").into());
+    }
+    main_store.set_purpose(
+        "src/lib.rs",
+        "Main checkout Rust library.",
+        PurposeSource::Agent,
+    )?;
+    drop(main_store);
+    let main_before_linked_operations = mcp_database_snapshot(&main_db)?;
+
+    let linked_atlas_dir = linked.join(ATLAS_DIR_NAME);
+    fs::create_dir(&linked_atlas_dir)?;
+    let linked_db = linked_atlas_dir.join("projectatlas.db");
+    let connection = Connection::open(&linked_db)?;
+    connection.execute_batch(include_str!(
+        "../../projectatlas-db/tests/fixtures/released-schema-8-evolved.sql"
+    ))?;
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES ('schema_version', '8')",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES ('project_root', ?1)",
+        [&linked_root_text],
+    )?;
+    drop(connection);
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&linked)
+        .args(["--format", "json", "scan", "."])
+        .assert()
+        .success();
+    let migrated: String = Connection::open(&linked_db)?.query_row(
+        "SELECT value FROM metadata WHERE key = 'schema_version'",
+        [],
+        |row| row.get(0),
+    )?;
+    if migrated != "16" {
+        return Err(io::Error::other(format!(
+            "linked first-write scan did not migrate its released schema: {migrated}"
+        ))
+        .into());
+    }
+    let linked_after_first_write = AtlasStore::open_for_project(&linked_db, &linked)?;
+    if linked_after_first_write
+        .load_node_by_path("src/feature_only.rs")?
+        .is_none()
+        || linked_after_first_write
+            .load_nodes()?
+            .iter()
+            .any(|node| node.node.path.contains("main-checkout"))
+    {
+        return Err(io::Error::other(
+            "linked first-write scan crossed its selected source boundary",
+        )
+        .into());
+    }
+    drop(linked_after_first_write);
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&linked)
+        .args(["--format", "json", "init"])
+        .assert()
+        .success();
+    for file_name in [
+        "config.toml",
+        "projectatlas.mcp.json",
+        "projectatlas.claude.mcp.json",
+        "projectatlas.opencode.json",
+    ] {
+        if !linked.join(ATLAS_DIR_NAME).join(file_name).is_file() {
+            return Err(io::Error::other(format!(
+                "linked-worktree init omitted local {file_name}"
+            ))
+            .into());
+        }
+    }
+    let linked_store = AtlasStore::open_for_project(&linked_db, &linked)?;
+    if linked_store
+        .load_node_by_path("src/feature_only.rs")?
+        .is_none()
+        || linked_store
+            .load_nodes()?
+            .iter()
+            .any(|node| node.node.path.contains("main-checkout"))
+    {
+        return Err(io::Error::other("linked atlas crossed its selected source root").into());
+    }
+    let linked_identity = linked_store
+        .project_instance_id()?
+        .ok_or_else(|| io::Error::other("linked project identity missing"))?;
+    if main_identity == linked_identity {
+        return Err(io::Error::other("linked worktrees shared one project identity").into());
+    }
+    if linked_store.repository_graph_generation()?.is_none()
+        || linked_store
+            .load_symbols(Some("src/lib.rs"), None, 20)?
+            .iter()
+            .all(|symbol| symbol.name != "linked_feature_marker")
+    {
+        return Err(io::Error::other(
+            "linked init omitted worktree-local symbol or graph publication",
+        )
+        .into());
+    }
+    linked_store.set_purpose(
+        "src/lib.rs",
+        "Feature worktree Rust library.",
+        PurposeSource::Agent,
+    )?;
+    drop(linked_store);
+    let main_purpose = AtlasStore::open_for_project(&main_db, &repo)?
+        .load_node_by_path("src/lib.rs")?
+        .ok_or_else(|| io::Error::other("main source missing after purpose write"))?;
+    let linked_purpose = AtlasStore::open_for_project(&linked_db, &linked)?
+        .load_node_by_path("src/lib.rs")?
+        .ok_or_else(|| io::Error::other("linked source missing after purpose write"))?;
+    if main_purpose.purpose.purpose.as_deref() != Some("Main checkout Rust library.")
+        || linked_purpose.purpose.purpose.as_deref() != Some("Feature worktree Rust library.")
+    {
+        return Err(io::Error::other("worktree-local purposes crossed databases").into());
+    }
+
+    let mcp_config = mcp_config_for_harness(&linked, &linked_db, "mcp-json")?;
+    let mcp_cwd = json_string_at(&mcp_config, &["mcpServers", "projectatlas", "cwd"])?;
+    if Path::new(mcp_cwd).canonicalize()? != linked_root {
+        return Err(io::Error::other(format!(
+            "linked MCP config selected the wrong working directory: {mcp_cwd}"
+        ))
+        .into());
+    }
+    let linked_summary = json_summary_command(&linked, &linked_db, "src/lib.rs")?;
+    require_json_contains(
+        &linked_summary,
+        &["content_summary"],
+        "linked_feature_marker",
+    )?;
+
+    git_success(&linked, &["switch", "-c", "alternate"])?;
+    fs::remove_file(linked.join(SRC_DIR_NAME).join(FEATURE_ONLY_RS_FILE_NAME))?;
+    fs::write(
+        linked.join(SRC_DIR_NAME).join(ALTERNATE_ONLY_RS_FILE_NAME),
+        "pub fn alternate_only_marker() {}\n",
+    )?;
+    fs::write(
+        linked.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn linked_alternate_marker() {}\n",
+    )?;
+    git_success(&linked, &["add", "-A"])?;
+    git_success(&linked, &["commit", "-m", "alternate fixture"])?;
+    run_watch_once(&linked, &linked_db)?;
+    let switched = AtlasStore::open_for_project(&linked_db, &linked)?;
+    if switched.load_node_by_path("src/feature_only.rs")?.is_some()
+        || switched
+            .load_node_by_path("src/alternate_only.rs")?
+            .is_none()
+    {
+        return Err(io::Error::other("branch-switch refresh published mixed branch state").into());
+    }
+    drop(switched);
+
+    fs::remove_file(linked.join(SRC_DIR_NAME).join(ALTERNATE_ONLY_RS_FILE_NAME))?;
+    fs::write(
+        linked.join(SRC_DIR_NAME).join("dirty_only.rs"),
+        "pub fn dirty_only_marker() {}\n",
+    )?;
+    fs::write(
+        linked.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn linked_dirty_marker() {}\n",
+    )?;
+    run_watch_once(&linked, &linked_db)?;
+    let dirty = AtlasStore::open_for_project(&linked_db, &linked)?;
+    let dirty_library = dirty
+        .load_node_by_path("src/lib.rs")?
+        .ok_or_else(|| io::Error::other("dirty refresh omitted linked library"))?;
+    if dirty.project_instance_id()? != Some(linked_identity)
+        || dirty.repository_graph_generation()?.is_none()
+        || dirty_library.purpose.purpose.as_deref() != Some("Feature worktree Rust library.")
+        || dirty.load_node_by_path("src/alternate_only.rs")?.is_some()
+        || dirty.load_node_by_path("src/dirty_only.rs")?.is_none()
+        || dirty
+            .load_symbols(Some("src/lib.rs"), None, 20)?
+            .iter()
+            .all(|symbol| symbol.name != "linked_dirty_marker")
+    {
+        return Err(io::Error::other("dirty refresh did not publish exact worktree state").into());
+    }
+    drop(dirty);
+    let dirty_summary = json_summary_command(&linked, &linked_db, "src/lib.rs")?;
+    require_json_contains(&dirty_summary, &["content_summary"], "linked_dirty_marker")?;
+
+    let (command, args) = mcp_command_and_args(&mcp_config)?;
+    let messages = vec![
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-worktree-e2e","version":"0.1.0"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_search","arguments":{"project_path":linked_root_text,"pattern":"linked_dirty_marker"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_search","arguments":{"project_path":projectatlas_core::normalize_native_path_display(repo.canonicalize()?),"pattern":"main_checkout_marker"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_search","arguments":{"project_path":projectatlas_core::normalize_native_path_display(linked.canonicalize()?),"pattern":"linked_dirty_marker"}}}).to_string(),
+    ];
+    let stdout = run_mcp_stdio(&command, &linked, &args, &messages)?;
+    for id in [2, 4] {
+        let text = mcp_tool_text(&stdout, id)?;
+        if !text.contains("linked_dirty_marker") || text.contains("main_checkout_marker") {
+            return Err(io::Error::other(format!(
+                "interleaved linked-worktree MCP read {id} crossed databases: {text}"
+            ))
+            .into());
+        }
+    }
+    let main_text = mcp_tool_text(&stdout, 3)?;
+    if !main_text.contains("main_checkout_marker") || main_text.contains("linked_dirty_marker") {
+        return Err(io::Error::other(format!(
+            "interleaved main-worktree MCP read crossed databases: {main_text}"
+        ))
+        .into());
+    }
+    let main_after_linked_operations = mcp_database_snapshot(&main_db)?;
+    if main_after_linked_operations.authoritative != main_before_linked_operations.authoritative
+        || main_after_linked_operations.authored_purposes
+            != main_before_linked_operations.authored_purposes
+        || main_after_linked_operations.project_instance_id
+            != main_before_linked_operations.project_instance_id
+        || main_after_linked_operations.generation != main_before_linked_operations.generation
+        || main_after_linked_operations.purpose_revision
+            != main_before_linked_operations.purpose_revision
+        || main_after_linked_operations.publication_state
+            != main_before_linked_operations.publication_state
+    {
+        return Err(io::Error::other(
+            "linked init, scan, branch, dirty, watch, or MCP operations changed main authoritative state",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn scan_refuses_unverified_registered_worktree_boundary_before_publication()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(MAIN_CHECKOUT_DIR_NAME);
+    fs::create_dir(&repo)?;
+    git_success(&repo, &["init"])?;
+    git_success(&repo, &["config", "user.name", "ProjectAtlas Test"])?;
+    git_success(
+        &repo,
+        &["config", "user.email", "projectatlas@example.invalid"],
+    )?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn main_checkout_marker() {}\n",
+    )?;
+    git_success(&repo, &["add", "."])?;
+    git_success(&repo, &["commit", "-m", "main fixture"])?;
+
+    let linked = repo.join(LINKED_CHECKOUTS_DIR_NAME).join("feature");
+    let worktree_output = git_command_for_root(&repo)
+        .args(["worktree", "add", "-b", "feature"])
+        .arg(&linked)
+        .output()?;
+    if !worktree_output.status.success() {
+        return Err(io::Error::other(format!(
+            "git worktree add failed: {}{}",
+            String::from_utf8_lossy(&worktree_output.stdout),
+            String::from_utf8_lossy(&worktree_output.stderr)
+        ))
+        .into());
+    }
+    let registration = fs::read_dir(repo.join(GIT_DIR_NAME).join("worktrees"))?
+        .next()
+        .transpose()?
+        .ok_or_else(|| io::Error::other("linked-worktree registration missing"))?;
+    let registration_gitdir = registration.path().join("gitdir");
+    let registered_git_control = fs::read_to_string(&registration_gitdir)?;
+    if Path::new(registered_git_control.trim()).canonicalize()?
+        != linked.join(GIT_DIR_NAME).canonicalize()?
+    {
+        return Err(io::Error::other("fixture selected the wrong worktree registration").into());
+    }
+    fs::write(&registration_gitdir, "unverified-worktree-root")?;
+    if !matches!(
+        scan_repo(&repo, &ScanOptions::default()),
+        Err(FsError::RepositoryBoundary { .. })
+    ) {
+        return Err(io::Error::other(
+            "filesystem scan did not classify the unverified worktree boundary",
+        )
+        .into());
+    }
+
+    let scan = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "scan", "."])
+        .output()?;
+    if scan.status.success() {
+        return Err(io::Error::other("scan accepted an unverified worktree boundary").into());
+    }
+    let error: Value = serde_json::from_slice(&scan.stderr)?;
+    require_json_string(&error, &["error", "kind"], "verification_incomplete")?;
+    require_json_string(
+        &error,
+        &["error", "verification_incomplete", "reason"],
+        "policy_unavailable",
+    )?;
+
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    if database.is_file() {
+        let store = AtlasStore::open_for_project(&database, &repo)?;
+        if !store.load_nodes()?.is_empty() || store.repository_graph_generation()?.is_some() {
+            return Err(io::Error::other(
+                "unverified worktree boundary published a database generation",
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let bare = temp.path().join("repository.git");
+    let output = StdCommand::new("git")
+        .args(["init", "--bare"])
+        .arg(&bare)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "git init --bare failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    git_success(&bare, &["config", "--unset", "core.bare"])?;
+
+    let manager = temp.path().join("repository-manager");
+    fs::create_dir(&manager)?;
+    git_success(&manager, &["init"])?;
+    let common_git_dir = manager.join(".git");
+    let common_dir_init = Command::cargo_bin("projectatlas")?
+        .current_dir(&common_git_dir)
+        .args(["--format", "json", "init"])
+        .output()?;
+    if common_dir_init.status.success() {
+        return Err(
+            io::Error::other("main checkout common Git directory initialized as source").into(),
+        );
+    }
+    let common_dir_error: Value = serde_json::from_slice(&common_dir_init.stderr)?;
+    require_json_string(&common_dir_error, &["error", "kind"], "worktree_required")?;
+    if common_git_dir.join(ATLAS_DIR_NAME).exists() {
+        return Err(
+            io::Error::other("common Git directory refusal created ProjectAtlas state").into(),
+        );
+    }
+    let included_config = temp.path().join("included-bare.config");
+    fs::write(&included_config, "[core]\n\tbare = true\n")?;
+    let included_config = included_config.to_string_lossy().to_string();
+    git_success(&manager, &["config", "include.path", &included_config])?;
+
+    let separate_worktree = temp.path().join("separate-worktree");
+    let separate_control = temp.path().join("separate-control");
+    fs::create_dir(&separate_worktree)?;
+    let output = StdCommand::new("git")
+        .args(["init", "--quiet", "--separate-git-dir"])
+        .arg(&separate_control)
+        .arg(&separate_worktree)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "git init --separate-git-dir failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+
+    for selected in [&bare, &manager, &separate_control] {
+        let init = Command::cargo_bin("projectatlas")?
+            .current_dir(selected)
+            .args(["--format", "json", "init"])
+            .output()?;
+        if init.status.success() {
+            return Err(io::Error::other(format!(
+                "bare Git control root initialized as source: {}",
+                selected.display()
+            ))
+            .into());
+        }
+        let error: Value = serde_json::from_slice(&init.stderr)?;
+        require_json_string(&error, &["error", "kind"], "worktree_required")?;
+        require_json_contains(
+            &error,
+            &["error", "message"],
+            "select a checked-out worktree",
+        )?;
+        if selected.join(ATLAS_DIR_NAME).exists() {
+            return Err(io::Error::other(format!(
+                "bare-root refusal created ProjectAtlas state: {}",
+                selected.display()
+            ))
+            .into());
+        }
+
+        let root_set = Command::cargo_bin("projectatlas")?
+            .args(["--format", "json", "root", "set"])
+            .arg(selected)
+            .output()?;
+        if root_set.status.success() {
+            return Err(io::Error::other(format!(
+                "root set bound a bare Git control root: {}",
+                selected.display()
+            ))
+            .into());
+        }
+        let root_set_error: Value = serde_json::from_slice(&root_set.stderr)?;
+        require_json_string(&root_set_error, &["error", "kind"], "worktree_required")?;
+        if selected.join(ATLAS_DIR_NAME).exists() {
+            return Err(io::Error::other(format!(
+                "bare root-set refusal created ProjectAtlas state: {}",
+                selected.display()
+            ))
+            .into());
+        }
+    }
+
+    let lookalike = temp.path().join("git-control-lookalike");
+    fs::create_dir(&lookalike)?;
+    fs::create_dir(lookalike.join("objects"))?;
+    fs::create_dir_all(lookalike.join("refs").join("heads"))?;
+    fs::write(lookalike.join("HEAD"), "ref: refs/heads/main\n")?;
+    fs::write(
+        lookalike.join("config"),
+        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n",
+    )?;
+    let lookalike_init = Command::cargo_bin("projectatlas")?
+        .current_dir(&lookalike)
+        .args(["--format", "json", "init", "--no-scan"])
+        .output()?;
+    if lookalike_init.status.success() {
+        return Err(io::Error::other(
+            "structurally complete Git control lookalike initialized as source",
+        )
+        .into());
+    }
+    let lookalike_error: Value = serde_json::from_slice(&lookalike_init.stderr)?;
+    require_json_string(&lookalike_error, &["error", "kind"], "worktree_required")?;
+    if lookalike.join(ATLAS_DIR_NAME).exists() {
+        return Err(
+            io::Error::other("structural control-root refusal created ProjectAtlas state").into(),
+        );
+    }
     Ok(())
 }
 
@@ -2851,8 +3837,11 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             .join("ci.yml"),
     )?;
     let readme = fs::read_to_string(workspace_root.join("README.md"))?;
-    let agent_integration =
-        fs::read_to_string(workspace_root.join("docs").join("agent-integration.md"))?;
+    let agent_integration = fs::read_to_string(
+        workspace_root
+            .join("docs")
+            .join(AGENT_INTEGRATION_DOC_FILE_NAME),
+    )?;
     let architecture = fs::read_to_string(
         workspace_root
             .join("docs")
@@ -2898,6 +3887,23 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
 
     for required in [
         "Convert-ProjectAtlasVersionTag",
+        "Initialize-ProjectAtlasRuntimeProbe",
+        "CreateSuspended",
+        "ExtendedStartupInfoPresent",
+        "ProcThreadAttributeHandleList",
+        "JobObjectLimitKillOnJobClose",
+        "InitializeProcThreadAttributeList",
+        "UpdateProcThreadAttribute",
+        "DeleteProcThreadAttributeList",
+        "CreateJobObject",
+        "SetInformationJobObject",
+        "AssignProcessToJobObject",
+        "ResumeThread",
+        "TerminateJobObject",
+        "RuntimeProbeProcess]::Start",
+        r#"String.Equals(extension, ".ps1""#,
+        r#"String.Equals(extension, ".cmd""#,
+        r"Environment.SpecialFolder.System",
         "$runtime.version -eq $expectedRuntimeVersion",
         "Sync-ProjectAtlasRuntimeToLocalAppData",
         "Get-ReleaseRuntimeInstallPath",
@@ -2905,9 +3911,27 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "ProjectAtlas LocalAppData mirror skipped",
         "PROJECTATLAS_SKIP_USER_PATH_UPDATE",
         "Set-ProjectAtlasProcessPathPrecedence",
+        "Test-ProjectAtlasBareCommandResolutionOnPath",
+        r#"[Environment]::SetEnvironmentVariable("Path""#,
+        r#"[Environment]::GetEnvironmentVariable("Path", "Machine")"#,
+        "$freshProcessPath = @($machinePath, $futureUserPath) -join \";\"",
+        "Test-ProjectAtlasBareCommandResolutionOnPath $freshProcessPath $FilePath",
         "Confirm-ProjectAtlasBareCommandResolution",
         "Active process resolves bare projectatlas to verified runtime",
         "Restart Codex or the shell",
+        "$inheritedProjectAtlasCommand = Get-Command projectatlas",
+        "$stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData",
+        "$inheritedSynchronizedMirrorReady = $stableMirrorSynchronized",
+        "$futureProcessPathReady = Set-ProjectAtlasPathPrecedence",
+        "$parentCliReady = $inheritedCommandReady -or $inheritedSynchronizedMirrorReady",
+        "$hostRestartRequired = -not $parentCliReady -and $futureProcessPathReady",
+        "ProjectAtlas readiness: runtime_mcp_configs_ready=",
+        "installer_cli_ready=",
+        "parent_cli_ready=",
+        "host_restart_required=",
+        "Existing host restart required:",
+        "restart alone will not repair it",
+        "first bare command for a fresh process",
         "Resolve-ProjectAtlasCodexCommand",
         "Update-ProjectAtlasCodexPlugin",
         "PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE",
@@ -2949,6 +3973,20 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         if !powershell_installer.contains(required) {
             return Err(io::Error::other(format!(
                 "PowerShell installer is missing runtime version guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for forbidden in [
+        "Stop-Process",
+        "Suspend-Process",
+        "PROCESS_TERMINATE",
+        "Win32_Process",
+        r"System32\taskkill.exe",
+    ] {
+        if powershell_installer.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "PowerShell installer must not use broad process control, found {forbidden:?}"
             ))
             .into());
         }
@@ -3117,6 +4155,18 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         )
         .into());
     }
+    for required in [
+        "windows_installer_fresh_path_probe_respects_machine_precedence",
+        "PROJECTATLAS_TEST_DISPOSABLE_RUNNER: ${{ runner.environment }}",
+        "PROJECTATLAS_TEST_PERSIST_USER_PATH: \"1\"",
+    ] {
+        if !e2e_smoke.contains(required) {
+            return Err(io::Error::other(format!(
+                "Windows CI smoke must exercise persisted User PATH through a fresh process; missing {required:?}"
+            ))
+            .into());
+        }
+    }
     if !e2e_smoke
         .contains("windows_release_binary_installer_repairs_stale_mirror_without_registering_it")
     {
@@ -3139,17 +4189,16 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
     }
     if opencode_native_plugin_dir.exists() {
         return Err(io::Error::other(
-            "ProjectAtlas OpenCode support is an MCP config template, not a native OpenCode plugin directory",
+            "the current ProjectAtlas release uses generated OpenCode MCP config and must not ship an unverified plugin directory",
         )
         .into());
     }
-    if !readme.contains("OpenCode MCP config template")
-        || !agent_integration
-            .contains("ProjectAtlas does not ship a native OpenCode JavaScript/TypeScript plugin")
-        || !architecture.contains("not a native OpenCode JavaScript/TypeScript plugin")
+    if !agent_integration
+        .contains("An installable `opencode plugin` package is separate distribution work.")
+        || !architecture.contains("`opencode plugin` package is separate distribution work")
     {
         return Err(io::Error::other(
-            "docs must distinguish Claude Code plugin packaging from OpenCode MCP config support",
+            "docs must distinguish current generated OpenCode MCP config support from future plugin packaging",
         )
         .into());
     }
@@ -3165,7 +4214,6 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         }
     }
     for (document_name, document) in [
-        ("README.md", readme.as_str()),
         ("docs/agent-integration.md", agent_integration.as_str()),
         (
             "plugins/projectatlas/skills/projectatlas/SKILL.md",
@@ -3190,6 +4238,17 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
                 ))
                 .into());
             }
+        }
+    }
+    for required in [
+        "codex plugin add projectatlas --marketplace projectatlas",
+        "docs/agent-integration.md",
+    ] {
+        if !readme.contains(required) {
+            return Err(io::Error::other(format!(
+                "README must keep concise install guidance and link its detailed owner; missing {required:?}"
+            ))
+            .into());
         }
     }
     let windows_release_smoke = workflow_job_block(&release_workflow, "installer-smoke-windows")?;
@@ -3279,6 +4338,352 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let machine_bin = temp.path().join("machine-bin");
+    let user_bin = temp.path().join("user-bin");
+    fs::create_dir_all(&machine_bin)?;
+    fs::create_dir_all(&user_bin)?;
+    fs::write(machine_bin.join("projectatlas.cmd"), "@exit /b 0\r\n")?;
+    let verified_runtime = user_bin.join("projectatlas.cmd");
+    fs::write(&verified_runtime, "@exit /b 0\r\n")?;
+    let hanging_runtime = temp.path().join("hanging-projectatlas.cmd");
+    fs::write(&hanging_runtime, "@echo off\r\n:probe\r\ngoto probe\r\n")?;
+    let flooding_runtime = temp.path().join("flooding-projectatlas.cmd");
+    let flood_child_pid = temp.path().join("flood-child.pid");
+    let probe_temp = temp.path().join("runtime-probe-temp");
+    fs::create_dir_all(&probe_temp)?;
+    fs::write(
+        &flooding_runtime,
+        "@echo off\r\npowershell -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID; $chunk = -join ('x' * 131072); while ($true) { [Console]::Out.Write($chunk); [Console]::Error.Write($chunk) }\"\r\n",
+    )?;
+    let async_runtime = temp.path().join("async-projectatlas.cmd");
+    let async_child_pid = temp.path().join("async-child.pid");
+    fs::write(
+        &async_runtime,
+        "@echo off\r\nstart \"\" /b powershell -NoLogo -NoProfile -NonInteractive -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_ASYNC_CHILD_PID; while ($true) { Start-Sleep -Seconds 60 }\"\r\nfor /L %%i in (1,1,200) do (\r\n  if exist \"%PROJECTATLAS_TEST_ASYNC_CHILD_PID%\" goto child_started\r\n  powershell -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Milliseconds 10\"\r\n)\r\nexit /b 2\r\n:child_started\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\nexit /b 0\r\n",
+    )?;
+    let powershell_runtime = temp.path().join("projectatlas.ps1");
+    fs::write(
+        &powershell_runtime,
+        "[Console]::Out.WriteLine('{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}')\r\n",
+    )?;
+    let command_host_dir = temp.path().join("command & (safe) !^");
+    fs::create_dir(&command_host_dir)?;
+    let command_host_runtime = command_host_dir.join("projectatlas.cmd");
+    fs::write(
+        &command_host_runtime,
+        "@echo off\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\n",
+    )?;
+    let nonnumeric_runtime = temp.path().join("nonnumeric-projectatlas.cmd");
+    fs::write(
+        &nonnumeric_runtime,
+        "@echo off\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":\"invalid\",\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\n",
+    )?;
+    let out_of_range_runtime = temp.path().join("out-of-range-projectatlas.cmd");
+    fs::write(
+        &out_of_range_runtime,
+        "@echo off\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":\"999999999999999999999\",\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\n",
+    )?;
+    let unpinned_runtime = temp.path().join("unpinned-runtime-version.txt");
+    fs::write(&unpinned_runtime, "0.4.1")?;
+    let local_app_data = temp.path().join("local-app-data");
+    let stable_runtime = local_app_data
+        .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
+        .join("bin")
+        .join("projectatlas.exe");
+    fs::create_dir_all(
+        stable_runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("stable runtime parent missing"))?,
+    )?;
+    fs::write(&stable_runtime, "0.4.0")?;
+
+    let installer = workspace_root()?
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    let output = StdCommand::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            r#"
+$ErrorActionPreference = "Stop"
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    $env:PROJECTATLAS_TEST_INSTALLER,
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -ne 0) {
+    throw ($errors | Out-String)
+}
+$names = @(
+    "Convert-ProjectAtlasVersionTag",
+    "Get-NormalizedPathEntry",
+    "Initialize-ProjectAtlasRuntimeProbe",
+    "Invoke-ProjectAtlasRuntimeInfo",
+    "Set-ProjectAtlasPathPrecedence",
+    "Set-ProjectAtlasProcessPathPrecedence",
+    "Split-PathList",
+    "Sync-ProjectAtlasRuntimeToLocalAppData",
+    "Test-ProjectAtlasBareCommandResolutionOnPath",
+    "Test-ProjectAtlasRuntime",
+    "Test-Truthy"
+)
+$functions = $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] `
+        -and $names -contains $node.Name
+}, $true)
+foreach ($name in $names) {
+    $definition = $functions | Where-Object Name -eq $name | Select-Object -First 1
+    if (-not $definition) {
+        throw "Installer function not found: $name"
+    }
+    Invoke-Expression $definition.Extent.Text
+}
+$machineFirst = "$env:PROJECTATLAS_TEST_MACHINE_BIN;$env:PROJECTATLAS_TEST_USER_BIN"
+$userFirst = "$env:PROJECTATLAS_TEST_USER_BIN;$env:PROJECTATLAS_TEST_MACHINE_BIN"
+if (Test-ProjectAtlasBareCommandResolutionOnPath $machineFirst $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME) {
+    throw "Machine PATH shadow was incorrectly classified as restart-recoverable"
+}
+if (-not (Test-ProjectAtlasBareCommandResolutionOnPath $userFirst $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME)) {
+    throw "Verified runtime first on PATH was not classified as restart-recoverable"
+}
+if ($env:PROJECTATLAS_TEST_PERSIST_USER_PATH -eq "1") {
+    if ($env:PROJECTATLAS_TEST_DISPOSABLE_RUNNER -ne "github-hosted") {
+        throw "Persisted User PATH test requires a disposable GitHub-hosted runner"
+    }
+    $originalUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $originalProcessPath = $env:Path
+    try {
+        if (-not (Set-ProjectAtlasPathPrecedence $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME)) {
+            throw "Persisted User PATH was not classified as fresh-host ready"
+        }
+        $persistedUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+        $env:Path = @($machinePath, $persistedUserPath) -join ";"
+        $freshChildPath = & powershell -NoProfile -Command `
+            "(Get-Command projectatlas -ErrorAction Stop).Source"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Fresh child could not resolve projectatlas from persisted User PATH"
+        }
+        if ((Get-NormalizedPathEntry $freshChildPath) -ne `
+            (Get-NormalizedPathEntry $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME)) {
+            throw "Fresh child resolved '$freshChildPath' instead of the persisted verified runtime"
+        }
+    }
+    finally {
+        $env:Path = $originalProcessPath
+        [Environment]::SetEnvironmentVariable("Path", $originalUserPath, "User")
+    }
+}
+$probe = [Diagnostics.Stopwatch]::StartNew()
+if (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_HANGING_RUNTIME $null) {
+    throw "Nonreturning runtime was accepted"
+}
+$probe.Stop()
+if ($probe.Elapsed -gt [TimeSpan]::FromSeconds(10)) {
+    throw "Nonreturning runtime probe exceeded its bounded tolerance: $($probe.Elapsed)"
+}
+$probe = [Diagnostics.Stopwatch]::StartNew()
+if (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_FLOODING_RUNTIME $null) {
+    throw "Output-flooding runtime was accepted"
+}
+$probe.Stop()
+if ($probe.Elapsed -gt [TimeSpan]::FromSeconds(4)) {
+    throw "Output-flooding runtime reached the timeout instead of the live byte limit: $($probe.Elapsed)"
+}
+$floodChildPid = $null
+try {
+    if (-not (Test-Path -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID)) {
+        throw "Output-flooding runtime did not report its child process"
+    }
+    $floodChildPid = [int](Get-Content -Raw -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID)
+    $childDeadline = [DateTime]::UtcNow.AddSeconds(2)
+    do {
+        $floodChild = Get-Process -Id $floodChildPid -ErrorAction SilentlyContinue
+        if (-not $floodChild) {
+            break
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    while ([DateTime]::UtcNow -lt $childDeadline)
+    if ($floodChild) {
+        throw "Bounded runtime probe left its owned child process alive: $floodChildPid"
+    }
+    $leftoverProbeFiles = @(
+        Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
+            -Filter "projectatlas-runtime-probe-*" `
+            -File |
+        Select-Object -ExpandProperty FullName
+    )
+    if ($leftoverProbeFiles.Count -ne 0) {
+        throw "Bounded runtime probe left temporary files: $($leftoverProbeFiles -join ', ')"
+    }
+}
+finally {
+    if ($floodChildPid -and (Get-Process -Id $floodChildPid -ErrorAction SilentlyContinue)) {
+        & (Join-Path $env:SystemRoot "System32\taskkill.exe") /PID $floodChildPid /T /F | Out-Null
+    }
+}
+$canary = Start-Process `
+    -FilePath (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe") `
+    -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "while (`$true) { Start-Sleep -Seconds 60 }") `
+    -WindowStyle Hidden `
+    -PassThru
+$asyncChildPid = $null
+try {
+    if (-not (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_ASYNC_RUNTIME $null)) {
+        throw "Runtime with an asynchronously exiting launcher was rejected"
+    }
+    if (-not (Test-Path -LiteralPath $env:PROJECTATLAS_TEST_ASYNC_CHILD_PID)) {
+        throw "Asynchronous launcher did not report its child process"
+    }
+    $asyncChildPid = [int](Get-Content -Raw -LiteralPath $env:PROJECTATLAS_TEST_ASYNC_CHILD_PID)
+    $childDeadline = [DateTime]::UtcNow.AddSeconds(2)
+    do {
+        $asyncChild = Get-Process -Id $asyncChildPid -ErrorAction SilentlyContinue
+        if (-not $asyncChild) {
+            break
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    while ([DateTime]::UtcNow -lt $childDeadline)
+    if ($asyncChild) {
+        throw "Contained job left its asynchronously spawned child alive: $asyncChildPid"
+    }
+    if ($canary.HasExited) {
+        throw "Contained job terminated the unrelated canary process"
+    }
+    if (-not (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_POWERSHELL_RUNTIME $null)) {
+        throw "PowerShell ProjectAtlas shim was not dispatched through PowerShell"
+    }
+    if (-not (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_COMMAND_HOST_RUNTIME $null)) {
+        throw "Command shim path was not safely quoted for cmd.exe"
+    }
+    $leftoverProbeFiles = @(
+        Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
+            -Filter "projectatlas-runtime-probe-*" `
+            -File |
+        Select-Object -ExpandProperty FullName
+    )
+    if ($leftoverProbeFiles.Count -ne 0) {
+        throw "Contained probe left temporary files: $($leftoverProbeFiles -join ', ')"
+    }
+}
+finally {
+    if ($asyncChildPid) {
+        $asyncChild = Get-Process -Id $asyncChildPid -ErrorAction SilentlyContinue
+        if ($asyncChild) {
+            $asyncChild.Kill()
+            [void]$asyncChild.WaitForExit(2000)
+        }
+    }
+    if (-not $canary.HasExited) {
+        $canary.Kill()
+        [void]$canary.WaitForExit(2000)
+    }
+    $canary.Dispose()
+}
+foreach ($invalidRuntime in @(
+    $env:PROJECTATLAS_TEST_NONNUMERIC_RUNTIME,
+    $env:PROJECTATLAS_TEST_OUT_OF_RANGE_RUNTIME
+)) {
+    if (Test-ProjectAtlasRuntime $invalidRuntime $null) {
+        throw "Runtime with invalid major_version was accepted: $invalidRuntime"
+    }
+}
+function Get-ProjectAtlasRuntimeVersion {
+    param([string]$FilePath)
+    if (-not (Test-Path -LiteralPath $FilePath)) {
+        return $null
+    }
+    return (Get-Content -Raw -LiteralPath $FilePath).Trim()
+}
+function Test-ProjectAtlasRuntime {
+    param([string]$FilePath, [string]$ExpectedVersion)
+    if (-not (Test-Path -LiteralPath $FilePath)) {
+        return $false
+    }
+    if ($script:ProjectAtlasTestForceStaleTarget `
+        -and (Get-NormalizedPathEntry $FilePath) -eq (Get-NormalizedPathEntry $env:PROJECTATLAS_TEST_STABLE_RUNTIME)) {
+        return $false
+    }
+    $actualVersion = Get-ProjectAtlasRuntimeVersion $FilePath
+    $expectedRuntimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
+    return -not $expectedRuntimeVersion -or $actualVersion -eq $expectedRuntimeVersion
+}
+if (-not (Sync-ProjectAtlasRuntimeToLocalAppData $env:PROJECTATLAS_TEST_UNPINNED_RUNTIME $null)) {
+    throw "Unpinned runtime did not synchronize its exact version"
+}
+if ((Get-ProjectAtlasRuntimeVersion $env:PROJECTATLAS_TEST_STABLE_RUNTIME) -ne "0.4.1") {
+    throw "Unpinned synchronization accepted an older stable mirror"
+}
+Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_STABLE_RUNTIME -Value "0.4.0"
+$script:ProjectAtlasTestForceStaleTarget = $true
+$stableLock = [IO.File]::Open(
+    $env:PROJECTATLAS_TEST_STABLE_RUNTIME,
+    [IO.FileMode]::Open,
+    [IO.FileAccess]::Read,
+    [IO.FileShare]::None
+)
+try {
+    if (Sync-ProjectAtlasRuntimeToLocalAppData $env:PROJECTATLAS_TEST_UNPINNED_RUNTIME $null) {
+        throw "Locked older stable mirror was reported synchronized"
+    }
+}
+finally {
+    $stableLock.Dispose()
+}
+"#,
+        ])
+        .env("PROJECTATLAS_TEST_INSTALLER", installer)
+        .env("PROJECTATLAS_TEST_MACHINE_BIN", &machine_bin)
+        .env("PROJECTATLAS_TEST_USER_BIN", &user_bin)
+        .env("PROJECTATLAS_TEST_VERIFIED_RUNTIME", &verified_runtime)
+        .env("PROJECTATLAS_TEST_HANGING_RUNTIME", &hanging_runtime)
+        .env("PROJECTATLAS_TEST_FLOODING_RUNTIME", &flooding_runtime)
+        .env("PROJECTATLAS_TEST_FLOOD_CHILD_PID", &flood_child_pid)
+        .env("PROJECTATLAS_TEST_ASYNC_RUNTIME", &async_runtime)
+        .env("PROJECTATLAS_TEST_ASYNC_CHILD_PID", &async_child_pid)
+        .env(
+            "PROJECTATLAS_TEST_POWERSHELL_RUNTIME",
+            &powershell_runtime,
+        )
+        .env(
+            "PROJECTATLAS_TEST_COMMAND_HOST_RUNTIME",
+            &command_host_runtime,
+        )
+        .env("TEMP", &probe_temp)
+        .env("TMP", &probe_temp)
+        .env("PROJECTATLAS_TEST_NONNUMERIC_RUNTIME", &nonnumeric_runtime)
+        .env(
+            "PROJECTATLAS_TEST_OUT_OF_RANGE_RUNTIME",
+            &out_of_range_runtime,
+        )
+        .env("PROJECTATLAS_TEST_UNPINNED_RUNTIME", &unpinned_runtime)
+        .env("PROJECTATLAS_TEST_STABLE_RUNTIME", &stable_runtime)
+        .env("LOCALAPPDATA", &local_app_data)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "fresh Windows PATH probe failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 #[test]
 fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<dyn Error>> {
     let skill = fs::read_to_string(
@@ -3292,6 +4697,7 @@ fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<
     for required in [
         "For task-directed work in an existing indexed repository",
         "On first use in each distinct project root",
+        "If a read-only call returns `init_required`, execute its exact `atlas_init` next call for the returned `project_path`",
         "Every project root owns its own `.projectatlas/projectatlas.db`",
         "**Fresh existing index:** make no indexing call",
         "**Changed files:** use `atlas_watch_once`",
@@ -3408,18 +4814,83 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
         .into());
     }
     let readme = fs::read_to_string(workspace_root.join("README.md"))?;
+    let agent_integration = fs::read_to_string(
+        workspace_root
+            .join("docs")
+            .join(AGENT_INTEGRATION_DOC_FILE_NAME),
+    )?;
+    let public_docs_index = fs::read_to_string(workspace_root.join("docs").join("index.md"))?;
     let gitignore = fs::read_to_string(workspace_root.join(".gitignore"))?;
     for required in [
-        "Rust-native local code index and atlas",
-        "complete SQLite-backed index",
-        "fast local SQLite index",
+        "Rust-native, high-performance local repository intelligence",
+        "persistent SQLite map",
+        "native Rust CLI and MCP server",
+        "purposes identify the responsible area",
+        "graph relationships reveal connected code",
+        "compact summaries and outlines",
+        "exact source slices provide the final evidence",
+        "docs/design/ani-mascot-reference.png",
+        "docs/agent-integration.md#runtime-installation-and-repair",
+        "docs/agent-integration.md#token-reporting-and-human-tui",
+        "docs/agent-integration.md#mcp-tool-sequence",
     ] {
         if !readme.contains(required) {
             return Err(io::Error::other(format!(
-                "README must present ProjectAtlas as a complete local code index; missing {required:?}"
+                "README must retain the consolidated Rust-native agent-first positioning; missing {required:?}"
             ))
             .into());
         }
+    }
+    for required in [
+        "### Runtime installation and repair",
+        "### Token reporting and human TUI",
+        "remain in the exact source ledger",
+        "rather than adding standalone bar panels",
+    ] {
+        if !agent_integration.contains(required) {
+            return Err(io::Error::other(format!(
+                "agent integration guide must own the linked setup and TUI behavior; missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "separate proportional bars for observed and modeled file reads avoided",
+        "retained in the exact source ledger and navigation composition",
+        "at wide terminal sizes, a bounded Atlas map",
+    ] {
+        if !public_docs_index.contains(required) {
+            return Err(io::Error::other(format!(
+                "public docs index must match the live token TUI; missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    for historical in ["frozen v0.3.26", "plain control", "3.9 times the median"] {
+        if readme.contains(historical) {
+            return Err(io::Error::other(format!(
+                "README must not restore the historical navigation comparison {historical:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "projectatlas token --view tui",
+        "docs/assets/token-impact-tui.png",
+    ] {
+        if !readme.contains(required) {
+            return Err(io::Error::other(format!(
+                "README must show the human TUI product example; missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    let readme_words = readme.split_whitespace().count();
+    if readme_words > 1_400 {
+        return Err(io::Error::other(format!(
+            "README landing page regressed into an operator-manual wall of text: {readme_words} words"
+        ))
+        .into());
     }
     for (workflow_name, workflow) in [("ci", &ci_workflow), ("release", &release_workflow)] {
         let verify = workflow_job_block(workflow, "verify")?;
@@ -3537,6 +5008,26 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
     {
         return Err(io::Error::other(
             "local ProjectAtlas purpose-review batches must stay ignored",
+        )
+        .into());
+    }
+    if !gitignore.lines().any(|line| line == "/.worktrees/") {
+        return Err(io::Error::other(
+            "project-local linked worktrees must stay ignored as defense in depth",
+        )
+        .into());
+    }
+    let ignored_worktree_probe = git_command_for_root(&workspace_root)
+        .args([
+            "check-ignore",
+            "--quiet",
+            "--no-index",
+            ".worktrees/projectatlas-boundary-probe/src/lib.rs",
+        ])
+        .status()?;
+    if !ignored_worktree_probe.success() {
+        return Err(io::Error::other(
+            "Git did not apply the root /.worktrees/ defense-in-depth policy",
         )
         .into());
     }
@@ -4683,6 +6174,14 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
     )?;
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
     fs::copy(&runtime, &stable_runtime)?;
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let stable_runtime_dir = stable_runtime
+        .parent()
+        .ok_or_else(|| io::Error::other("stable runtime parent missing"))?;
+    let parent_path = std::env::join_paths(
+        std::iter::once(stable_runtime_dir.to_path_buf())
+            .chain(std::env::split_paths(&inherited_path)),
+    )?;
 
     let db = atlas_dir.join("projectatlas.db");
     let mut locked_runtime = StdCommand::new(&stable_runtime)
@@ -4702,9 +6201,12 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
         ))
         .into());
     }
+    let mut current_lock_reaped = false;
+    let mut stale_lock_process = None;
 
     let test_result = (|| -> Result<(), Box<dyn Error>> {
         let release_archive = create_windows_release_archive(temp.path(), &runtime)?;
+        let release_asset_guard = lock_windows_release_asset_tests();
         let (release_base_url, release_server) = serve_release_assets(&release_archive, None)?;
         let workspace_root = workspace_root()?;
         let installer = workspace_root
@@ -4717,7 +6219,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .arg("-ExecutionPolicy")
             .arg("Bypass")
             .arg("-File")
-            .arg(installer)
+            .arg(&installer)
             .arg("-ProjectRoot")
             .arg(&repo)
             .arg("-ProjectAtlasVersion")
@@ -4729,6 +6231,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .env("USERPROFILE", &isolated_home)
             .env("APPDATA", &app_data)
             .env("LOCALAPPDATA", &local_app_data)
+            .env("PATH", &parent_path)
             .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
             .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
             .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
@@ -4745,6 +6248,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             io::Error::other(format!("release asset test server panicked: {message}"))
         })?;
         server_result?;
+        drop(release_asset_guard);
         let installer_output_text = format!(
             "{}\n{}",
             String::from_utf8_lossy(&output.stdout),
@@ -4756,28 +6260,26 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             ))
             .into());
         }
-        let normalized_installer_output = installer_output_text
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        for required in [
-            "ProjectAtlas LocalAppData mirror skipped",
-            "Close any running ProjectAtlas or Codex session using that file",
-            "then rerun this installer",
-            "Codex MCP and generated configs continue to use verified",
-        ] {
-            if !normalized_installer_output.contains(required) {
-                return Err(io::Error::other(format!(
-                    "installer did not provide locked LocalAppData mirror guidance {required:?}\n{installer_output_text}"
-                ))
-                .into());
-            }
+        if installer_output_text.contains("ProjectAtlas LocalAppData mirror skipped") {
+            return Err(io::Error::other(format!(
+                "installer tried to replace an already-current locked stable mirror\n{installer_output_text}"
+            ))
+            .into());
         }
         if !installer_output_text
             .contains("Active process resolves bare projectatlas to verified runtime")
         {
             return Err(io::Error::other(format!(
                 "installer did not make its active process prefer the verified runtime\n{installer_output_text}"
+            ))
+            .into());
+        }
+        if !installer_output_text.trim_end().ends_with(
+            "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=true host_restart_required=false",
+        ) || installer_output_text.contains("Existing host restart required:")
+        {
+            return Err(io::Error::other(format!(
+                "installer misstated readiness for the already-current locked stable mirror\n{installer_output_text}"
             ))
             .into());
         }
@@ -4795,6 +6297,43 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             ))
             .into());
         }
+        if let Some(status) = locked_runtime.try_wait()? {
+            return Err(io::Error::other(format!(
+                "installer terminated the owned process holding the stable mirror lock: {status}"
+            ))
+            .into());
+        }
+
+        let sibling_output = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg(
+                "$command = Get-Command projectatlas -ErrorAction Stop; Write-Output $command.Source; & projectatlas --require-version $env:PROJECTATLAS_VERSION --format json runtime-info",
+            )
+            .env("PATH", &parent_path)
+            .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        let sibling_stdout = String::from_utf8_lossy(&sibling_output.stdout);
+        if !sibling_output.status.success() {
+            return Err(io::Error::other(format!(
+                "later sibling from the unchanged parent failed:\n{sibling_stdout}\n{}",
+                String::from_utf8_lossy(&sibling_output.stderr)
+            ))
+            .into());
+        }
+        let sibling_command = sibling_stdout
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .ok_or_else(|| {
+                io::Error::other("later sibling did not report its bare command path")
+            })?;
+        require_same_executable(
+            sibling_command.trim(),
+            &stable_runtime,
+            "unchanged parent sibling",
+        )?;
+
         let fake_codex_calls = fs::read_to_string(&fake_codex_log)?;
         if !fake_codex_calls.contains("mcp add projectatlas --")
             || !fake_codex_calls.contains(versioned_runtime.to_string_lossy().as_ref())
@@ -4888,21 +6427,242 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .into());
         }
 
+        locked_runtime.kill()?;
+        locked_runtime.wait()?;
+        current_lock_reaped = true;
+        fs::write(&stable_runtime, b"stale ProjectAtlas stable mirror")?;
+        stale_lock_process = Some(spawn_exclusive_file_lock(&stable_runtime)?);
+
+        let stale_output = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&installer)
+            .arg("-ProjectRoot")
+            .arg(&repo)
+            .arg("-ProjectAtlasVersion")
+            .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+            .arg("-RuntimePath")
+            .arg(&versioned_runtime)
+            .env("HOME", &isolated_home)
+            .env("USERPROFILE", &isolated_home)
+            .env("APPDATA", &app_data)
+            .env("LOCALAPPDATA", &local_app_data)
+            .env("PATH", &parent_path)
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+            .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        let stale_output_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&stale_output.stdout),
+            String::from_utf8_lossy(&stale_output.stderr)
+        );
+        let normalized_stale_output = stale_output_text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for required in [
+            "ProjectAtlas LocalAppData mirror skipped",
+            "Close any running ProjectAtlas or Codex session using that file",
+            "then rerun this installer",
+            "Codex MCP and generated configs continue to use verified",
+        ] {
+            if !normalized_stale_output.contains(required) {
+                return Err(io::Error::other(format!(
+                    "installer did not provide stale locked-mirror guidance {required:?}\n{stale_output_text}"
+                ))
+                .into());
+            }
+        }
+        if !stale_output.status.success()
+            || !stale_output_text.trim_end().ends_with(
+                "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=false host_restart_required=false",
+            )
+            || stale_output_text.contains("Existing host restart required:")
+            || !stale_output_text.contains("restart alone will not repair it")
+        {
+            return Err(io::Error::other(format!(
+                "installer did not report repair-required state for the unchanged stale parent mirror\n{stale_output_text}"
+            ))
+            .into());
+        }
+        if let Some(status) = stale_lock_process
+            .as_mut()
+            .ok_or_else(|| io::Error::other("stale mirror lock process missing"))?
+            .try_wait()?
+        {
+            return Err(io::Error::other(format!(
+                "installer terminated the owned stale-mirror lock process: {status}"
+            ))
+            .into());
+        }
+        let stale_sibling = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg(
+                "$command = Get-Command projectatlas -ErrorAction Stop; Write-Output $command.Source; try { & projectatlas --require-version $env:PROJECTATLAS_VERSION --format json runtime-info; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Error $_; exit 1 }",
+            )
+            .env("PATH", &parent_path)
+            .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        let stale_sibling_stdout = String::from_utf8_lossy(&stale_sibling.stdout);
+        if stale_sibling.status.success() {
+            return Err(io::Error::other(format!(
+                "unchanged stale parent unexpectedly resolved a current bare runtime\n{stale_sibling_stdout}"
+            ))
+            .into());
+        }
+        let stale_sibling_command = stale_sibling_stdout
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .ok_or_else(|| io::Error::other("stale sibling did not report its command path"))?;
+        require_same_executable(
+            stale_sibling_command.trim(),
+            &stable_runtime,
+            "stale unchanged parent sibling",
+        )?;
+
+        let versioned_runtime_dir = versioned_runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("versioned runtime parent missing"))?;
+        let known_stale_shim = app_data.join(NPM_SHIM_DIR).join("projectatlas.cmd");
+        let known_stale_shim_dir = known_stale_shim
+            .parent()
+            .ok_or_else(|| io::Error::other("known stale shim parent missing"))?;
+        fs::create_dir_all(known_stale_shim_dir)?;
+        fs::write(
+            &known_stale_shim,
+            "@echo off\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.0.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\n",
+        )?;
+        let fresh_host_path = std::env::join_paths(
+            std::iter::once(known_stale_shim_dir.to_path_buf())
+                .chain(std::iter::once(versioned_runtime_dir.to_path_buf()))
+                .chain(std::env::split_paths(&parent_path)),
+        )?;
+        let post_quarantine_output = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&installer)
+            .arg("-ProjectRoot")
+            .arg(&repo)
+            .arg("-ProjectAtlasVersion")
+            .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+            .arg("-RuntimePath")
+            .arg(&versioned_runtime)
+            .env("HOME", &isolated_home)
+            .env("USERPROFILE", &isolated_home)
+            .env("APPDATA", &app_data)
+            .env("LOCALAPPDATA", &local_app_data)
+            .env("PATH", &fresh_host_path)
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+            .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        let post_quarantine_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&post_quarantine_output.stdout),
+            String::from_utf8_lossy(&post_quarantine_output.stderr)
+        );
+        if !post_quarantine_output.status.success()
+            || !post_quarantine_text.trim_end().ends_with(
+                "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=true host_restart_required=false",
+            )
+            || post_quarantine_text.contains("Existing host restart required:")
+        {
+            return Err(io::Error::other(format!(
+                "installer did not recognize the current runtime exposed after stale-shim quarantine\n{post_quarantine_text}"
+            ))
+            .into());
+        }
+        let known_stale_quarantine = stale_shim_quarantine_path(&known_stale_shim, "0.0.1");
+        if known_stale_shim.exists()
+            || !known_stale_quarantine.exists()
+            || !post_quarantine_text.contains("Quarantined stale ProjectAtlas shim")
+        {
+            return Err(io::Error::other(format!(
+                "installer did not quarantine the inherited stale shim before deriving restart state\n{post_quarantine_text}"
+            ))
+            .into());
+        }
+        if let Some(status) = stale_lock_process
+            .as_mut()
+            .ok_or_else(|| io::Error::other("stale mirror lock process missing"))?
+            .try_wait()?
+        {
+            return Err(io::Error::other(format!(
+                "post-quarantine install terminated the owned lock process: {status}"
+            ))
+            .into());
+        }
+        let fresh_sibling_output = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg(
+                "$command = Get-Command projectatlas -ErrorAction Stop; Write-Output $command.Source; & projectatlas --require-version $env:PROJECTATLAS_VERSION --format json runtime-info",
+            )
+            .env("PATH", &fresh_host_path)
+            .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        let fresh_sibling_stdout = String::from_utf8_lossy(&fresh_sibling_output.stdout);
+        if !fresh_sibling_output.status.success() {
+            return Err(io::Error::other(format!(
+                "fresh sibling failed to use the persisted runtime precedence:\n{fresh_sibling_stdout}\n{}",
+                String::from_utf8_lossy(&fresh_sibling_output.stderr)
+            ))
+            .into());
+        }
+        let fresh_sibling_command = fresh_sibling_stdout
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .ok_or_else(|| {
+                io::Error::other("fresh sibling did not report its bare command path")
+            })?;
+        require_same_executable(
+            fresh_sibling_command.trim(),
+            &versioned_runtime,
+            "fresh parent sibling",
+        )?;
+
         Ok(())
     })();
 
-    let kill_result = locked_runtime.kill();
-    let wait_result = locked_runtime.wait();
-    if let Err(error) = kill_result
-        && test_result.is_ok()
-        && error.kind() != io::ErrorKind::InvalidInput
-    {
-        return Err(error.into());
+    if !current_lock_reaped {
+        let kill_result = locked_runtime.kill();
+        let wait_result = locked_runtime.wait();
+        if let Err(error) = kill_result
+            && test_result.is_ok()
+            && error.kind() != io::ErrorKind::InvalidInput
+        {
+            return Err(error.into());
+        }
+        if let Err(error) = wait_result
+            && test_result.is_ok()
+        {
+            return Err(error.into());
+        }
     }
-    if let Err(error) = wait_result
-        && test_result.is_ok()
-    {
-        return Err(error.into());
+    if let Some(process) = stale_lock_process.as_mut() {
+        let kill_result = process.kill();
+        let wait_result = process.wait();
+        if let Err(error) = kill_result
+            && test_result.is_ok()
+            && error.kind() != io::ErrorKind::InvalidInput
+        {
+            return Err(error.into());
+        }
+        if let Err(error) = wait_result
+            && test_result.is_ok()
+        {
+            return Err(error.into());
+        }
     }
     test_result
 }
@@ -5055,7 +6815,7 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         isolated_home
             .join("AppData")
             .join("Roaming")
-            .join("npm")
+            .join(NPM_SHIM_DIR)
             .join("projectatlas.cmd")
     } else {
         isolated_home
@@ -5844,6 +7604,14 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
             .ok_or_else(|| io::Error::other("stable runtime parent missing"))?,
     )?;
     fs::write(&stable_runtime, b"stale 0.3.10 stable mirror")?;
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let stable_runtime_dir = stable_runtime
+        .parent()
+        .ok_or_else(|| io::Error::other("stable runtime parent missing"))?;
+    let parent_path = std::env::join_paths(
+        std::iter::once(stable_runtime_dir.to_path_buf())
+            .chain(std::env::split_paths(&inherited_path)),
+    )?;
 
     let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = isolated_home.join("codex.cmd");
@@ -5854,6 +7622,7 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
 
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
     let release_archive = create_windows_release_archive(temp.path(), &runtime)?;
+    let release_asset_guard = lock_windows_release_asset_tests();
     let (release_base_url, release_server) = serve_release_assets(&release_archive, None)?;
     let workspace_root = workspace_root()?;
     let installer = workspace_root
@@ -5866,7 +7635,7 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         .arg("-ExecutionPolicy")
         .arg("Bypass")
         .arg("-File")
-        .arg(installer)
+        .arg(&installer)
         .arg("-ProjectRoot")
         .arg(&repo)
         .arg("-ProjectAtlasVersion")
@@ -5878,6 +7647,7 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         .env("USERPROFILE", &isolated_home)
         .env("APPDATA", &app_data)
         .env("LOCALAPPDATA", &local_app_data)
+        .env("PATH", &parent_path)
         .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
         .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
         .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
@@ -5894,6 +7664,7 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         io::Error::other(format!("release asset test server panicked: {message}"))
     })?;
     server_result?;
+    drop(release_asset_guard);
     let installer_output_text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -5919,6 +7690,15 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         ))
         .into());
     }
+    if !installer_output_text.trim_end().ends_with(
+        "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=true host_restart_required=false",
+    ) || installer_output_text.contains("Existing host restart required:")
+    {
+        return Err(io::Error::other(format!(
+            "installer did not report full readiness after synchronizing the unlocked mirror\n{installer_output_text}"
+        ))
+        .into());
+    }
     for runtime_path in [&versioned_runtime, &stable_runtime] {
         let runtime_info = StdCommand::new(runtime_path)
             .arg("--require-version")
@@ -5936,6 +7716,110 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
             .into());
         }
     }
+    let sibling_output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-Command")
+        .arg(
+            "$command = Get-Command projectatlas -ErrorAction Stop; Write-Output $command.Source; & projectatlas --require-version $env:PROJECTATLAS_VERSION --format json runtime-info",
+        )
+        .env("PATH", &parent_path)
+        .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .output()?;
+    let sibling_stdout = String::from_utf8_lossy(&sibling_output.stdout);
+    if !sibling_output.status.success() {
+        return Err(io::Error::other(format!(
+            "unchanged sibling failed after the stable mirror synchronized:\n{sibling_stdout}\n{}",
+            String::from_utf8_lossy(&sibling_output.stderr)
+        ))
+        .into());
+    }
+    let sibling_command = sibling_stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| {
+            io::Error::other("synchronized sibling did not report its bare command path")
+        })?;
+    require_same_executable(
+        sibling_command.trim(),
+        &stable_runtime,
+        "synchronized parent sibling",
+    )?;
+
+    let stale_parent_bin = temp.path().join("stale-parent-bin");
+    fs::create_dir_all(&stale_parent_bin)?;
+    let stale_parent_runtime = stale_parent_bin.join("projectatlas.cmd");
+    fs::write(
+        &stale_parent_runtime,
+        "@echo off\r\necho {\"version\":\"0.3.26\"}\r\nexit /b 0\r\n",
+    )?;
+    let stale_parent_path = std::env::join_paths(
+        std::iter::once(stale_parent_bin).chain(std::env::split_paths(&inherited_path)),
+    )?;
+    let stale_parent_install = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(&installer)
+        .arg("-ProjectRoot")
+        .arg(&repo)
+        .arg("-ProjectAtlasVersion")
+        .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+        .arg("-RuntimePath")
+        .arg(&versioned_runtime)
+        .env("HOME", &isolated_home)
+        .env("USERPROFILE", &isolated_home)
+        .env("APPDATA", &app_data)
+        .env("LOCALAPPDATA", &local_app_data)
+        .env("PATH", &stale_parent_path)
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+        .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .output()?;
+    let stale_parent_install_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&stale_parent_install.stdout),
+        String::from_utf8_lossy(&stale_parent_install.stderr)
+    );
+    if !stale_parent_install.status.success()
+        || !stale_parent_install_text.trim_end().ends_with(
+            "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=false host_restart_required=false",
+        )
+        || stale_parent_install_text.contains("Existing host restart required:")
+        || !stale_parent_install_text.contains("restart alone will not repair it")
+    {
+        return Err(io::Error::other(format!(
+            "installer misstated repair requirements when the synchronized mirror was absent from the unchanged parent PATH\n{stale_parent_install_text}"
+        ))
+        .into());
+    }
+    let stale_sibling_output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-Command")
+        .arg(
+            "$command = Get-Command projectatlas -ErrorAction Stop; Write-Output $command.Source; & projectatlas --format json runtime-info",
+        )
+        .env("PATH", &stale_parent_path)
+        .output()?;
+    let stale_sibling_stdout = String::from_utf8_lossy(&stale_sibling_output.stdout);
+    if !stale_sibling_output.status.success() || !stale_sibling_stdout.contains("0.3.26") {
+        return Err(io::Error::other(format!(
+            "unchanged stale sibling did not demonstrate its stale bare-command resolution:\n{stale_sibling_stdout}\n{}",
+            String::from_utf8_lossy(&stale_sibling_output.stderr)
+        ))
+        .into());
+    }
+    let stale_sibling_command = stale_sibling_stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| io::Error::other("stale sibling did not report its bare command path"))?;
+    require_same_executable(
+        stale_sibling_command.trim(),
+        &stale_parent_runtime,
+        "stale parent sibling",
+    )?;
 
     let codex_config = read_json_file(&atlas_dir.join("projectatlas.mcp.json"))?;
     require_same_executable(
@@ -5982,6 +7866,7 @@ fn windows_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Bo
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
     let release_archive = create_windows_release_archive(temp.path(), &runtime)?;
     let wrong_hash = "0".repeat(64);
+    let release_asset_guard = lock_windows_release_asset_tests();
     let (release_base_url, release_server) =
         serve_release_assets(&release_archive, Some(wrong_hash.as_str()))?;
     let workspace_root = workspace_root()?;
@@ -6022,6 +7907,7 @@ fn windows_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Bo
         io::Error::other(format!("release asset test server panicked: {message}"))
     })?;
     server_result?;
+    drop(release_asset_guard);
     let installer_output_text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -6078,6 +7964,7 @@ fn windows_release_binary_only_rejects_invalid_runtime_without_fallback()
         b"this is not a valid ProjectAtlas Windows executable",
     )?;
     let release_archive = create_windows_release_archive(temp.path(), &invalid_runtime)?;
+    let release_asset_guard = lock_windows_release_asset_tests();
     let (release_base_url, release_server) = serve_release_assets(&release_archive, None)?;
     let workspace_root = workspace_root()?;
     let installer = workspace_root
@@ -6117,6 +8004,7 @@ fn windows_release_binary_only_rejects_invalid_runtime_without_fallback()
         io::Error::other(format!("release asset test server panicked: {message}"))
     })?;
     server_result?;
+    drop(release_asset_guard);
     let installer_output_text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -8146,6 +10034,34 @@ fn json_values_equivalent(left: &Value, right: &Value) -> bool {
 }
 
 #[test]
+fn mcp_tools_list_exposes_self_contained_codex_input_schemas_without_index_state()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    let database = atlas_dir.join("projectatlas.db");
+    let executable = mcp_contract_executable();
+
+    let inventory = run_mcp_contract_inventory(&executable, &repo, &database)?;
+    let response = mcp_response(&inventory, 2)?;
+    let tools = response
+        .get("result")
+        .and_then(|result| result.get("tools"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("MCP tools/list response omitted tools"))?;
+    assert_codex_bridge_compatible_input_schemas(tools)?;
+
+    if database.exists() || fs::read_dir(&atlas_dir)?.next().is_some() {
+        return Err(io::Error::other(
+            "tools/list created project index state while advertising schemas",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn agent_efficiency_cli_mcp_contract_is_typed_read_only_and_isolated() -> Result<(), Box<dyn Error>>
 {
     let temp = tempfile::tempdir()?;
@@ -10006,6 +11922,7 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
         .and_then(|result| result.get("tools"))
         .and_then(Value::as_array)
         .ok_or_else(|| io::Error::other("MCP contract tools/list omitted tools"))?;
+    assert_codex_bridge_compatible_input_schemas(tools)?;
     let tools_by_name = mcp_tools_by_name(tools)?;
     let advertised_names = tools_by_name.keys().copied().collect::<BTreeSet<_>>();
     let case_names = cases.iter().map(|case| case.name).collect::<BTreeSet<_>>();
@@ -10016,9 +11933,9 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
         .into());
     }
     let tools_digest = sha256_hex(&serde_json::to_vec(tools)?);
-    if tools_digest != MCP_V040_TOOLS_SHA256 {
+    if tools_digest != MCP_V041_TOOLS_SHA256 {
         return Err(io::Error::other(format!(
-            "frozen v0.4.0 MCP inventory/schema digest drifted: expected {MCP_V040_TOOLS_SHA256}, found {tools_digest}"
+            "frozen v0.4.1 MCP inventory/schema digest drifted: expected {MCP_V041_TOOLS_SHA256}, found {tools_digest}"
         ))
         .into());
     }
@@ -10166,6 +12083,8 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
         }
     }
 
+    let missing_index_root = temp.path().join("missing-index");
+    fs::create_dir(&missing_index_root)?;
     for (name, arguments, expected_error) in [
         (
             "atlas_slice",
@@ -10182,6 +12101,26 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
             serde_json::json!({"project_path": repo_argument, "path": "../parent-canary.txt", "purpose": "Must not escape."}),
             "project",
         ),
+        (
+            "atlas_purpose_review",
+            serde_json::json!({"project_path": repo_argument, "apply": false, "items": [{}]}),
+            "missing field `path`",
+        ),
+        (
+            "atlas_purpose_review",
+            serde_json::json!({"project_path": repo_argument, "apply": true, "items": [{"path": "src/scanned.rs", "purpose": "Must not apply.", "task": "mcp-contract", "work_key": "incomplete"}]}),
+            "entirely conditional",
+        ),
+        (
+            "atlas_purpose_review",
+            serde_json::json!({"project_path": parent_canary, "apply": true, "items": [{"path": "src/scanned.rs", "purpose": "Must not apply."}]}),
+            "not a directory",
+        ),
+        (
+            "atlas_purpose_review",
+            serde_json::json!({"project_path": missing_index_root, "apply": true, "items": [{"path": "src/scanned.rs", "purpose": "Must not apply."}]}),
+            "is missing",
+        ),
     ] {
         assert_mcp_contract_failure_no_mutation(
             &executable,
@@ -10191,6 +12130,51 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
             &arguments,
             expected_error,
         )?;
+    }
+    if missing_index_root.join(ATLAS_DIR_NAME).exists() {
+        return Err(io::Error::other("missing-index MCP review created project state").into());
+    }
+
+    let stale_before = mcp_database_snapshot(&db)?;
+    let (stale_response, stale_stdout) = run_mcp_contract_raw_call(
+        &executable,
+        &repo,
+        &db,
+        "atlas_purpose_review",
+        &serde_json::json!({
+            "project_path": repo_argument,
+            "apply": true,
+            "items": [{
+                "path": "src/scanned.rs",
+                "purpose": "Must not apply.",
+                "task": "mcp-contract",
+                "work_key": "0".repeat(64),
+                "state_token": "0".repeat(64)
+            }]
+        }),
+        false,
+    )?;
+    if stale_response
+        .get("result")
+        .and_then(|result| result.get("isError"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return Err(io::Error::other(format!(
+            "stale conditional MCP review returned an adapter error: {stale_response}"
+        ))
+        .into());
+    }
+    let stale_review: Value = toon_format::decode_default(&mcp_tool_text(&stale_stdout, 2)?)?;
+    require_json_usize(&stale_review, &["purpose_review", "changed"], 0)?;
+    require_json_usize(&stale_review, &["purpose_review", "conflicts"], 1)?;
+    require_json_string(
+        &stale_review,
+        &["purpose_review_items", "0", "action"],
+        "stale",
+    )?;
+    if mcp_database_snapshot(&db)? != stale_before {
+        return Err(io::Error::other("stale conditional MCP review changed SQLite state").into());
     }
     assert_mcp_non_git_freshness(&executable)?;
     assert_mcp_active_cancellation_preserves_generation(&executable)?;
@@ -12844,6 +14828,351 @@ fn normal_reads_do_not_serve_offline_stale_index_state() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn configured_module_aliases_resolve_across_adapters_and_refresh_atomically()
+-> Result<(), Box<dyn Error>> {
+    const ALTERNATE_DIR_NAME: &str = "alternate";
+    const CONTROLLER_TS_FILE: &str = "controller.ts";
+    const JS_DIR_NAME: &str = "js";
+    const TS_CONFIG: &str = r#"{
+  // JSONC is the native compiler configuration format.
+  "compilerOptions": {
+    "baseUrl": "src",
+    "paths": {
+      "@/*": ["*"],
+    },
+  },
+}
+"#;
+    const JS_CONFIG: &str = r#"{
+  "compilerOptions": {
+    "baseUrl": "../src",
+    "paths": {
+      "@/*": ["*"]
+    }
+  }
+}
+"#;
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("configured-module-aliases");
+    let source = repo.join(SRC_DIR_NAME);
+    let js_source = repo.join(JS_DIR_NAME).join(SRC_DIR_NAME);
+    fs::create_dir_all(&source)?;
+    fs::create_dir_all(&js_source)?;
+    let db = temp.path().join("configured-module-aliases.db");
+    let ts_config = repo.join("tsconfig.json");
+    let js_config = repo.join(JS_DIR_NAME).join("jsconfig.json");
+    fs::write(&ts_config, TS_CONFIG)?;
+    fs::write(&js_config, JS_CONFIG)?;
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"configured-shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+    fs::write(
+        repo.join(JS_DIR_NAME).join("Cargo.toml"),
+        "[package]\nname = \"configured-app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+    fs::write(
+        source.join(CONTROLLER_TS_FILE),
+        "export function useController(): string { return \"ok\"; }\n",
+    )?;
+    fs::write(
+        source.join("Page.vue"),
+        "<script setup lang=\"ts\">\nimport { useController } from \"@/controller\";\nconst value = useController();\n</script>\n<template><div>{{ value }}</div></template>\n",
+    )?;
+    fs::write(
+        source.join("js-controller.js"),
+        "export function useJsController() { return \"ok\"; }\n",
+    )?;
+    fs::write(
+        js_source.join("js-page.js"),
+        "import { useJsController } from \"@/js-controller\";\nexport const value = useJsController();\n",
+    )?;
+    run_scan(&repo, &db)?;
+
+    let ts_file = detailed_relation_payload(&repo, &db, "src/controller.ts", None, "inbound")?;
+    assert_detailed_resolution(&ts_file, 1, "resolved")?;
+    let ts_symbol = detailed_relation_payload(
+        &repo,
+        &db,
+        "src/controller.ts",
+        Some("useController"),
+        "inbound",
+    )?;
+    assert_detailed_resolution(&ts_symbol, 1, "resolved")?;
+    let js_file = detailed_relation_payload(&repo, &db, "src/js-controller.js", None, "inbound")?;
+    assert_detailed_resolution(&js_file, 1, "resolved")?;
+    let js_symbol = detailed_relation_payload(
+        &repo,
+        &db,
+        "src/js-controller.js",
+        Some("useJsController"),
+        "inbound",
+    )?;
+    assert_detailed_resolution(&js_symbol, 1, "resolved")?;
+    let js_outbound =
+        detailed_relation_payload(&repo, &db, "js/src/js-page.js", Some("value"), "outbound")?;
+    assert_detailed_resolution(&js_outbound, 1, "resolved")?;
+
+    let impact = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "--format",
+            "json",
+            "symbols",
+            "relations",
+            "--view",
+            "analysis",
+            "--analysis-mode",
+            "impact",
+            "--vcs",
+            "working-tree",
+            "--include-dead-code",
+            "--file",
+            "src/controller.ts",
+            "--symbol",
+            "useController",
+            "--direction",
+            "inbound",
+            "--depth",
+            "2",
+            "--limit",
+            "50",
+        ])
+        .output()?;
+    if !impact.status.success() {
+        return Err(io::Error::other(format!(
+            "configured alias impact analysis failed: {}",
+            String::from_utf8_lossy(&impact.stderr)
+        ))
+        .into());
+    }
+    let impact: Value = serde_json::from_slice(&impact.stdout)?;
+    let dead_code_nodes = impact
+        .pointer("/symbol_relations/findings")
+        .and_then(Value::as_array)
+        .and_then(|findings| {
+            findings
+                .iter()
+                .find(|finding| finding.get("kind").and_then(Value::as_str) == Some("dead_code"))
+        })
+        .and_then(|finding| finding.get("nodes"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("impact analysis omitted typed dead-code findings"))?;
+    if dead_code_nodes.iter().any(|node| {
+        node.pointer("/node/entity/selector/symbol/name")
+            .and_then(Value::as_str)
+            == Some("useController")
+    }) {
+        return Err(io::Error::other(
+            "configured alias target was presented as a dead-code candidate",
+        )
+        .into());
+    }
+
+    let messages = vec![
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"configured-module-e2e","version":"0.1.0"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "atlas_symbol_relations",
+                "arguments": {
+                    "view": "detailed",
+                    "file": "src/controller.ts",
+                    "direction": "inbound",
+                    "limit": 10
+                }
+            }
+        })
+        .to_string(),
+    ];
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let stdout = run_mcp_stdio_with_env(
+        &executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+    )?;
+    let mcp = mcp_tool_text(&stdout, 2)?;
+    for expected in ["status: resolved", "value: 1", "src/controller.ts"] {
+        if !mcp.contains(expected) {
+            return Err(io::Error::other(format!(
+                "configured alias MCP result omitted {expected:?}: {mcp}"
+            ))
+            .into());
+        }
+    }
+
+    fs::create_dir_all(source.join(ALTERNATE_DIR_NAME))?;
+    fs::write(
+        source.join(ALTERNATE_DIR_NAME).join(CONTROLLER_TS_FILE),
+        "export function useController(): string { return \"alternate\"; }\n",
+    )?;
+    fs::write(
+        &ts_config,
+        r#"{"compilerOptions":{"baseUrl":"src","paths":{"@/*":["alternate/*"]}}}"#,
+    )?;
+    run_watch_once(&repo, &db)?;
+    assert_detailed_resolution(
+        &detailed_relation_payload(&repo, &db, "src/controller.ts", None, "inbound")?,
+        0,
+        "resolved",
+    )?;
+    assert_detailed_resolution(
+        &detailed_relation_payload(&repo, &db, "src/alternate/controller.ts", None, "inbound")?,
+        1,
+        "resolved",
+    )?;
+
+    fs::remove_file(&ts_config)?;
+    run_watch_once(&repo, &db)?;
+    assert_detailed_resolution(
+        &detailed_relation_payload(&repo, &db, "src/alternate/controller.ts", None, "inbound")?,
+        0,
+        "resolved",
+    )?;
+    let unresolved = detailed_relation_payload(&repo, &db, "src/Page.vue", None, "outbound")?;
+    assert_detailed_resolution(&unresolved, 2, "unresolved")?;
+
+    let pending_ts_config = repo.join("tsconfig.pending.json");
+    fs::write(&pending_ts_config, TS_CONFIG)?;
+    fs::rename(&pending_ts_config, &ts_config)?;
+    run_watch_once(&repo, &db)?;
+    assert_detailed_resolution(
+        &detailed_relation_payload(&repo, &db, "src/controller.ts", None, "inbound")?,
+        1,
+        "resolved",
+    )?;
+    fs::rename(&ts_config, &pending_ts_config)?;
+    run_watch_once(&repo, &db)?;
+    assert_detailed_resolution(
+        &detailed_relation_payload(&repo, &db, "src/controller.ts", None, "inbound")?,
+        0,
+        "resolved",
+    )?;
+    fs::remove_file(&pending_ts_config)?;
+
+    let generation_before_failure = AtlasStore::open(&db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("configured alias publication is missing"))?
+        .generation;
+    fs::write(
+        &js_config,
+        r#"{"compilerOptions":{"baseUrl":"src","paths":["invalid"]}}"#,
+    )?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--db")
+        .arg(&db)
+        .args(["watch", ".", "--once"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("field 'paths' must be an object"));
+    fs::write(&js_config, JS_CONFIG)?;
+    let generation_after_failure = AtlasStore::open(&db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("configured alias publication disappeared"))?
+        .generation;
+    if generation_after_failure != generation_before_failure {
+        return Err(io::Error::other(
+            "malformed compiler configuration advanced the published generation",
+        )
+        .into());
+    }
+    assert_detailed_resolution(
+        &detailed_relation_payload(
+            &repo,
+            &db,
+            "src/js-controller.js",
+            Some("useJsController"),
+            "inbound",
+        )?,
+        1,
+        "resolved",
+    )?;
+    Ok(())
+}
+
+fn detailed_relation_payload(
+    repo: &Path,
+    db: &Path,
+    file: &str,
+    symbol: Option<&str>,
+    direction: &str,
+) -> Result<Value, Box<dyn Error>> {
+    let mut command = Command::cargo_bin("projectatlas")?;
+    command
+        .current_dir(repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--db")
+        .arg(db)
+        .args([
+            "--format",
+            "json",
+            "symbols",
+            "relations",
+            "--view",
+            "detailed",
+            "--file",
+            file,
+            "--direction",
+            direction,
+            "--limit",
+            "50",
+        ]);
+    if let Some(symbol) = symbol {
+        command.args(["--symbol", symbol]);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "configured alias relation query failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+fn assert_detailed_resolution(
+    payload: &Value,
+    expected_total: usize,
+    expected_resolution: &str,
+) -> Result<(), Box<dyn Error>> {
+    require_json_usize(
+        payload,
+        &["symbol_relations", "total", "value"],
+        expected_total,
+    )?;
+    let rows = payload
+        .pointer("/symbol_relations/rows")
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("detailed relation rows are missing"))?;
+    if rows.iter().any(|row| {
+        row.pointer("/relation/resolution/status")
+            .and_then(Value::as_str)
+            != Some(expected_resolution)
+    }) {
+        return Err(io::Error::other(format!(
+            "relation rows did not all retain {expected_resolution:?}: {rows:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn dependency_aware_refresh_re_resolves_unchanged_inbound_callers() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
@@ -14295,6 +16624,19 @@ fn git_command_for_root(root: &Path) -> StdCommand {
         command.env_remove(variable);
     }
     command
+}
+
+fn git_success(root: &Path, arguments: &[&str]) -> Result<(), Box<dyn Error>> {
+    let output = git_command_for_root(root).args(arguments).output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "git {arguments:?} failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
+    .into())
 }
 
 #[test]
@@ -18686,6 +21028,12 @@ impl McpContractSession {
 
     /// Send one request and wait for its matching response under a fixed deadline.
     fn request(&mut self, method: &str, params: &Value) -> Result<Value, Box<dyn Error>> {
+        let request_id = self.start_request(method, params)?;
+        self.wait_for_response(request_id, method)
+    }
+
+    /// Send one request and return its id before waiting for the response.
+    fn start_request(&mut self, method: &str, params: &Value) -> Result<u64, Box<dyn Error>> {
         let request_id = self.next_request_id;
         self.next_request_id = self
             .next_request_id
@@ -18697,6 +21045,15 @@ impl McpContractSession {
             "method": method,
             "params": params
         }))?;
+        Ok(request_id)
+    }
+
+    /// Wait for one previously sent request under the contract deadline.
+    fn wait_for_response(
+        &mut self,
+        request_id: u64,
+        method: &str,
+    ) -> Result<Value, Box<dyn Error>> {
         let deadline = Instant::now()
             .checked_add(Duration::from_secs(10))
             .ok_or_else(|| io::Error::other("MCP contract response deadline overflowed"))?;
@@ -19084,11 +21441,15 @@ fn assert_legacy_mcp_surface_compatible(stdout: &str) -> Result<(), Box<dyn Erro
             ))
             .into());
         }
+        let baseline_schema = baseline_tool
+            .get("inputSchema")
+            .ok_or_else(|| io::Error::other(format!("baseline schema missing for {name}")))?;
+        let normalized_schema = (name == "atlas_purpose_review")
+            .then(|| inline_legacy_purpose_review_item_schema(baseline_schema))
+            .transpose()?;
         assert_json_contract_subset(
             &format!("{name}.inputSchema"),
-            baseline_tool
-                .get("inputSchema")
-                .ok_or_else(|| io::Error::other(format!("baseline schema missing for {name}")))?,
+            normalized_schema.as_ref().unwrap_or(baseline_schema),
             current_tool
                 .get("inputSchema")
                 .ok_or_else(|| io::Error::other(format!("current schema missing for {name}")))?,
@@ -19127,6 +21488,156 @@ fn mcp_tools_by_name(tools: &[Value]) -> Result<BTreeMap<&str, &Value>, Box<dyn 
         }
     }
     Ok(indexed)
+}
+
+/// Require the concrete JSON Schema subset consumed by the supported Codex bridge.
+fn assert_codex_bridge_compatible_input_schemas(tools: &[Value]) -> Result<(), Box<dyn Error>> {
+    let tools_by_name = mcp_tools_by_name(tools)?;
+    for (name, tool) in &tools_by_name {
+        let schema = tool
+            .get("inputSchema")
+            .ok_or_else(|| io::Error::other(format!("{name} omitted inputSchema")))?;
+        assert_self_contained_input_schema(&format!("{name}.inputSchema"), schema)?;
+    }
+
+    let item_schema = tools_by_name
+        .get("atlas_purpose_review")
+        .and_then(|tool| tool.get("inputSchema"))
+        .and_then(|schema| schema.pointer("/properties/items/items"))
+        .ok_or_else(|| io::Error::other("atlas_purpose_review omitted its item schema"))?;
+    if item_schema.get("type").and_then(Value::as_str) != Some("object") {
+        return Err(io::Error::other(format!(
+            "atlas_purpose_review item schema is not a concrete object: {item_schema}"
+        ))
+        .into());
+    }
+    let required = item_schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    if required != BTreeSet::from(["path"]) {
+        return Err(io::Error::other(format!(
+            "atlas_purpose_review item required fields drifted: {required:?}"
+        ))
+        .into());
+    }
+    let properties = item_schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("atlas_purpose_review item omitted properties"))?;
+    for (name, expected_type) in [
+        ("path", "string"),
+        ("purpose", "string"),
+        ("confirm_existing", "boolean"),
+        ("task", "string"),
+        ("work_key", "string"),
+        ("state_token", "string"),
+    ] {
+        let property = properties.get(name).ok_or_else(|| {
+            io::Error::other(format!(
+                "atlas_purpose_review item omitted property {name:?}"
+            ))
+        })?;
+        if !schema_declares_type(property, expected_type) {
+            return Err(io::Error::other(format!(
+                "atlas_purpose_review item property {name:?} omitted type {expected_type:?}: {property}"
+            ))
+            .into());
+        }
+    }
+    if required_members_present(item_schema, &serde_json::json!({}))
+        || !required_members_present(item_schema, &serde_json::json!({"path": "src/lib.rs"}))
+    {
+        return Err(io::Error::other(
+            "atlas_purpose_review item schema does not make missing path host-rejectable",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Reject definitions or references anywhere in a self-contained input schema.
+fn assert_self_contained_input_schema(path: &str, value: &Value) -> Result<(), Box<dyn Error>> {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                if matches!(key.as_str(), "$defs" | "definitions" | "$ref") {
+                    return Err(io::Error::other(format!(
+                        "Codex-facing schema retained reference member {path}.{key}"
+                    ))
+                    .into());
+                }
+                assert_self_contained_input_schema(&format!("{path}.{key}"), child)?;
+            }
+        }
+        Value::Array(values) => {
+            for (index, child) in values.iter().enumerate() {
+                assert_self_contained_input_schema(&format!("{path}[{index}]"), child)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+#[test]
+fn codex_schema_audit_rejects_every_definition_and_reference_form() {
+    for schema in [
+        serde_json::json!({"$ref": "#/properties/value"}),
+        serde_json::json!({"items": {"$ref": "#/definitions/Value"}}),
+        serde_json::json!({"$ref": "https://example.invalid/schema.json"}),
+        serde_json::json!({"$defs": {"Value": {"type": "string"}}}),
+        serde_json::json!({"definitions": {"Value": {"type": "string"}}}),
+    ] {
+        assert!(assert_self_contained_input_schema("fixture", &schema).is_err());
+    }
+}
+
+/// Return whether one field schema admits the expected JSON primitive type.
+fn schema_declares_type(schema: &Value, expected: &str) -> bool {
+    schema.get("type").is_some_and(|value| match value {
+        Value::String(value) => value == expected,
+        Value::Array(values) => values.iter().any(|value| value.as_str() == Some(expected)),
+        _ => false,
+    })
+}
+
+/// Apply the advertised required-object members to one host-side candidate.
+fn required_members_present(schema: &Value, candidate: &Value) -> bool {
+    let Some(candidate) = candidate.as_object() else {
+        return false;
+    };
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .all(|required| candidate.contains_key(required))
+}
+
+/// Normalize the one frozen v0.3.26 nested schema whose representation is now inline.
+fn inline_legacy_purpose_review_item_schema(schema: &Value) -> Result<Value, Box<dyn Error>> {
+    let mut schema = schema.clone();
+    let object = schema
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("legacy purpose-review schema is not an object"))?;
+    let definitions = object
+        .remove("$defs")
+        .and_then(|value| value.as_object().cloned())
+        .ok_or_else(|| io::Error::other("legacy purpose-review schema omitted $defs"))?;
+    let item = definitions
+        .get("AtlasPurposeReviewItem")
+        .cloned()
+        .ok_or_else(|| io::Error::other("legacy purpose-review item definition is missing"))?;
+    let item_schema = schema
+        .pointer_mut("/properties/items/items")
+        .ok_or_else(|| io::Error::other("legacy purpose-review item reference is missing"))?;
+    *item_schema = item;
+    Ok(schema)
 }
 
 /// Capture bounded logical rows so WAL/page-layout changes do not masquerade as product state.
@@ -20310,6 +22821,42 @@ fn create_posix_release_archive(
         .into());
     }
     Ok(archive)
+}
+
+/// Serialize Windows installer tests while their release-asset server is active.
+#[cfg(windows)]
+fn lock_windows_release_asset_tests() -> std::sync::MutexGuard<'static, ()> {
+    match WINDOWS_RELEASE_ASSET_TEST_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Start one owned `PowerShell` process that holds an exclusive read lock.
+#[cfg(windows)]
+fn spawn_exclusive_file_lock(path: &Path) -> Result<Child, Box<dyn Error>> {
+    let mut child = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-Command")
+        .arg(
+            "$ErrorActionPreference='Stop'; $stream=[System.IO.File]::Open($env:PROJECTATLAS_TEST_LOCK_PATH,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::None); [Console]::Out.WriteLine('locked'); [Console]::Out.Flush(); try { Start-Sleep -Seconds 300 } finally { $stream.Dispose() }",
+        )
+        .env("PROJECTATLAS_TEST_LOCK_PATH", path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("exclusive lock process stdout missing"))?;
+    let mut ready = String::new();
+    BufReader::new(stdout).read_line(&mut ready)?;
+    if ready.trim() != "locked" {
+        drop(child.kill());
+        drop(child.wait());
+        return Err(io::Error::other("exclusive lock process did not become ready").into());
+    }
+    Ok(child)
 }
 
 /// Serve local release archive and checksum requests for installer smoke tests.

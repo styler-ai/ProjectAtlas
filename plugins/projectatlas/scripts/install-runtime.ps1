@@ -89,53 +89,756 @@ function Convert-ProjectAtlasVersionTag {
     return $Version.Trim().TrimStart("v")
 }
 
-function Test-ProjectAtlasRuntime {
-    param(
-        [string]$FilePath,
-        [string]$ExpectedVersion
-    )
-    if (-not $FilePath -or -not (Test-Path -LiteralPath $FilePath)) {
-        return $false
+function Initialize-ProjectAtlasRuntimeProbe {
+    if ("ProjectAtlas.Installer.RuntimeProbeProcess" -as [type]) {
+        return
     }
-    try {
-        $runtimeJson = & $FilePath --format json runtime-info 2>$null | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            return $false
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+namespace ProjectAtlas.Installer
+{
+    public sealed class RuntimeProbeProcess : IDisposable
+    {
+        private const uint CreateSuspended = 0x00000004;
+        private const uint CreateNoWindow = 0x08000000;
+        private const uint ExtendedStartupInfoPresent = 0x00080000;
+        private const uint StartfUseStdHandles = 0x00000100;
+        private static readonly IntPtr ProcThreadAttributeHandleList = new IntPtr(0x00020002);
+        private const uint GenericRead = 0x80000000;
+        private const uint GenericWrite = 0x40000000;
+        private const uint FileShareRead = 0x00000001;
+        private const uint FileShareWrite = 0x00000002;
+        private const uint FileShareDelete = 0x00000004;
+        private const uint CreateAlways = 2;
+        private const uint OpenExisting = 3;
+        private const uint FileAttributeNormal = 0x00000080;
+        private const uint JobObjectBasicAccountingInformation = 1;
+        private const uint JobObjectExtendedLimitInformation = 9;
+        private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+        private const uint WaitObject0 = 0;
+        private const uint WaitTimeout = 258;
+        private const uint StillActive = 259;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SecurityAttributes
+        {
+            internal int Length;
+            internal IntPtr SecurityDescriptor;
+            [MarshalAs(UnmanagedType.Bool)]
+            internal bool InheritHandle;
         }
-        $payload = $runtimeJson | ConvertFrom-Json
-        $runtime = if ($payload.runtime) { $payload.runtime } else { $payload }
-        $expectedRuntimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
-        $versionMatches = -not $expectedRuntimeVersion -or $runtime.version -eq $expectedRuntimeVersion
-        return $runtime.project -eq "ProjectAtlas" `
-            -and [int]$runtime.major_version -ge 3 `
-            -and @($runtime.capabilities) -contains "mcp" `
-            -and $runtime.text_format -eq "TOON" `
-            -and $versionMatches
-    }
-    catch {
-        return $false
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct StartupInfo
+        {
+            internal int Size;
+            internal string Reserved;
+            internal string Desktop;
+            internal string Title;
+            internal int X;
+            internal int Y;
+            internal int XSize;
+            internal int YSize;
+            internal int XCountChars;
+            internal int YCountChars;
+            internal int FillAttribute;
+            internal uint Flags;
+            internal short ShowWindow;
+            internal short ReservedBytes;
+            internal IntPtr ReservedPointer;
+            internal IntPtr StandardInput;
+            internal IntPtr StandardOutput;
+            internal IntPtr StandardError;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ProcessInformation
+        {
+            internal IntPtr Process;
+            internal IntPtr Thread;
+            internal uint ProcessId;
+            internal uint ThreadId;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct StartupInfoEx
+        {
+            internal StartupInfo StartupInfo;
+            internal IntPtr AttributeList;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IoCounters
+        {
+            internal ulong ReadOperations;
+            internal ulong WriteOperations;
+            internal ulong OtherOperations;
+            internal ulong ReadBytes;
+            internal ulong WriteBytes;
+            internal ulong OtherBytes;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JobObjectBasicAccountingInformationValue
+        {
+            internal long TotalUserTime;
+            internal long TotalKernelTime;
+            internal long ThisPeriodTotalUserTime;
+            internal long ThisPeriodTotalKernelTime;
+            internal uint TotalPageFaultCount;
+            internal uint TotalProcesses;
+            internal uint ActiveProcesses;
+            internal uint TotalTerminatedProcesses;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JobObjectBasicLimitInformation
+        {
+            internal long PerProcessUserTimeLimit;
+            internal long PerJobUserTimeLimit;
+            internal uint LimitFlags;
+            internal UIntPtr MinimumWorkingSetSize;
+            internal UIntPtr MaximumWorkingSetSize;
+            internal uint ActiveProcessLimit;
+            internal UIntPtr Affinity;
+            internal uint PriorityClass;
+            internal uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JobObjectExtendedLimitInformationValue
+        {
+            internal JobObjectBasicLimitInformation BasicLimitInformation;
+            internal IoCounters IoInfo;
+            internal UIntPtr ProcessMemoryLimit;
+            internal UIntPtr JobMemoryLimit;
+            internal UIntPtr PeakProcessMemoryUsed;
+            internal UIntPtr PeakJobMemoryUsed;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateFile(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            ref SecurityAttributes securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreateProcessW(
+            string applicationName,
+            StringBuilder commandLine,
+            IntPtr processAttributes,
+            IntPtr threadAttributes,
+            [MarshalAs(UnmanagedType.Bool)] bool inheritHandles,
+            uint creationFlags,
+            IntPtr environment,
+            string currentDirectory,
+            ref StartupInfoEx startupInfo,
+            out ProcessInformation processInformation);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool InitializeProcThreadAttributeList(
+            IntPtr attributeList,
+            int attributeCount,
+            int flags,
+            ref IntPtr size);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UpdateProcThreadAttribute(
+            IntPtr attributeList,
+            uint flags,
+            IntPtr attribute,
+            IntPtr value,
+            IntPtr size,
+            IntPtr previousValue,
+            IntPtr returnSize);
+
+        [DllImport("kernel32.dll")]
+        private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr CreateJobObject(IntPtr jobAttributes, string name);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetInformationJobObject(
+            IntPtr job,
+            uint informationClass,
+            ref JobObjectExtendedLimitInformationValue information,
+            uint informationLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryInformationJobObject(
+            IntPtr job,
+            uint informationClass,
+            out JobObjectBasicAccountingInformationValue information,
+            uint informationLength,
+            IntPtr returnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint ResumeThread(IntPtr thread);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        private IntPtr process;
+        private IntPtr job;
+        private IntPtr standardInput;
+        private IntPtr standardOutput;
+        private IntPtr standardError;
+        private bool disposed;
+
+        private RuntimeProbeProcess(
+            IntPtr process,
+            IntPtr job,
+            IntPtr standardInput,
+            IntPtr standardOutput,
+            IntPtr standardError)
+        {
+            this.process = process;
+            this.job = job;
+            this.standardInput = standardInput;
+            this.standardOutput = standardOutput;
+            this.standardError = standardError;
+        }
+
+        public static RuntimeProbeProcess Start(
+            string filePath,
+            string[] arguments,
+            string standardOutputPath,
+            string standardErrorPath)
+        {
+            if (String.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("Runtime path is required.", "filePath");
+
+            string application = Path.GetFullPath(filePath);
+            string[] commandArguments = arguments ?? new string[0];
+            string commandLineOverride = null;
+            string extension = Path.GetExtension(application);
+            if (String.Equals(extension, ".cmd", StringComparison.OrdinalIgnoreCase)
+                || String.Equals(extension, ".bat", StringComparison.OrdinalIgnoreCase))
+            {
+                string systemCommand = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "cmd.exe");
+                RequireDirectFile(systemCommand, "Windows command host");
+                StringBuilder command = new StringBuilder("\"");
+                command.Append(QuoteForCommandHost(application));
+                foreach (string argument in commandArguments)
+                    command.Append(' ').Append(QuoteForCommandHost(argument));
+                command.Append('"');
+                application = systemCommand;
+                commandLineOverride =
+                    QuoteWindowsArgument(systemCommand) + " /d /s /v:off /c " + command;
+                commandArguments = new string[0];
+            }
+            else if (String.Equals(extension, ".ps1", StringComparison.OrdinalIgnoreCase))
+            {
+                string powershell = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "WindowsPowerShell",
+                    "v1.0",
+                    "powershell.exe");
+                RequireDirectFile(powershell, "Windows PowerShell host");
+                string[] scriptArguments = new string[arguments.Length + 7];
+                scriptArguments[0] = "-NoLogo";
+                scriptArguments[1] = "-NoProfile";
+                scriptArguments[2] = "-NonInteractive";
+                scriptArguments[3] = "-ExecutionPolicy";
+                scriptArguments[4] = "Bypass";
+                scriptArguments[5] = "-File";
+                scriptArguments[6] = application;
+                Array.Copy(arguments, 0, scriptArguments, 7, arguments.Length);
+                application = powershell;
+                commandArguments = scriptArguments;
+            }
+            else
+            {
+                RequireDirectFile(application, "ProjectAtlas runtime probe");
+            }
+
+            SecurityAttributes inheritable = new SecurityAttributes();
+            inheritable.Length = Marshal.SizeOf(typeof(SecurityAttributes));
+            inheritable.InheritHandle = true;
+            IntPtr input = IntPtr.Zero;
+            IntPtr output = IntPtr.Zero;
+            IntPtr error = IntPtr.Zero;
+            IntPtr attributeList = IntPtr.Zero;
+            IntPtr inheritedHandles = IntPtr.Zero;
+            IntPtr containmentJob = IntPtr.Zero;
+            ProcessInformation created = new ProcessInformation();
+            bool assignedToJob = false;
+            bool attributeListInitialized = false;
+            try
+            {
+                input = CreateFile(
+                    "NUL",
+                    GenericRead,
+                    FileShareRead | FileShareWrite,
+                    ref inheritable,
+                    OpenExisting,
+                    FileAttributeNormal,
+                    IntPtr.Zero);
+                output = CreateFile(
+                    standardOutputPath,
+                    GenericWrite,
+                    FileShareRead | FileShareDelete,
+                    ref inheritable,
+                    CreateAlways,
+                    FileAttributeNormal,
+                    IntPtr.Zero);
+                error = CreateFile(
+                    standardErrorPath,
+                    GenericWrite,
+                    FileShareRead | FileShareDelete,
+                    ref inheritable,
+                    CreateAlways,
+                    FileAttributeNormal,
+                    IntPtr.Zero);
+                if (input == new IntPtr(-1) || output == new IntPtr(-1) || error == new IntPtr(-1))
+                    throw Win32Failure("open bounded runtime probe streams");
+
+                IntPtr attributeListSize = IntPtr.Zero;
+                InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeListSize);
+                if (attributeListSize == IntPtr.Zero)
+                    throw Win32Failure("size runtime probe handle list");
+                attributeList = Marshal.AllocHGlobal(attributeListSize);
+                if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeListSize))
+                    throw Win32Failure("initialize runtime probe handle list");
+                attributeListInitialized = true;
+                inheritedHandles = Marshal.AllocHGlobal(IntPtr.Size * 3);
+                Marshal.WriteIntPtr(inheritedHandles, 0, input);
+                Marshal.WriteIntPtr(inheritedHandles, IntPtr.Size, output);
+                Marshal.WriteIntPtr(inheritedHandles, IntPtr.Size * 2, error);
+                if (!UpdateProcThreadAttribute(
+                    attributeList,
+                    0,
+                    ProcThreadAttributeHandleList,
+                    inheritedHandles,
+                    new IntPtr(IntPtr.Size * 3),
+                    IntPtr.Zero,
+                    IntPtr.Zero))
+                    throw Win32Failure("set runtime probe handle list");
+
+                StartupInfoEx startup = new StartupInfoEx();
+                startup.StartupInfo.Size = Marshal.SizeOf(typeof(StartupInfoEx));
+                startup.StartupInfo.Flags = StartfUseStdHandles;
+                startup.StartupInfo.StandardInput = input;
+                startup.StartupInfo.StandardOutput = output;
+                startup.StartupInfo.StandardError = error;
+                startup.AttributeList = attributeList;
+                StringBuilder commandLine = new StringBuilder(
+                    commandLineOverride ?? BuildCommandLine(application, commandArguments));
+                if (!CreateProcessW(
+                    application,
+                    commandLine,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    true,
+                    CreateSuspended | CreateNoWindow | ExtendedStartupInfoPresent,
+                    IntPtr.Zero,
+                    null,
+                    ref startup,
+                    out created))
+                    throw Win32Failure("create suspended runtime probe");
+
+                containmentJob = CreateJobObject(IntPtr.Zero, null);
+                if (containmentJob == IntPtr.Zero)
+                    throw Win32Failure("create runtime probe job");
+                JobObjectExtendedLimitInformationValue limits =
+                    new JobObjectExtendedLimitInformationValue();
+                limits.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+                if (!SetInformationJobObject(
+                    containmentJob,
+                    JobObjectExtendedLimitInformation,
+                    ref limits,
+                    (uint)Marshal.SizeOf(typeof(JobObjectExtendedLimitInformationValue))))
+                    throw Win32Failure("configure runtime probe job");
+                if (!AssignProcessToJobObject(containmentJob, created.Process))
+                    throw Win32Failure("assign runtime probe job");
+                assignedToJob = true;
+                if (ResumeThread(created.Thread) == UInt32.MaxValue)
+                    throw Win32Failure("resume runtime probe");
+                CloseHandle(created.Thread);
+                created.Thread = IntPtr.Zero;
+
+                RuntimeProbeProcess result = new RuntimeProbeProcess(
+                    created.Process,
+                    containmentJob,
+                    input,
+                    output,
+                    error);
+                created.Process = IntPtr.Zero;
+                containmentJob = IntPtr.Zero;
+                input = IntPtr.Zero;
+                output = IntPtr.Zero;
+                error = IntPtr.Zero;
+                return result;
+            }
+            finally
+            {
+                Exception cleanupFailure = null;
+                try
+                {
+                    if (created.Process != IntPtr.Zero)
+                    {
+                        uint wait = WaitForSingleObject(created.Process, 0);
+                        if (wait == WaitTimeout)
+                        {
+                            bool terminated = assignedToJob && containmentJob != IntPtr.Zero
+                                ? TerminateJobObject(containmentJob, 1)
+                                : TerminateProcess(created.Process, 1);
+                            if (!terminated)
+                                throw Win32Failure("terminate failed runtime probe construction");
+                            wait = WaitForSingleObject(created.Process, 5000);
+                        }
+                        if (wait == WaitTimeout)
+                            throw new TimeoutException("Failed runtime probe construction did not stop.");
+                        if (wait != WaitObject0)
+                            throw Win32Failure("wait for failed runtime probe construction");
+                    }
+                }
+                catch (Exception failure)
+                {
+                    cleanupFailure = failure;
+                }
+                try { CloseIfValid(containmentJob, "close failed runtime probe job"); }
+                catch (Exception failure) { if (cleanupFailure == null) cleanupFailure = failure; }
+                if (attributeListInitialized)
+                    DeleteProcThreadAttributeList(attributeList);
+                if (attributeList != IntPtr.Zero)
+                    Marshal.FreeHGlobal(attributeList);
+                if (inheritedHandles != IntPtr.Zero)
+                    Marshal.FreeHGlobal(inheritedHandles);
+                try { CloseIfValid(created.Thread, "close failed runtime probe thread"); }
+                catch (Exception failure) { if (cleanupFailure == null) cleanupFailure = failure; }
+                try { CloseIfValid(created.Process, "close failed runtime probe process"); }
+                catch (Exception failure) { if (cleanupFailure == null) cleanupFailure = failure; }
+                try { CloseIfValid(input, "close failed runtime probe input"); }
+                catch (Exception failure) { if (cleanupFailure == null) cleanupFailure = failure; }
+                try { CloseIfValid(output, "close failed runtime probe output"); }
+                catch (Exception failure) { if (cleanupFailure == null) cleanupFailure = failure; }
+                try { CloseIfValid(error, "close failed runtime probe error"); }
+                catch (Exception failure) { if (cleanupFailure == null) cleanupFailure = failure; }
+                if (cleanupFailure != null)
+                    throw cleanupFailure;
+            }
+        }
+
+        public bool WaitForExit(int timeoutMilliseconds)
+        {
+            ThrowIfDisposed();
+            uint result = WaitForSingleObject(process, checked((uint)timeoutMilliseconds));
+            if (result == WaitObject0)
+                return true;
+            if (result == WaitTimeout)
+                return false;
+            throw Win32Failure("wait for runtime probe");
+        }
+
+        public int ExitCode
+        {
+            get
+            {
+                ThrowIfDisposed();
+                uint code;
+                if (!GetExitCodeProcess(process, out code))
+                    throw Win32Failure("read runtime probe exit code");
+                if (code == StillActive)
+                    throw new InvalidOperationException("Runtime probe is still active.");
+                return unchecked((int)code);
+            }
+        }
+
+        public void Stop(int timeoutMilliseconds)
+        {
+            ThrowIfDisposed();
+            if (ActiveProcesses() == 0)
+                return;
+            if (!TerminateJobObject(job, 1))
+                throw Win32Failure("terminate runtime probe job");
+            DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMilliseconds);
+            while (ActiveProcesses() != 0)
+            {
+                if (DateTime.UtcNow >= deadline)
+                    throw new TimeoutException("Runtime probe job did not stop within its cleanup bound.");
+                Thread.Sleep(10);
+            }
+        }
+
+        public void Dispose()
+        {
+            if (disposed)
+                return;
+            Exception cleanupFailure = null;
+            try
+            {
+                Stop(5000);
+            }
+            catch (Exception failure)
+            {
+                cleanupFailure = failure;
+            }
+            disposed = true;
+            try { CloseIfValid(job, "close runtime probe job"); }
+            catch (Exception failure) { if (cleanupFailure == null) cleanupFailure = failure; }
+            try { CloseIfValid(process, "close runtime probe process"); }
+            catch (Exception failure) { if (cleanupFailure == null) cleanupFailure = failure; }
+            try { CloseIfValid(standardInput, "close runtime probe input"); }
+            catch (Exception failure) { if (cleanupFailure == null) cleanupFailure = failure; }
+            try { CloseIfValid(standardOutput, "close runtime probe output"); }
+            catch (Exception failure) { if (cleanupFailure == null) cleanupFailure = failure; }
+            try { CloseIfValid(standardError, "close runtime probe error"); }
+            catch (Exception failure) { if (cleanupFailure == null) cleanupFailure = failure; }
+            job = IntPtr.Zero;
+            process = IntPtr.Zero;
+            standardInput = IntPtr.Zero;
+            standardOutput = IntPtr.Zero;
+            standardError = IntPtr.Zero;
+            if (cleanupFailure != null)
+                throw cleanupFailure;
+        }
+
+        private uint ActiveProcesses()
+        {
+            JobObjectBasicAccountingInformationValue accounting;
+            if (!QueryInformationJobObject(
+                job,
+                JobObjectBasicAccountingInformation,
+                out accounting,
+                (uint)Marshal.SizeOf(typeof(JobObjectBasicAccountingInformationValue)),
+                IntPtr.Zero))
+                throw Win32Failure("query runtime probe job");
+            return accounting.ActiveProcesses;
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (disposed)
+                throw new ObjectDisposedException("RuntimeProbeProcess");
+        }
+
+        private static string BuildCommandLine(string application, string[] arguments)
+        {
+            StringBuilder command = new StringBuilder(QuoteWindowsArgument(application));
+            foreach (string argument in arguments)
+                command.Append(' ').Append(QuoteWindowsArgument(argument));
+            return command.ToString();
+        }
+
+        private static string QuoteWindowsArgument(string argument)
+        {
+            if (argument.Length != 0 && argument.IndexOfAny(new char[] { ' ', '\t', '\n', '\v', '"' }) < 0)
+                return argument;
+            StringBuilder quoted = new StringBuilder("\"");
+            int backslashes = 0;
+            foreach (char character in argument)
+            {
+                if (character == '\\')
+                {
+                    backslashes++;
+                }
+                else if (character == '"')
+                {
+                    quoted.Append('\\', backslashes * 2 + 1).Append(character);
+                    backslashes = 0;
+                }
+                else
+                {
+                    quoted.Append('\\', backslashes).Append(character);
+                    backslashes = 0;
+                }
+            }
+            quoted.Append('\\', backslashes * 2).Append('"');
+            return quoted.ToString();
+        }
+
+        private static string QuoteForCommandHost(string argument)
+        {
+            if (argument.IndexOf('"') >= 0
+                || argument.IndexOf('%') >= 0
+                || argument.IndexOf('\r') >= 0
+                || argument.IndexOf('\n') >= 0)
+                throw new ArgumentException("Runtime probe argument contains unsupported command-host characters.");
+            return "\"" + argument + "\"";
+        }
+
+        private static void RequireDirectFile(string path, string label)
+        {
+            FileInfo file = new FileInfo(path);
+            if (!file.Exists || (file.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException(label + " must be a direct regular file: " + path);
+        }
+
+        private static Win32Exception Win32Failure(string operation)
+        {
+            return new Win32Exception(Marshal.GetLastWin32Error(), operation);
+        }
+
+        private static void CloseIfValid(IntPtr handle, string operation)
+        {
+            if (handle != IntPtr.Zero && handle != new IntPtr(-1))
+                CloseHandleChecked(handle, operation);
+        }
+
+        private static void CloseHandleChecked(IntPtr handle, string operation)
+        {
+            if (!CloseHandle(handle))
+                throw Win32Failure(operation);
+        }
     }
 }
+'@
+}
 
-function Get-ProjectAtlasRuntimeVersion {
+function Invoke-ProjectAtlasRuntimeInfo {
     param(
         [string]$FilePath
     )
     if (-not $FilePath -or -not (Test-Path -LiteralPath $FilePath)) {
         return $null
     }
+    $probeTimeoutMs = 5000
+    $maximumOutputBytes = 1024 * 1024
+    $probeId = [Guid]::NewGuid().ToString("N")
+    $standardOutput = Join-Path ([IO.Path]::GetTempPath()) "projectatlas-runtime-probe-$probeId.stdout"
+    $standardError = Join-Path ([IO.Path]::GetTempPath()) "projectatlas-runtime-probe-$probeId.stderr"
+    $probeFiles = @($standardOutput, $standardError)
+    $process = $null
     try {
-        $runtimeJson = & $FilePath --format json runtime-info 2>$null | Out-String
-        if ($LASTEXITCODE -ne 0) {
+        Initialize-ProjectAtlasRuntimeProbe
+        $process = [ProjectAtlas.Installer.RuntimeProbeProcess]::Start(
+            $FilePath,
+            [string[]]@("--format", "json", "runtime-info"),
+            $standardOutput,
+            $standardError
+        )
+        $probeClock = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            $exited = $process.WaitForExit(25)
+            $outputLimitExceeded = $false
+            foreach ($probeFile in $probeFiles) {
+                if ((Test-Path -LiteralPath $probeFile) `
+                    -and (Get-Item -LiteralPath $probeFile).Length -gt $maximumOutputBytes) {
+                    $outputLimitExceeded = $true
+                    break
+                }
+            }
+            if ($outputLimitExceeded -or (-not $exited -and $probeClock.ElapsedMilliseconds -ge $probeTimeoutMs)) {
+                $process.Stop($probeTimeoutMs)
+                return $null
+            }
+        }
+        while (-not $exited)
+        $exitCode = $process.ExitCode
+        # The job survives the launcher, so this also reaps asynchronously spawned descendants.
+        $process.Stop($probeTimeoutMs)
+        if ($exitCode -ne 0) {
             return $null
         }
+        foreach ($probeFile in $probeFiles) {
+            if ((Get-Item -LiteralPath $probeFile -ErrorAction Stop).Length -gt $maximumOutputBytes) {
+                return $null
+            }
+        }
+        $runtimeJson = Get-Content -Raw -LiteralPath $standardOutput
         $payload = $runtimeJson | ConvertFrom-Json
-        $runtime = if ($payload.runtime) { $payload.runtime } else { $payload }
-        return $runtime.version
+        return $(if ($payload.runtime) { $payload.runtime } else { $payload })
     }
     catch {
         return $null
     }
+    finally {
+        $probeCleanupFailure = $null
+        if ($process) {
+            try {
+                $process.Dispose()
+            }
+            catch {
+                $probeCleanupFailure = $_
+            }
+        }
+        $cleanupClock = [Diagnostics.Stopwatch]::StartNew()
+        $remainingProbeFiles = @($probeFiles)
+        do {
+            Remove-Item -LiteralPath $standardOutput, $standardError -Force -ErrorAction SilentlyContinue
+            $remainingProbeFiles = @($probeFiles | Where-Object { Test-Path -LiteralPath $_ })
+            if ($remainingProbeFiles.Count -eq 0) {
+                break
+            }
+            Start-Sleep -Milliseconds 25
+        }
+        while ($cleanupClock.ElapsedMilliseconds -lt $probeTimeoutMs)
+        if ($probeCleanupFailure) {
+            throw $probeCleanupFailure
+        }
+        if ($remainingProbeFiles.Count -ne 0) {
+            throw "ProjectAtlas runtime probe files were not removed within the cleanup bound: $($remainingProbeFiles -join ', ')"
+        }
+    }
+}
+
+function Test-ProjectAtlasRuntime {
+    param(
+        [string]$FilePath,
+        [string]$ExpectedVersion
+    )
+    $runtime = Invoke-ProjectAtlasRuntimeInfo $FilePath
+    if (-not $runtime) {
+        return $false
+    }
+    $majorVersion = 0
+    if (-not [int]::TryParse([string]$runtime.major_version, [ref]$majorVersion)) {
+        return $false
+    }
+    $expectedRuntimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
+    $versionMatches = -not $expectedRuntimeVersion -or $runtime.version -eq $expectedRuntimeVersion
+    return $runtime.project -eq "ProjectAtlas" `
+        -and $majorVersion -ge 3 `
+        -and @($runtime.capabilities) -contains "mcp" `
+        -and $runtime.text_format -eq "TOON" `
+        -and $versionMatches
+}
+
+function Get-ProjectAtlasRuntimeVersion {
+    param(
+        [string]$FilePath
+    )
+    $runtime = Invoke-ProjectAtlasRuntimeInfo $FilePath
+    return $(if ($runtime) { $runtime.version } else { $null })
 }
 
 function Get-KnownProjectAtlasShimPaths {
@@ -275,6 +978,23 @@ function Set-ProjectAtlasProcessPathPrecedence {
     $env:Path = (@($runtimeDir) + $processEntries) -join ";"
 }
 
+function Test-ProjectAtlasBareCommandResolutionOnPath {
+    param(
+        [string]$PathValue,
+        [string]$VerifiedPath
+    )
+    $installerProcessPath = $env:Path
+    try {
+        $env:Path = [Environment]::ExpandEnvironmentVariables($PathValue)
+        $command = Get-Command projectatlas -ErrorAction SilentlyContinue | Select-Object -First 1
+        return $command `
+            -and (Get-NormalizedPathEntry $command.Source) -eq (Get-NormalizedPathEntry $VerifiedPath)
+    }
+    finally {
+        $env:Path = $installerProcessPath
+    }
+}
+
 function Set-ProjectAtlasPathPrecedence {
     param(
         [string]$FilePath
@@ -282,19 +1002,23 @@ function Set-ProjectAtlasPathPrecedence {
     Set-ProjectAtlasProcessPathPrecedence $FilePath
     $runtimeDir = Split-Path -Parent $FilePath
     if (-not $runtimeDir) {
-        return
+        return $false
     }
 
     $normalizedRuntimeDir = Get-NormalizedPathEntry $runtimeDir
 
     if (Test-Truthy $env:PROJECTATLAS_SKIP_USER_PATH_UPDATE) {
-        return
+        return $false
     }
 
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $userEntries = Split-PathList $userPath
     $userEntries = @($userEntries | Where-Object { (Get-NormalizedPathEntry $_) -ne $normalizedRuntimeDir })
-    [Environment]::SetEnvironmentVariable("Path", ((@($runtimeDir) + $userEntries) -join ";"), "User")
+    $futureUserPath = (@($runtimeDir) + $userEntries) -join ";"
+    [Environment]::SetEnvironmentVariable("Path", $futureUserPath, "User")
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $freshProcessPath = @($machinePath, $futureUserPath) -join ";"
+    return (Test-ProjectAtlasBareCommandResolutionOnPath $freshProcessPath $FilePath)
 }
 
 function Confirm-ProjectAtlasBareCommandResolution {
@@ -325,25 +1049,29 @@ function Sync-ProjectAtlasRuntimeToLocalAppData {
         [string]$FilePath,
         [string]$ExpectedVersion
     )
-    if (-not (Test-ProjectAtlasRuntime $FilePath $ExpectedVersion)) {
-        return $null
+    $synchronizationVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
+    if (-not $synchronizationVersion) {
+        $synchronizationVersion = Convert-ProjectAtlasVersionTag (Get-ProjectAtlasRuntimeVersion $FilePath)
+    }
+    if (-not $synchronizationVersion -or -not (Test-ProjectAtlasRuntime $FilePath $synchronizationVersion)) {
+        return $false
     }
     $installDir = Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin"
     New-Item -ItemType Directory -Force -Path $installDir | Out-Null
     $target = Join-Path $installDir "projectatlas.exe"
+    if (Test-ProjectAtlasRuntime $target $synchronizationVersion) {
+        return $true
+    }
     if ((Get-NormalizedPathEntry $FilePath) -ne (Get-NormalizedPathEntry $target)) {
         try {
             Copy-Item -LiteralPath $FilePath -Destination $target -Force
         }
         catch {
             Write-Warning "ProjectAtlas LocalAppData mirror skipped because ${target} is locked: $($_.Exception.Message) Close any running ProjectAtlas or Codex session using that file, then rerun this installer. Codex MCP and generated configs continue to use verified runtime $FilePath."
-            return $FilePath
+            return $false
         }
     }
-    if (Test-ProjectAtlasRuntime $target $ExpectedVersion) {
-        return $target
-    }
-    return $FilePath
+    return (Test-ProjectAtlasRuntime $target $synchronizationVersion)
 }
 
 function Find-ProjectAtlas {
@@ -1137,13 +1865,17 @@ $releaseBinaryOnly = $ReleaseBinaryOnly -or (Test-Truthy $env:PROJECTATLAS_RELEA
 $ProjectRoot = (Resolve-Path $ProjectRoot).Path
 $atlasDir = Join-Path $ProjectRoot ".projectatlas"
 Assert-ProjectAtlasDirectPath $atlasDir "ProjectAtlas project state directory"
+$inheritedProcessPath = $env:Path
+$inheritedProjectAtlasCommand = Get-Command projectatlas -ErrorAction SilentlyContinue | Select-Object -First 1
+$inheritedProjectAtlasPath = if ($inheritedProjectAtlasCommand) { $inheritedProjectAtlasCommand.Source } else { $null }
+$futureProcessPathReady = $false
 
 if ($RuntimePath) {
     $projectAtlas = (Resolve-Path $RuntimePath).Path
     if (-not (Test-ProjectAtlasRuntime $projectAtlas $ProjectAtlasVersion)) {
         throw "Provided ProjectAtlas runtime does not satisfy the ProjectAtlas runtime/version contract: $projectAtlas"
     }
-    Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion | Out-Null
+    $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
     Set-ProjectAtlasProcessPathPrecedence $projectAtlas
 }
 else {
@@ -1178,14 +1910,43 @@ else {
     if (-not $projectAtlas) {
         throw "A ProjectAtlas runtime matching $ProjectAtlasVersion was not found. Install Rust/Cargo or provide the matching ProjectAtlas release binary on PATH."
     }
-    Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion | Out-Null
+    $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
 
-    Set-ProjectAtlasPathPrecedence $projectAtlas
+    Set-ProjectAtlasProcessPathPrecedence $projectAtlas
 }
 Invoke-Checked $projectAtlas @("--format", "json", "runtime-info") | Out-Null
 Confirm-ProjectAtlasBareCommandResolution $projectAtlas $ProjectAtlasVersion
+$verifiedRuntimePath = Get-NormalizedPathEntry $projectAtlas
+$stableMirrorPath = Get-NormalizedPathEntry (Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin\projectatlas.exe")
 Quarantine-ProjectAtlasStaleShims $projectAtlas $ProjectAtlasVersion
+if (-not $RuntimePath) {
+    $futureProcessPathReady = Set-ProjectAtlasPathPrecedence $projectAtlas
+}
 Write-ProjectAtlasPathShadowReport $projectAtlas $ProjectAtlasVersion
+$effectiveInheritedProjectAtlasPath = $inheritedProjectAtlasPath
+if ([string]::IsNullOrWhiteSpace($effectiveInheritedProjectAtlasPath) -or -not (Test-Path -LiteralPath $effectiveInheritedProjectAtlasPath)) {
+    $installerProcessPath = $env:Path
+    try {
+        $env:Path = $inheritedProcessPath
+        $effectiveInheritedProjectAtlasCommand = Get-Command projectatlas -ErrorAction SilentlyContinue | Select-Object -First 1
+        $effectiveInheritedProjectAtlasPath = if ($effectiveInheritedProjectAtlasCommand) { $effectiveInheritedProjectAtlasCommand.Source } else { $null }
+    }
+    finally {
+        $env:Path = $installerProcessPath
+    }
+}
+$inheritedCommandReady = -not [string]::IsNullOrWhiteSpace($effectiveInheritedProjectAtlasPath) `
+    -and (Get-NormalizedPathEntry $effectiveInheritedProjectAtlasPath) -eq $verifiedRuntimePath
+$inheritedSynchronizedMirrorReady = $stableMirrorSynchronized `
+    -and -not [string]::IsNullOrWhiteSpace($effectiveInheritedProjectAtlasPath) `
+    -and (Get-NormalizedPathEntry $effectiveInheritedProjectAtlasPath) -eq $stableMirrorPath
+$installerProjectAtlasCommand = Get-Command projectatlas -ErrorAction SilentlyContinue | Select-Object -First 1
+$installerProjectAtlasPath = if ($installerProjectAtlasCommand) { $installerProjectAtlasCommand.Source } else { $null }
+$installerCliReady = -not [string]::IsNullOrWhiteSpace($installerProjectAtlasPath) `
+    -and (Get-NormalizedPathEntry $installerProjectAtlasPath) -eq $verifiedRuntimePath
+$parentCliReady = $inheritedCommandReady -or $inheritedSynchronizedMirrorReady
+$hostRestartRequired = -not $parentCliReady -and $futureProcessPathReady
+$hostRepairRequired = -not $parentCliReady -and -not $futureProcessPathReady
 
 Assert-ProjectAtlasDirectPath $atlasDir "ProjectAtlas project state directory"
 New-Item -ItemType Directory -Force -Path $atlasDir | Out-Null
@@ -1249,3 +2010,10 @@ Write-Output "Project-local Claude Code MCP config written: $claudeMcpConfigPath
 Write-Output "Project-local OpenCode MCP config written: $opencodeConfigPath"
 Write-Output "Claude Code ProjectAtlas integration verified through generated MCP config; restart Claude Code if an older session cached previous instructions."
 Write-Output "OpenCode ProjectAtlas integration verified through generated MCP config; restart OpenCode if an older session cached previous instructions."
+if ($hostRestartRequired) {
+    Write-Warning "Existing host restart required: the inherited bare 'projectatlas' command remains stale, but the verified runtime is first on the persisted fresh-process PATH. Restart the environment-owning Windows launcher or terminal session, then start a new Codex or shell; restarting only a child of an unchanged launcher can retain stale PATH. The runtime and generated MCP configs are already ready through the verified absolute runtime."
+}
+elseif ($hostRepairRequired) {
+    Write-Warning "Existing host bare CLI is not ready, and restart alone will not repair it because this installation could not make the verified runtime the first bare command for a fresh process. Unlock or remove the stale command and rerun this installer, or configure $(Split-Path -Parent $projectAtlas) first on PATH. The runtime and generated MCP configs are ready through the verified absolute runtime."
+}
+Write-Output "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=$($installerCliReady.ToString().ToLowerInvariant()) parent_cli_ready=$($parentCliReady.ToString().ToLowerInvariant()) host_restart_required=$($hostRestartRequired.ToString().ToLowerInvariant())"

@@ -1,0 +1,8 @@
+## 1. OpenSpec Task Checklist
+
+- [x] 1.1 Add a typed, bounded configured-module projection context in `projectatlas-symbols`; resolve nearest applicable ECMAScript `baseUrl` and most-specific `paths` candidates through shared import and call keys while preserving relative, extension, `index`, unresolved, and ambiguous behavior.
+- [x] 1.2 Add bounded JSONC `tsconfig.json` / `jsconfig.json` discovery and repository-contained normalization in the CLI runtime; share one deterministic snapshot across full and incremental graph projection without adding a crate, dependency, schema, or transaction owner.
+- [x] 1.3 Treat compiler-configuration creation, edits, renames, and removal as complete-refresh inputs; reject malformed, escaping, over-limit, or concurrently changed configuration before atomic publication.
+- [x] 1.4 Audit Python, Rust, and Cargo semantic providers, retain applicable compatibility coverage, and record ECMAScript compiler aliases as not applicable without broadening provider claims.
+- [x] 1.5 Add coherent unit, integration, and real CLI/MCP fixtures covering JavaScript, JSX, TypeScript, TSX, Vue, file and exact-symbol traversal, outbound resolution, impact/dead-code safety, extension and `index` inference, nearest precedence, missing/no-config controls, ambiguity, malformed input, configuration edit/removal, bounds, cancellation, atomicity, and adapter equivalence.
+- [x] 1.6 Pass focused crate and E2E tests, formatting, workspace check/clippy, strict OpenSpec validation, issue-checklist validation, and live GitHub review-feedback audit without running benchmarks; leave task completion and remote issue state for exact-head parent review.

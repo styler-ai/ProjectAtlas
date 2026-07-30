@@ -2431,7 +2431,8 @@ Required plugin contents for 3.0:
   MCP server through absolute runtime paths on Windows, Linux, and macOS
 - Claude Code plugin metadata under `.claude-plugin/plugin.json`
 - disabled OpenCode `opencode.json` MCP config template with absolute-path
-  placeholders, not a native OpenCode JavaScript/TypeScript plugin
+  placeholders as the current ProjectAtlas integration path; an installable
+  `opencode plugin` package is separate distribution work
 - `projectatlas mcp-config` support for generated per-project MCP configs with
   absolute executable and DB/config paths. Codex/OpenCode outputs include a
   `cwd` project-root hint where supported; Claude Code output avoids relying on

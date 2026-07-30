@@ -7734,12 +7734,44 @@ mod tests {
     }
 
     #[test]
-    fn schema_upgrade_preserves_local_state_and_restarts_publication() -> Result<(), Box<dyn Error>>
-    {
+    fn released_schema_layouts_upgrade_without_losing_local_state() -> Result<(), Box<dyn Error>> {
+        let layouts: [(&str, fn(&Path, &Path) -> Result<(), Box<dyn Error>>); 2] = [
+            (
+                "fresh-v0.3.26",
+                write_released_schema_eight_compatibility_fixture,
+            ),
+            (
+                "evolved-v0.3.11-to-v0.3.26",
+                write_evolved_released_schema_eight_compatibility_fixture,
+            ),
+        ];
+        let mut previous_binding = None;
+        for (label, write_fixture) in layouts {
+            let binding =
+                assert_released_schema_upgrade_preserves_local_state(label, write_fixture)?;
+            if previous_binding
+                .as_ref()
+                .is_some_and(|previous| previous == &binding)
+            {
+                return Err(io::Error::other(
+                    "independent released-schema databases shared one project binding",
+                )
+                .into());
+            }
+            previous_binding = Some(binding);
+        }
+        Ok(())
+    }
+
+    /// Verify one released schema layout through migration, reopen, and publication.
+    fn assert_released_schema_upgrade_preserves_local_state(
+        label: &str,
+        write_fixture: fn(&Path, &Path) -> Result<(), Box<dyn Error>>,
+    ) -> Result<CapturedProjectBinding, Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let db_path = temp.path().join("projectatlas.db");
         let root = temp.path().join("repository");
-        write_released_schema_eight_compatibility_fixture(&db_path, &root)?;
+        write_fixture(&db_path, &root)?;
         let database_before_read = fs::read(&db_path)?;
 
         let Err(read_error) = AtlasStore::open_read_only(&db_path) else {
@@ -7762,7 +7794,7 @@ mod tests {
             "read-only rejection leaves database unchanged",
         )?;
 
-        let mut store = AtlasStore::open(&db_path)?;
+        let store = AtlasStore::open(&db_path)?;
         let stored_schema = store.connection.query_row(
             "SELECT value FROM metadata WHERE key = ?1",
             [SCHEMA_VERSION_KEY],
@@ -7772,6 +7804,15 @@ mod tests {
             &stored_schema,
             &SCHEMA_VERSION.to_string(),
             "upgraded schema version",
+        )?;
+        let migrated_binding = store.captured_project_binding()?;
+        drop(store);
+        schema::verify_current_integrity(&db_path, Some(&normalize_native_path_display(&root)))?;
+        let mut store = AtlasStore::open_for_project(&db_path, &root)?;
+        require_eq(
+            &store.captured_project_binding()?,
+            &migrated_binding,
+            &format!("{label} identity survives reopen"),
         )?;
         require_eq(
             &store.project_root()?,
@@ -7854,9 +7895,9 @@ mod tests {
                 .index_publication()?
                 .and_then(|publication| publication.contract_fingerprint),
             &Some("schema-9-contract".to_string()),
-            "fresh publication contract",
+            &format!("{label} fresh publication contract"),
         )?;
-        Ok(())
+        Ok(migrated_binding)
     }
 
     #[test]
@@ -11030,6 +11071,81 @@ mod tests {
             &1,
             "cleared repository traversal progress handler",
         )?;
+        store
+            .connection
+            .execute("CREATE TEMP TABLE follow_up(value INTEGER NOT NULL)", [])?;
+        store
+            .connection
+            .execute("INSERT INTO follow_up(value) VALUES(1)", [])?;
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite-progress-test-observer")]
+    #[test]
+    fn sqlite_read_progress_propagates_cancellation_during_an_active_batch()
+    -> Result<(), Box<dyn Error>> {
+        use crate::sqlite_progress_test_observer::{
+            SqliteReadProgressEvent, observe_sqlite_read_progress,
+        };
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let store = AtlasStore::in_memory()?;
+        let cancellation = projectatlas_core::IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        let callback_seen = Rc::new(Cell::new(false));
+        let cancelled = observe_sqlite_read_progress(
+            {
+                let callback_seen = Rc::clone(&callback_seen);
+                move |event| {
+                    if matches!(
+                        event,
+                        SqliteReadProgressEvent::CallbackEntered {
+                            stage: IndexWorkStage::RepositoryTraversal
+                        }
+                    ) {
+                        callback_seen.set(true);
+                        cancellation.cancel();
+                    }
+                }
+            },
+            || {
+                with_sqlite_read_progress(
+                    &store.connection,
+                    Some(&control),
+                    IndexWorkStage::RepositoryTraversal,
+                    || {
+                        store
+                            .connection
+                            .query_row(
+                                "WITH RECURSIVE numbers(value) AS (
+                                     VALUES(1)
+                                     UNION ALL
+                                     SELECT value + 1 FROM numbers WHERE value < 100000000
+                                 )
+                                 SELECT SUM(value) FROM numbers",
+                                [],
+                                |row| row.get::<_, i64>(0),
+                            )
+                            .map_err(DbError::from)
+                    },
+                )
+            },
+        );
+        require(
+            callback_seen.get()
+                && matches!(
+                    cancelled,
+                    Err(DbError::IndexWork(IndexWorkFailure::Cancelled {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    }))
+                ),
+            "active SQLite batch did not propagate typed cancellation",
+        )?;
+        store.connection.execute(
+            "CREATE TEMP TABLE cancellation_follow_up(value INTEGER)",
+            [],
+        )?;
         Ok(())
     }
 
@@ -12764,8 +12880,33 @@ mod tests {
         db_path: &Path,
         root: &Path,
     ) -> Result<(), Box<dyn Error>> {
+        write_schema_eight_compatibility_fixture(
+            db_path,
+            root,
+            schema::create_released_schema_eight,
+        )
+    }
+
+    /// Write evolved released schema-8 source, authored, telemetry, and publication state.
+    fn write_evolved_released_schema_eight_compatibility_fixture(
+        db_path: &Path,
+        root: &Path,
+    ) -> Result<(), Box<dyn Error>> {
+        write_schema_eight_compatibility_fixture(
+            db_path,
+            root,
+            schema::create_evolved_released_schema_eight,
+        )
+    }
+
+    /// Write one captured schema-8 layout with representative durable state.
+    fn write_schema_eight_compatibility_fixture(
+        db_path: &Path,
+        root: &Path,
+        create_schema: fn(&Connection) -> DbResult<()>,
+    ) -> Result<(), Box<dyn Error>> {
         let connection = Connection::open(db_path)?;
-        schema::create_released_schema_eight(&connection)?;
+        create_schema(&connection)?;
         schema::configure_writable(&connection)?;
         connection.execute_batch("BEGIN IMMEDIATE")?;
         let write_result = (|| -> DbResult<()> {

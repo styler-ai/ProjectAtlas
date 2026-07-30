@@ -23,8 +23,9 @@ use projectatlas_db::{
     RepositoryResolutionCandidate,
 };
 use projectatlas_symbols::{
-    MAX_RESOLUTION_KEYS_PER_FACT, ResolutionKeyProjection, ResolutionProjectionError,
-    derive_resolution_keys, parse_import_references,
+    ConfiguredModuleResolution, MAX_RESOLUTION_KEYS_PER_FACT, ResolutionKeyProjection,
+    ResolutionProjectionContext, ResolutionProjectionError, derive_resolution_keys_with_context,
+    parse_import_references,
 };
 use std::borrow::{Borrow, Cow};
 use std::cmp::Reverse;
@@ -246,9 +247,18 @@ pub(super) fn stage_full_repository_graph(
         .collect::<BTreeSet<_>>();
     let graphs = complete_symbol_graphs(store, &paths, symbols, control)?;
     control.check(IndexWorkStage::SymbolParsing)?;
+    let configured_modules =
+        super::module_resolution::load_configured_module_resolution(root, nodes, control)?;
     let packages = PackageIndex::from_graphs(&graphs)?;
-    let entity_projection = build_entity_projection(
-        project, generation, nodes, &graphs, &packages, true, control,
+    let entity_projection = build_entity_projection_with_config(
+        project,
+        generation,
+        nodes,
+        &graphs,
+        &packages,
+        &configured_modules,
+        true,
+        control,
     )?;
     let candidates = resolution_registry_from_exports(&entity_projection, control)?;
     enforce_resolution_staging_budget(&entity_projection, &candidates)?;
@@ -292,6 +302,8 @@ pub(super) fn stage_incremental_repository_graph(
 ) -> Result<StagedRepositoryGraph, CliError> {
     let project = selected_project(store)?;
     let generation = next_generation(base_generation)?;
+    let configured_modules =
+        super::module_resolution::load_configured_module_resolution(root, expected_nodes, control)?;
     let direct_paths = direct_paths.iter().cloned().collect::<BTreeSet<_>>();
     enforce_incremental_count(
         root,
@@ -340,7 +352,12 @@ pub(super) fn stage_incremental_repository_graph(
     let mut changed_keys = old_exports.rows.into_iter().collect::<BTreeSet<_>>();
     for graph in &direct_graphs {
         control.check(IndexWorkStage::SymbolParsing)?;
-        let projection = resolution_projection(project, packages.package_name(&graph.path), graph)?;
+        let projection = resolution_projection_with_config(
+            project,
+            packages.package_name(&graph.path),
+            graph,
+            &configured_modules,
+        )?;
         changed_keys.extend(projection.source_keys().iter().cloned());
         for symbol in projection.symbol_keys() {
             changed_keys.extend(symbol.keys().iter().cloned());
@@ -387,12 +404,13 @@ pub(super) fn stage_incremental_repository_graph(
         .filter(|node| affected_paths.contains(&node.path))
         .cloned()
         .collect::<Vec<_>>();
-    let entity_projection = build_entity_projection(
+    let entity_projection = build_entity_projection_with_config(
         project,
         generation,
         &affected_nodes,
         &affected_graphs,
         &packages,
+        &configured_modules,
         false,
         control,
     )?;
@@ -637,12 +655,37 @@ fn qualified_symbol_parents(graph: &SymbolGraph) -> Vec<Option<String>> {
 }
 
 /// Project file, symbol, package, and canonical export facts from parser graphs.
+#[cfg(test)]
 fn build_entity_projection(
     project: ProjectInstanceId,
     generation: IndexGeneration,
     nodes: &[Node],
     graphs: &[impl Borrow<SymbolGraph>],
     packages: &PackageIndex,
+    include_project: bool,
+    control: &IndexWorkControl,
+) -> Result<EntityProjection, CliError> {
+    build_entity_projection_with_config(
+        project,
+        generation,
+        nodes,
+        graphs,
+        packages,
+        &ConfiguredModuleResolution::default(),
+        include_project,
+        control,
+    )
+}
+
+/// Project entity/key facts with one shared configured-module snapshot.
+#[allow(clippy::too_many_arguments)]
+fn build_entity_projection_with_config(
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    nodes: &[Node],
+    graphs: &[impl Borrow<SymbolGraph>],
+    packages: &PackageIndex,
+    configured_modules: &ConfiguredModuleResolution,
     include_project: bool,
     control: &IndexWorkControl,
 ) -> Result<EntityProjection, CliError> {
@@ -750,7 +793,12 @@ fn build_entity_projection(
             }
             symbol_digests.push(entity_digest);
         }
-        let resolution = resolution_projection(project, packages.package_name(&graph.path), graph)?;
+        let resolution = resolution_projection_with_config(
+            project,
+            packages.package_name(&graph.path),
+            graph,
+            configured_modules,
+        )?;
         let file = entity_by_digest
             .get(&file_digest)
             .ok_or_else(|| CliError::InvalidInput("graph file owner was not staged".to_string()))?;
@@ -2628,13 +2676,15 @@ fn complete_symbol_graphs<'a>(
     Ok(graphs.into_values().collect())
 }
 
-/// Derive canonical resolution keys with typed resource-limit translation.
-fn resolution_projection(
+/// Derive canonical resolution keys with repository compiler configuration.
+fn resolution_projection_with_config(
     project: ProjectInstanceId,
     package: Option<&str>,
     graph: &SymbolGraph,
+    configured_modules: &ConfiguredModuleResolution,
 ) -> Result<ResolutionKeyProjection, CliError> {
-    match derive_resolution_keys(project, package, graph) {
+    let context = ResolutionProjectionContext::with_configured_modules(configured_modules);
+    match derive_resolution_keys_with_context(project, package, graph, context) {
         Ok(projection) => Ok(projection),
         Err(ResolutionProjectionError::KeyLimit { requested, .. }) => {
             Err(IndexWorkFailure::resource_limit(
@@ -2881,12 +2931,12 @@ mod tests {
         CliError, GRAPH_STAGE_DATABASE_FILE_NAME, GRAPH_STAGE_DIRECTORY_PREFIX, GraphOwners,
         GraphSymbolIndex, MAX_INCREMENTAL_GRAPH_BYTES, MAX_INCREMENTAL_GRAPH_ROWS, PackageIndex,
         ProjectResolutionRegistry, RepositoryGraphMutation, StagedRepositoryGraph,
-        build_entity_projection, cleanup_abandoned_graph_staging,
-        enforce_incremental_projection_budget, enforce_incremental_projection_limits,
-        explicit_external_selector, finish_projection, finish_projection_in_database,
-        insert_relation, is_cargo_manifest_path, registry_resolution_matches, relation_resolution,
-        remove_owned_graph_stage_payload, repository_path_belongs_to,
-        resolution_registry_from_exports, rust_toolchain_identity,
+        build_entity_projection, build_entity_projection_with_config,
+        cleanup_abandoned_graph_staging, enforce_incremental_projection_budget,
+        enforce_incremental_projection_limits, explicit_external_selector, finish_projection,
+        finish_projection_in_database, insert_relation, is_cargo_manifest_path,
+        registry_resolution_matches, relation_resolution, remove_owned_graph_stage_payload,
+        repository_path_belongs_to, resolution_registry_from_exports, rust_toolchain_identity,
         stage_incremental_repository_graph, try_graph_stage_lease,
     };
     use crate::runtime::{
@@ -2914,6 +2964,10 @@ mod tests {
         AtlasStore, RepositoryAffectedSourceFootprint, RepositoryGraphRelationQuery,
     };
     use projectatlas_symbols::extract_symbol_graph;
+    use projectatlas_symbols::{
+        ConfiguredModuleResolution, EcmaScriptConfigKind, EcmaScriptModuleConfig,
+        EcmaScriptPathMapping,
+    };
     use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error;
     use std::fmt::Debug;
@@ -4131,6 +4185,74 @@ mod tests {
             }),
             "duplicate same-file declarations did not remain ambiguous",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn configured_module_targets_reuse_graph_ambiguity_ownership() -> Result<(), Box<dyn Error>> {
+        let project = ProjectInstanceId::from_bytes([19; 16])?;
+        let generation = IndexGeneration::new(1);
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let graphs = vec![
+            extract_symbol_graph(
+                "src/first/controller.ts",
+                Some("typescript"),
+                "export function useController() { return 'first'; }\n",
+            ),
+            extract_symbol_graph(
+                "src/second/controller.ts",
+                Some("typescript"),
+                "export function useController() { return 'second'; }\n",
+            ),
+            extract_symbol_graph(
+                "src/page.ts",
+                Some("typescript"),
+                "import { useController } from '@/controller';\nexport const value = useController();\n",
+            ),
+        ];
+        let packages = PackageIndex::from_graphs(&graphs)?;
+        let configured = ConfiguredModuleResolution::new(vec![EcmaScriptModuleConfig::new(
+            "tsconfig.json",
+            EcmaScriptConfigKind::TypeScript,
+            None,
+            vec![EcmaScriptPathMapping::new(
+                "@/*",
+                vec!["src/first/*".to_string(), "src/second/*".to_string()],
+            )?],
+        )?])?;
+        let projection = build_entity_projection_with_config(
+            project,
+            generation,
+            &[],
+            &graphs,
+            &packages,
+            &configured,
+            true,
+            &control,
+        )?;
+        let candidates = resolution_registry_from_exports(&projection, &control)?;
+        let staged = finish_projection(
+            project,
+            generation,
+            RepositoryGraphMutation::Full,
+            &graphs,
+            projection,
+            &candidates,
+            &control,
+        )?;
+        for kind in [RelationKind::Imports, RelationKind::Calls] {
+            require(
+                staged.relations.iter().any(|relation| {
+                    relation.kind() == GraphRelationKind::from_legacy(kind)
+                        && matches!(
+                            relation.resolution(),
+                            RelationResolution::Ambiguous { candidates, .. }
+                                if candidates.get() == 2
+                        )
+                }),
+                "configured mapping did not retain all ambiguity candidates",
+            )?;
+        }
         Ok(())
     }
 

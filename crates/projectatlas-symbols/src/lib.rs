@@ -1,13 +1,21 @@
 //! Purpose: Extract tree-sitter-backed `ProjectAtlas` symbol graphs.
 
+mod configured_modules;
 mod languages;
 mod resolution_keys;
 mod semantic;
 
+pub use configured_modules::{
+    ConfiguredModuleError, ConfiguredModuleResolution, EcmaScriptConfigKind,
+    EcmaScriptModuleConfig, EcmaScriptPathMapping, MAX_CONFIGURED_MODULE_CONFIGS,
+    MAX_CONFIGURED_MODULE_IDENTITY_BYTES, MAX_CONFIGURED_MODULE_MAPPINGS,
+    MAX_CONFIGURED_MODULE_TARGETS,
+};
 pub use resolution_keys::{
     ImportReference, ImportSyntax, MAX_RESOLUTION_KEYS_PER_FACT, RelationResolutionKeys,
-    ResolutionKeyProjection, ResolutionProjectionError, SEMANTIC_RESOLUTION_CONTRACT_VERSION,
-    SymbolResolutionKeys, derive_resolution_keys, module_aliases_for_path, parse_import_references,
+    ResolutionKeyProjection, ResolutionProjectionContext, ResolutionProjectionError,
+    SEMANTIC_RESOLUTION_CONTRACT_VERSION, SymbolResolutionKeys, derive_resolution_keys,
+    derive_resolution_keys_with_context, module_aliases_for_path, parse_import_references,
     resolve_relative_import_path, semantic_resolution_contract_digest, source_stems_for_path,
 };
 

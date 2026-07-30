@@ -29,12 +29,13 @@ use projectatlas_core::telemetry::{
     TokenCalibrationOverview, TokenTrendWindow as CoreTokenTrendWindow, UsageInstanceOwner,
 };
 use projectatlas_core::toon::{
-    encode_agent_payload, render_outline, render_overview, render_ranked_node_rows,
-    render_ranked_nodes, render_symbol_relations, render_symbols, render_token_overview,
-    render_token_trends,
+    encode_agent_payload, encode_error_text, render_outline, render_overview,
+    render_ranked_node_rows, render_ranked_nodes, render_symbol_relations, render_symbols,
+    render_token_overview, render_token_trends,
 };
 use projectatlas_core::{
-    PurposeSource, PurposeStatus, normalize_native_path_display, normalize_repo_path_prefix,
+    IndexWorkControl, IndexWorkStage, PurposeSource, PurposeStatus, normalize_native_path_display,
+    normalize_repo_path_prefix,
 };
 use projectatlas_db::{
     AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, ProjectRootTransition,
@@ -59,8 +60,8 @@ use runtime::{
     MAX_HEALTH_LIMIT, MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel,
     PurposeReviewRequest, ScanRuntimePlan, SettingsReport, SymbolBuildOptions,
     UsageRuntimeInstance, WatchStatusReport, absolute_path, build_settings_report,
-    byte_count_to_tokens, canonical_project_root, config_root_mismatch_error,
-    default_mcp_project_root, defaultable_cli_project_root,
+    byte_count_to_tokens, canonical_project_root, canonical_source_project_root,
+    config_root_mismatch_error, default_mcp_project_root, defaultable_cli_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     index_work_control, init_config_path, init_path_status, lint_database_if_present,
     next_step_report, next_step_report_payload, normalized_folder_filter,
@@ -99,6 +100,8 @@ const PROJECTATLAS_MAJOR_VERSION: u8 = 3;
 const DEFAULT_CALLER_LABEL: &str = "default";
 /// Default maximum rows returned per structured file-summary section.
 const DEFAULT_FILE_SUMMARY_LIMIT: usize = 25;
+/// CLI top-level field for detailed and analysis relation responses.
+const CLI_PAYLOAD_SYMBOL_RELATIONS: &str = "symbol_relations";
 /// One-shot watcher refresh mode.
 const WATCH_MODE_ONCE: &str = "single-refresh";
 /// Event-backed watcher mode.
@@ -107,6 +110,8 @@ const WATCH_MODE_NOTIFY: &str = "notify";
 const DATABASE_FILESYSTEM_RECOVERY: &str = "Place the selected local source tree and its .projectatlas database on a supported local filesystem, resolve any mount or permission uncertainty, and retry; ProjectAtlas will not weaken the WAL durability profile.";
 /// Existing CLI command that performs one bounded refresh pass.
 const CLI_REFRESH_COMMAND: &str = "watch";
+/// Existing CLI command that initializes one selected project root.
+const CLI_INIT_COMMAND: &str = "init";
 /// Portable fallback watcher mode.
 const WATCH_MODE_POLLING: &str = "portable-polling";
 /// Default parity profile for repository-intelligence checks.
@@ -204,6 +209,12 @@ enum CliError {
     /// User input was invalid.
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    /// The selected source root has not been initialized.
+    #[error("{0}")]
+    InitRequired(Box<runtime::IndexInitRequired>),
+    /// A bare/common Git directory was selected instead of checked-out source.
+    #[error("{0}")]
+    WorktreeRequired(Box<runtime::ProjectWorktreeRequired>),
     /// Current local source differs from the durable index.
     #[error("{0}")]
     RefreshRequired(Box<runtime::IndexRefreshRequired>),
@@ -245,6 +256,12 @@ struct CliErrorPayload<'a> {
     /// Local-source mismatch details when a refresh is required.
     #[serde(skip_serializing_if = "Option::is_none")]
     refresh_required: Option<&'a runtime::IndexRefreshRequired>,
+    /// Exact selected-root initialization handoff.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    init_required: Option<&'a runtime::IndexInitRequired>,
+    /// Bare/common Git root selection diagnostic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worktree_required: Option<&'a runtime::ProjectWorktreeRequired>,
     /// Source/policy diagnostic when verification cannot complete.
     #[serde(skip_serializing_if = "Option::is_none")]
     verification_incomplete: Option<&'a runtime::IndexVerificationIncomplete>,
@@ -259,7 +276,7 @@ struct CliErrorPayload<'a> {
     search_capability: Option<SearchCapabilityErrorPayload>,
     /// Direct CLI recovery selector for a confirmed mismatch.
     #[serde(skip_serializing_if = "Option::is_none")]
-    next: Option<CliRefreshNextCall<'a>>,
+    next: Option<CliNextCall<'a>>,
 }
 
 /// Stable error kinds shared by CLI and MCP agent payloads.
@@ -268,6 +285,10 @@ struct CliErrorPayload<'a> {
 enum AgentErrorKind {
     /// General command, input, storage, or service failure.
     Error,
+    /// The selected project root needs explicit initialization.
+    InitRequired,
+    /// A checked-out source worktree must be selected.
+    WorktreeRequired,
     /// Current saved local source differs from the durable index.
     RefreshRequired,
     /// Current saved local source could not be inspected completely.
@@ -316,13 +337,14 @@ struct SearchCapabilityErrorPayload {
 
 /// Existing CLI command that repairs a confirmed stale index.
 #[derive(Serialize)]
-struct CliRefreshNextCall<'a> {
+struct CliNextCall<'a> {
     /// Command family accepted by the current runtime.
     command: &'static str,
     /// Selected project root to refresh.
     project_path: &'a str,
     /// Run exactly one refresh cycle.
-    once: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    once: Option<bool>,
 }
 
 /// CLI output serialization format.
@@ -527,6 +549,24 @@ struct DetailedRelationLimitArgs {
     /// Maximum exact occurrences retained per detailed relation.
     #[arg(long, default_value_t = 25)]
     occurrence_limit: u32,
+    /// Maximum adjacency rows inspected across the complete request.
+    #[arg(long)]
+    edge_limit: Option<u32>,
+    /// Maximum unique traversal nodes retained across the complete request.
+    #[arg(long)]
+    node_limit: Option<u32>,
+    /// Maximum unique visited identities retained across continuation pages.
+    #[arg(long)]
+    visited_limit: Option<u32>,
+    /// Maximum exact occurrences retained across the complete request.
+    #[arg(long)]
+    occurrence_total_limit: Option<u32>,
+    /// Maximum decoded, cursor, and service-composition intermediate bytes.
+    #[arg(long)]
+    intermediate_bytes: Option<u64>,
+    /// Maximum service-owned elapsed milliseconds.
+    #[arg(long)]
+    deadline_ms: Option<u64>,
     /// Maximum encoded bytes admitted to the detailed response.
     #[arg(long, default_value_t = 256 * 1024)]
     output_bytes: u32,
@@ -676,6 +716,7 @@ enum PurposeLintLevelArg {
     ValueEnum,
     schemars::JsonSchema,
 )]
+#[schemars(inline)]
 #[serde(rename_all = "lowercase")]
 enum SearchRetrievalModeArg {
     /// Correctness-authoritative lexical search.
@@ -720,6 +761,7 @@ enum IgnoreKind {
 #[derive(
     Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum, schemars::JsonSchema,
 )]
+#[schemars(inline)]
 #[serde(rename_all = "snake_case")]
 enum RootTransition {
     /// Initialize a missing binding or verify an identical existing binding.
@@ -1829,6 +1871,12 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                             depth,
                             include_occurrences,
                             occurrence_limit,
+                            edge_limit,
+                            node_limit,
+                            visited_limit,
+                            occurrence_total_limit,
+                            intermediate_bytes,
+                            deadline_ms,
                             output_bytes,
                         },
                     analysis,
@@ -1970,7 +2018,15 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         minimum_confidence: (*minimum_confidence).into(),
                         resolution: (*resolution).into(),
                         include_occurrences: *include_occurrences,
-                        budget: DetailedRelationBudget::from_graph_limits(limits),
+                        budget: DetailedRelationBudget::from_graph_limits(limits)
+                            .with_aggregate_limits(
+                                *edge_limit,
+                                *node_limit,
+                                *visited_limit,
+                                *occurrence_total_limit,
+                                *intermediate_bytes,
+                                *deadline_ms,
+                            )?,
                         cursor: cursor.clone(),
                     };
                     let output = if *view == RelationViewArg::Detailed {
@@ -2056,10 +2112,13 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                             })?;
                             let draft =
                                 load_federated_relation_analysis(stores, &query, Some(control))?;
-                            let (_report, output) = draft.fit_output(|report| {
-                                let payload = json!({ "symbol_relations": report });
-                                let toon = encode_agent_payload(&payload);
-                                serialized_output(cli.format, &toon, &payload)
+                            let (_report, output) = draft.fit_output(|report, control| {
+                                controlled_named_output(
+                                    cli.format,
+                                    CLI_PAYLOAD_SYMBOL_RELATIONS,
+                                    report,
+                                    control,
+                                )
                             })?;
                             output
                         } else {
@@ -2072,10 +2131,13 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                                 &query,
                                 None,
                             )?;
-                            let (_report, output) = draft.fit_output(|report| {
-                                let payload = json!({ "symbol_relations": report });
-                                let toon = encode_agent_payload(&payload);
-                                serialized_output(cli.format, &toon, &payload)
+                            let (_report, output) = draft.fit_output(|report, control| {
+                                controlled_named_output(
+                                    cli.format,
+                                    CLI_PAYLOAD_SYMBOL_RELATIONS,
+                                    report,
+                                    control,
+                                )
                             })?;
                             output
                         }
@@ -2702,6 +2764,8 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
                 kind: AgentErrorKind::UnsupportedContainment,
                 message: error.to_string(),
                 refresh_required: None,
+                init_required: None,
+                worktree_required: None,
                 verification_incomplete: None,
                 project_mismatch: None,
                 database_filesystem: None,
@@ -2709,24 +2773,56 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
                 next: None,
             })
         }
-        CliError::RefreshRequired(report) => Some(CliErrorPayload {
-            kind: AgentErrorKind::RefreshRequired,
+        CliError::InitRequired(report) => Some(CliErrorPayload {
+            kind: AgentErrorKind::InitRequired,
             message: error.to_string(),
-            refresh_required: Some(report.as_ref()),
+            refresh_required: None,
+            init_required: Some(report.as_ref()),
+            worktree_required: None,
             verification_incomplete: None,
             project_mismatch: None,
             database_filesystem: None,
             search_capability: None,
-            next: Some(CliRefreshNextCall {
+            next: Some(CliNextCall {
+                command: CLI_INIT_COMMAND,
+                project_path: &report.project_root,
+                once: None,
+            }),
+        }),
+        CliError::WorktreeRequired(report) => Some(CliErrorPayload {
+            kind: AgentErrorKind::WorktreeRequired,
+            message: error.to_string(),
+            refresh_required: None,
+            init_required: None,
+            worktree_required: Some(report.as_ref()),
+            verification_incomplete: None,
+            project_mismatch: None,
+            database_filesystem: None,
+            search_capability: None,
+            next: None,
+        }),
+        CliError::RefreshRequired(report) => Some(CliErrorPayload {
+            kind: AgentErrorKind::RefreshRequired,
+            message: error.to_string(),
+            refresh_required: Some(report.as_ref()),
+            init_required: None,
+            worktree_required: None,
+            verification_incomplete: None,
+            project_mismatch: None,
+            database_filesystem: None,
+            search_capability: None,
+            next: Some(CliNextCall {
                 command: CLI_REFRESH_COMMAND,
                 project_path: &report.project_root,
-                once: true,
+                once: Some(true),
             }),
         }),
         CliError::VerificationIncomplete(report) => Some(CliErrorPayload {
             kind: AgentErrorKind::VerificationIncomplete,
             message: error.to_string(),
             refresh_required: None,
+            init_required: None,
+            worktree_required: None,
             verification_incomplete: Some(report.as_ref()),
             project_mismatch: None,
             database_filesystem: None,
@@ -2737,6 +2833,8 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             kind: AgentErrorKind::ProjectMismatch,
             message: error.to_string(),
             refresh_required: None,
+            init_required: None,
+            worktree_required: None,
             verification_incomplete: None,
             project_mismatch: Some(report.as_ref()),
             database_filesystem: None,
@@ -2751,6 +2849,8 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             kind: AgentErrorKind::SearchCapabilityUnavailable,
             message: error.to_string(),
             refresh_required: None,
+            init_required: None,
+            worktree_required: None,
             verification_incomplete: None,
             project_mismatch: None,
             database_filesystem: None,
@@ -2766,6 +2866,8 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
                 kind,
                 message: error.to_string(),
                 refresh_required: None,
+                init_required: None,
+                worktree_required: None,
                 verification_incomplete: None,
                 project_mismatch: None,
                 database_filesystem: Some(database_filesystem),
@@ -2834,37 +2936,28 @@ fn database_filesystem_error_payload(
 
 /// Open the selected current index through one root-bound read snapshot.
 fn open_index_for_current_read(cli: &Cli) -> Result<AtlasStore, CliError> {
-    if !cli.db.is_file() {
-        return Err(CliError::InvalidInput(format!(
-            "ProjectAtlas index '{}' is missing; run `projectatlas scan <project-root>` first",
-            cli.db.display()
-        )));
-    }
     let root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+    if !cli.db.is_file() {
+        return Err(runtime::index_init_required(&root, &cli.db));
+    }
     open_atlas_store_read_only_for_project(&cli.db, &root)
 }
 
 /// Open and verify the durable index before a normal CLI read.
 fn open_index_for_read(cli: &Cli) -> Result<AtlasStore, CliError> {
-    if !cli.db.is_file() {
-        return Err(CliError::InvalidInput(format!(
-            "ProjectAtlas index '{}' is missing; run `projectatlas scan <project-root>` first",
-            cli.db.display()
-        )));
-    }
     let root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+    if !cli.db.is_file() {
+        return Err(runtime::index_init_required(&root, &cli.db));
+    }
     open_fresh_atlas_store_for_project(&cli.db, &root, cli.config.as_deref())
 }
 
 /// Open a selected project database for purpose or health mutation.
 fn open_index_for_mutation(cli: &Cli) -> Result<AtlasStore, CliError> {
-    if !cli.db.is_file() {
-        return Err(CliError::InvalidInput(format!(
-            "ProjectAtlas index '{}' is missing; run `projectatlas scan <project-root>` first",
-            cli.db.display()
-        )));
-    }
     let root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+    if !cli.db.is_file() {
+        return Err(runtime::index_init_required(&root, &cli.db));
+    }
     open_atlas_store_for_project(&cli.db, &root)
 }
 
@@ -3035,6 +3128,7 @@ fn bind_project_root(
     transition: RootTransition,
     nearest_project: bool,
 ) -> Result<RootReport, CliError> {
+    let root = canonical_source_project_root(root)?;
     if !root.is_dir() {
         return Err(CliError::InvalidInput(format!(
             "project root {} is not a directory",
@@ -3043,12 +3137,16 @@ fn bind_project_root(
     }
     let atlas_dir = root.join(".projectatlas");
     let db_path = atlas_dir.join("projectatlas.db");
-    let config_path = init_config_path(root, None);
+    let config_path = init_config_path(&root, None);
     if config_path.exists() {
         let config = load_atlas_config(Some(&config_path))?;
         let config_root = canonical_project_root(&config.root)?;
         if config_root != root {
-            return Err(config_root_mismatch_error(&config_path, &config_root, root));
+            return Err(config_root_mismatch_error(
+                &config_path,
+                &config_root,
+                &root,
+            ));
         }
     }
 
@@ -3059,13 +3157,13 @@ fn bind_project_root(
         ));
     }
     if !database_exists {
-        init_project_with_config(root, Some(&config_path))?;
+        init_project_with_config(&root, Some(&config_path))?;
     }
-    let transition_result = AtlasStore::transition_project_root(&db_path, root, transition.into())
+    let transition_result = AtlasStore::transition_project_root(&db_path, &root, transition.into())
         .map_err(runtime::project_store_error)?;
     let configuration_result: Result<(), CliError> = (|| {
         if database_exists {
-            init_project_with_config(root, Some(&config_path))?;
+            init_project_with_config(&root, Some(&config_path))?;
         }
 
         write_mcp_config_file(
@@ -3295,6 +3393,178 @@ fn serialized_output<T: serde::Serialize>(
         OutputFormat::Toon => Ok(toon.to_string()),
         OutputFormat::Json => Ok(format!("{}\n", serde_json::to_string_pretty(payload)?)),
     }
+}
+
+/// Maximum bytes copied between cooperative output-control checks.
+const CONTROLLED_ENCODING_CHUNK_BYTES: usize = 8 * 1024;
+
+/// One dynamic top-level payload field without an intermediate JSON value.
+struct NamedPayload<'a, T: ?Sized> {
+    /// Stable adapter-owned field name.
+    key: &'a str,
+    /// Borrowed service report.
+    payload: &'a T,
+}
+
+impl<T> Serialize for NamedPayload<'_, T>
+where
+    T: Serialize + ?Sized,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap as _;
+
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry(self.key, self.payload)?;
+        map.end()
+    }
+}
+
+/// Bounded output buffer that observes the request control between chunks.
+struct ControlledOutput<'a> {
+    /// Serialized bytes retained for the adapter result.
+    bytes: Vec<u8>,
+    /// Exact request control shared with service analysis.
+    control: &'a IndexWorkControl,
+    /// Whether a write stopped because the request became terminal.
+    interrupted: bool,
+}
+
+impl<'a> ControlledOutput<'a> {
+    /// Create an empty controlled output buffer.
+    const fn new(control: &'a IndexWorkControl) -> Self {
+        Self {
+            bytes: Vec::new(),
+            control,
+            interrupted: false,
+        }
+    }
+
+    /// Translate a terminal writer error back to the typed request failure.
+    fn check_terminal(&self) -> Result<(), CliError> {
+        self.control.check(IndexWorkStage::RepositoryTraversal)?;
+        Ok(())
+    }
+
+    /// Convert verified encoder output into UTF-8 text.
+    fn into_string(self) -> Result<String, CliError> {
+        String::from_utf8(self.bytes).map_err(|source| {
+            CliError::Output(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("encoded output was not UTF-8: {source}"),
+            ))
+        })
+    }
+}
+
+impl Write for ControlledOutput<'_> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if self
+            .control
+            .check(IndexWorkStage::RepositoryTraversal)
+            .is_err()
+        {
+            self.interrupted = true;
+            return Err(io::Error::other("analysis output encoding interrupted"));
+        }
+        let retained = buffer.len().min(CONTROLLED_ENCODING_CHUNK_BYTES);
+        self.bytes.extend_from_slice(&buffer[..retained]);
+        Ok(retained)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Controlled reader used by the installed TOON streaming encoder.
+struct ControlledInput<'a> {
+    /// Compact JSON bytes consumed by the TOON encoder.
+    bytes: &'a [u8],
+    /// Current input offset.
+    offset: usize,
+    /// Exact request control shared with service analysis.
+    control: &'a IndexWorkControl,
+    /// Whether a read stopped because the request became terminal.
+    interrupted: bool,
+}
+
+impl<'a> ControlledInput<'a> {
+    /// Borrow one serialized payload as a cooperatively bounded input stream.
+    const fn new(bytes: &'a [u8], control: &'a IndexWorkControl) -> Self {
+        Self {
+            bytes,
+            offset: 0,
+            control,
+            interrupted: false,
+        }
+    }
+}
+
+impl Read for ControlledInput<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self
+            .control
+            .check(IndexWorkStage::RepositoryTraversal)
+            .is_err()
+        {
+            self.interrupted = true;
+            return Err(io::Error::other("analysis output encoding interrupted"));
+        }
+        let remaining = &self.bytes[self.offset..];
+        let read = remaining
+            .len()
+            .min(buffer.len())
+            .min(CONTROLLED_ENCODING_CHUNK_BYTES);
+        buffer[..read].copy_from_slice(&remaining[..read]);
+        self.offset = self.offset.saturating_add(read);
+        Ok(read)
+    }
+}
+
+/// Serialize one named analysis envelope while retaining deadline and cancellation.
+fn controlled_named_output<T>(
+    format: OutputFormat,
+    key: &str,
+    payload: &T,
+    control: &IndexWorkControl,
+) -> Result<String, CliError>
+where
+    T: Serialize + ?Sized,
+{
+    let payload = NamedPayload { key, payload };
+    let mut json = ControlledOutput::new(control);
+    let json_result = match format {
+        OutputFormat::Toon => serde_json::to_writer(&mut json, &payload),
+        OutputFormat::Json => serde_json::to_writer_pretty(&mut json, &payload),
+    };
+    if json.interrupted {
+        json.check_terminal()?;
+    }
+    json_result?;
+    json.check_terminal()?;
+    if format == OutputFormat::Json {
+        json.bytes.push(b'\n');
+        return json.into_string();
+    }
+
+    let mut input = ControlledInput::new(&json.bytes, control);
+    let mut output = ControlledOutput::new(control);
+    let toon_result = toon_format::encode_json_stream_default(&mut input, &mut output);
+    if input.interrupted || output.interrupted {
+        control.check(IndexWorkStage::RepositoryTraversal)?;
+    }
+    control.check(IndexWorkStage::RepositoryTraversal)?;
+    if let Err(error) = toon_result {
+        return Ok(format!(
+            "toon_error: {}\n",
+            encode_error_text(&error.to_string())
+        ));
+    }
+    output.bytes.push(b'\n');
+    output.into_string()
 }
 
 /// Build a bounded DB health query from CLI filter arguments.
@@ -4442,9 +4712,9 @@ mod tests {
     };
     use super::{
         Cli, CliError, Command, GraphRelationKind, OutputFormat, SearchRetrievalMode,
-        SearchRetrievalModeArg, ServiceError, build_runtime_info, load_token_atlas_relations,
-        render_cli_error, render_token_dashboard, serialized_output, token_atlas_network_relation,
-        truthy_env,
+        SearchRetrievalModeArg, ServiceError, build_runtime_info, controlled_named_output,
+        load_token_atlas_relations, render_cli_error, render_token_dashboard, serialized_output,
+        token_atlas_network_relation, truthy_env,
     };
     #[cfg(feature = "optional-parser-supervisor")]
     use super::{OptionalParserPackLifecycleError, ParserPackCommand};
@@ -4458,7 +4728,10 @@ mod tests {
         CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
     };
     use projectatlas_core::telemetry::TokenOverview;
-    use projectatlas_core::{IndexGeneration, Node, NodeKind, normalize_native_path_display};
+    use projectatlas_core::{
+        IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
+        Node, NodeKind, normalize_native_path_display,
+    };
     use projectatlas_db::{AtlasStore, DbError, RepositoryGraphDirection};
     use projectatlas_fs::ScanOptions;
     use rmcp::model::{CallToolRequestParams, ClientInfo};
@@ -5413,6 +5686,56 @@ mod tests {
         }
         if json.len() <= toon.len() {
             return Err(io::Error::other("json output was not larger than toon fixture").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn analysis_output_encoding_is_equivalent_and_cancellable() -> Result<(), Box<dyn Error>> {
+        struct CancelDuringSerialize(IndexCancellation);
+
+        impl serde::Serialize for CancelDuringSerialize {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                use serde::ser::SerializeSeq as _;
+
+                let mut sequence = serializer.serialize_seq(Some(2))?;
+                sequence.serialize_element(&1_u8)?;
+                self.0.cancel();
+                sequence.serialize_element(&2_u8)?;
+                sequence.end()
+            }
+        }
+
+        let payload = json!({ "mode": "impact", "findings": [1, 2, 3] });
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let expected =
+            projectatlas_core::toon::encode_agent_payload(&json!({ "symbol_relations": payload }));
+        let encoded =
+            controlled_named_output(OutputFormat::Toon, "symbol_relations", &payload, &control)?;
+        if encoded != expected {
+            return Err(io::Error::other("controlled TOON output changed its wire format").into());
+        }
+
+        let cancellation = IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        let result = controlled_named_output(
+            OutputFormat::Json,
+            "symbol_relations",
+            &CancelDuringSerialize(cancellation),
+            &control,
+        );
+        if !matches!(
+            result,
+            Err(CliError::IndexWork(IndexWorkFailure::Cancelled {
+                stage: IndexWorkStage::RepositoryTraversal
+            }))
+        ) {
+            return Err(
+                io::Error::other("analysis adapter continued encoding after cancellation").into(),
+            );
         }
         Ok(())
     }
@@ -6568,8 +6891,11 @@ mod tests {
             json!(empty_repo.to_string_lossy().to_string()),
         );
         let missing_index_overview = call_text!("atlas_overview", missing_index_args);
-        if !missing_index_overview.contains("index")
-            || !missing_index_overview.contains("atlas_scan")
+        if !missing_index_overview.contains("kind: init_required")
+            || !missing_index_overview.contains("tool: atlas_init")
+            || !missing_index_overview.contains(&normalize_native_path_display(
+                super::runtime::canonical_project_root(&empty_repo)?,
+            ))
             || empty_repo.join(".projectatlas").exists()
         {
             return Err(

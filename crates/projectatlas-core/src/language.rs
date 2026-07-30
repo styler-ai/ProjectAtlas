@@ -16,7 +16,7 @@ pub const LANGUAGE_CAPABILITY_REGISTRY_VERSION: u32 = 3;
 pub const SEMANTIC_PROVIDER_CONTRACT_VERSION: u32 = 1;
 
 /// Version of the accepted language capability floor.
-pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION: u32 = 3;
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION: u32 = 4;
 
 /// Version of exact detector precedence and content-matching semantics.
 pub const LANGUAGE_DETECTION_POLICY_VERSION: u32 = 1;
@@ -41,6 +41,13 @@ pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V2_DIGEST: &str =
 /// semantic provider floor plus typed HTML-like/component/template embedding.
 pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V3_DIGEST: &str =
     "a4b69ce4aed2ebf8d28f7b237ead76a53e5363e34c8c97ea5980776ea4217ef4";
+
+/// Historical acceptance seal for capability-set version 4.
+///
+/// Version 4 preserves version 3 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.4.1 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V4_DIGEST: &str =
+    "e9a952d0b3bc2d2c5db832130d85b7cdfd656aaa07ebbafab1505da6b87d9084";
 
 /// Maximum content prefix inspected by the bounded content/dialect detector.
 pub const LANGUAGE_CONTENT_DETECTION_MAX_BYTES: usize = 512;
@@ -1579,7 +1586,7 @@ absent. Catalog recognition alone does not add these extensions to the default s
 pinned catalog is provenance for detection metadata only. A row becomes grammar-backed parsed \
 support only after its exact \
 grammar binary, subtree license, ABI/export, fixtures, and every accepted optional-pack target \
-pass the separate acceptance gates. The v0.4.0 optional-pack targets are Linux x86-64 and Windows \
+pass the separate acceptance gates. The v0.4 optional-pack targets are Linux x86-64 and Windows \
 x86-64; macOS keeps the full built-in surface and reports `unsupported_containment` for optional-\
 pack activation. Built-in owners always retain precedence.\n\n",
     );
@@ -2068,6 +2075,7 @@ pub fn validate_language_registry() -> Result<(), LanguageRegistryError> {
         1 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V1_DIGEST,
         2 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V2_DIGEST,
         3 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V3_DIGEST,
+        4 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V4_DIGEST,
         version => {
             return Err(LanguageRegistryError::new(format!(
                 "accepted language capability-set version {version} lacks a historical digest seal"

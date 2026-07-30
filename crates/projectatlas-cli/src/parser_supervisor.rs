@@ -5608,7 +5608,20 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             )));
         }
 
-        let healthy = case("healthy", ExpectedFailure::Io)?;
+        let mut healthy = case("healthy", ExpectedFailure::Io)?;
+        healthy.no_progress = healthy.deadline;
+        let cleanup_deadline = Instant::now() + healthy.deadline;
+        while PROCESS_SPAWN_ACTIVE.load(Ordering::Acquire) && Instant::now() < cleanup_deadline {
+            thread::yield_now();
+        }
+        if PROCESS_SPAWN_ACTIVE.load(Ordering::Acquire) {
+            return Err(io::Error::other(format!(
+                "hostile scenario {} did not finish late process cleanup",
+                hostile.scenario
+            )));
+        }
+        require_process_spawn_cleanup_health()
+            .map_err(|error| io::Error::other(error.to_string()))?;
         let evidence = operate(peer, &healthy).map_err(|error| {
             io::Error::other(format!(
                 "healthy restart after {} failed: {error:?}",
