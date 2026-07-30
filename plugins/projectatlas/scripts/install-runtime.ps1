@@ -89,6 +89,61 @@ function Convert-ProjectAtlasVersionTag {
     return $Version.Trim().TrimStart("v")
 }
 
+function Stop-ProjectAtlasOwnedRuntimeProbeTree {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [int]$TimeoutMs
+    )
+    if (-not $Process) {
+        return
+    }
+    try {
+        if ($Process.HasExited) {
+            return
+        }
+    }
+    catch {
+        return
+    }
+
+    $terminator = $null
+    try {
+        $taskkillPath = Join-Path $env:SystemRoot "System32\taskkill.exe"
+        $taskkill = Get-Item -Force -LiteralPath $taskkillPath -ErrorAction Stop
+        if (-not ($taskkill -is [System.IO.FileInfo]) `
+            -or (($taskkill.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            throw "Windows process-tree terminator must be a direct system file: $taskkillPath"
+        }
+        $terminator = Start-Process `
+            -FilePath $taskkill.FullName `
+            -ArgumentList @("/PID", [string]$Process.Id, "/T", "/F") `
+            -WindowStyle Hidden `
+            -PassThru
+        if (-not $terminator.WaitForExit($TimeoutMs)) {
+            $terminator.Kill()
+            [void]$terminator.WaitForExit($TimeoutMs)
+        }
+    }
+    catch {
+        # The exact tracked wrapper still receives bounded cleanup below.
+    }
+    finally {
+        if ($terminator) {
+            $terminator.Dispose()
+        }
+    }
+
+    try {
+        if (-not $Process.HasExited) {
+            $Process.Kill()
+            [void]$Process.WaitForExit($TimeoutMs)
+        }
+    }
+    catch {
+        # The probe has already failed; cleanup must not mask that result.
+    }
+}
+
 function Invoke-ProjectAtlasRuntimeInfo {
     param(
         [string]$FilePath
@@ -126,8 +181,7 @@ function Invoke-ProjectAtlasRuntimeInfo {
             }
             if ($outputLimitExceeded -or (-not $exited -and $probeClock.ElapsedMilliseconds -ge $probeTimeoutMs)) {
                 if (-not $exited) {
-                    $process.Kill()
-                    [void]$process.WaitForExit($probeTimeoutMs)
+                    Stop-ProjectAtlasOwnedRuntimeProbeTree $process $probeTimeoutMs
                 }
                 return $null
             }
@@ -153,12 +207,20 @@ function Invoke-ProjectAtlasRuntimeInfo {
     finally {
         if ($process) {
             if (-not $process.HasExited) {
-                $process.Kill()
-                [void]$process.WaitForExit($probeTimeoutMs)
+                Stop-ProjectAtlasOwnedRuntimeProbeTree $process $probeTimeoutMs
             }
             $process.Dispose()
         }
-        Remove-Item -LiteralPath $standardOutput, $standardError -Force -ErrorAction SilentlyContinue
+        $cleanupClock = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            Remove-Item -LiteralPath $standardOutput, $standardError -Force -ErrorAction SilentlyContinue
+            $remainingProbeFiles = @($probeFiles | Where-Object { Test-Path -LiteralPath $_ })
+            if ($remainingProbeFiles.Count -eq 0) {
+                break
+            }
+            Start-Sleep -Milliseconds 25
+        }
+        while ($cleanupClock.ElapsedMilliseconds -lt $probeTimeoutMs)
     }
 }
 

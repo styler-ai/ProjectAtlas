@@ -47,7 +47,7 @@ The installer SHALL keep the verified versioned runtime first in persisted User 
 - **THEN** the generated and registered MCP integration still launches the verified absolute runtime even though parent-host bare CLI remains stale
 
 ### Requirement: Installer never repairs readiness by terminating unrelated processes
-The installer SHALL NOT terminate, suspend, mutate, or replace the environment of any pre-existing ProjectAtlas, Codex, terminal, or unrelated process. It MAY terminate only the exact runtime-info probe child it started after that probe exceeds its time or output bound.
+The installer SHALL NOT terminate, suspend, mutate, or replace the environment of any pre-existing ProjectAtlas, Codex, terminal, or unrelated process. It MAY terminate only the exact runtime-info probe process tree it started after that probe exceeds its time or output bound.
 
 #### Scenario: Locked process remains alive
 - **WHEN** an owned stale runtime process keeps the stable mirror locked during installation
