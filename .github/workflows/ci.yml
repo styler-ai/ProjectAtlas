@@ -174,6 +174,14 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is_locked --test e2e
 
+      - name: Windows persisted User PATH E2E
+        if: matrix.label == 'windows'
+        timeout-minutes: 5
+        env:
+          PROJECTATLAS_TEST_DISPOSABLE_RUNNER: ${{ runner.environment }}
+          PROJECTATLAS_TEST_PERSIST_USER_PATH: "1"
+        run: cargo test --locked -p projectatlas-cli windows_installer_fresh_path_probe_respects_machine_precedence --test e2e -- --exact
+
       - name: Windows stale MCP registry update E2E
         if: matrix.label == 'windows'
         timeout-minutes: 5

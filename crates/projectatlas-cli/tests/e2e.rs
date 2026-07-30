@@ -3153,6 +3153,18 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         )
         .into());
     }
+    for required in [
+        "windows_installer_fresh_path_probe_respects_machine_precedence",
+        "PROJECTATLAS_TEST_DISPOSABLE_RUNNER: ${{ runner.environment }}",
+        "PROJECTATLAS_TEST_PERSIST_USER_PATH: \"1\"",
+    ] {
+        if !e2e_smoke.contains(required) {
+            return Err(io::Error::other(format!(
+                "Windows CI smoke must exercise persisted User PATH through a fresh process; missing {required:?}"
+            ))
+            .into());
+        }
+    }
     if !e2e_smoke
         .contains("windows_release_binary_installer_repairs_stale_mirror_without_registering_it")
     {
@@ -3388,9 +3400,13 @@ $names = @(
     "Convert-ProjectAtlasVersionTag",
     "Get-NormalizedPathEntry",
     "Invoke-ProjectAtlasRuntimeInfo",
+    "Set-ProjectAtlasPathPrecedence",
+    "Set-ProjectAtlasProcessPathPrecedence",
+    "Split-PathList",
     "Sync-ProjectAtlasRuntimeToLocalAppData",
     "Test-ProjectAtlasBareCommandResolutionOnPath",
-    "Test-ProjectAtlasRuntime"
+    "Test-ProjectAtlasRuntime",
+    "Test-Truthy"
 )
 $functions = $ast.FindAll({
     param($node)
@@ -3411,6 +3427,34 @@ if (Test-ProjectAtlasBareCommandResolutionOnPath $machineFirst $env:PROJECTATLAS
 }
 if (-not (Test-ProjectAtlasBareCommandResolutionOnPath $userFirst $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME)) {
     throw "Verified runtime first on PATH was not classified as restart-recoverable"
+}
+if ($env:PROJECTATLAS_TEST_PERSIST_USER_PATH -eq "1") {
+    if ($env:PROJECTATLAS_TEST_DISPOSABLE_RUNNER -ne "github-hosted") {
+        throw "Persisted User PATH test requires a disposable GitHub-hosted runner"
+    }
+    $originalUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $originalProcessPath = $env:Path
+    try {
+        if (-not (Set-ProjectAtlasPathPrecedence $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME)) {
+            throw "Persisted User PATH was not classified as fresh-host ready"
+        }
+        $persistedUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+        $env:Path = @($machinePath, $persistedUserPath) -join ";"
+        $freshChildPath = & powershell -NoProfile -Command `
+            "(Get-Command projectatlas -ErrorAction Stop).Source"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Fresh child could not resolve projectatlas from persisted User PATH"
+        }
+        if ((Get-NormalizedPathEntry $freshChildPath) -ne `
+            (Get-NormalizedPathEntry $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME)) {
+            throw "Fresh child resolved '$freshChildPath' instead of the persisted verified runtime"
+        }
+    }
+    finally {
+        $env:Path = $originalProcessPath
+        [Environment]::SetEnvironmentVariable("Path", $originalUserPath, "User")
+    }
 }
 $probe = [Diagnostics.Stopwatch]::StartNew()
 if (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_HANGING_RUNTIME $null) {
