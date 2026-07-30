@@ -10195,6 +10195,8 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
         }
     }
 
+    let missing_index_root = temp.path().join("missing-index");
+    fs::create_dir(&missing_index_root)?;
     for (name, arguments, expected_error) in [
         (
             "atlas_slice",
@@ -10216,6 +10218,21 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
             serde_json::json!({"project_path": repo_argument, "apply": false, "items": [{}]}),
             "missing field `path`",
         ),
+        (
+            "atlas_purpose_review",
+            serde_json::json!({"project_path": repo_argument, "apply": true, "items": [{"path": "src/scanned.rs", "purpose": "Must not apply.", "task": "mcp-contract", "work_key": "incomplete"}]}),
+            "entirely conditional",
+        ),
+        (
+            "atlas_purpose_review",
+            serde_json::json!({"project_path": parent_canary, "apply": true, "items": [{"path": "src/scanned.rs", "purpose": "Must not apply."}]}),
+            "not a directory",
+        ),
+        (
+            "atlas_purpose_review",
+            serde_json::json!({"project_path": missing_index_root, "apply": true, "items": [{"path": "src/scanned.rs", "purpose": "Must not apply."}]}),
+            "is missing",
+        ),
     ] {
         assert_mcp_contract_failure_no_mutation(
             &executable,
@@ -10225,6 +10242,51 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
             &arguments,
             expected_error,
         )?;
+    }
+    if missing_index_root.join(ATLAS_DIR_NAME).exists() {
+        return Err(io::Error::other("missing-index MCP review created project state").into());
+    }
+
+    let stale_before = mcp_database_snapshot(&db)?;
+    let (stale_response, stale_stdout) = run_mcp_contract_raw_call(
+        &executable,
+        &repo,
+        &db,
+        "atlas_purpose_review",
+        &serde_json::json!({
+            "project_path": repo_argument,
+            "apply": true,
+            "items": [{
+                "path": "src/scanned.rs",
+                "purpose": "Must not apply.",
+                "task": "mcp-contract",
+                "work_key": "0".repeat(64),
+                "state_token": "0".repeat(64)
+            }]
+        }),
+        false,
+    )?;
+    if stale_response
+        .get("result")
+        .and_then(|result| result.get("isError"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return Err(io::Error::other(format!(
+            "stale conditional MCP review returned an adapter error: {stale_response}"
+        ))
+        .into());
+    }
+    let stale_review: Value = toon_format::decode_default(&mcp_tool_text(&stale_stdout, 2)?)?;
+    require_json_usize(&stale_review, &["purpose_review", "changed"], 0)?;
+    require_json_usize(&stale_review, &["purpose_review", "conflicts"], 1)?;
+    require_json_string(
+        &stale_review,
+        &["purpose_review_items", "0", "action"],
+        "stale",
+    )?;
+    if mcp_database_snapshot(&db)? != stale_before {
+        return Err(io::Error::other("stale conditional MCP review changed SQLite state").into());
     }
     assert_mcp_non_git_freshness(&executable)?;
     assert_mcp_active_cancellation_preserves_generation(&executable)?;
