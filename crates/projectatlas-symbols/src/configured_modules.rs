@@ -127,6 +127,13 @@ pub struct ConfiguredModuleResolution {
     configs: Vec<EcmaScriptModuleConfig>,
 }
 
+/// One configuration selected once for a source graph.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ConfiguredModuleSource<'a> {
+    /// Nearest applicable compiler configuration, when one exists.
+    config: Option<&'a EcmaScriptModuleConfig>,
+}
+
 impl ConfiguredModuleResolution {
     /// Construct one sorted, bounded configuration snapshot.
     ///
@@ -155,13 +162,40 @@ impl ConfiguredModuleResolution {
         Ok(Self { configs })
     }
 
+    /// Select the applicable compiler configuration once for a source graph.
+    pub(crate) fn for_source(&self, caller_path: &str) -> ConfiguredModuleSource<'_> {
+        ConfiguredModuleSource {
+            config: self.applicable_config(caller_path),
+        }
+    }
+
+    /// Select the nearest containing config, preferring the source-family kind
+    /// only when both kinds exist at that same scope.
+    fn applicable_config(&self, caller_path: &str) -> Option<&EcmaScriptModuleConfig> {
+        let preferred = preferred_config_kind(caller_path);
+        self.configs
+            .iter()
+            .filter(|config| directory_contains(&config.directory, caller_path))
+            .max_by(|left, right| {
+                directory_depth(&left.directory)
+                    .cmp(&directory_depth(&right.directory))
+                    .then_with(|| {
+                        (left.kind == preferred)
+                            .cmp(&(right.kind == preferred))
+                            .then_with(|| right.config_path.cmp(&left.config_path))
+                    })
+            })
+    }
+}
+
+impl ConfiguredModuleSource<'_> {
     /// Resolve configured candidate scopes for one non-relative import.
-    pub(crate) fn scopes_for_import(&self, caller_path: &str, module_spec: &str) -> Vec<String> {
+    pub(crate) fn scopes_for_import(self, module_spec: &str) -> Vec<String> {
         if module_spec.starts_with("./") || module_spec.starts_with("../") || module_spec.is_empty()
         {
             return Vec::new();
         }
-        let Some(config) = self.applicable_config(caller_path) else {
+        let Some(config) = self.config else {
             return Vec::new();
         };
         let mut matched = config
@@ -203,24 +237,6 @@ impl ConfiguredModuleResolution {
             format!("{base_url}/{module_spec}")
         };
         vec![strip_known_source_extension(&scope)]
-    }
-
-    /// Select the nearest containing config, preferring the source-family kind
-    /// only when both kinds exist at that same scope.
-    fn applicable_config(&self, caller_path: &str) -> Option<&EcmaScriptModuleConfig> {
-        let preferred = preferred_config_kind(caller_path);
-        self.configs
-            .iter()
-            .filter(|config| directory_contains(&config.directory, caller_path))
-            .max_by(|left, right| {
-                directory_depth(&left.directory)
-                    .cmp(&directory_depth(&right.directory))
-                    .then_with(|| {
-                        (left.kind == preferred)
-                            .cmp(&(right.kind == preferred))
-                            .then_with(|| right.config_path.cmp(&left.config_path))
-                    })
-            })
     }
 }
 
@@ -438,12 +454,18 @@ mod tests {
             ],
         )?;
         let configured = ConfiguredModuleResolution::new(vec![root, nested])?;
-        if configured.scopes_for_import("packages/app/src/page.ts", "@/models/user")
+        if configured
+            .for_source("packages/app/src/page.ts")
+            .scopes_for_import("@/models/user")
             != vec!["packages/shared/models/user"]
         {
             return Err(std::io::Error::other("nearest config or specific pattern lost").into());
         }
-        if configured.scopes_for_import("src/page.ts", "@/controller") != vec!["src/controller"] {
+        if configured
+            .for_source("src/page.ts")
+            .scopes_for_import("@/controller")
+            != vec!["src/controller"]
+        {
             return Err(std::io::Error::other("root alias did not resolve").into());
         }
         Ok(())
@@ -471,11 +493,17 @@ mod tests {
             )?],
         )?;
         let configured = ConfiguredModuleResolution::new(vec![ts, js])?;
-        if configured.scopes_for_import("src/page.tsx", "@/tools") != vec!["src/typed/tools/index"]
+        if configured
+            .for_source("src/page.tsx")
+            .scopes_for_import("@/tools")
+            != vec!["src/typed/tools/index"]
         {
             return Err(std::io::Error::other("TypeScript config preference lost").into());
         }
-        if configured.scopes_for_import("src/page.jsx", "@/tools") != vec!["src/script/tools/index"]
+        if configured
+            .for_source("src/page.jsx")
+            .scopes_for_import("@/tools")
+            != vec!["src/script/tools/index"]
         {
             return Err(std::io::Error::other("JavaScript config preference lost").into());
         }

@@ -1,6 +1,7 @@
 //! Canonical import facts and resolution-key projection for extracted symbol graphs.
 
 use crate::ConfiguredModuleResolution;
+use crate::configured_modules::ConfiguredModuleSource;
 use crate::semantic;
 use blake3::Hasher;
 use projectatlas_core::graph::{
@@ -144,6 +145,9 @@ pub struct ResolutionProjectionContext<'a> {
     /// Validated configured-module snapshot, when the runtime supplied one.
     configured_modules: Option<&'a ConfiguredModuleResolution>,
 }
+
+/// Provider scopes expanded once per unique import in one source graph.
+type ImportScopeCache = BTreeMap<String, BTreeMap<String, Vec<String>>>;
 
 impl<'a> ResolutionProjectionContext<'a> {
     /// Construct a projection context with one validated configured-module snapshot.
@@ -511,6 +515,15 @@ pub fn derive_resolution_keys_with_context(
                 .push(reference);
         }
     }
+    let configured_source = context
+        .configured_modules
+        .map(|configured| configured.for_source(&graph.path));
+    let import_scopes = build_import_scope_cache(
+        provider_owner,
+        graph,
+        &parsed_imports,
+        configured_source.as_ref(),
+    );
 
     let mut relation_keys = Vec::new();
     for (relation_index, relation) in graph.relations.iter().enumerate() {
@@ -518,26 +531,24 @@ pub fn derive_resolution_keys_with_context(
             RelationKind::Imports if semantic::supports_source_dependencies(provider_owner) => {
                 import_dependency_keys(
                     project,
-                    provider_owner,
                     &provider,
                     &language,
                     package.as_ref(),
                     &relation.path,
                     &parsed_imports[relation_index],
-                    context,
+                    &import_scopes,
                 )?
             }
             RelationKind::Calls if semantic::supports_source_dependencies(provider_owner) => {
                 call_dependency_keys(
                     project,
-                    provider_owner,
                     &provider,
                     &language,
                     package.as_ref(),
                     &relation.path,
                     &relation.target_name,
                     &aliases,
-                    context,
+                    &import_scopes,
                 )?
             }
             RelationKind::DependsOn if semantic::supports_package_dependencies(provider_owner) => {
@@ -569,26 +580,59 @@ pub fn derive_resolution_keys_with_context(
     })
 }
 
+/// Expand each unique import scope once for the complete source graph.
+fn build_import_scope_cache(
+    provider_owner: SemanticProviderOwner,
+    graph: &SymbolGraph,
+    parsed_imports: &[Vec<ImportReference>],
+    configured_source: Option<&ConfiguredModuleSource<'_>>,
+) -> ImportScopeCache {
+    let mut cache = ImportScopeCache::new();
+    for (relation, references) in graph.relations.iter().zip(parsed_imports) {
+        let caller_path = &relation.path;
+        let modules = cache.entry(caller_path.clone()).or_default();
+        for reference in references {
+            modules
+                .entry(reference.module().to_string())
+                .or_insert_with(|| {
+                    semantic::import_scopes(
+                        provider_owner,
+                        caller_path,
+                        reference,
+                        configured_source,
+                    )
+                });
+        }
+    }
+    cache
+}
+
+/// Borrow one pre-expanded import scope list without allocating lookup keys.
+fn cached_import_scopes<'a>(
+    cache: &'a ImportScopeCache,
+    caller_path: &str,
+    reference: &ImportReference,
+) -> &'a [String] {
+    cache
+        .get(caller_path)
+        .and_then(|modules| modules.get(reference.module()))
+        .map_or(&[], Vec::as_slice)
+}
+
 /// Derive canonical module-target keys for import references.
 fn import_dependency_keys(
     project: ProjectInstanceId,
-    provider_owner: SemanticProviderOwner,
     provider: &GraphIdentityText,
     language: &GraphIdentityText,
     package: Option<&GraphIdentityText>,
     caller_path: &str,
     references: &[ImportReference],
-    context: ResolutionProjectionContext<'_>,
+    import_scopes: &ImportScopeCache,
 ) -> Result<Vec<CanonicalResolutionKey>, ResolutionProjectionError> {
     let mut keys = Vec::new();
     for reference in references {
-        let scopes = semantic::import_scopes(
-            provider_owner,
-            caller_path,
-            reference,
-            context.configured_modules,
-        );
-        for scope in &scopes {
+        let scopes = cached_import_scopes(import_scopes, caller_path, reference);
+        for scope in scopes {
             keys.push(canonical_key(
                 project,
                 ResolutionKeyDomain::Module,
@@ -607,14 +651,13 @@ fn import_dependency_keys(
 /// Derive canonical declaration keys for one call, including local aliases.
 fn call_dependency_keys(
     project: ProjectInstanceId,
-    provider_owner: SemanticProviderOwner,
     provider: &GraphIdentityText,
     language: &GraphIdentityText,
     package: Option<&GraphIdentityText>,
     caller_path: &str,
     target: &str,
     aliases: &BTreeMap<&str, Vec<&ImportReference>>,
-    context: ResolutionProjectionContext<'_>,
+    import_scopes: &ImportScopeCache,
 ) -> Result<Vec<CanonicalResolutionKey>, ResolutionProjectionError> {
     let (prefix, remainder) = split_qualified_target(target);
     let alias = prefix.unwrap_or(target).trim();
@@ -625,28 +668,24 @@ fn call_dependency_keys(
             let Some(identity) = identity else {
                 continue;
             };
-            let mut scopes = semantic::import_scopes(
-                provider_owner,
-                caller_path,
-                reference,
-                context.configured_modules,
-            );
-            if remainder.is_some()
-                && let Some(imported_parent) = reference.imported()
-            {
-                scopes = scopes
-                    .into_iter()
-                    .map(|scope| format!("{scope}/{imported_parent}"))
-                    .collect();
-            }
+            let scopes = cached_import_scopes(import_scopes, caller_path, reference);
             for scope in scopes {
+                let scoped_parent;
+                let scope = if remainder.is_some()
+                    && let Some(imported_parent) = reference.imported()
+                {
+                    scoped_parent = format!("{scope}/{imported_parent}");
+                    scoped_parent.as_str()
+                } else {
+                    scope.as_str()
+                };
                 keys.push(canonical_key(
                     project,
                     ResolutionKeyDomain::Declaration,
                     provider,
                     language,
                     package,
-                    Some(&scope),
+                    Some(scope),
                     RelationKind::Calls,
                     identity,
                 )?);
@@ -802,15 +841,16 @@ pub(super) fn strip_known_source_extension(path: &str) -> String {
 mod tests {
     use super::{
         ImportReference, ImportSyntax, RelationKind, ResolutionProjectionContext,
-        ResolutionProjectionError, SEMANTIC_RESOLUTION_CONTRACT_VERSION, derive_resolution_keys,
-        derive_resolution_keys_with_context, parse_import_references, resolve_relative_import_path,
-        semantic_resolution_contract_digest,
+        ResolutionProjectionError, SEMANTIC_RESOLUTION_CONTRACT_VERSION, build_import_scope_cache,
+        derive_resolution_keys, derive_resolution_keys_with_context, parse_import_references,
+        resolve_relative_import_path, semantic_resolution_contract_digest,
     };
     use crate::{
         ConfiguredModuleResolution, EcmaScriptConfigKind, EcmaScriptModuleConfig,
         EcmaScriptPathMapping, extract_symbol_graph,
     };
     use projectatlas_core::graph::{CanonicalResolutionKey, ProjectInstanceId};
+    use projectatlas_core::language::SemanticProviderOwner;
     use projectatlas_core::symbols::SymbolGraph;
     use std::error::Error;
     use std::io;
@@ -1204,6 +1244,58 @@ mod tests {
             .any(|keys| keys_intersect(keys, extension_target_projection.source_keys())),
             "configured extension target did not reuse extensionless source keys",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn configured_import_scopes_are_expanded_once_per_source_graph() -> Result<(), Box<dyn Error>> {
+        let configured = ConfiguredModuleResolution::new(vec![EcmaScriptModuleConfig::new(
+            "tsconfig.json",
+            EcmaScriptConfigKind::TypeScript,
+            Some("src".to_string()),
+            vec![EcmaScriptPathMapping::new(
+                "@/*",
+                vec!["src/*".to_string()],
+            )?],
+        )?])?;
+        let graph = extract_symbol_graph(
+            "src/page.ts",
+            Some("typescript"),
+            "import { useController } from '@/controller';\n\
+             export const first = useController();\n\
+             export const second = useController();\n",
+        );
+        let parsed_imports = graph
+            .relations
+            .iter()
+            .map(|relation| {
+                if relation.kind == RelationKind::Imports {
+                    crate::semantic::parse_imports(
+                        SemanticProviderOwner::EcmaScript,
+                        &relation.target_name,
+                    )
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect::<Vec<_>>();
+        let configured_source = configured.for_source(&graph.path);
+        let cache = build_import_scope_cache(
+            SemanticProviderOwner::EcmaScript,
+            &graph,
+            &parsed_imports,
+            Some(&configured_source),
+        );
+        let modules = cache
+            .get("src/page.ts")
+            .ok_or_else(|| io::Error::other("source graph omitted its import-scope cache"))?;
+        if modules.len() != 1 || modules.get("@/controller") != Some(&vec!["src/controller".into()])
+        {
+            return Err(io::Error::other(
+                "repeated imported calls did not reuse one configured scope expansion",
+            )
+            .into());
+        }
         Ok(())
     }
 

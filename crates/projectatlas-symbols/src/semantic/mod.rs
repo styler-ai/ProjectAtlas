@@ -6,7 +6,7 @@ pub(super) mod embedded_source;
 mod python;
 mod rust;
 
-use crate::configured_modules::ConfiguredModuleResolution;
+use crate::configured_modules::ConfiguredModuleSource;
 use crate::resolution_keys::{ImportReference, ImportSyntax};
 use projectatlas_core::language::{EmbeddedHostKind, SemanticProviderOwner, language_capability};
 use projectatlas_core::symbols::{ParserKind, SymbolGraph};
@@ -75,12 +75,12 @@ pub(super) fn import_scopes(
     provider: SemanticProviderOwner,
     caller_path: &str,
     reference: &ImportReference,
-    configured_modules: Option<&ConfiguredModuleResolution>,
+    configured_source: Option<&ConfiguredModuleSource<'_>>,
 ) -> Vec<String> {
     match provider {
         SemanticProviderOwner::Rust => rust::import_scopes(caller_path, reference),
         SemanticProviderOwner::EcmaScript => {
-            ecmascript::import_scopes(caller_path, reference, configured_modules)
+            ecmascript::import_scopes(caller_path, reference, configured_source)
         }
         SemanticProviderOwner::Python => python::import_scopes(caller_path, reference),
         SemanticProviderOwner::Cargo | SemanticProviderOwner::Unavailable => Vec::new(),

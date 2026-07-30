@@ -3,7 +3,7 @@
 use super::{
     ImportReference, ImportSyntax, is_compact_name, module_reference, named_reference, quoted_text,
 };
-use crate::configured_modules::ConfiguredModuleResolution;
+use crate::configured_modules::ConfiguredModuleSource;
 use projectatlas_core::symbols::SymbolGraph;
 
 /// Parse accepted named and namespace ECMAScript import forms.
@@ -60,13 +60,13 @@ pub(super) fn is_export_candidate(graph: &SymbolGraph, symbol_index: usize) -> b
 pub(super) fn import_scopes(
     caller_path: &str,
     reference: &ImportReference,
-    configured_modules: Option<&ConfiguredModuleResolution>,
+    configured_source: Option<&ConfiguredModuleSource<'_>>,
 ) -> Vec<String> {
     if let Some(scope) = resolve_relative_import_path(caller_path, reference.module()) {
         return vec![scope];
     }
-    configured_modules.map_or_else(Vec::new, |configured| {
-        configured.scopes_for_import(caller_path, reference.module())
+    configured_source.map_or_else(Vec::new, |configured| {
+        configured.scopes_for_import(reference.module())
     })
 }
 
