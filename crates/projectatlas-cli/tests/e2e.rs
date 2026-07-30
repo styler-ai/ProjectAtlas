@@ -2901,9 +2901,23 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
 
     for required in [
         "Convert-ProjectAtlasVersionTag",
-        "Stop-ProjectAtlasOwnedRuntimeProbeTree",
-        r"System32\taskkill.exe",
-        r#"@("/PID", [string]$Process.Id, "/T", "/F")"#,
+        "Initialize-ProjectAtlasRuntimeProbe",
+        "CreateSuspended",
+        "ExtendedStartupInfoPresent",
+        "ProcThreadAttributeHandleList",
+        "JobObjectLimitKillOnJobClose",
+        "InitializeProcThreadAttributeList",
+        "UpdateProcThreadAttribute",
+        "DeleteProcThreadAttributeList",
+        "CreateJobObject",
+        "SetInformationJobObject",
+        "AssignProcessToJobObject",
+        "ResumeThread",
+        "TerminateJobObject",
+        "RuntimeProbeProcess]::Start",
+        r#"String.Equals(extension, ".ps1""#,
+        r#"String.Equals(extension, ".cmd""#,
+        r"Environment.SpecialFolder.System",
         "$runtime.version -eq $expectedRuntimeVersion",
         "Sync-ProjectAtlasRuntimeToLocalAppData",
         "Get-ReleaseRuntimeInstallPath",
@@ -2980,9 +2994,9 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
     for forbidden in [
         "Stop-Process",
         "Suspend-Process",
-        "TerminateProcess",
         "PROCESS_TERMINATE",
         "Win32_Process",
+        r"System32\taskkill.exe",
     ] {
         if powershell_installer.contains(forbidden) {
             return Err(io::Error::other(format!(
@@ -3350,6 +3364,24 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
         &flooding_runtime,
         "@echo off\r\npowershell -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID; $chunk = -join ('x' * 131072); while ($true) { [Console]::Out.Write($chunk); [Console]::Error.Write($chunk) }\"\r\n",
     )?;
+    let async_runtime = temp.path().join("async-projectatlas.cmd");
+    let async_child_pid = temp.path().join("async-child.pid");
+    fs::write(
+        &async_runtime,
+        "@echo off\r\nstart \"\" /b powershell -NoLogo -NoProfile -NonInteractive -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_ASYNC_CHILD_PID; while ($true) { Start-Sleep -Seconds 60 }\"\r\nfor /L %%i in (1,1,200) do (\r\n  if exist \"%PROJECTATLAS_TEST_ASYNC_CHILD_PID%\" goto child_started\r\n  powershell -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Milliseconds 10\"\r\n)\r\nexit /b 2\r\n:child_started\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\nexit /b 0\r\n",
+    )?;
+    let powershell_runtime = temp.path().join("projectatlas.ps1");
+    fs::write(
+        &powershell_runtime,
+        "[Console]::Out.WriteLine('{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}')\r\n",
+    )?;
+    let command_host_dir = temp.path().join("command & (safe) !^");
+    fs::create_dir(&command_host_dir)?;
+    let command_host_runtime = command_host_dir.join("projectatlas.cmd");
+    fs::write(
+        &command_host_runtime,
+        "@echo off\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\n",
+    )?;
     let nonnumeric_runtime = temp.path().join("nonnumeric-projectatlas.cmd");
     fs::write(
         &nonnumeric_runtime,
@@ -3400,8 +3432,8 @@ if ($errors.Count -ne 0) {
 $names = @(
     "Convert-ProjectAtlasVersionTag",
     "Get-NormalizedPathEntry",
+    "Initialize-ProjectAtlasRuntimeProbe",
     "Invoke-ProjectAtlasRuntimeInfo",
-    "Stop-ProjectAtlasOwnedRuntimeProbeTree",
     "Set-ProjectAtlasPathPrecedence",
     "Set-ProjectAtlasProcessPathPrecedence",
     "Split-PathList",
@@ -3507,6 +3539,65 @@ finally {
         & (Join-Path $env:SystemRoot "System32\taskkill.exe") /PID $floodChildPid /T /F | Out-Null
     }
 }
+$canary = Start-Process `
+    -FilePath (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe") `
+    -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "while (`$true) { Start-Sleep -Seconds 60 }") `
+    -WindowStyle Hidden `
+    -PassThru
+$asyncChildPid = $null
+try {
+    if (-not (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_ASYNC_RUNTIME $null)) {
+        throw "Runtime with an asynchronously exiting launcher was rejected"
+    }
+    if (-not (Test-Path -LiteralPath $env:PROJECTATLAS_TEST_ASYNC_CHILD_PID)) {
+        throw "Asynchronous launcher did not report its child process"
+    }
+    $asyncChildPid = [int](Get-Content -Raw -LiteralPath $env:PROJECTATLAS_TEST_ASYNC_CHILD_PID)
+    $childDeadline = [DateTime]::UtcNow.AddSeconds(2)
+    do {
+        $asyncChild = Get-Process -Id $asyncChildPid -ErrorAction SilentlyContinue
+        if (-not $asyncChild) {
+            break
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    while ([DateTime]::UtcNow -lt $childDeadline)
+    if ($asyncChild) {
+        throw "Contained job left its asynchronously spawned child alive: $asyncChildPid"
+    }
+    if ($canary.HasExited) {
+        throw "Contained job terminated the unrelated canary process"
+    }
+    if (-not (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_POWERSHELL_RUNTIME $null)) {
+        throw "PowerShell ProjectAtlas shim was not dispatched through PowerShell"
+    }
+    if (-not (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_COMMAND_HOST_RUNTIME $null)) {
+        throw "Command shim path was not safely quoted for cmd.exe"
+    }
+    $leftoverProbeFiles = @(
+        Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
+            -Filter "projectatlas-runtime-probe-*" `
+            -File |
+        Select-Object -ExpandProperty FullName
+    )
+    if ($leftoverProbeFiles.Count -ne 0) {
+        throw "Contained probe left temporary files: $($leftoverProbeFiles -join ', ')"
+    }
+}
+finally {
+    if ($asyncChildPid) {
+        $asyncChild = Get-Process -Id $asyncChildPid -ErrorAction SilentlyContinue
+        if ($asyncChild) {
+            $asyncChild.Kill()
+            [void]$asyncChild.WaitForExit(2000)
+        }
+    }
+    if (-not $canary.HasExited) {
+        $canary.Kill()
+        [void]$canary.WaitForExit(2000)
+    }
+    $canary.Dispose()
+}
 foreach ($invalidRuntime in @(
     $env:PROJECTATLAS_TEST_NONNUMERIC_RUNTIME,
     $env:PROJECTATLAS_TEST_OUT_OF_RANGE_RUNTIME
@@ -3566,6 +3657,16 @@ finally {
         .env("PROJECTATLAS_TEST_HANGING_RUNTIME", &hanging_runtime)
         .env("PROJECTATLAS_TEST_FLOODING_RUNTIME", &flooding_runtime)
         .env("PROJECTATLAS_TEST_FLOOD_CHILD_PID", &flood_child_pid)
+        .env("PROJECTATLAS_TEST_ASYNC_RUNTIME", &async_runtime)
+        .env("PROJECTATLAS_TEST_ASYNC_CHILD_PID", &async_child_pid)
+        .env(
+            "PROJECTATLAS_TEST_POWERSHELL_RUNTIME",
+            &powershell_runtime,
+        )
+        .env(
+            "PROJECTATLAS_TEST_COMMAND_HOST_RUNTIME",
+            &command_host_runtime,
+        )
         .env("TEMP", &probe_temp)
         .env("TMP", &probe_temp)
         .env("PROJECTATLAS_TEST_NONNUMERIC_RUNTIME", &nonnumeric_runtime)
