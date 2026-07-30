@@ -326,24 +326,24 @@ function Sync-ProjectAtlasRuntimeToLocalAppData {
         [string]$ExpectedVersion
     )
     if (-not (Test-ProjectAtlasRuntime $FilePath $ExpectedVersion)) {
-        return $null
+        return $false
     }
     $installDir = Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin"
     New-Item -ItemType Directory -Force -Path $installDir | Out-Null
     $target = Join-Path $installDir "projectatlas.exe"
+    if (Test-ProjectAtlasRuntime $target $ExpectedVersion) {
+        return $true
+    }
     if ((Get-NormalizedPathEntry $FilePath) -ne (Get-NormalizedPathEntry $target)) {
         try {
             Copy-Item -LiteralPath $FilePath -Destination $target -Force
         }
         catch {
             Write-Warning "ProjectAtlas LocalAppData mirror skipped because ${target} is locked: $($_.Exception.Message) Close any running ProjectAtlas or Codex session using that file, then rerun this installer. Codex MCP and generated configs continue to use verified runtime $FilePath."
-            return $FilePath
+            return $false
         }
     }
-    if (Test-ProjectAtlasRuntime $target $ExpectedVersion) {
-        return $target
-    }
-    return $FilePath
+    return (Test-ProjectAtlasRuntime $target $ExpectedVersion)
 }
 
 function Find-ProjectAtlas {
@@ -1137,13 +1137,16 @@ $releaseBinaryOnly = $ReleaseBinaryOnly -or (Test-Truthy $env:PROJECTATLAS_RELEA
 $ProjectRoot = (Resolve-Path $ProjectRoot).Path
 $atlasDir = Join-Path $ProjectRoot ".projectatlas"
 Assert-ProjectAtlasDirectPath $atlasDir "ProjectAtlas project state directory"
+$inheritedProcessPath = $env:Path
+$inheritedProjectAtlasCommand = Get-Command projectatlas -ErrorAction SilentlyContinue | Select-Object -First 1
+$inheritedProjectAtlasPath = if ($inheritedProjectAtlasCommand) { $inheritedProjectAtlasCommand.Source } else { $null }
 
 if ($RuntimePath) {
     $projectAtlas = (Resolve-Path $RuntimePath).Path
     if (-not (Test-ProjectAtlasRuntime $projectAtlas $ProjectAtlasVersion)) {
         throw "Provided ProjectAtlas runtime does not satisfy the ProjectAtlas runtime/version contract: $projectAtlas"
     }
-    Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion | Out-Null
+    $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
     Set-ProjectAtlasProcessPathPrecedence $projectAtlas
 }
 else {
@@ -1178,14 +1181,38 @@ else {
     if (-not $projectAtlas) {
         throw "A ProjectAtlas runtime matching $ProjectAtlasVersion was not found. Install Rust/Cargo or provide the matching ProjectAtlas release binary on PATH."
     }
-    Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion | Out-Null
+    $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
 
     Set-ProjectAtlasPathPrecedence $projectAtlas
 }
 Invoke-Checked $projectAtlas @("--format", "json", "runtime-info") | Out-Null
 Confirm-ProjectAtlasBareCommandResolution $projectAtlas $ProjectAtlasVersion
+$verifiedRuntimePath = Get-NormalizedPathEntry $projectAtlas
+$stableMirrorPath = Get-NormalizedPathEntry (Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin\projectatlas.exe")
 Quarantine-ProjectAtlasStaleShims $projectAtlas $ProjectAtlasVersion
 Write-ProjectAtlasPathShadowReport $projectAtlas $ProjectAtlasVersion
+$effectiveInheritedProjectAtlasPath = $inheritedProjectAtlasPath
+if ([string]::IsNullOrWhiteSpace($effectiveInheritedProjectAtlasPath) -or -not (Test-Path -LiteralPath $effectiveInheritedProjectAtlasPath)) {
+    $installerProcessPath = $env:Path
+    try {
+        $env:Path = $inheritedProcessPath
+        $effectiveInheritedProjectAtlasCommand = Get-Command projectatlas -ErrorAction SilentlyContinue | Select-Object -First 1
+        $effectiveInheritedProjectAtlasPath = if ($effectiveInheritedProjectAtlasCommand) { $effectiveInheritedProjectAtlasCommand.Source } else { $null }
+    }
+    finally {
+        $env:Path = $installerProcessPath
+    }
+}
+$inheritedCommandReady = -not [string]::IsNullOrWhiteSpace($effectiveInheritedProjectAtlasPath) `
+    -and (Get-NormalizedPathEntry $effectiveInheritedProjectAtlasPath) -eq $verifiedRuntimePath
+$inheritedSynchronizedMirrorReady = $stableMirrorSynchronized `
+    -and -not [string]::IsNullOrWhiteSpace($effectiveInheritedProjectAtlasPath) `
+    -and (Get-NormalizedPathEntry $effectiveInheritedProjectAtlasPath) -eq $stableMirrorPath
+$installerProjectAtlasCommand = Get-Command projectatlas -ErrorAction SilentlyContinue | Select-Object -First 1
+$installerProjectAtlasPath = if ($installerProjectAtlasCommand) { $installerProjectAtlasCommand.Source } else { $null }
+$installerCliReady = -not [string]::IsNullOrWhiteSpace($installerProjectAtlasPath) `
+    -and (Get-NormalizedPathEntry $installerProjectAtlasPath) -eq $verifiedRuntimePath
+$hostRestartRequired = -not $inheritedCommandReady -and -not $inheritedSynchronizedMirrorReady
 
 Assert-ProjectAtlasDirectPath $atlasDir "ProjectAtlas project state directory"
 New-Item -ItemType Directory -Force -Path $atlasDir | Out-Null
@@ -1249,3 +1276,7 @@ Write-Output "Project-local Claude Code MCP config written: $claudeMcpConfigPath
 Write-Output "Project-local OpenCode MCP config written: $opencodeConfigPath"
 Write-Output "Claude Code ProjectAtlas integration verified through generated MCP config; restart Claude Code if an older session cached previous instructions."
 Write-Output "OpenCode ProjectAtlas integration verified through generated MCP config; restart OpenCode if an older session cached previous instructions."
+if ($hostRestartRequired) {
+    Write-Warning "Existing host restart required: the inherited bare 'projectatlas' command will not resolve a current verified runtime from the unchanged parent environment. The runtime and generated MCP configs are ready through the verified absolute runtime; restart Codex or the shell before relying on bare projectatlas from that host."
+}
+Write-Output "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=$($installerCliReady.ToString().ToLowerInvariant()) host_restart_required=$($hostRestartRequired.ToString().ToLowerInvariant())"
