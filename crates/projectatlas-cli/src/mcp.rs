@@ -9,18 +9,19 @@ use crate::atlas_map::{
 #[cfg(test)]
 use crate::runtime::run_scan_pipeline;
 use crate::runtime::{
-    DEFAULT_HEALTH_LIMIT, INDEX_WORKER_SAFE_CEILING, IndexProjectMismatch, IndexRefreshRequired,
-    IndexVerificationIncomplete, InitBootstrapOptions, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES,
-    PurposeCuratorHandoff, PurposeLintLevel, PurposeReviewRequest, ScanRuntimePlan,
-    SourceObservationRegistry, SymbolBuildOptions, UsageRuntimeInstance, VerifiedReadOutcome,
-    VerifiedReadStamp, build_settings_report, byte_count_to_tokens, canonical_project_root,
+    DEFAULT_HEALTH_LIMIT, INDEX_WORKER_SAFE_CEILING, IndexInitRequired, IndexProjectMismatch,
+    IndexRefreshRequired, IndexVerificationIncomplete, InitBootstrapOptions, MAX_HEALTH_LIMIT,
+    MAX_SYMBOL_FILE_BYTES, ProjectWorktreeRequired, PurposeCuratorHandoff, PurposeLintLevel,
+    PurposeReviewRequest, ScanRuntimePlan, SourceObservationRegistry, SymbolBuildOptions,
+    UsageRuntimeInstance, VerifiedReadOutcome, VerifiedReadStamp, build_settings_report,
+    byte_count_to_tokens, canonical_project_root, canonical_source_project_root,
     config_root_mismatch_error, default_mcp_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
-    index_work_control, init_config_path, lint_database_if_present, next_step_report,
-    next_step_report_payload, normalized_folder_filter, open_atlas_store_for_project,
-    open_atlas_store_read_only_for_project, open_federated_atlas_stores_for_project,
-    purpose_curation_page, purpose_curator_handoff, ranked_file_nodes_with_reasons,
-    ranked_folder_nodes_with_reasons, read_indexed_file_content,
+    index_init_required, index_work_control, init_config_path, lint_database_if_present,
+    next_step_report, next_step_report_payload, normalized_folder_filter,
+    open_atlas_store_for_project, open_atlas_store_read_only_for_project,
+    open_federated_atlas_stores_for_project, purpose_curation_page, purpose_curator_handoff,
+    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
     render_health_page, render_purpose_curation_page, render_purpose_review_report,
     reset_index_files, review_purposes, run_init_bootstrap, run_scan_pipeline_controlled,
@@ -242,9 +243,6 @@ const MCP_SETTINGS_RESPONSE_LIMIT_SUFFIX: &str = "-byte diagnostic limit";
 const MCP_SOURCE_TOKEN_BASELINE_LIMIT: usize = 128;
 /// Default MCP config server key.
 const MCP_DEFAULT_CONFIG_SERVER_NAME: &str = "projectatlas";
-/// Missing-index recovery guidance for MCP tools.
-const MISSING_INDEX_GUIDANCE: &str =
-    "run atlas_scan with project_path or atlas_set_project_path first";
 /// Recovery guidance when a path names a subfolder rather than another selected root.
 const SELECTED_ROOT_ASSERTION_GUIDANCE: &str = "pass project_path or call atlas_set_project_path for another repository, or use normal filesystem tools such as Get-Content or rg for files inside the selected project";
 /// Recovery guidance when a path escapes the selected `ProjectAtlas` root.
@@ -1626,6 +1624,12 @@ struct McpErrorPayload {
     /// Bounded local-source mismatch details when refresh is required.
     #[serde(skip_serializing_if = "Option::is_none")]
     refresh_required: Option<IndexRefreshRequired>,
+    /// Exact selected-root initialization handoff.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    init_required: Option<IndexInitRequired>,
+    /// Bare/common Git root selection diagnostic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worktree_required: Option<ProjectWorktreeRequired>,
     /// Bounded source/policy diagnostic when verification cannot complete.
     #[serde(skip_serializing_if = "Option::is_none")]
     verification_incomplete: Option<IndexVerificationIncomplete>,
@@ -1640,13 +1644,13 @@ struct McpErrorPayload {
     search_capability: Option<crate::SearchCapabilityErrorPayload>,
     /// Reusable recovery call when refresh is required.
     #[serde(skip_serializing_if = "Option::is_none")]
-    next: Option<McpRefreshNextCall>,
+    next: Option<McpNextCall>,
 }
 
-/// Direct recovery selector for a stale index.
+/// Direct MCP recovery selector.
 #[derive(Debug, Serialize)]
-struct McpRefreshNextCall {
-    /// Existing MCP tool that safely refreshes the selected project.
+struct McpNextCall {
+    /// Existing MCP tool that safely recovers the selected project.
     tool: &'static str,
     /// Canonical project root for per-call isolation.
     project_path: String,
@@ -2722,8 +2726,8 @@ struct McpCompactBriefRecommendation {
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum McpBriefRecommendationKind {
-    /// Refresh or create the `ProjectAtlas` index.
-    Scan,
+    /// Initialize the selected project-local atlas.
+    Init,
     /// Inspect the already-ranked file summary.
     Summary,
     /// Search the index when ranking has no directly navigable file.
@@ -3180,11 +3184,7 @@ impl ProjectAtlasMcpServer {
     /// Open the durable index through one root-bound read snapshot.
     fn open_read_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
         if !state.db_path.exists() {
-            return Err(CliError::InvalidInput(format!(
-                "ProjectAtlas index '{}' is missing for selected project root '{}'; {MISSING_INDEX_GUIDANCE}",
-                state.db_path.display(),
-                state.root.display()
-            )));
+            return Err(index_init_required(&state.root, &state.db_path));
         }
         open_atlas_store_read_only_for_project(&state.db_path, &state.root)
     }
@@ -3228,11 +3228,7 @@ impl ProjectAtlasMcpServer {
         F: FnMut(&AtlasStore, VerifiedReadStamp, &IndexWorkControl) -> Result<T, CliError>,
     {
         if !state.db_path.is_file() {
-            return Err(CliError::InvalidInput(format!(
-                "ProjectAtlas index '{}' is missing for selected project root '{}'; {MISSING_INDEX_GUIDANCE}",
-                state.db_path.display(),
-                state.root.display()
-            )));
+            return Err(index_init_required(&state.root, &state.db_path));
         }
         let control =
             index_work_control(&SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None));
@@ -3329,11 +3325,7 @@ impl ProjectAtlasMcpServer {
     /// Open an existing selected-project index for purpose or health mutation.
     fn open_existing_mut_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
         if !state.db_path.is_file() {
-            return Err(CliError::InvalidInput(format!(
-                "ProjectAtlas index '{}' is missing for selected project root '{}'; {MISSING_INDEX_GUIDANCE}",
-                state.db_path.display(),
-                state.root.display()
-            )));
+            return Err(index_init_required(&state.root, &state.db_path));
         }
         Self::open_mut_store(state)
     }
@@ -3741,6 +3733,7 @@ impl ProjectAtlasMcpServer {
         let purpose_limit = Self::brief_limit(params.purpose_limit);
         let project = Self::selected_project_capability(&state);
         if !state.db_path.exists() {
+            let init_project_path = Some(normalize_native_path_display(&state.root));
             return Ok(McpSessionBrief {
                 project,
                 policy: self.brief_policy(),
@@ -3754,7 +3747,7 @@ impl ProjectAtlasMcpServer {
                     items: Vec::new(),
                 },
                 purpose_handoff: None,
-                recommendations: Self::missing_index_recommendations(params.project_path),
+                recommendations: Self::missing_index_recommendations(init_project_path),
                 limits: McpBriefLimits {
                     folder_limit,
                     file_limit,
@@ -4095,8 +4088,8 @@ impl ProjectAtlasMcpServer {
     fn missing_index_recommendations(project_path: Option<String>) -> Vec<McpBriefRecommendation> {
         vec![
             McpBriefRecommendation {
-                kind: McpBriefRecommendationKind::Scan,
-                target: MCP_TOOL_ATLAS_SCAN.to_string(),
+                kind: McpBriefRecommendationKind::Init,
+                target: MCP_TOOL_ATLAS_INIT.to_string(),
                 reason: MCP_BRIEF_REASON_SELECTED_INDEX_MISSING.to_string(),
                 arguments: Self::project_path_arguments(project_path.clone()),
             },
@@ -4868,7 +4861,7 @@ impl ProjectAtlasMcpServer {
         root: &Path,
         validation: McpConfigValidation,
     ) -> Result<McpProjectState, CliError> {
-        let root = canonical_project_root(root)?;
+        let root = canonical_source_project_root(root)?;
         if !root.is_dir() {
             return Err(CliError::InvalidInput(format!(
                 "project path '{}' is not a directory",
@@ -5345,12 +5338,39 @@ impl ProjectAtlasMcpServer {
         let (
             kind,
             refresh_required,
+            init_required,
+            worktree_required,
             verification_incomplete,
             project_mismatch,
             database_filesystem,
             search_capability,
             next,
         ) = match error {
+            CliError::InitRequired(report) => (
+                AgentErrorKind::InitRequired,
+                None,
+                Some(report.as_ref().clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(McpNextCall {
+                    tool: MCP_TOOL_ATLAS_INIT,
+                    project_path: report.project_root.clone(),
+                }),
+            ),
+            CliError::WorktreeRequired(report) => (
+                AgentErrorKind::WorktreeRequired,
+                None,
+                None,
+                Some(report.as_ref().clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
             CliError::RefreshRequired(report) => (
                 AgentErrorKind::RefreshRequired,
                 Some(report.as_ref().clone()),
@@ -5358,13 +5378,17 @@ impl ProjectAtlasMcpServer {
                 None,
                 None,
                 None,
-                Some(McpRefreshNextCall {
+                None,
+                None,
+                Some(McpNextCall {
                     tool: MCP_TOOL_ATLAS_WATCH_ONCE,
                     project_path: report.project_root.clone(),
                 }),
             ),
             CliError::VerificationIncomplete(report) => (
                 AgentErrorKind::VerificationIncomplete,
+                None,
+                None,
                 None,
                 Some(report.as_ref().clone()),
                 None,
@@ -5374,6 +5398,8 @@ impl ProjectAtlasMcpServer {
             ),
             CliError::ProjectMismatch(report) => (
                 AgentErrorKind::ProjectMismatch,
+                None,
+                None,
                 None,
                 None,
                 Some(report.as_ref().clone()),
@@ -5391,6 +5417,8 @@ impl ProjectAtlasMcpServer {
                 None,
                 None,
                 None,
+                None,
+                None,
                 Some(crate::SearchCapabilityErrorPayload {
                     requested_mode: *requested_mode,
                     state,
@@ -5399,10 +5427,22 @@ impl ProjectAtlasMcpServer {
                 None,
             ),
             _ => database_filesystem_error_payload(error).map_or(
-                (AgentErrorKind::Error, None, None, None, None, None, None),
+                (
+                    AgentErrorKind::Error,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
                 |(kind, database_filesystem)| {
                     (
                         kind,
+                        None,
+                        None,
                         None,
                         None,
                         None,
@@ -5418,6 +5458,8 @@ impl ProjectAtlasMcpServer {
                 kind,
                 message: error.to_string(),
                 refresh_required,
+                init_required,
+                worktree_required,
                 verification_incomplete,
                 project_mismatch,
                 database_filesystem,
@@ -8610,8 +8652,16 @@ mod tests {
             return Err(io::Error::other("missing index opened unexpectedly").into());
         };
         require(
-            error.to_string().contains("index"),
-            "missing index error did not mention index",
+            matches!(error, CliError::InitRequired(_)),
+            "missing index did not return typed init_required state",
+        )?;
+        let payload = ProjectAtlasMcpServer::encode_error_payload(&error);
+        require(
+            payload.contains("kind: init_required")
+                && payload.contains("init_required:")
+                && payload.contains("tool: atlas_init")
+                && payload.contains(&normalize_native_path_display(&repo)),
+            "missing index payload did not contain the exact atlas_init recovery call",
         )?;
         require(
             !repo.join(".projectatlas").exists(),
@@ -8731,9 +8781,12 @@ mod tests {
         )?;
         require(
             brief.recommendations.iter().any(|recommendation| {
-                matches!(recommendation.kind, McpBriefRecommendationKind::Scan)
+                matches!(recommendation.kind, McpBriefRecommendationKind::Init)
+                    && recommendation.target == MCP_TOOL_ATLAS_INIT
+                    && recommendation.arguments.get(MCP_BRIEF_ARG_PROJECT_PATH)
+                        == Some(&serde_json::json!(normalize_native_path_display(&repo)))
             }),
-            "missing-index brief did not recommend scan",
+            "missing-index brief did not recommend atlas_init for the exact selected root",
         )?;
         require(
             !repo.join(".projectatlas").exists(),

@@ -110,6 +110,8 @@ const WATCH_MODE_NOTIFY: &str = "notify";
 const DATABASE_FILESYSTEM_RECOVERY: &str = "Place the selected local source tree and its .projectatlas database on a supported local filesystem, resolve any mount or permission uncertainty, and retry; ProjectAtlas will not weaken the WAL durability profile.";
 /// Existing CLI command that performs one bounded refresh pass.
 const CLI_REFRESH_COMMAND: &str = "watch";
+/// Existing CLI command that initializes one selected project root.
+const CLI_INIT_COMMAND: &str = "init";
 /// Portable fallback watcher mode.
 const WATCH_MODE_POLLING: &str = "portable-polling";
 /// Default parity profile for repository-intelligence checks.
@@ -207,6 +209,12 @@ enum CliError {
     /// User input was invalid.
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    /// The selected source root has not been initialized.
+    #[error("{0}")]
+    InitRequired(Box<runtime::IndexInitRequired>),
+    /// A bare/common Git directory was selected instead of checked-out source.
+    #[error("{0}")]
+    WorktreeRequired(Box<runtime::ProjectWorktreeRequired>),
     /// Current local source differs from the durable index.
     #[error("{0}")]
     RefreshRequired(Box<runtime::IndexRefreshRequired>),
@@ -248,6 +256,12 @@ struct CliErrorPayload<'a> {
     /// Local-source mismatch details when a refresh is required.
     #[serde(skip_serializing_if = "Option::is_none")]
     refresh_required: Option<&'a runtime::IndexRefreshRequired>,
+    /// Exact selected-root initialization handoff.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    init_required: Option<&'a runtime::IndexInitRequired>,
+    /// Bare/common Git root selection diagnostic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worktree_required: Option<&'a runtime::ProjectWorktreeRequired>,
     /// Source/policy diagnostic when verification cannot complete.
     #[serde(skip_serializing_if = "Option::is_none")]
     verification_incomplete: Option<&'a runtime::IndexVerificationIncomplete>,
@@ -262,7 +276,7 @@ struct CliErrorPayload<'a> {
     search_capability: Option<SearchCapabilityErrorPayload>,
     /// Direct CLI recovery selector for a confirmed mismatch.
     #[serde(skip_serializing_if = "Option::is_none")]
-    next: Option<CliRefreshNextCall<'a>>,
+    next: Option<CliNextCall<'a>>,
 }
 
 /// Stable error kinds shared by CLI and MCP agent payloads.
@@ -271,6 +285,10 @@ struct CliErrorPayload<'a> {
 enum AgentErrorKind {
     /// General command, input, storage, or service failure.
     Error,
+    /// The selected project root needs explicit initialization.
+    InitRequired,
+    /// A checked-out source worktree must be selected.
+    WorktreeRequired,
     /// Current saved local source differs from the durable index.
     RefreshRequired,
     /// Current saved local source could not be inspected completely.
@@ -319,13 +337,14 @@ struct SearchCapabilityErrorPayload {
 
 /// Existing CLI command that repairs a confirmed stale index.
 #[derive(Serialize)]
-struct CliRefreshNextCall<'a> {
+struct CliNextCall<'a> {
     /// Command family accepted by the current runtime.
     command: &'static str,
     /// Selected project root to refresh.
     project_path: &'a str,
     /// Run exactly one refresh cycle.
-    once: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    once: Option<bool>,
 }
 
 /// CLI output serialization format.
@@ -2745,6 +2764,8 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
                 kind: AgentErrorKind::UnsupportedContainment,
                 message: error.to_string(),
                 refresh_required: None,
+                init_required: None,
+                worktree_required: None,
                 verification_incomplete: None,
                 project_mismatch: None,
                 database_filesystem: None,
@@ -2752,24 +2773,56 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
                 next: None,
             })
         }
-        CliError::RefreshRequired(report) => Some(CliErrorPayload {
-            kind: AgentErrorKind::RefreshRequired,
+        CliError::InitRequired(report) => Some(CliErrorPayload {
+            kind: AgentErrorKind::InitRequired,
             message: error.to_string(),
-            refresh_required: Some(report.as_ref()),
+            refresh_required: None,
+            init_required: Some(report.as_ref()),
+            worktree_required: None,
             verification_incomplete: None,
             project_mismatch: None,
             database_filesystem: None,
             search_capability: None,
-            next: Some(CliRefreshNextCall {
+            next: Some(CliNextCall {
+                command: CLI_INIT_COMMAND,
+                project_path: &report.project_root,
+                once: None,
+            }),
+        }),
+        CliError::WorktreeRequired(report) => Some(CliErrorPayload {
+            kind: AgentErrorKind::WorktreeRequired,
+            message: error.to_string(),
+            refresh_required: None,
+            init_required: None,
+            worktree_required: Some(report.as_ref()),
+            verification_incomplete: None,
+            project_mismatch: None,
+            database_filesystem: None,
+            search_capability: None,
+            next: None,
+        }),
+        CliError::RefreshRequired(report) => Some(CliErrorPayload {
+            kind: AgentErrorKind::RefreshRequired,
+            message: error.to_string(),
+            refresh_required: Some(report.as_ref()),
+            init_required: None,
+            worktree_required: None,
+            verification_incomplete: None,
+            project_mismatch: None,
+            database_filesystem: None,
+            search_capability: None,
+            next: Some(CliNextCall {
                 command: CLI_REFRESH_COMMAND,
                 project_path: &report.project_root,
-                once: true,
+                once: Some(true),
             }),
         }),
         CliError::VerificationIncomplete(report) => Some(CliErrorPayload {
             kind: AgentErrorKind::VerificationIncomplete,
             message: error.to_string(),
             refresh_required: None,
+            init_required: None,
+            worktree_required: None,
             verification_incomplete: Some(report.as_ref()),
             project_mismatch: None,
             database_filesystem: None,
@@ -2780,6 +2833,8 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             kind: AgentErrorKind::ProjectMismatch,
             message: error.to_string(),
             refresh_required: None,
+            init_required: None,
+            worktree_required: None,
             verification_incomplete: None,
             project_mismatch: Some(report.as_ref()),
             database_filesystem: None,
@@ -2794,6 +2849,8 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             kind: AgentErrorKind::SearchCapabilityUnavailable,
             message: error.to_string(),
             refresh_required: None,
+            init_required: None,
+            worktree_required: None,
             verification_incomplete: None,
             project_mismatch: None,
             database_filesystem: None,
@@ -2809,6 +2866,8 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
                 kind,
                 message: error.to_string(),
                 refresh_required: None,
+                init_required: None,
+                worktree_required: None,
                 verification_incomplete: None,
                 project_mismatch: None,
                 database_filesystem: Some(database_filesystem),
@@ -2877,37 +2936,28 @@ fn database_filesystem_error_payload(
 
 /// Open the selected current index through one root-bound read snapshot.
 fn open_index_for_current_read(cli: &Cli) -> Result<AtlasStore, CliError> {
-    if !cli.db.is_file() {
-        return Err(CliError::InvalidInput(format!(
-            "ProjectAtlas index '{}' is missing; run `projectatlas scan <project-root>` first",
-            cli.db.display()
-        )));
-    }
     let root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+    if !cli.db.is_file() {
+        return Err(runtime::index_init_required(&root, &cli.db));
+    }
     open_atlas_store_read_only_for_project(&cli.db, &root)
 }
 
 /// Open and verify the durable index before a normal CLI read.
 fn open_index_for_read(cli: &Cli) -> Result<AtlasStore, CliError> {
-    if !cli.db.is_file() {
-        return Err(CliError::InvalidInput(format!(
-            "ProjectAtlas index '{}' is missing; run `projectatlas scan <project-root>` first",
-            cli.db.display()
-        )));
-    }
     let root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+    if !cli.db.is_file() {
+        return Err(runtime::index_init_required(&root, &cli.db));
+    }
     open_fresh_atlas_store_for_project(&cli.db, &root, cli.config.as_deref())
 }
 
 /// Open a selected project database for purpose or health mutation.
 fn open_index_for_mutation(cli: &Cli) -> Result<AtlasStore, CliError> {
-    if !cli.db.is_file() {
-        return Err(CliError::InvalidInput(format!(
-            "ProjectAtlas index '{}' is missing; run `projectatlas scan <project-root>` first",
-            cli.db.display()
-        )));
-    }
     let root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+    if !cli.db.is_file() {
+        return Err(runtime::index_init_required(&root, &cli.db));
+    }
     open_atlas_store_for_project(&cli.db, &root)
 }
 
@@ -6836,8 +6886,11 @@ mod tests {
             json!(empty_repo.to_string_lossy().to_string()),
         );
         let missing_index_overview = call_text!("atlas_overview", missing_index_args);
-        if !missing_index_overview.contains("index")
-            || !missing_index_overview.contains("atlas_scan")
+        if !missing_index_overview.contains("kind: init_required")
+            || !missing_index_overview.contains("tool: atlas_init")
+            || !missing_index_overview.contains(&normalize_native_path_display(
+                super::runtime::canonical_project_root(&empty_repo)?,
+            ))
             || empty_repo.join(".projectatlas").exists()
         {
             return Err(
