@@ -13,4 +13,4 @@
 
 - [x] 3.1 Run focused MCP schema and purpose-review tests, including the missing-`path` negative case and compatibility inventory.
 - [x] 3.2 Run formatting, workspace check, Clippy, rustdoc, OpenSpec, issue-map/checklist diagnostics, and diff-quality gates proportionate to the change.
-- [ ] 3.3 Synchronize the GitHub checklist and obtain final integrated, packaged-Codex/hosted, and live review proof.
+- [x] 3.3 Synchronize the GitHub checklist and obtain final integrated, packaged-Codex/hosted, and live review proof.
