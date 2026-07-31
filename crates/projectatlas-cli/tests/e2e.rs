@@ -4305,9 +4305,20 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         r"Environment.SpecialFolder.System",
         "$runtime.version -eq $expectedRuntimeVersion",
         "Sync-ProjectAtlasRuntimeToLocalAppData",
+        "ObsoleteMcpProcess",
+        "CommandLineToArgvW",
+        "Process.GetProcessById(processId)",
+        "expectedCreationFileTimeUtc",
+        "candidate.MainModule.FileName",
+        "TerminateProcess(handle, 0)",
+        "Find-ProjectAtlasObsoleteStableMcpProcess",
+        "Get-CimInstance -ClassName Win32_Process",
+        "Invoke-ProjectAtlasObsoleteStableMcpHandoff",
+        "ProjectAtlas convergence: update_state=",
+        "obsolete_mcp_handoff=",
         "Get-ReleaseRuntimeInstallPath",
         r"ProjectAtlas\runtimes\$safeVersion\x86_64-pc-windows-msvc",
-        "ProjectAtlas LocalAppData mirror skipped",
+        "ProjectAtlas LocalAppData mirror is locked",
         "PROJECTATLAS_SKIP_USER_PATH_UPDATE",
         "Set-ProjectAtlasProcessPathPrecedence",
         "Test-ProjectAtlasBareCommandResolutionOnPath",
@@ -4320,7 +4331,7 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Restart Codex or the shell",
         "$inheritedProjectAtlasCommand = Get-Command projectatlas",
         "$stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData",
-        "$inheritedSynchronizedMirrorReady = $stableMirrorSynchronized",
+        "$inheritedSynchronizedMirrorReady = $stableMirrorReady",
         "$futureProcessPathReady = Set-ProjectAtlasPathPrecedence",
         "$parentCliReady = $inheritedCommandReady -or $inheritedSynchronizedMirrorReady",
         "$hostRestartRequired = -not $parentCliReady -and $futureProcessPathReady",
@@ -4340,6 +4351,8 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Codex does not expose the active in-process ProjectAtlas skill path",
         "plugin marketplace add styler-ai/ProjectAtlas --ref",
         "Update-ProjectAtlasCodexMcpRegistry",
+        "Test-ProjectAtlasCodexPluginReady",
+        "Test-ProjectAtlasCodexMcpRegistryReady",
         "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE",
         "PROJECTATLAS_CODEX_COMMAND",
         "PROJECTATLAS_CODEX_COMMAND does not resolve",
@@ -4380,7 +4393,6 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Stop-Process",
         "Suspend-Process",
         "PROCESS_TERMINATE",
-        "Win32_Process",
         r"System32\taskkill.exe",
     ] {
         if powershell_installer.contains(forbidden) {
@@ -6659,7 +6671,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             ))
             .into());
         }
-        if installer_output_text.contains("ProjectAtlas LocalAppData mirror skipped") {
+        if installer_output_text.contains("ProjectAtlas LocalAppData mirror is locked") {
             return Err(io::Error::other(format!(
                 "installer tried to replace an already-current locked stable mirror\n{installer_output_text}"
             ))
@@ -6864,10 +6876,10 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .collect::<Vec<_>>()
             .join(" ");
         for required in [
-            "ProjectAtlas LocalAppData mirror skipped",
-            "Close any running ProjectAtlas or Codex session using that file",
-            "then rerun this installer",
-            "Codex MCP and generated configs continue to use verified",
+            "ProjectAtlas LocalAppData mirror is locked",
+            "verify durable absolute MCP configuration before attempting an exact obsolete-child handoff",
+            "process_owner=no_exact_owner",
+            "ProjectAtlas convergence: update_state=partial stable_mirror_ready=false obsolete_mcp_handoff=no_exact_owner",
         ] {
             if !normalized_stale_output.contains(required) {
                 return Err(io::Error::other(format!(
@@ -7064,6 +7076,328 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
         }
     }
     test_result
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_installer_retires_only_the_exact_obsolete_stable_mcp() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    let app_data = isolated_home.join("AppData").join("Roaming");
+    let local_app_data = isolated_home.join("AppData").join("Local");
+    fs::create_dir_all(&app_data)?;
+    fs::create_dir_all(&local_app_data)?;
+    let stable_runtime = local_app_data
+        .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
+        .join("bin")
+        .join("projectatlas.exe");
+    fs::create_dir_all(
+        stable_runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("stable runtime parent missing"))?,
+    )?;
+
+    let fixture_source = temp.path().join("obsolete-projectatlas.cs");
+    fs::write(
+        &fixture_source,
+        r#"using System;
+using System.Threading;
+
+public static class Program
+{
+    public static int Main(string[] arguments)
+    {
+        if (Array.IndexOf(arguments, "runtime-info") >= 0)
+        {
+            Console.WriteLine("{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.3.26\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}");
+            return 0;
+        }
+        if (Array.IndexOf(arguments, "mcp") >= 0)
+        {
+            Thread.Sleep(Timeout.Infinite);
+            return 0;
+        }
+        return 2;
+    }
+}
+"#,
+    )?;
+    let compile_output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(
+            "Add-Type -Path $env:PROJECTATLAS_FIXTURE_SOURCE -OutputAssembly $env:PROJECTATLAS_FIXTURE_RUNTIME -OutputType ConsoleApplication",
+        )
+        .env("PROJECTATLAS_FIXTURE_SOURCE", &fixture_source)
+        .env("PROJECTATLAS_FIXTURE_RUNTIME", &stable_runtime)
+        .output()?;
+    if !compile_output.status.success() {
+        return Err(io::Error::other(format!(
+            "failed to compile obsolete ProjectAtlas fixture runtime:\n{}",
+            String::from_utf8_lossy(&compile_output.stderr)
+        ))
+        .into());
+    }
+
+    let db = atlas_dir.join("projectatlas.db");
+    let mut obsolete_mcp = StdCommand::new(&stable_runtime)
+        .arg("--require-version")
+        .arg("0.3.26")
+        .arg("--db")
+        .arg(&db)
+        .arg("mcp")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    thread::sleep(Duration::from_millis(300));
+    if let Some(status) = obsolete_mcp.try_wait()? {
+        return Err(io::Error::other(format!(
+            "obsolete MCP fixture exited before installer handoff: {status}"
+        ))
+        .into());
+    }
+
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let stable_runtime_dir = stable_runtime
+        .parent()
+        .ok_or_else(|| io::Error::other("stable runtime parent missing"))?;
+    let parent_path = std::env::join_paths(
+        std::iter::once(stable_runtime_dir.to_path_buf())
+            .chain(std::env::split_paths(&inherited_path)),
+    )?;
+    let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
+    let fake_codex = isolated_home.join("codex.cmd");
+    fs::write(
+        &fake_codex,
+        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"mcp\" if \"%2\"==\"add\" (\r\n  echo current>\"%PROJECTATLAS_FAKE_CODEX_STATE%\"\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  echo projectatlas\r\n  if exist \"%PROJECTATLAS_FAKE_CODEX_STATE%\" (\r\n    echo   command: %PROJECTATLAS_EXPECTED_RUNTIME%\r\n    echo   args: --require-version %PROJECTATLAS_EXPECTED_VERSION% --db %PROJECTATLAS_EXPECTED_DB% --config %PROJECTATLAS_EXPECTED_CONFIG% mcp\r\n  ) else (\r\n    echo   command: %LOCALAPPDATA%\\ProjectAtlas\\bin\\projectatlas.exe\r\n    echo   args: --require-version 0.3.26 --db C:\\old\\.projectatlas\\projectatlas.db mcp\r\n  )\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n",
+    )?;
+    let fake_codex_state = isolated_home.join("codex-state.txt");
+
+    let test_result = (|| -> Result<(), Box<dyn Error>> {
+        let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+        let workspace_root = workspace_root()?;
+        let installer = workspace_root
+            .join("plugins")
+            .join("projectatlas")
+            .join("scripts")
+            .join("install-runtime.ps1");
+        let output = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&installer)
+            .arg("-ProjectRoot")
+            .arg(&repo)
+            .arg("-ProjectAtlasVersion")
+            .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+            .arg("-RuntimePath")
+            .arg(&runtime)
+            .env("HOME", &isolated_home)
+            .env("USERPROFILE", &isolated_home)
+            .env("APPDATA", &app_data)
+            .env("LOCALAPPDATA", &local_app_data)
+            .env("PATH", &parent_path)
+            .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+            .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+            .env("PROJECTATLAS_FAKE_CODEX_STATE", &fake_codex_state)
+            .env("PROJECTATLAS_EXPECTED_RUNTIME", &runtime)
+            .env("PROJECTATLAS_EXPECTED_VERSION", env!("CARGO_PKG_VERSION"))
+            .env("PROJECTATLAS_EXPECTED_DB", &db)
+            .env(
+                "PROJECTATLAS_EXPECTED_CONFIG",
+                atlas_dir.join("config.toml"),
+            )
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        let installer_output = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "installer failed exact obsolete MCP handoff:\n{installer_output}"
+            ))
+            .into());
+        }
+        if !installer_output.contains("Retired exact obsolete ProjectAtlas MCP process")
+            || !installer_output.contains(
+                "ProjectAtlas convergence: update_state=complete stable_mirror_ready=true obsolete_mcp_handoff=completed",
+            )
+            || !installer_output.trim_end().ends_with(
+                "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=true host_restart_required=false",
+            )
+        {
+            return Err(io::Error::other(format!(
+                "installer did not report exact complete obsolete MCP convergence:\n{installer_output}"
+            ))
+            .into());
+        }
+        if obsolete_mcp.try_wait()?.is_none() {
+            return Err(
+                io::Error::other("installer left the exact obsolete MCP process running").into(),
+            );
+        }
+
+        let runtime_info = StdCommand::new(&stable_runtime)
+            .arg("--require-version")
+            .arg(env!("CARGO_PKG_VERSION"))
+            .arg("--format")
+            .arg("json")
+            .arg("runtime-info")
+            .output()?;
+        if !runtime_info.status.success() {
+            return Err(io::Error::other(format!(
+                "stable mirror did not converge to the target runtime:\n{}",
+                String::from_utf8_lossy(&runtime_info.stderr)
+            ))
+            .into());
+        }
+        let codex_config = read_json_file(&atlas_dir.join("projectatlas.mcp.json"))?;
+        require_same_executable(
+            json_string_at(&codex_config, &["mcpServers", "projectatlas", "command"])?,
+            &runtime,
+            "obsolete handoff codex config",
+        )?;
+        require_json_string(
+            &codex_config,
+            &["mcpServers", "projectatlas", "args", "1"],
+            env!("CARGO_PKG_VERSION"),
+        )?;
+        let fake_codex_calls = fs::read_to_string(&fake_codex_log)?;
+        if !fake_codex_calls.contains("mcp add projectatlas --")
+            || !fake_codex_calls.contains(runtime.to_string_lossy().as_ref())
+            || fake_codex_calls.contains(stable_runtime.to_string_lossy().as_ref())
+        {
+            return Err(io::Error::other(format!(
+                "Codex registry did not converge before the exact MCP handoff:\n{fake_codex_calls}"
+            ))
+            .into());
+        }
+        Ok(())
+    })();
+
+    if obsolete_mcp.try_wait()?.is_none() {
+        let kill_result = obsolete_mcp.kill();
+        let wait_result = obsolete_mcp.wait();
+        if let Err(error) = kill_result
+            && test_result.is_ok()
+            && error.kind() != io::ErrorKind::InvalidInput
+        {
+            return Err(error.into());
+        }
+        if let Err(error) = wait_result
+            && test_result.is_ok()
+        {
+            return Err(error.into());
+        }
+    }
+    test_result
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_obsolete_mcp_retirement_rejects_changed_exited_and_inaccessible_processes()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("test-obsolete-mcp-retirement.ps1");
+    fs::write(
+        &script,
+        r#"$ErrorActionPreference = "Stop"
+$installerSource = Get-Content -Raw -LiteralPath $env:PROJECTATLAS_INSTALLER
+$sourceMatch = [regex]::Match(
+    $installerSource,
+    "(?s)Add-Type -TypeDefinition @'\r?\n(?<source>.*?)\r?\n'@"
+)
+if (-not $sourceMatch.Success) {
+    throw "Installer runtime process source was not found."
+}
+Add-Type -TypeDefinition $sourceMatch.Groups["source"].Value
+$hostPath = (Get-Process -Id $PID).Path
+$owned = Start-Process $hostPath `
+    -ArgumentList @("-NoProfile", "-Command", "Start-Sleep -Seconds 30") `
+    -WindowStyle Hidden `
+    -PassThru
+try {
+    $creationFileTime = $owned.StartTime.ToUniversalTime().ToFileTimeUtc()
+    $changed = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
+        $owned.Id,
+        $creationFileTime + 1000,
+        $hostPath,
+        1000
+    )
+    if ($changed.State -ne "identity_changed_creation" -or $owned.HasExited) {
+        throw "Changed process identity was not refused safely: $($changed.State)"
+    }
+    Stop-Process -Id $owned.Id -Force
+    $owned.WaitForExit()
+    $exited = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
+        $owned.Id,
+        $creationFileTime,
+        $hostPath,
+        1000
+    )
+    if ($exited.State -ne "exited") {
+        throw "Exited process race was not classified safely: $($exited.State)"
+    }
+    $accessDenied = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
+        4,
+        0,
+        $hostPath,
+        1000
+    )
+    if ($accessDenied.State -ne "access_denied" -or $accessDenied.ErrorCode -ne 5) {
+        throw "Access-denied process was not classified safely: $($accessDenied.State):$($accessDenied.ErrorCode)"
+    }
+    Write-Output "identity_changed_creation exited access_denied"
+}
+finally {
+    if (-not $owned.HasExited) {
+        Stop-Process -Id $owned.Id -Force -ErrorAction SilentlyContinue
+        $owned.WaitForExit()
+    }
+}
+"#,
+    )?;
+    let installer = workspace_root()?
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    let output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(&script)
+        .env("PROJECTATLAS_INSTALLER", &installer)
+        .output()?;
+    if !output.status.success()
+        || !String::from_utf8_lossy(&output.stdout)
+            .contains("identity_changed_creation exited access_denied")
+    {
+        return Err(io::Error::other(format!(
+            "bounded process-retirement failure coverage failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 #[test]
