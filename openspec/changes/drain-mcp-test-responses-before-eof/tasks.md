@@ -6,4 +6,4 @@
 ## 2. Routing and Verification
 
 - [x] 2.1 Map issue #416 to this change, synchronize its live checklist, pass `openspec validate drain-mcp-test-responses-before-eof --strict`, and run `.github/scripts/issue-checklists.py`.
-- [ ] 2.2 Pass formatting, warnings-denied workspace Clippy, repeated focused `normal_reads_do_not_serve_offline_stale_index_state` and `mcp_advertised_tools_own_their_real_sqlite_effects` E2E runs, the complete E2E target, the repository pre-push gate, and the exact Windows release package regression with explicit hard timeouts.
+- [x] 2.2 Pass formatting, warnings-denied workspace Clippy, repeated focused `normal_reads_do_not_serve_offline_stale_index_state` and `mcp_advertised_tools_own_their_real_sqlite_effects` E2E runs, the complete E2E target, the repository pre-push gate, and the exact Windows release package regression with explicit hard timeouts.
