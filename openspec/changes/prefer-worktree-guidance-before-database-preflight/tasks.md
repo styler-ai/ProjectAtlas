@@ -11,5 +11,5 @@
 
 ## 3. Verification and Release Control
 
-- [ ] 3.1 Run Rust formatting, warnings-denied Clippy, CLI unit tests, and complete CLI E2E tests on Windows.
-- [ ] 3.2 Validate OpenSpec and issue checklist parity, then require behavior-relevant Linux, Windows, macOS x64, and macOS ARM64 hosted checks before closure.
+- [x] 3.1 Run Rust formatting, warnings-denied Clippy, CLI unit tests, and complete CLI E2E tests on Windows.
+- [x] 3.2 Validate OpenSpec and issue checklist parity, then require behavior-relevant Linux, Windows, macOS x64, and macOS ARM64 hosted checks before closure.
