@@ -30,6 +30,8 @@ mod parser_supervisor;
 const TEST_ARTIFACT_BYTES: &[u8] = b"parser-supervisor-hostile-peer";
 /// Cargo-visible target name used for libtest-compatible substring filtering.
 const HARNESS_NAME: &str = "parser_supervisor_adversarial";
+/// Healthy completion delay beyond the hostile 500 ms no-progress budget.
+const DELAYED_HEALTHY_COMPLETION: Duration = Duration::from_millis(550);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args();
@@ -284,17 +286,22 @@ fn hostile_peer(scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
             1,
             "source_file_with_a_deliberately_long_but_valid_name",
         )?,
-        "healthy" | "idle-close" => write_completion(
-            &mut output,
-            &request,
-            request.source().byte_len(),
-            1,
-            1,
-            "source_file",
-        )?,
+        "healthy" | "healthy-delayed" | "idle-close" => {
+            if scenario == "healthy-delayed" {
+                thread::sleep(DELAYED_HEALTHY_COMPLETION);
+            }
+            write_completion(
+                &mut output,
+                &request,
+                request.source().byte_len(),
+                1,
+                1,
+                "source_file",
+            )?;
+        }
         _ => {}
     }
-    if matches!(scenario, "healthy" | "idle-close") {
+    if matches!(scenario, "healthy" | "healthy-delayed" | "idle-close") {
         io::copy(&mut input, &mut io::sink())?;
     }
     Ok(())

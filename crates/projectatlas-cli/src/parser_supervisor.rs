@@ -5175,6 +5175,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
 
     struct Case {
         scenario: &'static str,
+        recovery_scenario: &'static str,
         expected: ExpectedFailure,
         source_bytes: usize,
         cancel_before_launch: bool,
@@ -5193,6 +5194,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
     fn case(scenario: &'static str, expected: ExpectedFailure) -> io::Result<Case> {
         Ok(Case {
             scenario,
+            recovery_scenario: "healthy",
             expected,
             source_bytes: 32,
             cancel_before_launch: false,
@@ -5608,7 +5610,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             )));
         }
 
-        let mut healthy = case("healthy", ExpectedFailure::Io)?;
+        let mut healthy = case(hostile.recovery_scenario, ExpectedFailure::Io)?;
         healthy.no_progress = healthy.deadline;
         let cleanup_deadline = Instant::now() + healthy.deadline;
         while PROCESS_SPAWN_ACTIVE.load(Ordering::Acquire) && Instant::now() < cleanup_deadline {
@@ -5642,7 +5644,11 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             opening_cancel.cancel_before_launch = true;
             opening_cancel
         },
-        case("pre-ready-stall", ExpectedFailure::NoProgress)?,
+        {
+            let mut pre_ready_stall = case("pre-ready-stall", ExpectedFailure::NoProgress)?;
+            pre_ready_stall.recovery_scenario = "healthy-delayed";
+            pre_ready_stall
+        },
         case("ready-session", ExpectedFailure::Ready("session"))?,
         case("ready-artifact", ExpectedFailure::Ready("artifact"))?,
         case("ready-containment", ExpectedFailure::Ready("containment"))?,
