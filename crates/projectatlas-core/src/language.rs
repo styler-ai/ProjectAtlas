@@ -16,7 +16,7 @@ pub const LANGUAGE_CAPABILITY_REGISTRY_VERSION: u32 = 3;
 pub const SEMANTIC_PROVIDER_CONTRACT_VERSION: u32 = 1;
 
 /// Version of the accepted language capability floor.
-pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION: u32 = 4;
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION: u32 = 5;
 
 /// Version of exact detector precedence and content-matching semantics.
 pub const LANGUAGE_DETECTION_POLICY_VERSION: u32 = 1;
@@ -48,6 +48,13 @@ pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V3_DIGEST: &str =
 /// binding ProjectAtlas-owned parser provenance to the 0.4.1 runtime.
 pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V4_DIGEST: &str =
     "e9a952d0b3bc2d2c5db832130d85b7cdfd656aaa07ebbafab1505da6b87d9084";
+
+/// Historical acceptance seal for capability-set version 5.
+///
+/// Version 5 preserves version 4 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.4.2 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V5_DIGEST: &str =
+    "07a3d2c45a4736bc764e44016a6ba9b7f9ea1b769b0100604702160528679bc7";
 
 /// Maximum content prefix inspected by the bounded content/dialect detector.
 pub const LANGUAGE_CONTENT_DETECTION_MAX_BYTES: usize = 512;
@@ -2076,6 +2083,7 @@ pub fn validate_language_registry() -> Result<(), LanguageRegistryError> {
         2 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V2_DIGEST,
         3 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V3_DIGEST,
         4 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V4_DIGEST,
+        5 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V5_DIGEST,
         version => {
             return Err(LanguageRegistryError::new(format!(
                 "accepted language capability-set version {version} lacks a historical digest seal"
