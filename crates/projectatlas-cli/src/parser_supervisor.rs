@@ -75,10 +75,34 @@ const ARTIFACT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(15);
 const ARTIFACT_ADMISSION_AGGREGATE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 /// Maximum interval without meaningful worker progress during artifact admission.
 const ARTIFACT_ADMISSION_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
+/// Test-only launch allowance for hostile fixtures that do not stall admission.
+#[cfg(test)]
+const ADVERSARIAL_NON_STALL_LAUNCH_NO_PROGRESS: Duration = Duration::from_secs(2);
 /// Source bytes that force post-admission parser allocation through the Windows job limit.
 const WINDOWS_MEMORY_PROBE_SOURCE_BYTES: usize = 1024 * 1024;
 /// Declared maximum interval between sampled Linux resident-memory observations.
 pub const PARSER_LINUX_RSS_OBSERVATION_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Select the launch/admission allowance without changing the operation allowance.
+#[cfg(test)]
+fn adversarial_launch_no_progress(scenario: &str, operation_no_progress: Duration) -> Duration {
+    match scenario {
+        "pre-ready-stall" | "admission-stall" => operation_no_progress,
+        _ => ADVERSARIAL_NON_STALL_LAUNCH_NO_PROGRESS,
+    }
+}
+
+/// Require an adversarial absolute-deadline failure from the intended protocol phase.
+#[cfg(test)]
+fn adversarial_deadline_matches(
+    error: &ParserSupervisorError,
+    expected_phase: &'static str,
+) -> bool {
+    matches!(
+        error,
+        ParserSupervisorError::DeadlineExceeded { phase } if *phase == expected_phase
+    )
+}
 
 /// Closed memory ceilings owned by one supervisor instance.
 #[derive(Clone, Copy)]
@@ -5161,7 +5185,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
     #[derive(Clone, Copy)]
     enum ExpectedFailure {
         Cancelled,
-        Deadline,
+        Deadline(&'static str),
         InvalidAdmission,
         Io,
         NoProgress,
@@ -5209,10 +5233,13 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
     fn error_matches(error: &ParserSupervisorError, expected: ExpectedFailure) -> bool {
         match (error, expected) {
             (ParserSupervisorError::Cancelled { .. }, ExpectedFailure::Cancelled)
-            | (ParserSupervisorError::DeadlineExceeded { .. }, ExpectedFailure::Deadline)
             | (ParserSupervisorError::InvalidAdmission, ExpectedFailure::InvalidAdmission)
             | (ParserSupervisorError::IoThread { .. }, ExpectedFailure::Io)
             | (ParserSupervisorError::NoProgress { .. }, ExpectedFailure::NoProgress) => true,
+            (
+                ParserSupervisorError::DeadlineExceeded { .. },
+                ExpectedFailure::Deadline(expected_phase),
+            ) => adversarial_deadline_matches(error, expected_phase),
             (
                 ParserSupervisorError::Protocol {
                     source: ParserProtocolError::ProgressRegression { field },
@@ -5349,7 +5376,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             ParserMemoryLimits::PRODUCTION,
             Instant::now(),
             deadline,
-            Duration::from_secs(1),
+            ADVERSARIAL_NON_STALL_LAUNCH_NO_PROGRESS,
             &cancellation,
             command_for(peer, "idle-close")?,
         )
@@ -5447,7 +5474,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
                 ParserMemoryLimits::PRODUCTION,
                 Instant::now(),
                 deadline,
-                Duration::from_secs(1),
+                ADVERSARIAL_NON_STALL_LAUNCH_NO_PROGRESS,
                 &cancellation,
                 command_for(peer, "idle-close")?,
             )
@@ -5532,7 +5559,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             ParserMemoryLimits::PRODUCTION,
             now,
             deadline,
-            case.no_progress,
+            adversarial_launch_no_progress(case.scenario, case.no_progress),
             &cancellation,
             command_for(peer, case.scenario).map_err(|source| ParserSupervisorError::IoThread {
                 phase: "adversarial test command",
@@ -5671,7 +5698,10 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             "progress-regression",
             ExpectedFailure::Progress("completed_work"),
         )?,
-        case("progress-endless", ExpectedFailure::Deadline)?,
+        case(
+            "progress-endless",
+            ExpectedFailure::Deadline("request response"),
+        )?,
         case("progress-no-work", ExpectedFailure::NoProgress)?,
         case(
             "completion-malformed",
@@ -5707,7 +5737,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
     blocked_cancel.cancellation_after_launch = Some(Duration::from_millis(75));
     blocked_cancel.no_progress = Duration::from_secs(1);
     cases.push(blocked_cancel);
-    let mut blocked_deadline = case("blocked-write", ExpectedFailure::Deadline)?;
+    let mut blocked_deadline = case("blocked-write", ExpectedFailure::Deadline("request write"))?;
     blocked_deadline.source_bytes = 4 * 1024 * 1024;
     blocked_deadline.deadline_after_launch = Some(Duration::from_millis(125));
     blocked_deadline.no_progress = Duration::from_secs(1);
@@ -5716,7 +5746,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         .iter_mut()
         .find(|candidate| candidate.scenario == "progress-endless")
     {
-        progress_endless.deadline = Duration::from_millis(250);
+        progress_endless.deadline_after_launch = Some(Duration::from_millis(250));
         progress_endless.no_progress = Duration::from_secs(1);
     }
     if let Some(output_limit) = cases
@@ -5790,6 +5820,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn adversarial_launch_allowance_is_phase_specific_and_production_independent() {
+        let operation_no_progress = Duration::from_millis(500);
+        assert_eq!(
+            adversarial_launch_no_progress("pre-ready-stall", operation_no_progress),
+            operation_no_progress
+        );
+        assert_eq!(
+            adversarial_launch_no_progress("admission-stall", operation_no_progress),
+            operation_no_progress
+        );
+        for scenario in [
+            "progress-no-work",
+            "admission-forged",
+            "completion-malformed",
+        ] {
+            assert_eq!(
+                adversarial_launch_no_progress(scenario, operation_no_progress),
+                ADVERSARIAL_NON_STALL_LAUNCH_NO_PROGRESS
+            );
+        }
+        assert_eq!(ARTIFACT_ADMISSION_TIMEOUT, Duration::from_secs(15));
+        assert_eq!(
+            ARTIFACT_ADMISSION_AGGREGATE_TIMEOUT,
+            Duration::from_secs(20 * 60)
+        );
+        assert_eq!(
+            ARTIFACT_ADMISSION_NO_PROGRESS_TIMEOUT,
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn adversarial_deadline_expectation_requires_the_exact_operation_phase() {
+        let delayed_admission = ParserSupervisorError::DeadlineExceeded {
+            phase: "containment admission",
+        };
+        assert!(!adversarial_deadline_matches(
+            &delayed_admission,
+            "request response"
+        ));
+
+        let response_deadline = ParserSupervisorError::DeadlineExceeded {
+            phase: "request response",
+        };
+        assert!(adversarial_deadline_matches(
+            &response_deadline,
+            "request response"
+        ));
     }
 
     #[test]

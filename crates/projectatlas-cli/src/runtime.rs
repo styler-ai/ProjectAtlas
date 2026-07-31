@@ -1995,6 +1995,7 @@ fn effective_git_config_bare_setting(
             "--bool",
             "core.bare",
         ])
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -2366,14 +2367,30 @@ pub(crate) fn default_mcp_project_root(
     canonical_source_project_root(&current_dir)
 }
 
+/// Resolve the default CLI project root before opening an implicit database.
+pub(crate) fn default_cli_project_root(
+    db: &Path,
+    config_path: Option<&Path>,
+    database_path_is_explicit: bool,
+) -> Result<PathBuf, CliError> {
+    if !database_path_is_explicit
+        && config_path.is_none()
+        && let Some(project_root) = project_root_from_db_path(db)
+    {
+        return canonical_source_project_root(&project_root);
+    }
+    default_mcp_project_root(db, config_path)
+}
+
 /// Resolve a CLI repository-root argument, using indexed state for the default `.`.
 pub(crate) fn defaultable_cli_project_root(
     path: &Path,
     db: &Path,
     config_path: Option<&Path>,
+    database_path_is_explicit: bool,
 ) -> Result<PathBuf, CliError> {
     if path == Path::new(".") {
-        return default_mcp_project_root(db, config_path);
+        return default_cli_project_root(db, config_path, database_path_is_explicit);
     }
     Ok(path.to_path_buf())
 }

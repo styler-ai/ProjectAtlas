@@ -1728,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "projectatlas-cli"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "assert_cmd",
  "blake3",
@@ -1775,7 +1775,7 @@ dependencies = [
 
 [[package]]
 name = "projectatlas-core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blake3",
  "object",
@@ -1792,7 +1792,7 @@ dependencies = [
 
 [[package]]
 name = "projectatlas-db"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blake3",
  "getrandom 0.4.3",
@@ -1807,7 +1807,7 @@ dependencies = [
 
 [[package]]
 name = "projectatlas-fs"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blake3",
  "ignore",
@@ -1818,7 +1818,7 @@ dependencies = [
 
 [[package]]
 name = "projectatlas-lints"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "proc-macro2",
  "syn",
@@ -1826,7 +1826,7 @@ dependencies = [
 
 [[package]]
 name = "projectatlas-service"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blake3",
  "globset",
@@ -1842,7 +1842,7 @@ dependencies = [
 
 [[package]]
 name = "projectatlas-symbols"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blake3",
  "projectatlas-core",

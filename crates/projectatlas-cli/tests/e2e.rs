@@ -85,6 +85,7 @@ const SCANNED_RS_FILE_NAME: &str = "scanned.rs";
 const GIT_DIR_NAME: &str = ".git";
 const MAIN_CHECKOUT_DIR_NAME: &str = "main-checkout";
 const LINKED_CHECKOUTS_DIR_NAME: &str = "branches";
+const BARE_REPOSITORY_DIR_NAME: &str = "repository.git";
 const FEATURE_ONLY_RS_FILE_NAME: &str = "feature_only.rs";
 const ALTERNATE_ONLY_RS_FILE_NAME: &str = "alternate_only.rs";
 const OUTSIDE_CANARY_FILE_NAME: &str = "outside-canary.txt";
@@ -1015,6 +1016,107 @@ fn impact_analysis_deadline_and_mcp_cancellation_release_resources() -> Result<(
     }
     session.call_tool("atlas_overview", &json!({}))?;
     Connection::open(&database)?.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")?;
+    session.shutdown()
+}
+
+#[test]
+fn persistent_mcp_stdin_does_not_block_repository_startup_probes() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("persistent-git-probe");
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn ready() {}\n",
+    )?;
+    git_success(&repo, &["init", "--quiet"])?;
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let init = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .args(["--format", "json", "init"])
+        .output()?;
+    if !init.status.success() {
+        return Err(io::Error::other(format!(
+            "persistent-probe fixture init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ))
+        .into());
+    }
+
+    let project_path = repo.to_string_lossy().to_string();
+    let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+    for (tool, arguments, expected) in [
+        (
+            "atlas_session_brief",
+            json!({"project_path": project_path, "compact": true}),
+            "session_brief:",
+        ),
+        (
+            "atlas_root",
+            json!({"project_path": project_path, "verify": true}),
+            "root:",
+        ),
+        (
+            "atlas_init",
+            json!({"project_path": project_path, "no_scan": true}),
+            "init:",
+        ),
+        (
+            "atlas_overview",
+            json!({"project_path": project_path}),
+            "overview:",
+        ),
+        (
+            "atlas_folders",
+            json!({"project_path": project_path, "query": SRC_DIR_NAME, "limit": 2}),
+            "folders",
+        ),
+        (
+            "atlas_files",
+            json!({"project_path": project_path, "query": "ready", "folder": SRC_DIR_NAME, "limit": 2}),
+            "files",
+        ),
+        (
+            "atlas_file_summary",
+            json!({"project_path": project_path, "file": "src/lib.rs", "compact": true}),
+            "file_summary:",
+        ),
+        (
+            "atlas_outline",
+            json!({"project_path": project_path, "file": "src/lib.rs", "lines": 4}),
+            "outline:",
+        ),
+        (
+            "atlas_search",
+            json!({"project_path": project_path, "pattern": "ready", "file_pattern": "src/*.rs", "limit": 1}),
+            "search:",
+        ),
+        (
+            "atlas_slice",
+            json!({"project_path": project_path, "file": "src/lib.rs", "start_line": 1, "end_line": 1, "output_bytes": 4096}),
+            "slice:",
+        ),
+    ] {
+        let started = Instant::now();
+        let text = session.call_tool(tool, &arguments)?;
+        if started.elapsed() > Duration::from_secs(5) || !text.contains(expected) {
+            return Err(io::Error::other(format!(
+                "{tool} did not complete over persistent stdin: elapsed={:?} text={text}",
+                started.elapsed()
+            ))
+            .into());
+        }
+    }
+    let followup = session.call_tool(
+        "atlas_root",
+        &json!({"project_path": project_path, "verify": true}),
+    )?;
+    if !followup.contains("verified: true") {
+        return Err(io::Error::other(format!(
+            "immediate root follow-up failed after persistent probes: {followup}"
+        ))
+        .into());
+    }
     session.shutdown()
 }
 
@@ -3310,7 +3412,7 @@ fn scan_refuses_unverified_registered_worktree_boundary_before_publication()
 #[test]
 fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let bare = temp.path().join("repository.git");
+    let bare = temp.path().join(BARE_REPOSITORY_DIR_NAME);
     let output = StdCommand::new("git")
         .args(["init", "--bare"])
         .arg(&bare)
@@ -3344,6 +3446,45 @@ fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<()
         return Err(
             io::Error::other("common Git directory refusal created ProjectAtlas state").into(),
         );
+    }
+    let common_atlas_dir = common_git_dir.join(ATLAS_DIR_NAME);
+    fs::create_dir(&common_atlas_dir)?;
+    let common_database = common_atlas_dir.join("projectatlas.db");
+    {
+        let connection = Connection::open(&common_database)?;
+        connection.execute_batch(
+            "
+            CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO metadata(key, value) VALUES('schema_version', '18');
+            CREATE TABLE authored_state(value TEXT NOT NULL);
+            INSERT INTO authored_state(value) VALUES('preserve-common-dir');
+            ",
+        )?;
+    }
+    let common_database_before = fs::read(&common_database)?;
+    let common_dir_settings = Command::cargo_bin("projectatlas")?
+        .current_dir(&common_git_dir)
+        .args(["--format", "json", "settings"])
+        .output()?;
+    if common_dir_settings.status.success() {
+        return Err(io::Error::other("common Git directory settings read succeeded").into());
+    }
+    let common_settings_error: Value = serde_json::from_slice(&common_dir_settings.stderr)?;
+    require_json_string(
+        &common_settings_error,
+        &["error", "kind"],
+        "worktree_required",
+    )?;
+    if fs::read(&common_database)? != common_database_before {
+        return Err(io::Error::other("common Git directory refusal changed database bytes").into());
+    }
+    for sidecar in ["projectatlas.db-wal", "projectatlas.db-shm"] {
+        if common_atlas_dir.join(sidecar).exists() {
+            return Err(io::Error::other(format!(
+                "common Git directory refusal created SQLite sidecar {sidecar}"
+            ))
+            .into());
+        }
     }
     let included_config = temp.path().join("included-bare.config");
     fs::write(&included_config, "[core]\n\tbare = true\n")?;
@@ -3441,6 +3582,263 @@ fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<()
         return Err(
             io::Error::other("structural control-root refusal created ProjectAtlas state").into(),
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn implicit_bare_root_refuses_before_opening_a_future_schema_database() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let bare = temp.path().join(BARE_REPOSITORY_DIR_NAME);
+    let output = StdCommand::new("git")
+        .args(["init", "--bare"])
+        .arg(&bare)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "git init --bare failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+
+    let atlas_dir = bare.join(ATLAS_DIR_NAME);
+    fs::create_dir(&atlas_dir)?;
+    let database = atlas_dir.join("projectatlas.db");
+    {
+        let connection = Connection::open(&database)?;
+        connection.execute_batch(
+            "
+            CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO metadata(key, value) VALUES('schema_version', '18');
+            CREATE TABLE authored_state(value TEXT NOT NULL);
+            INSERT INTO authored_state(value) VALUES('preserve-me');
+            ",
+        )?;
+    }
+    let database_before = fs::read(&database)?;
+
+    let implicit = Command::cargo_bin("projectatlas")?
+        .current_dir(&bare)
+        .args(["--format", "json", "token", "--view", "tui"])
+        .output()?;
+    if implicit.status.success() {
+        return Err(io::Error::other("implicit bare-root token read succeeded").into());
+    }
+    let implicit_error: Value = serde_json::from_slice(&implicit.stderr)?;
+    require_json_string(&implicit_error, &["error", "kind"], "worktree_required")?;
+    if fs::read(&database)? != database_before {
+        return Err(
+            io::Error::other("bare-root refusal changed future-schema database bytes").into(),
+        );
+    }
+    for sidecar in ["projectatlas.db-wal", "projectatlas.db-shm"] {
+        if atlas_dir.join(sidecar).exists() {
+            return Err(io::Error::other(format!(
+                "bare-root refusal created SQLite sidecar {sidecar}"
+            ))
+            .into());
+        }
+    }
+
+    let explicit = Command::cargo_bin("projectatlas")?
+        .current_dir(&bare)
+        .args(["--format", "json", "--db"])
+        .arg(&database)
+        .args(["token", "--view", "tui"])
+        .output()?;
+    if explicit.status.success() {
+        return Err(io::Error::other("explicit future-schema token read succeeded").into());
+    }
+    let explicit_stderr = String::from_utf8_lossy(&explicit.stderr);
+    if !explicit_stderr.contains("unsupported schema version 18") {
+        return Err(io::Error::other(format!(
+            "explicit database selection hid schema error: {explicit_stderr}"
+        ))
+        .into());
+    }
+    if fs::read(&database)? != database_before {
+        return Err(
+            io::Error::other("explicit future-schema refusal changed database bytes").into(),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn implicit_bare_root_refusal_is_database_state_agnostic() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    for state in ["absent", "compatible", "older-supported", "malformed"] {
+        let bare = temp.path().join(format!("{state}.git"));
+        let output = StdCommand::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "git init --bare failed for {state}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+
+        let atlas_dir = bare.join(ATLAS_DIR_NAME);
+        let database = atlas_dir.join("projectatlas.db");
+        match state {
+            "absent" => {}
+            "compatible" => {
+                fs::create_dir(&atlas_dir)?;
+                drop(AtlasStore::open(&database)?);
+            }
+            "older-supported" => {
+                fs::create_dir(&atlas_dir)?;
+                let connection = Connection::open(&database)?;
+                connection.execute_batch(
+                    "
+                    CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    INSERT INTO metadata(key, value) VALUES('schema_version', '8');
+                    CREATE TABLE authored_state(value TEXT NOT NULL);
+                    INSERT INTO authored_state(value) VALUES('preserve-me');
+                    ",
+                )?;
+            }
+            "malformed" => {
+                fs::create_dir(&atlas_dir)?;
+                fs::write(&database, b"not a SQLite database")?;
+            }
+            _ => unreachable!(),
+        }
+        let database_before = database.exists().then(|| fs::read(&database)).transpose()?;
+
+        let implicit = Command::cargo_bin("projectatlas")?
+            .current_dir(&bare)
+            .args(["--format", "json", "settings"])
+            .output()?;
+        if implicit.status.success() {
+            return Err(io::Error::other(format!(
+                "implicit bare-root settings succeeded for {state}"
+            ))
+            .into());
+        }
+        let error: Value = serde_json::from_slice(&implicit.stderr)?;
+        require_json_string(&error, &["error", "kind"], "worktree_required")?;
+        if database.exists().then(|| fs::read(&database)).transpose()? != database_before {
+            return Err(io::Error::other(format!(
+                "bare-root refusal changed {state} database state"
+            ))
+            .into());
+        }
+        for sidecar in ["projectatlas.db-wal", "projectatlas.db-shm"] {
+            if atlas_dir.join(sidecar).exists() {
+                return Err(io::Error::other(format!(
+                    "bare-root refusal created {sidecar} for {state} database state"
+                ))
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn implicit_bare_root_commands_preserve_live_wal_and_authored_state() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let bare = temp.path().join(BARE_REPOSITORY_DIR_NAME);
+    let output = StdCommand::new("git")
+        .args(["init", "--bare"])
+        .arg(&bare)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "git init --bare failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+
+    let atlas_dir = bare.join(ATLAS_DIR_NAME);
+    fs::create_dir(&atlas_dir)?;
+    let database = atlas_dir.join("projectatlas.db");
+    drop(AtlasStore::open(&database)?);
+    let connection = Connection::open(&database)?;
+    let journal_mode: String =
+        connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+    if journal_mode != "wal" {
+        return Err(
+            io::Error::other(format!("SQLite did not enter WAL mode: {journal_mode}")).into(),
+        );
+    }
+    connection.execute_batch(
+        "
+        PRAGMA wal_autocheckpoint = 0;
+        CREATE TABLE authored_state(value TEXT NOT NULL);
+        INSERT INTO authored_state(value) VALUES('preserve-purpose');
+        CREATE TABLE authored_telemetry(value TEXT NOT NULL);
+        INSERT INTO authored_telemetry(value) VALUES('preserve-telemetry');
+        ",
+    )?;
+    let config = atlas_dir.join("config.toml");
+    fs::write(&config, b"[scan]\nmax_file_bytes = 1000000\n")?;
+    let backup = atlas_dir.join("projectatlas.db.backup");
+    fs::write(&backup, b"preserve-backup")?;
+    let wal = atlas_dir.join("projectatlas.db-wal");
+    let shm = atlas_dir.join("projectatlas.db-shm");
+    if !wal.is_file() || !shm.is_file() {
+        return Err(io::Error::other("active WAL fixture did not create WAL and SHM files").into());
+    }
+    let preserved_paths = [database, wal, shm, config, backup];
+    let preserved_before = preserved_paths
+        .iter()
+        .map(fs::read)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let commands = [
+        ("settings", vec!["settings"]),
+        ("root show", vec!["root"]),
+        ("root verify", vec!["root", "verify"]),
+        ("map", vec!["map", "--force"]),
+        ("config", vec!["config", "--print"]),
+        ("lint", vec!["lint"]),
+        ("reset-index", vec!["reset-index", "--apply"]),
+        ("mcp", vec!["mcp"]),
+        ("mcp-config", vec!["mcp-config"]),
+    ];
+    for (name, arguments) in commands {
+        let implicit = Command::cargo_bin("projectatlas")?
+            .current_dir(&bare)
+            .args(["--format", "json"])
+            .args(arguments)
+            .output()?;
+        if implicit.status.success() {
+            return Err(
+                io::Error::other(format!("implicit bare-root {name} command succeeded")).into(),
+            );
+        }
+        let error: Value = serde_json::from_slice(&implicit.stderr)?;
+        require_json_string(&error, &["error", "kind"], "worktree_required")?;
+        let preserved_after = preserved_paths
+            .iter()
+            .map(fs::read)
+            .collect::<Result<Vec<_>, _>>()?;
+        if preserved_after != preserved_before {
+            return Err(io::Error::other(format!(
+                "implicit bare-root {name} command changed DB, WAL, SHM, config, or backup bytes"
+            ))
+            .into());
+        }
+    }
+
+    let purpose: String =
+        connection.query_row("SELECT value FROM authored_state", [], |row| row.get(0))?;
+    let telemetry: String =
+        connection.query_row("SELECT value FROM authored_telemetry", [], |row| row.get(0))?;
+    if purpose != "preserve-purpose" || telemetry != "preserve-telemetry" {
+        return Err(io::Error::other("bare-root refusal changed authored SQLite state").into());
     }
     Ok(())
 }
@@ -8385,6 +8783,49 @@ fn explicit_database_binding_is_used_by_cli_and_mcp_admin_surfaces() -> Result<(
             .into());
         }
     }
+    Ok(())
+}
+
+#[test]
+fn generated_mcp_config_preserves_explicit_conventional_database_authority()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let source = temp.path().join("source");
+    let selected = temp.path().join("selected");
+    fs::create_dir_all(source.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(selected.join(ATLAS_DIR_NAME))?;
+    fs::write(
+        source.join(SRC_DIR_NAME).join("main.rs"),
+        "pub fn stored_project_root_marker() {}\n",
+    )?;
+    let source_database = source.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&source)
+        .arg("--db")
+        .arg(&source_database)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    let selected_database = selected.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    fs::copy(&source_database, &selected_database)?;
+    let mcp_config = mcp_config_for_harness(&source, &selected_database, "mcp-json")?;
+    let (mcp_command, mcp_args) = mcp_command_and_args(&mcp_config)?;
+    let mcp_output = run_mcp_stdio(
+        &mcp_command,
+        &source,
+        &mcp_args,
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_root","arguments":{}}}"#,
+        ],
+    )?;
+    let root: Value = toon_format::decode_default(&mcp_tool_text(&mcp_output, 2)?)?;
+    let canonical_source = normalize_native_path_display(source.canonicalize()?);
+    require_json_string(&root, &["root", "root"], &canonical_source)?;
+    require_json_string(&root, &["root", "db_project_root"], &canonical_source)?;
+    require_json_bool(&root, &["root", "verified"], true)?;
     Ok(())
 }
 

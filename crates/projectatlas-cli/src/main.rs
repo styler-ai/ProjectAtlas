@@ -61,10 +61,10 @@ use runtime::{
     PurposeReviewRequest, ScanRuntimePlan, SettingsReport, SymbolBuildOptions,
     UsageRuntimeInstance, WatchStatusReport, absolute_path, build_settings_report,
     byte_count_to_tokens, canonical_project_root, canonical_source_project_root,
-    config_root_mismatch_error, default_mcp_project_root, defaultable_cli_project_root,
-    estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
-    index_work_control, init_config_path, init_path_status, lint_database_if_present,
-    next_step_report, next_step_report_payload, normalized_folder_filter,
+    config_root_mismatch_error, default_cli_project_root, default_mcp_project_root,
+    defaultable_cli_project_root, estimated_source_tokens_for_indexed_files,
+    estimated_source_tokens_for_paths, index_work_control, init_config_path, init_path_status,
+    lint_database_if_present, next_step_report, next_step_report_payload, normalized_folder_filter,
     open_atlas_store_for_project, open_atlas_store_read_only_for_project,
     open_federated_atlas_stores_for_project, open_fresh_atlas_store_for_project,
     purpose_curation_page, ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons,
@@ -845,6 +845,35 @@ struct Cli {
     command: Box<Command>,
 }
 
+impl Cli {
+    /// Resolve this invocation's selected source root before opening an implicit database.
+    fn project_root(&self) -> Result<PathBuf, CliError> {
+        default_cli_project_root(
+            &self.db,
+            self.config.as_deref(),
+            self.database_path_is_explicit,
+        )
+    }
+
+    /// Resolve an optional command root using this invocation's database selection.
+    fn project_root_for_path(&self, path: &Path) -> Result<PathBuf, CliError> {
+        defaultable_cli_project_root(
+            path,
+            &self.db,
+            self.config.as_deref(),
+            self.database_path_is_explicit,
+        )
+    }
+
+    /// Validate only the implicit conventional root without changing explicit authority.
+    fn preflight_implicit_project_root(&self) -> Result<(), CliError> {
+        if !self.database_path_is_explicit && self.config.is_none() {
+            drop(self.project_root()?);
+        }
+        Ok(())
+    }
+}
+
 /// Supported `ProjectAtlas` CLI commands.
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -1523,6 +1552,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 write_stderr("Skipping ProjectAtlas map update in CI.\n")?;
                 return Ok(());
             }
+            cli.preflight_implicit_project_root()?;
             let config = load_cli_atlas_config(cli)?;
             write_map(&config, *json)?;
         }
@@ -1530,7 +1560,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             path,
             text_index_max_bytes,
         } => {
-            let path = defaultable_cli_project_root(path, &cli.db, cli.config.as_deref())?;
+            let path = cli.project_root_for_path(path)?;
             let symbol_options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None);
             let control = index_work_control(&symbol_options);
             let plan = ScanRuntimePlan::for_path_controlled(
@@ -1801,7 +1831,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 max_workers,
                 timeout_seconds,
             } => {
-                let path = defaultable_cli_project_root(path, &cli.db, cli.config.as_deref())?;
+                let path = cli.project_root_for_path(path)?;
                 let options = SymbolBuildOptions::new(*max_bytes, *max_workers, *timeout_seconds);
                 let control = index_work_control(&options);
                 let plan = ScanRuntimePlan::for_path_controlled(
@@ -1910,7 +1940,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         .with_timeout_ceiling(Duration::from_millis(10_000))
                 });
                 let mut federated_stores = if let Some(control) = federation_control.as_ref() {
-                    let selected_root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+                    let selected_root = cli.project_root()?;
                     Some(open_federated_atlas_stores_for_project(
                         &cli.db,
                         &selected_root,
@@ -2187,6 +2217,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             }
         },
         Command::Settings => {
+            cli.preflight_implicit_project_root()?;
             let report = build_settings_report(&cli.db, cli.config.as_deref(), cli.format)?;
             let toon = render_settings_report(&report);
             print_output(cli.format, &toon, &report)?;
@@ -2268,10 +2299,12 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 print_output(cli.format, &render_root_report(&report), &report)?;
             }
             None | Some(RootCommand::Show) => {
+                cli.preflight_implicit_project_root()?;
                 let report = build_root_report(&cli.db, cli.config.as_deref())?;
                 print_output(cli.format, &render_root_report(&report), &report)?;
             }
             Some(RootCommand::Verify) => {
+                cli.preflight_implicit_project_root()?;
                 let report = build_root_report(&cli.db, cli.config.as_deref())?;
                 let verified = report.verified;
                 if verified {
@@ -2284,6 +2317,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             }
         },
         Command::Config { print: _ } => {
+            cli.preflight_implicit_project_root()?;
             let config = load_cli_atlas_config(cli)?;
             let report = effective_config_report(&config);
             print_output(
@@ -2294,7 +2328,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         }
         Command::Ignore { command } => match command {
             IgnoreCommand::List => {
-                let project_root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+                let project_root = cli.project_root()?;
                 let report = list_ignore_entries(cli.config.as_deref(), &project_root)?;
                 print_output(
                     cli.format,
@@ -2303,7 +2337,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 )?;
             }
             IgnoreCommand::InitGitignore => {
-                let project_root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+                let project_root = cli.project_root()?;
                 let report = init_gitignore(cli.config.as_deref(), &project_root)?;
                 print_output(
                     cli.format,
@@ -2312,7 +2346,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 )?;
             }
             IgnoreCommand::Add { kind, value } => {
-                let project_root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+                let project_root = cli.project_root()?;
                 let report =
                     add_ignore_entry(cli.config.as_deref(), &project_root, (*kind).into(), value)?;
                 print_output(
@@ -2322,7 +2356,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 )?;
             }
             IgnoreCommand::Remove { kind, value } => {
-                let project_root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+                let project_root = cli.project_root()?;
                 let report = remove_ignore_entry(
                     cli.config.as_deref(),
                     &project_root,
@@ -2350,7 +2384,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             timeout_seconds,
             text_index_max_bytes,
         } => {
-            let path = defaultable_cli_project_root(path, &cli.db, cli.config.as_deref())?;
+            let path = cli.project_root_for_path(path)?;
             let symbol_options =
                 SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, *max_workers, *timeout_seconds);
             let report = if *once {
@@ -2485,6 +2519,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             report_untracked,
             strict_untracked,
         } => {
+            cli.preflight_implicit_project_root()?;
             let config = load_cli_atlas_config(cli)?;
             let (mut report, mut exit_code) = lint_map(
                 &config,
@@ -2615,7 +2650,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             dry_run,
             strip_source_headers,
         } => {
-            let path = defaultable_cli_project_root(path, &cli.db, cli.config.as_deref())?;
+            let path = cli.project_root_for_path(path)?;
             let report = strip_legacy_purpose(
                 &path,
                 cli.config.as_deref(),
@@ -2634,6 +2669,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             dry_run,
             include_mcp_config,
         } => {
+            cli.preflight_implicit_project_root()?;
             let report = reset_index_files(&cli.db, *apply, *dry_run, *include_mcp_config)?;
             print_output(
                 cli.format,
@@ -2642,6 +2678,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             )?;
         }
         Command::Mcp { nearest_project } => {
+            cli.preflight_implicit_project_root()?;
             mcp::run_mcp_server(
                 cli.db.clone(),
                 cli.config.clone(),
@@ -2654,6 +2691,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             harness,
             nearest_project,
         } => {
+            cli.preflight_implicit_project_root()?;
             let report = build_harness_mcp_config_report(
                 *harness,
                 server_name,
@@ -2936,7 +2974,7 @@ fn database_filesystem_error_payload(
 
 /// Open the selected current index through one root-bound read snapshot.
 fn open_index_for_current_read(cli: &Cli) -> Result<AtlasStore, CliError> {
-    let root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+    let root = cli.project_root()?;
     if !cli.db.is_file() {
         return Err(runtime::index_init_required(&root, &cli.db));
     }
@@ -2945,7 +2983,7 @@ fn open_index_for_current_read(cli: &Cli) -> Result<AtlasStore, CliError> {
 
 /// Open and verify the durable index before a normal CLI read.
 fn open_index_for_read(cli: &Cli) -> Result<AtlasStore, CliError> {
-    let root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+    let root = cli.project_root()?;
     if !cli.db.is_file() {
         return Err(runtime::index_init_required(&root, &cli.db));
     }
@@ -2954,7 +2992,7 @@ fn open_index_for_read(cli: &Cli) -> Result<AtlasStore, CliError> {
 
 /// Open a selected project database for purpose or health mutation.
 fn open_index_for_mutation(cli: &Cli) -> Result<AtlasStore, CliError> {
-    let root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+    let root = cli.project_root()?;
     if !cli.db.is_file() {
         return Err(runtime::index_init_required(&root, &cli.db));
     }

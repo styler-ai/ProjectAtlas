@@ -21,6 +21,7 @@
     "harden-project-path-types": 294,
     "enhance-projectatlas-init-first-run": 305,
     "fix-token-tui-reference-visual-regression": 304,
+    "isolate-effective-git-config-stdin": 409,
     "isolate-linked-worktree-atlases": 382,
     "match-token-impact-reference-tui": 302,
     "migrate-released-database-layouts": 379,
@@ -36,6 +37,7 @@
         }
       ]
     },
+    "prefer-worktree-guidance-before-database-preflight": 412,
     "publish-rustdoc-readme-links": 300,
     "report-installer-host-restart": 383,
     "resolve-configured-module-aliases": 385,
@@ -43,6 +45,7 @@
     "reuse-unchanged-ci-build-layers": 341,
     "show-agent-efficiency-dashboard": 340,
     "simplify-token-tui-dashboard": 296,
+    "stabilize-hostile-parser-fixture-admission": 397,
     "stabilize-parser-recovery-harness": 391
   }
 }
