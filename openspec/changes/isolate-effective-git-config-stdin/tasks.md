@@ -8,4 +8,4 @@
 
 - [x] 2.1 Run the focused regression plus existing linked-worktree, bare-root, wrong-root, missing-index, included-config, and no-implicit-mutation coverage.
 - [x] 2.2 Pass `cargo fmt --all -- --check`, package Clippy with `-D warnings`, strict OpenSpec validation, and `.github/scripts/issue-checklists.py`.
-- [ ] 2.3 Review the exact current-main diff, inspect all hosted review feedback and checks, then land the verified head for v0.4.2.
+- [x] 2.3 Review the exact current-main diff, inspect all hosted review feedback and checks, then land the verified head for v0.4.2.
