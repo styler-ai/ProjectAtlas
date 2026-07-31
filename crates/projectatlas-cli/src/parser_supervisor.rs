@@ -5173,9 +5173,10 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         Worker(ParserFailureCode),
     }
 
+    const CONTROLLED_RECOVERY_PROGRESS_AGE: Duration = Duration::from_millis(550);
+
     struct Case {
         scenario: &'static str,
-        recovery_scenario: &'static str,
         expected: ExpectedFailure,
         source_bytes: usize,
         cancel_before_launch: bool,
@@ -5194,7 +5195,6 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
     fn case(scenario: &'static str, expected: ExpectedFailure) -> io::Result<Case> {
         Ok(Case {
             scenario,
-            recovery_scenario: "healthy",
             expected,
             source_bytes: 32,
             cancel_before_launch: false,
@@ -5514,6 +5514,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
     fn operate(
         peer: &Path,
         case: &Case,
+        initial_progress_age: Duration,
     ) -> Result<ParserCompletionEvidence, ParserSupervisorError> {
         let launch = test_launch(peer).map_err(|source| ParserSupervisorError::IoThread {
             phase: "adversarial test launch",
@@ -5524,13 +5525,14 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         if case.cancel_before_launch {
             cancellation.cancel();
         }
-        let now = Instant::now();
-        let deadline = now.checked_add(case.deadline).unwrap_or(now);
+        let started = Instant::now();
+        let last_progress = started.checked_sub(initial_progress_age).unwrap_or(started);
+        let deadline = started.checked_add(case.deadline).unwrap_or(started);
         let resident = ResidentParserSession::launch_command(
             &launch,
             grammar,
             ParserMemoryLimits::PRODUCTION,
-            now,
+            last_progress,
             deadline,
             case.no_progress,
             &cancellation,
@@ -5591,7 +5593,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
     }
 
     fn require_failure(peer: &Path, hostile: &Case) -> io::Result<()> {
-        let Err(error) = operate(peer, hostile) else {
+        let Err(error) = operate(peer, hostile, Duration::ZERO) else {
             return Err(io::Error::other(format!(
                 "hostile scenario {} unexpectedly succeeded",
                 hostile.scenario
@@ -5610,8 +5612,13 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             )));
         }
 
-        let mut healthy = case(hostile.recovery_scenario, ExpectedFailure::Io)?;
+        let mut healthy = case("healthy", ExpectedFailure::Io)?;
         healthy.no_progress = healthy.deadline;
+        let recovery_progress_age = if hostile.scenario == "pre-ready-stall" {
+            CONTROLLED_RECOVERY_PROGRESS_AGE
+        } else {
+            Duration::ZERO
+        };
         let cleanup_deadline = Instant::now() + healthy.deadline;
         while PROCESS_SPAWN_ACTIVE.load(Ordering::Acquire) && Instant::now() < cleanup_deadline {
             thread::yield_now();
@@ -5624,7 +5631,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         }
         require_process_spawn_cleanup_health()
             .map_err(|error| io::Error::other(error.to_string()))?;
-        let evidence = operate(peer, &healthy).map_err(|error| {
+        let evidence = operate(peer, &healthy, recovery_progress_age).map_err(|error| {
             io::Error::other(format!(
                 "healthy restart after {} failed: {error:?}",
                 hostile.scenario
@@ -5644,11 +5651,7 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             opening_cancel.cancel_before_launch = true;
             opening_cancel
         },
-        {
-            let mut pre_ready_stall = case("pre-ready-stall", ExpectedFailure::NoProgress)?;
-            pre_ready_stall.recovery_scenario = "healthy-delayed";
-            pre_ready_stall
-        },
+        case("pre-ready-stall", ExpectedFailure::NoProgress)?,
         case("ready-session", ExpectedFailure::Ready("session"))?,
         case("ready-artifact", ExpectedFailure::Ready("artifact"))?,
         case("ready-containment", ExpectedFailure::Ready("containment"))?,
