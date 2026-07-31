@@ -15190,7 +15190,7 @@ fn notify_watch_refreshes_symbols_after_file_change() -> Result<(), Box<dyn Erro
     let db = temp.path().join("projectatlas.db");
 
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
-    let mut child = StdCommand::new(executable)
+    let mut child = StdCommand::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -15198,7 +15198,54 @@ fn notify_watch_refreshes_symbols_after_file_change() -> Result<(), Box<dyn Erro
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    thread::sleep(Duration::from_millis(750));
+    let readiness_started = Instant::now();
+    let mut last_observation: String;
+    loop {
+        let initial_symbol_is_published = match AtlasStore::open_read_only(&db)
+            .and_then(|store| store.load_symbols(Some("src/lib.rs"), None, 2))
+        {
+            Ok(symbols) => {
+                let exact_initial = matches!(
+                    symbols.as_slice(),
+                    [symbol] if symbol.path == "src/lib.rs" && symbol.name == "initial"
+                );
+                last_observation = format!("symbols query returned {symbols:?}");
+                exact_initial
+            }
+            Err(error) => {
+                last_observation = format!("symbols query failed: {error}");
+                false
+            }
+        };
+        if let Some(status) = child.try_wait()? {
+            let output = child.wait_with_output()?;
+            return Err(io::Error::other(format!(
+                "projectatlas watch exited before initial symbol readiness: status={status}; {last_observation}; stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        if initial_symbol_is_published {
+            break;
+        }
+        if readiness_started.elapsed() > Duration::from_secs(15) {
+            if child.try_wait()?.is_none() {
+                child.kill()?;
+            }
+            let output = child.wait_with_output()?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "projectatlas watch did not publish the exact initial symbol within 15 seconds: {last_observation}; stdout={} stderr={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
     fs::write(
         repo.join(SRC_DIR_NAME).join("lib.rs"),
         "pub fn changed() {\n    initial();\n}\n\npub fn initial() {}\n",
