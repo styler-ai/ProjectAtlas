@@ -28,4 +28,4 @@ The change affects only the existing compiler-configuration byte loader in `proj
 - Rewriting user configuration files or changing alias-resolution semantics.
 - Changing file-size accounting, source-currentness checks, refresh routing, or database publication.
 
-This v0.4.2 bug fix is ready for implementation.
+This v0.4.3 bug fix is ready for implementation.
