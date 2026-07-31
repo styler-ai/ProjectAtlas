@@ -5173,6 +5173,8 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         Worker(ParserFailureCode),
     }
 
+    const RECOVERY_ALLOWANCE_PROBE_AGE: Duration = Duration::from_millis(550);
+
     struct Case {
         scenario: &'static str,
         expected: ExpectedFailure,
@@ -5610,6 +5612,15 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
 
         let mut healthy = case("healthy", ExpectedFailure::Io)?;
         healthy.no_progress = healthy.deadline;
+        if hostile.scenario == "pre-ready-stall"
+            && !(hostile.no_progress < RECOVERY_ALLOWANCE_PROBE_AGE
+                && RECOVERY_ALLOWANCE_PROBE_AGE < healthy.no_progress)
+        {
+            return Err(io::Error::other(format!(
+                "controlled recovery age {:?} must exceed hostile allowance {:?} and remain below healthy allowance {:?}",
+                RECOVERY_ALLOWANCE_PROBE_AGE, hostile.no_progress, healthy.no_progress
+            )));
+        }
         let cleanup_deadline = Instant::now() + healthy.deadline;
         while PROCESS_SPAWN_ACTIVE.load(Ordering::Acquire) && Instant::now() < cleanup_deadline {
             thread::yield_now();
