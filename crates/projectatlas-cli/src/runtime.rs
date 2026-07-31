@@ -1995,6 +1995,7 @@ fn effective_git_config_bare_setting(
             "--bool",
             "core.bare",
         ])
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
