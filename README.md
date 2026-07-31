@@ -24,9 +24,10 @@ ProjectAtlas is a native Rust CLI and MCP server that keeps a project-local map 
 
 The map is deliberately agent-first: purposes identify the responsible area, graph relationships reveal connected code, compact summaries and outlines explain the selected files, and exact source slices provide the final evidence. Agents narrow before they read broadly.
 
-No required `.purpose` files. No source-header tax. No hosted index or credentials. Project state lives beside the repository in `.projectatlas/`.
 
 ## Install
+
+Point your agent to the ProjectAtlas GitHub repository and ask it to install the latest version of ProjectAtlas.
 
 The Codex plugin is the recommended path:
 
