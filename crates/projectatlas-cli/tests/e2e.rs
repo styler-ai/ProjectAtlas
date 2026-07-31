@@ -15190,7 +15190,7 @@ fn notify_watch_refreshes_symbols_after_file_change() -> Result<(), Box<dyn Erro
     let db = temp.path().join("projectatlas.db");
 
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
-    let mut child = StdCommand::new(executable)
+    let mut child = StdCommand::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -15198,7 +15198,54 @@ fn notify_watch_refreshes_symbols_after_file_change() -> Result<(), Box<dyn Erro
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    thread::sleep(Duration::from_millis(750));
+    let readiness_started = Instant::now();
+    let mut last_observation: String;
+    loop {
+        let initial_symbol_is_published = match AtlasStore::open_read_only(&db)
+            .and_then(|store| store.load_symbols(Some("src/lib.rs"), None, 2))
+        {
+            Ok(symbols) => {
+                let exact_initial = matches!(
+                    symbols.as_slice(),
+                    [symbol] if symbol.path == "src/lib.rs" && symbol.name == "initial"
+                );
+                last_observation = format!("symbols query returned {symbols:?}");
+                exact_initial
+            }
+            Err(error) => {
+                last_observation = format!("symbols query failed: {error}");
+                false
+            }
+        };
+        if let Some(status) = child.try_wait()? {
+            let output = child.wait_with_output()?;
+            return Err(io::Error::other(format!(
+                "projectatlas watch exited before initial symbol readiness: status={status}; {last_observation}; stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        if initial_symbol_is_published {
+            break;
+        }
+        if readiness_started.elapsed() > Duration::from_secs(15) {
+            if child.try_wait()?.is_none() {
+                child.kill()?;
+            }
+            let output = child.wait_with_output()?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "projectatlas watch did not publish the exact initial symbol within 15 seconds: {last_observation}; stdout={} stderr={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
     fs::write(
         repo.join(SRC_DIR_NAME).join("lib.rs"),
         "pub fn changed() {\n    initial();\n}\n\npub fn initial() {}\n",
@@ -16823,41 +16870,52 @@ fn exercise_normal_read_freshness(
         .join(SESSION_TEST_FILE_NAME)
         .to_string_lossy()
         .to_string();
-    let stale_messages = vec![
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":"src/lib.rs"}}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_search","arguments":{"pattern":"legacy_store","file_pattern":"*.rs"}}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"file":"src/lib.rs"}}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_files","arguments":{"file_pattern":"tests/*.rs"}}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"atlas_slice","arguments":{"file":"src/lib.rs","symbol":"legacy_store"}}}"#.to_string(),
-        serde_json::json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":deleted_absolute_selector}}}).to_string(),
+    let stale_reads = [
+        (
+            "atlas_file_summary",
+            serde_json::json!({"file": "src/lib.rs"}),
+        ),
+        (
+            "atlas_search",
+            serde_json::json!({"pattern": "legacy_store", "file_pattern": "*.rs"}),
+        ),
+        (
+            "atlas_symbol_relations",
+            serde_json::json!({"file": "src/lib.rs"}),
+        ),
+        (
+            "atlas_files",
+            serde_json::json!({"file_pattern": "tests/*.rs"}),
+        ),
+        (
+            "atlas_slice",
+            serde_json::json!({"file": "src/lib.rs", "symbol": "legacy_store"}),
+        ),
+        (
+            "atlas_file_summary",
+            serde_json::json!({"file": deleted_absolute_selector}),
+        ),
     ];
-    let stale_stdout = run_mcp_stdio(
-        &executable,
-        repo,
-        &[
-            "--db".to_string(),
-            db.display().to_string(),
-            "mcp".to_string(),
-        ],
-        &stale_messages,
-    )?;
-    for id in 2..=7 {
-        let tool_text = mcp_tool_text(&stale_stdout, id)?;
-        if !tool_text.contains("kind: refresh_required")
-            || !tool_text.contains("status: refresh_required")
-            || !tool_text.contains("tool: atlas_watch_once")
-            || !tool_text.contains("changed:")
-            || tool_text.contains("changed: 0")
-            || tool_text.contains("legacy_store")
-        {
-            return Err(io::Error::other(format!(
-                "stale MCP read {id} did not return the typed fail-closed state: {tool_text}"
-            ))
-            .into());
+    let mut stale_session = McpContractSession::spawn(&executable, repo, db)?;
+    let stale_result = (|| -> Result<(), Box<dyn Error>> {
+        for (tool, arguments) in stale_reads {
+            let tool_text = stale_session.call_tool(tool, &arguments)?;
+            if !tool_text.contains("kind: refresh_required")
+                || !tool_text.contains("status: refresh_required")
+                || !tool_text.contains("tool: atlas_watch_once")
+                || !tool_text.contains("changed:")
+                || tool_text.contains("changed: 0")
+                || tool_text.contains("legacy_store")
+            {
+                return Err(io::Error::other(format!(
+                    "stale MCP read {tool} did not return the typed fail-closed state: {tool_text}"
+                ))
+                .into());
+            }
         }
-    }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(stale_result, || stale_session.shutdown())?;
 
     Command::cargo_bin("projectatlas")?
         .current_dir(repo)
@@ -21012,22 +21070,21 @@ fn run_mcp_contract_inventory(
     cwd: &Path,
     database: &Path,
 ) -> Result<String, Box<dyn Error>> {
-    let messages = [
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-mcp-contract","version":"0.4.0"}}}"#,
-        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
-    ];
-    run_mcp_stdio_with_env(
+    let (mut session, initialized) = McpContractSession::spawn_initialized(
         executable,
         cwd,
-        &[
-            "--db".to_string(),
-            database.display().to_string(),
-            "mcp".to_string(),
-        ],
-        &messages,
+        database,
         &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
-    )
+    )?;
+    let operation_result = (|| -> Result<String, Box<dyn Error>> {
+        let tools = session.request("tools/list", &serde_json::json!({}))?;
+        Ok(format!(
+            "{}\n{}\n",
+            serde_json::to_string(&initialized)?,
+            serde_json::to_string(&tools)?
+        ))
+    })();
+    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())
 }
 
 /// Execute one advertised tool through its own real stdio process.
@@ -21070,39 +21127,26 @@ fn run_mcp_contract_raw_call(
     arguments: &Value,
     telemetry_enabled: bool,
 ) -> Result<(Value, String), Box<dyn Error>> {
-    let messages = [
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-mcp-contract","version":"0.4.0"}}}"#.to_string(),
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {}
-        })
-        .to_string(),
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {
-                "name": name,
-                "arguments": arguments,
-            }
-        })
-        .to_string(),
-    ];
     let telemetry = if telemetry_enabled { None } else { Some("1") };
-    let stdout = run_mcp_stdio_with_env(
+    let (mut session, initialized) = McpContractSession::spawn_initialized(
         executable,
         cwd,
-        &[
-            "--db".to_string(),
-            database.display().to_string(),
-            "mcp".to_string(),
-        ],
-        &messages,
+        database,
         &[("PROJECTATLAS_NO_TELEMETRY", telemetry)],
     )?;
-    let response = mcp_response(&stdout, 2)?;
-    Ok((response, stdout))
+    let operation_result = (|| -> Result<(Value, String), Box<dyn Error>> {
+        let response = session.request(
+            "tools/call",
+            &serde_json::json!({"name": name, "arguments": arguments}),
+        )?;
+        let stdout = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&initialized)?,
+            serde_json::to_string(&response)?
+        );
+        Ok((response, stdout))
+    })();
+    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())
 }
 
 /// Require an invalid real MCP call to fail without changing logical `SQLite` state.
@@ -21352,7 +21396,40 @@ fn mcp_source_publication_table(table: &str) -> bool {
     ) || table.starts_with("file_text_fts")
 }
 
-/// Persistent real MCP session used for ordered task cancellation.
+fn complete_mcp_test_after_shutdown<T>(
+    operation_result: Result<T, Box<dyn Error>>,
+    shutdown: impl FnOnce() -> Result<(), Box<dyn Error>>,
+) -> Result<T, Box<dyn Error>> {
+    let shutdown_result = shutdown();
+    let value = operation_result?;
+    shutdown_result?;
+    Ok(value)
+}
+
+#[test]
+fn mcp_test_shutdown_runs_after_primary_failure_without_hiding_it() -> Result<(), Box<dyn Error>> {
+    let mut shutdown_attempted = false;
+    let result = complete_mcp_test_after_shutdown(
+        Err::<(), Box<dyn Error>>(io::Error::other("primary MCP test failure").into()),
+        || {
+            shutdown_attempted = true;
+            Err(io::Error::other("secondary MCP shutdown failure").into())
+        },
+    );
+    if !shutdown_attempted {
+        return Err(io::Error::other("MCP test shutdown was not attempted").into());
+    }
+    match result {
+        Err(error) if error.to_string() == "primary MCP test failure" => Ok(()),
+        Err(error) => Err(io::Error::other(format!(
+            "MCP shutdown hid the primary test failure: {error}"
+        ))
+        .into()),
+        Ok(()) => Err(io::Error::other("MCP test failure was discarded").into()),
+    }
+}
+
+/// Persistent real MCP session used by E2E contract clients.
 struct McpContractSession {
     child: Option<Child>,
     stdin: Option<ChildStdin>,
@@ -21365,16 +21442,39 @@ struct McpContractSession {
 impl McpContractSession {
     /// Spawn and initialize one telemetry-disabled release-candidate MCP process.
     fn spawn(executable: &Path, repo: &Path, database: &Path) -> Result<Self, Box<dyn Error>> {
-        let mut child = StdCommand::new(executable)
+        let (session, _initialized) = Self::spawn_initialized(
+            executable,
+            repo,
+            database,
+            &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        )?;
+        Ok(session)
+    }
+
+    /// Spawn and initialize one release-candidate MCP process.
+    fn spawn_initialized(
+        executable: &Path,
+        repo: &Path,
+        database: &Path,
+        environment: &[(&str, Option<&str>)],
+    ) -> Result<(Self, Value), Box<dyn Error>> {
+        let mut command = StdCommand::new(executable);
+        command
             .current_dir(repo)
             .arg("--db")
             .arg(database)
             .arg("mcp")
-            .env("PROJECTATLAS_NO_TELEMETRY", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        for (key, value) in environment {
+            if let Some(value) = value {
+                command.env(key, value);
+            } else {
+                command.env_remove(key);
+            }
+        }
+        let mut child = command.spawn()?;
         let stdin = child
             .stdin
             .take()
@@ -21419,22 +21519,28 @@ impl McpContractSession {
             stderr_reader: Some(stderr_reader),
             next_request_id: 1,
         };
-        let initialized = session.request(
-            "initialize",
-            &serde_json::json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "projectatlas-mcp-contract",
-                    "version": "0.4.0"
-                }
-            }),
-        )?;
-        if initialized.get("result").is_none() {
-            return Err(io::Error::other("MCP contract initialize omitted result").into());
+        let operation_result = (|| -> Result<Value, Box<dyn Error>> {
+            let initialized = session.request(
+                "initialize",
+                &serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "projectatlas-mcp-contract",
+                        "version": "0.4.0"
+                    }
+                }),
+            )?;
+            if initialized.get("result").is_none() {
+                return Err(io::Error::other("MCP contract initialize omitted result").into());
+            }
+            session.notify("notifications/initialized", &serde_json::json!({}))?;
+            Ok(initialized)
+        })();
+        match operation_result {
+            Ok(initialized) => Ok((session, initialized)),
+            Err(error) => complete_mcp_test_after_shutdown(Err(error), || session.shutdown()),
         }
-        session.notify("notifications/initialized", &serde_json::json!({}))?;
-        Ok(session)
     }
 
     /// Call one real MCP tool and return its text payload.
