@@ -21023,22 +21023,21 @@ fn run_mcp_contract_inventory(
     cwd: &Path,
     database: &Path,
 ) -> Result<String, Box<dyn Error>> {
-    let messages = [
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-mcp-contract","version":"0.4.0"}}}"#,
-        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
-    ];
-    run_mcp_stdio_with_env(
+    let (mut session, initialized) = McpContractSession::spawn_initialized(
         executable,
         cwd,
-        &[
-            "--db".to_string(),
-            database.display().to_string(),
-            "mcp".to_string(),
-        ],
-        &messages,
+        database,
         &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
-    )
+    )?;
+    let operation_result = (|| -> Result<String, Box<dyn Error>> {
+        let tools = session.request("tools/list", &serde_json::json!({}))?;
+        Ok(format!(
+            "{}\n{}\n",
+            serde_json::to_string(&initialized)?,
+            serde_json::to_string(&tools)?
+        ))
+    })();
+    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())
 }
 
 /// Execute one advertised tool through its own real stdio process.
@@ -21081,39 +21080,26 @@ fn run_mcp_contract_raw_call(
     arguments: &Value,
     telemetry_enabled: bool,
 ) -> Result<(Value, String), Box<dyn Error>> {
-    let messages = [
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-mcp-contract","version":"0.4.0"}}}"#.to_string(),
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {}
-        })
-        .to_string(),
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {
-                "name": name,
-                "arguments": arguments,
-            }
-        })
-        .to_string(),
-    ];
     let telemetry = if telemetry_enabled { None } else { Some("1") };
-    let stdout = run_mcp_stdio_with_env(
+    let (mut session, initialized) = McpContractSession::spawn_initialized(
         executable,
         cwd,
-        &[
-            "--db".to_string(),
-            database.display().to_string(),
-            "mcp".to_string(),
-        ],
-        &messages,
+        database,
         &[("PROJECTATLAS_NO_TELEMETRY", telemetry)],
     )?;
-    let response = mcp_response(&stdout, 2)?;
-    Ok((response, stdout))
+    let operation_result = (|| -> Result<(Value, String), Box<dyn Error>> {
+        let response = session.request(
+            "tools/call",
+            &serde_json::json!({"name": name, "arguments": arguments}),
+        )?;
+        let stdout = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&initialized)?,
+            serde_json::to_string(&response)?
+        );
+        Ok((response, stdout))
+    })();
+    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())
 }
 
 /// Require an invalid real MCP call to fail without changing logical `SQLite` state.
@@ -21396,7 +21382,7 @@ fn mcp_test_shutdown_runs_after_primary_failure_without_hiding_it() -> Result<()
     }
 }
 
-/// Persistent real MCP session used for ordered task cancellation.
+/// Persistent real MCP session used by E2E contract clients.
 struct McpContractSession {
     child: Option<Child>,
     stdin: Option<ChildStdin>,
@@ -21409,16 +21395,39 @@ struct McpContractSession {
 impl McpContractSession {
     /// Spawn and initialize one telemetry-disabled release-candidate MCP process.
     fn spawn(executable: &Path, repo: &Path, database: &Path) -> Result<Self, Box<dyn Error>> {
-        let mut child = StdCommand::new(executable)
+        let (session, _initialized) = Self::spawn_initialized(
+            executable,
+            repo,
+            database,
+            &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        )?;
+        Ok(session)
+    }
+
+    /// Spawn and initialize one release-candidate MCP process.
+    fn spawn_initialized(
+        executable: &Path,
+        repo: &Path,
+        database: &Path,
+        environment: &[(&str, Option<&str>)],
+    ) -> Result<(Self, Value), Box<dyn Error>> {
+        let mut command = StdCommand::new(executable);
+        command
             .current_dir(repo)
             .arg("--db")
             .arg(database)
             .arg("mcp")
-            .env("PROJECTATLAS_NO_TELEMETRY", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        for (key, value) in environment {
+            if let Some(value) = value {
+                command.env(key, value);
+            } else {
+                command.env_remove(key);
+            }
+        }
+        let mut child = command.spawn()?;
         let stdin = child
             .stdin
             .take()
@@ -21463,22 +21472,28 @@ impl McpContractSession {
             stderr_reader: Some(stderr_reader),
             next_request_id: 1,
         };
-        let initialized = session.request(
-            "initialize",
-            &serde_json::json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "projectatlas-mcp-contract",
-                    "version": "0.4.0"
-                }
-            }),
-        )?;
-        if initialized.get("result").is_none() {
-            return Err(io::Error::other("MCP contract initialize omitted result").into());
+        let operation_result = (|| -> Result<Value, Box<dyn Error>> {
+            let initialized = session.request(
+                "initialize",
+                &serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "projectatlas-mcp-contract",
+                        "version": "0.4.0"
+                    }
+                }),
+            )?;
+            if initialized.get("result").is_none() {
+                return Err(io::Error::other("MCP contract initialize omitted result").into());
+            }
+            session.notify("notifications/initialized", &serde_json::json!({}))?;
+            Ok(initialized)
+        })();
+        match operation_result {
+            Ok(initialized) => Ok((session, initialized)),
+            Err(error) => complete_mcp_test_after_shutdown(Err(error), || session.shutdown()),
         }
-        session.notify("notifications/initialized", &serde_json::json!({}))?;
-        Ok(session)
     }
 
     /// Call one real MCP tool and return its text payload.

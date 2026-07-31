@@ -1,19 +1,21 @@
 ## Why
 
-The MCP freshness E2E closes stdin immediately after sending six accepted read requests, so RMCP's bounded post-EOF drain can discard a varying unfinished response under load. The v0.4.2 gate must test stale-read behavior deterministically instead of depending on shutdown timing.
+Two release-mandatory MCP E2E paths close stdin immediately after sending accepted requests, so RMCP's bounded post-EOF drain can discard a varying unfinished response under load. The stale-read gate exposed the race first; the v0.4.2 Windows release gate then lost the all-tools inventory response after the #409 persistent-session regression had passed. Release tests must observe their required responses deterministically instead of depending on shutdown timing.
 
 ## What Changes
 
-- Reuse the existing persistent MCP contract session for the six stale-read adapter checks.
-- Keep the session input open until each accepted request receives its response, then attempt explicit bounded shutdown on both success and failure.
+- Reuse the existing persistent MCP contract session for the six stale-read adapter checks, the all-tools inventory, and each advertised-tool contract call.
+- Complete the MCP initialization handshake and keep session input open until every required response arrives.
+- Attempt explicit bounded shutdown after both successful validation and request/assertion failure.
 - Preserve one MCP server and project binding plus every exact typed `refresh_required` assertion.
+- Keep the release-mandatory persistent #409 and all-advertised-tool contracts deterministic.
 - Keep production MCP, freshness, cancellation, storage, dependencies, and public contracts unchanged.
 
 ## Non-Goals
 
 - Increasing RMCP's post-EOF drain timeout or changing production shutdown behavior.
-- Adding a concurrent-read contract to this stale-state test.
-- Adding another session abstraction or launching one server per tool.
+- Changing the generic EOF-bounded batch helper or adding a concurrent-read contract to sequential release checks.
+- Adding another session abstraction or changing the existing one-process-per-contract isolation.
 
 This bugfix is ready for implementation in v0.4.2.
 

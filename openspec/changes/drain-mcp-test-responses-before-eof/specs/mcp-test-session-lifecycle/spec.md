@@ -7,6 +7,10 @@ An MCP E2E client that requires responses from accepted requests SHALL keep its 
 - **WHEN** one persistent test session issues several accepted tool requests
 - **THEN** the client receives and validates each corresponding response before closing stdin
 
+#### Scenario: All advertised tools preserve required responses
+- **WHEN** the release E2E inventories the MCP surface or invokes one advertised tool contract
+- **THEN** the client completes initialization, keeps stdin open, and receives the required inventory or tool response before shutting down
+
 #### Scenario: Explicit bounded shutdown after success or failure
 - **WHEN** the final response is validated or a request or assertion fails
 - **THEN** the client attempts to close and reap the one persistent MCP child within the existing bound before returning the primary result
