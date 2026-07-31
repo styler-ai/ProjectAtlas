@@ -5,7 +5,7 @@ ProjectAtlas can deadlock its effective local Git-config probe when an MCP serve
 ## What Changes
 
 - Give the effective `core.bare` Git subprocess a closed stdin instead of inheriting the CLI or MCP transport.
-- Add a real persistent-stdio MCP regression that exercises `atlas_session_brief`, `atlas_root`, and `atlas_init`, followed by an immediate root query in the same session.
+- Add a real persistent-stdio MCP regression that exercises `atlas_session_brief`, `atlas_root`, and `atlas_init`, followed by an immediate root query in the same session, and run it in the cross-platform E2E matrix.
 - Keep the existing timeout, bounded output, exit handling, and root-classification behavior unchanged.
 
 ## Capabilities
@@ -20,7 +20,7 @@ None.
 
 ## Impact
 
-- Affects the shared Git `core.bare` probe in `projectatlas-cli` and its CLI/MCP end-to-end tests.
+- Affects the shared Git `core.bare` probe in `projectatlas-cli`, its CLI/MCP end-to-end tests, and the existing cross-platform E2E CI matrix.
 - Adds no dependency, public API, schema, migration, or protocol change.
 - Ready for implementation in the v0.4.2 bugfix release.
 
