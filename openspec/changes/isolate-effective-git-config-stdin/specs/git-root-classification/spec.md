@@ -4,8 +4,8 @@
 ProjectAtlas SHALL run its effective local Git `core.bare` query with a closed child stdin so root classification never waits for CLI or MCP transport input.
 
 #### Scenario: Persistent MCP transport remains open
-- **WHEN** an MCP client keeps the server stdin open while calling `atlas_session_brief`, `atlas_root`, or `atlas_init`
-- **THEN** each tool completes its Git-root classification without waiting for transport shutdown
+- **WHEN** an MCP client keeps the server stdin open while calling `atlas_session_brief`, `atlas_root`, `atlas_init`, `atlas_overview`, `atlas_folders`, `atlas_files`, `atlas_file_summary`, `atlas_outline`, `atlas_search`, and `atlas_slice`
+- **THEN** the complete startup and agent-navigation path responds without waiting for transport shutdown
 
 #### Scenario: Session remains reusable
 - **WHEN** the client calls another root-sensitive tool immediately after the startup probes

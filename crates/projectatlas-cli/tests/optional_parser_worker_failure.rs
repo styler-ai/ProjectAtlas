@@ -791,9 +791,11 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
     let mut scan = ScanProcess::spawn(&repo, &host)?;
     let runtime = wait_for_runtime_processes(&mut scan, PROCESS_DISCOVERY_TIMEOUT)?;
     let tracked = runtime.tracked();
+    let mut suspended = SuspendedProcess::suspend(runtime.worker.clone())?;
     terminate_process(&runtime.worker)?;
     let output = scan.finish(PROCESS_EXIT_TIMEOUT)?;
     wait_for_process_cleanup(&tracked, PROCESS_CLEANUP_TIMEOUT)?;
+    suspended.disarm_after_exit();
     require_optional_worker_failure(&output)?;
     let retained_store = AtlasStore::open_read_only(&database)?;
     let retained_publication = retained_store

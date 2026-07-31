@@ -221,6 +221,22 @@ jobs:
           if ($contracts.Count -ne 1) {
             throw "Expected one compiled packaged contract runner, found $($contracts.Count)."
           }
+          & $contracts[0].FullName persistent_mcp_stdin_does_not_block_repository_startup_probes --exact --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            throw "Persistent MCP Git config stdin release regression failed with exit code $LASTEXITCODE."
+          }
+          & $contracts[0].FullName mcp_advertised_tools_own_their_real_sqlite_effects --exact --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            throw "Advertised MCP tool contract release regression failed with exit code $LASTEXITCODE."
+          }
+          & $contracts[0].FullName implicit_bare_root --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bare-root database preflight release regression failed with exit code $LASTEXITCODE."
+          }
+          & $contracts[0].FullName generated_mcp_config_preserves_explicit_conventional_database_authority --exact --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            throw "Generated MCP database authority release regression failed with exit code $LASTEXITCODE."
+          }
           New-Item -ItemType Directory -Force -Path "contract-artifacts" | Out-Null
           Copy-Item -LiteralPath $contracts[0].FullName -Destination "contract-artifacts\projectatlas-packaged-contract.exe"
 

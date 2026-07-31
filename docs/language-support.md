@@ -2,7 +2,7 @@
 
 This document is generated from the versioned Rust language capability registry. Do not edit the capability table or totals by hand. Canonical rows count once; aliases and extensions never increase a capability total.
 
-Registry version: `3`. Accepted capability-set version: `4`. Detection policy version: `1`. Registry digest: `e9a952d0b3bc2d2c5db832130d85b7cdfd656aaa07ebbafab1505da6b87d9084`. Accepted-set digest: `e9a952d0b3bc2d2c5db832130d85b7cdfd656aaa07ebbafab1505da6b87d9084`. Semantic-provider digest: `b26c4aa768ebe3bb185d5929350d2f41c6b1b2f93630080248dec7eb6ec00e82`.
+Registry version: `3`. Accepted capability-set version: `5`. Detection policy version: `1`. Registry digest: `07a3d2c45a4736bc764e44016a6ba9b7f9ea1b769b0100604702160528679bc7`. Accepted-set digest: `07a3d2c45a4736bc764e44016a6ba9b7f9ea1b769b0100604702160528679bc7`. Semantic-provider digest: `b26c4aa768ebe3bb185d5929350d2f41c6b1b2f93630080248dec7eb6ec00e82`.
 
 Optional catalog input: `tree-sitter-language-pack@1.13.2` revision `6258abac30304283763a0d2dc8a48cb87fbcf438` under `MIT` metadata license. This catalog identity is not a grammar-license or runtime-support claim.
 
@@ -30,53 +30,53 @@ Broad candidate rows are admitted only when the pinned catalog supplies a stable
 | `cpp` | `c++` | `.cpp`, `.cxx`, `.cc` | tree-sitter-cpp@0.23.4 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-cpp@0.23.4` | `MIT` |
 | `h` | — | `.h` | tree-sitter-c@0.24.2 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-c@0.24.2` | `MIT` |
 | `hpp` | — | `.hpp`, `.hxx`, `.hh` | tree-sitter-cpp@0.23.4 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-cpp@0.23.4` | `MIT` |
-| `cargo-manifest` | — | exact `Cargo.toml` | projectatlas:cargo-manifest | supported | supported | supported (cargo) | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `cargo-lock` | — | exact `Cargo.lock` | projectatlas:cargo-manifest | supported | supported | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `vue` | — | `.vue` | projectatlas:vue | supported | supported | unavailable | component → ecma-script | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `markdown` | `md` | `.md`, `.mdx` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `json` | — | `.json`, `.jsonc` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `yaml` | `yml` | `.yml`, `.yaml` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `css` | — | `.css`, `.scss`, `.sass`, `.less`, `.stylus`, `.styl` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `html` | — | `.html`, `.htm` | unavailable | supported | unavailable | unavailable | html-like → ecma-script | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `toon` | — | `.toon` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `dockerfile` | — | exact `Dockerfile` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `makefile` | — | exact `Makefile` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `text` | `txt` | `.txt` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `toml` | — | `.toml` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `xml` | — | `.xml` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `svelte` | — | `.svelte` | projectatlas:fallback | fallback | fallback | unavailable | template → ecma-script | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `astro` | — | `.astro` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `jsp` | — | `.jsp`, `.jspx`, `.jspf` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `jsp-tag` | — | `.tag`, `.tagx` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `gsp` | — | `.gsp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `groovy` | — | `.gradle`, `.groovy` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `protobuf` | `proto` | `.proto` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `handlebars` | `hbs` | `.hbs`, `.handlebars` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `ejs` | — | `.ejs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `pug` | — | `.pug` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `freemarker` | `ftl` | `.ftl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `mustache` | — | `.mustache` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `liquid` | — | `.liquid` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `erb` | — | `.erb` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `sql` | — | `.sql`, `.ddl`, `.dml`, `.mysql`, `.postgresql`, `.psql`, `.sqlite`, `.mssql`, `.oracle`, `.ora`, `.db2`, `.proc`, `.procedure`, `.func`, `.function`, `.view`, `.trigger`, `.index`, `.migration`, `.seed`, `.fixture`, `.schema`, `.cql`, `.cypher`, `.sparql`, `.liquibase`, `.flyway` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `graphql` | `gql` | `.gql` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `config` | — | `.ini`, `.cfg`, `.conf`, `.properties`, `.env`, `.gitignore`, `.dockerignore`, `.editorconfig` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `ruby` | `rb` | `.rb`, shebang `ruby` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `php` | — | `.php` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `swift` | — | `.swift` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `scala` | — | `.scala` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `shell` | `sh` | `.sh`, `.bash`, `.zsh`, shebang `sh`, shebang `bash`, shebang `dash`, shebang `ash`, shebang `zsh`, shebang `ksh`, shebang `mksh`, shebang `fish` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `powershell` | `pwsh` | `.ps1`, `.psm1`, `.psd1`, shebang `powershell`, shebang `pwsh` | projectatlas:powershell | supported | supported | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `batch` | — | `.bat`, `.cmd` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `r` | `rscript` | `.r`, `.R`, shebang `rscript` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `perl` | — | `.pl`, `.pm`, shebang `perl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `lua` | — | `.lua`, shebang `lua` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `dart` | — | `.dart` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `haskell` | `hs` | `.hs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `ocaml` | — | `.ml`, `.mli` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `fsharp` | `f#` | `.fs`, `.fsx` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `clojure` | `clj` | `.clj`, `.cljs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
-| `vim` | `vimscript` | `.vim` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.1` | `MIT` |
+| `cargo-manifest` | — | exact `Cargo.toml` | projectatlas:cargo-manifest | supported | supported | supported (cargo) | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `cargo-lock` | — | exact `Cargo.lock` | projectatlas:cargo-manifest | supported | supported | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `vue` | — | `.vue` | projectatlas:vue | supported | supported | unavailable | component → ecma-script | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `markdown` | `md` | `.md`, `.mdx` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `json` | — | `.json`, `.jsonc` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `yaml` | `yml` | `.yml`, `.yaml` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `css` | — | `.css`, `.scss`, `.sass`, `.less`, `.stylus`, `.styl` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `html` | — | `.html`, `.htm` | unavailable | supported | unavailable | unavailable | html-like → ecma-script | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `toon` | — | `.toon` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `dockerfile` | — | exact `Dockerfile` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `makefile` | — | exact `Makefile` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `text` | `txt` | `.txt` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `toml` | — | `.toml` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `xml` | — | `.xml` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `svelte` | — | `.svelte` | projectatlas:fallback | fallback | fallback | unavailable | template → ecma-script | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `astro` | — | `.astro` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `jsp` | — | `.jsp`, `.jspx`, `.jspf` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `jsp-tag` | — | `.tag`, `.tagx` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `gsp` | — | `.gsp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `groovy` | — | `.gradle`, `.groovy` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `protobuf` | `proto` | `.proto` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `handlebars` | `hbs` | `.hbs`, `.handlebars` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `ejs` | — | `.ejs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `pug` | — | `.pug` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `freemarker` | `ftl` | `.ftl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `mustache` | — | `.mustache` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `liquid` | — | `.liquid` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `erb` | — | `.erb` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `sql` | — | `.sql`, `.ddl`, `.dml`, `.mysql`, `.postgresql`, `.psql`, `.sqlite`, `.mssql`, `.oracle`, `.ora`, `.db2`, `.proc`, `.procedure`, `.func`, `.function`, `.view`, `.trigger`, `.index`, `.migration`, `.seed`, `.fixture`, `.schema`, `.cql`, `.cypher`, `.sparql`, `.liquibase`, `.flyway` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `graphql` | `gql` | `.gql` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `config` | — | `.ini`, `.cfg`, `.conf`, `.properties`, `.env`, `.gitignore`, `.dockerignore`, `.editorconfig` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `ruby` | `rb` | `.rb`, shebang `ruby` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `php` | — | `.php` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `swift` | — | `.swift` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `scala` | — | `.scala` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `shell` | `sh` | `.sh`, `.bash`, `.zsh`, shebang `sh`, shebang `bash`, shebang `dash`, shebang `ash`, shebang `zsh`, shebang `ksh`, shebang `mksh`, shebang `fish` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `powershell` | `pwsh` | `.ps1`, `.psm1`, `.psd1`, shebang `powershell`, shebang `pwsh` | projectatlas:powershell | supported | supported | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `batch` | — | `.bat`, `.cmd` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `r` | `rscript` | `.r`, `.R`, shebang `rscript` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `perl` | — | `.pl`, `.pm`, shebang `perl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `lua` | — | `.lua`, shebang `lua` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `dart` | — | `.dart` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `haskell` | `hs` | `.hs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `ocaml` | — | `.ml`, `.mli` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `fsharp` | `f#` | `.fs`, `.fsx` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `clojure` | `clj` | `.clj`, `.cljs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
+| `vim` | `vimscript` | `.vim` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.2` | `MIT` |
 | `abl` | — | `.p` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
 | `actionscript` | — | `.as` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
 | `ada` | — | `.ada` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
@@ -288,7 +288,7 @@ Broad candidate rows are admitted only when the pinned catalog supplies a stable
 
 ## Language & Ecosystem Support
 
-Complete-support schema version: `1`. Ecosystem catalog version: `1`. Catalog digest: `c3efd8911398c7a43c978dca6cd605b64c0cb21b2f0b19e171916ce5c2c69b92`.
+Complete-support schema version: `1`. Ecosystem catalog version: `1`. Catalog digest: `45bb70b04dd67cb09fe0eec40e3bed9013a0e36c2a9168342b95878e31e516cd`.
 
 `Complete` means conformance to the fixed ProjectAtlas navigation contract, not compiler, build-system, runtime, or whole-language completeness. Final v0.4 MCP navigation revalidation retained every runtime candidate at its achieved detected/parsed/symbol/semantic/benchmarked tier: none has the complete schema-bound capability and agent-navigation evidence required for promotion.
 
