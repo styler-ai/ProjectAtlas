@@ -43,6 +43,7 @@
     "reuse-unchanged-ci-build-layers": 341,
     "show-agent-efficiency-dashboard": 340,
     "simplify-token-tui-dashboard": 296,
+    "stabilize-hostile-parser-fixture-admission": 397,
     "stabilize-parser-recovery-harness": 391
   }
 }

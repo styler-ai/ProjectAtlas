@@ -30,6 +30,8 @@ mod parser_supervisor;
 const TEST_ARTIFACT_BYTES: &[u8] = b"parser-supervisor-hostile-peer";
 /// Cargo-visible target name used for libtest-compatible substring filtering.
 const HARNESS_NAME: &str = "parser_supervisor_adversarial";
+/// Launch/admission delay that deliberately exceeds the progress-endless operation deadline.
+const PROGRESS_ENDLESS_LAUNCH_DELAY: Duration = Duration::from_millis(300);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args();
@@ -85,6 +87,10 @@ fn hostile_peer(scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();
     let mut diagnostic = io::stderr().lock();
+
+    if scenario == "progress-endless" {
+        thread::sleep(PROGRESS_ENDLESS_LAUNCH_DELAY);
+    }
 
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     match scenario {
