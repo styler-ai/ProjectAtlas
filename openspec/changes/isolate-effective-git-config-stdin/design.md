@@ -7,7 +7,7 @@
 **Goals:**
 
 - Make the shared effective Git-config probe independent of caller stdin.
-- Prove the real persistent MCP transport and immediate reuse of the same session.
+- Prove the real persistent MCP transport across the ten-call startup and agent-navigation path, then immediately reuse the same session.
 - Preserve current root classification, timeout, output, and error behavior.
 
 **Non-Goals:**
@@ -18,7 +18,7 @@
 ## Decisions
 
 - Set `stdin(Stdio::null())` on the existing `git config` command. This is the standard-library ownership boundary that fixes every caller without changing the established subprocess lifecycle.
-- Exercise the three affected MCP startup tools over one real stdio session whose stdin remains open. A direct unit test would not recreate the inherited transport handle that caused the bug.
+- Exercise the three affected MCP startup tools and seven common navigation tools over one real stdio session whose stdin remains open. A direct unit test would not recreate the inherited transport handle that caused the bug. Keep the existing complete advertised-tool contract separate because it owns schemas, valid arguments, and SQLite effects for all tools; run both tests before release publication.
 - Retain the existing implementation for deadlines, output collection, status parsing, and root semantics. A larger supervisor was considered and rejected for this patch because it would add unrelated process and platform contracts.
 
 ## Risks / Trade-offs

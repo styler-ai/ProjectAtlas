@@ -2,7 +2,7 @@
 
 - [x] 1.1 Map issue #409 and align its live checklist with this narrow stdin-isolation contract.
 - [x] 1.2 Close stdin on the shared effective local Git-config subprocess without changing its existing lifecycle or result semantics.
-- [x] 1.3 Add a persistent-open stdio MCP regression covering `atlas_session_brief`, `atlas_root`, `atlas_init`, and immediate session reuse.
+- [x] 1.3 Add a persistent-open stdio MCP regression covering the ten-call startup and agent-navigation path plus immediate session reuse, and run it with the complete advertised-tool contract before every release.
 
 ## 2. Compatibility and Landing
 

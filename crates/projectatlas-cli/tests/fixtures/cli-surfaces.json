@@ -62,7 +62,7 @@
       "watch": ["[PATH]=.", "--poll-seconds=2", "--max-cycles=0"]
     }
   },
-  "v0.4.1": {
+  "v0.4.2": {
     "commands": [
       "init",
       "map",

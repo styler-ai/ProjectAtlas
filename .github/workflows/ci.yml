@@ -204,3 +204,11 @@ jobs:
       - name: Persistent MCP Git config stdin E2E
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli persistent_mcp_stdin_does_not_block_repository_startup_probes --test e2e
+
+      - name: Bare-root database preflight E2E
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli implicit_bare_root --test e2e -- --nocapture
+
+      - name: Generated MCP database authority E2E
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli generated_mcp_config_preserves_explicit_conventional_database_authority --test e2e -- --exact --nocapture
