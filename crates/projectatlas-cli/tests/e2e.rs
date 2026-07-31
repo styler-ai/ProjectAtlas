@@ -8821,19 +8821,11 @@ fn generated_mcp_config_preserves_explicit_conventional_database_authority()
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_root","arguments":{}}}"#,
         ],
     )?;
-    let root = mcp_tool_text(&mcp_output, 2)?;
-    if !root.contains(&normalize_native_path_display(&source)) {
-        return Err(io::Error::other(format!(
-            "generated MCP config replaced stored project-root authority: {root}"
-        ))
-        .into());
-    }
-    if root.contains("project_mismatch") {
-        return Err(io::Error::other(format!(
-            "generated MCP config rebound copied conventional database: {root}"
-        ))
-        .into());
-    }
+    let root: Value = toon_format::decode_default(&mcp_tool_text(&mcp_output, 2)?)?;
+    let canonical_source = normalize_native_path_display(source.canonicalize()?);
+    require_json_string(&root, &["root", "root"], &canonical_source)?;
+    require_json_string(&root, &["root", "db_project_root"], &canonical_source)?;
+    require_json_bool(&root, &["root", "verified"], true)?;
     Ok(())
 }
 
