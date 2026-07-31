@@ -336,28 +336,29 @@ observed readiness.
 flowchart TD
     Target[Verify versioned runtime and generated configs] --> Managed{Codex plugin and exact JSON registry ready?}
     Managed -->|no| ReadinessPartial[Partial: preserve every process]
-    Managed -->|yes| Owner{Exactly one obsolete stable-path MCP owner?}
+    Managed -->|yes| Owner{Exactly one obsolete stable-path MCP<br/>with an inspectable Codex parent?}
     Owner -->|no: absent, current, inaccessible, or ambiguous| OwnerPartial[Partial: preserve every process]
     Owner -->|yes| Version[Reprobe the observed obsolete version]
-    Version --> Handle[Hold the process handle]
-    Handle --> Identity{Creation, path, complete argv,<br/>MCP mode, and image digest unchanged?}
-    Identity -->|no| IdentityPartial[Typed partial: preserve the process]
-    Identity -->|yes| Retire[Retire only the exact obsolete handle]
+    Version --> Handle[Hold the child and Codex-parent handles]
+    Handle --> Identity{Child and parent creation, path, argv;<br/>child MCP mode and image digest unchanged?}
+    Identity -->|no| IdentityPartial[Typed partial: preserve every process]
+    Identity -->|yes| Retire[Retire only the exact obsolete child handle]
     Retire --> Retry[Retry stable-mirror synchronization once]
     Retry --> Verify{Target mirror verifies?}
     Verify -->|yes| Complete[Complete handoff]
     Verify -->|no| RetryPartial[Partial: retry_failed;<br/>versioned runtime and configs remain ready]
 ```
 
-Selection records the process creation time, parsed complete command, observed
-obsolete version, and SHA-256 image identity. Immediately before termination it
-reprobes the version; the native retirement helper then keeps the process handle
-open while checking creation, image path, handle-read command line, complete
-arguments, final `mcp` mode, and executable digest. No fallback widens selection
-to executable name, parent host, or another project. Real installed-Codex proof
-of parent survival, target-child replacement, exact version, and successful MCP
-initialization remains a hosted release gate rather than an inference from local
-fixtures.
+Selection records the child's process creation time, parsed complete command,
+observed obsolete version, and SHA-256 image identity together with its Codex
+parent's process ID, creation time, image path, and complete command. Immediately
+before termination it reprobes the version; the native retirement helper then
+keeps both handles open while revalidating both identities and the child's final
+`mcp` mode and executable digest. No fallback widens selection to executable
+name, another parent host, or another project, and the Codex parent is never
+terminated. Real installed-Codex proof of parent survival, target-child
+replacement, exact version, and successful MCP initialization remains a hosted
+release gate rather than an inference from local fixtures.
 
 ### Database Authority And Responsibility
 

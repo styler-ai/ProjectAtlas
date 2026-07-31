@@ -226,16 +226,17 @@ Codex restart.
 On Windows, a running obsolete MCP child can lock the stable LocalAppData
 mirror. After the versioned runtime, generated configs, target plugin skill, and
 exact Codex registry entry are verified, the installer may hand off exactly one
-unambiguous stable-path process whose complete command ends in `mcp`. It
-reprobes the observed obsolete version, then holds that process handle while
-revalidating creation time, image path, complete command arguments, MCP mode,
-and executable digest. Any missing, current, inaccessible, ambiguous, changed,
-or unready identity stays alive and produces a partial convergence state; the
-installer never terminates Codex, a process selected only by name, or unrelated
-ProjectAtlas processes. After an exact retirement it retries the stable-mirror
-copy once and reports `retry_failed` if the mirror still cannot be installed and
-verified. The versioned runtime and project-local configs remain usable in all
-partial states.
+unambiguous stable-path process whose complete command ends in `mcp` and whose
+inspectable parent is the exact `codex.exe` process that launched it. It
+reprobes the observed obsolete version, then holds both process handles while
+revalidating the child and parent creation times, image paths, and complete
+commands plus the child's MCP mode and executable digest. Any missing, current,
+inaccessible, ambiguous, changed, or unready identity stays alive and produces
+a partial convergence state; the installer never terminates the Codex parent,
+a process selected only by name, or unrelated ProjectAtlas processes. After an
+exact child retirement it retries the stable-mirror copy once and reports
+`retry_failed` if the mirror still cannot be installed and verified. The
+versioned runtime and project-local configs remain usable in all partial states.
 
 Local installer fixtures prove the selection, identity, readiness, failure, and
 retry-reporting contracts, but do not prove the real Codex parent/child

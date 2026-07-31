@@ -15,7 +15,7 @@
 
 - [x] 3.1 Document the safe handoff, partial/retry states, and skip semantics in the host-integration guide.
 - [x] 3.2 Update the focused installer architecture Mermaid view, render it with Mermaid CLI, and inspect the result visually.
-- [x] 3.3 Map this OpenSpec change to GitHub issue 411 locally and retain the remote issue update as an unauthorized transition.
+- [x] 3.3 Map this OpenSpec change to GitHub issue 411 and synchronize its live checklist through IssueOps validation.
 
 ## 4. Release Gate
 

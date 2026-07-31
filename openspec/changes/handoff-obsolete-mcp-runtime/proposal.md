@@ -24,4 +24,4 @@ None.
 
 The Windows plugin runtime installer, its Rust E2E/static contract tests, Codex host-integration documentation, and installer architecture view are affected. No Rust runtime API, SQLite schema, MCP tool schema, dependency, or non-Windows installer behavior changes.
 
-This bugfix is ready for implementation in the v0.4.1 stabilization scope. Non-goals are broad process termination, automatic Codex restart, retiring current/unrelated/ambiguous processes, changing database ownership, and claiming real-host success without external exact-version verification.
+This bugfix targets the v0.4.3 stabilization scope. Non-goals are broad process termination, automatic Codex restart, retiring current/unrelated/ambiguous processes, changing database ownership, and claiming real-host success without external exact-version verification.

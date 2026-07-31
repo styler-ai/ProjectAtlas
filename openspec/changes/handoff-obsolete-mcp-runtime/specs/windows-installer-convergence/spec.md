@@ -27,14 +27,14 @@ The Windows installer SHALL parse `codex mcp get projectatlas --json` and requir
 - **THEN** registry readiness is false and the installer does not implicitly initialize, mutate, or reuse that other project's index
 
 ### Requirement: Obsolete process retirement is narrow and handle-bound
-The Windows installer SHALL retire at most one obsolete stable-mirror process and only after target readiness plus final creation-time, image-path, complete-command, MCP-mode, observed-version, and image-digest revalidation against the held process handle.
+The Windows installer SHALL retire at most one obsolete stable-mirror process and only after target readiness plus final child and Codex-parent creation-time, image-path, and complete-command revalidation against held process handles, together with child MCP-mode, observed-version, and image-digest revalidation.
 
 #### Scenario: Exact obsolete MCP owner
-- **WHEN** exactly one obsolete stable-mirror process is running in MCP mode, the target runtime/plugin/registry are ready, and every final identity field still matches
+- **WHEN** exactly one obsolete stable-mirror process is running in MCP mode under an inspectable Codex parent, the target runtime/plugin/registry are ready, and every final child and parent identity field still matches
 - **THEN** the installer terminates only that process and proceeds to the bounded mirror retry
 
 #### Scenario: Final identity changes
-- **WHEN** creation time, image path, command arguments or mode, observed obsolete version, or image digest differs at final revalidation
+- **WHEN** either process's creation time, image path, or command differs, or the child's mode, observed obsolete version, or image digest differs at final revalidation
 - **THEN** the installer reports the corresponding typed partial state and leaves the process alive
 
 #### Scenario: Owner is absent, current, inaccessible, or ambiguous
