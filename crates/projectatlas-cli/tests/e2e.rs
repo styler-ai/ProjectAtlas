@@ -16796,41 +16796,52 @@ fn exercise_normal_read_freshness(
         .join(SESSION_TEST_FILE_NAME)
         .to_string_lossy()
         .to_string();
-    let stale_messages = vec![
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":"src/lib.rs"}}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_search","arguments":{"pattern":"legacy_store","file_pattern":"*.rs"}}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"file":"src/lib.rs"}}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_files","arguments":{"file_pattern":"tests/*.rs"}}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"atlas_slice","arguments":{"file":"src/lib.rs","symbol":"legacy_store"}}}"#.to_string(),
-        serde_json::json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":deleted_absolute_selector}}}).to_string(),
+    let stale_reads = [
+        (
+            "atlas_file_summary",
+            serde_json::json!({"file": "src/lib.rs"}),
+        ),
+        (
+            "atlas_search",
+            serde_json::json!({"pattern": "legacy_store", "file_pattern": "*.rs"}),
+        ),
+        (
+            "atlas_symbol_relations",
+            serde_json::json!({"file": "src/lib.rs"}),
+        ),
+        (
+            "atlas_files",
+            serde_json::json!({"file_pattern": "tests/*.rs"}),
+        ),
+        (
+            "atlas_slice",
+            serde_json::json!({"file": "src/lib.rs", "symbol": "legacy_store"}),
+        ),
+        (
+            "atlas_file_summary",
+            serde_json::json!({"file": deleted_absolute_selector}),
+        ),
     ];
-    let stale_stdout = run_mcp_stdio(
-        &executable,
-        repo,
-        &[
-            "--db".to_string(),
-            db.display().to_string(),
-            "mcp".to_string(),
-        ],
-        &stale_messages,
-    )?;
-    for id in 2..=7 {
-        let tool_text = mcp_tool_text(&stale_stdout, id)?;
-        if !tool_text.contains("kind: refresh_required")
-            || !tool_text.contains("status: refresh_required")
-            || !tool_text.contains("tool: atlas_watch_once")
-            || !tool_text.contains("changed:")
-            || tool_text.contains("changed: 0")
-            || tool_text.contains("legacy_store")
-        {
-            return Err(io::Error::other(format!(
-                "stale MCP read {id} did not return the typed fail-closed state: {tool_text}"
-            ))
-            .into());
+    let mut stale_session = McpContractSession::spawn(&executable, repo, db)?;
+    let stale_result = (|| -> Result<(), Box<dyn Error>> {
+        for (tool, arguments) in stale_reads {
+            let tool_text = stale_session.call_tool(tool, &arguments)?;
+            if !tool_text.contains("kind: refresh_required")
+                || !tool_text.contains("status: refresh_required")
+                || !tool_text.contains("tool: atlas_watch_once")
+                || !tool_text.contains("changed:")
+                || tool_text.contains("changed: 0")
+                || tool_text.contains("legacy_store")
+            {
+                return Err(io::Error::other(format!(
+                    "stale MCP read {tool} did not return the typed fail-closed state: {tool_text}"
+                ))
+                .into());
+            }
         }
-    }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(stale_result, || stale_session.shutdown())?;
 
     Command::cargo_bin("projectatlas")?
         .current_dir(repo)
@@ -21323,6 +21334,39 @@ fn mcp_source_publication_table(table: &str) -> bool {
             | "project_identity"
             | "purposes"
     ) || table.starts_with("file_text_fts")
+}
+
+fn complete_mcp_test_after_shutdown<T>(
+    operation_result: Result<T, Box<dyn Error>>,
+    shutdown: impl FnOnce() -> Result<(), Box<dyn Error>>,
+) -> Result<T, Box<dyn Error>> {
+    let shutdown_result = shutdown();
+    let value = operation_result?;
+    shutdown_result?;
+    Ok(value)
+}
+
+#[test]
+fn mcp_test_shutdown_runs_after_primary_failure_without_hiding_it() -> Result<(), Box<dyn Error>> {
+    let mut shutdown_attempted = false;
+    let result = complete_mcp_test_after_shutdown(
+        Err::<(), Box<dyn Error>>(io::Error::other("primary MCP test failure").into()),
+        || {
+            shutdown_attempted = true;
+            Err(io::Error::other("secondary MCP shutdown failure").into())
+        },
+    );
+    if !shutdown_attempted {
+        return Err(io::Error::other("MCP test shutdown was not attempted").into());
+    }
+    match result {
+        Err(error) if error.to_string() == "primary MCP test failure" => Ok(()),
+        Err(error) => Err(io::Error::other(format!(
+            "MCP shutdown hid the primary test failure: {error}"
+        ))
+        .into()),
+        Ok(()) => Err(io::Error::other("MCP test failure was discarded").into()),
+    }
 }
 
 /// Persistent real MCP session used for ordered task cancellation.
