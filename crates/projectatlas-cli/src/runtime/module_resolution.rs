@@ -386,20 +386,27 @@ mod tests {
         let control = IndexWorkControl::new(IndexCancellation::new(), None);
 
         for config_path in ["tsconfig.json", "jsconfig.json"] {
-            let malformed = [UTF8_BOM, b"{"].concat();
-            fs::write(temp.path().join(config_path), &malformed)?;
-            match load_configured_module_resolution(
-                temp.path(),
-                &[config_node(config_path, &malformed)],
-                &control,
-            ) {
-                Err(CliError::InvalidInput(message))
-                    if message.contains("failed to parse compiler configuration") => {}
-                result => {
-                    return Err(std::io::Error::other(format!(
-                        "{config_path} malformed BOM input returned {result:?}"
-                    ))
-                    .into());
+            for (case, malformed) in [
+                ("after a leading BOM", [UTF8_BOM, b"{"].concat()),
+                (
+                    "with a complete BOM after byte zero",
+                    [b"{".as_slice(), UTF8_BOM, b"}".as_slice()].concat(),
+                ),
+            ] {
+                fs::write(temp.path().join(config_path), &malformed)?;
+                match load_configured_module_resolution(
+                    temp.path(),
+                    &[config_node(config_path, &malformed)],
+                    &control,
+                ) {
+                    Err(CliError::InvalidInput(message))
+                        if message.contains("failed to parse compiler configuration") => {}
+                    result => {
+                        return Err(std::io::Error::other(format!(
+                            "{config_path} malformed input {case} returned {result:?}"
+                        ))
+                        .into());
+                    }
                 }
             }
 
