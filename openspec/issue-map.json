@@ -1,6 +1,7 @@
 {
   "schema_version": 2,
   "changes": {
+    "accept-compiler-config-utf8-bom": 408,
     "add-agent-session-brief": 292,
     "add-mcp-task-progress-model": 295,
     "add-nearest-project-routing": 276,

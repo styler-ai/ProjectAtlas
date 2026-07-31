@@ -15316,6 +15316,72 @@ fn normal_reads_do_not_serve_offline_stale_index_state() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn compiler_config_utf8_bom_refreshes_through_cli_and_mcp() -> Result<(), Box<dyn Error>> {
+    const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("compiler-config-utf8-bom");
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("index.ts"),
+        "export const value = 1;\n",
+    )?;
+    let config_path = repo.join("tsconfig.json");
+    fs::write(
+        &config_path,
+        [UTF8_BOM, br#"{"compilerOptions":{"baseUrl":"src"}}"#].concat(),
+    )?;
+
+    let init = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "json", "init"])
+        .output()?;
+    if !init.status.success() {
+        return Err(io::Error::other(format!(
+            "init rejected UTF-8 BOM compiler configuration: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ))
+        .into());
+    }
+    let db = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    run_scan(&repo, &db)?;
+
+    fs::write(
+        &config_path,
+        [
+            UTF8_BOM,
+            br#"{"compilerOptions":{"baseUrl":"src","paths":{"@/*":["*"]}}}"#,
+        ]
+        .concat(),
+    )?;
+    run_watch_once(&repo, &db)?;
+
+    fs::write(
+        &config_path,
+        [
+            UTF8_BOM,
+            br#"{// MCP refresh must use the same loader.
+"compilerOptions":{"baseUrl":"src"}}"#,
+        ]
+        .concat(),
+    )?;
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let mut session = McpContractSession::spawn(&executable, &repo, &db)?;
+    let report = session.call_tool(
+        "atlas_watch_once",
+        &serde_json::json!({"project_path": repo, "path": repo}),
+    )?;
+    session.shutdown()?;
+    if !report.contains("watch:") || !report.contains("single-refresh") {
+        return Err(io::Error::other(format!(
+            "MCP watch did not report a successful BOM refresh: {report}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn configured_module_aliases_resolve_across_adapters_and_refresh_atomically()
 -> Result<(), Box<dyn Error>> {
     const ALTERNATE_DIR_NAME: &str = "alternate";
