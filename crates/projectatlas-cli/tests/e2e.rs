@@ -95,6 +95,7 @@ const GITHOOKS_DIR_NAME: &str = ".githooks";
 const ISSUE_TEMPLATE_DIR_NAME: &str = "ISSUE_TEMPLATE";
 const VERSIONS_DIR_NAME: &str = "versions";
 const PRE_PUSH_HOOK_FILE_NAME: &str = "pre-push";
+const TS_CONFIG_FILE_NAME: &str = "tsconfig.json";
 const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_CONFIG",
@@ -15316,6 +15317,113 @@ fn normal_reads_do_not_serve_offline_stale_index_state() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn compiler_config_utf8_bom_refreshes_through_cli_and_mcp() -> Result<(), Box<dyn Error>> {
+    const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
+    const COMPILER_CONFIG: &[u8] =
+        br#"{"compilerOptions":{"baseUrl":"src","paths":{"@/*":["*"]}}}"#;
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("compiler-config-utf8-bom");
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("controller.ts"),
+        "export function useController(): string { return \"ok\"; }\n",
+    )?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("page.ts"),
+        "import { useController } from \"@/controller\";\nexport const value = useController();\n",
+    )?;
+    let config_path = repo.join(TS_CONFIG_FILE_NAME);
+    fs::write(&config_path, [UTF8_BOM, COMPILER_CONFIG].concat())?;
+
+    let init = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "json", "init"])
+        .output()?;
+    if !init.status.success() {
+        return Err(io::Error::other(format!(
+            "init rejected UTF-8 BOM compiler configuration: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ))
+        .into());
+    }
+    let db = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    run_scan(&repo, &db)?;
+    let current_generation = || -> Result<usize, Box<dyn Error>> {
+        let generation = AtlasStore::open(&db)?
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("compiler-config publication is missing"))?
+            .generation;
+        Ok(usize::try_from(generation.get())?)
+    };
+    let bom_relation = detailed_relation_payload(&repo, &db, "src/controller.ts", None, "inbound")?;
+    assert_detailed_resolution(&bom_relation, 1, "resolved")?;
+    require_json_usize(
+        &bom_relation,
+        &["symbol_relations", "generation"],
+        current_generation()?,
+    )?;
+    let expected_alias_semantics = detailed_resolution_semantics(&bom_relation)
+        .ok_or_else(|| io::Error::other("initial alias relation omitted semantic fields"))?;
+
+    fs::write(&config_path, COMPILER_CONFIG)?;
+    run_watch_once(&repo, &db)?;
+    let plain_relation =
+        detailed_relation_payload(&repo, &db, "src/controller.ts", None, "inbound")?;
+    assert_detailed_resolution(&plain_relation, 1, "resolved")?;
+    require_json_usize(
+        &plain_relation,
+        &["symbol_relations", "generation"],
+        current_generation()?,
+    )?;
+    if detailed_resolution_semantics(&plain_relation) != Some(expected_alias_semantics) {
+        return Err(io::Error::other(
+            "CLI BOM-to-plain refresh changed configured alias semantics",
+        )
+        .into());
+    }
+
+    fs::write(&config_path, [UTF8_BOM, COMPILER_CONFIG].concat())?;
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let mut session = McpContractSession::spawn(&executable, &repo, &db)?;
+    let report = session.call_tool(
+        "atlas_watch_once",
+        &serde_json::json!({"project_path": repo.as_path(), "path": repo.as_path()}),
+    )?;
+    let mcp_relation: Value = toon_format::decode_default(&session.call_tool(
+        "atlas_symbol_relations",
+        &serde_json::json!({
+            "project_path": repo.as_path(),
+            "view": "detailed",
+            "compact": true,
+            "file": "src/controller.ts",
+            "direction": "inbound",
+            "limit": 10
+        }),
+    )?)?;
+    session.shutdown()?;
+    if !report.contains("watch:") || !report.contains("single-refresh") {
+        return Err(io::Error::other(format!(
+            "MCP watch did not report a successful BOM refresh: {report}"
+        ))
+        .into());
+    }
+    assert_detailed_resolution(&mcp_relation, 1, "resolved")?;
+    require_json_usize(
+        &mcp_relation,
+        &["symbol_relations", "generation"],
+        current_generation()?,
+    )?;
+    if detailed_resolution_semantics(&mcp_relation) != Some(expected_alias_semantics) {
+        return Err(io::Error::other(
+            "MCP plain-to-BOM refresh changed configured alias semantics",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn configured_module_aliases_resolve_across_adapters_and_refresh_atomically()
 -> Result<(), Box<dyn Error>> {
     const ALTERNATE_DIR_NAME: &str = "alternate";
@@ -15347,7 +15455,7 @@ fn configured_module_aliases_resolve_across_adapters_and_refresh_atomically()
     fs::create_dir_all(&source)?;
     fs::create_dir_all(&js_source)?;
     let db = temp.path().join("configured-module-aliases.db");
-    let ts_config = repo.join("tsconfig.json");
+    let ts_config = repo.join(TS_CONFIG_FILE_NAME);
     let js_config = repo.join(JS_DIR_NAME).join("jsconfig.json");
     fs::write(&ts_config, TS_CONFIG)?;
     fs::write(&js_config, JS_CONFIG)?;
@@ -15658,6 +15766,13 @@ fn assert_detailed_resolution(
         .into());
     }
     Ok(())
+}
+
+fn detailed_resolution_semantics(payload: &Value) -> Option<(&Value, &Value)> {
+    Some((
+        payload.pointer("/symbol_relations/rows/0/relation/kind")?,
+        payload.pointer("/symbol_relations/rows/0/relation/resolution/selector")?,
+    ))
 }
 
 #[test]
