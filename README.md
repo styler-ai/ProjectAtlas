@@ -28,6 +28,8 @@ No required `.purpose` files. No source-header tax. No hosted index or credentia
 
 ## Install
 
+Point your agent to the ProjectAtlas GitHub repository and ask it to install the latest version of ProjectAtlas.
+
 The Codex plugin is the recommended path:
 
 ```bash
