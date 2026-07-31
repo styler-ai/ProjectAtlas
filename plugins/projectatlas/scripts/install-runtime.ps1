@@ -99,6 +99,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 
@@ -739,6 +740,10 @@ namespace ProjectAtlas.Installer
         private const uint WaitObject0 = 0;
         private const uint WaitTimeout = 258;
         private const int ErrorAccessDenied = 5;
+        // ProcessCommandLineInformation reads the command from the held handle,
+        // avoiding a final PID-only lookup before the one allowed termination.
+        private const int ProcessCommandLineInformation = 60;
+        private const int StatusInfoLengthMismatch = unchecked((int)0xC0000004);
         // Win32_Process CreationDate can lose sub-microsecond FILETIME precision.
         private const long CreationTimeRepresentationToleranceTicks = 10;
 
@@ -756,6 +761,25 @@ namespace ProjectAtlas.Installer
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+        [DllImport("ntdll.dll")]
+        private static extern int NtQueryInformationProcess(
+            IntPtr process,
+            int informationClass,
+            IntPtr information,
+            int informationLength,
+            out int returnLength);
+
+        [DllImport("ntdll.dll")]
+        private static extern uint RtlNtStatusToDosError(int status);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct UnicodeString
+        {
+            internal ushort Length;
+            internal ushort MaximumLength;
+            internal IntPtr Buffer;
+        }
 
         public static string[] ParseCommandLine(string commandLine)
         {
@@ -785,6 +809,8 @@ namespace ProjectAtlas.Installer
             int processId,
             long expectedCreationFileTimeUtc,
             string expectedPath,
+            string[] expectedArguments,
+            string expectedImageSha256,
             int timeoutMilliseconds)
         {
             try
@@ -813,6 +839,25 @@ namespace ProjectAtlas.Installer
                         return new ProcessRetirementResult("identity_changed_path", 0);
                     if (candidate.HasExited)
                         return new ProcessRetirementResult("exited", 0);
+                    string commandLine;
+                    try
+                    {
+                        commandLine = ReadCommandLine(handle);
+                    }
+                    catch (Win32Exception failure)
+                    {
+                        return Failure("inspection_failed", failure.NativeErrorCode);
+                    }
+                    string[] actualArguments = ParseCommandLine(commandLine);
+                    if (!ArgumentsEqual(actualArguments, expectedArguments))
+                        return new ProcessRetirementResult("identity_changed_command", 0);
+                    if (!String.Equals(
+                            ComputeImageSha256(expectedPath),
+                            expectedImageSha256,
+                            StringComparison.OrdinalIgnoreCase))
+                        return new ProcessRetirementResult("identity_changed_file", 0);
+                    if (candidate.HasExited)
+                        return new ProcessRetirementResult("exited", 0);
                     if (!TerminateProcess(handle, 0))
                     {
                         int errorCode = Marshal.GetLastWin32Error();
@@ -837,6 +882,88 @@ namespace ProjectAtlas.Installer
             catch (InvalidOperationException)
             {
                 return new ProcessRetirementResult("exited", 0);
+            }
+            catch (IOException)
+            {
+                return new ProcessRetirementResult("inspection_failed", 0);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return new ProcessRetirementResult("access_denied", ErrorAccessDenied);
+            }
+        }
+
+        private static string ReadCommandLine(IntPtr process)
+        {
+            int returnLength;
+            int status = NtQueryInformationProcess(
+                process,
+                ProcessCommandLineInformation,
+                IntPtr.Zero,
+                0,
+                out returnLength);
+            if (status != StatusInfoLengthMismatch || returnLength <= Marshal.SizeOf(typeof(UnicodeString)))
+                throw NtFailure("size process command line", status);
+            IntPtr buffer = Marshal.AllocHGlobal(returnLength);
+            try
+            {
+                status = NtQueryInformationProcess(
+                    process,
+                    ProcessCommandLineInformation,
+                    buffer,
+                    returnLength,
+                    out returnLength);
+                if (status < 0)
+                    throw NtFailure("read process command line", status);
+                UnicodeString commandLine = (UnicodeString)Marshal.PtrToStructure(
+                    buffer,
+                    typeof(UnicodeString));
+                if (commandLine.Buffer == IntPtr.Zero || commandLine.Length == 0)
+                    throw new Win32Exception(87, "Process command line is empty.");
+                return Marshal.PtrToStringUni(commandLine.Buffer, commandLine.Length / 2);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        private static Win32Exception NtFailure(string operation, int status)
+        {
+            return new Win32Exception(checked((int)RtlNtStatusToDosError(status)), operation);
+        }
+
+        private static bool ArgumentsEqual(string[] actual, string[] expected)
+        {
+            if (actual == null || expected == null || actual.Length != expected.Length)
+                return false;
+            for (int index = 0; index < actual.Length; index++)
+            {
+                StringComparison comparison = index == 0
+                    ? StringComparison.OrdinalIgnoreCase
+                    : StringComparison.Ordinal;
+                string actualArgument = index == 0 ? Path.GetFullPath(actual[index]) : actual[index];
+                string expectedArgument = index == 0 ? Path.GetFullPath(expected[index]) : expected[index];
+                if (!String.Equals(actualArgument, expectedArgument, comparison))
+                    return false;
+            }
+            return true;
+        }
+
+        public static string ComputeImageSha256(string path)
+        {
+            using (FileStream input = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read | FileShare.Delete))
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                byte[] digest = sha256.ComputeHash(input);
+                StringBuilder hex = new StringBuilder(digest.Length * 2);
+                foreach (byte value in digest)
+                    hex.Append(value.ToString("x2", System.Globalization.CultureInfo.InvariantCulture));
+                return hex.ToString();
             }
         }
 
@@ -968,6 +1095,20 @@ function Get-ProjectAtlasRuntimeVersion {
     return $(if ($runtime) { $runtime.version } else { $null })
 }
 
+function Get-ProjectAtlasRuntimeImageSha256 {
+    param(
+        [string]$FilePath
+    )
+    try {
+        Assert-ProjectAtlasDirectFilePath $FilePath "ProjectAtlas runtime image"
+        Initialize-ProjectAtlasRuntimeProbe
+        return [ProjectAtlas.Installer.ObsoleteMcpProcess]::ComputeImageSha256($FilePath)
+    }
+    catch {
+        return $null
+    }
+}
+
 function Find-ProjectAtlasObsoleteStableMcpProcess {
     param(
         [string]$StableMirrorPath,
@@ -1025,6 +1166,7 @@ function Find-ProjectAtlasObsoleteStableMcpProcess {
             $stableMcpProcesses += [pscustomobject]@{
                 ProcessId = [int]$process.ProcessId
                 CreationFileTimeUtc = [long]$creationTime.ToFileTimeUtc()
+                Arguments = [string[]]$arguments
             }
         }
         catch {
@@ -1040,10 +1182,14 @@ function Find-ProjectAtlasObsoleteStableMcpProcess {
     if ($stableMcpProcesses.Count -eq 0) {
         return [pscustomobject]@{ State = "no_exact_owner" }
     }
+    $imageSha256BeforeProbe = Get-ProjectAtlasRuntimeImageSha256 $StableMirrorPath
     $observedVersion = Convert-ProjectAtlasVersionTag (
         Get-ProjectAtlasRuntimeVersion $StableMirrorPath
     )
-    if ([string]::IsNullOrWhiteSpace($observedVersion)) {
+    $imageSha256AfterProbe = Get-ProjectAtlasRuntimeImageSha256 $StableMirrorPath
+    if ([string]::IsNullOrWhiteSpace($observedVersion) `
+        -or [string]::IsNullOrWhiteSpace($imageSha256BeforeProbe) `
+        -or $imageSha256BeforeProbe -ne $imageSha256AfterProbe) {
         return [pscustomobject]@{ State = "unsafe_owner" }
     }
     if ($observedVersion -eq $targetVersion) {
@@ -1053,7 +1199,9 @@ function Find-ProjectAtlasObsoleteStableMcpProcess {
         State = "exact"
         ProcessId = $stableMcpProcesses[0].ProcessId
         CreationFileTimeUtc = $stableMcpProcesses[0].CreationFileTimeUtc
+        Arguments = $stableMcpProcesses[0].Arguments
         ObservedVersion = $observedVersion
+        ImageSha256 = $imageSha256AfterProbe
     }
 }
 
@@ -1083,10 +1231,19 @@ function Invoke-ProjectAtlasObsoleteStableMcpHandoff {
         Write-Warning "ProjectAtlas obsolete MCP handoff remained partial: the target Codex MCP registry entry was not verified. Codex and all ProjectAtlas processes remain running."
         return "codex_registry_not_verified"
     }
+    $finalObservedVersion = Convert-ProjectAtlasVersionTag (
+        Get-ProjectAtlasRuntimeVersion $StableMirrorPath
+    )
+    if ($finalObservedVersion -ne $selection.ObservedVersion) {
+        Write-Warning "ProjectAtlas obsolete MCP handoff remained partial: process_owner=identity_changed_version. Codex and all ProjectAtlas processes remain running."
+        return "identity_changed_version"
+    }
     $result = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
         $selection.ProcessId,
         $selection.CreationFileTimeUtc,
         $StableMirrorPath,
+        [string[]]$selection.Arguments,
+        $selection.ImageSha256,
         5000
     )
     if ($result.State -eq "retired") {
@@ -1669,7 +1826,12 @@ function Get-ProjectAtlasCodexPlugin {
     param(
         [string]$CodexCommandPath
     )
-    $pluginsText = & $CodexCommandPath plugin list --marketplace projectatlas --json 2>&1 | Out-String
+    try {
+        $pluginsText = & $CodexCommandPath plugin list --marketplace projectatlas --json 2>&1 | Out-String
+    }
+    catch {
+        return $null
+    }
     if ($LASTEXITCODE -ne 0) {
         return $null
     }
@@ -1935,17 +2097,12 @@ function Update-ProjectAtlasCodexMcpRegistry {
         return
     }
     try {
-        $existing = & $codexCommandPath mcp get projectatlas 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
+        $existing = Get-ProjectAtlasCodexMcpRegistryEntry $codexCommandPath
+        if (-not $existing) {
             Write-Output "Codex MCP registry update skipped: no global projectatlas MCP server is configured."
             return
         }
-        $expectedConfigPath = if (Test-Path -LiteralPath $ProjectConfigPath) { $ProjectConfigPath } elseif (Test-Path -LiteralPath $FlatConfigPath) { $FlatConfigPath } else { $null }
-        $alreadyCurrent = $existing.Contains($VerifiedPath) -and $existing.Contains($runtimeVersion) -and $existing.Contains($DbPath)
-        if ($expectedConfigPath) {
-            $alreadyCurrent = $alreadyCurrent -and $existing.Contains($expectedConfigPath)
-        }
-        if ($alreadyCurrent) {
+        if (Test-ProjectAtlasCodexMcpRegistryEntry $existing $VerifiedPath $launchArgs) {
             Write-Output "Codex MCP registry already points to ProjectAtlas $runtimeVersion for $DbPath."
             return
         }
@@ -1961,6 +2118,11 @@ function Update-ProjectAtlasCodexMcpRegistry {
             Write-Warning "Codex MCP registry update failed: could not add verified global projectatlas server."
             return
         }
+        $updated = Get-ProjectAtlasCodexMcpRegistryEntry $codexCommandPath
+        if (-not (Test-ProjectAtlasCodexMcpRegistryEntry $updated $VerifiedPath $launchArgs)) {
+            Write-Warning "Codex MCP registry update failed: the replacement entry did not exactly match the verified command and ordered arguments."
+            return
+        }
         Write-Output "Codex MCP registry updated to ProjectAtlas runtime $VerifiedPath with database $DbPath."
     }
     catch {
@@ -1968,13 +2130,91 @@ function Update-ProjectAtlasCodexMcpRegistry {
     }
 }
 
+function Test-ProjectAtlasCodexCommandAvailable {
+    if (-not [string]::IsNullOrWhiteSpace($env:PROJECTATLAS_CODEX_COMMAND)) {
+        return [bool]((Resolve-Path $env:PROJECTATLAS_CODEX_COMMAND -ErrorAction SilentlyContinue) `
+                -or (Get-Command $env:PROJECTATLAS_CODEX_COMMAND -ErrorAction SilentlyContinue))
+    }
+    return [bool](Get-Command codex -ErrorAction SilentlyContinue)
+}
+
+function Get-ProjectAtlasCodexMcpRegistryEntry {
+    param(
+        [string]$CodexCommandPath
+    )
+    try {
+        $registeredText = & $CodexCommandPath mcp get projectatlas --json 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            return $null
+        }
+        return ($registeredText | ConvertFrom-Json)
+    }
+    catch {
+        return $null
+    }
+}
+
+function Test-ProjectAtlasCodexMcpRegistryEntry {
+    param(
+        [object]$Registration,
+        [string]$VerifiedPath,
+        [string[]]$ExpectedArguments
+    )
+    if (-not $Registration `
+        -or [string]$Registration.name -ne "projectatlas" `
+        -or [string]$Registration.transport.type -ne "stdio") {
+        return $false
+    }
+    try {
+        $actualCommand = Get-ProjectAtlasComparablePath ([string]$Registration.transport.command)
+        $expectedCommand = Get-ProjectAtlasComparablePath $VerifiedPath
+    }
+    catch {
+        return $false
+    }
+    if (-not [string]::Equals(
+            $actualCommand,
+            $expectedCommand,
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    $actualArguments = @($Registration.transport.args)
+    if ($actualArguments.Count -ne $ExpectedArguments.Count) {
+        return $false
+    }
+    $pathValueExpected = $false
+    for ($index = 0; $index -lt $ExpectedArguments.Count; $index += 1) {
+        $actual = [string]$actualArguments[$index]
+        $expected = [string]$ExpectedArguments[$index]
+        if ($pathValueExpected) {
+            try {
+                $actualPath = Get-ProjectAtlasComparablePath $actual
+                $expectedPath = Get-ProjectAtlasComparablePath $expected
+            }
+            catch {
+                return $false
+            }
+            if (-not [string]::Equals(
+                    $actualPath,
+                    $expectedPath,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+            $pathValueExpected = $false
+            continue
+        }
+        if (-not [string]::Equals($actual, $expected, [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+        $pathValueExpected = $actual -eq "--db" -or $actual -eq "--config"
+    }
+    return -not $pathValueExpected
+}
+
 function Test-ProjectAtlasCodexPluginReady {
     param(
         [string]$ExpectedVersion
     )
-    if (Test-Truthy $env:PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE) {
-        return $true
-    }
     $runtimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
     $codexCommandPath = Resolve-ProjectAtlasCodexCommand "Codex ProjectAtlas plugin verification"
     if ([string]::IsNullOrWhiteSpace($runtimeVersion) -or -not $codexCommandPath) {
@@ -2002,23 +2242,18 @@ function Test-ProjectAtlasCodexMcpRegistryReady {
         [string]$ProjectConfigPath,
         [string]$FlatConfigPath
     )
-    if (Test-Truthy $env:PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE) {
-        return $true
-    }
     $runtimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
     $codexCommandPath = Resolve-ProjectAtlasCodexCommand "Codex MCP registry verification"
     if ([string]::IsNullOrWhiteSpace($runtimeVersion) -or -not $codexCommandPath) {
         return $false
     }
-    $registered = & $codexCommandPath mcp get projectatlas 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0 `
-        -or -not $registered.Contains($VerifiedPath) `
-        -or -not $registered.Contains($runtimeVersion) `
-        -or -not $registered.Contains($DbPath)) {
-        return $false
-    }
-    $expectedConfigPath = Get-ProjectAtlasEffectiveConfigPath $ProjectConfigPath $FlatConfigPath
-    return -not $expectedConfigPath -or $registered.Contains($expectedConfigPath)
+    $launchArgs = Get-ProjectAtlasMcpLaunchArguments `
+        $DbPath `
+        $ProjectConfigPath `
+        $FlatConfigPath `
+        $ExpectedVersion
+    $registered = Get-ProjectAtlasCodexMcpRegistryEntry $codexCommandPath
+    return Test-ProjectAtlasCodexMcpRegistryEntry $registered $VerifiedPath $launchArgs
 }
 
 function Write-ProjectAtlasWorkflowPinReport {
@@ -2305,6 +2540,7 @@ Confirm-ProjectAtlasGeneratedMcpConfig $claudeMcpConfigPath "Claude Code" $proje
 Confirm-ProjectAtlasGeneratedMcpConfig $opencodeConfigPath "OpenCode" $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath $ProjectRoot
 Update-ProjectAtlasCodexPlugin $ProjectAtlasVersion
 Update-ProjectAtlasCodexMcpRegistry $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath
+$codexIntegrationManaged = Test-ProjectAtlasCodexCommandAvailable
 $codexPluginReady = Test-ProjectAtlasCodexPluginReady $ProjectAtlasVersion
 $codexRegistryReady = Test-ProjectAtlasCodexMcpRegistryReady $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath
 $handoffState = "not_required"
@@ -2339,7 +2575,7 @@ $hostRestartRequired = -not $parentCliReady -and $futureProcessPathReady
 $hostRepairRequired = -not $parentCliReady -and -not $futureProcessPathReady
 $codexPluginReady = Test-ProjectAtlasCodexPluginReady $ProjectAtlasVersion
 $codexRegistryReady = Test-ProjectAtlasCodexMcpRegistryReady $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath
-$integrationVerificationRequired = $handoffState -ne "not_required"
+$integrationVerificationRequired = $handoffState -ne "not_required" -or $codexIntegrationManaged
 $updateState = if ($stableMirrorReady `
         -and (-not $integrationVerificationRequired -or ($codexPluginReady -and $codexRegistryReady))) {
     "complete"

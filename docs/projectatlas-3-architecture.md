@@ -323,6 +323,42 @@ Dependency direction remains acyclic. The lint crate is a workspace quality
 tool, not a runtime dependency. No eighth crate is justified unless a durable
 independently consumed ownership boundary appears.
 
+### Windows Locked-Runtime Convergence
+
+The Windows installer owns only the compatibility mirror and the narrow update
+orchestration around it. A running host owns its Codex parent and MCP children.
+The installer therefore crosses the process-termination boundary only after the
+replacement runtime and every managed Codex integration are exact, and only for
+one handle-bound obsolete MCP identity. Mutation skip flags never substitute for
+observed readiness.
+
+```mermaid
+flowchart TD
+    Target[Verify versioned runtime and generated configs] --> Managed{Codex plugin and exact JSON registry ready?}
+    Managed -->|no| ReadinessPartial[Partial: preserve every process]
+    Managed -->|yes| Owner{Exactly one obsolete stable-path MCP owner?}
+    Owner -->|no: absent, current, inaccessible, or ambiguous| OwnerPartial[Partial: preserve every process]
+    Owner -->|yes| Version[Reprobe the observed obsolete version]
+    Version --> Handle[Hold the process handle]
+    Handle --> Identity{Creation, path, complete argv,<br/>MCP mode, and image digest unchanged?}
+    Identity -->|no| IdentityPartial[Typed partial: preserve the process]
+    Identity -->|yes| Retire[Retire only the exact obsolete handle]
+    Retire --> Retry[Retry stable-mirror synchronization once]
+    Retry --> Verify{Target mirror verifies?}
+    Verify -->|yes| Complete[Complete handoff]
+    Verify -->|no| RetryPartial[Partial: retry_failed;<br/>versioned runtime and configs remain ready]
+```
+
+Selection records the process creation time, parsed complete command, observed
+obsolete version, and SHA-256 image identity. Immediately before termination it
+reprobes the version; the native retirement helper then keeps the process handle
+open while checking creation, image path, handle-read command line, complete
+arguments, final `mcp` mode, and executable digest. No fallback widens selection
+to executable name, parent host, or another project. Real installed-Codex proof
+of parent survival, target-child replacement, exact version, and successful MCP
+initialization remains a hosted release gate rather than an inference from local
+fixtures.
+
 ### Database Authority And Responsibility
 
 ```mermaid

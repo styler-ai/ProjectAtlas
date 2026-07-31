@@ -196,7 +196,7 @@ launcher or terminal session before starting a new Codex or shell; restarting
 only a child of an unchanged launcher can retain its stale process PATH.
 
 When `codex` is available, installers also inspect the official
-`projectatlas` Codex marketplace and `codex mcp get projectatlas`. If the
+`projectatlas` Codex marketplace and `codex mcp get projectatlas --json`. If the
 official marketplace is stale, the installer replaces that marketplace ref with
 the runtime release tag and reinstalls the `projectatlas` Codex plugin. When
 Codex exposes the installed plugin source path, the installer verifies the
@@ -211,11 +211,38 @@ Codex registry entries stay pinned to the verified runtime path. Set
 `PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1` only when a managed environment
 intentionally owns the Codex ProjectAtlas plugin marketplace, and set
 `PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1` only when it intentionally owns
-the global Codex MCP registry. After plugin/runtime updates, agents should
+the global Codex MCP registry. These variables skip mutations only; they do not
+make missing or stale plugin/registry state ready. Registry verification parses
+the JSON transport and requires the exact runtime command plus the complete
+ordered `--require-version`, `--db`, optional `--config`, and final `mcp`
+arguments. Only executable, database, and config path values use Windows path
+normalization, so substrings, reordered flags, another project's DB/config, and
+extra arguments remain mismatches. After plugin/runtime updates, agents should
 verify `codex plugin list --marketplace projectatlas --json` and
-`codex mcp get projectatlas` or `codex mcp list`; stale entries should be
+`codex mcp get projectatlas --json` or `codex mcp list`; stale entries should be
 repaired by rerunning the ProjectAtlas installer instead of left for the next
 Codex restart.
+
+On Windows, a running obsolete MCP child can lock the stable LocalAppData
+mirror. After the versioned runtime, generated configs, target plugin skill, and
+exact Codex registry entry are verified, the installer may hand off exactly one
+unambiguous stable-path process whose complete command ends in `mcp`. It
+reprobes the observed obsolete version, then holds that process handle while
+revalidating creation time, image path, complete command arguments, MCP mode,
+and executable digest. Any missing, current, inaccessible, ambiguous, changed,
+or unready identity stays alive and produces a partial convergence state; the
+installer never terminates Codex, a process selected only by name, or unrelated
+ProjectAtlas processes. After an exact retirement it retries the stable-mirror
+copy once and reports `retry_failed` if the mirror still cannot be installed and
+verified. The versioned runtime and project-local configs remain usable in all
+partial states.
+
+Local installer fixtures prove the selection, identity, readiness, failure, and
+retry-reporting contracts, but do not prove the real Codex parent/child
+lifecycle. Release acceptance for this handoff additionally requires an
+installed-Codex exact-version test showing that the parent survives, the
+obsolete child is replaced, and the target MCP server completes
+initialization.
 
 The installers verify Claude Code and OpenCode generated MCP configs after writing them. The checks
 parse the generated JSON and require the verified runtime path, `--require-version`, selected DB
