@@ -36,6 +36,7 @@
         }
       ]
     },
+    "prefer-worktree-guidance-before-database-preflight": 412,
     "publish-rustdoc-readme-links": 300,
     "report-installer-host-restart": 383,
     "resolve-configured-module-aliases": 385,
