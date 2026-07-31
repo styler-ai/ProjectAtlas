@@ -1019,6 +1019,72 @@ fn impact_analysis_deadline_and_mcp_cancellation_release_resources() -> Result<(
     session.shutdown()
 }
 
+#[test]
+fn persistent_mcp_stdin_does_not_block_repository_startup_probes() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("persistent-git-probe");
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn ready() {}\n",
+    )?;
+    git_success(&repo, &["init", "--quiet"])?;
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let init = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .args(["--format", "json", "init"])
+        .output()?;
+    if !init.status.success() {
+        return Err(io::Error::other(format!(
+            "persistent-probe fixture init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ))
+        .into());
+    }
+
+    let project_path = repo.to_string_lossy().to_string();
+    let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+    for (tool, arguments, expected) in [
+        (
+            "atlas_session_brief",
+            json!({"project_path": project_path, "compact": true}),
+            "session_brief:",
+        ),
+        (
+            "atlas_root",
+            json!({"project_path": project_path, "verify": true}),
+            "root:",
+        ),
+        (
+            "atlas_init",
+            json!({"project_path": project_path, "no_scan": true}),
+            "init:",
+        ),
+    ] {
+        let started = Instant::now();
+        let text = session.call_tool(tool, &arguments)?;
+        if started.elapsed() > Duration::from_secs(5) || !text.contains(expected) {
+            return Err(io::Error::other(format!(
+                "{tool} did not complete over persistent stdin: elapsed={:?} text={text}",
+                started.elapsed()
+            ))
+            .into());
+        }
+    }
+    let followup = session.call_tool(
+        "atlas_root",
+        &json!({"project_path": project_path, "verify": true}),
+    )?;
+    if !followup.contains("verified: true") {
+        return Err(io::Error::other(format!(
+            "immediate root follow-up failed after persistent probes: {followup}"
+        ))
+        .into());
+    }
+    session.shutdown()
+}
+
 #[cfg(feature = "optional-parser-supervisor")]
 #[test]
 fn parser_pack_disable_does_not_require_default_user_storage() -> Result<(), Box<dyn Error>> {
