@@ -95,6 +95,7 @@ const GITHOOKS_DIR_NAME: &str = ".githooks";
 const ISSUE_TEMPLATE_DIR_NAME: &str = "ISSUE_TEMPLATE";
 const VERSIONS_DIR_NAME: &str = "versions";
 const PRE_PUSH_HOOK_FILE_NAME: &str = "pre-push";
+const TS_CONFIG_FILE_NAME: &str = "tsconfig.json";
 const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_CONFIG",
@@ -15331,7 +15332,7 @@ fn compiler_config_utf8_bom_refreshes_through_cli_and_mcp() -> Result<(), Box<dy
         repo.join(SRC_DIR_NAME).join("page.ts"),
         "import { useController } from \"@/controller\";\nexport const value = useController();\n",
     )?;
-    let config_path = repo.join("tsconfig.json");
+    let config_path = repo.join(TS_CONFIG_FILE_NAME);
     fs::write(&config_path, [UTF8_BOM, COMPILER_CONFIG].concat())?;
 
     let init = Command::cargo_bin("projectatlas")?
@@ -15454,7 +15455,7 @@ fn configured_module_aliases_resolve_across_adapters_and_refresh_atomically()
     fs::create_dir_all(&source)?;
     fs::create_dir_all(&js_source)?;
     let db = temp.path().join("configured-module-aliases.db");
-    let ts_config = repo.join("tsconfig.json");
+    let ts_config = repo.join(TS_CONFIG_FILE_NAME);
     let js_config = repo.join(JS_DIR_NAME).join("jsconfig.json");
     fs::write(&ts_config, TS_CONFIG)?;
     fs::write(&js_config, JS_CONFIG)?;
