@@ -951,6 +951,8 @@ namespace ProjectAtlas.Installer
                         if (!TerminateProcess(handle, 0))
                         {
                             int errorCode = Marshal.GetLastWin32Error();
+                            if (WaitForSingleObject(handle, 0) == WaitObject0)
+                                return new ProcessRetirementResult("exited", 0);
                             return Failure("retirement_failed", errorCode);
                         }
                     }
@@ -1659,13 +1661,19 @@ function Invoke-ProjectAtlasObsoleteStableMcpHandoff {
         Write-Warning "ProjectAtlas obsolete MCP handoff remained partial: replacement readiness changed before it could be captured. Codex and all ProjectAtlas processes remain running."
         return "replacement_readiness_changed"
     }
-    Assert-ProjectAtlasDirectFilePath $StableMirrorPath "ProjectAtlas stable runtime mirror"
-    $selection = Find-ProjectAtlasObsoleteStableMcpProcess `
-        $StableMirrorPath `
-        $DbPath `
-        $ProjectConfigPath `
-        $FlatConfigPath `
-        $ExpectedVersion
+    try {
+        Assert-ProjectAtlasDirectFilePath $StableMirrorPath "ProjectAtlas stable runtime mirror"
+        $selection = Find-ProjectAtlasObsoleteStableMcpProcess `
+            $StableMirrorPath `
+            $DbPath `
+            $ProjectConfigPath `
+            $FlatConfigPath `
+            $ExpectedVersion
+    }
+    catch {
+        Write-Warning "ProjectAtlas obsolete MCP handoff remained partial because the stable runtime mirror could not be inspected safely. Repair the invalid mirror path and rerun this installer. Codex and all ProjectAtlas processes remain running."
+        return "inspection_failed"
+    }
     if ($selection.State -ne "exact") {
         Write-Warning "ProjectAtlas obsolete MCP handoff remained partial: process_owner=$($selection.State). Codex and all ProjectAtlas processes remain running."
         return [string]$selection.State
@@ -2533,8 +2541,15 @@ function Get-ProjectAtlasCodexPluginSourceManifestVersion {
         return ""
     }
     try {
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-        if ($manifest.version -is [string]) {
+        $manifestText = Get-Content -LiteralPath $manifestPath -Raw
+        if (-not $manifestText.TrimStart().StartsWith(
+                "{",
+                [System.StringComparison]::Ordinal
+            )) {
+            return ""
+        }
+        $manifest = ConvertFrom-Json -InputObject $manifestText
+        if ((Test-ProjectAtlasJsonObject $manifest) -and $manifest.version -is [string]) {
             return $manifest.version
         }
     }
@@ -2590,15 +2605,9 @@ function Confirm-ProjectAtlasCodexSkillArtifact {
         Write-Warning "Codex ProjectAtlas plugin skill verification failed: ProjectAtlas skill was not found at $skillPath."
         return
     }
-    try {
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-        if ($manifest.version -ne $runtimeVersion) {
-            Write-Warning "Codex ProjectAtlas plugin skill verification failed: manifest version '$($manifest.version)' does not match $runtimeVersion."
-            return
-        }
-    }
-    catch {
-        Write-Warning "Codex ProjectAtlas plugin skill verification failed: could not read $manifestPath."
+    $manifestVersion = Get-ProjectAtlasCodexPluginSourceManifestVersion $projectAtlasPlugin
+    if ($manifestVersion -ne $runtimeVersion) {
+        Write-Warning "Codex ProjectAtlas plugin skill verification failed: manifest version '$manifestVersion' does not match $runtimeVersion."
         return
     }
     Write-Output "Codex ProjectAtlas plugin skill verified at $skillPath for $runtimeVersion."
@@ -3291,7 +3300,12 @@ if ($hostRestartRequired) {
     Write-Warning "Existing host restart required: the inherited bare 'projectatlas' command remains stale, but the verified runtime is first on the persisted fresh-process PATH. Restart the environment-owning Windows launcher or terminal session, then start a new Codex or shell; restarting only a child of an unchanged launcher can retain stale PATH. $runtimeMcpConfigGuidance"
 }
 elseif ($hostRepairRequired) {
-    Write-Warning "Existing host bare CLI is not ready, and restart alone will not repair it because this installation could not make the verified runtime the first bare command for a fresh process. The installer could not prove an exact retireable obsolete MCP owner; restart the owning host and rerun this installer, or configure $(Split-Path -Parent $projectAtlas) first on PATH. $runtimeMcpConfigGuidance"
+    if ($handoffState -in @("not_required", "completed", "completed_after_exit", "retry_failed", "exit_retry_failed")) {
+        Write-Warning "Existing host bare CLI is not ready, and restart alone will not repair it because the verified runtime is not the first bare command for a fresh process. Configure $(Split-Path -Parent $projectAtlas) first on PATH, then rerun this installer if convergence remains partial. $runtimeMcpConfigGuidance"
+    }
+    else {
+        Write-Warning "Existing host bare CLI is not ready, and restart alone will not repair it because this installation could not make the verified runtime the first bare command for a fresh process. The installer could not prove an exact retireable obsolete MCP owner; restart the owning host and rerun this installer, or configure $(Split-Path -Parent $projectAtlas) first on PATH. $runtimeMcpConfigGuidance"
+    }
 }
 Write-Output "ProjectAtlas convergence: update_state=$updateState stable_mirror_ready=$($stableMirrorReady.ToString().ToLowerInvariant()) obsolete_mcp_handoff=$handoffState codex_plugin_ready=$($codexPluginReady.ToString().ToLowerInvariant()) codex_registry_ready=$($codexRegistryReady.ToString().ToLowerInvariant())"
 Write-Output "ProjectAtlas readiness: runtime_mcp_configs_ready=$($runtimeMcpConfigsReady.ToString().ToLowerInvariant()) installer_cli_ready=$($installerCliReady.ToString().ToLowerInvariant()) parent_cli_ready=$($parentCliReady.ToString().ToLowerInvariant()) host_restart_required=$($hostRestartRequired.ToString().ToLowerInvariant())"
