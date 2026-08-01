@@ -262,6 +262,17 @@ The Codex parent is never terminated. A failed post-retirement retry reports
 `retry_failed` and preserves the versioned runtime plus project-local configs;
 any bundle that cannot be reverified is reported unready with rerun guidance.
 
+When the stable mirror stays locked but the versioned runtime and generated
+configs remain verified, final output names the captured stale bare-command
+path and its observed version (or `unavailable`), the verified absolute runtime
+and target version, and whether restarting the environment-owning host can
+repair command resolution. Use the emitted absolute runtime command until the
+lock owner exits or releases the mirror, then rerun the emitted installer
+command. From the reported project root, require both the bare-command
+version gate and `projectatlas --require-version <target> token --view tui`
+before declaring convergence. Restart never makes the locked mirror ready by
+itself, and this recovery path adds no process-termination authority.
+
 Local installer fixtures prove the selection, identity, readiness, failure, and
 retry-reporting contracts, but do not prove the real Codex parent/child
 lifecycle. Release acceptance for this handoff additionally requires an

@@ -982,19 +982,108 @@ pub(crate) fn seal_project_usage_instances(
 /// Run due post-commit maintenance only for the adapter's captured project identity.
 pub(crate) fn maintain_after_commit_for_project(
     connection: &Connection,
+    expected_root: Option<&str>,
     project: ProjectInstanceId,
     policy: TelemetryRetentionPolicy,
 ) -> DbResult<()> {
+    maintain_after_commit_for_project_with_checkpoint(
+        connection,
+        expected_root,
+        project,
+        policy,
+        |connection| Ok(passive_checkpoint_state(connection)),
+    )
+}
+
+/// Run due maintenance with an explicit passive-checkpoint boundary.
+fn maintain_after_commit_for_project_with_checkpoint(
+    connection: &Connection,
+    expected_root: Option<&str>,
+    project: ProjectInstanceId,
+    policy: TelemetryRetentionPolicy,
+    checkpoint: impl FnOnce(&Connection) -> DbResult<TelemetryCheckpointState>,
+) -> DbResult<()> {
     crate::project_identity::require_bound_project_identity(connection, project)?;
     let policy = policy.validate()?;
-    let writes = connection.query_row(
-        "SELECT writes_since_checkpoint FROM usage_retention_state WHERE singleton = 1",
-        [],
-        |row| row.get::<_, i64>(0),
+    let checkpoint_start_writes = count_usize(
+        "writes_since_checkpoint",
+        connection.query_row(
+            "SELECT writes_since_checkpoint FROM usage_retention_state WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?,
     )?;
-    if count_usize("writes_since_checkpoint", writes)? < policy.checkpoint_write_interval {
+    if checkpoint_start_writes < policy.checkpoint_write_interval {
         return Ok(());
     }
+    crate::schema::validate_active_binding(connection, expected_root, Some(project))?;
+    let checkpoint_data_version =
+        connection.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?;
+    let state = checkpoint(connection)?;
+    crate::with_validated_write_transaction(
+        connection,
+        expected_root,
+        Some(project),
+        |transaction| {
+            let current_data_version =
+                transaction.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?;
+            let current_writes = count_usize(
+                "writes_since_checkpoint",
+                transaction.query_row(
+                    "SELECT writes_since_checkpoint
+                     FROM usage_retention_state WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+            )?;
+            let retained_writes = writes_after_checkpoint_attempt(
+                state,
+                checkpoint_start_writes,
+                current_writes,
+                current_data_version == checkpoint_data_version,
+            );
+            let now = now_epoch_seconds()?;
+            let (raw_rows, raw_bytes, old_raw) = raw_pressure(transaction, policy, now)?;
+            let retention_pending = raw_rows > policy.max_raw_rows
+                || raw_bytes > policy.max_raw_logical_bytes
+                || old_raw > 0
+                || retention_counter(transaction, RetentionCounter::InstanceRows)?
+                    > policy.max_retained_instances
+                || retention_counter(transaction, RetentionCounter::LabelRows)?
+                    > policy.max_retained_labels
+                || retention_counter(transaction, RetentionCounter::DailyRows)?
+                    > policy.max_daily_rows
+                || retention_counter(transaction, RetentionCounter::LabelTombstoneRows)?
+                    > policy.max_label_tombstones
+                || retention_counter(transaction, RetentionCounter::InstanceTombstoneRows)?
+                    > policy.max_instance_tombstones
+                || aged_maintenance_pending(transaction, policy, now)?;
+            let completed = state == TelemetryCheckpointState::Completed;
+            transaction.execute(
+                "UPDATE usage_retention_state
+                 SET writes_since_checkpoint = ?1,
+                     last_checkpoint_epoch = ?2,
+                     checkpoint_state = ?3,
+                     maintenance_pending = ?4
+                 WHERE singleton = 1",
+                params![
+                    to_i64("writes_since_checkpoint", retained_writes)?,
+                    now,
+                    state.as_str(),
+                    i64::from(
+                        !completed
+                            || retention_pending
+                            || retained_writes >= policy.checkpoint_write_interval
+                    ),
+                ],
+            )?;
+            Ok(())
+        },
+    )
+}
+
+/// Run one passive checkpoint and classify its bounded `SQLite` result.
+fn passive_checkpoint_state(connection: &Connection) -> TelemetryCheckpointState {
     let result = connection.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
         Ok((
             row.get::<_, i64>(0)?,
@@ -1002,44 +1091,27 @@ pub(crate) fn maintain_after_commit_for_project(
             row.get::<_, i64>(2)?,
         ))
     });
-    let state = match result {
+    match result {
         Ok((0, log_frames, checkpointed_frames)) if checkpointed_frames == log_frames => {
             TelemetryCheckpointState::Completed
         }
         Ok(_) => TelemetryCheckpointState::Busy,
         Err(_) => TelemetryCheckpointState::Error,
-    };
-    crate::project_identity::require_bound_project_identity(connection, project)?;
-    let now = now_epoch_seconds()?;
-    let (raw_rows, raw_bytes, old_raw) = raw_pressure(connection, policy, now)?;
-    let retention_pending = raw_rows > policy.max_raw_rows
-        || raw_bytes > policy.max_raw_logical_bytes
-        || old_raw > 0
-        || retention_counter(connection, RetentionCounter::InstanceRows)?
-            > policy.max_retained_instances
-        || retention_counter(connection, RetentionCounter::LabelRows)? > policy.max_retained_labels
-        || retention_counter(connection, RetentionCounter::DailyRows)? > policy.max_daily_rows
-        || retention_counter(connection, RetentionCounter::LabelTombstoneRows)?
-            > policy.max_label_tombstones
-        || retention_counter(connection, RetentionCounter::InstanceTombstoneRows)?
-            > policy.max_instance_tombstones
-        || aged_maintenance_pending(connection, policy, now)?;
-    let completed = state == TelemetryCheckpointState::Completed;
-    connection.execute(
-        "UPDATE usage_retention_state
-         SET writes_since_checkpoint = ?1,
-             last_checkpoint_epoch = ?2,
-             checkpoint_state = ?3,
-             maintenance_pending = ?4
-         WHERE singleton = 1",
-        params![
-            if completed { 0 } else { writes },
-            now,
-            state.as_str(),
-            i64::from(!completed || retention_pending),
-        ],
-    )?;
-    Ok(())
+    }
+}
+
+/// Preserve writes that committed after a checkpoint attempt began.
+const fn writes_after_checkpoint_attempt(
+    state: TelemetryCheckpointState,
+    checkpoint_start_writes: usize,
+    current_writes: usize,
+    data_version_unchanged: bool,
+) -> usize {
+    if matches!(state, TelemetryCheckpointState::Completed) && data_version_unchanged {
+        current_writes.saturating_sub(checkpoint_start_writes)
+    } else {
+        current_writes
+    }
 }
 
 /// Return content-free bounded telemetry state.
@@ -5146,7 +5218,12 @@ mod tests {
 
             let lookalike = database.temp.path().join("usage-telemetry-spill.db");
             std::fs::write(&lookalike, b"not owned by ProjectAtlas")?;
-            maintain_after_commit_for_project(&database.connection, database.project, policy)?;
+            maintain_after_commit_for_project(
+                &database.connection,
+                None,
+                database.project,
+                policy,
+            )?;
             assert_eq!(std::fs::read(lookalike)?, b"not owned by ProjectAtlas");
             Ok(())
         })();
@@ -5396,7 +5473,113 @@ mod tests {
     }
 
     #[test]
-    fn production_store_checkpoint_retries_after_a_held_reader_and_rejects_stale_binding() {
+    fn checkpoint_finalization_preserves_writes_committed_after_attempt() {
+        assert_eq!(
+            writes_after_checkpoint_attempt(
+                TelemetryCheckpointState::Completed,
+                1_024,
+                1_025,
+                true,
+            ),
+            1
+        );
+        assert_eq!(
+            writes_after_checkpoint_attempt(
+                TelemetryCheckpointState::Completed,
+                1_024,
+                1_025,
+                false,
+            ),
+            1_025
+        );
+        assert_eq!(
+            writes_after_checkpoint_attempt(TelemetryCheckpointState::Busy, 1_024, 1_025, true,),
+            1_025
+        );
+        assert_eq!(
+            writes_after_checkpoint_attempt(TelemetryCheckpointState::Error, 1_024, 1_025, true,),
+            1_025
+        );
+    }
+
+    #[test]
+    fn overlapping_checkpoint_finalizers_preserve_later_event_debt() {
+        let result = (|| -> Result<(), Box<dyn Error>> {
+            let database = production_database()?;
+            let policy = TelemetryRetentionPolicy::default();
+            let first = AtlasStore::open_for_project(&database.database_path, &database.root)?;
+            let second = AtlasStore::open_for_project(&database.database_path, &database.root)?;
+            let event_writer =
+                AtlasStore::open_for_project(&database.database_path, &database.root)?;
+            let first_instance = instance(91)?;
+            let second_instance = instance(92)?;
+            let first_event = event("checkpoint-overlap-first", 100, 10);
+            let second_event = event("checkpoint-overlap-second", 100, 10);
+            database.store.connection.execute(
+                "UPDATE usage_retention_state
+                 SET writes_since_checkpoint = ?1 WHERE singleton = 1",
+                [to_i64(
+                    "checkpoint_write_interval",
+                    policy.checkpoint_write_interval,
+                )?],
+            )?;
+
+            maintain_after_commit_for_project_with_checkpoint(
+                &first.connection,
+                first.validated_project_root.as_deref(),
+                database.project,
+                policy,
+                |connection| {
+                    let state = passive_checkpoint_state(connection);
+                    record_transaction(
+                        &event_writer.connection,
+                        database.project,
+                        first_instance,
+                        UsageInstanceOwner::McpProcess,
+                        &first_event,
+                        policy,
+                        false,
+                    )?;
+                    maintain_after_commit_for_project_with_checkpoint(
+                        &second.connection,
+                        second.validated_project_root.as_deref(),
+                        database.project,
+                        policy,
+                        |connection| {
+                            let state = passive_checkpoint_state(connection);
+                            record_transaction(
+                                &event_writer.connection,
+                                database.project,
+                                second_instance,
+                                UsageInstanceOwner::McpProcess,
+                                &second_event,
+                                policy,
+                                false,
+                            )?;
+                            Ok(state)
+                        },
+                    )?;
+                    Ok(state)
+                },
+            )?;
+
+            let retention = database.store.telemetry_retention_state()?;
+            assert_eq!(
+                retention.writes_since_checkpoint,
+                policy.checkpoint_write_interval + 2,
+                "overlapping checkpoint finalizers erased later event debt"
+            );
+            assert!(retention.maintenance_pending);
+            Ok(())
+        })();
+        assert!(
+            result.is_ok(),
+            "overlapping checkpoint test failed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn production_store_checkpoint_retries_and_rejects_stale_schema_or_binding() {
         let result = (|| -> Result<(), Box<dyn Error>> {
             let database = production_database()?;
             let runtime = instance(90)?;
@@ -5429,6 +5612,7 @@ mod tests {
             )?;
             maintain_after_commit_for_project(
                 &database.store.connection,
+                database.store.validated_project_root.as_deref(),
                 database.project,
                 policy,
             )?;
@@ -5442,6 +5626,7 @@ mod tests {
             reader.finish_index_read_snapshot()?;
             maintain_after_commit_for_project(
                 &database.store.connection,
+                database.store.validated_project_root.as_deref(),
                 database.project,
                 policy,
             )?;
@@ -5451,6 +5636,121 @@ mod tests {
                 TelemetryCheckpointState::Completed
             );
             assert_eq!(completed.writes_since_checkpoint, 0);
+
+            database.store.connection.execute(
+                "UPDATE usage_retention_state
+                 SET writes_since_checkpoint = ?1 WHERE singleton = 1",
+                [to_i64(
+                    "checkpoint_write_interval",
+                    policy.checkpoint_write_interval,
+                )?],
+            )?;
+            let newer_owner = Connection::open(&database.database_path)?;
+            let future_schema = crate::schema::SCHEMA_VERSION + 1;
+            newer_owner.execute(
+                "UPDATE metadata SET value = ?2 WHERE key = ?1",
+                params![crate::schema::SCHEMA_VERSION_KEY, future_schema.to_string()],
+            )?;
+            let wal_path = crate::schema::sqlite_sidecar_path(&database.database_path, "-wal");
+            let wal_before = fs::read(&wal_path)?;
+            let maintenance_before = database.store.telemetry_retention_state()?;
+            let Err(error) = maintain_after_commit_for_project(
+                &database.store.connection,
+                database.store.validated_project_root.as_deref(),
+                database.project,
+                policy,
+            ) else {
+                return Err(std::io::Error::other(
+                    "post-commit maintenance accepted a newer schema",
+                )
+                .into());
+            };
+            assert!(matches!(
+                error,
+                DbError::SchemaVersion { found, expected }
+                    if found == future_schema && expected == crate::schema::SCHEMA_VERSION
+            ));
+            assert_eq!(
+                database.store.telemetry_retention_state()?,
+                maintenance_before,
+                "newer-schema maintenance refusal changed retention state"
+            );
+            assert_eq!(
+                fs::read(&wal_path)?,
+                wal_before,
+                "newer-schema maintenance refusal checkpointed the WAL"
+            );
+            assert_eq!(
+                newer_owner.query_row(
+                    "SELECT value FROM metadata WHERE key = ?1",
+                    [crate::schema::SCHEMA_VERSION_KEY],
+                    |row| row.get::<_, String>(0),
+                )?,
+                future_schema.to_string(),
+                "newer-schema owner stopped observing its schema"
+            );
+            newer_owner.execute(
+                "UPDATE metadata SET value = ?2 WHERE key = ?1",
+                params![
+                    crate::schema::SCHEMA_VERSION_KEY,
+                    crate::schema::SCHEMA_VERSION.to_string()
+                ],
+            )?;
+
+            database.store.connection.execute(
+                "UPDATE usage_retention_state
+                 SET writes_since_checkpoint = ?1 WHERE singleton = 1",
+                [to_i64(
+                    "checkpoint_write_interval",
+                    policy.checkpoint_write_interval,
+                )?],
+            )?;
+            let transition_before = database.store.telemetry_retention_state()?;
+            let Err(error) = maintain_after_commit_for_project_with_checkpoint(
+                &database.store.connection,
+                database.store.validated_project_root.as_deref(),
+                database.project,
+                policy,
+                |connection| {
+                    let state = passive_checkpoint_state(connection);
+                    newer_owner.execute(
+                        "UPDATE metadata SET value = ?2 WHERE key = ?1",
+                        params![crate::schema::SCHEMA_VERSION_KEY, future_schema.to_string()],
+                    )?;
+                    Ok(state)
+                },
+            ) else {
+                return Err(std::io::Error::other(
+                    "maintenance finalized after a schema transition at the checkpoint boundary",
+                )
+                .into());
+            };
+            assert!(matches!(
+                error,
+                DbError::SchemaVersion { found, expected }
+                    if found == future_schema && expected == crate::schema::SCHEMA_VERSION
+            ));
+            assert_eq!(
+                database.store.telemetry_retention_state()?,
+                transition_before,
+                "checkpoint-boundary schema transition changed retention state"
+            );
+            assert_eq!(
+                newer_owner.query_row(
+                    "SELECT value FROM metadata WHERE key = ?1",
+                    [crate::schema::SCHEMA_VERSION_KEY],
+                    |row| row.get::<_, String>(0),
+                )?,
+                future_schema.to_string(),
+                "checkpoint-boundary refusal changed the concurrent owner's schema"
+            );
+            newer_owner.execute(
+                "UPDATE metadata SET value = ?2 WHERE key = ?1",
+                params![
+                    crate::schema::SCHEMA_VERSION_KEY,
+                    crate::schema::SCHEMA_VERSION.to_string()
+                ],
+            )?;
 
             let old_project = database.project;
             let captured = database.store.captured_project_binding()?;
@@ -5467,8 +5767,12 @@ mod tests {
                     .revalidate_captured_project_binding()
                     .is_err()
             );
-            let stale =
-                maintain_after_commit_for_project(&database.store.connection, old_project, policy);
+            let stale = maintain_after_commit_for_project(
+                &database.store.connection,
+                database.store.validated_project_root.as_deref(),
+                old_project,
+                policy,
+            );
             assert!(stale.is_err());
             Ok(())
         })();

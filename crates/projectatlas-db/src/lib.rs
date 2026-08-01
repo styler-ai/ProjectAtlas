@@ -569,6 +569,30 @@ pub enum DbError {
 }
 
 impl DbError {
+    /// Return a schema version with a complete migration route owned by this runtime.
+    #[must_use]
+    pub fn supported_schema_migration(&self) -> Option<(i64, i64, u32)> {
+        match self {
+            Self::SchemaVersion { found, expected } => schema::migration_steps_remaining(*found)
+                .filter(|steps| *steps > 0)
+                .map(|steps| (*found, *expected, steps)),
+            _ => None,
+        }
+    }
+
+    /// Return a schema version rejected by this runtime's migration inventory.
+    #[must_use]
+    pub fn unsupported_schema_version(&self) -> Option<(i64, i64)> {
+        match self {
+            Self::SchemaVersion { found, expected }
+                if schema::migration_steps_remaining(*found).is_none() =>
+            {
+                Some((*found, *expected))
+            }
+            _ => None,
+        }
+    }
+
     /// Return whether a derived-index write could not proceed without implying
     /// corruption, schema drift, or an identity-contract failure.
     #[must_use]
@@ -1258,6 +1282,32 @@ const PURPOSE_HEALTH_SPECS: [PurposeHealthSpec; 3] = [
     },
 ];
 
+/// Run one standalone write only while the captured schema and project binding still match.
+fn with_validated_write_transaction<T>(
+    connection: &Connection,
+    expected_root: Option<&str>,
+    expected_identity: Option<ProjectInstanceId>,
+    operation: impl FnOnce(&Connection) -> DbResult<T>,
+) -> DbResult<T> {
+    let transaction =
+        rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    let result = schema::validate_active_binding(&transaction, expected_root, expected_identity)
+        .and_then(|()| operation(&transaction));
+    match result {
+        Ok(value) => {
+            transaction.commit()?;
+            Ok(value)
+        }
+        Err(operation) => match transaction.rollback() {
+            Ok(()) => Err(operation),
+            Err(rollback) => Err(DbError::TransactionRollback {
+                operation: Box::new(operation),
+                rollback,
+            }),
+        },
+    }
+}
+
 impl AtlasStore {
     /// Reject mutations while this connection owns an ordinary read snapshot.
     fn require_mutation_scope(&self) -> DbResult<()> {
@@ -1294,27 +1344,12 @@ impl AtlasStore {
         if !self.connection.is_autocommit() {
             return operation(&self.connection);
         }
-        let transaction =
-            rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
-        let result = schema::validate_active_binding(
-            &transaction,
+        with_validated_write_transaction(
+            &self.connection,
             self.validated_project_root.as_deref(),
             self.validated_project_instance_id,
+            operation,
         )
-        .and_then(|()| operation(&transaction));
-        match result {
-            Ok(value) => {
-                transaction.commit()?;
-                Ok(value)
-            }
-            Err(operation) => match transaction.rollback() {
-                Ok(()) => Err(operation),
-                Err(rollback) => Err(DbError::TransactionRollback {
-                    operation: Box::new(operation),
-                    rollback,
-                }),
-            },
-        }
     }
 
     /// Run telemetry against this store's exact captured database binding.
@@ -1340,6 +1375,7 @@ impl AtlasStore {
             }
             return Err(DbError::TelemetryPathUnavailable);
         };
+        let _ = schema::preflight(path, self.validated_project_root.as_deref())?;
         let connection = open_writable_connection(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE,
@@ -5616,39 +5652,28 @@ impl AtlasStore {
             .validated_project_instance_id
             .ok_or(DbError::ProjectInstanceIdentityMissing)?;
         self.with_telemetry_connection(|connection| {
-            let transaction =
-                rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
-            let operation = schema::validate_active_binding(
-                &transaction,
+            with_validated_write_transaction(
+                connection,
                 self.validated_project_root.as_deref(),
                 Some(project_instance_id),
-            )
-            .and_then(|()| {
-                telemetry::record_usage_for_project(
-                    &transaction,
-                    project_instance_id,
-                    instance_id,
-                    owner,
-                    event,
-                    policy,
-                    seal_after_record,
-                )
-            });
-            match operation {
-                Ok(()) => transaction.commit().map_err(DbError::from),
-                Err(operation) => match transaction.rollback() {
-                    Ok(()) => Err(operation),
-                    Err(rollback) => Err(DbError::TransactionRollback {
-                        operation: Box::new(operation),
-                        rollback,
-                    }),
+                |transaction| {
+                    telemetry::record_usage_for_project(
+                        transaction,
+                        project_instance_id,
+                        instance_id,
+                        owner,
+                        event,
+                        policy,
+                        seal_after_record,
+                    )
                 },
-            }?;
+            )?;
             // The event is already committed. Passive maintenance remains
             // observable through retention state and must never make callers
             // retry a successfully persisted event.
             drop(telemetry::maintain_after_commit_for_project(
                 connection,
+                self.validated_project_root.as_deref(),
                 project_instance_id,
                 policy,
             ));
@@ -5664,24 +5689,12 @@ impl AtlasStore {
     /// already inactive, or `SQLite` cannot commit the state transition.
     pub fn seal_usage_instance(&self, instance_id: UsageInstanceId) -> DbResult<()> {
         self.with_telemetry_connection(|connection| {
-            let transaction =
-                rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
-            let operation = schema::validate_active_binding(
-                &transaction,
+            with_validated_write_transaction(
+                connection,
                 self.validated_project_root.as_deref(),
                 self.validated_project_instance_id,
+                |transaction| telemetry::seal_usage_instance(transaction, instance_id),
             )
-            .and_then(|()| telemetry::seal_usage_instance(&transaction, instance_id));
-            match operation {
-                Ok(()) => transaction.commit().map_err(Into::into),
-                Err(operation) => match transaction.rollback() {
-                    Ok(()) => Err(operation),
-                    Err(rollback) => Err(DbError::TransactionRollback {
-                        operation: Box::new(operation),
-                        rollback,
-                    }),
-                },
-            }
         })
     }
 
@@ -7634,6 +7647,65 @@ mod tests {
     use std::time::Instant;
 
     #[test]
+    fn unsupported_schema_versions_follow_the_migration_inventory() -> Result<(), Box<dyn Error>> {
+        for found in schema::PREVIOUS_SCHEMA_VERSION..=schema::SCHEMA_VERSION {
+            let error = DbError::SchemaVersion {
+                found,
+                expected: schema::SCHEMA_VERSION,
+            };
+            let expected_migration = if found < schema::SCHEMA_VERSION {
+                Some((
+                    found,
+                    schema::SCHEMA_VERSION,
+                    u32::try_from(schema::SCHEMA_VERSION - found)?,
+                ))
+            } else {
+                None
+            };
+            require_eq(
+                &error.supported_schema_migration(),
+                &expected_migration,
+                "admitted schema migration",
+            )?;
+            require_eq(
+                &error.unsupported_schema_version(),
+                &None,
+                "admitted schema version",
+            )?;
+        }
+        for found in [
+            schema::PREVIOUS_SCHEMA_VERSION - 1,
+            schema::SCHEMA_VERSION + 1,
+        ] {
+            let error = DbError::SchemaVersion {
+                found,
+                expected: schema::SCHEMA_VERSION,
+            };
+            require_eq(
+                &error.unsupported_schema_version(),
+                &Some((found, schema::SCHEMA_VERSION)),
+                "unsupported schema version",
+            )?;
+            require_eq(
+                &error.supported_schema_migration(),
+                &None,
+                "unsupported schema migration",
+            )?;
+        }
+        require_eq(
+            &DbError::SchemaVersionMissing.unsupported_schema_version(),
+            &None,
+            "unrelated database error",
+        )?;
+        require_eq(
+            &DbError::SchemaVersionMissing.supported_schema_migration(),
+            &None,
+            "unrelated migration error",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn stores_nodes_and_overview() -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::in_memory()?;
         let node = Node {
@@ -9008,6 +9080,105 @@ mod tests {
             &read_project_root_read_only(&db_path)?,
             &Some(normalize_native_path_display(&root)),
             "WAL-aware read-only project root",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn validated_write_transaction_revalidates_before_operation_and_rolls_back()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        let store = AtlasStore::open_for_project(&db_path, &root)?;
+        let expected_identity = store
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let sentinel_key = "validated_write_transaction_test";
+
+        with_validated_write_transaction(
+            &store.connection,
+            store.validated_project_root.as_deref(),
+            Some(expected_identity),
+            |connection| set_metadata(connection, sentinel_key, "committed"),
+        )?;
+        require_eq(
+            &store.connection.query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [sentinel_key],
+                |row| row.get::<_, String>(0),
+            )?,
+            &"committed".to_string(),
+            "validated write positive control",
+        )?;
+
+        let Err(operation_error) = with_validated_write_transaction(
+            &store.connection,
+            store.validated_project_root.as_deref(),
+            Some(expected_identity),
+            |connection| -> DbResult<()> {
+                set_metadata(connection, sentinel_key, "rolled-back")?;
+                Err(DbError::TelemetryIdentityUnavailable)
+            },
+        ) else {
+            return Err(io::Error::other("failing validated write unexpectedly committed").into());
+        };
+        require_eq(
+            &matches!(operation_error, DbError::TelemetryIdentityUnavailable),
+            &true,
+            "validated write operation error",
+        )?;
+        require_eq(
+            &store.connection.query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [sentinel_key],
+                |row| row.get::<_, String>(0),
+            )?,
+            &"committed".to_string(),
+            "validated write rollback",
+        )?;
+
+        let future_schema = schema::SCHEMA_VERSION + 1;
+        let newer_owner = Connection::open(&db_path)?;
+        newer_owner.execute(
+            "UPDATE metadata SET value = ?2 WHERE key = ?1",
+            params![schema::SCHEMA_VERSION_KEY, future_schema.to_string()],
+        )?;
+        let operation_invoked = Cell::new(false);
+        let Err(binding_error) = with_validated_write_transaction(
+            &store.connection,
+            store.validated_project_root.as_deref(),
+            Some(expected_identity),
+            |connection| {
+                operation_invoked.set(true);
+                set_metadata(connection, sentinel_key, "wrong-schema")
+            },
+        ) else {
+            return Err(io::Error::other("newer schema accepted a validated write").into());
+        };
+        require_eq(
+            &matches!(
+                binding_error,
+                DbError::SchemaVersion { found, expected }
+                    if found == future_schema && expected == schema::SCHEMA_VERSION
+            ),
+            &true,
+            "validated write schema recheck",
+        )?;
+        require_eq(
+            &operation_invoked.get(),
+            &false,
+            "validated write closure invocation",
+        )?;
+        require_eq(
+            &newer_owner.query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [sentinel_key],
+                |row| row.get::<_, String>(0),
+            )?,
+            &"committed".to_string(),
+            "newer-schema sentinel value",
         )?;
         Ok(())
     }
@@ -12987,6 +13158,23 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::open(db_path)?;
         store.set_project_root(root)?;
+        populate_schema_compatibility_fixture(&mut store, label)?;
+        set_metadata(
+            &store.connection,
+            SCHEMA_VERSION_KEY,
+            &schema_version.to_string(),
+        )?;
+        store
+            .connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        Ok(())
+    }
+
+    /// Populate representative source, authored, telemetry, and publication state.
+    pub(crate) fn populate_schema_compatibility_fixture(
+        store: &mut AtlasStore,
+        label: &str,
+    ) -> Result<(), Box<dyn Error>> {
         {
             let mut publication = store.begin_index_publication("untrusted-contract")?;
             write_test_projection(&mut publication, label)?;
@@ -13018,14 +13206,6 @@ mod tests {
             20,
         ))?;
         set_metadata(&store.connection, "custom_setting", "preserved")?;
-        set_metadata(
-            &store.connection,
-            SCHEMA_VERSION_KEY,
-            &schema_version.to_string(),
-        )?;
-        store
-            .connection
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
         Ok(())
     }
 

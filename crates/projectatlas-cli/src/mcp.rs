@@ -35,11 +35,13 @@ use crate::token_tui::{
 };
 use crate::{
     AgentErrorKind, CliError, DEFAULT_FILE_SUMMARY_LIMIT, DatabaseFilesystemErrorPayload,
-    HarnessConfig, OutputFormat, RootTransition, RuntimeInfoReport, SearchRetrievalModeArg,
-    build_harness_mcp_config_report, build_parity_report, build_root_report, build_runtime_info,
-    controlled_named_output, database_filesystem_error_payload, finalize_coverage_output,
-    render_code_slice, render_file_summary, render_parity_report, render_root_report,
-    render_runtime_info, render_search_report, render_watch_status,
+    HarnessConfig, OutputFormat, RootTransition, RuntimeInfoReport, SchemaMigrationRequiredPayload,
+    SchemaVersionMismatchPayload, SearchRetrievalModeArg, build_harness_mcp_config_report,
+    build_parity_report, build_root_report, build_runtime_info, controlled_named_output,
+    database_filesystem_error_payload, finalize_coverage_output, render_code_slice,
+    render_file_summary, render_parity_report, render_root_report, render_runtime_info,
+    render_search_report, render_watch_status, schema_migration_required_payload,
+    schema_version_mismatch_payload,
 };
 use projectatlas_core::graph::{
     Completeness, ConfidenceClass, CoverageRecord, EntitySelector, ExternalSelector,
@@ -81,7 +83,9 @@ use projectatlas_service::{
     parse_symbol_kind, read_indexed_code_slice_from_source_bounded,
     read_symbol_slice_from_source_bounded, search_indexed_files_with_control,
 };
-use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
+use rmcp::handler::server::{
+    router::tool::ToolRouter, tool::IntoCallToolResult, wrapper::Parameters,
+};
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::schemars;
 use rmcp::service::RequestContext;
@@ -96,6 +100,32 @@ use std::sync::{
 };
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Text response routed through `rmcp`'s native tool-success/tool-error conversion.
+#[derive(Debug, PartialEq, Eq)]
+struct McpToolTextResult(Result<String, String>);
+
+impl std::ops::Deref for McpToolTextResult {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        match &self.0 {
+            Ok(text) | Err(text) => text,
+        }
+    }
+}
+
+impl std::fmt::Display for McpToolTextResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self)
+    }
+}
+
+impl IntoCallToolResult for McpToolTextResult {
+    fn into_call_tool_result(self) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        self.0.into_call_tool_result()
+    }
+}
 
 /// MCP tools required for the agent-first repository-intelligence surface.
 pub(crate) const REQUIRED_MCP_TOOL_NAMES: &[&str] = &[
@@ -1639,6 +1669,12 @@ struct McpErrorPayload {
     /// Content-free database placement details for a rejected `SQLite` profile.
     #[serde(skip_serializing_if = "Option::is_none")]
     database_filesystem: Option<DatabaseFilesystemErrorPayload>,
+    /// Content-free incompatible schema details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema_version_mismatch: Option<SchemaVersionMismatchPayload>,
+    /// Content-free supported migration handoff.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema_migration_required: Option<SchemaMigrationRequiredPayload>,
     /// Optional retrieval capability state and recovery guidance.
     #[serde(skip_serializing_if = "Option::is_none")]
     search_capability: Option<crate::SearchCapabilityErrorPayload>,
@@ -5338,6 +5374,12 @@ impl ProjectAtlasMcpServer {
 
     /// Encode an MCP error as a structured agent-readable payload.
     fn encode_error_payload(error: &CliError) -> String {
+        let schema_version_mismatch = schema_version_mismatch_payload(error);
+        let schema_migration_required = schema_migration_required_payload(error);
+        let message = schema_migration_required.as_ref().map_or_else(
+            || error.to_string(),
+            SchemaMigrationRequiredPayload::message,
+        );
         let (
             kind,
             refresh_required,
@@ -5429,6 +5471,28 @@ impl ProjectAtlasMcpServer {
                 }),
                 None,
             ),
+            _ if schema_version_mismatch.is_some() => (
+                AgentErrorKind::SchemaVersionMismatch,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            _ if schema_migration_required.is_some() => (
+                AgentErrorKind::SchemaMigrationRequired,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
             _ => database_filesystem_error_payload(error).map_or(
                 (
                     AgentErrorKind::Error,
@@ -5459,13 +5523,15 @@ impl ProjectAtlasMcpServer {
         let payload = McpErrorResponse {
             error: McpErrorPayload {
                 kind,
-                message: error.to_string(),
+                message,
                 refresh_required,
                 init_required,
                 worktree_required,
                 verification_incomplete,
                 project_mismatch,
                 database_filesystem,
+                schema_version_mismatch,
+                schema_migration_required,
                 search_capability,
                 next,
             },
@@ -5481,10 +5547,17 @@ impl ProjectAtlasMcpServer {
     }
 
     /// Convert a command result into an agent-readable TOON MCP text payload.
-    fn as_mcp_text(result: Result<String, CliError>) -> String {
+    fn as_mcp_text(result: Result<String, CliError>) -> McpToolTextResult {
         match result {
-            Ok(text) => text,
-            Err(error) => Self::encode_error_payload(&error),
+            Ok(text) => McpToolTextResult(Ok(text)),
+            Err(error) => {
+                let payload = Self::encode_error_payload(&error);
+                if schema_version_mismatch_payload(&error).is_some() {
+                    McpToolTextResult(Err(payload))
+                } else {
+                    McpToolTextResult(Ok(payload))
+                }
+            }
         }
     }
 }
@@ -5616,7 +5689,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_set_project_path(
         &self,
         Parameters(params): Parameters<AtlasSetProjectPathParams>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = Self::project_state_from_root(Path::new(&params.project_path))?;
             self.set_active_project_state(state.clone())?;
@@ -5629,7 +5702,7 @@ impl ProjectAtlasMcpServer {
         name = "atlas_init",
         description = "Initialize ProjectAtlas project-local config, database, host MCP configs, scan/index, and purpose handoff."
     )]
-    fn atlas_init(&self, Parameters(params): Parameters<AtlasInitParams>) -> String {
+    fn atlas_init(&self, Parameters(params): Parameters<AtlasInitParams>) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.admin_project_root(params.project_path)?;
             let config_path = init_config_path(&state.root, state.config_path.as_deref());
@@ -5659,7 +5732,7 @@ impl ProjectAtlasMcpServer {
         name = "atlas_map",
         description = "Write the explicit compatibility ProjectAtlas map export for older workflows."
     )]
-    fn atlas_map(&self, Parameters(params): Parameters<AtlasMapParams>) -> String {
+    fn atlas_map(&self, Parameters(params): Parameters<AtlasMapParams>) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.admin_project_root(params.project_path)?;
             let report = Self::build_map_report(
@@ -5676,7 +5749,7 @@ impl ProjectAtlasMcpServer {
         name = "atlas_root",
         description = "Show or verify ProjectAtlas root, DB, config, and runtime identity."
     )]
-    fn atlas_root(&self, Parameters(params): Parameters<AtlasRootParams>) -> String {
+    fn atlas_root(&self, Parameters(params): Parameters<AtlasRootParams>) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.admin_project_root(params.project_path)?;
             let report = build_root_report(&state.db_path, state.config_path.as_deref())?;
@@ -5692,7 +5765,10 @@ impl ProjectAtlasMcpServer {
         name = "atlas_root_set",
         description = "Bind a repository root, generate project-local MCP configs, and make it active for later MCP calls."
     )]
-    fn atlas_root_set(&self, Parameters(params): Parameters<AtlasRootSetParams>) -> String {
+    fn atlas_root_set(
+        &self,
+        Parameters(params): Parameters<AtlasRootSetParams>,
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let root = canonical_project_root(Path::new(&params.root))?;
             let report = crate::bind_project_root(
@@ -5711,7 +5787,10 @@ impl ProjectAtlasMcpServer {
         name = "atlas_config",
         description = "Return the effective ProjectAtlas scan, purpose, and output configuration."
     )]
-    fn atlas_config(&self, Parameters(params): Parameters<AtlasProjectParams>) -> String {
+    fn atlas_config(
+        &self,
+        Parameters(params): Parameters<AtlasProjectParams>,
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.admin_project_root(params.project_path)?;
             let report = effective_config_report(&Self::load_config_for_state(&state)?);
@@ -5724,7 +5803,10 @@ impl ProjectAtlasMcpServer {
         name = "atlas_ignore_list",
         description = "List effective ProjectAtlas manual ignore policy and inherited .gitignore status."
     )]
-    fn atlas_ignore_list(&self, Parameters(params): Parameters<AtlasProjectParams>) -> String {
+    fn atlas_ignore_list(
+        &self,
+        Parameters(params): Parameters<AtlasProjectParams>,
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.admin_project_root(params.project_path)?;
             let report = list_ignore_entries(state.config_path.as_deref(), &state.root)?;
@@ -5740,7 +5822,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_ignore_init_gitignore(
         &self,
         Parameters(params): Parameters<AtlasProjectParams>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.admin_project_root(params.project_path)?;
             let report = init_gitignore(state.config_path.as_deref(), &state.root)?;
@@ -5756,7 +5838,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_ignore_add(
         &self,
         Parameters(params): Parameters<AtlasIgnoreMutationParams>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.admin_project_root(params.project_path)?;
             let kind = Self::parse_ignore_kind(params.kind.as_deref(), true)?.ok_or_else(|| {
@@ -5780,7 +5862,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_ignore_remove(
         &self,
         Parameters(params): Parameters<AtlasIgnoreMutationParams>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.admin_project_root(params.project_path)?;
             let kind = Self::parse_ignore_kind(params.kind.as_deref(), false)?;
@@ -5799,7 +5881,7 @@ impl ProjectAtlasMcpServer {
         name = "atlas_scan",
         description = "Scan repository structure, import ProjectAtlas purpose metadata, rebuild symbols, and return a TOON overview."
     )]
-    fn atlas_scan(&self, Parameters(params): Parameters<AtlasScanParams>) -> String {
+    fn atlas_scan(&self, Parameters(params): Parameters<AtlasScanParams>) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let background = params.background.unwrap_or(false);
@@ -5856,7 +5938,7 @@ impl ProjectAtlasMcpServer {
         &self,
         params: AtlasProjectParams,
         context: Option<RequestContext<RoleServer>>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
             self.with_fresh_string_and_usage_for_request(&state, context, |store, stamp| {
@@ -5887,7 +5969,7 @@ impl ProjectAtlasMcpServer {
         &self,
         Parameters(params): Parameters<AtlasProjectParams>,
         context: RequestContext<RoleServer>,
-    ) -> String {
+    ) -> McpToolTextResult {
         self.atlas_overview_response(params, Some(context))
     }
 
@@ -5900,7 +5982,7 @@ impl ProjectAtlasMcpServer {
         &self,
         Parameters(params): Parameters<AtlasQueryParams>,
         context: RequestContext<RoleServer>,
-    ) -> String {
+    ) -> McpToolTextResult {
         self.atlas_folders_response(params, Some(context))
     }
 
@@ -5909,7 +5991,7 @@ impl ProjectAtlasMcpServer {
         &self,
         params: AtlasQueryParams,
         context: Option<RequestContext<RoleServer>>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
             let query = Self::query_or_empty(params.query);
@@ -5942,7 +6024,7 @@ impl ProjectAtlasMcpServer {
         &self,
         Parameters(params): Parameters<AtlasFilesParams>,
         context: RequestContext<RoleServer>,
-    ) -> String {
+    ) -> McpToolTextResult {
         self.atlas_files_response(params, Some(context))
     }
 
@@ -5951,7 +6033,7 @@ impl ProjectAtlasMcpServer {
         &self,
         params: AtlasFilesParams,
         context: Option<RequestContext<RoleServer>>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let (state, folder_filter, routed_project) = self.state_and_optional_folder_filter(
@@ -6010,7 +6092,7 @@ impl ProjectAtlasMcpServer {
         &self,
         Parameters(params): Parameters<AtlasQueryParams>,
         context: RequestContext<RoleServer>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
             let query = Self::query_or_empty(params.query);
@@ -6043,7 +6125,7 @@ impl ProjectAtlasMcpServer {
         &self,
         Parameters(params): Parameters<AtlasOutlineParams>,
         context: RequestContext<RoleServer>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let resolved = self.state_and_file_key(
@@ -6080,7 +6162,7 @@ impl ProjectAtlasMcpServer {
         &self,
         params: &AtlasFileSummaryParams,
         context: Option<RequestContext<RoleServer>>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let resolved = self.state_and_file_key(
@@ -6126,7 +6208,7 @@ impl ProjectAtlasMcpServer {
         &self,
         Parameters(params): Parameters<AtlasFileSummaryParams>,
         context: RequestContext<RoleServer>,
-    ) -> String {
+    ) -> McpToolTextResult {
         self.atlas_file_summary_response(&params, Some(context))
     }
 
@@ -6139,7 +6221,7 @@ impl ProjectAtlasMcpServer {
         &self,
         Parameters(params): Parameters<AtlasSearchParams>,
         context: RequestContext<RoleServer>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path.clone())?;
             self.with_fresh_string_and_usage_controlled_for_request(
@@ -6183,7 +6265,7 @@ impl ProjectAtlasMcpServer {
         &self,
         Parameters(params): Parameters<AtlasSliceParams>,
         context: RequestContext<RoleServer>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let resolved = self.state_and_file_key(
@@ -6271,7 +6353,10 @@ impl ProjectAtlasMcpServer {
         name = "atlas_symbols_build",
         description = "Rebuild ProjectAtlas symbol graphs for indexed files and return a TOON build report."
     )]
-    fn atlas_symbols_build(&self, Parameters(params): Parameters<AtlasScanParams>) -> String {
+    fn atlas_symbols_build(
+        &self,
+        Parameters(params): Parameters<AtlasScanParams>,
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let background = params.background.unwrap_or(false);
@@ -6330,7 +6415,7 @@ impl ProjectAtlasMcpServer {
         &self,
         params: &AtlasSymbolsParams,
         context: Option<RequestContext<RoleServer>>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let (state, file, routed_project) = self.state_and_optional_file_key(
@@ -6383,7 +6468,7 @@ impl ProjectAtlasMcpServer {
         &self,
         Parameters(params): Parameters<AtlasSymbolsParams>,
         context: RequestContext<RoleServer>,
-    ) -> String {
+    ) -> McpToolTextResult {
         self.atlas_symbols_response(&params, Some(context))
     }
 
@@ -6634,7 +6719,7 @@ impl ProjectAtlasMcpServer {
         &self,
         params: &AtlasSymbolRelationsParams,
         context: Option<RequestContext<RoleServer>>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let (detailed, analysis) = match params
                 .view
@@ -6778,7 +6863,7 @@ impl ProjectAtlasMcpServer {
         &self,
         Parameters(params): Parameters<AtlasSymbolRelationsParams>,
         context: RequestContext<RoleServer>,
-    ) -> String {
+    ) -> McpToolTextResult {
         self.atlas_symbol_relations_response(&params, Some(context))
     }
 
@@ -6791,7 +6876,7 @@ impl ProjectAtlasMcpServer {
         &self,
         Parameters(params): Parameters<AtlasHealthParams>,
         context: RequestContext<RoleServer>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path.clone())?;
             if params.coverage.unwrap_or(false) {
@@ -6859,7 +6944,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_health_resolve(
         &self,
         Parameters(params): Parameters<AtlasHealthResolveParams>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
             let store = Self::open_existing_mut_store(&state)?;
@@ -6880,7 +6965,7 @@ impl ProjectAtlasMcpServer {
         name = "atlas_lint",
         description = "Run ProjectAtlas lint checks and return an ok flag, CLI-compatible exit code, and report text."
     )]
-    fn atlas_lint(&self, Parameters(params): Parameters<AtlasLintParams>) -> String {
+    fn atlas_lint(&self, Parameters(params): Parameters<AtlasLintParams>) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.admin_project_root(params.project_path.clone())?;
             let report = Self::lint_report_for_state(&state, &params)?;
@@ -6893,7 +6978,10 @@ impl ProjectAtlasMcpServer {
         name = "atlas_token_report",
         description = "Return ProjectAtlas token-savings telemetry for the whole index or one session."
     )]
-    fn atlas_token_report(&self, Parameters(params): Parameters<AtlasTokenParams>) -> String {
+    fn atlas_token_report(
+        &self,
+        Parameters(params): Parameters<AtlasTokenParams>,
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path.clone())?;
             let store = Self::open_read_store(&state)?;
@@ -6975,7 +7063,7 @@ impl ProjectAtlasMcpServer {
         &self,
         Parameters(params): Parameters<AtlasParityParams>,
         context: RequestContext<RoleServer>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
             let profile = params
@@ -6992,7 +7080,10 @@ impl ProjectAtlasMcpServer {
         name = "atlas_settings",
         description = "Return ProjectAtlas local settings, config, and durable index paths."
     )]
-    fn atlas_settings(&self, Parameters(params): Parameters<AtlasProjectParams>) -> String {
+    fn atlas_settings(
+        &self,
+        Parameters(params): Parameters<AtlasProjectParams>,
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
             self.render_settings_with_capabilities(&state)
@@ -7004,7 +7095,10 @@ impl ProjectAtlasMcpServer {
         name = "atlas_watch_status",
         description = "Return ProjectAtlas watcher availability and current operating mode."
     )]
-    fn atlas_watch_status(&self, Parameters(params): Parameters<AtlasProjectParams>) -> String {
+    fn atlas_watch_status(
+        &self,
+        Parameters(params): Parameters<AtlasProjectParams>,
+    ) -> McpToolTextResult {
         let state = match self.state_for_project_path(params.project_path) {
             Ok(state) => state,
             Err(error) => return Self::as_mcp_text(Err(error)),
@@ -7023,7 +7117,10 @@ impl ProjectAtlasMcpServer {
         name = "atlas_watch_once",
         description = "Run one MCP-safe watcher refresh pass over the repository and rebuild changed symbols, with optional worker, timeout, and text-index size controls."
     )]
-    fn atlas_watch_once(&self, Parameters(params): Parameters<AtlasWatchOnceParams>) -> String {
+    fn atlas_watch_once(
+        &self,
+        Parameters(params): Parameters<AtlasWatchOnceParams>,
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let background = params.background.unwrap_or(false);
@@ -7088,7 +7185,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_strip_legacy_purpose(
         &self,
         Parameters(params): Parameters<AtlasStripLegacyParams>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let (state, path) =
@@ -7111,7 +7208,10 @@ impl ProjectAtlasMcpServer {
         name = "atlas_reset_index",
         description = "Preview or clear ProjectAtlas local SQLite index/cache files for recovery."
     )]
-    fn atlas_reset_index(&self, Parameters(params): Parameters<AtlasResetIndexParams>) -> String {
+    fn atlas_reset_index(
+        &self,
+        Parameters(params): Parameters<AtlasResetIndexParams>,
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
             let report = reset_index_files(
@@ -7129,7 +7229,10 @@ impl ProjectAtlasMcpServer {
         name = "atlas_mcp_config",
         description = "Return a generated ProjectAtlas MCP config document for mcp-json, codex, claude-code, or opencode hosts."
     )]
-    fn atlas_mcp_config(&self, Parameters(params): Parameters<AtlasMcpConfigParams>) -> String {
+    fn atlas_mcp_config(
+        &self,
+        Parameters(params): Parameters<AtlasMcpConfigParams>,
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.admin_project_root(params.project_path)?;
             let harness = Self::parse_harness_config(params.harness.as_deref())?;
@@ -7152,7 +7255,10 @@ impl ProjectAtlasMcpServer {
         name = "atlas_runtime_info",
         description = "Return ProjectAtlas runtime identity, version, capabilities, and compiled MCP tool names."
     )]
-    fn atlas_runtime_info(&self, Parameters(_params): Parameters<AtlasProjectParams>) -> String {
+    fn atlas_runtime_info(
+        &self,
+        Parameters(_params): Parameters<AtlasProjectParams>,
+    ) -> McpToolTextResult {
         let _session_scope = self.session.as_str();
         Self::as_mcp_text(Ok(render_runtime_info(&build_runtime_info())))
     }
@@ -7166,7 +7272,7 @@ impl ProjectAtlasMcpServer {
         &self,
         Parameters(params): Parameters<AtlasSessionBriefParams>,
         context: RequestContext<RoleServer>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             if params.compact.unwrap_or(false) {
                 let brief = self.build_compact_session_brief(params, Some(context))?;
@@ -7183,7 +7289,10 @@ impl ProjectAtlasMcpServer {
         name = "atlas_task_status",
         description = "Return typed status for a bounded MCP task-progress record."
     )]
-    fn atlas_task_status(&self, Parameters(params): Parameters<AtlasTaskParams>) -> String {
+    fn atlas_task_status(
+        &self,
+        Parameters(params): Parameters<AtlasTaskParams>,
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let status = self.task_status(params.task_id)?;
             Self::encode_named_payload(MCP_PAYLOAD_TASK_STATUS, &status)
@@ -7195,7 +7304,10 @@ impl ProjectAtlasMcpServer {
         name = "atlas_task_cancel",
         description = "Request cancellation for a bounded MCP task-progress record."
     )]
-    fn atlas_task_cancel(&self, Parameters(params): Parameters<AtlasTaskParams>) -> String {
+    fn atlas_task_cancel(
+        &self,
+        Parameters(params): Parameters<AtlasTaskParams>,
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let cancel = self.task_cancel(params.task_id)?;
             Self::encode_named_payload(MCP_PAYLOAD_TASK_CANCEL, &cancel)
@@ -7211,7 +7323,7 @@ impl ProjectAtlasMcpServer {
         &self,
         Parameters(params): Parameters<AtlasPurposeQueueParams>,
         context: RequestContext<RoleServer>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.health.project_path.clone())?;
             let query =
@@ -7245,7 +7357,10 @@ impl ProjectAtlasMcpServer {
         name = "atlas_purpose_set",
         description = "Set agent-approved ProjectAtlas purpose metadata for one indexed path."
     )]
-    fn atlas_purpose_set(&self, Parameters(params): Parameters<AtlasPurposeSetParams>) -> String {
+    fn atlas_purpose_set(
+        &self,
+        Parameters(params): Parameters<AtlasPurposeSetParams>,
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
             let store = Self::open_existing_mut_store(&state)?;
@@ -7271,7 +7386,7 @@ impl ProjectAtlasMcpServer {
         &self,
         Parameters(params): Parameters<AtlasPurposeReviewParams>,
         context: RequestContext<RoleServer>,
-    ) -> String {
+    ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let apply = params.apply.unwrap_or(false);
             let requests = params
@@ -7902,6 +8017,48 @@ mod tests {
                 && payload.contains("filesystem_type: nfs")
                 && payload.contains("supported local filesystem"),
             "MCP TOON lost typed filesystem details or recovery guidance",
+        )
+    }
+
+    #[test]
+    fn mcp_schema_version_mismatches_are_typed_and_content_free()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let error = CliError::Db(DbError::SchemaVersion {
+            found: 17,
+            expected: 16,
+        });
+        let payload = ProjectAtlasMcpServer::encode_error_payload(&error);
+        require(
+            payload.contains("kind: schema_version_mismatch")
+                && payload.contains("found_schema_version: 17")
+                && payload.contains("supported_schema_version: 16")
+                && payload.contains(env!("CARGO_PKG_VERSION"))
+                && payload.contains("do not reset")
+                && !payload.contains(".projectatlas")
+                && !payload.contains("session_id")
+                && !payload.contains("project_root"),
+            "MCP TOON lost typed schema-version details or exposed database context",
+        )?;
+
+        let predecessor = CliError::Service(ServiceError::Db(DbError::SchemaVersion {
+            found: 8,
+            expected: 16,
+        }));
+        let McpToolTextResult(predecessor_result) =
+            ProjectAtlasMcpServer::as_mcp_text(Err(predecessor));
+        let predecessor_payload = predecessor_result.map_err(std::io::Error::other)?;
+        require(
+            predecessor_payload.contains("kind: schema_migration_required")
+                && predecessor_payload.contains("found_schema_version: 8")
+                && predecessor_payload.contains("supported_schema_version: 16")
+                && predecessor_payload.contains("migration_steps_remaining: 8")
+                && predecessor_payload.contains("projectatlas init")
+                && predecessor_payload.contains("atlas_init")
+                && predecessor_payload.contains("same global `--db`/`--config` selection")
+                && predecessor_payload.contains("same MCP server/database binding")
+                && !predecessor_payload.contains("schema_version_mismatch")
+                && !predecessor_payload.contains(crate::SCHEMA_VERSION_MISMATCH_RECOVERY),
+            "MCP omitted the supported-predecessor migration handoff",
         )
     }
 

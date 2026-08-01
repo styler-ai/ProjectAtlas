@@ -366,7 +366,7 @@ pub(crate) fn render_token_dashboard_with_theme(
     session: Option<&str>,
     theme: TokenDashboardTheme,
 ) -> String {
-    let width = dashboard_width().clamp(80, 140) as u16;
+    let width = 140;
     with_token_theme(theme, || {
         render_dashboard_to_ansi_string(width, DASHBOARD_HEIGHT, |frame| {
             render_overview_frame(frame, overview, session);
@@ -3466,8 +3466,7 @@ mod tests {
     }
 
     fn render_overview_buffer(overview: &TokenOverview, session: Option<&str>) -> Buffer {
-        let width = dashboard_width().clamp(80, 140) as u16;
-        render_overview_buffer_at_width(overview, session, width)
+        render_overview_buffer_at_width(overview, session, 140)
     }
 
     fn render_overview_buffer_at_width(

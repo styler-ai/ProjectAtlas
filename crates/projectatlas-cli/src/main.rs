@@ -108,6 +108,10 @@ const WATCH_MODE_ONCE: &str = "single-refresh";
 const WATCH_MODE_NOTIFY: &str = "notify";
 /// Recovery guidance for a database whose local WAL-safe placement was rejected.
 const DATABASE_FILESYSTEM_RECOVERY: &str = "Place the selected local source tree and its .projectatlas database on a supported local filesystem, resolve any mount or permission uncertainty, and retry; ProjectAtlas will not weaken the WAL durability profile.";
+/// Recovery guidance for a database owned by another schema version.
+const SCHEMA_VERSION_MISMATCH_RECOVERY: &str = "Use a ProjectAtlas runtime that supports this database schema; do not reset, downgrade, or repair the database with this runtime.";
+/// Recovery guidance for an admitted predecessor database.
+const SCHEMA_MIGRATION_REQUIRED_RECOVERY: &str = "Apply the supported database-owned migration without changing the selected database: for CLI, use the `projectatlas init` action from the selected project root while preserving the same global `--db`/`--config` selection; for MCP, call `atlas_init` through the same MCP server/database binding. Do not reset or replace the database.";
 /// Existing CLI command that performs one bounded refresh pass.
 const CLI_REFRESH_COMMAND: &str = "watch";
 /// Existing CLI command that initializes one selected project root.
@@ -299,6 +303,10 @@ enum AgentErrorKind {
     DatabaseFilesystemUnsupported,
     /// The database's required local filesystem guarantees could not be established.
     DatabaseFilesystemUncertain,
+    /// The selected database schema is unsupported by this runtime.
+    SchemaVersionMismatch,
+    /// The selected database schema has a supported migration route.
+    SchemaMigrationRequired,
     /// The host has no accepted optional parser containment adapter.
     #[cfg(feature = "optional-parser-supervisor")]
     UnsupportedContainment,
@@ -322,6 +330,82 @@ struct DatabaseFilesystemErrorPayload {
     reason: Option<String>,
     /// Safe recovery action.
     recovery: &'static str,
+}
+
+/// Typed schema-version mismatch shared by CLI and MCP adapters.
+#[derive(Clone, Debug, Serialize)]
+struct SchemaVersionMismatchPayload {
+    /// Schema version stored by the database owner.
+    found_schema_version: i64,
+    /// Schema version supported by this runtime.
+    supported_schema_version: i64,
+    /// Public `ProjectAtlas` package version executing the request.
+    runtime_version: &'static str,
+    /// Safe recovery action.
+    recovery: &'static str,
+}
+
+/// CLI error details for an incompatible database schema.
+#[derive(Serialize)]
+struct SchemaVersionMismatchErrorPayload {
+    /// Machine-readable error kind.
+    kind: AgentErrorKind,
+    /// Human-readable recovery guidance.
+    message: String,
+    /// Content-free incompatible schema details.
+    schema_version_mismatch: SchemaVersionMismatchPayload,
+}
+
+/// Structured CLI response for an incompatible database schema.
+#[derive(Serialize)]
+struct SchemaVersionMismatchErrorResponse {
+    /// Typed error details.
+    error: SchemaVersionMismatchErrorPayload,
+}
+
+/// Typed supported-schema migration handoff shared by CLI and MCP adapters.
+#[derive(Clone, Debug, Serialize)]
+struct SchemaMigrationRequiredPayload {
+    /// Schema version stored by the database owner.
+    found_schema_version: i64,
+    /// Schema version supported by this runtime.
+    supported_schema_version: i64,
+    /// Remaining ordered database-owned migration steps.
+    migration_steps_remaining: u32,
+    /// Public `ProjectAtlas` package version executing the request.
+    runtime_version: &'static str,
+    /// Safe migration action.
+    recovery: &'static str,
+}
+
+impl SchemaMigrationRequiredPayload {
+    /// Render one content-free explanation for a command that requires the current schema.
+    fn message(&self) -> String {
+        format!(
+            "database schema version {} requires {} supported migration step(s) to version {} before this command can run",
+            self.found_schema_version,
+            self.migration_steps_remaining,
+            self.supported_schema_version
+        )
+    }
+}
+
+/// CLI error details for an admitted predecessor schema.
+#[derive(Serialize)]
+struct SchemaMigrationRequiredErrorPayload {
+    /// Machine-readable error kind.
+    kind: AgentErrorKind,
+    /// Human-readable migration handoff.
+    message: String,
+    /// Content-free supported migration details.
+    schema_migration_required: SchemaMigrationRequiredPayload,
+}
+
+/// Structured CLI response for an admitted predecessor schema.
+#[derive(Serialize)]
+struct SchemaMigrationRequiredErrorResponse {
+    /// Typed error details.
+    error: SchemaMigrationRequiredErrorPayload,
 }
 
 /// Typed optional search-capability failure shared by CLI and MCP adapters.
@@ -2795,6 +2879,41 @@ fn run_parser_pack_command(
 
 /// Render typed source-state failures in the selected agent/script format.
 fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, serde_json::Error> {
+    if let Some(schema_version_mismatch) = schema_version_mismatch_payload(error) {
+        let response = SchemaVersionMismatchErrorResponse {
+            error: SchemaVersionMismatchErrorPayload {
+                kind: AgentErrorKind::SchemaVersionMismatch,
+                message: error.to_string(),
+                schema_version_mismatch,
+            },
+        };
+        return match format {
+            OutputFormat::Toon => {
+                serde_json::to_value(response).map(|value| encode_agent_payload(&value))
+            }
+            OutputFormat::Json => {
+                serde_json::to_string_pretty(&response).map(|text| format!("{text}\n"))
+            }
+        };
+    }
+    if let Some(schema_migration_required) = schema_migration_required_payload(error) {
+        let message = schema_migration_required.message();
+        let response = SchemaMigrationRequiredErrorResponse {
+            error: SchemaMigrationRequiredErrorPayload {
+                kind: AgentErrorKind::SchemaMigrationRequired,
+                message,
+                schema_migration_required,
+            },
+        };
+        return match format {
+            OutputFormat::Toon => {
+                serde_json::to_value(response).map(|value| encode_agent_payload(&value))
+            }
+            OutputFormat::Json => {
+                serde_json::to_string_pretty(&response).map(|text| format!("{text}\n"))
+            }
+        };
+    }
     let details = match error {
         #[cfg(feature = "optional-parser-supervisor")]
         CliError::ParserPack(source) if source.is_unsupported_containment() => {
@@ -2970,6 +3089,41 @@ fn database_filesystem_error_payload(
             recovery: DATABASE_FILESYSTEM_RECOVERY,
         },
     ))
+}
+
+/// Extract one privacy-safe schema mismatch from the shared database error.
+fn schema_version_mismatch_payload(error: &CliError) -> Option<SchemaVersionMismatchPayload> {
+    let (CliError::Db(database_error) | CliError::Service(ServiceError::Db(database_error))) =
+        error
+    else {
+        return None;
+    };
+    let (found_schema_version, supported_schema_version) =
+        database_error.unsupported_schema_version()?;
+    Some(SchemaVersionMismatchPayload {
+        found_schema_version,
+        supported_schema_version,
+        runtime_version: env!("CARGO_PKG_VERSION"),
+        recovery: SCHEMA_VERSION_MISMATCH_RECOVERY,
+    })
+}
+
+/// Extract one privacy-safe migration handoff from the shared database error.
+fn schema_migration_required_payload(error: &CliError) -> Option<SchemaMigrationRequiredPayload> {
+    let (CliError::Db(database_error) | CliError::Service(ServiceError::Db(database_error))) =
+        error
+    else {
+        return None;
+    };
+    let (found_schema_version, supported_schema_version, migration_steps_remaining) =
+        database_error.supported_schema_migration()?;
+    Some(SchemaMigrationRequiredPayload {
+        found_schema_version,
+        supported_schema_version,
+        migration_steps_remaining,
+        runtime_version: env!("CARGO_PKG_VERSION"),
+        recovery: SCHEMA_MIGRATION_REQUIRED_RECOVERY,
+    })
 }
 
 /// Open the selected current index through one root-bound read snapshot.
@@ -4749,9 +4903,11 @@ mod tests {
         watch_path_requires_full_scan, watcher_status_report,
     };
     use super::{
-        Cli, CliError, Command, GraphRelationKind, OutputFormat, SearchRetrievalMode,
+        Cli, CliError, Command, GraphRelationKind, OutputFormat,
+        SCHEMA_MIGRATION_REQUIRED_RECOVERY, SCHEMA_VERSION_MISMATCH_RECOVERY, SearchRetrievalMode,
         SearchRetrievalModeArg, ServiceError, build_runtime_info, controlled_named_output,
-        load_token_atlas_relations, render_cli_error, render_token_dashboard, serialized_output,
+        load_token_atlas_relations, render_cli_error, render_token_dashboard,
+        schema_migration_required_payload, schema_version_mismatch_payload, serialized_output,
         token_atlas_network_relation, truthy_env,
     };
     #[cfg(feature = "optional-parser-supervisor")]
@@ -5155,6 +5311,133 @@ mod tests {
                 && toon.contains("supported local filesystem"),
             "CLI TOON lost typed filesystem details",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cli_schema_version_mismatches_are_typed_and_content_free() -> Result<(), Box<dyn Error>> {
+        for (error, found) in [
+            (
+                CliError::Db(DbError::SchemaVersion {
+                    found: 17,
+                    expected: 16,
+                }),
+                17,
+            ),
+            (
+                CliError::Service(ServiceError::Db(DbError::SchemaVersion {
+                    found: 17,
+                    expected: 16,
+                })),
+                17,
+            ),
+            (
+                CliError::Db(DbError::SchemaVersion {
+                    found: 7,
+                    expected: 16,
+                }),
+                7,
+            ),
+            (
+                CliError::Service(ServiceError::Db(DbError::SchemaVersion {
+                    found: 7,
+                    expected: 16,
+                })),
+                7,
+            ),
+        ] {
+            let expected_message = format!("unsupported schema version {found}, expected 16");
+            let json_text = render_cli_error(OutputFormat::Json, &error)?;
+            let json: Value = serde_json::from_str(&json_text)?;
+            require_condition(
+                json.pointer("/error/kind").and_then(Value::as_str)
+                    == Some("schema_version_mismatch")
+                    && json
+                        .pointer("/error/schema_version_mismatch/found_schema_version")
+                        .and_then(Value::as_i64)
+                        == Some(found)
+                    && json
+                        .pointer("/error/schema_version_mismatch/supported_schema_version")
+                        .and_then(Value::as_i64)
+                        == Some(16)
+                    && json
+                        .pointer("/error/schema_version_mismatch/runtime_version")
+                        .and_then(Value::as_str)
+                        == Some(env!("CARGO_PKG_VERSION"))
+                    && json
+                        .pointer("/error/schema_version_mismatch/recovery")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| value.contains("do not reset"))
+                    && json.pointer("/error/message").and_then(Value::as_str)
+                        == Some(expected_message.as_str()),
+                "CLI JSON lost the typed schema-version mismatch contract",
+            )?;
+            require_condition(
+                !json_text.contains(".projectatlas")
+                    && !json_text.contains("session_id")
+                    && !json_text.contains("project_root"),
+                "CLI schema mismatch exposed private database context",
+            )?;
+
+            let toon = render_cli_error(OutputFormat::Toon, &error)?;
+            require_condition(
+                toon.contains("kind: schema_version_mismatch")
+                    && toon.contains(&format!("found_schema_version: {found}"))
+                    && toon.contains("supported_schema_version: 16")
+                    && toon.contains(env!("CARGO_PKG_VERSION"))
+                    && toon.contains("do not reset"),
+                "CLI TOON lost typed schema-version details or recovery guidance",
+            )?;
+        }
+        for error in [
+            CliError::Db(DbError::SchemaVersion {
+                found: 8,
+                expected: 16,
+            }),
+            CliError::Service(ServiceError::Db(DbError::SchemaVersion {
+                found: 15,
+                expected: 16,
+            })),
+        ] {
+            require_condition(
+                schema_version_mismatch_payload(&error).is_none(),
+                "CLI treated an admitted predecessor as unsupported",
+            )?;
+            let migration = schema_migration_required_payload(&error).ok_or_else(|| {
+                std::io::Error::other("CLI omitted the admitted-predecessor migration handoff")
+            })?;
+            let expected_steps = u32::try_from(16 - migration.found_schema_version)?;
+            require_condition(
+                migration.supported_schema_version == 16
+                    && migration.migration_steps_remaining == expected_steps,
+                "CLI migration handoff drifted from the database migration inventory",
+            )?;
+            let rendered = render_cli_error(OutputFormat::Json, &error)?;
+            let json: Value = serde_json::from_str(&rendered)?;
+            require_condition(
+                json.pointer("/error/kind").and_then(Value::as_str)
+                    == Some("schema_migration_required")
+                    && json
+                        .pointer("/error/schema_migration_required/migration_steps_remaining")
+                        .and_then(Value::as_u64)
+                        == Some(u64::from(expected_steps))
+                    && json
+                        .pointer("/error/schema_migration_required/recovery")
+                        .and_then(Value::as_str)
+                        == Some(SCHEMA_MIGRATION_REQUIRED_RECOVERY)
+                    && rendered.contains("same global `--db`/`--config` selection")
+                    && rendered.contains("same MCP server/database binding")
+                    && json
+                        .pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| message.contains("supported migration step"))
+                    && !rendered.contains("schema_version_mismatch")
+                    && !rendered.contains(SCHEMA_VERSION_MISMATCH_RECOVERY)
+                    && !rendered.contains(".projectatlas")
+                    && !rendered.contains("project_root"),
+                "CLI did not return a private, actionable supported-migration handoff",
+            )?;
+        }
         Ok(())
     }
 
