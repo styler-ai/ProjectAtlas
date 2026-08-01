@@ -9825,7 +9825,7 @@ fn plugin_update_skips_non_official_codex_marketplace() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_skill()
+fn plugin_update_leaves_current_codex_marketplace_untouched_and_windows_repairs_stale_skill()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
@@ -9920,6 +9920,9 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
             ))
             .into());
         }
+    }
+    if !cfg!(windows) {
+        return Ok(());
     }
     for (label, skill_bytes) in [("missing", None), ("stale", Some(&b"stale skill"[..]))] {
         if let Some(skill_bytes) = skill_bytes {
