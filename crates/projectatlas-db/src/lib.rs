@@ -1340,6 +1340,7 @@ impl AtlasStore {
             }
             return Err(DbError::TelemetryPathUnavailable);
         };
+        let _ = schema::preflight(path, self.validated_project_root.as_deref())?;
         let connection = open_writable_connection(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE,
@@ -12987,6 +12988,23 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::open(db_path)?;
         store.set_project_root(root)?;
+        populate_schema_compatibility_fixture(&mut store, label)?;
+        set_metadata(
+            &store.connection,
+            SCHEMA_VERSION_KEY,
+            &schema_version.to_string(),
+        )?;
+        store
+            .connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        Ok(())
+    }
+
+    /// Populate representative source, authored, telemetry, and publication state.
+    pub(crate) fn populate_schema_compatibility_fixture(
+        store: &mut AtlasStore,
+        label: &str,
+    ) -> Result<(), Box<dyn Error>> {
         {
             let mut publication = store.begin_index_publication("untrusted-contract")?;
             write_test_projection(&mut publication, label)?;
@@ -13018,14 +13036,6 @@ mod tests {
             20,
         ))?;
         set_metadata(&store.connection, "custom_setting", "preserved")?;
-        set_metadata(
-            &store.connection,
-            SCHEMA_VERSION_KEY,
-            &schema_version.to_string(),
-        )?;
-        store
-            .connection
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
         Ok(())
     }
 

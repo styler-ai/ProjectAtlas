@@ -108,6 +108,8 @@ const WATCH_MODE_ONCE: &str = "single-refresh";
 const WATCH_MODE_NOTIFY: &str = "notify";
 /// Recovery guidance for a database whose local WAL-safe placement was rejected.
 const DATABASE_FILESYSTEM_RECOVERY: &str = "Place the selected local source tree and its .projectatlas database on a supported local filesystem, resolve any mount or permission uncertainty, and retry; ProjectAtlas will not weaken the WAL durability profile.";
+/// Recovery guidance for a database owned by another schema version.
+const SCHEMA_VERSION_MISMATCH_RECOVERY: &str = "Use a ProjectAtlas runtime that supports this database schema; do not reset, downgrade, or repair the database with this runtime.";
 /// Existing CLI command that performs one bounded refresh pass.
 const CLI_REFRESH_COMMAND: &str = "watch";
 /// Existing CLI command that initializes one selected project root.
@@ -299,6 +301,8 @@ enum AgentErrorKind {
     DatabaseFilesystemUnsupported,
     /// The database's required local filesystem guarantees could not be established.
     DatabaseFilesystemUncertain,
+    /// The selected database schema is unsupported by this runtime.
+    SchemaVersionMismatch,
     /// The host has no accepted optional parser containment adapter.
     #[cfg(feature = "optional-parser-supervisor")]
     UnsupportedContainment,
@@ -322,6 +326,37 @@ struct DatabaseFilesystemErrorPayload {
     reason: Option<String>,
     /// Safe recovery action.
     recovery: &'static str,
+}
+
+/// Typed schema-version mismatch shared by CLI and MCP adapters.
+#[derive(Clone, Debug, Serialize)]
+struct SchemaVersionMismatchPayload {
+    /// Schema version stored by the database owner.
+    found_schema_version: i64,
+    /// Schema version supported by this runtime.
+    supported_schema_version: i64,
+    /// Public `ProjectAtlas` package version executing the request.
+    runtime_version: &'static str,
+    /// Safe recovery action.
+    recovery: &'static str,
+}
+
+/// CLI error details for an incompatible database schema.
+#[derive(Serialize)]
+struct SchemaVersionMismatchErrorPayload {
+    /// Machine-readable error kind.
+    kind: AgentErrorKind,
+    /// Human-readable recovery guidance.
+    message: String,
+    /// Content-free incompatible schema details.
+    schema_version_mismatch: SchemaVersionMismatchPayload,
+}
+
+/// Structured CLI response for an incompatible database schema.
+#[derive(Serialize)]
+struct SchemaVersionMismatchErrorResponse {
+    /// Typed error details.
+    error: SchemaVersionMismatchErrorPayload,
 }
 
 /// Typed optional search-capability failure shared by CLI and MCP adapters.
@@ -2795,6 +2830,23 @@ fn run_parser_pack_command(
 
 /// Render typed source-state failures in the selected agent/script format.
 fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, serde_json::Error> {
+    if let Some(schema_version_mismatch) = schema_version_mismatch_payload(error) {
+        let response = SchemaVersionMismatchErrorResponse {
+            error: SchemaVersionMismatchErrorPayload {
+                kind: AgentErrorKind::SchemaVersionMismatch,
+                message: error.to_string(),
+                schema_version_mismatch,
+            },
+        };
+        return match format {
+            OutputFormat::Toon => {
+                serde_json::to_value(response).map(|value| encode_agent_payload(&value))
+            }
+            OutputFormat::Json => {
+                serde_json::to_string_pretty(&response).map(|text| format!("{text}\n"))
+            }
+        };
+    }
     let details = match error {
         #[cfg(feature = "optional-parser-supervisor")]
         CliError::ParserPack(source) if source.is_unsupported_containment() => {
@@ -2970,6 +3022,23 @@ fn database_filesystem_error_payload(
             recovery: DATABASE_FILESYSTEM_RECOVERY,
         },
     ))
+}
+
+/// Extract one privacy-safe schema mismatch from the shared database error.
+fn schema_version_mismatch_payload(error: &CliError) -> Option<SchemaVersionMismatchPayload> {
+    let (found_schema_version, supported_schema_version) = match error {
+        CliError::Db(DbError::SchemaVersion { found, expected })
+        | CliError::Service(ServiceError::Db(DbError::SchemaVersion { found, expected })) => {
+            (*found, *expected)
+        }
+        _ => return None,
+    };
+    Some(SchemaVersionMismatchPayload {
+        found_schema_version,
+        supported_schema_version,
+        runtime_version: env!("CARGO_PKG_VERSION"),
+        recovery: SCHEMA_VERSION_MISMATCH_RECOVERY,
+    })
 }
 
 /// Open the selected current index through one root-bound read snapshot.
@@ -5155,6 +5224,63 @@ mod tests {
                 && toon.contains("supported local filesystem"),
             "CLI TOON lost typed filesystem details",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cli_schema_version_mismatches_are_typed_and_content_free() -> Result<(), Box<dyn Error>> {
+        for error in [
+            CliError::Db(DbError::SchemaVersion {
+                found: 17,
+                expected: 16,
+            }),
+            CliError::Service(ServiceError::Db(DbError::SchemaVersion {
+                found: 17,
+                expected: 16,
+            })),
+        ] {
+            let json_text = render_cli_error(OutputFormat::Json, &error)?;
+            let json: Value = serde_json::from_str(&json_text)?;
+            require_condition(
+                json.pointer("/error/kind").and_then(Value::as_str)
+                    == Some("schema_version_mismatch")
+                    && json
+                        .pointer("/error/schema_version_mismatch/found_schema_version")
+                        .and_then(Value::as_i64)
+                        == Some(17)
+                    && json
+                        .pointer("/error/schema_version_mismatch/supported_schema_version")
+                        .and_then(Value::as_i64)
+                        == Some(16)
+                    && json
+                        .pointer("/error/schema_version_mismatch/runtime_version")
+                        .and_then(Value::as_str)
+                        == Some(env!("CARGO_PKG_VERSION"))
+                    && json
+                        .pointer("/error/schema_version_mismatch/recovery")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| value.contains("do not reset"))
+                    && json.pointer("/error/message").and_then(Value::as_str)
+                        == Some("unsupported schema version 17, expected 16"),
+                "CLI JSON lost the typed schema-version mismatch contract",
+            )?;
+            require_condition(
+                !json_text.contains(".projectatlas")
+                    && !json_text.contains("session_id")
+                    && !json_text.contains("project_root"),
+                "CLI schema mismatch exposed private database context",
+            )?;
+
+            let toon = render_cli_error(OutputFormat::Toon, &error)?;
+            require_condition(
+                toon.contains("kind: schema_version_mismatch")
+                    && toon.contains("found_schema_version: 17")
+                    && toon.contains("supported_schema_version: 16")
+                    && toon.contains(env!("CARGO_PKG_VERSION"))
+                    && toon.contains("do not reset"),
+                "CLI TOON lost typed schema-version details or recovery guidance",
+            )?;
+        }
         Ok(())
     }
 

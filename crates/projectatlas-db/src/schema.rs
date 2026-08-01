@@ -2354,12 +2354,13 @@ mod tests {
     use super::*;
     use crate::{AtlasStore, DbError};
     use projectatlas_core::telemetry::{
-        TokenOverview, TokenTrendPeriod, TokenTrendWindow, UsageEvent,
+        TokenOverview, TokenTrendPeriod, TokenTrendWindow, UsageEvent, usage_from_estimates,
     };
     use rusqlite::types::Value;
     use std::error::Error;
     use std::fs;
     use std::io;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier};
     use std::thread;
 
@@ -2403,6 +2404,238 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Complete current-schema object and logical-row snapshot used by refusal tests.
+    #[derive(Debug, PartialEq)]
+    struct CurrentSchemaSnapshot {
+        schema_objects: Vec<Vec<Value>>,
+        tables: Vec<(String, Vec<Vec<Value>>)>,
+    }
+
+    /// Read every user table and schema object without checkpointing the live database.
+    fn current_schema_snapshot(
+        connection: &Connection,
+    ) -> Result<CurrentSchemaSnapshot, Box<dyn Error>> {
+        let schema_objects = query_all_values(
+            connection,
+            "SELECT type, name, tbl_name, sql
+             FROM sqlite_master
+             WHERE name NOT LIKE 'sqlite_%'
+             ORDER BY type, name",
+        )?;
+        let table_names = query_all_values(
+            connection,
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+        )?;
+        let mut tables = Vec::with_capacity(table_names.len());
+        for row in table_names {
+            let [Value::Text(table_name)] = row.as_slice() else {
+                return Err(io::Error::other(format!(
+                    "sqlite_master returned an invalid table name: {row:?}"
+                ))
+                .into());
+            };
+            let quoted_name = table_name.replace('"', "\"\"");
+            let select = format!("SELECT * FROM \"{quoted_name}\"");
+            let column_count = connection.prepare(&select)?.column_count();
+            let ordering = (1..=column_count)
+                .map(|column| column.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let rows = query_all_values(connection, &format!("{select} ORDER BY {ordering}"))?;
+            tables.push((table_name.clone(), rows));
+        }
+        Ok(CurrentSchemaSnapshot {
+            schema_objects,
+            tables,
+        })
+    }
+
+    #[test]
+    fn newer_schema_active_wal_is_refused_without_mutating_durable_state()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &root)?;
+        store
+            .connection
+            .execute_batch("PRAGMA wal_autocheckpoint = 0")?;
+        crate::tests::populate_schema_compatibility_fixture(&mut store, "future")?;
+        let navigation_store = AtlasStore::open_read_only_for_project(&db_path, &root)?;
+
+        let future_version = SCHEMA_VERSION + 1;
+        set_metadata(
+            &store.connection,
+            SCHEMA_VERSION_KEY,
+            &future_version.to_string(),
+        )?;
+        let wal_path = sqlite_sidecar_path(&db_path, "-wal");
+        let shm_path = sqlite_sidecar_path(&db_path, "-shm");
+        let wal_before = fs::read(&wal_path)?;
+        if wal_before.is_empty() || !shm_path.is_file() {
+            return Err(io::Error::other(
+                "future-schema fixture did not retain a live WAL and SHM sidecar",
+            )
+            .into());
+        }
+        let database_before = fs::read(&db_path)?;
+        let inventory_before = directory_entry_names(temp.path())?;
+        let snapshot_before = current_schema_snapshot(&store.connection)?;
+        for required_table in [
+            "project_identity",
+            "purposes",
+            "health_resolutions",
+            "usage_events",
+            "nodes",
+            "summaries",
+            "symbols",
+            "file_texts",
+        ] {
+            if !snapshot_before
+                .tables
+                .iter()
+                .any(|(table, rows)| table == required_table && !rows.is_empty())
+            {
+                return Err(io::Error::other(format!(
+                    "future-schema fixture did not populate {required_table}"
+                ))
+                .into());
+            }
+        }
+
+        let Err(error) = AtlasStore::open_for_project(&db_path, &root) else {
+            return Err(io::Error::other("newer schema unexpectedly opened writable").into());
+        };
+        if !matches!(
+            error,
+            DbError::SchemaVersion {
+                found,
+                expected: SCHEMA_VERSION,
+            } if found == future_version
+        ) {
+            return Err(io::Error::other(format!(
+                "newer-schema refusal returned the wrong error: {error}"
+            ))
+            .into());
+        }
+
+        let Err(telemetry_error) = navigation_store.record_usage(&usage_from_estimates(
+            "future-schema-session",
+            "summary",
+            Some("src/lib.rs".to_string()),
+            None,
+            100,
+            20,
+        )) else {
+            return Err(io::Error::other(
+                "newer schema unexpectedly opened writable for telemetry",
+            )
+            .into());
+        };
+        if !matches!(
+            telemetry_error,
+            DbError::SchemaVersion {
+                found,
+                expected: SCHEMA_VERSION,
+            } if found == future_version
+        ) {
+            return Err(io::Error::other(format!(
+                "newer-schema telemetry refusal returned the wrong error: {telemetry_error}"
+            ))
+            .into());
+        }
+
+        if fs::read(&db_path)? != database_before
+            || fs::read(&wal_path)? != wal_before
+            || directory_entry_names(temp.path())? != inventory_before
+        {
+            return Err(io::Error::other(
+                "newer-schema refusal changed database bytes, WAL bytes, or sidecar inventory",
+            )
+            .into());
+        }
+        let snapshot_after = current_schema_snapshot(&store.connection)?;
+        if snapshot_after != snapshot_before {
+            return Err(io::Error::other(
+                "newer-schema refusal changed schema objects or logical database state",
+            )
+            .into());
+        }
+        if read_metadata(&store.connection, SCHEMA_VERSION_KEY)? != Some(future_version.to_string())
+        {
+            return Err(io::Error::other("live owner could not read the retained schema").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn newer_schema_preflight_work_is_independent_of_derived_row_count()
+    -> Result<(), Box<dyn Error>> {
+        let small_steps = incompatible_preflight_vm_steps(1)?;
+        let large_steps = incompatible_preflight_vm_steps(10_000)?;
+        if small_steps == 0 || large_steps != small_steps {
+            return Err(io::Error::other(format!(
+                "newer-schema inspection scaled with derived rows: small={small_steps}, large={large_steps}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Count the actual `SQLite` virtual-machine work used by incompatible preflight.
+    fn incompatible_preflight_vm_steps(row_count: i64) -> Result<usize, Box<dyn Error>> {
+        let store = AtlasStore::in_memory()?;
+        store.connection.execute(
+            "WITH RECURSIVE sequence(value) AS (
+                 VALUES(1)
+                 UNION ALL
+                 SELECT value + 1 FROM sequence WHERE value < ?1
+             )
+             INSERT INTO nodes(path, kind)
+             SELECT printf('src/file-%08d.rs', value), 'file' FROM sequence",
+            [row_count],
+        )?;
+        let inserted = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get::<_, i64>(0))?;
+        if inserted != row_count {
+            return Err(io::Error::other("row-count fixture was not populated").into());
+        }
+        let future_version = SCHEMA_VERSION + 1;
+        set_metadata(
+            &store.connection,
+            SCHEMA_VERSION_KEY,
+            &future_version.to_string(),
+        )?;
+        let vm_steps = Arc::new(AtomicUsize::new(0));
+        let observed_steps = Arc::clone(&vm_steps);
+        store.connection.progress_handler(
+            1,
+            Some(move || {
+                observed_steps.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        );
+        let result = inspect_connection(&store.connection, None, false);
+        store.connection.progress_handler(0, None::<fn() -> bool>);
+        let Err(error) = result else {
+            return Err(io::Error::other("newer schema unexpectedly passed inspection").into());
+        };
+        if !matches!(
+            error,
+            DbError::SchemaVersion {
+                found,
+                expected: SCHEMA_VERSION,
+            } if found == future_version
+        ) {
+            return Err(io::Error::other("bounded inspection returned the wrong error").into());
+        }
+        Ok(vm_steps.load(Ordering::Relaxed))
     }
 
     #[test]

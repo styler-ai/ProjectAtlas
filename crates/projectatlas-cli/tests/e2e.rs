@@ -91,6 +91,7 @@ const ALTERNATE_ONLY_RS_FILE_NAME: &str = "alternate_only.rs";
 const OUTSIDE_CANARY_FILE_NAME: &str = "outside-canary.txt";
 const PARENT_CANARY_FILE_NAME: &str = "parent-canary.txt";
 const ATLAS_DIR_NAME: &str = ".projectatlas";
+const MISSING_INDEX_DIR_NAME: &str = "missing-index";
 const GITHOOKS_DIR_NAME: &str = ".githooks";
 const ISSUE_TEMPLATE_DIR_NAME: &str = "ISSUE_TEMPLATE";
 const VERSIONS_DIR_NAME: &str = "versions";
@@ -295,6 +296,15 @@ struct McpDatabaseSnapshot {
     generation: u64,
     purpose_revision: u64,
     publication_state: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SqliteCompatibilitySnapshot {
+    database_bytes: Vec<u8>,
+    wal_bytes: Option<Vec<u8>>,
+    sidecars: BTreeSet<String>,
+    schema_objects: Vec<String>,
+    tables: BTreeMap<String, String>,
 }
 
 #[test]
@@ -3729,12 +3739,39 @@ fn implicit_bare_root_refuses_before_opening_a_future_schema_database() -> Resul
     if explicit.status.success() {
         return Err(io::Error::other("explicit future-schema token read succeeded").into());
     }
+    let explicit_error: Value = serde_json::from_slice(&explicit.stderr)?;
+    require_json_string(
+        &explicit_error,
+        &["error", "kind"],
+        "schema_version_mismatch",
+    )?;
+    require_json_usize(
+        &explicit_error,
+        &["error", "schema_version_mismatch", "found_schema_version"],
+        18,
+    )?;
+    require_json_usize(
+        &explicit_error,
+        &[
+            "error",
+            "schema_version_mismatch",
+            "supported_schema_version",
+        ],
+        16,
+    )?;
+    require_json_string(
+        &explicit_error,
+        &["error", "schema_version_mismatch", "runtime_version"],
+        env!("CARGO_PKG_VERSION"),
+    )?;
     let explicit_stderr = String::from_utf8_lossy(&explicit.stderr);
-    if !explicit_stderr.contains("unsupported schema version 18") {
-        return Err(io::Error::other(format!(
-            "explicit database selection hid schema error: {explicit_stderr}"
-        ))
-        .into());
+    for private in [database.display().to_string(), bare.display().to_string()] {
+        if explicit_stderr.contains(&private) {
+            return Err(io::Error::other(format!(
+                "explicit database schema error exposed private path {private}"
+            ))
+            .into());
+        }
     }
     if fs::read(&database)? != database_before {
         return Err(
@@ -6898,6 +6935,10 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .join("projectatlas")
             .join("scripts")
             .join("install-runtime.ps1");
+        let standalone_installer_dir = temp.path().join("standalone-installer");
+        fs::create_dir_all(&standalone_installer_dir)?;
+        let standalone_installer = standalone_installer_dir.join("install-runtime.ps1");
+        fs::copy(&installer, &standalone_installer)?;
         let output = StdCommand::new("powershell")
             .arg("-NoProfile")
             .arg("-ExecutionPolicy")
@@ -7052,6 +7093,24 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             ))
             .into());
         }
+        let init = StdCommand::new(&versioned_runtime)
+            .current_dir(&repo)
+            .arg("--require-version")
+            .arg(env!("CARGO_PKG_VERSION"))
+            .arg("--format")
+            .arg("json")
+            .arg("--db")
+            .arg(&db)
+            .arg("init")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        if !init.status.success() {
+            return Err(io::Error::other(format!(
+                "versioned runtime could not initialize the locked-mirror fixture: {}",
+                String::from_utf8_lossy(&init.stderr)
+            ))
+            .into());
+        }
 
         let codex_config = read_json_file(&atlas_dir.join("projectatlas.mcp.json"))?;
         let claude_config = read_json_file(&atlas_dir.join("projectatlas.claude.mcp.json"))?;
@@ -7125,13 +7184,12 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .arg("-ExecutionPolicy")
             .arg("Bypass")
             .arg("-File")
-            .arg(&installer)
+            .arg(&standalone_installer)
             .arg("-ProjectRoot")
             .arg(&repo)
-            .arg("-ProjectAtlasVersion")
-            .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
             .arg("-RuntimePath")
             .arg(&versioned_runtime)
+            .env_remove("PROJECTATLAS_VERSION")
             .env("HOME", &isolated_home)
             .env("USERPROFILE", &isolated_home)
             .env("APPDATA", &app_data)
@@ -7154,12 +7212,46 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
         for required in [
             "ProjectAtlas LocalAppData mirror is locked",
             "verify durable absolute MCP configuration before attempting an exact obsolete-child handoff",
-            "process_owner=no_exact_owner",
-            "ProjectAtlas convergence: update_state=partial stable_mirror_ready=false obsolete_mcp_handoff=no_exact_owner",
+            "process_owner=inspection_failed",
+            "ProjectAtlas convergence: update_state=partial stable_mirror_ready=false obsolete_mcp_handoff=inspection_failed",
         ] {
             if !normalized_stale_output.contains(required) {
                 return Err(io::Error::other(format!(
                     "installer did not provide stale locked-mirror guidance {required:?}\n{stale_output_text}"
+                ))
+                .into());
+            }
+        }
+        for required in [
+            format!(
+                "ProjectAtlas stale bare command: path={} observed_version=unavailable ready=false",
+                stable_runtime.display()
+            ),
+            format!(
+                "verified_runtime={} target_version={}",
+                versioned_runtime.display(),
+                env!("CARGO_PKG_VERSION")
+            ),
+            format!(
+                "ProjectAtlas verified absolute runtime command: & '{}' --require-version '{}' --format json runtime-info",
+                versioned_runtime.display(),
+                env!("CARGO_PKG_VERSION")
+            ),
+            "ProjectAtlas locked-mirror recovery: restart_can_repair_command_resolution=false"
+                .to_string(),
+            format!(
+                "-ProjectAtlasVersion '{}' -RuntimePath '{}'",
+                env!("CARGO_PKG_VERSION"),
+                versioned_runtime.display()
+            ),
+            format!(
+                "projectatlas --require-version '{}' token --view tui",
+                env!("CARGO_PKG_VERSION")
+            ),
+        ] {
+            if !normalized_stale_output.contains(&required) {
+                return Err(io::Error::other(format!(
+                    "installer omitted exact stale-command recovery field {required:?}\n{stale_output_text}"
                 ))
                 .into());
             }
@@ -7183,6 +7275,36 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
         {
             return Err(io::Error::other(format!(
                 "installer terminated the owned stale-mirror lock process: {status}"
+            ))
+            .into());
+        }
+        let compatible_before = mcp_database_snapshot(&db)?;
+        let versioned_token = StdCommand::new(&versioned_runtime)
+            .current_dir(&repo)
+            .arg("--require-version")
+            .arg(env!("CARGO_PKG_VERSION"))
+            .arg("--db")
+            .arg(&db)
+            .args(["token", "--view", "tui"])
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        if !versioned_token.status.success() {
+            return Err(io::Error::other(format!(
+                "verified absolute runtime token TUI failed while the stale mirror stayed locked: {}",
+                String::from_utf8_lossy(&versioned_token.stderr)
+            ))
+            .into());
+        }
+        if mcp_database_snapshot(&db)? != compatible_before {
+            return Err(io::Error::other(
+                "verified absolute runtime token TUI changed the compatible locked-mirror database",
+            )
+            .into());
+        }
+        let locked_config_mcp = run_mcp_stdio(&mcp_command, &repo, &mcp_args, &messages)?;
+        if !locked_config_mcp.contains(&expected_server_info) {
+            return Err(io::Error::other(format!(
+                "generated MCP config stopped using the verified runtime while the stale mirror stayed locked: {locked_config_mcp}"
             ))
             .into());
         }
@@ -7318,6 +7440,87 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             "fresh parent sibling",
         )?;
 
+        let mut stale_lock = stale_lock_process
+            .take()
+            .ok_or_else(|| io::Error::other("stale mirror lock process missing before rerun"))?;
+        stale_lock.kill()?;
+        stale_lock.wait()?;
+        let converged_output = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&installer)
+            .arg("-ProjectRoot")
+            .arg(&repo)
+            .arg("-ProjectAtlasVersion")
+            .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+            .arg("-RuntimePath")
+            .arg(&versioned_runtime)
+            .env("HOME", &isolated_home)
+            .env("USERPROFILE", &isolated_home)
+            .env("APPDATA", &app_data)
+            .env("LOCALAPPDATA", &local_app_data)
+            .env("PATH", &parent_path)
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+            .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        let converged_output_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&converged_output.stdout),
+            String::from_utf8_lossy(&converged_output.stderr)
+        );
+        if !converged_output.status.success()
+            || !converged_output_text.contains("stable_mirror_ready=true")
+            || !converged_output_text.trim_end().ends_with(
+                "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=true host_restart_required=false",
+            )
+            || converged_output_text.contains("ProjectAtlas stale bare command:")
+        {
+            return Err(io::Error::other(format!(
+                "installer did not converge the stable mirror after its lock was released\n{converged_output_text}"
+            ))
+            .into());
+        }
+        let converged_before = mcp_database_snapshot(&db)?;
+        let bare_token = StdCommand::new("powershell")
+            .current_dir(&repo)
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg(
+                "$command = Get-Command projectatlas -ErrorAction Stop; Write-Output $command.Source; & projectatlas --require-version $env:PROJECTATLAS_VERSION --format json runtime-info; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & projectatlas --require-version $env:PROJECTATLAS_VERSION --db $env:PROJECTATLAS_DB token --view tui; exit $LASTEXITCODE",
+            )
+            .env("PATH", &parent_path)
+            .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+            .env("PROJECTATLAS_DB", &db)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        let bare_token_stdout = String::from_utf8_lossy(&bare_token.stdout);
+        if !bare_token.status.success() {
+            return Err(io::Error::other(format!(
+                "converged bare runtime/version/token gate failed:\n{bare_token_stdout}\n{}",
+                String::from_utf8_lossy(&bare_token.stderr)
+            ))
+            .into());
+        }
+        let bare_command = bare_token_stdout
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .ok_or_else(|| io::Error::other("converged bare gate omitted its command path"))?;
+        require_same_executable(
+            bare_command.trim(),
+            &stable_runtime,
+            "converged bare command",
+        )?;
+        if mcp_database_snapshot(&db)? != converged_before {
+            return Err(io::Error::other(
+                "converged bare runtime/token gate changed the compatible database",
+            )
+            .into());
+        }
+
         Ok(())
     })();
 
@@ -7443,6 +7646,15 @@ public static class Program
             .iter()
             .any(|candidate| entry.join(candidate).exists())
         }))?;
+    let stale_parent_path = std::env::join_paths(
+        std::iter::once(
+            stable_runtime
+                .parent()
+                .ok_or_else(|| io::Error::other("stable runtime parent missing"))?
+                .to_path_buf(),
+        )
+        .chain(std::env::split_paths(&parent_path)),
+    )?;
     let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = isolated_home.join("codex.cmd");
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
@@ -7534,7 +7746,7 @@ public static class Program
         .ok_or_else(|| io::Error::other("installer plugin root missing"))?;
     let installer = temp.path().join("install-runtime-owner-seam.ps1");
     write_installer_with_test_codex_identity_seam(&production_installer, &installer)?;
-    let run_installer = |process_ids: &[u32]| {
+    let run_installer = |process_ids: &[u32], process_path: &OsStr| {
         let mut process_ids = process_ids.to_vec();
         process_ids.push(std::process::id());
         let process_id_allowlist = windows_test_process_id_allowlist(&process_ids)?;
@@ -7554,7 +7766,7 @@ public static class Program
             .env("USERPROFILE", &isolated_home)
             .env("APPDATA", &app_data)
             .env("LOCALAPPDATA", &local_app_data)
-            .env("PATH", &parent_path)
+            .env("PATH", process_path)
             .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
             .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
             .env("PROJECTATLAS_TEST_CODEX_OWNER", &codex_owner_fixture)
@@ -7635,7 +7847,10 @@ public static class Program
             ))
             .into());
         }
-        let output = run_installer(&[obsolete_mcp_pid.process_id, codex_owner.id()])?;
+        let output = run_installer(
+            &[obsolete_mcp_pid.process_id, codex_owner.id()],
+            &parent_path,
+        )?;
         let installer_output = format!(
             "{}\n{}",
             String::from_utf8_lossy(&output.stdout),
@@ -7767,13 +7982,41 @@ public static class Program
             .as_ref()
             .ok_or_else(|| io::Error::other("second Codex owner fixture missing"))?
             .id();
-        let retry_output =
-            run_installer(&[child_pid.process_id, retry_parent_id, direct_child_id])?;
+        let retry_output = run_installer(
+            &[child_pid.process_id, retry_parent_id, direct_child_id],
+            &stale_parent_path,
+        )?;
         let retry_text = format!(
             "{}\n{}",
             String::from_utf8_lossy(&retry_output.stdout),
             String::from_utf8_lossy(&retry_output.stderr)
         );
+        let normalized_retry_text = retry_text.split_whitespace().collect::<Vec<_>>().join(" ");
+        for required in [
+            format!(
+                "ProjectAtlas stale bare command: path={} observed_version=0.3.26 ready=false",
+                stable_runtime.display()
+            ),
+            format!(
+                "verified_runtime={} target_version={}",
+                runtime.display(),
+                env!("CARGO_PKG_VERSION")
+            ),
+            format!(
+                "ProjectAtlas verified absolute runtime command: & '{}' --require-version '{}' --format json runtime-info",
+                runtime.display(),
+                env!("CARGO_PKG_VERSION")
+            ),
+            "ProjectAtlas locked-mirror recovery: restart_can_repair_command_resolution=false"
+                .to_string(),
+        ] {
+            if !normalized_retry_text.contains(&required) {
+                return Err(io::Error::other(format!(
+                    "obsolete locked-mirror retry omitted exact diagnostic {required:?}:\n{retry_text}"
+                ))
+                .into());
+            }
+        }
         if !retry_output.status.success()
             || !retry_text.contains(
                 "ProjectAtlas convergence: update_state=partial stable_mirror_ready=false obsolete_mcp_handoff=retry_failed codex_plugin_ready=true codex_registry_ready=true",
@@ -14801,6 +15044,147 @@ fn packaged_cli_commands_own_their_real_sqlite_effects() -> Result<(), Box<dyn E
         &["file_summary", "file_purpose"],
         "CLI contract watched source.",
     )?;
+
+    Connection::open(&database)?.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    let missing_root = temp.path().join(MISSING_INDEX_DIR_NAME);
+    fs::create_dir(&missing_root)?;
+    let wrong_root = temp.path().join("wrong-owner");
+    let wrong_atlas_dir = wrong_root.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&wrong_atlas_dir)?;
+    let wrong_database = wrong_atlas_dir.join("projectatlas.db");
+    fs::copy(&database, &wrong_database)?;
+    let wrong_before = sqlite_compatibility_snapshot(&wrong_database)?;
+
+    let writer = Connection::open(&database)?;
+    writer.execute_batch("PRAGMA wal_autocheckpoint = 0")?;
+    let supported_schema_version = writer.query_row(
+        "SELECT CAST(value AS INTEGER) FROM metadata WHERE key = 'schema_version'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let future_schema_version = supported_schema_version
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other("schema version overflowed"))?;
+    writer.execute(
+        "UPDATE metadata SET value = ?1 WHERE key = 'schema_version'",
+        [future_schema_version],
+    )?;
+    let wal_path = sqlite_sidecar_path(&database, "-wal");
+    if !wal_path.is_file() || fs::metadata(&wal_path)?.len() == 0 {
+        return Err(io::Error::other(
+            "packaged schema-mismatch fixture did not retain an active WAL",
+        )
+        .into());
+    }
+    let incompatible_before = sqlite_compatibility_snapshot(&database)?;
+
+    let incompatible_cli = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .arg("--require-version")
+        .arg(env!("CARGO_PKG_VERSION"))
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&database)
+        .arg("overview")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .output()?;
+    if incompatible_cli.status.success() {
+        return Err(io::Error::other("packaged CLI opened a newer-schema database").into());
+    }
+    let incompatible_cli_error: Value = serde_json::from_slice(&incompatible_cli.stderr)?;
+    require_schema_version_mismatch(
+        &incompatible_cli_error,
+        future_schema_version,
+        supported_schema_version,
+    )?;
+    let incompatible_cli_text = String::from_utf8_lossy(&incompatible_cli.stderr);
+    for private in [database.display().to_string(), repo.display().to_string()] {
+        if incompatible_cli_text.contains(&private) {
+            return Err(io::Error::other(format!(
+                "packaged CLI schema mismatch exposed private path {private}"
+            ))
+            .into());
+        }
+    }
+    if sqlite_compatibility_snapshot(&database)? != incompatible_before {
+        return Err(io::Error::other(
+            "packaged CLI schema mismatch changed the active-WAL database",
+        )
+        .into());
+    }
+
+    let mut incompatible_session = McpContractSession::spawn(&executable, &repo, &database)?;
+    let incompatible_mcp_result = (|| -> Result<(), Box<dyn Error>> {
+        let mismatch_text = incompatible_session
+            .call_tool_error("atlas_overview", &serde_json::json!({"project_path": repo}))?;
+        let mismatch: Value = toon_format::decode_default(&mismatch_text)?;
+        require_schema_version_mismatch(
+            &mismatch,
+            future_schema_version,
+            supported_schema_version,
+        )?;
+        for private in [database.display().to_string(), repo.display().to_string()] {
+            if mismatch_text.contains(&private) {
+                return Err(io::Error::other(format!(
+                    "packaged MCP schema mismatch exposed private path {private}"
+                ))
+                .into());
+            }
+        }
+
+        let missing_text = incompatible_session.call_tool(
+            "atlas_overview",
+            &serde_json::json!({"project_path": missing_root}),
+        )?;
+        if !missing_text.contains("kind: init_required")
+            || missing_root.join(ATLAS_DIR_NAME).exists()
+        {
+            return Err(io::Error::other(format!(
+                "persistent MCP missing-index control mutated state or lost typed guidance: {missing_text}"
+            ))
+            .into());
+        }
+
+        let wrong_text = incompatible_session.call_tool(
+            "atlas_overview",
+            &serde_json::json!({"project_path": wrong_root}),
+        )?;
+        if !wrong_text.contains("kind: project_mismatch")
+            || wrong_text.contains("kind: schema_version_mismatch")
+            || sqlite_compatibility_snapshot(&wrong_database)? != wrong_before
+        {
+            return Err(io::Error::other(format!(
+                "persistent MCP wrong-root control mutated state or lost typed ownership: {wrong_text}"
+            ))
+            .into());
+        }
+
+        let runtime_text =
+            incompatible_session.call_tool("atlas_runtime_info", &serde_json::json!({}))?;
+        if !runtime_text.contains(env!("CARGO_PKG_VERSION")) {
+            return Err(io::Error::other(
+                "persistent MCP session stopped responding after schema mismatch",
+            )
+            .into());
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(incompatible_mcp_result, || incompatible_session.shutdown())?;
+    if sqlite_compatibility_snapshot(&database)? != incompatible_before {
+        return Err(io::Error::other(
+            "packaged MCP schema mismatch changed the active-WAL database",
+        )
+        .into());
+    }
+    if writer.query_row::<i64, _, _>(
+        "SELECT CAST(value AS INTEGER) FROM metadata WHERE key = 'schema_version'",
+        [],
+        |row| row.get(0),
+    )? != future_schema_version
+    {
+        return Err(io::Error::other("live WAL owner could not read the retained schema").into());
+    }
     Ok(())
 }
 
@@ -15380,7 +15764,7 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
         }
     }
 
-    let missing_index_root = temp.path().join("missing-index");
+    let missing_index_root = temp.path().join(MISSING_INDEX_DIR_NAME);
     fs::create_dir(&missing_index_root)?;
     for (name, arguments, expected_error) in [
         (
@@ -24515,20 +24899,41 @@ impl McpContractSession {
 
     /// Call one real MCP tool and return its text payload.
     fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<String, Box<dyn Error>> {
+        self.call_tool_text(name, arguments, false)
+    }
+
+    /// Call one real MCP tool and require a visible tool-level error result.
+    fn call_tool_error(&mut self, name: &str, arguments: &Value) -> Result<String, Box<dyn Error>> {
+        self.call_tool_text(name, arguments, true)
+    }
+
+    /// Call one real MCP tool and require the expected `isError` state.
+    fn call_tool_text(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+        expected_error: bool,
+    ) -> Result<String, Box<dyn Error>> {
         let response = self.request(
             "tools/call",
             &serde_json::json!({"name": name, "arguments": arguments}),
         )?;
-        if response.get("error").is_some()
-            || response
-                .get("result")
-                .and_then(|result| result.get("isError"))
-                .and_then(Value::as_bool)
-                == Some(true)
-        {
-            return Err(
-                io::Error::other(format!("MCP contract tool {name} failed: {response}")).into(),
-            );
+        if response.get("error").is_some() {
+            return Err(io::Error::other(format!(
+                "MCP contract tool {name} returned a protocol error: {response}"
+            ))
+            .into());
+        }
+        let is_error = response
+            .get("result")
+            .and_then(|result| result.get("isError"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if is_error != expected_error {
+            return Err(io::Error::other(format!(
+                "MCP contract tool {name} returned isError={is_error}, expected {expected_error}: {response}"
+            ))
+            .into());
         }
         response
             .get("result")
@@ -25157,12 +25562,13 @@ fn inline_legacy_purpose_review_item_schema(schema: &Value) -> Result<Value, Box
     Ok(schema)
 }
 
-/// Capture bounded logical rows so WAL/page-layout changes do not masquerade as product state.
-fn mcp_database_snapshot(database: &Path) -> Result<McpDatabaseSnapshot, Box<dyn Error>> {
+/// Hash every bounded user-table row through one read-only `SQLite` connection.
+fn sqlite_table_digests(
+    connection: &Connection,
+) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
     const MAX_TABLE_ROWS: usize = 16_384;
     const MAX_TABLE_BYTES: usize = 8 * 1024 * 1024;
 
-    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let table_names = {
         let mut statement = connection.prepare(
             "SELECT name
@@ -25174,8 +25580,7 @@ fn mcp_database_snapshot(database: &Path) -> Result<McpDatabaseSnapshot, Box<dyn
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?
     };
-    let mut authoritative = BTreeMap::new();
-    let mut usage = BTreeMap::new();
+    let mut tables = BTreeMap::new();
     for table_name in table_names {
         let quoted_name = format!("\"{}\"", table_name.replace('"', "\"\""));
         let column_count = {
@@ -25239,12 +25644,60 @@ fn mcp_database_snapshot(database: &Path) -> Result<McpDatabaseSnapshot, Box<dyn
             }
         }
         let digest = format!("{row_count}:{}", sha256_hex(&encoded));
-        if table_name.starts_with("usage_") {
-            usage.insert(table_name, digest);
-        } else {
-            authoritative.insert(table_name, digest);
+        tables.insert(table_name, digest);
+    }
+    Ok(tables)
+}
+
+/// Capture durable bytes, schema objects, and all logical rows without checkpointing.
+fn sqlite_compatibility_snapshot(
+    database: &Path,
+) -> Result<SqliteCompatibilitySnapshot, Box<dyn Error>> {
+    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let schema_objects = {
+        let mut statement = connection.prepare(
+            "SELECT type, name, tbl_name, COALESCE(sql, '')
+             FROM sqlite_schema
+             WHERE name NOT LIKE 'sqlite_%'
+             ORDER BY type, name",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok(format!(
+                    "{}\0{}\0{}\0{}",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let tables = sqlite_table_digests(&connection)?;
+    drop(connection);
+    let wal_path = sqlite_sidecar_path(database, "-wal");
+    let mut sidecars = BTreeSet::new();
+    for suffix in ["-wal", "-shm"] {
+        if sqlite_sidecar_path(database, suffix).is_file() {
+            sidecars.insert(suffix.to_string());
         }
     }
+    Ok(SqliteCompatibilitySnapshot {
+        database_bytes: fs::read(database)?,
+        wal_bytes: wal_path.is_file().then(|| fs::read(wal_path)).transpose()?,
+        sidecars,
+        schema_objects,
+        tables,
+    })
+}
+
+/// Capture bounded logical rows so WAL/page-layout changes do not masquerade as product state.
+fn mcp_database_snapshot(database: &Path) -> Result<McpDatabaseSnapshot, Box<dyn Error>> {
+    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let tables = sqlite_table_digests(&connection)?;
+    let (usage, authoritative) = tables
+        .into_iter()
+        .partition(|(table_name, _)| table_name.starts_with("usage_"));
     drop(connection);
 
     let store = AtlasStore::open_read_only(database)?;
@@ -27490,6 +27943,37 @@ fn require_json_string(value: &Value, path: &[&str], expected: &str) -> Result<(
         ))
         .into())
     }
+}
+
+/// Require the shared privacy-safe CLI/MCP schema mismatch contract.
+fn require_schema_version_mismatch(
+    value: &Value,
+    found: i64,
+    supported: i64,
+) -> Result<(), Box<dyn Error>> {
+    require_json_string(value, &["error", "kind"], "schema_version_mismatch")?;
+    let mismatch = json_at(value, &["error", "schema_version_mismatch"])?;
+    if mismatch.get("found_schema_version").and_then(Value::as_i64) != Some(found)
+        || mismatch
+            .get("supported_schema_version")
+            .and_then(Value::as_i64)
+            != Some(supported)
+    {
+        return Err(io::Error::other(format!(
+            "schema mismatch versions differ: expected found={found} supported={supported}, actual={mismatch}"
+        ))
+        .into());
+    }
+    require_json_string(
+        value,
+        &["error", "schema_version_mismatch", "runtime_version"],
+        env!("CARGO_PKG_VERSION"),
+    )?;
+    require_json_contains(
+        value,
+        &["error", "schema_version_mismatch", "recovery"],
+        "do not reset",
+    )
 }
 
 /// Require a nested JSON string to contain a substring.

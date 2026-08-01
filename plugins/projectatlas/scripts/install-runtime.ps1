@@ -3296,6 +3296,39 @@ else {
     Write-Warning "ProjectAtlas runtime or generated MCP config readiness changed before final reporting; rerun this installer."
     "The installed runtime and generated MCP configs could not be reverified; rerun this installer."
 }
+$targetRuntimeVersion = Convert-ProjectAtlasVersionTag $ProjectAtlasVersion
+if ([string]::IsNullOrWhiteSpace($targetRuntimeVersion) -and $runtimeMcpConfigsReady) {
+    $targetRuntimeVersion = Convert-ProjectAtlasVersionTag (Get-ProjectAtlasRuntimeVersion $verifiedRuntimePath)
+}
+$staleBareCommandPath = if (-not $stableMirrorReady `
+        -and -not [string]::IsNullOrWhiteSpace($effectiveInheritedProjectAtlasPath)) {
+    Get-NormalizedPathEntry $effectiveInheritedProjectAtlasPath
+}
+else {
+    $null
+}
+$staleBareCommandVersion = if ($runtimeMcpConfigsReady -and $staleBareCommandPath) {
+    Get-ProjectAtlasRuntimeVersion $staleBareCommandPath
+}
+else {
+    $null
+}
+$lockedStaleCommandRecoveryRequired = $runtimeMcpConfigsReady `
+    -and -not $stableMirrorReady `
+    -and $staleBareCommandPath `
+    -and -not [string]::IsNullOrWhiteSpace($targetRuntimeVersion) `
+    -and $staleBareCommandVersion -ne $targetRuntimeVersion
+if ($lockedStaleCommandRecoveryRequired) {
+    $observedVersion = if ($staleBareCommandVersion) { $staleBareCommandVersion } else { "unavailable" }
+    $quotedRuntime = "'" + $verifiedRuntimePath.Replace("'", "''") + "'"
+    $quotedInstaller = "'" + (Get-NormalizedPathEntry $PSCommandPath).Replace("'", "''") + "'"
+    $quotedProjectRoot = "'" + $ProjectRoot.Replace("'", "''") + "'"
+    $quotedReleaseVersion = "'" + $targetRuntimeVersion.Replace("'", "''") + "'"
+    $quotedRuntimeVersion = "'" + $targetRuntimeVersion.Replace("'", "''") + "'"
+    Write-Warning "ProjectAtlas stale bare command: path=$staleBareCommandPath observed_version=$observedVersion ready=false; verified_runtime=$verifiedRuntimePath target_version=$targetRuntimeVersion."
+    Write-Output "ProjectAtlas verified absolute runtime command: & $quotedRuntime --require-version $quotedRuntimeVersion --format json runtime-info"
+    Write-Warning "ProjectAtlas locked-mirror recovery: restart_can_repair_command_resolution=$($hostRestartRequired.ToString().ToLowerInvariant()). Wait for the lock owner to exit or release $stableMirrorPath; then rerun & $quotedInstaller -ProjectRoot $quotedProjectRoot -ProjectAtlasVersion $quotedReleaseVersion -RuntimePath $quotedRuntime. From $ProjectRoot, require both bare-command gates before declaring convergence: projectatlas --require-version $quotedRuntimeVersion --format json runtime-info; projectatlas --require-version $quotedRuntimeVersion token --view tui."
+}
 if ($hostRestartRequired) {
     Write-Warning "Existing host restart required: the inherited bare 'projectatlas' command remains stale, but the verified runtime is first on the persisted fresh-process PATH. Restart the environment-owning Windows launcher or terminal session, then start a new Codex or shell; restarting only a child of an unchanged launcher can retain stale PATH. $runtimeMcpConfigGuidance"
 }
