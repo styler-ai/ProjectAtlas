@@ -45,7 +45,7 @@ A SQL mock was rejected because it cannot prove SQLite open flags, WAL behavior,
 
 ### Reuse one typed schema-mismatch payload in CLI and MCP
 
-Extend the existing shared agent error vocabulary with `AgentErrorKind::SchemaVersionMismatch` and one serializable payload containing `found_schema_version`, `supported_schema_version`, and the current `runtime_version`. A single extractor from `CliError::Db(DbError::SchemaVersion { .. })` supplies both CLI JSON/TOON rendering and MCP error encoding. The stable serialized kind is `schema_version_mismatch`.
+Extend the existing shared agent error vocabulary with `AgentErrorKind::SchemaVersionMismatch` and one serializable payload containing `found_schema_version`, `supported_schema_version`, and the current `runtime_version`. The database-owned migration inventory distinguishes admitted predecessors from unsupported versions before shared extractors supply both CLI JSON/TOON rendering and MCP error encoding. An admitted predecessor that reaches a current-only read returns `schema_migration_required`, the bounded remaining-step count, and the existing `projectatlas init` / `atlas_init` migration owner while explicitly preserving the same CLI `--db`/`--config` selection or MCP server/database binding; the stable incompatible-schema kind remains `schema_version_mismatch`.
 
 The payload and human message contain only bounded numeric versions and the public runtime version. They omit database paths, project roots, metadata values, SQL, and authored content. String matching in each adapter was rejected because it would duplicate classification and could expose unrelated error context.
 
@@ -55,7 +55,7 @@ Use the repository's official packaged-runtime construction in an isolated desti
 
 ### Specialize the existing Windows partial-convergence guidance
 
-Reuse the installer's captured effective inherited command, bounded version probe, verified versioned runtime, target version, stable-mirror state, and existing readiness booleans. When the effective bare command is an obsolete locked mirror, emit deterministic diagnostics that name:
+Reuse the installer's captured effective inherited command, bounded version probe, verified versioned runtime, target version, stable-mirror state, and existing readiness booleans. Keep the final runtime probe separate from generated-config digest readiness so config-only drift retains the verified absolute-runtime recovery while runtime drift cannot advertise that path as verified. When the effective bare command is an obsolete locked mirror, emit deterministic diagnostics that name:
 
 - the exact resolved stale executable and observed version;
 - the exact verified absolute runtime and target version;

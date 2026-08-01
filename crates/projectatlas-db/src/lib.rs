@@ -569,6 +569,30 @@ pub enum DbError {
 }
 
 impl DbError {
+    /// Return a schema version with a complete migration route owned by this runtime.
+    #[must_use]
+    pub fn supported_schema_migration(&self) -> Option<(i64, i64, u32)> {
+        match self {
+            Self::SchemaVersion { found, expected } => schema::migration_steps_remaining(*found)
+                .filter(|steps| *steps > 0)
+                .map(|steps| (*found, *expected, steps)),
+            _ => None,
+        }
+    }
+
+    /// Return a schema version rejected by this runtime's migration inventory.
+    #[must_use]
+    pub fn unsupported_schema_version(&self) -> Option<(i64, i64)> {
+        match self {
+            Self::SchemaVersion { found, expected }
+                if schema::migration_steps_remaining(*found).is_none() =>
+            {
+                Some((*found, *expected))
+            }
+            _ => None,
+        }
+    }
+
     /// Return whether a derived-index write could not proceed without implying
     /// corruption, schema drift, or an identity-contract failure.
     #[must_use]
@@ -7633,6 +7657,65 @@ mod tests {
     use std::fs;
     use std::io;
     use std::time::Instant;
+
+    #[test]
+    fn unsupported_schema_versions_follow_the_migration_inventory() -> Result<(), Box<dyn Error>> {
+        for found in schema::PREVIOUS_SCHEMA_VERSION..=schema::SCHEMA_VERSION {
+            let error = DbError::SchemaVersion {
+                found,
+                expected: schema::SCHEMA_VERSION,
+            };
+            let expected_migration = if found < schema::SCHEMA_VERSION {
+                Some((
+                    found,
+                    schema::SCHEMA_VERSION,
+                    u32::try_from(schema::SCHEMA_VERSION - found)?,
+                ))
+            } else {
+                None
+            };
+            require_eq(
+                &error.supported_schema_migration(),
+                &expected_migration,
+                "admitted schema migration",
+            )?;
+            require_eq(
+                &error.unsupported_schema_version(),
+                &None,
+                "admitted schema version",
+            )?;
+        }
+        for found in [
+            schema::PREVIOUS_SCHEMA_VERSION - 1,
+            schema::SCHEMA_VERSION + 1,
+        ] {
+            let error = DbError::SchemaVersion {
+                found,
+                expected: schema::SCHEMA_VERSION,
+            };
+            require_eq(
+                &error.unsupported_schema_version(),
+                &Some((found, schema::SCHEMA_VERSION)),
+                "unsupported schema version",
+            )?;
+            require_eq(
+                &error.supported_schema_migration(),
+                &None,
+                "unsupported schema migration",
+            )?;
+        }
+        require_eq(
+            &DbError::SchemaVersionMissing.unsupported_schema_version(),
+            &None,
+            "unrelated database error",
+        )?;
+        require_eq(
+            &DbError::SchemaVersionMissing.supported_schema_migration(),
+            &None,
+            "unrelated migration error",
+        )?;
+        Ok(())
+    }
 
     #[test]
     fn stores_nodes_and_overview() -> Result<(), Box<dyn Error>> {

@@ -12,13 +12,13 @@
 ## 3. Shared CLI and MCP Contract
 
 - [x] 3.1 Add the shared `schema_version_mismatch` agent error kind and one typed payload/extractor for found schema, supported schema, and runtime versions; reuse it from CLI JSON/TOON and MCP encoding without paths, roots, SQL, metadata values, or authored content.
-- [x] 3.2 Cover exact CLI JSON/TOON mismatch fields plus human diagnostics, privacy-negative assertions, and unchanged behavior for compatible, missing-index, wrong-root, malformed, and non-schema failures.
+- [x] 3.2 Cover exact CLI JSON/TOON mismatch fields plus human diagnostics, privacy-negative assertions, an actionable supported-predecessor migration handoff that preserves explicit CLI and MCP database selection, and unchanged behavior for current, missing-index, wrong-root, malformed, and non-schema failures.
 - [x] 3.3 Exercise a real stdio MCP initialize/tool exchange with explicit `project_path` against the newer active-WAL database, a missing index, and a wrong-root index; assert typed mismatch/init/project errors, protocol-correct failure, no implicit mutation, and subsequent MCP session behavior.
 
 ## 4. Windows Locked-Mirror Recovery
 
 - [x] 4.1 Extend the existing installer partial-convergence output using its bounded probes and captured readiness state to report the exact stale bare-command path/observed version, verified absolute runtime/target version, absolute verification/use command, restart applicability, and unlock/rerun/bare-command gate without broadening #411 handoff authority.
-- [x] 4.2 On Windows, cover obsolete locked mirror, unavailable stale-version probe, already-current command, fresh-PATH shadowing, non-retireable lock-owner survival, verified versioned-runtime/generated-config use while locked, unlock plus installer rerun, target bare-command version, and bare token TUI success against the unchanged compatible database; do not claim `handoff-obsolete-mcp-runtime` task 4.1.
+- [x] 4.2 On Windows, cover obsolete locked mirror, unavailable stale-version probe, already-current command, fresh-PATH shadowing, non-retireable lock-owner survival, config-only and runtime drift, verified versioned-runtime/generated-config use while locked, unlock plus installer rerun, target bare-command version, and bare token TUI success against the unchanged compatible database; do not claim `handoff-obsolete-mcp-runtime` task 4.1.
 
 ## 5. Packaged, Performance, and Release Verification
 

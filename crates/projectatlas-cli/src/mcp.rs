@@ -35,12 +35,13 @@ use crate::token_tui::{
 };
 use crate::{
     AgentErrorKind, CliError, DEFAULT_FILE_SUMMARY_LIMIT, DatabaseFilesystemErrorPayload,
-    HarnessConfig, OutputFormat, RootTransition, RuntimeInfoReport, SchemaVersionMismatchPayload,
-    SearchRetrievalModeArg, build_harness_mcp_config_report, build_parity_report,
-    build_root_report, build_runtime_info, controlled_named_output,
+    HarnessConfig, OutputFormat, RootTransition, RuntimeInfoReport, SchemaMigrationRequiredPayload,
+    SchemaVersionMismatchPayload, SearchRetrievalModeArg, build_harness_mcp_config_report,
+    build_parity_report, build_root_report, build_runtime_info, controlled_named_output,
     database_filesystem_error_payload, finalize_coverage_output, render_code_slice,
     render_file_summary, render_parity_report, render_root_report, render_runtime_info,
-    render_search_report, render_watch_status, schema_version_mismatch_payload,
+    render_search_report, render_watch_status, schema_migration_required_payload,
+    schema_version_mismatch_payload,
 };
 use projectatlas_core::graph::{
     Completeness, ConfidenceClass, CoverageRecord, EntitySelector, ExternalSelector,
@@ -1671,6 +1672,9 @@ struct McpErrorPayload {
     /// Content-free incompatible schema details.
     #[serde(skip_serializing_if = "Option::is_none")]
     schema_version_mismatch: Option<SchemaVersionMismatchPayload>,
+    /// Content-free supported migration handoff.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema_migration_required: Option<SchemaMigrationRequiredPayload>,
     /// Optional retrieval capability state and recovery guidance.
     #[serde(skip_serializing_if = "Option::is_none")]
     search_capability: Option<crate::SearchCapabilityErrorPayload>,
@@ -5371,6 +5375,11 @@ impl ProjectAtlasMcpServer {
     /// Encode an MCP error as a structured agent-readable payload.
     fn encode_error_payload(error: &CliError) -> String {
         let schema_version_mismatch = schema_version_mismatch_payload(error);
+        let schema_migration_required = schema_migration_required_payload(error);
+        let message = schema_migration_required.as_ref().map_or_else(
+            || error.to_string(),
+            SchemaMigrationRequiredPayload::message,
+        );
         let (
             kind,
             refresh_required,
@@ -5473,6 +5482,17 @@ impl ProjectAtlasMcpServer {
                 None,
                 None,
             ),
+            _ if schema_migration_required.is_some() => (
+                AgentErrorKind::SchemaMigrationRequired,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
             _ => database_filesystem_error_payload(error).map_or(
                 (
                     AgentErrorKind::Error,
@@ -5503,7 +5523,7 @@ impl ProjectAtlasMcpServer {
         let payload = McpErrorResponse {
             error: McpErrorPayload {
                 kind,
-                message: error.to_string(),
+                message,
                 refresh_required,
                 init_required,
                 worktree_required,
@@ -5511,6 +5531,7 @@ impl ProjectAtlasMcpServer {
                 project_mismatch,
                 database_filesystem,
                 schema_version_mismatch,
+                schema_migration_required,
                 search_capability,
                 next,
             },
@@ -8017,6 +8038,27 @@ mod tests {
                 && !payload.contains("session_id")
                 && !payload.contains("project_root"),
             "MCP TOON lost typed schema-version details or exposed database context",
+        )?;
+
+        let predecessor = CliError::Service(ServiceError::Db(DbError::SchemaVersion {
+            found: 8,
+            expected: 16,
+        }));
+        let McpToolTextResult(predecessor_result) =
+            ProjectAtlasMcpServer::as_mcp_text(Err(predecessor));
+        let predecessor_payload = predecessor_result.map_err(std::io::Error::other)?;
+        require(
+            predecessor_payload.contains("kind: schema_migration_required")
+                && predecessor_payload.contains("found_schema_version: 8")
+                && predecessor_payload.contains("supported_schema_version: 16")
+                && predecessor_payload.contains("migration_steps_remaining: 8")
+                && predecessor_payload.contains("projectatlas init")
+                && predecessor_payload.contains("atlas_init")
+                && predecessor_payload.contains("same global `--db`/`--config` selection")
+                && predecessor_payload.contains("same MCP server/database binding")
+                && !predecessor_payload.contains("schema_version_mismatch")
+                && !predecessor_payload.contains(crate::SCHEMA_VERSION_MISMATCH_RECOVERY),
+            "MCP omitted the supported-predecessor migration handoff",
         )
     }
 

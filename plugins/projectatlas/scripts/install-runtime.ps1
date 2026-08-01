@@ -2308,16 +2308,13 @@ function Confirm-ProjectAtlasGeneratedMcpConfig {
     return (Get-ProjectAtlasSha256FromBytes $configBytes)
 }
 
-function Test-ProjectAtlasRuntimeMcpConfigReadiness {
+function Test-ProjectAtlasGeneratedMcpConfigReadiness {
     param(
-        [string]$RuntimePath,
-        [string]$ExpectedVersion,
         [string[]]$ConfigPaths,
         [string[]]$ExpectedSha256
     )
     try {
-        if (-not (Test-ProjectAtlasRuntime $RuntimePath $ExpectedVersion) `
-            -or $ConfigPaths.Count -eq 0 `
+        if ($ConfigPaths.Count -eq 0 `
             -or $ConfigPaths.Count -ne $ExpectedSha256.Count) {
             return $false
         }
@@ -3249,27 +3246,29 @@ if (-not $stableMirrorSynchronized) {
         }
     }
 }
-$stableMirrorReady = $stableMirrorSynchronized `
-    -and (Test-ProjectAtlasRuntime $stableMirrorPath $ProjectAtlasVersion)
-$inheritedCommandReady = -not [string]::IsNullOrWhiteSpace($effectiveInheritedProjectAtlasPath) `
+$inheritedCommandMatchesRuntime = -not [string]::IsNullOrWhiteSpace($effectiveInheritedProjectAtlasPath) `
     -and (Get-NormalizedPathEntry $effectiveInheritedProjectAtlasPath) -eq $verifiedRuntimePath
-$inheritedSynchronizedMirrorReady = $stableMirrorReady `
-    -and -not [string]::IsNullOrWhiteSpace($effectiveInheritedProjectAtlasPath) `
+$inheritedCommandMatchesMirror = -not [string]::IsNullOrWhiteSpace($effectiveInheritedProjectAtlasPath) `
     -and (Get-NormalizedPathEntry $effectiveInheritedProjectAtlasPath) -eq $stableMirrorPath
 $installerProjectAtlasCommand = Get-Command projectatlas -ErrorAction SilentlyContinue | Select-Object -First 1
 $installerProjectAtlasPath = if ($installerProjectAtlasCommand) { $installerProjectAtlasCommand.Source } else { $null }
-$installerCliReady = -not [string]::IsNullOrWhiteSpace($installerProjectAtlasPath) `
+$installerCommandMatchesRuntime = -not [string]::IsNullOrWhiteSpace($installerProjectAtlasPath) `
     -and (Get-NormalizedPathEntry $installerProjectAtlasPath) -eq $verifiedRuntimePath
-$parentCliReady = $inheritedCommandReady -or $inheritedSynchronizedMirrorReady
-$hostRestartRequired = -not $parentCliReady -and $futureProcessPathReady
-$hostRepairRequired = -not $parentCliReady -and -not $futureProcessPathReady
 $codexPluginReady = Test-ProjectAtlasCodexPluginReady $ProjectAtlasVersion
 $codexRegistryReady = Test-ProjectAtlasCodexMcpRegistryReady $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath
-$runtimeMcpConfigsReady = Test-ProjectAtlasRuntimeMcpConfigReadiness `
-    $projectAtlas `
-    $ProjectAtlasVersion `
+$generatedMcpConfigsReady = Test-ProjectAtlasGeneratedMcpConfigReadiness `
     ([string[]]@($mcpConfigPath, $claudeMcpConfigPath, $opencodeConfigPath)) `
     ([string[]]@($mcpConfigSha256, $claudeMcpConfigSha256, $opencodeConfigSha256))
+$verifiedRuntimeReady = Test-ProjectAtlasRuntime $projectAtlas $ProjectAtlasVersion
+$stableMirrorReady = $stableMirrorSynchronized `
+    -and (Test-ProjectAtlasRuntime $stableMirrorPath $ProjectAtlasVersion)
+$inheritedCommandReady = $verifiedRuntimeReady -and $inheritedCommandMatchesRuntime
+$inheritedSynchronizedMirrorReady = $stableMirrorReady -and $inheritedCommandMatchesMirror
+$installerCliReady = $verifiedRuntimeReady -and $installerCommandMatchesRuntime
+$parentCliReady = $inheritedCommandReady -or $inheritedSynchronizedMirrorReady
+$hostRestartRequired = $verifiedRuntimeReady -and -not $parentCliReady -and $futureProcessPathReady
+$hostRepairRequired = $verifiedRuntimeReady -and -not $parentCliReady -and -not $futureProcessPathReady
+$runtimeMcpConfigsReady = $verifiedRuntimeReady -and $generatedMcpConfigsReady
 $integrationVerificationRequired = $handoffState -ne "not_required" -or $codexIntegrationManaged
 $updateState = if ($runtimeMcpConfigsReady `
         -and $stableMirrorReady `
@@ -3279,10 +3278,20 @@ $updateState = if ($runtimeMcpConfigsReady `
 else {
     "partial"
 }
-Write-ProjectAtlasPathShadowReport $projectAtlas $ProjectAtlasVersion
+if ($verifiedRuntimeReady) {
+    Write-ProjectAtlasPathShadowReport $projectAtlas $ProjectAtlasVersion
+}
+else {
+    Write-Warning "ProjectAtlas PATH shadow report skipped because the requested absolute runtime failed final verification."
+}
 Write-ProjectAtlasWorkflowPinReport $ProjectRoot $ProjectAtlasVersion
 
-Write-Output "ProjectAtlas runtime installed and verified: $projectAtlas"
+if ($verifiedRuntimeReady) {
+    Write-Output "ProjectAtlas runtime installed and verified: $projectAtlas"
+}
+else {
+    Write-Warning "ProjectAtlas runtime failed final verification: path=$verifiedRuntimePath target_version=$(Convert-ProjectAtlasVersionTag $ProjectAtlasVersion). Rerun this installer with a valid matching runtime."
+}
 Write-Output "ProjectAtlas update preserved project state under $atlasDir; use reset-index --apply for explicit state cleanup."
 Write-Output "Project-local MCP config written: $mcpConfigPath"
 Write-Output "Project-local Claude Code MCP config written: $claudeMcpConfigPath"
@@ -3293,11 +3302,16 @@ $runtimeMcpConfigGuidance = if ($runtimeMcpConfigsReady) {
     "The runtime and generated MCP configs are ready through the verified absolute runtime."
 }
 else {
-    Write-Warning "ProjectAtlas runtime or generated MCP config readiness changed before final reporting; rerun this installer."
+    if (-not $verifiedRuntimeReady) {
+        Write-Warning "ProjectAtlas runtime readiness changed before final reporting; generated MCP configs are not usable until the runtime is reverified."
+    }
+    else {
+        Write-Warning "ProjectAtlas generated MCP config readiness changed before final reporting; rerun this installer."
+    }
     "The installed runtime and generated MCP configs could not be reverified; rerun this installer."
 }
 $targetRuntimeVersion = Convert-ProjectAtlasVersionTag $ProjectAtlasVersion
-if ([string]::IsNullOrWhiteSpace($targetRuntimeVersion) -and $runtimeMcpConfigsReady) {
+if ([string]::IsNullOrWhiteSpace($targetRuntimeVersion)) {
     $targetRuntimeVersion = Convert-ProjectAtlasVersionTag (Get-ProjectAtlasRuntimeVersion $verifiedRuntimePath)
 }
 $staleBareCommandPath = if (-not $stableMirrorReady `
@@ -3307,29 +3321,37 @@ $staleBareCommandPath = if (-not $stableMirrorReady `
 else {
     $null
 }
-$staleBareCommandVersion = if ($runtimeMcpConfigsReady -and $staleBareCommandPath) {
+$staleBareCommandVersion = if ($staleBareCommandPath) {
     Get-ProjectAtlasRuntimeVersion $staleBareCommandPath
 }
 else {
     $null
 }
-$lockedStaleCommandRecoveryRequired = $runtimeMcpConfigsReady `
-    -and -not $stableMirrorReady `
+$lockedStaleCommandRecoveryRequired = -not $stableMirrorReady `
     -and $staleBareCommandPath `
     -and -not [string]::IsNullOrWhiteSpace($targetRuntimeVersion) `
     -and $staleBareCommandVersion -ne $targetRuntimeVersion
 if ($lockedStaleCommandRecoveryRequired) {
     $observedVersion = if ($staleBareCommandVersion) { $staleBareCommandVersion } else { "unavailable" }
-    $quotedRuntime = "'" + $verifiedRuntimePath.Replace("'", "''") + "'"
     $quotedInstaller = "'" + (Get-NormalizedPathEntry $PSCommandPath).Replace("'", "''") + "'"
     $quotedProjectRoot = "'" + $ProjectRoot.Replace("'", "''") + "'"
     $quotedReleaseVersion = "'" + $targetRuntimeVersion.Replace("'", "''") + "'"
     $quotedRuntimeVersion = "'" + $targetRuntimeVersion.Replace("'", "''") + "'"
-    Write-Warning "ProjectAtlas stale bare command: path=$staleBareCommandPath observed_version=$observedVersion ready=false; verified_runtime=$verifiedRuntimePath target_version=$targetRuntimeVersion."
-    Write-Output "ProjectAtlas verified absolute runtime command: & $quotedRuntime --require-version $quotedRuntimeVersion --format json runtime-info"
-    Write-Warning "ProjectAtlas locked-mirror recovery: restart_can_repair_command_resolution=$($hostRestartRequired.ToString().ToLowerInvariant()). Wait for the lock owner to exit or release $stableMirrorPath; then rerun & $quotedInstaller -ProjectRoot $quotedProjectRoot -ProjectAtlasVersion $quotedReleaseVersion -RuntimePath $quotedRuntime. From $ProjectRoot, require both bare-command gates before declaring convergence: projectatlas --require-version $quotedRuntimeVersion --format json runtime-info; projectatlas --require-version $quotedRuntimeVersion token --view tui."
+    if ($verifiedRuntimeReady) {
+        $quotedRuntime = "'" + $verifiedRuntimePath.Replace("'", "''") + "'"
+        Write-Warning "ProjectAtlas stale bare command: path=$staleBareCommandPath observed_version=$observedVersion ready=false; verified_runtime=$verifiedRuntimePath target_version=$targetRuntimeVersion."
+        Write-Output "ProjectAtlas verified absolute runtime command: & $quotedRuntime --require-version $quotedRuntimeVersion --format json runtime-info"
+        Write-Warning "ProjectAtlas locked-mirror recovery: restart_can_repair_command_resolution=$($hostRestartRequired.ToString().ToLowerInvariant()). Wait for the lock owner to exit or release $stableMirrorPath; then rerun & $quotedInstaller -ProjectRoot $quotedProjectRoot -ProjectAtlasVersion $quotedReleaseVersion -RuntimePath $quotedRuntime. From $ProjectRoot, require both bare-command gates before declaring convergence: projectatlas --require-version $quotedRuntimeVersion --format json runtime-info; projectatlas --require-version $quotedRuntimeVersion token --view tui."
+    }
+    else {
+        Write-Warning "ProjectAtlas stale bare command: path=$staleBareCommandPath observed_version=$observedVersion ready=false; target_version=$targetRuntimeVersion."
+        Write-Warning "ProjectAtlas requested absolute runtime failed final verification: path=$verifiedRuntimePath target_version=$targetRuntimeVersion. Restore or replace that runtime and rerun & $quotedInstaller -ProjectRoot $quotedProjectRoot -ProjectAtlasVersion $quotedReleaseVersion; do not use it through -RuntimePath until verification succeeds."
+    }
 }
-if ($hostRestartRequired) {
+if (-not $verifiedRuntimeReady) {
+    Write-Warning "Existing host recovery cannot use or advertise the requested absolute runtime until final runtime verification succeeds. $runtimeMcpConfigGuidance"
+}
+elseif ($hostRestartRequired) {
     Write-Warning "Existing host restart required: the inherited bare 'projectatlas' command remains stale, but the verified runtime is first on the persisted fresh-process PATH. Restart the environment-owning Windows launcher or terminal session, then start a new Codex or shell; restarting only a child of an unchanged launcher can retain stale PATH. $runtimeMcpConfigGuidance"
 }
 elseif ($hostRepairRequired) {
@@ -3341,4 +3363,4 @@ elseif ($hostRepairRequired) {
     }
 }
 Write-Output "ProjectAtlas convergence: update_state=$updateState stable_mirror_ready=$($stableMirrorReady.ToString().ToLowerInvariant()) obsolete_mcp_handoff=$handoffState codex_plugin_ready=$($codexPluginReady.ToString().ToLowerInvariant()) codex_registry_ready=$($codexRegistryReady.ToString().ToLowerInvariant())"
-Write-Output "ProjectAtlas readiness: runtime_mcp_configs_ready=$($runtimeMcpConfigsReady.ToString().ToLowerInvariant()) installer_cli_ready=$($installerCliReady.ToString().ToLowerInvariant()) parent_cli_ready=$($parentCliReady.ToString().ToLowerInvariant()) host_restart_required=$($hostRestartRequired.ToString().ToLowerInvariant())"
+Write-Output "ProjectAtlas readiness: runtime_ready=$($verifiedRuntimeReady.ToString().ToLowerInvariant()) generated_mcp_configs_ready=$($generatedMcpConfigsReady.ToString().ToLowerInvariant()) runtime_mcp_configs_ready=$($runtimeMcpConfigsReady.ToString().ToLowerInvariant()) installer_cli_ready=$($installerCliReady.ToString().ToLowerInvariant()) parent_cli_ready=$($parentCliReady.ToString().ToLowerInvariant()) host_restart_required=$($hostRestartRequired.ToString().ToLowerInvariant())"

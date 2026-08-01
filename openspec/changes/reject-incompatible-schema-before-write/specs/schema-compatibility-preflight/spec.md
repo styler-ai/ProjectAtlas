@@ -53,6 +53,10 @@ ProjectAtlas SHALL serialize incompatible schema errors from the shared typed da
 - **WHEN** a real stdio MCP session initializes and a tool addresses a newer project database through explicit `project_path`
 - **THEN** the tool error returns the same kind and version fields as the CLI while the MCP session remains protocol-correct
 
+#### Scenario: Current-only adapter encounters an admitted predecessor
+- **WHEN** a CLI or MCP read requires the current schema but the database has a released predecessor represented by the centralized migration inventory
+- **THEN** ProjectAtlas returns a content-free `schema_migration_required` handoff with the found version, supported version, remaining migration steps, and the existing safe `init` migration action through the same CLI `--db`/`--config` selection or MCP server/database binding instead of calling the schema unsupported or creating the default database
+
 #### Scenario: MCP addresses a missing index
 - **WHEN** an MCP tool addresses a project root with no project-local database
 - **THEN** it returns the existing typed initialization handoff and does not create an index implicitly
