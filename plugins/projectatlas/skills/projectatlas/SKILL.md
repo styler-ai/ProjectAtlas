@@ -82,7 +82,7 @@ Search is lexical by default. Literal/token acceleration must preserve exact res
 When init, session brief, or `atlas_purpose_queue` returns an actionable `low`-scope handoff:
 
 1. Keep the main task moving.
-2. If the host supports bounded isolated subagents, partition a large queue into bounded, non-overlapping batches and delegate them to one or more agents at the lowest reasoning tier the host can enforce. Respect the host's subagent and ProjectAtlas worker budget, assign each path to exactly one curator, and curate folders before files whose responsibility depends on them. Otherwise process the queue in the main agent.
+2. If the host supports bounded isolated subagents, partition a large queue into bounded, non-overlapping batches and delegate them to one or more agents at the lowest reliable reasoning and cost tier the host supports. Examples when available: Codex `gpt-5.6-luna` with `low` reasoning, or Claude Code `haiku`; otherwise use the host's lowest reliable equivalent as model names and availability change. Respect the host's subagent and ProjectAtlas worker budget, assign each path to exactly one curator, and curate folders before files whose responsibility depends on them. Otherwise process the queue in the main agent.
 3. Give each curator only its queue rows and bounded summary/graph/outline/slice context.
 4. Copy each batch's `task`, `work_key`, and `state_token` into `atlas_purpose_review`. Write only through `atlas_purpose_set` / `atlas_purpose_review` or their CLI equivalents; never edit SQLite. A successful agent write is already approved and agent-reviewed.
 5. Skip accepted purposes unless an agent or user explicitly assigns a correction.
