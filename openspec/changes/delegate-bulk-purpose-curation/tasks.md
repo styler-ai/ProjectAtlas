@@ -8,7 +8,7 @@
 
 - [x] 2.1 Update the packaged ProjectAtlas skill with low-reasoning subagent purpose creation/correction guidance.
 - [x] 2.2 Update agent integration docs and startup snippets with the same bounded rule.
-- [x] 2.3 Ensure the guidance applies host-neutrally when subagent support exists, without naming a model or host-specific API.
+- [x] 2.3 Keep the skill and shared init/session-brief handoff rule host-neutral and capability-based; allow Codex `gpt-5.6-luna` with `low` reasoning and Claude Code `haiku` only as conditional skill examples when available after that rule, reject hard universal model names, and preserve a generic fallback as names and availability change.
 
 ## 3. Verification
 

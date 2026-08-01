@@ -11,7 +11,7 @@ cd your-project
 projectatlas init
 ```
 
-After that one command, the project should have the local `.projectatlas` structure, DB, config, deep index, and a clear agent-facing purpose-curation handoff. In an agent/plugin harness, the harness can then spawn low-reasoning subagents to create and apply reviewed folder/file purposes.
+After that one command, the project should have the local `.projectatlas` structure, DB, config, deep index, and a clear agent-facing purpose-curation handoff. In an agent/plugin harness, the harness can then spawn bounded isolated subagents at the lowest reliable reasoning and cost tier the host supports to create and apply reviewed folder/file purposes; a fixed reliable tier still delegates without a selector, and only hosts without bounded isolated subagent execution use the main agent.
 
 ## What Changes
 
@@ -26,7 +26,7 @@ After that one command, the project should have the local `.projectatlas` struct
   - report scan summary and health/purpose queue counts.
 - Add an agent-harness handoff contract:
   - CLI/MCP returns a structured setup report and purpose-curation work plan,
-  - plugin/agent guidance says to spawn low-reasoning subagents for initial folder/file purpose creation and correction,
+  - plugin/agent guidance says to delegate initial folder/file purpose creation and correction under the reliable-tier handoff rule,
   - applied purposes are marked agent-reviewed through ProjectAtlas purpose APIs.
 - Keep the workflow native to ProjectAtlas's plugin/runtime mechanism; do not introduce npm or OpenSpec as a runtime dependency.
 - Add MCP parity so `atlas_init` can perform or request the same first-run setup flow.
@@ -51,7 +51,7 @@ Expected future implementation scope:
 - MCP `atlas_init` parameter/result expansion.
 - scan/index orchestration using existing runtime scan pipeline.
 - purpose queue/report generation using existing purpose APIs.
-- plugin/skill/harness documentation for low-reasoning subagent purpose curation.
+- plugin/skill/harness documentation for reliable low-cost purpose curation.
 - tests for new repo, existing `.projectatlas`, existing DB, stale config, scan disabled, and harness handoff output.
 
 ## Non-Goals

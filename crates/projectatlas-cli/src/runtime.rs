@@ -104,6 +104,8 @@ pub(crate) const DEFAULT_HEALTH_LIMIT: usize = 50;
 pub(crate) const MAX_HEALTH_LIMIT: usize = 200;
 /// Maximum JSON bytes read for one CLI purpose-review batch.
 pub(crate) const MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES: u64 = 2 * 1_024 * 1_024;
+/// Stable serialized recommendation for host-owned purpose curator selection.
+pub(crate) const PURPOSE_CURATOR_RECOMMENDED_REASONING: &str = "lowest_reliable_host_supported";
 /// Maximum output retained from one effective Git config query.
 const MAX_GIT_CONFIG_QUERY_OUTPUT_BYTES: usize = 64 * 1_024;
 /// Maximum time allowed for one effective Git config query.
@@ -1882,7 +1884,7 @@ pub(crate) struct PurposeCuratorHandoff {
     pub(crate) agent_harness_expected: bool,
     /// Curator execution is owned by the agent host, never the Rust server.
     pub(crate) execution_owner: &'static str,
-    /// Recommended subagent reasoning selection.
+    /// Recommended host-relative reliable subagent tier selection.
     pub(crate) recommended_subagent_reasoning: &'static str,
     /// Whether the current main agent may process the same bounded batch.
     pub(crate) main_agent_fallback: bool,
@@ -2256,7 +2258,7 @@ pub(crate) fn init_path_status(existed: bool) -> InitPhaseStatus {
 /// Return stable purpose handoff instructions for agent harnesses.
 fn purpose_handoff_instructions() -> Vec<String> {
     vec![
-        "If the host supports isolated subagents, delegate this actionable low-scope batch at the lowest reasoning tier the host can enforce; otherwise let the main agent process the same bounded rows without blocking navigation.".to_string(),
+        "If the host supports isolated subagents, delegate this actionable low-scope batch at the lowest reliable reasoning and cost tier the host supports; otherwise let the main agent process the same bounded rows without blocking navigation.".to_string(),
         "Inspect only bounded current summary, graph, outline, or exact-slice context, then copy task, work_key, and state_token into atlas_purpose_review or projectatlas purpose review --apply; never edit SQLite directly.".to_string(),
         "Skip accepted purposes unless an agent or user explicitly assigns a correction; use atlas_purpose_set or projectatlas purpose set for that deliberate correction path.".to_string(),
         "Keep successful curator maintenance out of normal conversation; ProjectAtlas reports a handoff and never claims that the Rust server spawned an agent.".to_string(),
@@ -2268,7 +2270,7 @@ pub(crate) fn purpose_curator_handoff(queue: PurposeCurationPage) -> PurposeCura
     PurposeCuratorHandoff {
         agent_harness_expected: true,
         execution_owner: "agent_host",
-        recommended_subagent_reasoning: "lowest_host_enforced",
+        recommended_subagent_reasoning: PURPOSE_CURATOR_RECOMMENDED_REASONING,
         main_agent_fallback: true,
         server_started_curator: false,
         silent_on_success: true,
@@ -2294,7 +2296,7 @@ fn init_next_steps(
     }
     if purpose_queue_total > 0 {
         steps.push(
-            "Use the purpose_handoff queue to delegate purpose creation/correction at the lowest reasoning tier the host can enforce."
+            "Use the purpose_handoff queue to delegate purpose creation/correction at the lowest reliable reasoning and cost tier the host supports."
                 .to_string(),
         );
     } else {
@@ -10286,8 +10288,15 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         )?;
         require_eq(
             &handoff.recommended_subagent_reasoning,
-            &"lowest_host_enforced",
-            "lowest host-enforced reasoning",
+            &PURPOSE_CURATOR_RECOMMENDED_REASONING,
+            "lowest reliable host-supported reasoning",
+        )?;
+        require_eq(
+            &handoff.instructions.first().is_some_and(|instruction| {
+                instruction.contains("lowest reliable reasoning and cost tier the host supports")
+            }),
+            &true,
+            "purpose handoff omitted the reliable reasoning and cost qualification",
         )?;
         require_eq(&handoff.main_agent_fallback, &true, "main-agent fallback")?;
 

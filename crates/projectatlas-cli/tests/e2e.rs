@@ -3149,7 +3149,7 @@ fn init_bootstrap_creates_db_scan_report_and_host_configs() -> Result<(), Box<dy
     require_json_string(
         &report,
         &["purpose_handoff", "recommended_subagent_reasoning"],
-        "lowest_host_enforced",
+        "lowest_reliable_host_supported",
     )?;
     require_json_string(
         &report,
@@ -5594,8 +5594,9 @@ finally {
 
 #[test]
 fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
     let skill = fs::read_to_string(
-        workspace_root()?
+        workspace_root
             .join("plugins")
             .join("projectatlas")
             .join(PROJECTATLAS_SKILL_DIR)
@@ -5625,6 +5626,9 @@ fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<
         "Do not guess a symbol line or other disambiguator",
         "Fall back to `atlas_overview` only when the session-brief MCP tool is unavailable",
         "partition a large queue into bounded, non-overlapping batches",
+        "lowest reliable reasoning and cost tier the host supports",
+        "Examples when available: Codex `gpt-5.6-luna` with `low` reasoning, or Claude Code `haiku`",
+        "otherwise use the host's lowest reliable equivalent as model names and availability change",
         "becomes `approved`, `source: agent`, and `agent_reviewed: true` immediately",
         "add one durable pointer to the nearest harness instruction file",
         "a runtime `version` matching the selected plugin release",
@@ -5638,6 +5642,94 @@ fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<
             ))
             .into());
         }
+    }
+    for path in [
+        "AGENTS.md",
+        "templates/AGENTS.md",
+        "plugins/projectatlas/skills/projectatlas/SKILL.md",
+        "docs/agent-integration.md",
+        "docs/agent-navigation.md",
+        "openspec/changes/advance-rust-repository-intelligence/proposal.md",
+        "openspec/changes/advance-rust-repository-intelligence/design.md",
+        "openspec/changes/advance-rust-repository-intelligence/specs/graph-retrieval-and-analysis/spec.md",
+        "openspec/changes/advance-rust-repository-intelligence/tasks.md",
+        "openspec/changes/enhance-projectatlas-init-first-run/proposal.md",
+        "openspec/changes/enhance-projectatlas-init-first-run/design.md",
+        "openspec/changes/enhance-projectatlas-init-first-run/specs/projectatlas-first-run-init/spec.md",
+        "openspec/changes/enhance-projectatlas-init-first-run/tasks.md",
+    ] {
+        let guidance = fs::read_to_string(workspace_root.join(path))?;
+        for required in [
+            "bounded isolated subagent",
+            "lowest reliable reasoning and cost tier",
+        ] {
+            if !guidance.contains(required) {
+                return Err(io::Error::other(format!(
+                    "{path} must preserve fixed-tier-compatible purpose delegation; missing {required:?}"
+                ))
+                .into());
+            }
+        }
+        for stale in [
+            "Reserve low-reasoning subagents",
+            "to a low-reasoning subagent",
+            "Low-reasoning purpose curator",
+            "low-reasoning purpose curator",
+            "low-reasoning curator",
+            "low-reasoning subagent",
+            "low-reasoning subagents",
+            "subagent with low reasoning",
+            "lowest reasoning tier the host can enforce",
+            "cannot enforce subagent execution or reasoning selection",
+            "cannot enforce isolated subagents or reasoning selection",
+        ] {
+            if guidance.contains(stale) {
+                return Err(io::Error::other(format!(
+                    "{path} still contains stale purpose-delegation guidance {stale:?}"
+                ))
+                .into());
+            }
+        }
+    }
+    for path in [
+        "openspec/changes/advance-rust-repository-intelligence/specs/graph-retrieval-and-analysis/spec.md",
+        "openspec/changes/advance-rust-repository-intelligence/tasks.md",
+        "openspec/changes/enhance-projectatlas-init-first-run/specs/projectatlas-first-run-init/spec.md",
+        "openspec/changes/enhance-projectatlas-init-first-run/tasks.md",
+    ] {
+        let contract = fs::read_to_string(workspace_root.join(path))?;
+        for required in [
+            "fixed reliable subagent tier",
+            "reasoning selection is optional",
+            "only absence of bounded isolated subagent execution",
+            "main-agent fallback",
+        ] {
+            if !contract.contains(required) {
+                return Err(io::Error::other(format!(
+                    "{path} must keep fixed-tier purpose delegation independent from selector availability; missing {required:?}"
+                ))
+                .into());
+            }
+        }
+    }
+    for path in ["docs/agent-integration.md", "docs/agent-navigation.md"] {
+        let guidance = fs::read_to_string(workspace_root.join(path))?;
+        if !guidance.contains(
+            "fixed reliable subagent tier still delegates at that tier; reasoning selection is optional",
+        ) {
+            return Err(io::Error::other(format!(
+                "{path} must keep fixed-tier hosts on the bounded purpose-delegation path"
+            ))
+            .into());
+        }
+    }
+    let adoption = fs::read_to_string(workspace_root.join("docs/adoption.md"))?;
+    if !adoption.contains("Add the startup snippet from `templates/AGENTS.md` to your `AGENTS.md`")
+    {
+        return Err(io::Error::other(
+            "adoption guidance must distribute the current ProjectAtlas AGENTS template",
+        )
+        .into());
     }
     for stale in [
         "otherwise call `atlas_overview`",
@@ -5658,7 +5750,7 @@ fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<
         "docs/index.md",
         "docs/workflow.md",
     ] {
-        let guidance = fs::read_to_string(workspace_root()?.join(path))?;
+        let guidance = fs::read_to_string(workspace_root.join(path))?;
         for required in ["atlas_session_brief", "compact: true"] {
             if !guidance.contains(required) {
                 return Err(io::Error::other(format!(
@@ -16734,6 +16826,16 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
     let rejected_legacy_compact_text = mcp_tool_text(&stdout, 34)?;
     let session_brief_has_ready_call = session_brief_text.contains("target: atlas_file_summary")
         && session_brief_text.contains("file: src/lib.rs");
+    if !compact_session_brief_text
+        .contains("recommended_subagent_reasoning: lowest_reliable_host_supported")
+        || !compact_session_brief_text
+            .contains("lowest reliable reasoning and cost tier the host supports")
+    {
+        return Err(io::Error::other(format!(
+            "compact real MCP purpose handoff lost its reliable-tier instruction: {compact_session_brief_text}"
+        ))
+        .into());
+    }
     if !stdout.contains(r#""id":1"#)
         || !stdout.contains(r#""serverInfo":{"name":"ProjectAtlas","version":"#)
         || !stdout.contains(r#""name":"atlas_files""#)
