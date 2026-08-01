@@ -46,9 +46,10 @@ The first-run init flow SHALL run scan/index by default and provide explicit con
 ### Requirement: Purpose Curation Handoff
 The first-run init flow SHALL prepare purpose curation for agent harnesses without making the Rust binary directly spawn subagents.
 
-#### Scenario: Agent harness receives a low-reasoning subagent handoff
+#### Scenario: Agent harness receives a reliable low-cost purpose handoff
 - **WHEN** `projectatlas init` completes in an agent/plugin harness
-- **THEN** the report SHALL include guidance to spawn low-reasoning subagents for initial folder and file purpose creation/correction
+- **THEN** the report SHALL include guidance to delegate initial folder and file purpose creation/correction to bounded isolated subagents at the lowest reliable reasoning and cost tier the host supports
+- **AND** a fixed reliable subagent tier SHALL still delegate at that tier without a selector; reasoning selection is optional, and only absence of bounded isolated subagent execution SHALL select the main-agent fallback
 - **AND** it SHALL include purpose queue counts or batches that the harness can assign
 - **AND** it SHALL instruct the harness to apply purposes through ProjectAtlas purpose APIs.
 

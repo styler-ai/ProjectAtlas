@@ -172,7 +172,7 @@ main task:
 sequenceDiagram
     participant Host as Agent host
     participant Main as Main agent
-    participant Curator as Low-reasoning purpose curator
+    participant Curator as Reliable-tier purpose curator
     participant Atlas as ProjectAtlas purpose APIs
 
     Host->>Main: continue source task immediately
@@ -186,7 +186,7 @@ sequenceDiagram
     Note over Curator,Host: no ordinary conversation or per-path status
 ```
 
-At startup and relevant task/source transitions, a supported agent host launches the packaged purpose-curator lane without blocking the main task. Init, explicit session brief, and purpose queue expose one bounded task/generation/path-scoped handoff; ordinary folder/file/summary responses carry no maintenance status. Deterministic work keys coalesce duplicate host work, and current-row state tokens make stale review writes no-ops. ProjectAtlas itself does not pretend an MCP server can spawn a host agent. If the host cannot enforce isolated subagents or reasoning selection, the main agent may process the same `low`-scope batch; `medium` and `strict` remain explicit.
+At startup and relevant task/source transitions, a host with bounded isolated subagent execution launches the packaged purpose-curator lane at the lowest reliable reasoning and cost tier it supports without blocking the main task. A host with one fixed reliable subagent tier still delegates at that tier; reasoning selection is optional. Init, explicit session brief, and purpose queue expose one bounded task/generation/path-scoped handoff; ordinary folder/file/summary responses carry no maintenance status. Deterministic work keys coalesce duplicate host work, and current-row state tokens make stale review writes no-ops. ProjectAtlas itself does not pretend an MCP server can spawn a host agent. Only when bounded isolated subagent execution is unavailable may the main agent process the same `low`-scope batch; `medium` and `strict` remain explicit.
 
 Successful curation is silent in the main conversation: no per-file progress, approval, or completion messages. Later navigation simply benefits from the improved purposes. If a host requires a terminal result, it should be a minimal machine-facing state. Task-relevant conflicts that would make ranking unsafe and repeated degraded/failure state remain available through compact blockers or explicit health/settings diagnostics.
 

@@ -55,7 +55,7 @@ Never reset or replace an incompatible database as an orientation shortcut. Foll
 | Architecture, impact, dead-code, cycle, or static path review | `atlas_symbol_relations` with its closed analysis view/mode | Treat candidate/inconclusive output as review evidence, then inspect returned source selectors |
 | Indexed text discovery | `atlas_search` with a bounded `file_pattern` when possible | Slice the returned range; narrow before paging when truncated |
 | Exact source | `atlas_slice` | Stop when sufficient |
-| Missing, suggested, stale, or wrong purposes | `atlas_purpose_queue`, then `atlas_purpose_review` or `atlas_purpose_set` | Delegate one bounded `low` batch to a low-reasoning subagent when supported; never edit SQLite |
+| Missing, suggested, stale, or wrong purposes | `atlas_purpose_queue`, then `atlas_purpose_review` or `atlas_purpose_set` | Delegate one bounded `low` batch through isolated subagent execution at the lowest reliable reasoning and cost tier the host supports; otherwise process it in the main agent; never edit SQLite |
 | Cleanup, coverage, or purpose diagnostics | `atlas_health` / `atlas_purpose_queue` | Resolve a confirmed conflict or curate through purpose APIs |
 | Manual ProjectAtlas ignore policy | `atlas_ignore_list`, then `atlas_ignore_add` / `atlas_ignore_remove` | Keep `.gitignore` authoritative and add only stricter atlas-specific rules |
 | Runtime/config/index diagnostics | `atlas_runtime_info`, `atlas_root`, `atlas_config`, `atlas_settings`, `atlas_watch_status` | Use typed recovery guidance |

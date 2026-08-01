@@ -18,7 +18,7 @@ Existing folder, file, symbol, search, summary, and relation calls SHALL preserv
 
 ### Requirement: Purpose Curation Can Run Quietly Beside Navigation
 
-The purpose queue SHALL support bounded task/generation/path-scoped selection of folders and high-impact files whose purposes are missing or suggested, including generated vague or generic suggestions that have not been accepted. When the host supports isolated bounded subagents, packaged guidance SHALL direct a low-reasoning curator to process the default `low` scope beside the main task at startup and relevant transitions using only queue rows, bounded current summary/graph/outline/slice context, and ProjectAtlas purpose APIs. Navigation SHALL not wait for successful low-scope curation. Duplicate project/generation/path work SHALL coalesce, and conflicting or ambiguous proposals SHALL not overwrite reviewed intent.
+The purpose queue SHALL support bounded task/generation/path-scoped selection of folders and high-impact files whose purposes are missing or suggested, including generated vague or generic suggestions that have not been accepted. When the host supports bounded isolated subagents, packaged guidance SHALL direct a purpose curator to process the default `low` scope beside the main task at startup and relevant transitions at the lowest reliable reasoning and cost tier the host supports, using only queue rows, bounded current summary/graph/outline/slice context, and ProjectAtlas purpose APIs. A fixed reliable subagent tier SHALL still delegate at that tier without a selector; reasoning selection is optional, and only absence of bounded isolated subagent execution SHALL select the main-agent fallback. Navigation SHALL not wait for successful low-scope curation. Duplicate project/generation/path work SHALL coalesce, and conflicting or ambiguous proposals SHALL not overwrite reviewed intent.
 
 An accepted purpose SHALL remain durable authored responsibility state across source-byte, content-hash, symbol, summary, graph, scan, watcher, migration, publication, backup/restore, and rollback changes. Automation SHALL NOT demote, invalidate, overwrite, or silently revise it. A main agent, reviewer, explicitly assigned curator, or user MAY correct an accepted purpose through the existing typed purpose APIs after finding a mistake, inconsistency, or genuine repurposing; that correction SHALL remain independent from graph publication. A deleted or excluded source path SHALL be absent from current navigation without treating its stored purpose text as automatically wrong.
 
@@ -35,7 +35,7 @@ Successful low-scope maintenance SHALL NOT add per-path progress, approval, or c
 - **THEN** the existing purpose API may replace it explicitly with another approved value without graph republishing or an automatic revision mechanism
 
 #### Scenario: Background curation succeeds
-- **WHEN** the low-reasoning curator approves several bounded purpose updates
+- **WHEN** the bounded purpose curator approves several purpose updates
 - **THEN** normal navigation emits no purpose-maintenance chatter and explicit diagnostics expose only aggregate state on request
 
 #### Scenario: Strict purpose enforcement exists
