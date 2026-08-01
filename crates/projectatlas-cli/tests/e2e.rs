@@ -6946,6 +6946,18 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .into());
         }
     }
+    let exact_contracts = release.matches("--exact").count();
+    if exact_contracts == 0
+        || release
+            .matches("--exact --include-ignored --nocapture")
+            .count()
+            != exact_contracts
+    {
+        return Err(io::Error::other(
+            "every exact release contract must execute even when marked ignored",
+        )
+        .into());
+    }
     let unix_prepublish = release
         .split("  prepublish-installer-smoke-unix:")
         .nth(1)
@@ -7018,7 +7030,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
                 .into());
             }
         }
-        for required in ["timeout-minutes: 5", "--exact --nocapture"] {
+        for required in [
+            "timeout-minutes: 5",
+            "--exact --include-ignored --nocapture",
+        ] {
             if !packaged_step.contains(required) {
                 return Err(io::Error::other(format!(
                     "{job} packaged contract step omitted fail-closed contract {required:?}"
@@ -7026,7 +7041,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
                 .into());
             }
         }
-        for required in ["timeout-minutes: 10", "--exact --nocapture"] {
+        for required in [
+            "timeout-minutes: 10",
+            "--exact --include-ignored --nocapture",
+        ] {
             if !installed_candidate_step.contains(required) {
                 return Err(io::Error::other(format!(
                     "{job} installed-candidate step omitted fail-closed contract {required:?}"
