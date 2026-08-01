@@ -4,10 +4,10 @@ A Windows Codex host can keep the stable ProjectAtlas MCP executable locked afte
 
 ## What Changes
 
-- Verify Codex plugin and MCP registry readiness independently from whether their mutation steps are enabled.
-- Compare the global Codex MCP registration as structured JSON using the exact runtime command and ordered arguments.
-- Retire only one unambiguous obsolete stable-mirror MCP process after final handle-bound creation, path, command-mode, version, and image-identity checks.
-- Retry the stable-mirror replacement once and report typed complete or partial convergence without terminating Codex or unrelated ProjectAtlas processes.
+- Verify typed, unique Codex plugin and MCP registry readiness independently from whether their mutation steps are enabled, and repair a missing or stale current-ref skill artifact.
+- Compare the global Codex MCP registration as structured JSON using exact field types, cardinality, runtime command, and ordered arguments.
+- Retire only one unambiguous obsolete stable-mirror MCP process whose observed parent is an absolute, validly Authenticode-signed OpenAI `codex.exe`, after final replacement-readiness and handle-bound child/parent identity checks.
+- Retry the stable-mirror replacement once only after exact child retirement or an actual observed exit, and report typed complete or partial convergence without terminating Codex or unrelated ProjectAtlas processes.
 - Document the safe handoff, retry, and external host-integration release gate.
 
 ## Capabilities

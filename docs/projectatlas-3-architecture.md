@@ -334,31 +334,44 @@ observed readiness.
 
 ```mermaid
 flowchart TD
-    Target[Verify versioned runtime and generated configs] --> Managed{Codex plugin and exact JSON registry ready?}
-    Managed -->|no| ReadinessPartial[Partial: preserve every process]
-    Managed -->|yes| Owner{Exactly one obsolete stable-path MCP<br/>with an inspectable Codex parent?}
-    Owner -->|no: absent, current, inaccessible, or ambiguous| OwnerPartial[Partial: preserve every process]
-    Owner -->|yes| Version[Reprobe the observed obsolete version]
-    Version --> Handle[Hold the child and Codex-parent handles]
-    Handle --> Identity{Child and parent creation, path, argv;<br/>child MCP mode and image digest unchanged?}
-    Identity -->|no| IdentityPartial[Typed partial: preserve every process]
-    Identity -->|yes| Retire[Retire only the exact obsolete child handle]
-    Retire --> Retry[Retry stable-mirror synchronization once]
+    Target[Verify target runtime;<br/>validate and digest each config byte snapshot] --> Snapshot[Take one 5s Windows process snapshot]
+    Snapshot --> Owner{One obsolete stable-path MCP<br/>with an authentic Codex parent?}
+    Owner -->|no| OwnerPartial[Typed partial: preserve every process]
+    Owner -->|yes| Managed{Plugin and registry JSON<br/>have exact types and cardinality?}
+    Managed -->|no| ReadinessPartial[Typed partial: preserve every process]
+    Managed -->|yes| Version[Reprobe the observed obsolete version and digest]
+    Version --> Late{Parent signature and digest, target runtime,<br/>three configs, plugin, and registry unchanged?}
+    Late -->|no| ReplacementPartial[replacement_readiness_changed:<br/>preserve every process]
+    Late -->|yes| Handle[Hold child and Codex-parent handles;<br/>revalidate identity and image digests]
+    Handle --> Outcome{Exact child retired<br/>or actually exited?}
+    Outcome -->|no| IdentityPartial[Typed partial: preserve every process]
+    Outcome -->|yes| Retry[Retry stable-mirror synchronization once]
     Retry --> Verify{Target mirror verifies?}
     Verify -->|yes| Complete[Complete handoff]
     Verify -->|no| RetryPartial[Partial: retry_failed;<br/>versioned runtime and configs remain ready]
 ```
 
-Selection records the child's process creation time, parsed complete command,
-observed obsolete version, and SHA-256 image identity together with its Codex
-parent's process ID, creation time, image path, and complete command. Immediately
-before termination it reprobes the version; the native retirement helper then
-keeps both handles open while revalidating both identities and the child's final
-`mcp` mode and executable digest. No fallback widens selection to executable
-name, another parent host, or another project, and the Codex parent is never
-terminated. Real installed-Codex proof of parent survival, target-child
-replacement, exact version, and successful MCP initialization remains a hosted
-release gate rather than an inference from local fixtures.
+Selection uses one five-second Windows process snapshot. It records the child's
+creation time, parsed complete command, observed obsolete version, and SHA-256
+image identity together with its parent's process ID, creation time, absolute
+`codex.exe` path, complete command, and digest. The parent is eligible only when
+Windows resolves the module-qualified
+`Microsoft.PowerShell.Security\Get-AuthenticodeSignature` cmdlet from the trusted
+`$PSHOME\Modules\Microsoft.PowerShell.Security` tree, rejects session command
+shadowing, and receives `Valid`, `SignatureType = Authenticode`, and signer simple
+name `OpenAI OpCo, LLC`. Each generated config's semantics and SHA-256 come from
+one captured byte snapshot. Immediately before retirement, the installer rechecks
+the parent signature and digest, target runtime digest, all three captured config
+digests, and structured plugin/registry readiness; drift is the typed
+`replacement_readiness_changed` partial state. The native helper then keeps both
+handles open while revalidating both identities and image digests. Only an actual
+missing or exited child can take the `exited` retry path. No fallback
+widens selection to an unsigned or non-Codex parent, executable name, another
+host, or another project; every incomplete or ambiguous snapshot preserves all
+processes, and the Codex parent is never terminated. Real installed-Codex proof
+of parent survival, target-child replacement, exact version, and successful MCP
+initialization remains a hosted release gate rather than an inference from local
+fixtures.
 
 ### Database Authority And Responsibility
 
