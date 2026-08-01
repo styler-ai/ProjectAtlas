@@ -196,7 +196,7 @@ launcher or terminal session before starting a new Codex or shell; restarting
 only a child of an unchanged launcher can retain its stale process PATH.
 
 When `codex` is available, installers also inspect the official
-`projectatlas` Codex marketplace and `codex mcp get projectatlas`. If the
+`projectatlas` Codex marketplace and `codex mcp get projectatlas --json`. If the
 official marketplace is stale, the installer replaces that marketplace ref with
 the runtime release tag and reinstalls the `projectatlas` Codex plugin. When
 Codex exposes the installed plugin source path, the installer verifies the
@@ -211,11 +211,63 @@ Codex registry entries stay pinned to the verified runtime path. Set
 `PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1` only when a managed environment
 intentionally owns the Codex ProjectAtlas plugin marketplace, and set
 `PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1` only when it intentionally owns
-the global Codex MCP registry. After plugin/runtime updates, agents should
+the global Codex MCP registry. These variables skip mutations only; they do not
+make missing or stale plugin/registry state ready. Registry verification parses
+the JSON transport, requires every contract field to have its expected type,
+and accepts exactly one installed ProjectAtlas plugin plus one exact registry
+entry. It requires the exact runtime command and complete ordered
+`--require-version`, `--db`, optional `--config`, and final `mcp` arguments.
+Only executable, database, and config path values use Windows path normalization,
+so scalar or duplicate plugin results, non-string arguments, substrings,
+reordered flags, another project's DB/config, and extra arguments remain
+mismatches. A marketplace already pinned to the target release does not bypass
+repair: the installer removes and re-adds the plugin when the current-ref skill
+is missing or its digest is stale. After plugin/runtime updates, agents should
 verify `codex plugin list --marketplace projectatlas --json` and
-`codex mcp get projectatlas` or `codex mcp list`; stale entries should be
+`codex mcp get projectatlas --json` or `codex mcp list`; stale entries should be
 repaired by rerunning the ProjectAtlas installer instead of left for the next
 Codex restart.
+
+On Windows, a running obsolete MCP child can lock the stable LocalAppData
+mirror. The installer takes one Windows process snapshot with a five-second
+inspection bound and may hand off exactly one unambiguous stable-path process
+whose complete command ends in `mcp`. Its observed parent must have an absolute
+`codex.exe` image, matching absolute command identity, and a creation time no
+later than the child's. Signature inspection
+resolves the module-qualified
+`Microsoft.PowerShell.Security\Get-AuthenticodeSignature` cmdlet from the trusted
+`$PSHOME\Modules\Microsoft.PowerShell.Security` tree and rejects session command
+shadowing. That cmdlet must report `Valid`, `SignatureType = Authenticode`, and
+signer simple name `OpenAI OpCo, LLC`. Selection captures both complete process
+identities plus the child and parent image digests.
+
+Before selection, the installer reads each generated config once and binds its
+semantic validation and SHA-256 to that same byte snapshot. Before invoking
+retirement, it revalidates the target runtime digest, all three captured config
+digests, the parent signature and digest, and late plugin/registry readiness.
+Any drift returns
+`replacement_readiness_changed`. Final reporting re-probes the target runtime
+and rechecks all three config snapshots; uncertainty in that runtime/config
+bundle keeps convergence partial, reports `runtime_mcp_configs_ready=false`, and suppresses integration-verified
+claims. Bounded JSON probes likewise emit a valid payload only after their owned
+process and temporary-file cleanup succeeds, so cleanup uncertainty becomes an
+unready result instead of aborting the installer. The native helper then holds both process
+handles while revalidating creation times, image paths, complete commands,
+parent relationship, and both image digests; it terminates only the exact child.
+A non-Codex, unsigned, wrong-signer, missing, current, inaccessible, ambiguous,
+incomplete, changed, or unready identity preserves every process. Only an actual
+no-such-process or observed child exit returns `exited`; the installer performs
+one stable-mirror retry only after that actual exit or exact child retirement.
+The Codex parent is never terminated. A failed post-retirement retry reports
+`retry_failed` and preserves the versioned runtime plus project-local configs;
+any bundle that cannot be reverified is reported unready with rerun guidance.
+
+Local installer fixtures prove the selection, identity, readiness, failure, and
+retry-reporting contracts, but do not prove the real Codex parent/child
+lifecycle. Release acceptance for this handoff additionally requires an
+installed-Codex exact-version test showing that the parent survives, the
+obsolete child is replaced, and the target MCP server completes
+initialization.
 
 The installers verify Claude Code and OpenCode generated MCP configs after writing them. The checks
 parse the generated JSON and require the verified runtime path, `--require-version`, selected DB

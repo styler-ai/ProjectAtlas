@@ -323,6 +323,62 @@ Dependency direction remains acyclic. The lint crate is a workspace quality
 tool, not a runtime dependency. No eighth crate is justified unless a durable
 independently consumed ownership boundary appears.
 
+### Windows Locked-Runtime Convergence
+
+The Windows installer owns only the compatibility mirror and the narrow update
+orchestration around it. A running host owns its Codex parent and MCP children.
+The installer therefore crosses the process-termination boundary only after the
+replacement runtime and every managed Codex integration are exact, and only for
+one handle-bound obsolete MCP identity. Mutation skip flags never substitute for
+observed readiness.
+
+```mermaid
+flowchart TD
+    Target[Verify target runtime;<br/>validate and digest each config byte snapshot] --> Snapshot[Take one 5s Windows process snapshot]
+    Snapshot --> Owner{One obsolete stable-path MCP<br/>with an authentic Codex parent?}
+    Owner -->|no| OwnerPartial[Typed partial: preserve every process]
+    Owner -->|yes| Managed{Plugin and registry JSON<br/>have exact types and cardinality?}
+    Managed -->|no| ReadinessPartial[Typed partial: preserve every process]
+    Managed -->|yes| Version{Obsolete version and digest<br/>still match the observation?}
+    Version -->|no| ObsoletePartial[identity_changed_version or identity_changed_file:<br/>preserve every process]
+    Version -->|yes| Late{Parent signature and digest, target runtime,<br/>three configs, plugin, and registry unchanged?}
+    Late -->|no| ReplacementPartial[replacement_readiness_changed:<br/>preserve every process]
+    Late -->|yes| Handle[Hold child and Codex-parent handles;<br/>revalidate identity and image digests]
+    Handle --> Outcome{Exact child retired<br/>or actually exited?}
+    Outcome -->|no| IdentityPartial[Typed partial: preserve every process]
+    Outcome -->|yes| Retry[Retry stable-mirror synchronization once]
+    Retry --> Verify{Target mirror verifies?}
+    Verify -->|yes| Complete[Complete handoff]
+    Verify -->|no| RetryPartial[Partial: retry_failed;<br/>versioned runtime and configs remain ready]
+```
+
+Selection uses one five-second Windows process snapshot. It records the child's
+creation time, parsed complete command, observed obsolete version, and SHA-256
+image identity together with its parent's process ID, creation time, absolute
+`codex.exe` path, complete command, and digest. The parent is eligible only when
+its observed creation time is no later than the child's and
+Windows resolves the module-qualified
+`Microsoft.PowerShell.Security\Get-AuthenticodeSignature` cmdlet from the trusted
+`$PSHOME\Modules\Microsoft.PowerShell.Security` tree, rejects session command
+shadowing, and receives `Valid`, `SignatureType = Authenticode`, and signer simple
+name `OpenAI OpCo, LLC`. Each generated config's semantics and SHA-256 come from
+one captured byte snapshot. Immediately before retirement, the installer rechecks
+the parent signature and digest, target runtime digest, all three captured config
+digests, and structured plugin/registry readiness; drift is the typed
+`replacement_readiness_changed` partial state. Final reporting re-probes the
+target and rechecks all three config snapshots; uncertainty in that bundle reports
+`runtime_mcp_configs_ready=false` and suppresses integration-verified claims.
+Bounded JSON probes expose a payload only after owned process and temporary-file
+cleanup succeeds. The native helper then keeps both
+handles open while revalidating both identities and image digests. Only an actual
+missing or exited child can take the `exited` retry path. No fallback
+widens selection to an unsigned or non-Codex parent, executable name, another
+host, or another project; every incomplete or ambiguous snapshot preserves all
+processes, and the Codex parent is never terminated. Real installed-Codex proof
+of parent survival, target-child replacement, exact version, and successful MCP
+initialization remains a hosted release gate rather than an inference from local
+fixtures.
+
 ### Database Authority And Responsibility
 
 ```mermaid

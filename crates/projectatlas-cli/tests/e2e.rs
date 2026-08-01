@@ -119,11 +119,20 @@ const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
 const CARGO_LOCK_FILE_NAME: &str = "Cargo.lock";
 const CODEX_CONFIG_DIR: &str = ".codex";
 const CODEX_PLUGIN_MANIFEST_DIR: &str = ".codex-plugin";
+#[cfg(windows)]
+const CODEX_FIXTURE_EXECUTABLE_FILE_NAME: &str = "codex.exe";
 const FAKE_CODEX_LOG_FILE: &str = "fake-codex.log";
 const FAKE_CODEX_PLUGIN_CACHE_DIR: &str = "plugin-cache";
 const FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_FILE: &str = "plugin-add-failed.marker";
 const FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_ENV: &str = "PROJECTATLAS_FAKE_FAILURE_MARKER";
-const FAKE_CODEX_SKILL_CONTENT: &str = "# ProjectAtlas\n";
+#[cfg(windows)]
+const FAKE_CODEX_PLUGIN_LIST_FILE_NAME: &str = "codex-plugin-list.json";
+const FAKE_CODEX_REGISTRY_CURRENT_FILE_NAME: &str = "codex-registry-current.json";
+const FAKE_CODEX_REGISTRY_STALE_FILE_NAME: &str = "codex-registry-stale.json";
+#[cfg(windows)]
+const FAKE_CODEX_REGISTRY_STATE_FILE_NAME: &str = "codex-registry-state.txt";
+const FAKE_CODEX_SKILL_CONTENT: &str =
+    include_str!("../../../plugins/projectatlas/skills/projectatlas/SKILL.md");
 const FAKE_PATH_DIR: &str = "fake-path";
 const IGNORED_FIXTURE_DIR: &str = "ignored-dir";
 const ISOLATED_HOME_DIR: &str = "isolated-home";
@@ -132,6 +141,73 @@ const NPM_SHIM_DIR: &str = "npm";
 const WINDOWS_SYSTEM32_DIR: &str = "System32";
 #[cfg(windows)]
 static WINDOWS_RELEASE_ASSET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(windows)]
+const CODEX_MCP_OWNER_FIXTURE_SOURCE: &str = r#"using System;
+using System.Diagnostics;
+using System.IO;
+using System.Threading;
+
+public static class Program
+{
+    private static string Quote(string value)
+    {
+        return "\"" + value.Replace("\"", "\\\"") + "\"";
+    }
+
+    public static int Main(string[] arguments)
+    {
+        if (arguments.Length < 3)
+            return 2;
+        string childPath = Path.GetFullPath(arguments[1]);
+        string childArguments =
+            "--require-version 0.3.26 --db " + Quote(arguments[2]);
+        if (arguments.Length >= 4)
+            childArguments += " --config " + Quote(arguments[3]);
+        childArguments += " mcp";
+        using (Process child = Process.Start(new ProcessStartInfo
+        {
+            FileName = childPath,
+            Arguments = childArguments,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        }))
+        {
+            try
+            {
+                string identityPath = arguments[0];
+                string temporaryIdentityPath = identityPath + ".tmp";
+                File.WriteAllLines(temporaryIdentityPath, new[]
+                {
+                    child.Id.ToString(),
+                    child.StartTime.ToUniversalTime().ToFileTimeUtc().ToString(),
+                    childPath
+                });
+                File.Move(temporaryIdentityPath, identityPath);
+                while (!child.WaitForExit(25))
+                {
+                    if (File.Exists(identityPath + ".stop"))
+                    {
+                        child.Kill();
+                        child.WaitForExit();
+                        return 0;
+                    }
+                }
+                Thread.Sleep(Timeout.Infinite);
+            }
+            finally
+            {
+                if (!child.HasExited)
+                {
+                    child.Kill();
+                    child.WaitForExit();
+                }
+            }
+        }
+        return 0;
+    }
+}
+"#;
 #[cfg(feature = "optional-parser-supervisor")]
 const OPTIONAL_PARSER_ARCHIVE_ENV: &str = "PROJECTATLAS_OPTIONAL_PARSER_ARCHIVE";
 #[cfg(feature = "optional-parser-supervisor")]
@@ -4305,9 +4381,21 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         r"Environment.SpecialFolder.System",
         "$runtime.version -eq $expectedRuntimeVersion",
         "Sync-ProjectAtlasRuntimeToLocalAppData",
+        "ObsoleteMcpProcess",
+        "CommandLineToArgvW",
+        "Process.GetProcessById(processId)",
+        "expectedCreationFileTimeUtc",
+        "candidate.MainModule.FileName",
+        "TerminateProcess(handle, 0)",
+        "Find-ProjectAtlasObsoleteStableMcpProcess",
+        "Get-CimInstance -ClassName Win32_Process",
+        "ProjectAtlas Codex parent was created after the MCP child",
+        "Invoke-ProjectAtlasObsoleteStableMcpHandoff",
+        "ProjectAtlas convergence: update_state=",
+        "obsolete_mcp_handoff=",
         "Get-ReleaseRuntimeInstallPath",
         r"ProjectAtlas\runtimes\$safeVersion\x86_64-pc-windows-msvc",
-        "ProjectAtlas LocalAppData mirror skipped",
+        "ProjectAtlas LocalAppData mirror is locked",
         "PROJECTATLAS_SKIP_USER_PATH_UPDATE",
         "Set-ProjectAtlasProcessPathPrecedence",
         "Test-ProjectAtlasBareCommandResolutionOnPath",
@@ -4320,7 +4408,7 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Restart Codex or the shell",
         "$inheritedProjectAtlasCommand = Get-Command projectatlas",
         "$stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData",
-        "$inheritedSynchronizedMirrorReady = $stableMirrorSynchronized",
+        "$inheritedSynchronizedMirrorReady = $stableMirrorReady",
         "$futureProcessPathReady = Set-ProjectAtlasPathPrecedence",
         "$parentCliReady = $inheritedCommandReady -or $inheritedSynchronizedMirrorReady",
         "$hostRestartRequired = -not $parentCliReady -and $futureProcessPathReady",
@@ -4340,6 +4428,8 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Codex does not expose the active in-process ProjectAtlas skill path",
         "plugin marketplace add styler-ai/ProjectAtlas --ref",
         "Update-ProjectAtlasCodexMcpRegistry",
+        "Test-ProjectAtlasCodexPluginReady",
+        "Test-ProjectAtlasCodexMcpRegistryReady",
         "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE",
         "PROJECTATLAS_CODEX_COMMAND",
         "PROJECTATLAS_CODEX_COMMAND does not resolve",
@@ -4363,6 +4453,11 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         r#"Write-ProjectAtlasMcpConfig $claudeMcpConfigPath "claude-code""#,
         r#"Write-ProjectAtlasMcpConfig $opencodeConfigPath "opencode""#,
         "Confirm-ProjectAtlasGeneratedMcpConfig",
+        "Test-ProjectAtlasRuntimeMcpConfigReadiness",
+        "Test-ProjectAtlasRuntime $RuntimePath $ExpectedVersion",
+        "$runtimeMcpConfigsReady = Test-ProjectAtlasRuntimeMcpConfigReadiness",
+        "$probeCleanupSucceeded = -not $probeCleanupFailure",
+        "if (-not $probeCleanupSucceeded)",
         "ProjectAtlas generated MCP config verified",
         "Write-ProjectAtlasWorkflowPinReport",
         "Stale ProjectAtlas workflow release pin",
@@ -4380,8 +4475,8 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Stop-Process",
         "Suspend-Process",
         "PROCESS_TERMINATE",
-        "Win32_Process",
         r"System32\taskkill.exe",
+        "runtime_mcp_configs_ready=true",
     ] {
         if powershell_installer.contains(forbidden) {
             return Err(io::Error::other(format!(
@@ -4769,6 +4864,33 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
         &powershell_runtime,
         "[Console]::Out.WriteLine('{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}')\r\n",
     )?;
+    let unicode_json = temp.path().join("unicode-runtime-info.json");
+    fs::write(
+        &unicode_json,
+        serde_json::to_vec(&json!({
+            "project": "ProjectAtlas",
+            "major_version": 3,
+            "version": "0.4.1",
+            "capabilities": ["mcp"],
+            "text_format": "TOON",
+            "unicode_path": "M\u{fc}nchen\\\u{8def}\u{5f84}"
+        }))?,
+    )?;
+    let unicode_json_runtime = temp.path().join("unicode-runtime-info.cmd");
+    fs::write(
+        &unicode_json_runtime,
+        "@echo off\r\ntype \"%PROJECTATLAS_TEST_UNICODE_JSON%\"\r\n",
+    )?;
+    let singleton_runtime_root = temp.path().join("singleton-runtime-root.ps1");
+    fs::write(
+        &singleton_runtime_root,
+        "[Console]::Out.WriteLine('[{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}]')\r\n",
+    )?;
+    let singleton_nested_runtime = temp.path().join("singleton-nested-runtime.ps1");
+    fs::write(
+        &singleton_nested_runtime,
+        "[Console]::Out.WriteLine('{\"runtime\":[{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}]}')\r\n",
+    )?;
     let command_host_dir = temp.path().join("command & (safe) !^");
     fs::create_dir(&command_host_dir)?;
     let command_host_runtime = command_host_dir.join("projectatlas.cmd");
@@ -4827,12 +4949,14 @@ $names = @(
     "Convert-ProjectAtlasVersionTag",
     "Get-NormalizedPathEntry",
     "Initialize-ProjectAtlasRuntimeProbe",
+    "Invoke-ProjectAtlasBoundedJsonCommand",
     "Invoke-ProjectAtlasRuntimeInfo",
     "Set-ProjectAtlasPathPrecedence",
     "Set-ProjectAtlasProcessPathPrecedence",
     "Split-PathList",
     "Sync-ProjectAtlasRuntimeToLocalAppData",
     "Test-ProjectAtlasBareCommandResolutionOnPath",
+    "Test-ProjectAtlasJsonObject",
     "Test-ProjectAtlasRuntime",
     "Test-Truthy"
 )
@@ -4848,6 +4972,9 @@ foreach ($name in $names) {
     }
     Invoke-Expression $definition.Extent.Text
 }
+$boundedJsonDefinition = ($functions |
+    Where-Object Name -eq "Invoke-ProjectAtlasBoundedJsonCommand" |
+    Select-Object -First 1).Extent.Text
 $machineFirst = "$env:PROJECTATLAS_TEST_MACHINE_BIN;$env:PROJECTATLAS_TEST_USER_BIN"
 $userFirst = "$env:PROJECTATLAS_TEST_USER_BIN;$env:PROJECTATLAS_TEST_MACHINE_BIN"
 if (Test-ProjectAtlasBareCommandResolutionOnPath $machineFirst $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME) {
@@ -4855,6 +4982,113 @@ if (Test-ProjectAtlasBareCommandResolutionOnPath $machineFirst $env:PROJECTATLAS
 }
 if (-not (Test-ProjectAtlasBareCommandResolutionOnPath $userFirst $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME)) {
     throw "Verified runtime first on PATH was not classified as restart-recoverable"
+}
+$unicodePayload = Invoke-ProjectAtlasBoundedJsonCommand `
+    $env:PROJECTATLAS_TEST_UNICODE_JSON_RUNTIME `
+    ([string[]]@("runtime-info"))
+$expectedUnicodePath = "M$([char]0x00FC)nchen\$([char]0x8DEF)$([char]0x5F84)"
+if ($unicodePayload.unicode_path -ne $expectedUnicodePath) {
+    throw "Bounded JSON command did not strictly decode BOM-less UTF-8 output: expected='$expectedUnicodePath' actual='$($unicodePayload.unicode_path)'"
+}
+$shortBoundedJsonDefinition = $boundedJsonDefinition.Replace(
+    '$probeTimeoutMs = 5000',
+    '$probeTimeoutMs = 100'
+)
+Invoke-Expression $shortBoundedJsonDefinition
+function Remove-Item {
+    [CmdletBinding()]
+    param(
+        [string[]]$LiteralPath,
+        [switch]$Force
+    )
+}
+$cleanupFailureProbe = [Diagnostics.Stopwatch]::StartNew()
+try {
+    $cleanupFailurePayload = Invoke-ProjectAtlasBoundedJsonCommand `
+        $env:PROJECTATLAS_TEST_UNICODE_JSON_RUNTIME `
+        ([string[]]@("runtime-info"))
+}
+finally {
+    $cleanupFailureProbe.Stop()
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath Function:\Remove-Item -Force
+    Invoke-Expression $boundedJsonDefinition
+}
+if ($null -ne $cleanupFailurePayload) {
+    throw "Bounded JSON command emitted a payload after cleanup could not be verified."
+}
+if ($cleanupFailureProbe.Elapsed -gt [TimeSpan]::FromSeconds(2)) {
+    throw "Cleanup failure probe exceeded its bounded tolerance: $($cleanupFailureProbe.Elapsed)"
+}
+$leftoverCommandProbeFiles = @(
+    Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
+        -Filter "projectatlas-command-probe-*" `
+        -File
+)
+if ($leftoverCommandProbeFiles.Count -ne 2) {
+    throw "Suppressed cleanup did not preserve both bounded-probe files: $($leftoverCommandProbeFiles.FullName -join ', ')"
+}
+Microsoft.PowerShell.Management\Remove-Item `
+    -LiteralPath $leftoverCommandProbeFiles.FullName `
+    -Force
+if (Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
+    -Filter "projectatlas-command-probe-*" `
+    -File) {
+    throw "Bounded JSON cleanup regression left temporary files."
+}
+Invoke-Expression $shortBoundedJsonDefinition
+function Remove-Item {
+    [CmdletBinding()]
+    param(
+        [string[]]$LiteralPath,
+        [switch]$Force
+    )
+    throw "Injected bounded-probe cleanup failure."
+}
+$cleanupExceptionProbe = [Diagnostics.Stopwatch]::StartNew()
+$cleanupException = $null
+$cleanupExceptionPayload = $null
+try {
+    $cleanupExceptionPayload = Invoke-ProjectAtlasBoundedJsonCommand `
+        $env:PROJECTATLAS_TEST_UNICODE_JSON_RUNTIME `
+        ([string[]]@("runtime-info"))
+}
+catch {
+    $cleanupException = $_
+}
+finally {
+    $cleanupExceptionProbe.Stop()
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath Function:\Remove-Item -Force
+    Invoke-Expression $boundedJsonDefinition
+    $cleanupExceptionFiles = @(
+        Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
+            -Filter "projectatlas-command-probe-*" `
+            -File
+    )
+    if ($cleanupExceptionFiles.Count -ne 0) {
+        Microsoft.PowerShell.Management\Remove-Item `
+            -LiteralPath $cleanupExceptionFiles.FullName `
+            -Force
+    }
+}
+if ($cleanupException) {
+    throw "Bounded JSON cleanup exception escaped: $cleanupException"
+}
+if ($null -ne $cleanupExceptionPayload) {
+    throw "Bounded JSON command emitted a payload after cleanup threw."
+}
+if ($cleanupExceptionFiles.Count -ne 2) {
+    throw "Injected cleanup exception did not preserve both bounded-probe files: $($cleanupExceptionFiles.FullName -join ', ')"
+}
+if ($cleanupExceptionProbe.Elapsed -gt [TimeSpan]::FromSeconds(2)) {
+    throw "Cleanup exception probe exceeded its bounded tolerance: $($cleanupExceptionProbe.Elapsed)"
+}
+foreach ($invalidRuntimeShape in @(
+    $env:PROJECTATLAS_TEST_SINGLETON_RUNTIME_ROOT,
+    $env:PROJECTATLAS_TEST_SINGLETON_NESTED_RUNTIME
+)) {
+    if (Test-ProjectAtlasRuntime $invalidRuntimeShape $null) {
+        throw "Runtime probe accepted a singleton-array object shape: $invalidRuntimeShape"
+    }
 }
 if ($env:PROJECTATLAS_TEST_PERSIST_USER_PATH -eq "1") {
     if ($env:PROJECTATLAS_TEST_DISPOSABLE_RUNNER -ne "github-hosted") {
@@ -4920,7 +5154,7 @@ try {
     }
     $leftoverProbeFiles = @(
         Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
-            -Filter "projectatlas-runtime-probe-*" `
+            -Filter "projectatlas-command-probe-*" `
             -File |
         Select-Object -ExpandProperty FullName
     )
@@ -4970,7 +5204,7 @@ try {
     }
     $leftoverProbeFiles = @(
         Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
-            -Filter "projectatlas-runtime-probe-*" `
+            -Filter "projectatlas-command-probe-*" `
             -File |
         Select-Object -ExpandProperty FullName
     )
@@ -5056,6 +5290,19 @@ finally {
         .env(
             "PROJECTATLAS_TEST_POWERSHELL_RUNTIME",
             &powershell_runtime,
+        )
+        .env("PROJECTATLAS_TEST_UNICODE_JSON", &unicode_json)
+        .env(
+            "PROJECTATLAS_TEST_UNICODE_JSON_RUNTIME",
+            &unicode_json_runtime,
+        )
+        .env(
+            "PROJECTATLAS_TEST_SINGLETON_RUNTIME_ROOT",
+            &singleton_runtime_root,
+        )
+        .env(
+            "PROJECTATLAS_TEST_SINGLETON_NESTED_RUNTIME",
+            &singleton_nested_runtime,
         )
         .env(
             "PROJECTATLAS_TEST_COMMAND_HOST_RUNTIME",
@@ -6557,9 +6804,12 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
 
     let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = isolated_home.join("codex.cmd");
+    let fake_codex_state = isolated_home.join(FAKE_CODEX_REGISTRY_STATE_FILE_NAME);
+    let fake_codex_stale_registry = isolated_home.join(FAKE_CODEX_REGISTRY_STALE_FILE_NAME);
+    let fake_codex_current_registry = isolated_home.join(FAKE_CODEX_REGISTRY_CURRENT_FILE_NAME);
     fs::write(
         &fake_codex,
-        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  echo projectatlas\r\n  echo   command: %LOCALAPPDATA%\\ProjectAtlas\\bin\\projectatlas.exe\r\n  echo   args: --require-version 0.3.15 --db C:\\old\\.projectatlas\\projectatlas.db mcp\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n",
+        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"mcp\" if \"%2\"==\"add\" (\r\n  echo current>\"%PROJECTATLAS_FAKE_CODEX_STATE%\"\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  if exist \"%PROJECTATLAS_FAKE_CODEX_STATE%\" (\r\n    type \"%PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT%\"\r\n  ) else (\r\n    type \"%PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE%\"\r\n  )\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n",
     )?;
 
     let stable_runtime = local_app_data
@@ -6583,6 +6833,41 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
     )?;
 
     let db = atlas_dir.join("projectatlas.db");
+    let versioned_runtime = local_app_data
+        .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
+        .join("runtimes")
+        .join(env!("CARGO_PKG_VERSION"))
+        .join("x86_64-pc-windows-msvc")
+        .join("projectatlas.exe");
+    fs::write(
+        &fake_codex_stale_registry,
+        serde_json::to_vec(&json!({
+            "name": "projectatlas",
+            "enabled": true,
+            "transport": {
+                "type": "stdio",
+                "command": stable_runtime,
+                "args": ["--require-version", "0.3.15", "--db", "C:\\old\\.projectatlas\\projectatlas.db", "mcp"]
+            }
+        }))?,
+    )?;
+    fs::write(
+        &fake_codex_current_registry,
+        serde_json::to_vec(&json!({
+            "name": "projectatlas",
+            "enabled": true,
+            "transport": {
+                "type": "stdio",
+                "command": versioned_runtime,
+                "args": [
+                    "--require-version", env!("CARGO_PKG_VERSION"),
+                    "--db", db,
+                    "--config", atlas_dir.join("config.toml"),
+                    "mcp"
+                ]
+            }
+        }))?,
+    )?;
     let mut locked_runtime = StdCommand::new(&stable_runtime)
         .arg("--require-version")
         .arg(env!("CARGO_PKG_VERSION"))
@@ -6634,6 +6919,15 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
             .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
             .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+            .env("PROJECTATLAS_FAKE_CODEX_STATE", &fake_codex_state)
+            .env(
+                "PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE",
+                &fake_codex_stale_registry,
+            )
+            .env(
+                "PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT",
+                &fake_codex_current_registry,
+            )
             .env("PROJECTATLAS_NO_TELEMETRY", "1")
             .output()?;
         let server_result = release_server.join().map_err(|panic_payload| {
@@ -6659,7 +6953,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             ))
             .into());
         }
-        if installer_output_text.contains("ProjectAtlas LocalAppData mirror skipped") {
+        if installer_output_text.contains("ProjectAtlas LocalAppData mirror is locked") {
             return Err(io::Error::other(format!(
                 "installer tried to replace an already-current locked stable mirror\n{installer_output_text}"
             ))
@@ -6683,12 +6977,6 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .into());
         }
 
-        let versioned_runtime = local_app_data
-            .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
-            .join("runtimes")
-            .join(env!("CARGO_PKG_VERSION"))
-            .join("x86_64-pc-windows-msvc")
-            .join("projectatlas.exe");
         if !versioned_runtime.exists() {
             return Err(io::Error::other(format!(
                 "release binary was not installed to the versioned runtime path: {}",
@@ -6864,10 +7152,10 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .collect::<Vec<_>>()
             .join(" ");
         for required in [
-            "ProjectAtlas LocalAppData mirror skipped",
-            "Close any running ProjectAtlas or Codex session using that file",
-            "then rerun this installer",
-            "Codex MCP and generated configs continue to use verified",
+            "ProjectAtlas LocalAppData mirror is locked",
+            "verify durable absolute MCP configuration before attempting an exact obsolete-child handoff",
+            "process_owner=no_exact_owner",
+            "ProjectAtlas convergence: update_state=partial stable_mirror_ready=false obsolete_mcp_handoff=no_exact_owner",
         ] {
             if !normalized_stale_output.contains(required) {
                 return Err(io::Error::other(format!(
@@ -7067,6 +7355,2440 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
 }
 
 #[test]
+#[cfg(windows)]
+fn windows_installer_obsolete_mcp_handoff_retires_only_exact_child_and_reports_retry_failure()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    let app_data = isolated_home.join("AppData").join("Roaming");
+    let local_app_data = isolated_home.join("AppData").join("Local");
+    fs::create_dir_all(&app_data)?;
+    fs::create_dir_all(&local_app_data)?;
+    let stable_runtime = local_app_data
+        .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
+        .join("bin")
+        .join("projectatlas.exe");
+    fs::create_dir_all(
+        stable_runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("stable runtime parent missing"))?,
+    )?;
+
+    let fixture_source = temp.path().join("obsolete-projectatlas.cs");
+    fs::write(
+        &fixture_source,
+        r#"using System;
+using System.Threading;
+
+public static class Program
+{
+    public static int Main(string[] arguments)
+    {
+        if (Array.IndexOf(arguments, "runtime-info") >= 0)
+        {
+            Console.WriteLine("{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.3.26\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}");
+            return 0;
+        }
+        if (Array.IndexOf(arguments, "mcp") >= 0)
+        {
+            Thread.Sleep(Timeout.Infinite);
+            return 0;
+        }
+        return 2;
+    }
+}
+"#,
+    )?;
+    let compile_output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(
+            "Add-Type -Path $env:PROJECTATLAS_FIXTURE_SOURCE -OutputAssembly $env:PROJECTATLAS_FIXTURE_RUNTIME -OutputType ConsoleApplication",
+        )
+        .env("PROJECTATLAS_FIXTURE_SOURCE", &fixture_source)
+        .env("PROJECTATLAS_FIXTURE_RUNTIME", &stable_runtime)
+        .output()?;
+    if !compile_output.status.success() {
+        return Err(io::Error::other(format!(
+            "failed to compile obsolete ProjectAtlas fixture runtime:\n{}",
+            String::from_utf8_lossy(&compile_output.stderr)
+        ))
+        .into());
+    }
+
+    let db = atlas_dir.join("projectatlas.db");
+    let codex_owner_fixture = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
+    compile_codex_mcp_owner_fixture(&codex_owner_fixture)?;
+    let child_pid_file = temp.path().join("obsolete-mcp.pid");
+
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let parent_path =
+        std::env::join_paths(std::env::split_paths(&inherited_path).filter(|entry| {
+            ![
+                "projectatlas.exe",
+                "projectatlas.cmd",
+                "projectatlas.bat",
+                "projectatlas.ps1",
+            ]
+            .iter()
+            .any(|candidate| entry.join(candidate).exists())
+        }))?;
+    let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
+    let fake_codex = isolated_home.join("codex.cmd");
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let plugin_cache = isolated_home.join(FAKE_CODEX_PLUGIN_CACHE_DIR);
+    let plugin_manifest = plugin_cache
+        .join(CODEX_PLUGIN_MANIFEST_DIR)
+        .join("plugin.json");
+    let plugin_skill = plugin_cache
+        .join(PROJECTATLAS_SKILL_DIR)
+        .join(PROJECTATLAS_SKILL_NAME)
+        .join(SKILL_FILE_NAME);
+    fs::create_dir_all(
+        plugin_manifest
+            .parent()
+            .ok_or_else(|| io::Error::other("fake plugin manifest parent missing"))?,
+    )?;
+    fs::create_dir_all(
+        plugin_skill
+            .parent()
+            .ok_or_else(|| io::Error::other("fake plugin skill parent missing"))?,
+    )?;
+    fs::write(
+        &plugin_manifest,
+        serde_json::to_vec(&json!({ "version": env!("CARGO_PKG_VERSION") }))?,
+    )?;
+    fs::write(&plugin_skill, FAKE_CODEX_SKILL_CONTENT)?;
+    let fake_plugin_list = isolated_home.join(FAKE_CODEX_PLUGIN_LIST_FILE_NAME);
+    fs::write(
+        &fake_plugin_list,
+        serde_json::to_vec(&json!({
+            "installed": [{
+                "pluginId": "projectatlas@projectatlas",
+                "name": "projectatlas",
+                "marketplaceName": "projectatlas",
+                "version": env!("CARGO_PKG_VERSION"),
+                "installed": true,
+                "enabled": true,
+                "marketplaceSource": {
+                    "source": "https://github.com/styler-ai/ProjectAtlas.git"
+                },
+                "source": { "path": plugin_cache }
+            }]
+        }))?,
+    )?;
+    let stale_registry = isolated_home.join(FAKE_CODEX_REGISTRY_STALE_FILE_NAME);
+    fs::write(
+        &stale_registry,
+        serde_json::to_vec(&json!({
+            "name": "projectatlas",
+            "enabled": true,
+            "transport": {
+                "type": "stdio",
+                "command": stable_runtime,
+                "args": ["--require-version", "0.3.26", "--db", "C:\\old\\.projectatlas\\projectatlas.db", "mcp"]
+            }
+        }))?,
+    )?;
+    let current_registry = isolated_home.join(FAKE_CODEX_REGISTRY_CURRENT_FILE_NAME);
+    fs::write(
+        &current_registry,
+        serde_json::to_vec(&json!({
+            "name": "projectatlas",
+            "enabled": true,
+            "transport": {
+                "type": "stdio",
+                "command": runtime,
+                "args": [
+                    "--require-version", env!("CARGO_PKG_VERSION"),
+                    "--db", db,
+                    "--config", atlas_dir.join("config.toml"),
+                    "mcp"
+                ]
+            }
+        }))?,
+    )?;
+    fs::write(
+        &fake_codex,
+        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  type \"%PROJECTATLAS_FAKE_CODEX_PLUGIN_LIST%\"\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"add\" (\r\n  echo current>\"%PROJECTATLAS_FAKE_CODEX_STATE%\"\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  if exist \"%PROJECTATLAS_FAKE_CODEX_STATE%\" (\r\n    type \"%PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT%\"\r\n  ) else (\r\n    type \"%PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE%\"\r\n  )\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n",
+    )?;
+    let fake_codex_state = isolated_home.join("codex-state.txt");
+    let production_installer = workspace_root()?
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    let installer_plugin_root = production_installer
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| io::Error::other("installer plugin root missing"))?;
+    let installer = temp.path().join("install-runtime-owner-seam.ps1");
+    write_installer_with_test_codex_identity_seam(&production_installer, &installer)?;
+    let run_installer = |process_ids: &[u32]| {
+        let mut process_ids = process_ids.to_vec();
+        process_ids.push(std::process::id());
+        let process_id_allowlist = windows_test_process_id_allowlist(&process_ids)?;
+        StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&installer)
+            .arg("-ProjectRoot")
+            .arg(&repo)
+            .arg("-ProjectAtlasVersion")
+            .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+            .arg("-RuntimePath")
+            .arg(&runtime)
+            .env("HOME", &isolated_home)
+            .env("USERPROFILE", &isolated_home)
+            .env("APPDATA", &app_data)
+            .env("LOCALAPPDATA", &local_app_data)
+            .env("PATH", &parent_path)
+            .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_TEST_CODEX_OWNER", &codex_owner_fixture)
+            .env("PROJECTATLAS_TEST_PROCESS_IDS", process_id_allowlist)
+            .env(
+                "PROJECTATLAS_TEST_INSTALLER_PLUGIN_ROOT",
+                installer_plugin_root,
+            )
+            .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+            .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+            .env("PROJECTATLAS_FAKE_CODEX_STATE", &fake_codex_state)
+            .env("PROJECTATLAS_FAKE_CODEX_PLUGIN_LIST", &fake_plugin_list)
+            .env("PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE", &stale_registry)
+            .env(
+                "PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT",
+                &current_registry,
+            )
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()
+    };
+
+    let run_production_installer = || {
+        StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&production_installer)
+            .arg("-ProjectRoot")
+            .arg(&repo)
+            .arg("-ProjectAtlasVersion")
+            .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+            .arg("-RuntimePath")
+            .arg(&runtime)
+            .env("HOME", &isolated_home)
+            .env("USERPROFILE", &isolated_home)
+            .env("APPDATA", &app_data)
+            .env("LOCALAPPDATA", &local_app_data)
+            .env("PATH", &parent_path)
+            .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+            .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+            .env("PROJECTATLAS_FAKE_CODEX_STATE", &fake_codex_state)
+            .env("PROJECTATLAS_FAKE_CODEX_PLUGIN_LIST", &fake_plugin_list)
+            .env("PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE", &stale_registry)
+            .env(
+                "PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT",
+                &current_registry,
+            )
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()
+    };
+
+    let (mut codex_owner, obsolete_mcp_pid) = spawn_codex_owned_obsolete_mcp(
+        &codex_owner_fixture,
+        &stable_runtime,
+        &db,
+        Some(&atlas_dir.join("config.toml")),
+        &child_pid_file,
+    )?;
+    let mut second_codex_owner = None;
+    let mut second_obsolete_mcp_pid = None;
+    let mut non_codex_child = None;
+    let test_result = (|| -> Result<(), Box<dyn Error>> {
+        let unsigned_output = run_production_installer()?;
+        let unsigned_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&unsigned_output.stdout),
+            String::from_utf8_lossy(&unsigned_output.stderr)
+        );
+        if !unsigned_output.status.success()
+            || !unsigned_text.contains("obsolete_mcp_handoff=unsafe_owner")
+            || !windows_process_is_alive(&obsolete_mcp_pid)?
+        {
+            return Err(io::Error::other(format!(
+                "unsigned arbitrary codex.exe owner was not refused safely:\n{unsigned_text}"
+            ))
+            .into());
+        }
+        let output = run_installer(&[obsolete_mcp_pid.process_id, codex_owner.id()])?;
+        let installer_output = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let normalized_installer_output = installer_output
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let expected_path_guidance = format!(
+            "Configure {} first on PATH, then rerun this installer if convergence remains partial.",
+            runtime
+                .parent()
+                .ok_or_else(|| io::Error::other("verified runtime parent missing"))?
+                .display()
+        );
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "installer failed exact obsolete MCP handoff:\n{installer_output}"
+            ))
+            .into());
+        }
+        if !installer_output.contains("Retired exact obsolete Codex-owned ProjectAtlas MCP process")
+            || !installer_output.contains(
+                "ProjectAtlas convergence: update_state=complete stable_mirror_ready=true obsolete_mcp_handoff=completed",
+            )
+            || !installer_output.trim_end().ends_with(
+                "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=false host_restart_required=false",
+            )
+            || !normalized_installer_output.contains(&expected_path_guidance)
+            || normalized_installer_output
+                .contains("could not prove an exact retireable obsolete MCP owner")
+            || normalized_installer_output.contains("restart the owning host")
+        {
+            return Err(io::Error::other(format!(
+                "installer did not report exact complete obsolete MCP convergence:\n{installer_output}"
+            ))
+            .into());
+        }
+        if windows_process_is_alive(&obsolete_mcp_pid)? {
+            return Err(
+                io::Error::other("installer left the exact obsolete MCP process running").into(),
+            );
+        }
+        if codex_owner.try_wait()?.is_some() {
+            return Err(io::Error::other("installer terminated the Codex owner process").into());
+        }
+
+        let runtime_info = StdCommand::new(&stable_runtime)
+            .arg("--require-version")
+            .arg(env!("CARGO_PKG_VERSION"))
+            .arg("--format")
+            .arg("json")
+            .arg("runtime-info")
+            .output()?;
+        if !runtime_info.status.success() {
+            return Err(io::Error::other(format!(
+                "stable mirror did not converge to the target runtime:\n{}",
+                String::from_utf8_lossy(&runtime_info.stderr)
+            ))
+            .into());
+        }
+        let codex_config = read_json_file(&atlas_dir.join("projectatlas.mcp.json"))?;
+        require_same_executable(
+            json_string_at(&codex_config, &["mcpServers", "projectatlas", "command"])?,
+            &runtime,
+            "obsolete handoff codex config",
+        )?;
+        require_json_string(
+            &codex_config,
+            &["mcpServers", "projectatlas", "args", "1"],
+            env!("CARGO_PKG_VERSION"),
+        )?;
+        let fake_codex_calls = fs::read_to_string(&fake_codex_log)?;
+        if !fake_codex_calls.contains("mcp add projectatlas --")
+            || !fake_codex_calls.contains(runtime.to_string_lossy().as_ref())
+            || fake_codex_calls.contains(stable_runtime.to_string_lossy().as_ref())
+        {
+            return Err(io::Error::other(format!(
+                "Codex registry did not converge before the exact MCP handoff:\n{fake_codex_calls}"
+            ))
+            .into());
+        }
+
+        fs::remove_file(&stable_runtime)?;
+        let recompile_output = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-Command")
+            .arg(
+                "Add-Type -Path $env:PROJECTATLAS_FIXTURE_SOURCE -OutputAssembly $env:PROJECTATLAS_FIXTURE_RUNTIME -OutputType ConsoleApplication",
+            )
+            .env("PROJECTATLAS_FIXTURE_SOURCE", &fixture_source)
+            .env("PROJECTATLAS_FIXTURE_RUNTIME", &stable_runtime)
+            .output()?;
+        if !recompile_output.status.success() {
+            return Err(io::Error::other(format!(
+                "failed to restore obsolete ProjectAtlas fixture runtime:\n{}",
+                String::from_utf8_lossy(&recompile_output.stderr)
+            ))
+            .into());
+        }
+        let direct_child = StdCommand::new(&stable_runtime)
+            .arg("--require-version")
+            .arg("0.3.26")
+            .arg("--db")
+            .arg(&db)
+            .arg("--config")
+            .arg(atlas_dir.join("config.toml"))
+            .arg("mcp")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let direct_child_id = direct_child.id();
+        non_codex_child = Some(direct_child);
+        let (owner, child_pid) = spawn_codex_owned_obsolete_mcp(
+            &codex_owner_fixture,
+            &stable_runtime,
+            &db,
+            Some(&atlas_dir.join("config.toml")),
+            &temp.path().join("retry-obsolete-mcp.pid"),
+        )?;
+        second_codex_owner = Some(owner);
+        second_obsolete_mcp_pid = Some(child_pid.clone());
+
+        let retry_parent_id = second_codex_owner
+            .as_ref()
+            .ok_or_else(|| io::Error::other("second Codex owner fixture missing"))?
+            .id();
+        let retry_output =
+            run_installer(&[child_pid.process_id, retry_parent_id, direct_child_id])?;
+        let retry_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&retry_output.stdout),
+            String::from_utf8_lossy(&retry_output.stderr)
+        );
+        if !retry_output.status.success()
+            || !retry_text.contains(
+                "ProjectAtlas convergence: update_state=partial stable_mirror_ready=false obsolete_mcp_handoff=retry_failed codex_plugin_ready=true codex_registry_ready=true",
+            )
+            || !runtime.exists()
+            || !atlas_dir.join("projectatlas.mcp.json").exists()
+            || !atlas_dir.join("projectatlas.claude.mcp.json").exists()
+            || !atlas_dir.join("projectatlas.opencode.json").exists()
+            || read_json_file(&atlas_dir.join("projectatlas.mcp.json"))? != codex_config
+        {
+            return Err(io::Error::other(format!(
+                "installer did not preserve truthful partial readiness after the bounded retry failed:\n{retry_text}"
+            ))
+            .into());
+        }
+        if windows_process_is_alive(&child_pid)? {
+            return Err(io::Error::other(
+                "installer left the exact Codex-owned retry fixture running",
+            )
+            .into());
+        }
+        if second_codex_owner
+            .as_mut()
+            .ok_or_else(|| io::Error::other("second Codex owner fixture missing"))?
+            .try_wait()?
+            .is_some()
+        {
+            return Err(io::Error::other(
+                "installer terminated the second Codex parent during retry failure",
+            )
+            .into());
+        }
+        if non_codex_child
+            .as_mut()
+            .ok_or_else(|| io::Error::other("non-Codex MCP fixture missing"))?
+            .try_wait()?
+            .is_some()
+        {
+            return Err(io::Error::other(
+                "installer terminated the non-Codex process that kept the mirror locked",
+            )
+            .into());
+        }
+        let versioned_runtime_info = StdCommand::new(&runtime)
+            .arg("--require-version")
+            .arg(env!("CARGO_PKG_VERSION"))
+            .arg("--format")
+            .arg("json")
+            .arg("runtime-info")
+            .output()?;
+        if !versioned_runtime_info.status.success() {
+            return Err(io::Error::other(format!(
+                "verified versioned runtime was unusable after retry failure:\n{}",
+                String::from_utf8_lossy(&versioned_runtime_info.stderr)
+            ))
+            .into());
+        }
+        Ok(())
+    })();
+
+    if let Some(process_id) = second_obsolete_mcp_pid.as_ref()
+        && windows_process_is_alive(process_id)?
+    {
+        let stop_result = stop_windows_fixture_process(process_id);
+        if let Err(error) = stop_result
+            && test_result.is_ok()
+        {
+            return Err(error);
+        }
+    }
+    if let Some(process) = second_codex_owner.as_mut()
+        && process.try_wait()?.is_none()
+    {
+        let kill_result = process.kill();
+        let wait_result = process.wait();
+        if let Err(error) = kill_result
+            && test_result.is_ok()
+            && error.kind() != io::ErrorKind::InvalidInput
+        {
+            return Err(error.into());
+        }
+        if let Err(error) = wait_result
+            && test_result.is_ok()
+        {
+            return Err(error.into());
+        }
+    }
+    if let Some(process) = non_codex_child.as_mut()
+        && process.try_wait()?.is_none()
+    {
+        let kill_result = process.kill();
+        let wait_result = process.wait();
+        if let Err(error) = kill_result
+            && test_result.is_ok()
+            && error.kind() != io::ErrorKind::InvalidInput
+        {
+            return Err(error.into());
+        }
+        if let Err(error) = wait_result
+            && test_result.is_ok()
+        {
+            return Err(error.into());
+        }
+    }
+    if windows_process_is_alive(&obsolete_mcp_pid)? {
+        let stop_result = stop_windows_fixture_process(&obsolete_mcp_pid);
+        if let Err(error) = stop_result
+            && test_result.is_ok()
+        {
+            return Err(error);
+        }
+    }
+    if codex_owner.try_wait()?.is_none() {
+        let kill_result = codex_owner.kill();
+        let wait_result = codex_owner.wait();
+        if let Err(error) = kill_result
+            && test_result.is_ok()
+            && error.kind() != io::ErrorKind::InvalidInput
+        {
+            return Err(error.into());
+        }
+        if let Err(error) = wait_result
+            && test_result.is_ok()
+        {
+            return Err(error.into());
+        }
+    }
+    test_result
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_installer_obsolete_mcp_handoff_preserves_unready_and_ambiguous_processes()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    let app_data = isolated_home.join("AppData").join("Roaming");
+    let local_app_data = isolated_home.join("AppData").join("Local");
+    fs::create_dir_all(&app_data)?;
+    fs::create_dir_all(&local_app_data)?;
+    let stable_runtime = local_app_data
+        .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
+        .join("bin")
+        .join("projectatlas.exe");
+    fs::create_dir_all(
+        stable_runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("stable runtime parent missing"))?,
+    )?;
+    let fixture_source = temp.path().join("obsolete-projectatlas-unready.cs");
+    fs::write(
+        &fixture_source,
+        r#"using System;
+using System.Threading;
+
+public static class Program
+{
+    public static int Main(string[] arguments)
+    {
+        if (Array.IndexOf(arguments, "runtime-info") >= 0)
+        {
+            Console.WriteLine("{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.3.26\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}");
+            return 0;
+        }
+        if (Array.IndexOf(arguments, "mcp") >= 0)
+        {
+            Thread.Sleep(Timeout.Infinite);
+            return 0;
+        }
+        return 2;
+    }
+}
+"#,
+    )?;
+    let compile_obsolete_runtime = || -> Result<(), Box<dyn Error>> {
+        let output = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-Command")
+            .arg(
+                "Add-Type -Path $env:PROJECTATLAS_FIXTURE_SOURCE -OutputAssembly $env:PROJECTATLAS_FIXTURE_RUNTIME -OutputType ConsoleApplication",
+            )
+            .env("PROJECTATLAS_FIXTURE_SOURCE", &fixture_source)
+            .env("PROJECTATLAS_FIXTURE_RUNTIME", &stable_runtime)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "failed to compile obsolete ProjectAtlas readiness fixture:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        Ok(())
+    };
+    compile_obsolete_runtime()?;
+
+    let db = atlas_dir.join("projectatlas.db");
+    let codex_owner_fixture = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
+    compile_codex_mcp_owner_fixture(&codex_owner_fixture)?;
+    let first_child_pid_file = temp.path().join("first-obsolete-mcp.pid");
+
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let plugin_cache = isolated_home.join(FAKE_CODEX_PLUGIN_CACHE_DIR);
+    let plugin_manifest = plugin_cache
+        .join(CODEX_PLUGIN_MANIFEST_DIR)
+        .join("plugin.json");
+    let plugin_skill = plugin_cache
+        .join(PROJECTATLAS_SKILL_DIR)
+        .join(PROJECTATLAS_SKILL_NAME)
+        .join(SKILL_FILE_NAME);
+    fs::create_dir_all(
+        plugin_manifest
+            .parent()
+            .ok_or_else(|| io::Error::other("fake plugin manifest parent missing"))?,
+    )?;
+    fs::create_dir_all(
+        plugin_skill
+            .parent()
+            .ok_or_else(|| io::Error::other("fake plugin skill parent missing"))?,
+    )?;
+    fs::write(
+        &plugin_manifest,
+        serde_json::to_vec(&json!({ "version": env!("CARGO_PKG_VERSION") }))?,
+    )?;
+    fs::write(&plugin_skill, FAKE_CODEX_SKILL_CONTENT)?;
+    let plugin_list = isolated_home.join(FAKE_CODEX_PLUGIN_LIST_FILE_NAME);
+    fs::write(
+        &plugin_list,
+        serde_json::to_vec(&json!({ "installed": [] }))?,
+    )?;
+    let write_plugin_list =
+        |version: &str, enabled: bool, marketplace_source: &str| -> Result<(), Box<dyn Error>> {
+            fs::write(
+                &plugin_list,
+                serde_json::to_vec(&json!({
+                    "installed": [{
+                        "pluginId": "projectatlas@projectatlas",
+                        "name": "projectatlas",
+                        "marketplaceName": "projectatlas",
+                        "version": version,
+                        "installed": true,
+                        "enabled": enabled,
+                        "marketplaceSource": { "source": marketplace_source },
+                        "source": { "path": &plugin_cache }
+                    }]
+                }))?,
+            )?;
+            Ok(())
+        };
+    let registry = isolated_home.join("codex-registry.json");
+    fs::write(
+        &registry,
+        serde_json::to_vec(&json!({
+            "name": "projectatlas",
+            "enabled": true,
+            "transport": {
+                "type": "stdio",
+                "command": stable_runtime,
+                "args": ["--require-version", "0.3.26", "--db", "C:\\old\\projectatlas.db", "mcp"]
+            }
+        }))?,
+    )?;
+    let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
+    let config_drift_trigger = isolated_home.join("drift-generated-config");
+    let config_to_drift = atlas_dir.join("projectatlas.mcp.json");
+    let fake_codex = isolated_home.join("codex.cmd");
+    fs::write(
+        &fake_codex,
+        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  if exist \"%PROJECTATLAS_FAKE_CODEX_CONFIG_DRIFT_TRIGGER%\" (\r\n    echo {}>\"%PROJECTATLAS_FAKE_CODEX_CONFIG_TO_DRIFT%\"\r\n    del /q \"%PROJECTATLAS_FAKE_CODEX_CONFIG_DRIFT_TRIGGER%\"\r\n  )\r\n  type \"%PROJECTATLAS_FAKE_CODEX_PLUGIN_LIST%\"\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  if not exist \"%PROJECTATLAS_FAKE_CODEX_REGISTRY%\" exit /b 1\r\n  type \"%PROJECTATLAS_FAKE_CODEX_REGISTRY%\"\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n",
+    )?;
+    let stable_runtime_dir = stable_runtime
+        .parent()
+        .ok_or_else(|| io::Error::other("stable runtime parent missing"))?;
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let parent_path = std::env::join_paths(
+        std::iter::once(stable_runtime_dir.to_path_buf())
+            .chain(std::env::split_paths(&inherited_path)),
+    )?;
+    let production_installer = workspace_root()?
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    let installer_plugin_root = production_installer
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| io::Error::other("installer plugin root missing"))?;
+    let installer = temp.path().join("install-runtime-readiness-seam.ps1");
+    write_installer_with_test_codex_identity_seam(&production_installer, &installer)?;
+    let run_installer = |process_ids: &[u32]| {
+        let mut process_ids = process_ids.to_vec();
+        process_ids.push(std::process::id());
+        let process_id_allowlist = windows_test_process_id_allowlist(&process_ids)?;
+        StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&installer)
+            .arg("-ProjectRoot")
+            .arg(&repo)
+            .arg("-ProjectAtlasVersion")
+            .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+            .arg("-RuntimePath")
+            .arg(&runtime)
+            .env("HOME", &isolated_home)
+            .env("USERPROFILE", &isolated_home)
+            .env("APPDATA", &app_data)
+            .env("LOCALAPPDATA", &local_app_data)
+            .env("PATH", &parent_path)
+            .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_TEST_CODEX_OWNER", &codex_owner_fixture)
+            .env("PROJECTATLAS_TEST_PROCESS_IDS", process_id_allowlist)
+            .env(
+                "PROJECTATLAS_TEST_INSTALLER_PLUGIN_ROOT",
+                installer_plugin_root,
+            )
+            .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+            .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+            .env("PROJECTATLAS_FAKE_CODEX_PLUGIN_LIST", &plugin_list)
+            .env("PROJECTATLAS_FAKE_CODEX_REGISTRY", &registry)
+            .env(
+                "PROJECTATLAS_FAKE_CODEX_CONFIG_DRIFT_TRIGGER",
+                &config_drift_trigger,
+            )
+            .env("PROJECTATLAS_FAKE_CODEX_CONFIG_TO_DRIFT", &config_to_drift)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()
+    };
+
+    let exact_registry = json!({
+        "name": "projectatlas",
+        "enabled": true,
+        "transport": {
+            "type": "stdio",
+            "command": &runtime,
+            "args": [
+                "--require-version", env!("CARGO_PKG_VERSION"),
+                "--db", &db,
+                "--config", atlas_dir.join("config.toml"),
+                "mcp"
+            ]
+        }
+    });
+    write_plugin_list(
+        env!("CARGO_PKG_VERSION"),
+        true,
+        "https://github.com/styler-ai/ProjectAtlas.git",
+    )?;
+    fs::write(&registry, serde_json::to_vec(&exact_registry)?)?;
+    fs::write(&config_drift_trigger, b"drift")?;
+    let no_handoff_drift_output = run_installer(&[])?;
+    let no_handoff_drift_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&no_handoff_drift_output.stdout),
+        String::from_utf8_lossy(&no_handoff_drift_output.stderr)
+    );
+    if !no_handoff_drift_output.status.success()
+        || !no_handoff_drift_text.contains("update_state=partial")
+        || !no_handoff_drift_text.contains("obsolete_mcp_handoff=not_required")
+        || !no_handoff_drift_text.contains("codex_plugin_ready=true codex_registry_ready=true")
+        || !no_handoff_drift_text.contains("runtime_mcp_configs_ready=false")
+        || !no_handoff_drift_text.contains("rerun this installer")
+        || no_handoff_drift_text.contains("integration verified through generated MCP config")
+        || no_handoff_drift_text.contains("The runtime and generated MCP configs are ready")
+    {
+        return Err(io::Error::other(format!(
+            "installer reported stale final runtime/config readiness without a handoff:\n{no_handoff_drift_text}"
+        ))
+        .into());
+    }
+    fs::remove_file(&stable_runtime)?;
+    fs::create_dir(&stable_runtime)?;
+    let invalid_mirror_output = run_installer(&[])?;
+    let invalid_mirror_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&invalid_mirror_output.stdout),
+        String::from_utf8_lossy(&invalid_mirror_output.stderr)
+    );
+    if !invalid_mirror_output.status.success()
+        || !invalid_mirror_text.contains(
+            "ProjectAtlas convergence: update_state=partial stable_mirror_ready=false obsolete_mcp_handoff=inspection_failed codex_plugin_ready=true codex_registry_ready=true",
+        )
+        || !invalid_mirror_text.contains("runtime_mcp_configs_ready=true")
+        || !invalid_mirror_text.contains("Repair the invalid mirror path and rerun this installer")
+        || invalid_mirror_text.contains("Retired exact obsolete Codex-owned ProjectAtlas MCP process")
+        || !stable_runtime.is_dir()
+    {
+        return Err(io::Error::other(format!(
+            "installer trusted or aborted on a directory-shaped stable runtime mirror:\n{invalid_mirror_text}"
+        ))
+        .into());
+    }
+    for forbidden_state in [
+        "obsolete_mcp_handoff=exited",
+        "obsolete_mcp_handoff=retired",
+        "obsolete_mcp_handoff=completed",
+        "obsolete_mcp_handoff=retry_failed",
+    ] {
+        if invalid_mirror_text.contains(forbidden_state) {
+            return Err(io::Error::other(format!(
+                "invalid stable mirror entered forbidden handoff state {forbidden_state}:\n{invalid_mirror_text}"
+            ))
+            .into());
+        }
+    }
+    fs::remove_dir_all(&stable_runtime)?;
+    fs::write(
+        &plugin_list,
+        serde_json::to_vec(&json!({ "installed": [] }))?,
+    )?;
+    fs::write(
+        &registry,
+        serde_json::to_vec(&json!({
+            "name": "projectatlas",
+            "enabled": true,
+            "transport": {
+                "type": "stdio",
+                "command": &stable_runtime,
+                "args": ["--require-version", "0.3.26", "--db", "C:\\old\\projectatlas.db", "mcp"]
+            }
+        }))?,
+    )?;
+    compile_obsolete_runtime()?;
+
+    let (mut first_owner, first_obsolete_mcp_pid) = spawn_codex_owned_obsolete_mcp(
+        &codex_owner_fixture,
+        &stable_runtime,
+        &db,
+        Some(&atlas_dir.join("config.toml")),
+        &first_child_pid_file,
+    )?;
+    let mut second_owner = None;
+    let mut second_obsolete_mcp_pid = None;
+    let test_result = (|| -> Result<(), Box<dyn Error>> {
+        {
+            let require_plugin_unready = |label: &str| -> Result<(), Box<dyn Error>> {
+                let output = run_installer(&[first_obsolete_mcp_pid.process_id, first_owner.id()])?;
+                let text = format!(
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                if !output.status.success()
+                    || !text.contains("obsolete_mcp_handoff=codex_plugin_not_verified")
+                    || !text.contains("codex_plugin_ready=false codex_registry_ready=false")
+                    || !windows_process_is_alive(&first_obsolete_mcp_pid)?
+                {
+                    return Err(io::Error::other(format!(
+                        "{label} plugin state was treated as readiness:\n{text}"
+                    ))
+                    .into());
+                }
+                Ok(())
+            };
+            require_plugin_unready("missing")?;
+            fs::write(
+                &plugin_list,
+                serde_json::to_vec(&json!([{ "installed": [] }]))?,
+            )?;
+            require_plugin_unready("singleton-array-root")?;
+            fs::write(
+                &plugin_list,
+                serde_json::to_vec(&json!({
+                    "installed": [[{
+                        "pluginId": "projectatlas@projectatlas",
+                        "name": "projectatlas",
+                        "marketplaceName": "projectatlas",
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "installed": true,
+                        "enabled": true,
+                        "marketplaceSource": {
+                            "source": "https://github.com/styler-ai/ProjectAtlas.git"
+                        },
+                        "source": { "path": &plugin_cache }
+                    }]]
+                }))?,
+            )?;
+            require_plugin_unready("singleton-array-plugin-entry")?;
+            for (label, version, enabled, source) in [
+                (
+                    "stale",
+                    "0.0.1",
+                    true,
+                    "https://github.com/styler-ai/ProjectAtlas.git",
+                ),
+                (
+                    "disabled",
+                    env!("CARGO_PKG_VERSION"),
+                    false,
+                    "https://github.com/styler-ai/ProjectAtlas.git",
+                ),
+                (
+                    "wrong-source",
+                    env!("CARGO_PKG_VERSION"),
+                    true,
+                    "https://github.com/example/ProjectAtlas.git",
+                ),
+            ] {
+                write_plugin_list(version, enabled, source)?;
+                require_plugin_unready(label)?;
+            }
+            write_plugin_list(
+                env!("CARGO_PKG_VERSION"),
+                true,
+                "https://github.com/styler-ai/ProjectAtlas.git",
+            )?;
+            fs::write(&plugin_skill, b"stale skill")?;
+            require_plugin_unready("wrong-skill")?;
+            fs::write(&plugin_skill, FAKE_CODEX_SKILL_CONTENT)?;
+            fs::write(
+                &plugin_manifest,
+                serde_json::to_vec(&json!([{
+                    "version": env!("CARGO_PKG_VERSION")
+                }]))?,
+            )?;
+            require_plugin_unready("singleton-array-source-manifest")?;
+            fs::write(
+                &plugin_manifest,
+                serde_json::to_vec(&json!({
+                    "version": env!("CARGO_PKG_VERSION")
+                }))?,
+            )?;
+        }
+
+        fs::write(
+            &registry,
+            serde_json::to_vec(&json!({
+                "name": "projectatlas",
+                "enabled": false,
+                "transport": {
+                    "type": "stdio",
+                    "command": runtime,
+                    "args": [
+                        "--require-version", env!("CARGO_PKG_VERSION"),
+                        "--db", db,
+                        "--config", atlas_dir.join("config.toml"),
+                        "mcp"
+                    ]
+                }
+            }))?,
+        )?;
+        let disabled_registry_output =
+            run_installer(&[first_obsolete_mcp_pid.process_id, first_owner.id()])?;
+        let disabled_registry_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&disabled_registry_output.stdout),
+            String::from_utf8_lossy(&disabled_registry_output.stderr)
+        );
+        if !disabled_registry_output.status.success()
+            || !disabled_registry_text.contains("obsolete_mcp_handoff=codex_registry_not_verified")
+            || !disabled_registry_text
+                .contains("codex_plugin_ready=true codex_registry_ready=false")
+            || !windows_process_is_alive(&first_obsolete_mcp_pid)?
+        {
+            return Err(io::Error::other(format!(
+                "disabled exact registry was treated as readiness:\n{disabled_registry_text}"
+            ))
+            .into());
+        }
+
+        fs::remove_file(&registry)?;
+        let missing_registry_output =
+            run_installer(&[first_obsolete_mcp_pid.process_id, first_owner.id()])?;
+        let missing_registry_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&missing_registry_output.stdout),
+            String::from_utf8_lossy(&missing_registry_output.stderr)
+        );
+        if !missing_registry_output.status.success()
+            || !missing_registry_text.contains("obsolete_mcp_handoff=codex_registry_not_verified")
+            || !missing_registry_text.contains("codex_plugin_ready=true codex_registry_ready=false")
+            || !windows_process_is_alive(&first_obsolete_mcp_pid)?
+        {
+            return Err(io::Error::other(format!(
+                "skip flags treated missing registry as readiness:\n{missing_registry_text}"
+            ))
+            .into());
+        }
+
+        for (label, malformed_registry) in [
+            ("singleton-array-root", json!([exact_registry.clone()])),
+            (
+                "singleton-array-transport",
+                json!({
+                    "name": "projectatlas",
+                    "enabled": true,
+                    "transport": [exact_registry["transport"].clone()]
+                }),
+            ),
+        ] {
+            fs::write(&registry, serde_json::to_vec(&malformed_registry)?)?;
+            let malformed_output =
+                run_installer(&[first_obsolete_mcp_pid.process_id, first_owner.id()])?;
+            let malformed_text = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&malformed_output.stdout),
+                String::from_utf8_lossy(&malformed_output.stderr)
+            );
+            if !malformed_output.status.success()
+                || !malformed_text.contains("obsolete_mcp_handoff=codex_registry_not_verified")
+                || !windows_process_is_alive(&first_obsolete_mcp_pid)?
+            {
+                return Err(io::Error::other(format!(
+                    "{label} registry JSON shape was treated as readiness:\n{malformed_text}"
+                ))
+                .into());
+            }
+        }
+        fs::write(&registry, serde_json::to_vec(&exact_registry)?)?;
+        fs::write(&config_drift_trigger, b"drift")?;
+        let drift_output = run_installer(&[first_obsolete_mcp_pid.process_id, first_owner.id()])?;
+        let drift_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&drift_output.stdout),
+            String::from_utf8_lossy(&drift_output.stderr)
+        );
+        if !drift_output.status.success()
+            || !drift_text.contains("update_state=partial")
+            || !drift_text.contains("obsolete_mcp_handoff=replacement_readiness_changed")
+            || !drift_text.contains("runtime_mcp_configs_ready=false")
+            || !drift_text.contains("rerun this installer")
+            || drift_text.contains("integration verified through generated MCP config")
+            || drift_text.contains("The runtime and generated MCP configs are ready")
+            || !windows_process_is_alive(&first_obsolete_mcp_pid)?
+            || first_owner.try_wait()?.is_some()
+        {
+            return Err(io::Error::other(format!(
+                "installer reported stale final runtime/config readiness after config drift:\n{drift_text}"
+            ))
+            .into());
+        }
+        let (owner, process_id) = spawn_codex_owned_obsolete_mcp(
+            &codex_owner_fixture,
+            &stable_runtime,
+            &db,
+            Some(&atlas_dir.join("config.toml")),
+            &temp.path().join("second-obsolete-mcp.pid"),
+        )?;
+        second_owner = Some(owner);
+        second_obsolete_mcp_pid = Some(process_id);
+        let second_identity = second_obsolete_mcp_pid
+            .as_ref()
+            .ok_or_else(|| io::Error::other("second obsolete MCP fixture missing"))?;
+        let second_parent_id = second_owner
+            .as_ref()
+            .ok_or_else(|| io::Error::other("second Codex owner fixture missing"))?
+            .id();
+        let ambiguous_output = run_installer(&[
+            first_obsolete_mcp_pid.process_id,
+            first_owner.id(),
+            second_identity.process_id,
+            second_parent_id,
+        ])?;
+        let ambiguous_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&ambiguous_output.stdout),
+            String::from_utf8_lossy(&ambiguous_output.stderr)
+        );
+        let second_alive = windows_process_is_alive(
+            second_obsolete_mcp_pid
+                .as_ref()
+                .ok_or_else(|| io::Error::other("second obsolete MCP fixture missing"))?,
+        )?;
+        if !ambiguous_output.status.success()
+            || !ambiguous_text.contains("obsolete_mcp_handoff=ambiguous")
+            || !ambiguous_text.contains("codex_plugin_ready=true codex_registry_ready=true")
+            || !windows_process_is_alive(&first_obsolete_mcp_pid)?
+            || !second_alive
+        {
+            return Err(io::Error::other(format!(
+                "ambiguous obsolete MCP owners were not preserved:\n{ambiguous_text}"
+            ))
+            .into());
+        }
+        let fake_codex_calls = fs::read_to_string(&fake_codex_log)?;
+        for forbidden in [
+            "plugin marketplace remove",
+            "plugin remove",
+            "plugin add",
+            "mcp remove",
+            "mcp add",
+        ] {
+            if fake_codex_calls.contains(forbidden) {
+                return Err(io::Error::other(format!(
+                    "skip flags allowed forbidden Codex mutation {forbidden:?}:\n{fake_codex_calls}"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    })();
+
+    if let Some(process_id) = second_obsolete_mcp_pid.as_ref()
+        && windows_process_is_alive(process_id)?
+    {
+        let stop_result = stop_windows_fixture_process(process_id);
+        if let Err(error) = stop_result
+            && test_result.is_ok()
+        {
+            return Err(error);
+        }
+    }
+    if let Some(process) = second_owner.as_mut()
+        && process.try_wait()?.is_none()
+    {
+        let kill_result = process.kill();
+        let wait_result = process.wait();
+        if let Err(error) = kill_result
+            && test_result.is_ok()
+            && error.kind() != io::ErrorKind::InvalidInput
+        {
+            return Err(error.into());
+        }
+        if let Err(error) = wait_result
+            && test_result.is_ok()
+        {
+            return Err(error.into());
+        }
+    }
+    if windows_process_is_alive(&first_obsolete_mcp_pid)? {
+        let stop_result = stop_windows_fixture_process(&first_obsolete_mcp_pid);
+        if let Err(error) = stop_result
+            && test_result.is_ok()
+        {
+            return Err(error);
+        }
+    }
+    if first_owner.try_wait()?.is_none() {
+        let kill_result = first_owner.kill();
+        let wait_result = first_owner.wait();
+        if let Err(error) = kill_result
+            && test_result.is_ok()
+            && error.kind() != io::ErrorKind::InvalidInput
+        {
+            return Err(error.into());
+        }
+        if let Err(error) = wait_result
+            && test_result.is_ok()
+        {
+            return Err(error.into());
+        }
+    }
+    test_result
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_installer_obsolete_mcp_handoff_requires_exact_codex_plugin_state()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let script_dir = temp.path().join("scripts");
+    fs::create_dir_all(&script_dir)?;
+    let script = script_dir.join("test-codex-plugin-selection.ps1");
+    fs::write(
+        &script,
+        r#"$ErrorActionPreference = "Stop"
+$installerSource = Get-Content -Raw -LiteralPath $env:PROJECTATLAS_INSTALLER
+foreach ($functionName in @(
+        "Test-ProjectAtlasJsonObject",
+        "Get-ProjectAtlasCodexPlugin",
+        "Get-ProjectAtlasCodexMarketplace",
+        "Get-ProjectAtlasCodexPluginSourcePath",
+        "Get-ProjectAtlasCodexPluginSourceManifestVersion",
+        "Test-ProjectAtlasCodexPluginSourceManifest",
+        "Test-ProjectAtlasCodexPluginReady"
+    )) {
+    $functionMatch = [regex]::Match(
+        $installerSource,
+        "(?ms)^function $functionName \{.*?^\}"
+    )
+    if (-not $functionMatch.Success) {
+        throw "Installer Codex selector was not found: $functionName"
+    }
+    Invoke-Expression $functionMatch.Value
+}
+$script:pluginPayload = $null
+function Invoke-ProjectAtlasBoundedJsonCommand {
+    return ,$script:pluginPayload
+}
+$validPlugin = [pscustomobject]@{
+    pluginId = "projectatlas@projectatlas"
+    name = "projectatlas"
+    marketplaceName = "projectatlas"
+    version = "0.4.2"
+    installed = $true
+    enabled = $true
+    marketplaceSource = [pscustomobject]@{
+        source = "https://github.com/styler-ai/ProjectAtlas.git"
+    }
+    source = [pscustomobject]@{ path = $env:PROJECTATLAS_PLUGIN_CACHE }
+}
+$script:pluginPayload = [pscustomobject]@{ installed = @($validPlugin) }
+if ($null -eq (Get-ProjectAtlasCodexPlugin "codex.exe")) {
+    throw "Exact singleton ProjectAtlas plugin was rejected."
+}
+$invalidPluginPayloads = [System.Collections.Generic.List[object]]::new()
+$invalidPluginPayloads.Add([object[]]@([pscustomobject]@{ installed = @($validPlugin) }))
+$invalidPluginPayloads.Add([pscustomobject]@{ installed = $validPlugin })
+$invalidPluginPayloads.Add([pscustomobject]@{ installed = @(
+            $validPlugin,
+            [pscustomobject]@{
+                pluginId = 1
+                name = "projectatlas"
+                marketplaceName = "projectatlas"
+            }
+        ) })
+$invalidPluginPayloads.Add([pscustomobject]@{ installed = @([pscustomobject]@{
+                pluginId = 1
+                name = "projectatlas"
+                marketplaceName = "projectatlas"
+            }) })
+$invalidPluginPayloads.Add([pscustomobject]@{ installed = @("projectatlas") })
+$invalidPluginPayloads.Add([pscustomobject]@{ installed = [object[]]@(, [object[]]@($validPlugin)) })
+$invalidPluginPayloads.Add([pscustomobject]@{ installed = $null })
+$invalidPluginPayloads.Add("projectatlas")
+$invalidPluginLabels = @(
+    "singleton-array-root",
+    "scalar-installed",
+    "valid-plus-colliding-record",
+    "malformed-identity",
+    "scalar-entry",
+    "nested-entry-array",
+    "null-installed",
+    "scalar-root"
+)
+$caseIndex = 0
+foreach ($payload in $invalidPluginPayloads) {
+    $script:pluginPayload = $payload
+    if ($null -ne (Get-ProjectAtlasCodexPlugin "codex.exe")) {
+        throw "Malformed or ambiguous ProjectAtlas plugin selection was accepted: $($invalidPluginLabels[$caseIndex])"
+    }
+    $caseIndex += 1
+}
+$validMarketplace = [pscustomobject]@{
+    name = "projectatlas"
+    marketplaceSource = [pscustomobject]@{
+        source = "https://github.com/styler-ai/ProjectAtlas.git"
+    }
+}
+$validMarketplacePayload = [pscustomobject]@{ marketplaces = @($validMarketplace) }
+if ($null -eq (Get-ProjectAtlasCodexMarketplace $validMarketplacePayload)) {
+    throw "Exact singleton ProjectAtlas marketplace was rejected."
+}
+$invalidMarketplacePayloads = [System.Collections.Generic.List[object]]::new()
+$invalidMarketplacePayloads.Add([object[]]@($validMarketplacePayload))
+$invalidMarketplacePayloads.Add([pscustomobject]@{ marketplaces = $validMarketplace })
+$invalidMarketplacePayloads.Add([pscustomobject]@{ marketplaces = @(
+            $validMarketplace,
+            [pscustomobject]@{ name = "projectatlas"; marketplaceSource = $null }
+        ) })
+$invalidMarketplacePayloads.Add([pscustomobject]@{ marketplaces = @("projectatlas") })
+$invalidMarketplacePayloads.Add([pscustomobject]@{ marketplaces = [object[]]@(, [object[]]@($validMarketplace)) })
+$invalidMarketplacePayloads.Add([pscustomobject]@{ marketplaces = $null })
+$invalidMarketplacePayloads.Add("projectatlas")
+$invalidMarketplaceLabels = @(
+    "singleton-array-root",
+    "scalar-marketplaces",
+    "valid-plus-colliding-record",
+    "scalar-entry",
+    "nested-entry-array",
+    "null-marketplaces",
+    "scalar-root"
+)
+$caseIndex = 0
+foreach ($payload in $invalidMarketplacePayloads) {
+    if ($null -ne (Get-ProjectAtlasCodexMarketplace $payload)) {
+        throw "Malformed or ambiguous ProjectAtlas marketplace selection was accepted: $($invalidMarketplaceLabels[$caseIndex])"
+    }
+    $caseIndex += 1
+}
+$manifestDirectory = Join-Path $env:PROJECTATLAS_PLUGIN_CACHE ".codex-plugin"
+New-Item -ItemType Directory -Force -Path $manifestDirectory | Out-Null
+$manifestPath = Join-Path $manifestDirectory "plugin.json"
+Set-Content -LiteralPath $manifestPath -Value '{"name":"projectatlas","version":"0.4.2"}'
+if (-not (Test-ProjectAtlasCodexPluginSourceManifest $validPlugin "0.4.2")) {
+    throw "Exact object-root plugin source manifest was rejected."
+}
+Set-Content -LiteralPath $manifestPath -Value '[{"name":"projectatlas","version":"0.4.2"}]'
+if ((Get-ProjectAtlasCodexPluginSourceManifestVersion $validPlugin) -eq "0.4.2" `
+    -or (Test-ProjectAtlasCodexPluginSourceManifest $validPlugin "0.4.2")) {
+    throw "Singleton-array plugin source manifest was accepted."
+}
+$script:pluginPayload = [pscustomobject]@{ installed = @($validPlugin) }
+function Convert-ProjectAtlasVersionTag { return "0.4.2" }
+function Resolve-ProjectAtlasCodexCommand { return "C:\Codex\codex.exe" }
+function Get-ProjectAtlasCodexPlugin { return $validPlugin }
+function Test-ProjectAtlasOfficialMarketplaceSource { return $true }
+$script:sourceManifestError = $false
+function Test-ProjectAtlasCodexPluginSourceManifest {
+    if ($script:sourceManifestError) { throw "Unreadable plugin source manifest." }
+    return $true
+}
+$script:pluginSourcePath = $null
+function Get-ProjectAtlasCodexPluginSourcePath { return $script:pluginSourcePath }
+function Get-ProjectAtlasSha256 { throw "Unreadable plugin artifact." }
+$directoryArtifactRoot = Join-Path $env:PROJECTATLAS_PLUGIN_CACHE "directory-artifact"
+$unreadableArtifactRoot = Join-Path $env:PROJECTATLAS_PLUGIN_CACHE "unreadable-artifact"
+foreach ($pluginRoot in @($directoryArtifactRoot, $unreadableArtifactRoot)) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $pluginRoot ".codex-plugin") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $pluginRoot "skills\projectatlas") | Out-Null
+    Set-Content -LiteralPath (Join-Path $pluginRoot ".codex-plugin\plugin.json") -Value "{}"
+}
+New-Item -ItemType Directory -Force -Path (Join-Path $directoryArtifactRoot "skills\projectatlas\SKILL.md") | Out-Null
+Set-Content -LiteralPath (Join-Path $unreadableArtifactRoot "skills\projectatlas\SKILL.md") -Value "fixture"
+$installerSkillPath = Join-Path (Split-Path -Parent $PSScriptRoot) "skills\projectatlas\SKILL.md"
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $installerSkillPath) | Out-Null
+Set-Content -LiteralPath $installerSkillPath -Value "fixture"
+$script:pluginSourcePath = $directoryArtifactRoot
+if (Test-ProjectAtlasCodexPluginReady "0.4.2") {
+    throw "A plugin cache directory was accepted as a skill file."
+}
+$script:pluginSourcePath = $unreadableArtifactRoot
+if (Test-ProjectAtlasCodexPluginReady "0.4.2") {
+    throw "An unreadable plugin artifact was accepted as ready."
+}
+$script:sourceManifestError = $true
+if (Test-ProjectAtlasCodexPluginReady "0.4.2") {
+    throw "An unreadable plugin source manifest was accepted as ready."
+}
+$script:sourceManifestError = $false
+$script:pluginSourcePath = "C:\bad$([char]0)path"
+if (Test-ProjectAtlasCodexPluginReady "0.4.2") {
+    throw "A malformed plugin source path was accepted as ready."
+}
+Write-Output "strict_plugin_marketplace_and_readiness"
+"#,
+    )?;
+    let installer = workspace_root()?
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    for shell in ["powershell", "pwsh"] {
+        let output = StdCommand::new(shell)
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&script)
+            .env("PROJECTATLAS_INSTALLER", &installer)
+            .env(
+                "PROJECTATLAS_PLUGIN_CACHE",
+                temp.path().join("plugin-cache"),
+            )
+            .output()?;
+        if !output.status.success()
+            || !String::from_utf8_lossy(&output.stdout)
+                .contains("strict_plugin_marketplace_and_readiness")
+        {
+            return Err(io::Error::other(format!(
+                "strict Codex plugin, marketplace, and readiness coverage failed under {shell}:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_installer_obsolete_mcp_handoff_binds_generated_config_digest_to_validated_bytes()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let project_root = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = project_root.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    let project_config = atlas_dir.join("config.toml");
+    fs::write(&project_config, "[project]\nroot = \".\"\n")?;
+    let generated = atlas_dir.join("projectatlas.mcp.json");
+    let runtime = temp.path().join("projectatlas.exe");
+    let db = atlas_dir.join("projectatlas.db");
+    let valid = json!({
+        "mcpServers": {
+            "projectatlas": {
+                "command": runtime,
+                "args": [
+                    "--require-version", env!("CARGO_PKG_VERSION"),
+                    "--db", db,
+                    "--config", project_config,
+                    "mcp"
+                ],
+                "cwd": project_root
+            }
+        }
+    });
+    let valid_bytes = serde_json::to_vec(&valid)?;
+    fs::write(&generated, &valid_bytes)?;
+    let singleton_root = serde_json::to_vec(&json!([valid]))?;
+    let singleton_nested_object = serde_json::to_vec(&json!({
+        "mcpServers": [valid["mcpServers"].clone()]
+    }))?;
+    let extra_arguments = serde_json::to_vec(&json!({
+        "mcpServers": {
+            "projectatlas": {
+                "command": runtime,
+                "args": [
+                    "--require-version", env!("CARGO_PKG_VERSION"),
+                    "--db", db,
+                    "--config", project_config,
+                    "--extra", "value", "mcp"
+                ],
+                "cwd": project_root
+            }
+        }
+    }))?;
+    let extra_arguments_path = temp.path().join("generated-extra-arguments.json");
+    let singleton_root_path = temp.path().join("generated-singleton-root.json");
+    let singleton_nested_object_path = temp.path().join("generated-singleton-nested-object.json");
+    fs::write(&extra_arguments_path, &extra_arguments)?;
+    fs::write(&singleton_root_path, &singleton_root)?;
+    fs::write(&singleton_nested_object_path, &singleton_nested_object)?;
+    let script = temp.path().join("test-generated-config-snapshot.ps1");
+    fs::write(
+        &script,
+        r#"$ErrorActionPreference = "Stop"
+$installerSource = Get-Content -Raw -LiteralPath $env:PROJECTATLAS_INSTALLER
+foreach ($functionName in @(
+        "Assert-ProjectAtlasDirectPath",
+        "Assert-ProjectAtlasDirectFilePath",
+        "Convert-ProjectAtlasVersionTag",
+        "Get-NormalizedPathEntry",
+        "Get-ProjectAtlasComparablePath",
+        "Get-ProjectAtlasMcpLaunchArguments",
+        "Test-ProjectAtlasArgumentsUseAbsolutePaths",
+        "Test-ProjectAtlasExactArguments",
+        "Assert-ProjectAtlasEquivalentPath",
+        "Get-ProjectAtlasSha256",
+        "Get-ProjectAtlasSha256FromBytes",
+        "Test-ProjectAtlasJsonObject",
+        "Test-ProjectAtlasJsonStringArray",
+        "Confirm-ProjectAtlasGeneratedMcpConfig",
+        "Test-ProjectAtlasRuntimeMcpConfigReadiness"
+    )) {
+    $match = [regex]::Match($installerSource, "(?ms)^function $functionName \{.*?^\}")
+    if (-not $match.Success) { throw "Installer function missing: $functionName" }
+    Invoke-Expression $match.Value
+}
+$digest = Confirm-ProjectAtlasGeneratedMcpConfig `
+    $env:PROJECTATLAS_GENERATED_CONFIG `
+    "Codex" `
+    $env:PROJECTATLAS_RUNTIME `
+    $env:PROJECTATLAS_VERSION `
+    $env:PROJECTATLAS_DB `
+    $env:PROJECTATLAS_PROJECT_CONFIG `
+    $env:PROJECTATLAS_FLAT_CONFIG `
+    $env:PROJECTATLAS_PROJECT_ROOT
+Write-Output "validated_digest=$digest"
+$validatedBytes = [System.IO.File]::ReadAllBytes($env:PROJECTATLAS_GENERATED_CONFIG)
+function Test-ProjectAtlasRuntime { return $script:runtimeReady }
+$script:runtimeReady = $true
+$configPaths = [string[]]@($env:PROJECTATLAS_GENERATED_CONFIG)
+$expectedDigests = [string[]]@($digest)
+if (-not (Test-ProjectAtlasRuntimeMcpConfigReadiness `
+        $env:PROJECTATLAS_RUNTIME `
+        $env:PROJECTATLAS_VERSION `
+        $configPaths `
+        $expectedDigests)) {
+    throw "Validated runtime/config bundle was not ready."
+}
+[System.IO.File]::WriteAllBytes(
+    $env:PROJECTATLAS_GENERATED_CONFIG,
+    [System.IO.File]::ReadAllBytes($env:PROJECTATLAS_EXTRA_ARGUMENTS)
+)
+if (Test-ProjectAtlasRuntimeMcpConfigReadiness `
+    $env:PROJECTATLAS_RUNTIME `
+    $env:PROJECTATLAS_VERSION `
+    $configPaths `
+    $expectedDigests) {
+    throw "Changed generated config was reported ready."
+}
+[System.IO.File]::WriteAllBytes($env:PROJECTATLAS_GENERATED_CONFIG, $validatedBytes)
+$script:runtimeReady = $false
+if (Test-ProjectAtlasRuntimeMcpConfigReadiness `
+    $env:PROJECTATLAS_RUNTIME `
+    $env:PROJECTATLAS_VERSION `
+    $configPaths `
+    $expectedDigests) {
+    throw "Changed runtime readiness was reported ready."
+}
+$script:runtimeReady = $true
+Microsoft.PowerShell.Management\Remove-Item `
+    -LiteralPath $env:PROJECTATLAS_GENERATED_CONFIG `
+    -Force
+if (Test-ProjectAtlasRuntimeMcpConfigReadiness `
+    $env:PROJECTATLAS_RUNTIME `
+    $env:PROJECTATLAS_VERSION `
+    $configPaths `
+    $expectedDigests) {
+    throw "Missing generated config was reported ready."
+}
+[System.IO.File]::WriteAllBytes($env:PROJECTATLAS_GENERATED_CONFIG, $validatedBytes)
+Write-Output "final_runtime_config_drift_not_ready"
+foreach ($invalidBytes in @(
+        [System.IO.File]::ReadAllBytes($env:PROJECTATLAS_EXTRA_ARGUMENTS),
+        [System.IO.File]::ReadAllBytes($env:PROJECTATLAS_SINGLETON_ROOT),
+        [System.IO.File]::ReadAllBytes($env:PROJECTATLAS_SINGLETON_NESTED_OBJECT)
+    )) {
+    [System.IO.File]::WriteAllBytes($env:PROJECTATLAS_GENERATED_CONFIG, $invalidBytes)
+    try {
+        Confirm-ProjectAtlasGeneratedMcpConfig `
+            $env:PROJECTATLAS_GENERATED_CONFIG `
+            "Codex" `
+            $env:PROJECTATLAS_RUNTIME `
+            $env:PROJECTATLAS_VERSION `
+            $env:PROJECTATLAS_DB `
+            $env:PROJECTATLAS_PROJECT_CONFIG `
+            $env:PROJECTATLAS_FLAT_CONFIG `
+            $env:PROJECTATLAS_PROJECT_ROOT | Out-Null
+        throw "Invalid generated config was accepted."
+    }
+    catch {
+        if ($_.Exception.Message -eq "Invalid generated config was accepted.") { throw }
+    }
+}
+Write-Output "invalid_snapshots_rejected"
+"#,
+    )?;
+    let installer = workspace_root()?
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    let output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(&script)
+        .env("PROJECTATLAS_INSTALLER", &installer)
+        .env("PROJECTATLAS_GENERATED_CONFIG", &generated)
+        .env("PROJECTATLAS_RUNTIME", &runtime)
+        .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+        .env("PROJECTATLAS_DB", &db)
+        .env("PROJECTATLAS_PROJECT_CONFIG", &project_config)
+        .env(
+            "PROJECTATLAS_FLAT_CONFIG",
+            project_root.join("projectatlas.toml"),
+        )
+        .env("PROJECTATLAS_PROJECT_ROOT", &project_root)
+        .env("PROJECTATLAS_EXTRA_ARGUMENTS", &extra_arguments_path)
+        .env("PROJECTATLAS_SINGLETON_ROOT", &singleton_root_path)
+        .env(
+            "PROJECTATLAS_SINGLETON_NESTED_OBJECT",
+            &singleton_nested_object_path,
+        )
+        .output()?;
+    let output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected_digest = sha256_hex(&valid_bytes);
+    if !output.status.success()
+        || !output_text.contains(&format!("validated_digest={expected_digest}"))
+        || !output_text.contains("final_runtime_config_drift_not_ready")
+        || !output_text.contains("invalid_snapshots_rejected")
+    {
+        return Err(io::Error::other(format!(
+            "generated config same-byte validation coverage failed:\n{output_text}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_installer_obsolete_mcp_handoff_rejects_changed_exited_and_inaccessible_processes()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("test-obsolete-mcp-retirement.ps1");
+    fs::write(
+        &script,
+        r#"$ErrorActionPreference = "Stop"
+$installerSource = Get-Content -Raw -LiteralPath $env:PROJECTATLAS_INSTALLER
+$sourceMatch = [regex]::Match(
+    $installerSource,
+    "(?s)Add-Type -TypeDefinition @'\r?\n(?<source>.*?)\r?\n'@"
+)
+if (-not $sourceMatch.Success) {
+    throw "Installer runtime process source was not found."
+}
+Add-Type -TypeDefinition $sourceMatch.Groups["source"].Value
+$hostPath = (Get-Process -Id $PID).Path
+$parent = Get-Process -Id $PID
+$parentCreationFileTime = $parent.StartTime.ToUniversalTime().ToFileTimeUtc()
+$parentCim = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $PID"
+$parentArguments = [ProjectAtlas.Installer.ObsoleteMcpProcess]::ParseCommandLine(
+    [string]$parentCim.CommandLine
+)
+$owned = Start-Process $hostPath `
+    -ArgumentList @("-NoProfile", "-Command", "Start-Sleep -Seconds 30") `
+    -WindowStyle Hidden `
+    -PassThru
+try {
+    $creationFileTime = $owned.StartTime.ToUniversalTime().ToFileTimeUtc()
+    $ownedCim = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($owned.Id)"
+    $ownedArguments = [ProjectAtlas.Installer.ObsoleteMcpProcess]::ParseCommandLine(
+        [string]$ownedCim.CommandLine
+    )
+    $imageSha256 = [ProjectAtlas.Installer.ObsoleteMcpProcess]::ComputeImageSha256($hostPath)
+    $changed = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
+        $owned.Id,
+        $creationFileTime + 1000,
+        $hostPath,
+        $ownedArguments,
+        $imageSha256,
+        $PID,
+        $parentCreationFileTime,
+        $hostPath,
+        $parentArguments,
+        $imageSha256,
+        1000
+    )
+    if ($changed.State -ne "identity_changed_creation" -or $owned.HasExited) {
+        throw "Changed process identity was not refused safely: $($changed.State)"
+    }
+    $wrongPath = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
+        $owned.Id,
+        $creationFileTime,
+        (Join-Path (Split-Path -Parent $hostPath) "not-the-owner.exe"),
+        $ownedArguments,
+        $imageSha256,
+        $PID,
+        $parentCreationFileTime,
+        $hostPath,
+        $parentArguments,
+        $imageSha256,
+        1000
+    )
+    if ($wrongPath.State -ne "identity_changed_path" -or $owned.HasExited) {
+        throw "Changed process path was not refused safely: $($wrongPath.State)"
+    }
+    $wrongArguments = @($ownedArguments)
+    $wrongArguments[$wrongArguments.Count - 1] = "runtime-info"
+    $changedCommand = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
+        $owned.Id,
+        $creationFileTime,
+        $hostPath,
+        $wrongArguments,
+        $imageSha256,
+        $PID,
+        $parentCreationFileTime,
+        $hostPath,
+        $parentArguments,
+        $imageSha256,
+        1000
+    )
+    if ($changedCommand.State -ne "identity_changed_command" -or $owned.HasExited) {
+        throw "Changed process command was not refused safely: $($changedCommand.State)"
+    }
+    $changedFile = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
+        $owned.Id,
+        $creationFileTime,
+        $hostPath,
+        $ownedArguments,
+        ("0" * 64),
+        $PID,
+        $parentCreationFileTime,
+        $hostPath,
+        $parentArguments,
+        $imageSha256,
+        1000
+    )
+    if ($changedFile.State -ne "identity_changed_file" -or $owned.HasExited) {
+        throw "Changed process image was not refused safely: $($changedFile.State)"
+    }
+    $changedParent = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
+        $owned.Id,
+        $creationFileTime,
+        $hostPath,
+        $ownedArguments,
+        $imageSha256,
+        ($PID + 1),
+        $parentCreationFileTime,
+        $hostPath,
+        $parentArguments,
+        $imageSha256,
+        1000
+    )
+    if ($changedParent.State -ne "identity_changed_parent" -or $owned.HasExited) {
+        throw "Changed process parent identity was not refused safely: $($changedParent.State)"
+    }
+    $changedParentCreation = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
+        $owned.Id,
+        $creationFileTime,
+        $hostPath,
+        $ownedArguments,
+        $imageSha256,
+        $PID,
+        ($parentCreationFileTime + 1000),
+        $hostPath,
+        $parentArguments,
+        $imageSha256,
+        1000
+    )
+    if ($changedParentCreation.State -ne "identity_changed_parent_creation" -or $owned.HasExited) {
+        throw "Changed parent creation was not refused safely: $($changedParentCreation.State)"
+    }
+    $changedParentPath = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
+        $owned.Id,
+        $creationFileTime,
+        $hostPath,
+        $ownedArguments,
+        $imageSha256,
+        $PID,
+        $parentCreationFileTime,
+        (Join-Path (Split-Path -Parent $hostPath) "not-the-parent.exe"),
+        $parentArguments,
+        $imageSha256,
+        1000
+    )
+    if ($changedParentPath.State -ne "identity_changed_parent_path" -or $owned.HasExited) {
+        throw "Changed parent path was not refused safely: $($changedParentPath.State)"
+    }
+    $wrongParentArguments = @($parentArguments) + "identity-changed"
+    $changedParentCommand = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
+        $owned.Id,
+        $creationFileTime,
+        $hostPath,
+        $ownedArguments,
+        $imageSha256,
+        $PID,
+        $parentCreationFileTime,
+        $hostPath,
+        $wrongParentArguments,
+        $imageSha256,
+        1000
+    )
+    if ($changedParentCommand.State -ne "identity_changed_parent_command" -or $owned.HasExited) {
+        throw "Changed process parent command was not refused safely: $($changedParentCommand.State)"
+    }
+    $changedParentFile = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
+        $owned.Id,
+        $creationFileTime,
+        $hostPath,
+        $ownedArguments,
+        $imageSha256,
+        $PID,
+        $parentCreationFileTime,
+        $hostPath,
+        $parentArguments,
+        ("0" * 64),
+        1000
+    )
+    if ($changedParentFile.State -ne "identity_changed_parent_file" -or $owned.HasExited) {
+        throw "Changed parent image was not refused safely: $($changedParentFile.State)"
+    }
+    $invalidExpectedPath = $hostPath + [char]0
+    $invalidPath = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
+        $owned.Id,
+        $creationFileTime,
+        $invalidExpectedPath,
+        $ownedArguments,
+        $imageSha256,
+        $PID,
+        $parentCreationFileTime,
+        $hostPath,
+        $parentArguments,
+        $imageSha256,
+        1000
+    )
+    if ($invalidPath.State -ne "inspection_failed" -or $owned.HasExited) {
+        throw "Invalid identity input was misclassified as process exit: $($invalidPath.State)"
+    }
+    $findMatch = [regex]::Match(
+        $installerSource,
+        "(?ms)^function Find-ProjectAtlasObsoleteStableMcpProcess \{.*?^\}"
+    )
+    if (-not $findMatch.Success) {
+        throw "Installer obsolete MCP finder function was not found."
+    }
+    Invoke-Expression $findMatch.Value
+    $syntheticStablePath = "C:\stable\projectatlas.exe"
+    $syntheticCodexPath = "C:\signed\codex.exe"
+    function Initialize-ProjectAtlasRuntimeProbe {}
+    function Get-CimInstance {
+        return @(
+            [pscustomobject]@{
+                ProcessId = 42
+                Name = "projectatlas.exe"
+                ExecutablePath = $syntheticStablePath
+                CommandLine = '"C:\stable\projectatlas.exe" --require-version 0.3.26 --db C:\repo\projectatlas.db --config C:\repo\config.toml mcp'
+                CreationDate = 100
+                ParentProcessId = 43
+            },
+            [pscustomobject]@{
+                ProcessId = 43
+                Name = "codex.exe"
+                ExecutablePath = $syntheticCodexPath
+                CommandLine = '"C:\signed\codex.exe" app-server'
+                CreationDate = 200
+                ParentProcessId = 1
+            }
+        )
+    }
+    function Convert-ProjectAtlasVersionTag {
+        param([string]$Version)
+        return $Version.TrimStart("v")
+    }
+    function Get-NormalizedPathEntry {
+        param([string]$Path)
+        return $Path.ToLowerInvariant()
+    }
+    function Test-ProjectAtlasArgumentsUseAbsolutePaths { return $true }
+    function Get-ProjectAtlasMcpLaunchArguments { return @() }
+    function Test-ProjectAtlasExactArguments { return $true }
+    function Convert-ProjectAtlasCimCreationFileTime {
+        param([object]$Value)
+        return [long]$Value
+    }
+    function Get-ProjectAtlasCodexImageIdentity { return ("c" * 64) }
+    $reusedParentSelection = Find-ProjectAtlasObsoleteStableMcpProcess `
+        $syntheticStablePath `
+        "C:\repo\projectatlas.db" `
+        "C:\repo\config.toml" `
+        "C:\repo\projectatlas.toml" `
+        "0.4.3"
+    if ($reusedParentSelection.State -ne "unsafe_owner" -or $owned.HasExited -or $parent.HasExited) {
+        throw "Parent created after its MCP child was not refused safely: $($reusedParentSelection.State)"
+    }
+    $handoffMatch = [regex]::Match(
+        $installerSource,
+        "(?ms)^function Invoke-ProjectAtlasObsoleteStableMcpHandoff \{.*?^\}"
+    )
+    if (-not $handoffMatch.Success) {
+        throw "Installer obsolete MCP handoff function was not found."
+    }
+    Invoke-Expression $handoffMatch.Value
+    function Test-ProjectAtlasRuntime { return $true }
+    function Assert-ProjectAtlasDirectFilePath {}
+    function Find-ProjectAtlasObsoleteStableMcpProcess {
+        return [pscustomobject]@{
+            State = "exact"
+            ObservedVersion = "0.3.26"
+            ImageSha256 = ("a" * 64)
+        }
+    }
+    function Test-ProjectAtlasCodexPluginReady { return $true }
+    function Test-ProjectAtlasCodexMcpRegistryReady { return $true }
+    function Get-ProjectAtlasRuntimeImageSha256 { return ("a" * 64) }
+    function Get-ProjectAtlasSha256 { return ("b" * 64) }
+    function Get-ProjectAtlasRuntimeVersion { return "0.3.27" }
+    function Convert-ProjectAtlasVersionTag { param([string]$Version); return $Version }
+    $changedVersion = Invoke-ProjectAtlasObsoleteStableMcpHandoff `
+        $hostPath `
+        $hostPath `
+        "0.4.3" `
+        "C:\repo\.projectatlas\projectatlas.db" `
+        "C:\repo\.projectatlas\config.toml" `
+        "C:\repo\projectatlas.toml" `
+        "C:\repo\.projectatlas\projectatlas.mcp.json" `
+        "C:\repo\.projectatlas\projectatlas.claude.mcp.json" `
+        "C:\repo\.projectatlas\projectatlas.opencode.json" `
+        ("b" * 64) `
+        ("b" * 64) `
+        ("b" * 64)
+    if ($changedVersion -ne "identity_changed_version" -or $owned.HasExited) {
+        throw "Changed runtime version was not refused safely: $changedVersion"
+    }
+    $changedBeforeHandoff = Invoke-ProjectAtlasObsoleteStableMcpHandoff `
+        $hostPath `
+        $hostPath `
+        "0.4.3" `
+        "C:\repo\.projectatlas\projectatlas.db" `
+        "C:\repo\.projectatlas\config.toml" `
+        "C:\repo\projectatlas.toml" `
+        "C:\repo\.projectatlas\projectatlas.mcp.json" `
+        "C:\repo\.projectatlas\projectatlas.claude.mcp.json" `
+        "C:\repo\.projectatlas\projectatlas.opencode.json" `
+        ("e" * 64) `
+        ("e" * 64) `
+        ("e" * 64)
+    if ($changedBeforeHandoff -ne "replacement_readiness_changed" -or $owned.HasExited) {
+        throw "Pre-handoff replacement config was not refused safely: $changedBeforeHandoff"
+    }
+    function Find-ProjectAtlasObsoleteStableMcpProcess {
+        return [pscustomobject]@{
+            State = "exact"
+            ObservedVersion = "0.3.26"
+            ImageSha256 = ("a" * 64)
+            ParentPath = $hostPath
+            ParentImageSha256 = ("c" * 64)
+        }
+    }
+    function Get-ProjectAtlasRuntimeVersion { return "0.3.26" }
+    function Get-ProjectAtlasCodexImageIdentity { return ("c" * 64) }
+    $script:configHashCalls = 0
+    function Get-ProjectAtlasSha256 {
+        $script:configHashCalls += 1
+        if ($script:configHashCalls -gt 3) { return ("d" * 64) }
+        return ("b" * 64)
+    }
+    $changedReplacement = Invoke-ProjectAtlasObsoleteStableMcpHandoff `
+        $hostPath `
+        $hostPath `
+        "0.4.3" `
+        "C:\repo\.projectatlas\projectatlas.db" `
+        "C:\repo\.projectatlas\config.toml" `
+        "C:\repo\projectatlas.toml" `
+        "C:\repo\.projectatlas\projectatlas.mcp.json" `
+        "C:\repo\.projectatlas\projectatlas.claude.mcp.json" `
+        "C:\repo\.projectatlas\projectatlas.opencode.json" `
+        ("b" * 64) `
+        ("b" * 64) `
+        ("b" * 64)
+    if ($changedReplacement -ne "replacement_readiness_changed" -or $owned.HasExited) {
+        throw "Changed replacement config was not refused safely: $changedReplacement"
+    }
+    function Get-ProjectAtlasSha256 { return ("b" * 64) }
+    function Get-ProjectAtlasCodexImageIdentity { return ("d" * 64) }
+    $changedOwnerDigest = Invoke-ProjectAtlasObsoleteStableMcpHandoff `
+        $hostPath `
+        $hostPath `
+        "0.4.3" `
+        "C:\repo\.projectatlas\projectatlas.db" `
+        "C:\repo\.projectatlas\config.toml" `
+        "C:\repo\projectatlas.toml" `
+        "C:\repo\.projectatlas\projectatlas.mcp.json" `
+        "C:\repo\.projectatlas\projectatlas.claude.mcp.json" `
+        "C:\repo\.projectatlas\projectatlas.opencode.json" `
+        ("b" * 64) `
+        ("b" * 64) `
+        ("b" * 64)
+    if ($changedOwnerDigest -ne "replacement_readiness_changed" -or $owned.HasExited) {
+        throw "Changed final Codex owner digest was not refused safely: $changedOwnerDigest"
+    }
+    if (-not $owned.HasExited) {
+        $owned.Kill()
+        $owned.WaitForExit()
+    }
+    $exited = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
+        $owned.Id,
+        $creationFileTime,
+        $hostPath,
+        $ownedArguments,
+        $imageSha256,
+        $PID,
+        $parentCreationFileTime,
+        $hostPath,
+        $parentArguments,
+        $imageSha256,
+        1000
+    )
+    if ($exited.State -ne "exited") {
+        throw "Exited process race was not classified safely: $($exited.State)"
+    }
+    $accessDenied = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
+        4,
+        0,
+        $hostPath,
+        $ownedArguments,
+        $imageSha256,
+        $PID,
+        $parentCreationFileTime,
+        $hostPath,
+        $parentArguments,
+        $imageSha256,
+        1000
+    )
+    if ($accessDenied.State -ne "access_denied" -or $accessDenied.ErrorCode -ne 5) {
+        throw "Access-denied process was not classified safely: $($accessDenied.State):$($accessDenied.ErrorCode)"
+    }
+    Write-Output "identity_changed_creation identity_changed_path identity_changed_command identity_changed_version replacement_readiness_changed identity_changed_file identity_changed_parent identity_changed_parent_creation identity_changed_parent_path identity_changed_parent_command identity_changed_parent_file parent_created_after_child inspection_failed exited access_denied"
+}
+finally {
+    if (-not $owned.HasExited) {
+        $owned.Kill()
+        $owned.WaitForExit()
+    }
+}
+"#,
+    )?;
+    let installer = workspace_root()?
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    let output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(&script)
+        .env("PROJECTATLAS_INSTALLER", &installer)
+        .output()?;
+    if !output.status.success()
+        || !String::from_utf8_lossy(&output.stdout)
+            .contains("identity_changed_creation identity_changed_path identity_changed_command identity_changed_version replacement_readiness_changed identity_changed_file identity_changed_parent identity_changed_parent_creation identity_changed_parent_path identity_changed_parent_command identity_changed_parent_file parent_created_after_child inspection_failed exited access_denied")
+    {
+        return Err(io::Error::other(format!(
+            "bounded process-retirement failure coverage failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_installer_obsolete_mcp_handoff_classifies_exit_after_final_identity_check()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("test-obsolete-mcp-exit-race.ps1");
+    fs::write(
+        &script,
+        r#"$ErrorActionPreference = "Stop"
+$installerSource = Get-Content -Raw -LiteralPath $env:PROJECTATLAS_INSTALLER
+$sourceMatch = [regex]::Match(
+    $installerSource,
+    "(?s)Add-Type -TypeDefinition @'\r?\n(?<source>.*?)\r?\n'@"
+)
+if (-not $sourceMatch.Success) {
+    throw "Installer runtime process source was not found."
+}
+$source = $sourceMatch.Groups["source"].Value
+$seamPattern = '(?m)^                        if \(parent\.HasExited\)\r?\n' +
+    '^                            return new ProcessRetirementResult\("owner_parent_exited", 0\);\r?\n' +
+    '^                        if \(candidate\.HasExited\)\r?\n' +
+    '^                            return new ProcessRetirementResult\("exited", 0\);\r?\n' +
+    '^                        if \(!TerminateProcess\(handle, 0\)\)'
+$seam = [regex]::new($seamPattern)
+if ($seam.Matches($source).Count -ne 1) {
+    throw "Installer retirement race seam was not unique."
+}
+$replacement = @'
+                        if (parent.HasExited)
+                            return new ProcessRetirementResult("owner_parent_exited", 0);
+                        if (candidate.HasExited)
+                            return new ProcessRetirementResult("exited", 0);
+                        string exitGate = Environment.GetEnvironmentVariable("PROJECTATLAS_TEST_RETIRE_EXIT_GATE");
+                        if (String.IsNullOrWhiteSpace(exitGate))
+                            throw new InvalidOperationException("Test exit gate is missing.");
+                        File.Delete(exitGate);
+                        if (WaitForSingleObject(handle, 5000) != WaitObject0)
+                            throw new TimeoutException("Test child did not exit after final identity validation.");
+                        if (!TerminateProcess(handle, 0))
+'@
+$source = $seam.Replace($source, $replacement, 1)
+Add-Type -TypeDefinition $source
+
+$hostPath = (Get-Process -Id $PID).Path
+$parent = Get-Process -Id $PID
+$parentCreationFileTime = $parent.StartTime.ToUniversalTime().ToFileTimeUtc()
+$parentCim = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $PID"
+$parentArguments = [ProjectAtlas.Installer.ObsoleteMcpProcess]::ParseCommandLine(
+    [string]$parentCim.CommandLine
+)
+$imageSha256 = [ProjectAtlas.Installer.ObsoleteMcpProcess]::ComputeImageSha256($hostPath)
+$exitGate = Join-Path $PSScriptRoot "projectatlas-retire-exit-$PID-$([guid]::NewGuid()).gate"
+Set-Content -LiteralPath $exitGate -Value "wait"
+$env:PROJECTATLAS_TEST_RETIRE_EXIT_GATE = $exitGate
+$child = Start-Process $hostPath `
+    -ArgumentList @(
+        "-NoProfile",
+        "-Command",
+        'while (Test-Path -LiteralPath $env:PROJECTATLAS_TEST_RETIRE_EXIT_GATE) { Start-Sleep -Milliseconds 10 }'
+    ) `
+    -WindowStyle Hidden `
+    -PassThru
+try {
+    $childCreationFileTime = $child.StartTime.ToUniversalTime().ToFileTimeUtc()
+    $childCim = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($child.Id)"
+    $childArguments = [ProjectAtlas.Installer.ObsoleteMcpProcess]::ParseCommandLine(
+        [string]$childCim.CommandLine
+    )
+    $result = [ProjectAtlas.Installer.ObsoleteMcpProcess]::Retire(
+        $child.Id,
+        $childCreationFileTime,
+        $hostPath,
+        $childArguments,
+        $imageSha256,
+        $PID,
+        $parentCreationFileTime,
+        $hostPath,
+        $parentArguments,
+        $imageSha256,
+        1000
+    )
+    $childExited = $child.WaitForExit(1000)
+    if ($result.State -ne "exited" -or $result.ErrorCode -ne 0 -or -not $childExited) {
+        throw "Exit after final identity validation was not classified safely: $($result.State):$($result.ErrorCode)"
+    }
+    if ($parent.HasExited) {
+        throw "Exit-race classification terminated the parent process."
+    }
+    Write-Output "exit_after_final_identity_check"
+}
+finally {
+    Remove-Item Env:PROJECTATLAS_TEST_RETIRE_EXIT_GATE -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $exitGate -Force -ErrorAction SilentlyContinue
+    if (-not $child.HasExited) {
+        $child.Kill()
+        if (-not $child.WaitForExit(5000)) {
+            throw "Exit-race child cleanup timed out."
+        }
+    }
+}
+"#,
+    )?;
+    let installer = workspace_root()?
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    let output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(&script)
+        .env("PROJECTATLAS_INSTALLER", &installer)
+        .output()?;
+    if !output.status.success()
+        || !String::from_utf8_lossy(&output.stdout).contains("exit_after_final_identity_check")
+    {
+        return Err(io::Error::other(format!(
+            "post-identity child-exit race coverage failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_installer_obsolete_mcp_handoff_requires_trusted_authenticode_cmdlet()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let codex = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
+    fs::write(&codex, b"codex identity fixture")?;
+    let script = temp.path().join("test-codex-image-identity.ps1");
+    fs::write(
+        &script,
+        r#"$ErrorActionPreference = "Stop"
+$installerSource = Get-Content -Raw -LiteralPath $env:PROJECTATLAS_INSTALLER
+$functionNames = @(
+    "Test-ProjectAtlasAuthenticodeCodexSignature",
+    "Test-ProjectAtlasStableCodexImageIdentity",
+    "Get-ProjectAtlasCodexImageIdentity"
+)
+foreach ($functionName in $functionNames) {
+    $functionMatch = [regex]::Match(
+        $installerSource,
+        "(?ms)^function $functionName \{.*?^\}"
+    )
+    if (-not $functionMatch.Success) {
+        throw "Installer Codex identity function was not found: $functionName"
+    }
+    Invoke-Expression $functionMatch.Value
+}
+$script:imageHashCalls = 0
+function Get-ProjectAtlasRuntimeImageSha256 {
+    $script:imageHashCalls += 1
+    return ("a" * 64)
+}
+$script:maliciousLookupCalled = $false
+$script:maliciousSignatureCalled = $false
+function Get-Command {
+    $script:maliciousLookupCalled = $true
+    throw "Malicious command resolver was called."
+}
+function Get-AuthenticodeSignature {
+    $script:maliciousSignatureCalled = $true
+    throw "Malicious signature probe was called."
+}
+$codexPath = [System.IO.Path]::GetFullPath($env:PROJECTATLAS_TEST_CODEX)
+if ($null -ne (Get-ProjectAtlasCodexImageIdentity $codexPath) `
+    -or $script:maliciousLookupCalled `
+    -or $script:maliciousSignatureCalled `
+    -or $script:imageHashCalls -ne 1) {
+    throw "Unsigned Codex or malicious unqualified command shadow was trusted."
+}
+
+$script:identityMode = "valid"
+function New-ProjectAtlasTestSignature {
+    $certificate = [pscustomobject]@{}
+    $certificate | Add-Member -MemberType ScriptMethod -Name GetNameInfo -Value {
+        param($NameType, $ForIssuer)
+        if ($script:identityMode -eq "wrong_signer") { return "Example Corp" }
+        return "OpenAI OpCo, LLC"
+    }
+    return [pscustomobject]@{
+        Status = if ($script:identityMode -eq "wrong_status") {
+            [System.Management.Automation.SignatureStatus]::HashMismatch
+        } else {
+            [System.Management.Automation.SignatureStatus]::Valid
+        }
+        SignatureType = if ($script:identityMode -eq "wrong_type") {
+            [System.Management.Automation.SignatureType]::Catalog
+        } else {
+            [System.Management.Automation.SignatureType]::Authenticode
+        }
+        SignerCertificate = $certificate
+    }
+}
+if (-not (Test-ProjectAtlasAuthenticodeCodexSignature (New-ProjectAtlasTestSignature))) {
+    throw "Valid OpenAI Authenticode signature facts were rejected."
+}
+$validSignature = New-ProjectAtlasTestSignature
+if (-not (Test-ProjectAtlasStableCodexImageIdentity ("a" * 64) $validSignature ("a" * 64)) `
+    -or (Test-ProjectAtlasStableCodexImageIdentity ("a" * 64) $validSignature ("b" * 64))) {
+    throw "Stable Codex digest binding accepted a pre/post-signature mismatch."
+}
+foreach ($mode in @("wrong_signer", "wrong_status", "wrong_type")) {
+    $script:identityMode = $mode
+    if (Test-ProjectAtlasAuthenticodeCodexSignature (New-ProjectAtlasTestSignature)) {
+        throw "Invalid Codex signature facts were accepted: $mode"
+    }
+}
+Write-Output "trusted_authenticode_cmdlet_only"
+"#,
+    )?;
+    let installer = workspace_root()?
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    let output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(&script)
+        .env("PROJECTATLAS_INSTALLER", &installer)
+        .env("PROJECTATLAS_TEST_CODEX", &codex)
+        .output()?;
+    if !output.status.success()
+        || !String::from_utf8_lossy(&output.stdout).contains("trusted_authenticode_cmdlet_only")
+    {
+        return Err(io::Error::other(format!(
+            "Codex Authenticode identity coverage failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_installer_obsolete_mcp_handoff_requires_exact_codex_registry()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("test-codex-registry-readiness.ps1");
+    fs::write(
+        &script,
+        r#"$ErrorActionPreference = "Stop"
+$installerSource = Get-Content -Raw -LiteralPath $env:PROJECTATLAS_INSTALLER
+foreach ($functionName in @(
+        "Get-NormalizedPathEntry",
+        "Test-ProjectAtlasArgumentsUseAbsolutePaths",
+        "Test-ProjectAtlasExactArguments",
+        "Test-ProjectAtlasJsonObject",
+        "Test-ProjectAtlasJsonStringArray",
+        "Test-ProjectAtlasCodexMcpRegistryEntry"
+    )) {
+    $match = [regex]::Match(
+        $installerSource,
+        "(?ms)^function $functionName \{.*?^\}"
+    )
+    if (-not $match.Success) {
+        throw "Installer function was not found: $functionName"
+    }
+    Invoke-Expression $match.Value
+}
+$runtime = "C:\ProjectAtlas\runtime\projectatlas.exe"
+$arguments = @(
+    "--require-version", "0.4.1",
+    "--db", "C:\repo\.projectatlas\projectatlas.db",
+    "--config", "C:\repo\.projectatlas\config.toml",
+    "mcp"
+)
+$exact = [pscustomobject]@{
+    name = "projectatlas"
+    enabled = $true
+    transport = [pscustomobject]@{
+        type = "stdio"
+        command = $runtime
+        args = $arguments
+    }
+}
+if (-not (Test-ProjectAtlasCodexMcpRegistryEntry $exact $runtime $arguments)) {
+    throw "Exact structured registry entry was rejected."
+}
+$singletonArrayRoot = [object[]]@($exact)
+if (Test-ProjectAtlasCodexMcpRegistryEntry $singletonArrayRoot $runtime $arguments) {
+    throw "Singleton-array registry root was accepted."
+}
+foreach ($invalidRoot in @("projectatlas", 1, $null)) {
+    if (Test-ProjectAtlasCodexMcpRegistryEntry $invalidRoot $runtime $arguments) {
+        throw "Scalar or null registry root was accepted."
+    }
+}
+$nestedTransport = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$nestedTransport.transport = [object[]]@($nestedTransport.transport)
+if (Test-ProjectAtlasCodexMcpRegistryEntry $nestedTransport $runtime $arguments) {
+    throw "Array registry transport was accepted."
+}
+$disabled = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$disabled.enabled = $false
+if (Test-ProjectAtlasCodexMcpRegistryEntry $disabled $runtime $arguments) {
+    throw "Disabled exact registry entry was accepted."
+}
+foreach ($invalidEnabled in @("true", 1)) {
+    $malformedEnabled = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+    $malformedEnabled.enabled = $invalidEnabled
+    if (Test-ProjectAtlasCodexMcpRegistryEntry $malformedEnabled $runtime $arguments) {
+        throw "Non-Boolean registry enabled value was accepted: $invalidEnabled"
+    }
+}
+$numericName = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$numericName.name = 1
+if (Test-ProjectAtlasCodexMcpRegistryEntry $numericName $runtime $arguments) {
+    throw "Non-string registry name was accepted."
+}
+$numericTransportType = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$numericTransportType.transport.type = 1
+if (Test-ProjectAtlasCodexMcpRegistryEntry $numericTransportType $runtime $arguments) {
+    throw "Non-string registry transport type was accepted."
+}
+$numericCommand = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$numericCommand.transport.command = 1
+if (Test-ProjectAtlasCodexMcpRegistryEntry $numericCommand $runtime $arguments) {
+    throw "Non-string registry command was accepted."
+}
+$scalarArguments = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$scalarArguments.transport.args = "--require-version"
+if (Test-ProjectAtlasCodexMcpRegistryEntry $scalarArguments $runtime $arguments) {
+    throw "Scalar registry arguments were accepted."
+}
+$numericArgument = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$numericArgument.transport.args[1] = 1
+if (Test-ProjectAtlasCodexMcpRegistryEntry $numericArgument $runtime $arguments) {
+    throw "Non-string registry argument was accepted."
+}
+$nestedArgument = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$nestedArgument.transport.args[1] = [object[]]@("0.4.1")
+if (Test-ProjectAtlasCodexMcpRegistryEntry $nestedArgument $runtime $arguments) {
+    throw "Nested registry argument array was accepted."
+}
+$substringCommand = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$substringCommand.transport.command = "$runtime.backup"
+if (Test-ProjectAtlasCodexMcpRegistryEntry $substringCommand $runtime $arguments) {
+    throw "Command substring false positive was accepted."
+}
+$substringValue = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$substringValue.transport.args[1] = "prefix-0.4.1-suffix"
+if (Test-ProjectAtlasCodexMcpRegistryEntry $substringValue $runtime $arguments) {
+    throw "Argument substring false positive was accepted."
+}
+$reordered = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$reordered.transport.args = @(
+    "--db", "C:\repo\.projectatlas\projectatlas.db",
+    "--require-version", "0.4.1",
+    "--config", "C:\repo\.projectatlas\config.toml",
+    "mcp"
+)
+if (Test-ProjectAtlasCodexMcpRegistryEntry $reordered $runtime $arguments) {
+    throw "Reordered arguments were accepted."
+}
+$extra = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$extra.transport.args = @($arguments) + "--extra"
+if (Test-ProjectAtlasCodexMcpRegistryEntry $extra $runtime $arguments) {
+    throw "Extra arguments were accepted."
+}
+Write-Output "exact_json_registry_contract_verified"
+"#,
+    )?;
+    let installer = workspace_root()?
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    let output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(&script)
+        .env("PROJECTATLAS_INSTALLER", &installer)
+        .output()?;
+    if !output.status.success()
+        || !String::from_utf8_lossy(&output.stdout)
+            .contains("exact_json_registry_contract_verified")
+    {
+        return Err(io::Error::other(format!(
+            "exact Codex registry verifier coverage failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result<(), Box<dyn Error>>
 {
     let temp = tempfile::tempdir()?;
@@ -7168,6 +9890,7 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
     let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
     let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = stale_runtime_dir.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
     let fake_plugin_cache = isolated_home
         .join(FAKE_CODEX_PLUGIN_CACHE_DIR)
         .join("projectatlas");
@@ -7196,17 +9919,46 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
     let fake_plugin_cache_json =
         serde_json::to_string(&fake_plugin_cache.to_string_lossy().to_string())?;
     let plugin_list_json = format!(
-        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","source":{{"path":{}}}}}],"available":[]}}"#,
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{}}}}}],"available":[]}}"#,
         env!("CARGO_PKG_VERSION"),
         fake_plugin_cache_json
     );
+    fs::write(
+        isolated_home.join(FAKE_CODEX_REGISTRY_STALE_FILE_NAME),
+        serde_json::to_vec(&json!({
+            "name": "projectatlas",
+            "enabled": true,
+            "transport": {
+                "type": "stdio",
+                "command": if cfg!(windows) { "C:\\stale\\ProjectAtlas\\bin\\projectatlas.exe" } else { "/stale/ProjectAtlas/bin/projectatlas" },
+                "args": ["--require-version", "0.0.1", "--db", if cfg!(windows) { "C:\\stale-repo\\.projectatlas\\projectatlas.db" } else { "/stale-repo/.projectatlas/projectatlas.db" }, "mcp"]
+            }
+        }))?,
+    )?;
+    fs::write(
+        isolated_home.join(FAKE_CODEX_REGISTRY_CURRENT_FILE_NAME),
+        serde_json::to_vec(&json!({
+            "name": "projectatlas",
+            "enabled": true,
+            "transport": {
+                "type": "stdio",
+                "command": runtime,
+                "args": [
+                    "--require-version", env!("CARGO_PKG_VERSION"),
+                    "--db", db,
+                    "--config", atlas_dir.join("config.toml"),
+                    "mcp"
+                ]
+            }
+        }))?,
+    )?;
     let fake_codex_script = if cfg!(windows) {
         format!(
-            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"marketplace\" if \"%3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  echo {plugin_list_json}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  echo projectatlas\r\n  echo   command: C:\\stale\\ProjectAtlas\\bin\\projectatlas.exe\r\n  echo   args: --require-version 0.0.1 --db C:\\stale-repo\\.projectatlas\\projectatlas.db mcp\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n"
+            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"marketplace\" if \"%3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  echo {plugin_list_json}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"add\" (\r\n  echo current>\"%PROJECTATLAS_FAKE_CODEX_STATE%\"\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  if exist \"%PROJECTATLAS_FAKE_CODEX_STATE%\" (\r\n    type \"%PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT%\"\r\n  ) else (\r\n    type \"%PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE%\"\r\n  )\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n"
         )
     } else {
         format!(
-            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{plugin_list_json}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  printf '%s\\n' 'projectatlas'\n  printf '%s\\n' '  command: /stale/ProjectAtlas/bin/projectatlas'\n  printf '%s\\n' '  args: --require-version 0.0.1 --db /stale-repo/.projectatlas/projectatlas.db mcp'\n  exit 0\nfi\nexit 0\n"
+            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{plugin_list_json}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"add\" ]; then\n  printf '%s\\n' current > \"$PROJECTATLAS_FAKE_CODEX_STATE\"\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  if [ -f \"$PROJECTATLAS_FAKE_CODEX_STATE\" ]; then\n    cat \"$PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT\"\n  else\n    cat \"$PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE\"\n  fi\n  exit 0\nfi\nexit 0\n"
         )
     };
     write_executable_script(&fake_codex, &fake_codex_script)?;
@@ -7286,7 +10038,6 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
     )?;
 
     let workspace_root = workspace_root()?;
-    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
     let installer_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
         &workspace_root,
         &repo,
@@ -7573,7 +10324,8 @@ fn plugin_update_skips_non_official_codex_marketplace() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn plugin_update_leaves_current_codex_marketplace_untouched() -> Result<(), Box<dyn Error>> {
+fn plugin_update_leaves_current_codex_marketplace_untouched_and_windows_repairs_stale_skill()
+-> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
@@ -7607,28 +10359,26 @@ fn plugin_update_leaves_current_codex_marketplace_untouched() -> Result<(), Box<
             env!("CARGO_PKG_VERSION")
         ),
     )?;
-    fs::write(
-        fake_plugin_cache
-            .join(PROJECTATLAS_SKILL_DIR)
-            .join(PROJECTATLAS_SKILL_NAME)
-            .join(SKILL_FILE_NAME),
-        FAKE_CODEX_SKILL_CONTENT,
-    )?;
+    let plugin_skill = fake_plugin_cache
+        .join(PROJECTATLAS_SKILL_DIR)
+        .join(PROJECTATLAS_SKILL_NAME)
+        .join(SKILL_FILE_NAME);
+    fs::write(&plugin_skill, FAKE_CODEX_SKILL_CONTENT)?;
     let fake_plugin_cache_json =
         serde_json::to_string(&fake_plugin_cache.to_string_lossy().to_string())?;
     let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
     let plugin_list_json = format!(
-        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","source":{{"path":{}}}}}],"available":[]}}"#,
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{}}}}}],"available":[]}}"#,
         env!("CARGO_PKG_VERSION"),
         fake_plugin_cache_json
     );
     let fake_codex_script = if cfg!(windows) {
         format!(
-            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"marketplace\" if \"%3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  echo {plugin_list_json}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" exit /b 1\r\nexit /b 0\r\n"
+            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"marketplace\" if \"%3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  echo {plugin_list_json}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"add\" (\r\n  copy /Y \"%PROJECTATLAS_PACKAGED_SKILL%\" \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" >nul\r\n  if errorlevel 1 exit /b 1\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" exit /b 1\r\nexit /b 0\r\n"
         )
     } else {
         format!(
-            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{plugin_list_json}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  exit 1\nfi\nexit 0\n"
+            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{plugin_list_json}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"add\" ]; then\n  cp \"$PROJECTATLAS_PACKAGED_SKILL\" \"$PROJECTATLAS_FAKE_PLUGIN_SKILL\"\n  exit $?\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  exit 1\nfi\nexit 0\n"
         )
     };
     write_executable_script(&fake_codex, &fake_codex_script)?;
@@ -7655,7 +10405,8 @@ fn plugin_update_leaves_current_codex_marketplace_untouched() -> Result<(), Box<
         ))
         .into());
     }
-    let fake_codex_calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
+    let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
+    let fake_codex_calls = fs::read_to_string(&fake_codex_log)?;
     for forbidden in [
         "plugin marketplace remove projectatlas",
         "plugin marketplace add styler-ai/ProjectAtlas",
@@ -7667,6 +10418,60 @@ fn plugin_update_leaves_current_codex_marketplace_untouched() -> Result<(), Box<
                 "current Codex marketplace/plugin state was mutated by forbidden call {forbidden:?}:\n{fake_codex_calls}"
             ))
             .into());
+        }
+    }
+    if !cfg!(windows) {
+        return Ok(());
+    }
+    for (label, skill_bytes) in [("missing", None), ("stale", Some(&b"stale skill"[..]))] {
+        if let Some(skill_bytes) = skill_bytes {
+            fs::write(&plugin_skill, skill_bytes)?;
+        } else {
+            fs::remove_file(&plugin_skill)?;
+        }
+        fs::write(&fake_codex_log, b"")?;
+        let repair_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+            &workspace_root,
+            &repo,
+            &runtime,
+            &fake_path,
+            &isolated_home,
+        )?;
+        let repair_output_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&repair_output.stdout),
+            String::from_utf8_lossy(&repair_output.stderr)
+        );
+        if !repair_output_text.contains("Codex ProjectAtlas plugin skill artifact does not match")
+            || fs::read_to_string(&plugin_skill)? != FAKE_CODEX_SKILL_CONTENT
+        {
+            return Err(io::Error::other(format!(
+                "installer did not repair the current-version {label} Codex skill artifact:\n{repair_output_text}"
+            ))
+            .into());
+        }
+        let repair_calls = fs::read_to_string(&fake_codex_log)?;
+        for required in [
+            "plugin remove projectatlas --marketplace projectatlas",
+            "plugin add projectatlas --marketplace projectatlas",
+        ] {
+            if !repair_calls.contains(required) {
+                return Err(io::Error::other(format!(
+                    "{label} skill repair omitted {required:?}:\n{repair_calls}"
+                ))
+                .into());
+            }
+        }
+        for forbidden in [
+            "plugin marketplace remove projectatlas",
+            "plugin marketplace add styler-ai/ProjectAtlas",
+        ] {
+            if repair_calls.contains(forbidden) {
+                return Err(io::Error::other(format!(
+                    "{label} skill repair mutated the current marketplace with {forbidden:?}:\n{repair_calls}"
+                ))
+                .into());
+            }
         }
     }
     Ok(())
@@ -7717,7 +10522,7 @@ fn plugin_update_repairs_current_codex_plugin_with_stale_source_manifest()
         serde_json::to_string(&fake_plugin_cache.to_string_lossy().to_string())?;
     let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
     let plugin_list_json = format!(
-        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","source":{{"path":{}}}}}],"available":[]}}"#,
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{}}}}}],"available":[]}}"#,
         env!("CARGO_PKG_VERSION"),
         fake_plugin_cache_json
     );
@@ -8014,9 +10819,47 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
 
     let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = isolated_home.join("codex.cmd");
+    let fake_codex_state = isolated_home.join(FAKE_CODEX_REGISTRY_STATE_FILE_NAME);
+    let fake_codex_stale_registry = isolated_home.join(FAKE_CODEX_REGISTRY_STALE_FILE_NAME);
+    let fake_codex_current_registry = isolated_home.join(FAKE_CODEX_REGISTRY_CURRENT_FILE_NAME);
+    let versioned_runtime = local_app_data
+        .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
+        .join("runtimes")
+        .join(env!("CARGO_PKG_VERSION"))
+        .join("x86_64-pc-windows-msvc")
+        .join("projectatlas.exe");
+    fs::write(
+        &fake_codex_stale_registry,
+        serde_json::to_vec(&json!({
+            "name": "projectatlas",
+            "enabled": true,
+            "transport": {
+                "type": "stdio",
+                "command": "C:\\Users\\shaun_tyler\\AppData\\Local\\ProjectAtlas\\bin\\projectatlas.exe",
+                "args": ["--require-version", "0.3.10", "--db", "C:\\projects\\io.pasx.kai\\.projectatlas\\projectatlas.db", "mcp"]
+            }
+        }))?,
+    )?;
+    fs::write(
+        &fake_codex_current_registry,
+        serde_json::to_vec(&json!({
+            "name": "projectatlas",
+            "enabled": true,
+            "transport": {
+                "type": "stdio",
+                "command": versioned_runtime,
+                "args": [
+                    "--require-version", env!("CARGO_PKG_VERSION"),
+                    "--db", atlas_dir.join("projectatlas.db"),
+                    "--config", atlas_dir.join("config.toml"),
+                    "mcp"
+                ]
+            }
+        }))?,
+    )?;
     fs::write(
         &fake_codex,
-        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  echo projectatlas\r\n  echo   command: C:\\Users\\shaun_tyler\\AppData\\Local\\ProjectAtlas\\bin\\projectatlas.exe\r\n  echo   args: --require-version 0.3.10 --db C:\\projects\\io.pasx.kai\\.projectatlas\\projectatlas.db mcp\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n",
+        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"mcp\" if \"%2\"==\"add\" (\r\n  echo current>\"%PROJECTATLAS_FAKE_CODEX_STATE%\"\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  if exist \"%PROJECTATLAS_FAKE_CODEX_STATE%\" (\r\n    type \"%PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT%\"\r\n  ) else (\r\n    type \"%PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE%\"\r\n  )\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n",
     )?;
 
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
@@ -8050,6 +10893,15 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
         .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
         .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+        .env("PROJECTATLAS_FAKE_CODEX_STATE", &fake_codex_state)
+        .env(
+            "PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE",
+            &fake_codex_stale_registry,
+        )
+        .env(
+            "PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT",
+            &fake_codex_current_registry,
+        )
         .env("PROJECTATLAS_NO_TELEMETRY", "1")
         .output()?;
     let server_result = release_server.join().map_err(|panic_payload| {
@@ -8076,12 +10928,6 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         .into());
     }
 
-    let versioned_runtime = local_app_data
-        .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
-        .join("runtimes")
-        .join(env!("CARGO_PKG_VERSION"))
-        .join("x86_64-pc-windows-msvc")
-        .join("projectatlas.exe");
     if !versioned_runtime.exists() {
         return Err(io::Error::other(format!(
             "release binary was not installed to the versioned runtime path: {}",
@@ -8175,6 +11021,15 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
         .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
         .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+        .env("PROJECTATLAS_FAKE_CODEX_STATE", &fake_codex_state)
+        .env(
+            "PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE",
+            &fake_codex_stale_registry,
+        )
+        .env(
+            "PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT",
+            &fake_codex_current_registry,
+        )
         .env("PROJECTATLAS_NO_TELEMETRY", "1")
         .output()?;
     let stale_parent_install_text = format!(
@@ -23631,6 +26486,498 @@ fn write_executable_script(path: &Path, script: &str) -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+#[cfg(windows)]
+fn compile_codex_mcp_owner_fixture(output: &Path) -> Result<(), Box<dyn Error>> {
+    let source = output.with_extension("cs");
+    fs::write(&source, CODEX_MCP_OWNER_FIXTURE_SOURCE)?;
+    let compile_output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(
+            "Add-Type -Path $env:PROJECTATLAS_FIXTURE_SOURCE -OutputAssembly $env:PROJECTATLAS_FIXTURE_RUNTIME -OutputType ConsoleApplication",
+        )
+        .env("PROJECTATLAS_FIXTURE_SOURCE", &source)
+        .env("PROJECTATLAS_FIXTURE_RUNTIME", output)
+        .output()?;
+    if !compile_output.status.success() {
+        return Err(io::Error::other(format!(
+            "failed to compile Codex MCP owner fixture:\n{}",
+            String::from_utf8_lossy(&compile_output.stderr)
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn write_installer_with_test_codex_identity_seam(
+    installer: &Path,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let source = fs::read_to_string(installer)?;
+    let identity_start = source
+        .find("function Get-ProjectAtlasCodexImageIdentity {")
+        .ok_or_else(|| io::Error::other("installer Codex identity function missing"))?;
+    let identity_end = source[identity_start..]
+        .find("function Find-ProjectAtlasObsoleteStableMcpProcess {")
+        .map(|offset| identity_start + offset)
+        .ok_or_else(|| io::Error::other("installer obsolete MCP finder missing"))?;
+    let test_identity = r"function Get-ProjectAtlasCodexImageIdentity {
+    param([string]$FilePath)
+    if ([string]::IsNullOrWhiteSpace($env:PROJECTATLAS_TEST_CODEX_OWNER) `
+        -or -not [string]::Equals(
+            [System.IO.Path]::GetFullPath($FilePath),
+            [System.IO.Path]::GetFullPath($env:PROJECTATLAS_TEST_CODEX_OWNER),
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+    return Get-ProjectAtlasRuntimeImageSha256 $FilePath
+}
+
+";
+    let mut isolated = String::with_capacity(source.len());
+    isolated.push_str(&source[..identity_start]);
+    isolated.push_str(test_identity);
+    isolated.push_str(&source[identity_end..]);
+    let plugin_root_binding = "$installerPluginRoot = Split-Path -Parent $PSScriptRoot";
+    if !isolated.contains(plugin_root_binding) {
+        return Err(io::Error::other("installer plugin root binding missing").into());
+    }
+    let isolated = isolated.replace(
+        plugin_root_binding,
+        "$installerPluginRoot = $env:PROJECTATLAS_TEST_INSTALLER_PLUGIN_ROOT",
+    );
+    let process_snapshot_binding =
+        "        $processes = @(Get-CimInstance -ClassName Win32_Process -OperationTimeoutSec 5)";
+    let process_snapshot_occurrences = isolated.matches(process_snapshot_binding).count();
+    if process_snapshot_occurrences != 1 {
+        return Err(io::Error::other(format!(
+            "installer process snapshot binding occurred {process_snapshot_occurrences} times instead of exactly once"
+        ))
+        .into());
+    }
+    let test_process_snapshot = r#"        $allowedProcessIdText = [string]$env:PROJECTATLAS_TEST_PROCESS_IDS
+        if ([string]::IsNullOrWhiteSpace($allowedProcessIdText)) {
+            throw "ProjectAtlas test process allowlist is missing."
+        }
+        $allowedProcessIds = @()
+        foreach ($entry in $allowedProcessIdText.Split(',')) {
+            $candidateProcessId = [uint32]0
+            if ($entry -notmatch '^[1-9][0-9]*$' `
+                -or -not [uint32]::TryParse($entry, [ref]$candidateProcessId) `
+                -or $candidateProcessId -eq 0 `
+                -or $candidateProcessId.ToString(
+                    [System.Globalization.CultureInfo]::InvariantCulture
+                ) -ne $entry `
+                -or $allowedProcessIds -contains $candidateProcessId) {
+                throw "ProjectAtlas test process allowlist contains an invalid process ID."
+            }
+            $allowedProcessIds += $candidateProcessId
+        }
+        $processFilter = ($allowedProcessIds | ForEach-Object {
+                "ProcessId = $_"
+            }) -join " OR "
+        $observedProcesses = @(
+            CimCmdlets\Get-CimInstance `
+                -ClassName Win32_Process `
+                -Filter $processFilter `
+                -OperationTimeoutSec 5
+        )
+        $observedProcessIds = @()
+        foreach ($process in $observedProcesses) {
+            $observedProcessIdText = [string]$process.ProcessId
+            $observedProcessId = [uint32]0
+            if ($observedProcessIdText -notmatch '^[1-9][0-9]*$' `
+                -or -not [uint32]::TryParse(
+                    $observedProcessIdText,
+                    [ref]$observedProcessId
+                ) `
+                -or $observedProcessId -eq 0 `
+                -or $observedProcessId.ToString(
+                    [System.Globalization.CultureInfo]::InvariantCulture
+                ) -ne $observedProcessIdText `
+                -or $observedProcessIds -contains $observedProcessId) {
+                throw "ProjectAtlas test process snapshot contains an invalid process ID."
+            }
+            $observedProcessIds += $observedProcessId
+        }
+        if ($observedProcessIds.Count -ne $allowedProcessIds.Count) {
+            throw "ProjectAtlas test process snapshot did not contain the exact allowlist."
+        }
+        foreach ($allowedProcessId in $allowedProcessIds) {
+            if ($observedProcessIds -notcontains $allowedProcessId) {
+                throw "ProjectAtlas test process snapshot did not contain the exact allowlist."
+            }
+        }
+        $processes = @($observedProcesses)"#;
+    let isolated = isolated.replacen(process_snapshot_binding, test_process_snapshot, 1);
+    fs::write(output, isolated)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_test_process_id_allowlist(process_ids: &[u32]) -> io::Result<String> {
+    if process_ids.is_empty() || process_ids.contains(&0) {
+        return Err(io::Error::other(
+            "Windows test process allowlist requires positive process IDs",
+        ));
+    }
+    let mut process_ids = process_ids.to_vec();
+    process_ids.sort_unstable();
+    process_ids.dedup();
+    Ok(process_ids
+        .into_iter()
+        .map(|process_id| process_id.to_string())
+        .collect::<Vec<_>>()
+        .join(","))
+}
+
+#[cfg(windows)]
+fn stop_codex_owner_after_spawn_failure(
+    parent: &mut Child,
+    child_identity_file: &Path,
+    stable_runtime: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let mut stop_file = child_identity_file.as_os_str().to_os_string();
+    stop_file.push(".stop");
+    let stop_result = fs::write(PathBuf::from(stop_file), b"stop");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    if stop_result.is_ok() {
+        loop {
+            match parent.try_wait() {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => {
+                    drop(parent.kill());
+                    drop(parent.wait());
+                    return Err(io::Error::other(format!(
+                        "failed to observe Codex owner fixture cleanup: {error}"
+                    ))
+                    .into());
+                }
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    let child_cleanup_result = read_codex_owner_child_identity(child_identity_file, stable_runtime)
+        .and_then(|identity| stop_windows_fixture_process(&identity));
+    let kill_result = parent.kill();
+    let wait_result = parent.wait();
+    let mut failures = Vec::new();
+    if let Err(error) = stop_result {
+        failures.push(format!("could not signal the owner fixture: {error}"));
+    } else {
+        failures.push("owner fixture did not stop within five seconds".to_string());
+    }
+    if let Err(error) = child_cleanup_result {
+        failures.push(format!(
+            "could not retire its published child safely: {error}"
+        ));
+    }
+    if let Err(error) = kill_result
+        && error.kind() != io::ErrorKind::InvalidInput
+    {
+        failures.push(format!(
+            "could not terminate the held owner process: {error}"
+        ));
+    }
+    if let Err(error) = wait_result {
+        failures.push(format!("could not reap the held owner process: {error}"));
+    }
+    Err(io::Error::other(format!(
+        "Codex owner fixture cleanup failed: {}",
+        failures.join("; ")
+    ))
+    .into())
+}
+
+#[cfg(windows)]
+fn read_codex_owner_child_identity(
+    child_identity_file: &Path,
+    stable_runtime: &Path,
+) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
+    let identity_text = fs::read_to_string(child_identity_file)?;
+    let mut identity_lines = identity_text.lines();
+    let process_id = identity_lines
+        .next()
+        .ok_or_else(|| io::Error::other("owner fixture omitted child PID"))?
+        .parse::<u32>()?;
+    let owner_creation_file_time_utc = identity_lines
+        .next()
+        .ok_or_else(|| io::Error::other("owner fixture omitted child creation time"))?
+        .parse::<i64>()?;
+    let owner_executable_path = PathBuf::from(
+        identity_lines
+            .next()
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| io::Error::other("owner fixture omitted child executable path"))?,
+    );
+    let captured = capture_windows_process_identity(process_id)?;
+    if captured.process_id != process_id
+        || captured.creation_file_time_utc != owner_creation_file_time_utc
+    {
+        return Err(io::Error::other(format!(
+            "owner-published child identity differed: published_pid={process_id} captured_pid={} published_creation={owner_creation_file_time_utc} captured_creation={}",
+            captured.process_id,
+            captured.creation_file_time_utc
+        ))
+        .into());
+    }
+    let owner_canonical = normalize_native_path_display(fs::canonicalize(&owner_executable_path)?);
+    let captured_canonical =
+        normalize_native_path_display(fs::canonicalize(&captured.executable_path)?);
+    let expected_canonical = normalize_native_path_display(fs::canonicalize(stable_runtime)?);
+    if !captured_canonical.eq_ignore_ascii_case(&owner_canonical)
+        || !captured_canonical.eq_ignore_ascii_case(&expected_canonical)
+    {
+        return Err(io::Error::other(format!(
+            "owner-published child path differed: published_raw={} captured_raw={} expected_raw={} published_canonical={owner_canonical} captured_canonical={captured_canonical} expected_canonical={expected_canonical}",
+            owner_executable_path.display(),
+            captured.executable_path.display(),
+            stable_runtime.display()
+        ))
+        .into());
+    }
+    Ok(captured)
+}
+
+#[cfg(windows)]
+fn codex_owner_spawn_error(
+    parent: &mut Child,
+    child_identity_file: &Path,
+    stable_runtime: &Path,
+    error: impl std::fmt::Display,
+) -> Box<dyn Error> {
+    match stop_codex_owner_after_spawn_failure(parent, child_identity_file, stable_runtime) {
+        Ok(()) => io::Error::other(error.to_string()).into(),
+        Err(cleanup_error) => io::Error::other(format!(
+            "{error}; fixture cleanup also failed: {cleanup_error}"
+        ))
+        .into(),
+    }
+}
+
+#[cfg(windows)]
+fn spawn_codex_owned_obsolete_mcp(
+    codex_fixture: &Path,
+    stable_runtime: &Path,
+    db: &Path,
+    config: Option<&Path>,
+    child_pid_file: &Path,
+) -> Result<(Child, WindowsProcessIdentity), Box<dyn Error>> {
+    let mut command = StdCommand::new(codex_fixture);
+    command
+        .arg(child_pid_file)
+        .arg(stable_runtime)
+        .arg(db)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(config) = config {
+        command.arg(config).arg("--config").arg("model=\"o3\"");
+    }
+    let mut parent = command.spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match parent.try_wait() {
+            Ok(Some(status)) => {
+                return Err(codex_owner_spawn_error(
+                    &mut parent,
+                    child_pid_file,
+                    stable_runtime,
+                    format!(
+                        "Codex MCP owner fixture exited before publishing its child PID: {status}"
+                    ),
+                ));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Err(codex_owner_spawn_error(
+                    &mut parent,
+                    child_pid_file,
+                    stable_runtime,
+                    format!("failed to inspect Codex MCP owner fixture: {error}"),
+                ));
+            }
+        }
+        if child_pid_file.is_file() {
+            match read_codex_owner_child_identity(child_pid_file, stable_runtime) {
+                Ok(captured) => return Ok((parent, captured)),
+                Err(error) => {
+                    return Err(codex_owner_spawn_error(
+                        &mut parent,
+                        child_pid_file,
+                        stable_runtime,
+                        error,
+                    ));
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(codex_owner_spawn_error(
+                &mut parent,
+                child_pid_file,
+                stable_runtime,
+                "Codex MCP owner fixture did not publish its child PID",
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug)]
+struct WindowsProcessIdentity {
+    process_id: u32,
+    creation_file_time_utc: i64,
+    executable_path: PathBuf,
+}
+
+#[cfg(windows)]
+fn capture_windows_process_identity(
+    process_id: u32,
+) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
+    let output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(
+            "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction Stop; [pscustomobject]@{ process_id = [uint32]$process.Id; creation_file_time_utc = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); executable_path = [System.IO.Path]::GetFullPath($process.Path) } | ConvertTo-Json -Compress",
+        )
+        .env("PROJECTATLAS_FIXTURE_PID", process_id.to_string())
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "failed to capture Windows fixture process identity {process_id}:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let identity: Value = serde_json::from_slice(&output.stdout)?;
+    let captured_process_id = identity["process_id"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| io::Error::other("Windows fixture identity omitted its process ID"))?;
+    let creation_file_time_utc = identity["creation_file_time_utc"]
+        .as_i64()
+        .ok_or_else(|| io::Error::other("Windows fixture identity omitted its creation time"))?;
+    let executable_path = identity["executable_path"]
+        .as_str()
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::other("Windows fixture identity omitted its executable path"))?;
+    Ok(WindowsProcessIdentity {
+        process_id: captured_process_id,
+        creation_file_time_utc,
+        executable_path,
+    })
+}
+
+#[cfg(windows)]
+fn windows_process_is_alive(identity: &WindowsProcessIdentity) -> Result<bool, Box<dyn Error>> {
+    let status = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(
+            "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 1 }; try { $creation = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); $path = [System.IO.Path]::GetFullPath($process.Path); if ($creation -eq [long]$env:PROJECTATLAS_FIXTURE_CREATION -and [string]::Equals($path, [System.IO.Path]::GetFullPath($env:PROJECTATLAS_FIXTURE_PATH), [System.StringComparison]::OrdinalIgnoreCase)) { exit 0 } } catch {}; exit 1",
+        )
+        .env(
+            "PROJECTATLAS_FIXTURE_PID",
+            identity.process_id.to_string(),
+        )
+        .env(
+            "PROJECTATLAS_FIXTURE_CREATION",
+            identity.creation_file_time_utc.to_string(),
+        )
+        .env("PROJECTATLAS_FIXTURE_PATH", &identity.executable_path)
+        .status()?;
+    Ok(status.success())
+}
+
+#[cfg(windows)]
+fn stop_windows_fixture_process(identity: &WindowsProcessIdentity) -> Result<(), Box<dyn Error>> {
+    let status = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(
+            "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 0 }; $result = 0; try { $heldHandle = $process.Handle; $creation = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); $path = [System.IO.Path]::GetFullPath($process.Path); if ($creation -ne [long]$env:PROJECTATLAS_FIXTURE_CREATION -or -not [string]::Equals($path, [System.IO.Path]::GetFullPath($env:PROJECTATLAS_FIXTURE_PATH), [System.StringComparison]::OrdinalIgnoreCase)) { $result = 3 } elseif (-not $process.HasExited) { $process.Kill(); if (-not $process.WaitForExit(5000)) { $result = 5 } } } catch { if (-not $process.HasExited) { $result = 4 } } finally { $process.Dispose() }; exit $result",
+        )
+        .env(
+            "PROJECTATLAS_FIXTURE_PID",
+            identity.process_id.to_string(),
+        )
+        .env(
+            "PROJECTATLAS_FIXTURE_CREATION",
+            identity.creation_file_time_utc.to_string(),
+        )
+        .env("PROJECTATLAS_FIXTURE_PATH", &identity.executable_path)
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "refused to stop Windows fixture process {} without its exact captured identity",
+            identity.process_id
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_cleanup_requires_exact_process_identity() -> Result<(), Box<dyn Error>> {
+    let mut process = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let identity = match capture_windows_process_identity(process.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            return Err(error);
+        }
+    };
+    let mut changed_identity = identity.clone();
+    changed_identity.creation_file_time_utc += 1;
+    let test_result = (|| -> Result<(), Box<dyn Error>> {
+        if windows_process_is_alive(&changed_identity)? {
+            return Err(io::Error::other("changed Windows fixture identity appeared live").into());
+        }
+        if stop_windows_fixture_process(&changed_identity).is_ok() {
+            return Err(
+                io::Error::other("cleanup accepted a changed Windows fixture identity").into(),
+            );
+        }
+        if !windows_process_is_alive(&identity)? {
+            return Err(io::Error::other("identity-safe cleanup stopped the wrong process").into());
+        }
+        Ok(())
+    })();
+    if windows_process_is_alive(&identity)? {
+        let cleanup_result = stop_windows_fixture_process(&identity);
+        if let Err(error) = cleanup_result
+            && test_result.is_ok()
+        {
+            return Err(error);
+        }
+    }
+    process.wait()?;
+    test_result
+}
+
 /// Run the bundled plugin installer with an explicit runtime path.
 fn run_projectatlas_plugin_installer(
     workspace_root: &Path,
@@ -23756,7 +27103,40 @@ fn run_projectatlas_plugin_installer_with_optional_path_and_home(
                     .join("projectatlas")
                     .join(CODEX_PLUGIN_MANIFEST_DIR)
                     .join("plugin.json"),
+            )
+            .env(
+                "PROJECTATLAS_FAKE_PLUGIN_SKILL",
+                home.join(FAKE_CODEX_PLUGIN_CACHE_DIR)
+                    .join("projectatlas")
+                    .join(PROJECTATLAS_SKILL_DIR)
+                    .join(PROJECTATLAS_SKILL_NAME)
+                    .join(SKILL_FILE_NAME),
+            )
+            .env(
+                "PROJECTATLAS_PACKAGED_SKILL",
+                workspace_root
+                    .join("plugins")
+                    .join("projectatlas")
+                    .join(PROJECTATLAS_SKILL_DIR)
+                    .join(PROJECTATLAS_SKILL_NAME)
+                    .join(SKILL_FILE_NAME),
             );
+        for (name, file_name) in [
+            ("PROJECTATLAS_FAKE_CODEX_STATE", "codex-registry-state.txt"),
+            (
+                "PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE",
+                "codex-registry-stale.json",
+            ),
+            (
+                "PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT",
+                "codex-registry-current.json",
+            ),
+        ] {
+            let path = home.join(file_name);
+            if path.exists() || name == "PROJECTATLAS_FAKE_CODEX_STATE" {
+                command.env(name, path);
+            }
+        }
     }
     let output = command.output()?;
     if !output.status.success() {

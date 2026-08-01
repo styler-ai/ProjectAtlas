@@ -192,6 +192,11 @@ jobs:
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli --all-features --test installer_trust_boundaries
 
+      - name: Windows obsolete MCP handoff E2E
+        if: matrix.label == 'windows'
+        timeout-minutes: 10
+        run: cargo test --locked -p projectatlas-cli --test e2e windows_installer_obsolete_mcp_handoff_ -- --test-threads=1
+
       - name: macOS unsupported parser-pack boundary E2E
         if: runner.os == 'macOS'
         timeout-minutes: 5
