@@ -419,6 +419,19 @@ codex_projectatlas_plugin_source_manifest_matches() {
   [ "$(codex_projectatlas_plugin_source_manifest_version)" = "$expected_version" ]
 }
 
+codex_projectatlas_plugin_skill_matches() {
+  plugin_source_path=$(codex_projectatlas_plugin_source_path)
+  case "$plugin_source_path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  installed_skill="$plugin_source_path/skills/projectatlas/SKILL.md"
+  packaged_skill="$plugin_root/skills/projectatlas/SKILL.md"
+  [ -f "$installed_skill" ] &&
+    [ -f "$packaged_skill" ] &&
+    cmp -s "$installed_skill" "$packaged_skill"
+}
+
 verify_codex_projectatlas_skill_artifact() {
   runtime_version=$(expected_runtime_version)
   if [ -z "$runtime_version" ]; then
@@ -493,7 +506,8 @@ update_codex_plugin() {
   current_plugin_version=$(codex_projectatlas_plugin_version)
   if [ "$previous_ref" = "$release_tag" ] &&
     [ "$current_plugin_version" = "$runtime_version" ] &&
-    codex_projectatlas_plugin_source_manifest_matches "$runtime_version"; then
+    codex_projectatlas_plugin_source_manifest_matches "$runtime_version" &&
+    codex_projectatlas_plugin_skill_matches; then
     printf 'Codex ProjectAtlas plugin marketplace already points to %s.\n' "$release_tag"
     verify_codex_projectatlas_skill_artifact
     return 0
@@ -503,6 +517,9 @@ update_codex_plugin() {
       ! codex_projectatlas_plugin_source_manifest_matches "$runtime_version"; then
       source_manifest_version=$(codex_projectatlas_plugin_source_manifest_version)
       printf "Codex ProjectAtlas plugin source manifest version '%s' does not match %s; refreshing official projectatlas plugin cache.\n" "$source_manifest_version" "$runtime_version"
+    elif [ "$current_plugin_version" = "$runtime_version" ] &&
+      ! codex_projectatlas_plugin_skill_matches; then
+      printf 'Codex ProjectAtlas plugin skill artifact does not match %s; refreshing official projectatlas plugin cache.\n' "$runtime_version"
     fi
     "$codex_bin" plugin remove projectatlas --marketplace projectatlas --json >/dev/null 2>&1 || true
     if "$codex_bin" plugin add projectatlas --marketplace projectatlas --json >/dev/null 2>&1; then
