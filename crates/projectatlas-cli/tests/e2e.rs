@@ -125,9 +125,11 @@ const FAKE_CODEX_LOG_FILE: &str = "fake-codex.log";
 const FAKE_CODEX_PLUGIN_CACHE_DIR: &str = "plugin-cache";
 const FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_FILE: &str = "plugin-add-failed.marker";
 const FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_ENV: &str = "PROJECTATLAS_FAKE_FAILURE_MARKER";
+#[cfg(windows)]
 const FAKE_CODEX_PLUGIN_LIST_FILE_NAME: &str = "codex-plugin-list.json";
 const FAKE_CODEX_REGISTRY_CURRENT_FILE_NAME: &str = "codex-registry-current.json";
 const FAKE_CODEX_REGISTRY_STALE_FILE_NAME: &str = "codex-registry-stale.json";
+#[cfg(windows)]
 const FAKE_CODEX_REGISTRY_STATE_FILE_NAME: &str = "codex-registry-state.txt";
 const FAKE_CODEX_SKILL_CONTENT: &str =
     include_str!("../../../plugins/projectatlas/skills/projectatlas/SKILL.md");
