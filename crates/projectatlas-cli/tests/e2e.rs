@@ -363,6 +363,88 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
     Ok(())
 }
 
+#[test]
+fn installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui()
+-> Result<(), Box<dyn Error>> {
+    let expected_version = env!("CARGO_PKG_VERSION");
+    let executable = mcp_contract_executable();
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    fs::write(repo.join("lib.rs"), "pub fn indexed() {}\n")?;
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+
+    let version_output = StdCommand::new(&executable).arg("--version").output()?;
+    if !version_output.status.success() {
+        return Err(io::Error::other(format!(
+            "installed candidate --version failed: {}",
+            String::from_utf8_lossy(&version_output.stderr)
+        ))
+        .into());
+    }
+    let version_stdout = String::from_utf8(version_output.stdout)?;
+    let cli_version = version_stdout
+        .trim()
+        .strip_prefix("projectatlas ")
+        .ok_or_else(|| io::Error::other("installed candidate emitted an invalid --version line"))?;
+
+    let runtime_info = run_mcp_contract_json(&executable, &repo, &["runtime-info".to_string()])?;
+    let runtime_version = json_at(&runtime_info, &["version"])?
+        .as_str()
+        .ok_or_else(|| io::Error::other("runtime-info.version was not a string"))?;
+
+    run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            database.display().to_string(),
+            "scan".to_string(),
+            ".".to_string(),
+        ],
+    )?;
+    let token_output = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--db")
+        .arg(&database)
+        .args(["token", "--view", "tui"])
+        .output()?;
+    if !token_output.status.success() {
+        return Err(io::Error::other(format!(
+            "installed candidate token TUI failed: {}",
+            String::from_utf8_lossy(&token_output.stderr)
+        ))
+        .into());
+    }
+    let token_stdout = String::from_utf8(token_output.stdout)?;
+    let footer_prefix = "ProjectAtlas v";
+    if token_stdout.matches(footer_prefix).count() != 1 {
+        return Err(io::Error::other(
+            "token TUI must render exactly one ProjectAtlas version footer",
+        )
+        .into());
+    }
+    let footer_version = token_stdout
+        .split_once(footer_prefix)
+        .and_then(|(_, tail)| {
+            tail.split(|character: char| character.is_whitespace() || character == '\u{1b}')
+                .next()
+        })
+        .ok_or_else(|| io::Error::other("token TUI version footer was not parseable"))?;
+
+    if [cli_version, runtime_version, footer_version]
+        .into_iter()
+        .any(|version| version != expected_version)
+    {
+        return Err(io::Error::other(format!(
+            "installed candidate version drift: workspace={expected_version} cli={cli_version} runtime-info={runtime_version} token-tui={footer_version}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 #[cfg(feature = "derived-snapshot")]
 #[test]
 fn derived_snapshot_cli_round_trips_without_replacing_authored_state() -> Result<(), Box<dyn Error>>
@@ -1123,7 +1205,7 @@ fn persistent_mcp_stdin_does_not_block_repository_startup_probes() -> Result<(),
     )?;
     git_success(&repo, &["init", "--quiet"])?;
     let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
-    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let executable = mcp_contract_executable();
     let init = StdCommand::new(&executable)
         .current_dir(&repo)
         .args(["--format", "json", "init"])
@@ -2876,7 +2958,8 @@ fn supported_predecessor_recovery_preserves_explicit_database_selection()
     }
     let default_db = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
 
-    let cli_error = Command::cargo_bin("projectatlas")?
+    let executable = mcp_contract_executable();
+    let cli_error = Command::new(&executable)
         .current_dir(&repo)
         .args(["--format", "json", "--db"])
         .arg(&cli_db)
@@ -2894,7 +2977,7 @@ fn supported_predecessor_recovery_preserves_explicit_database_selection()
         ))
         .into());
     }
-    let cli_init = Command::cargo_bin("projectatlas")?
+    let cli_init = Command::new(&executable)
         .current_dir(&repo)
         .args(["--format", "json", "--db"])
         .arg(&cli_db)
@@ -2913,7 +2996,6 @@ fn supported_predecessor_recovery_preserves_explicit_database_selection()
         return Err(io::Error::other("CLI recovery created the default database").into());
     }
 
-    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let mut mcp = McpContractSession::spawn(&executable, &repo, &mcp_db)?;
     let mcp_result = (|| -> Result<(), Box<dyn Error>> {
         let migration = mcp.call_tool("atlas_token_report", &json!({}))?;
@@ -6783,14 +6865,142 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .and_then(|tail| tail.split("  parser-pack-assets:").next())
         .ok_or_else(|| io::Error::other("release omitted the Windows prepublish job"))?;
     for (job, body) in [("Unix", unix_prepublish), ("Windows", windows_prepublish)] {
+        let packaged_step_name = "- name: Install packaged runtime through plugin";
+        let installed_candidate_step_name =
+            "- name: Installed-candidate regression and upgrade contracts";
+        for (step_name, label) in [
+            (packaged_step_name, "packaged contract"),
+            (
+                installed_candidate_step_name,
+                "installed-candidate contract",
+            ),
+        ] {
+            if body.matches(step_name).count() != 1 {
+                return Err(io::Error::other(format!(
+                    "{job} prepublish must own exactly one {label} step"
+                ))
+                .into());
+            }
+        }
+        let packaged_step = body
+            .split(packaged_step_name)
+            .nth(1)
+            .and_then(|tail| tail.split(installed_candidate_step_name).next())
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "{job} prepublish omitted the packaged contract step"
+                ))
+            })?;
         for contract in [
             "mcp_advertised_tools_own_their_real_sqlite_effects",
             "packaged_cli_surface_preserves_v0326_routes_and_defaults",
             "packaged_cli_commands_own_their_real_sqlite_effects",
         ] {
-            if !body.contains(contract) {
+            if !packaged_step.contains(contract) {
                 return Err(io::Error::other(format!(
                     "{job} prepublish omitted packaged contract {contract:?}"
+                ))
+                .into());
+            }
+        }
+        let installed_candidate_step = body
+            .split(installed_candidate_step_name)
+            .nth(1)
+            .and_then(|tail| tail.split("\n      - name:").next())
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "{job} prepublish omitted the installed-candidate regression and upgrade step"
+                ))
+            })?;
+        for contract in [
+            "installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui",
+            "persistent_mcp_stdin_does_not_block_repository_startup_probes",
+            "compiler_config_utf8_bom_refreshes_through_cli_and_mcp",
+            "supported_predecessor_recovery_preserves_explicit_database_selection",
+            "plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp",
+        ] {
+            if !installed_candidate_step.contains(contract) {
+                return Err(io::Error::other(format!(
+                    "{job} installed-candidate step omitted regression or upgrade contract {contract:?}"
+                ))
+                .into());
+            }
+        }
+        for required in ["timeout-minutes: 5", "--exact --nocapture"] {
+            if !packaged_step.contains(required) {
+                return Err(io::Error::other(format!(
+                    "{job} packaged contract step omitted fail-closed contract {required:?}"
+                ))
+                .into());
+            }
+        }
+        for required in ["timeout-minutes: 10", "--exact --nocapture"] {
+            if !installed_candidate_step.contains(required) {
+                return Err(io::Error::other(format!(
+                    "{job} installed-candidate step omitted fail-closed contract {required:?}"
+                ))
+                .into());
+            }
+        }
+        for (scope, step) in [
+            ("Packaged", packaged_step),
+            ("Installed-candidate", installed_candidate_step),
+        ] {
+            let inventory_contracts: &[&str] = if job == "Unix" {
+                &[
+                    "if ! inventory=\"$(\"$contract\" --list)\"; then",
+                    "awk -v expected=\"${test}: test\" '$0 == expected { matches += 1 } END { print matches + 0 }'",
+                    "if [ \"$matches\" -ne 1 ]; then",
+                    "exit 1",
+                ]
+            } else {
+                &[
+                    "$inventory = @(& $contractRunner --list)",
+                    "$LASTEXITCODE -ne 0",
+                    "Where-Object { $_ -ceq \"${test}: test\" }",
+                    "if ($matches -ne 1) {",
+                ]
+            };
+            for required in inventory_contracts {
+                if !step.contains(required) {
+                    return Err(io::Error::other(format!(
+                        "{job} {scope} contract step omitted exact inventory guard {required:?}"
+                    ))
+                    .into());
+                }
+            }
+            for required in [
+                format!("{scope} contract inventory failed"),
+                format!("{scope} contract inventory must contain exactly one"),
+            ] {
+                if !step.contains(&required) {
+                    return Err(io::Error::other(format!(
+                        "{job} {scope} contract step omitted inventory failure contract {required:?}"
+                    ))
+                    .into());
+                }
+            }
+        }
+        let platform_contracts: &[&str] = if job == "Unix" {
+            &[
+                "set -euo pipefail",
+                "runtime=\"$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas\"",
+                "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE=\"$runtime\"",
+                "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT=\"$GITHUB_WORKSPACE/plugins/projectatlas\"",
+            ]
+        } else {
+            &[
+                "$env:PROJECTATLAS_MCP_CONTRACT_EXECUTABLE = Join-Path $env:RUNNER_TEMP \"projectatlas-prepublish\\projectatlas.exe\"",
+                "$env:PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT = Join-Path $env:GITHUB_WORKSPACE \"plugins\\projectatlas\"",
+                "foreach ($test in @(",
+                "$LASTEXITCODE -ne 0",
+                "throw \"Installed-candidate contract '$test' failed with exit code $LASTEXITCODE.\"",
+            ]
+        };
+        for required in platform_contracts {
+            if !installed_candidate_step.contains(required) {
+                return Err(io::Error::other(format!(
+                    "{job} installed-candidate step omitted platform contract {required:?}"
                 ))
                 .into());
             }
@@ -10775,7 +10985,8 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         "existing project-local state must survive plugin updates\n",
     )?;
     let db = atlas_dir.join("projectatlas.db");
-    Command::cargo_bin("projectatlas")?
+    let runtime = mcp_contract_executable();
+    Command::new(&runtime)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -10844,7 +11055,6 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
     let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
     let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = stale_runtime_dir.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
-    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
     let fake_plugin_cache = isolated_home
         .join(FAKE_CODEX_PLUGIN_CACHE_DIR)
         .join("projectatlas");
@@ -19310,7 +19520,8 @@ fn compiler_config_utf8_bom_refreshes_through_cli_and_mcp() -> Result<(), Box<dy
     let config_path = repo.join(TS_CONFIG_FILE_NAME);
     fs::write(&config_path, [UTF8_BOM, COMPILER_CONFIG].concat())?;
 
-    let init = Command::cargo_bin("projectatlas")?
+    let executable = mcp_contract_executable();
+    let init = Command::new(&executable)
         .current_dir(&repo)
         .env("PROJECTATLAS_NO_TELEMETRY", "1")
         .args(["--format", "json", "init"])
@@ -19359,7 +19570,6 @@ fn compiler_config_utf8_bom_refreshes_through_cli_and_mcp() -> Result<(), Box<dy
     }
 
     fs::write(&config_path, [UTF8_BOM, COMPILER_CONFIG].concat())?;
-    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let mut session = McpContractSession::spawn(&executable, &repo, &db)?;
     let report = session.call_tool(
         "atlas_watch_once",
@@ -19682,7 +19892,7 @@ fn detailed_relation_payload(
     symbol: Option<&str>,
     direction: &str,
 ) -> Result<Value, Box<dyn Error>> {
-    let mut command = Command::cargo_bin("projectatlas")?;
+    let mut command = Command::new(mcp_contract_executable());
     command
         .current_dir(repo)
         .env("PROJECTATLAS_NO_TELEMETRY", "1")
@@ -20115,7 +20325,7 @@ struct InternalDerivedSnapshot {
 }
 
 fn run_scan(repo: &Path, db: &Path) -> Result<(), Box<dyn Error>> {
-    let output = Command::cargo_bin("projectatlas")?
+    let output = Command::new(mcp_contract_executable())
         .current_dir(repo)
         .arg("--db")
         .arg(db)
@@ -20137,7 +20347,7 @@ fn run_watch_once(repo: &Path, db: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 fn run_watch_once_report(repo: &Path, db: &Path) -> Result<String, Box<dyn Error>> {
-    let output = Command::cargo_bin("projectatlas")?
+    let output = Command::new(mcp_contract_executable())
         .current_dir(repo)
         .arg("--db")
         .arg(db)
