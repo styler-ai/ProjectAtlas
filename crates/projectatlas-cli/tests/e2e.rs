@@ -7572,17 +7572,14 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             String::from_utf8_lossy(&stale_output.stdout),
             String::from_utf8_lossy(&stale_output.stderr)
         );
-        let normalized_stale_output = stale_output_text
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let normalized_stale_output = stale_output_text.split_whitespace().collect::<String>();
         for required in [
             "ProjectAtlas LocalAppData mirror is locked",
             "verify durable absolute MCP configuration before attempting an exact obsolete-child handoff",
             "process_owner=inspection_failed",
             "ProjectAtlas convergence: update_state=partial stable_mirror_ready=false obsolete_mcp_handoff=inspection_failed",
         ] {
-            if !normalized_stale_output.contains(required) {
+            if !normalized_stale_output.contains(&required.split_whitespace().collect::<String>()) {
                 return Err(io::Error::other(format!(
                     "installer did not provide stale locked-mirror guidance {required:?}\n{stale_output_text}"
                 ))
@@ -7629,7 +7626,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
                 env!("CARGO_PKG_VERSION")
             ),
         ] {
-            if !normalized_stale_output.contains(&required) {
+            if !normalized_stale_output.contains(&required.split_whitespace().collect::<String>()) {
                 return Err(io::Error::other(format!(
                     "installer omitted exact stale-command recovery field {required:?}\n{stale_output_text}"
                 ))
@@ -7637,11 +7634,21 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             }
         }
         if !stale_output.status.success()
-            || !stale_output_text.trim_end().ends_with(
-                "ProjectAtlas readiness: runtime_ready=true generated_mcp_configs_ready=true runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=false host_restart_required=false",
+            || !normalized_stale_output.ends_with(
+                &"ProjectAtlas readiness: runtime_ready=true generated_mcp_configs_ready=true runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=false host_restart_required=false"
+                    .split_whitespace()
+                    .collect::<String>(),
             )
-            || stale_output_text.contains("Existing host restart required:")
-            || !stale_output_text.contains("restart alone will not repair it")
+            || normalized_stale_output.contains(
+                &"Existing host restart required:"
+                    .split_whitespace()
+                    .collect::<String>(),
+            )
+            || !normalized_stale_output.contains(
+                &"restart alone will not repair it"
+                    .split_whitespace()
+                    .collect::<String>(),
+            )
         {
             return Err(io::Error::other(format!(
                 "installer did not report repair-required state for the unchanged stale parent mirror\n{stale_output_text}"
@@ -7655,6 +7662,115 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
         {
             return Err(io::Error::other(format!(
                 "installer terminated the owned stale-mirror lock process: {status}"
+            ))
+            .into());
+        }
+
+        let same_version_shadow = temp
+            .path()
+            .join("machine-shadow-bin")
+            .join("projectatlas.exe");
+        fs::create_dir_all(
+            same_version_shadow
+                .parent()
+                .ok_or_else(|| io::Error::other("same-version shadow parent missing"))?,
+        )?;
+        fs::copy(&versioned_runtime, &same_version_shadow)?;
+        let same_version_path = std::env::join_paths(
+            std::iter::once(
+                same_version_shadow
+                    .parent()
+                    .ok_or_else(|| io::Error::other("same-version shadow parent missing"))?
+                    .to_path_buf(),
+            )
+            .chain(std::env::split_paths(&parent_path)),
+        )?;
+        let compatible_before_same_version_shadow = mcp_database_snapshot(&db)?;
+        let same_version_output = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&standalone_installer)
+            .arg("-ProjectRoot")
+            .arg(&repo)
+            .arg("-RuntimePath")
+            .arg(&versioned_runtime)
+            .env_remove("PROJECTATLAS_VERSION")
+            .env("HOME", &isolated_home)
+            .env("USERPROFILE", &isolated_home)
+            .env("APPDATA", &app_data)
+            .env("LOCALAPPDATA", &local_app_data)
+            .env("PATH", &same_version_path)
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+            .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        let same_version_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&same_version_output.stdout),
+            String::from_utf8_lossy(&same_version_output.stderr)
+        );
+        let normalized_same_version_text = same_version_text.split_whitespace().collect::<String>();
+        let same_version_shadow_diagnostic_path =
+            normalize_native_path_display(fs::canonicalize(&same_version_shadow)?)
+                .replace('/', "\\");
+        for required in [
+            format!(
+                "ProjectAtlas stale bare command: path={same_version_shadow_diagnostic_path} observed_version={} ready=false",
+                env!("CARGO_PKG_VERSION")
+            ),
+            format!(
+                "verified_runtime={versioned_runtime_diagnostic_path} target_version={}",
+                env!("CARGO_PKG_VERSION")
+            ),
+            format!(
+                "ProjectAtlas verified absolute runtime command: & '{}' --require-version '{}' --format json runtime-info",
+                versioned_runtime_diagnostic_path,
+                env!("CARGO_PKG_VERSION")
+            ),
+            format!(
+                "ProjectAtlas verified absolute runtime operation: & '{}' '--require-version' '{}' '--db' '{}' '--config' '{}' 'token' '--view' 'tui'",
+                versioned_runtime_diagnostic_path,
+                env!("CARGO_PKG_VERSION"),
+                db_diagnostic_path,
+                config_diagnostic_path
+            ),
+            "ProjectAtlas locked-mirror recovery: restart_can_repair_command_resolution=false"
+                .to_string(),
+            "stable_mirror_ready=false".to_string(),
+            "parent_cli_ready=false".to_string(),
+        ] {
+            if !normalized_same_version_text
+                .contains(&required.split_whitespace().collect::<String>())
+            {
+                return Err(io::Error::other(format!(
+                    "same-version foreign PATH command suppressed recovery field {required:?}\n{same_version_text}"
+                ))
+                .into());
+            }
+        }
+        if !same_version_output.status.success()
+            || mcp_database_snapshot(&db)? != compatible_before_same_version_shadow
+            || temp
+                .path()
+                .join(ATLAS_DIR_NAME)
+                .join("projectatlas.db")
+                .exists()
+        {
+            return Err(io::Error::other(format!(
+                "same-version foreign PATH recovery changed state or failed\n{same_version_text}"
+            ))
+            .into());
+        }
+        if let Some(status) = stale_lock_process
+            .as_mut()
+            .ok_or_else(|| io::Error::other("stale mirror lock process missing"))?
+            .try_wait()?
+        {
+            return Err(io::Error::other(format!(
+                "same-version PATH recovery terminated the unrelated lock owner: {status}"
             ))
             .into());
         }
@@ -7846,6 +7962,7 @@ exit $exitCode
             || !post_quarantine_text.trim_end().ends_with(
                 "ProjectAtlas readiness: runtime_ready=true generated_mcp_configs_ready=true runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=true host_restart_required=false",
             )
+            || post_quarantine_text.contains("ProjectAtlas stale bare command:")
             || post_quarantine_text.contains("Existing host restart required:")
         {
             return Err(io::Error::other(format!(
@@ -8327,10 +8444,7 @@ public static class Program
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        let normalized_installer_output = installer_output
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let normalized_installer_output = installer_output.split_whitespace().collect::<String>();
         let expected_path_guidance = format!(
             "Configure {} first on PATH, then rerun this installer if convergence remains partial.",
             runtime
@@ -8344,17 +8458,26 @@ public static class Program
             ))
             .into());
         }
-        if !installer_output.contains("Retired exact obsolete Codex-owned ProjectAtlas MCP process")
-            || !installer_output.contains(
-                "ProjectAtlas convergence: update_state=complete stable_mirror_ready=true obsolete_mcp_handoff=completed",
-            )
-            || !installer_output.trim_end().ends_with(
-                "ProjectAtlas readiness: runtime_ready=true generated_mcp_configs_ready=true runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=false host_restart_required=false",
-            )
-            || !normalized_installer_output.contains(&expected_path_guidance)
+        if !normalized_installer_output.contains(
+            &"Retired exact obsolete Codex-owned ProjectAtlas MCP process"
+                .split_whitespace()
+                .collect::<String>(),
+        ) || !normalized_installer_output.contains(
+            &"ProjectAtlas convergence: update_state=complete stable_mirror_ready=true obsolete_mcp_handoff=completed"
+                .split_whitespace()
+                .collect::<String>(),
+        ) || !normalized_installer_output.ends_with(
+            &"ProjectAtlas readiness: runtime_ready=true generated_mcp_configs_ready=true runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=false host_restart_required=false"
+                .split_whitespace()
+                .collect::<String>(),
+        ) || !normalized_installer_output.contains(
+            &expected_path_guidance
+                .split_whitespace()
+                .collect::<String>(),
+        )
             || normalized_installer_output
-                .contains("could not prove an exact retireable obsolete MCP owner")
-            || normalized_installer_output.contains("restart the owning host")
+                .contains("couldnotproveanexactretireableobsoleteMCPowner")
+            || normalized_installer_output.contains("restarttheowninghost")
         {
             return Err(io::Error::other(format!(
                 "installer did not report exact complete obsolete MCP convergence:\n{installer_output}"
@@ -8462,7 +8585,7 @@ public static class Program
             String::from_utf8_lossy(&retry_output.stdout),
             String::from_utf8_lossy(&retry_output.stderr)
         );
-        let normalized_retry_text = retry_text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized_retry_text = retry_text.split_whitespace().collect::<String>();
         let stable_runtime_diagnostic_path =
             normalize_native_path_display(fs::canonicalize(&stable_runtime)?).replace('/', "\\");
         let runtime_diagnostic_path =
@@ -8494,7 +8617,7 @@ public static class Program
             "ProjectAtlas locked-mirror recovery: restart_can_repair_command_resolution=false"
                 .to_string(),
         ] {
-            if !normalized_retry_text.contains(&required) {
+            if !normalized_retry_text.contains(&required.split_whitespace().collect::<String>()) {
                 return Err(io::Error::other(format!(
                     "obsolete locked-mirror retry omitted exact diagnostic {required:?}:\n{retry_text}"
                 ))
@@ -8502,8 +8625,10 @@ public static class Program
             }
         }
         if !retry_output.status.success()
-            || !retry_text.contains(
-                "ProjectAtlas convergence: update_state=partial stable_mirror_ready=false obsolete_mcp_handoff=retry_failed codex_plugin_ready=true codex_registry_ready=true",
+            || !normalized_retry_text.contains(
+                &"ProjectAtlas convergence: update_state=partial stable_mirror_ready=false obsolete_mcp_handoff=retry_failed codex_plugin_ready=true codex_registry_ready=true"
+                    .split_whitespace()
+                    .collect::<String>(),
             )
             || !runtime.exists()
             || !atlas_dir.join("projectatlas.mcp.json").exists()
@@ -8903,8 +9028,7 @@ public static class Program
     );
     let normalized_no_handoff_runtime_drift_text = no_handoff_runtime_drift_text
         .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+        .collect::<String>();
     if !no_handoff_runtime_drift_output.status.success()
         || !no_handoff_runtime_drift_text.contains("update_state=partial")
         || !no_handoff_runtime_drift_text.contains("obsolete_mcp_handoff=not_required")
@@ -8912,11 +9036,17 @@ public static class Program
         || !no_handoff_runtime_drift_text.contains("generated_mcp_configs_ready=true")
         || !no_handoff_runtime_drift_text.contains("runtime_mcp_configs_ready=false")
         || !no_handoff_runtime_drift_text.contains("installer_cli_ready=false")
-        || !normalized_no_handoff_runtime_drift_text.contains(&format!(
-            "ProjectAtlas runtime failed final verification: path={runtime_diagnostic_path}"
-        ))
-        || !no_handoff_runtime_drift_text.contains(
-            "ProjectAtlas PATH shadow report skipped because the requested absolute runtime failed final verification",
+        || !normalized_no_handoff_runtime_drift_text.contains(
+            &format!(
+                "ProjectAtlas runtime failed final verification: path={runtime_diagnostic_path}"
+            )
+            .split_whitespace()
+            .collect::<String>(),
+        )
+        || !normalized_no_handoff_runtime_drift_text.contains(
+            &"ProjectAtlas PATH shadow report skipped because the requested absolute runtime failed final verification"
+                .split_whitespace()
+                .collect::<String>(),
         )
         || no_handoff_runtime_drift_text.contains("ProjectAtlas verified absolute runtime command:")
         || no_handoff_runtime_drift_text
@@ -8939,13 +9069,18 @@ public static class Program
         String::from_utf8_lossy(&invalid_mirror_output.stdout),
         String::from_utf8_lossy(&invalid_mirror_output.stderr)
     );
+    let normalized_invalid_mirror_text = invalid_mirror_text.split_whitespace().collect::<String>();
     if !invalid_mirror_output.status.success()
-        || !invalid_mirror_text.contains(
-            "ProjectAtlas convergence: update_state=partial stable_mirror_ready=false obsolete_mcp_handoff=inspection_failed codex_plugin_ready=true codex_registry_ready=true",
+        || !normalized_invalid_mirror_text.contains(
+            &"ProjectAtlas convergence: update_state=partial stable_mirror_ready=false obsolete_mcp_handoff=inspection_failed codex_plugin_ready=true codex_registry_ready=true"
+                .split_whitespace()
+                .collect::<String>(),
         )
-        || !invalid_mirror_text.contains("runtime_mcp_configs_ready=true")
-        || !invalid_mirror_text.contains("Repair the invalid mirror path and rerun this installer")
-        || invalid_mirror_text.contains("Retired exact obsolete Codex-owned ProjectAtlas MCP process")
+        || !normalized_invalid_mirror_text.contains("runtime_mcp_configs_ready=true")
+        || !normalized_invalid_mirror_text
+            .contains("Repairtheinvalidmirrorpathandrerunthisinstaller")
+        || normalized_invalid_mirror_text
+            .contains("RetiredexactobsoleteCodex-ownedProjectAtlasMCPprocess")
         || !stable_runtime.is_dir()
     {
         return Err(io::Error::other(format!(
@@ -8959,7 +9094,7 @@ public static class Program
         "obsolete_mcp_handoff=completed",
         "obsolete_mcp_handoff=retry_failed",
     ] {
-        if invalid_mirror_text.contains(forbidden_state) {
+        if normalized_invalid_mirror_text.contains(forbidden_state) {
             return Err(io::Error::other(format!(
                 "invalid stable mirror entered forbidden handoff state {forbidden_state}:\n{invalid_mirror_text}"
             ))
@@ -11740,6 +11875,8 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let normalized_installer_output_text =
+        installer_output_text.split_whitespace().collect::<String>();
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "release-binary installer failed\n{installer_output_text}"
@@ -11754,9 +11891,15 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         ))
         .into());
     }
-    if !installer_output_text.trim_end().ends_with(
-        "ProjectAtlas readiness: runtime_ready=true generated_mcp_configs_ready=true runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=true host_restart_required=false",
-    ) || installer_output_text.contains("Existing host restart required:")
+    if !normalized_installer_output_text.ends_with(
+        &"ProjectAtlas readiness: runtime_ready=true generated_mcp_configs_ready=true runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=true host_restart_required=false"
+            .split_whitespace()
+            .collect::<String>(),
+    ) || normalized_installer_output_text.contains(
+        &"Existing host restart required:"
+            .split_whitespace()
+            .collect::<String>(),
+    )
     {
         return Err(io::Error::other(format!(
             "installer did not report full readiness after synchronizing the unlocked mirror\n{installer_output_text}"
@@ -11856,12 +11999,25 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         String::from_utf8_lossy(&stale_parent_install.stdout),
         String::from_utf8_lossy(&stale_parent_install.stderr)
     );
+    let normalized_stale_parent_install_text = stale_parent_install_text
+        .split_whitespace()
+        .collect::<String>();
     if !stale_parent_install.status.success()
-        || !stale_parent_install_text.trim_end().ends_with(
-            "ProjectAtlas readiness: runtime_ready=true generated_mcp_configs_ready=true runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=false host_restart_required=false",
+        || !normalized_stale_parent_install_text.ends_with(
+            &"ProjectAtlas readiness: runtime_ready=true generated_mcp_configs_ready=true runtime_mcp_configs_ready=true installer_cli_ready=true parent_cli_ready=false host_restart_required=false"
+                .split_whitespace()
+                .collect::<String>(),
         )
-        || stale_parent_install_text.contains("Existing host restart required:")
-        || !stale_parent_install_text.contains("restart alone will not repair it")
+        || normalized_stale_parent_install_text.contains(
+            &"Existing host restart required:"
+                .split_whitespace()
+                .collect::<String>(),
+        )
+        || !normalized_stale_parent_install_text.contains(
+            &"restart alone will not repair it"
+                .split_whitespace()
+                .collect::<String>(),
+        )
     {
         return Err(io::Error::other(format!(
             "installer misstated repair requirements when the synchronized mirror was absent from the unchanged parent PATH\n{stale_parent_install_text}"
@@ -11910,7 +12066,11 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         ))
         .into());
     }
-    if !installer_output_text.contains("Codex MCP registry updated to ProjectAtlas runtime") {
+    if !normalized_installer_output_text.contains(
+        &"Codex MCP registry updated to ProjectAtlas runtime"
+            .split_whitespace()
+            .collect::<String>(),
+    ) {
         return Err(io::Error::other(format!(
             "installer did not report Codex registry repair:\n{installer_output_text}"
         ))

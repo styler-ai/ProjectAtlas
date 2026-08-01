@@ -5,6 +5,7 @@ A stale ProjectAtlas runtime can damage compatibility by opening a database owne
 ## What Changes
 
 - Preserve one database-owned, read-only schema identity/version preflight before writable open, WAL activation, DDL, repair, index creation, or migration.
+- Revalidate schema, root, and project identity inside the same immediate transaction as every ancillary telemetry DML operation, including post-commit maintenance.
 - Return a shared typed `schema_version_mismatch` classification through CLI and MCP adapters with found and supported versions but no private path or database contents.
 - Add real SQLite regressions, including an active WAL, that compare durable database state and sidecars before and after a newer-schema refusal.
 - Exercise the same refusal through packaged CLI and stdio MCP entry points so source-only tests cannot mask release-artifact drift.

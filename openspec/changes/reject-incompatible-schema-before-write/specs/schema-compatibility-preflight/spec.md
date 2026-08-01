@@ -27,6 +27,26 @@ ProjectAtlas SHALL inspect an existing database through the database-owned read-
 - **WHEN** preflight finds a valid schema whose durable project identity belongs to another root
 - **THEN** ProjectAtlas returns the existing typed project mismatch and does not migrate, rebind, create, or mutate either project's index
 
+#### Scenario: Ancillary telemetry writer observes a transition after preflight
+- **WHEN** a short-lived telemetry writer opens after preflight and another runtime has changed the schema, project root, or project identity
+- **THEN** ProjectAtlas begins an immediate transaction, revalidates the exact captured binding inside that transaction, and refuses event, seal, or maintenance DML before invoking it
+
+#### Scenario: Post-commit telemetry maintenance becomes due
+- **WHEN** a committed event reaches the passive-checkpoint interval
+- **THEN** ProjectAtlas refuses a binding that is already stale before checkpointing, treats the passive checkpoint as schema-independent SQLite engine maintenance, then revalidates and updates bounded maintenance state inside one short immediate transaction without making the already-committed event retryable
+
+#### Scenario: Schema transition races passive checkpoint maintenance
+- **WHEN** another runtime changes the binding after the maintenance precheck but before the passive checkpoint completes
+- **THEN** ProjectAtlas may observe SQLite's passive checkpoint result, but it revalidates and refuses all subsequent ProjectAtlas DML under the final writer transaction while preserving the concurrent owner's committed state
+
+#### Scenario: Telemetry write commits after checkpoint start
+- **WHEN** another telemetry event increments the durable write counter after a checkpoint attempt starts
+- **THEN** completed-checkpoint finalization subtracts the count observed before the attempt only when the maintenance connection's SQLite data-version witness is unchanged; any other connection commit, busy checkpoint, or failed checkpoint preserves the complete current count so no later write is erased
+
+#### Scenario: Successful checkpoint finalizers overlap
+- **WHEN** two connections complete overlapping passive checkpoint attempts and either finalizer or another telemetry event commits before the stale finalizer updates retention state
+- **THEN** the changed SQLite data-version witness makes the stale finalizer preserve the complete current write counter instead of subtracting from a different counter generation
+
 ### Requirement: Newer-schema refusal preserves complete durable state
 ProjectAtlas SHALL leave the main database, WAL contents, schema objects, schema metadata, project identity, authored state, telemetry, and derived rows unchanged after refusing a newer schema. The refusal SHALL remain non-mutating when the newer schema and committed fixture writes are present in an active uncheckpointed WAL retained by another live connection.
 

@@ -11,6 +11,10 @@ When Windows cannot synchronize an obsolete locked stable mirror, the ProjectAtl
 - **WHEN** the inherited executable is locked or present but its bounded version probe cannot produce a trustworthy version
 - **THEN** the installer reports the exact path with version unavailable, does not claim the command current, and keeps convergence partial
 
+#### Scenario: Same-version foreign PATH command is not ready
+- **WHEN** inherited PATH selects an executable at neither the verified runtime path nor the synchronized stable-mirror path, even though its bounded probe reports the target version
+- **THEN** the installer reports that exact command and version as unready, emits verified-runtime recovery guidance, and derives restart applicability from exact fresh-process command resolution
+
 #### Scenario: Bare command already resolves to the verified target
 - **WHEN** the inherited command and version exactly match the verified runtime target
 - **THEN** the installer does not emit stale-command recovery guidance

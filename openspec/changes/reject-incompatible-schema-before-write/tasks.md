@@ -5,7 +5,7 @@
 
 ## 2. Database-Owned Compatibility Boundary
 
-- [x] 2.1 Trace every normal writable store caller through `schema::preflight` and `AtlasStore::open_with_binding_requirement`; retain the single read-only gate before writable open, WAL policy, write pragmas, DDL, repair, index creation, and migration, changing only that shared owner if the failing regression exposes a gap.
+- [x] 2.1 Trace every normal writable store caller through `schema::preflight` and `AtlasStore::open_with_binding_requirement`, plus every ancillary telemetry writer through preflight and the shared validated write transaction; retain the read-only gate before writable open, WAL policy, write pragmas, DDL, repair, index creation, and migration.
 - [x] 2.2 Prove newer-schema refusal returns the exact typed database version error while the live WAL owner remains usable and all captured database/WAL bytes, schema objects, metadata, authored state, telemetry, and derived rows remain unchanged without checkpointing.
 - [x] 2.3 Retain positive current-schema and admitted-predecessor behavior and cover malformed/missing version metadata, incompatible schema shape, wrong-root ownership, and genuinely missing-database classification without implicit creation, rebind, repair, or migration.
 

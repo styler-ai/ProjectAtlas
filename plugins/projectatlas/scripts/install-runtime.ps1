@@ -3356,7 +3356,7 @@ else {
 $lockedStaleCommandRecoveryRequired = -not $stableMirrorReady `
     -and $staleBareCommandPath `
     -and -not [string]::IsNullOrWhiteSpace($targetRuntimeVersion) `
-    -and $staleBareCommandVersion -ne $targetRuntimeVersion
+    -and -not $parentCliReady
 if ($lockedStaleCommandRecoveryRequired) {
     $observedVersion = if ($staleBareCommandVersion) { $staleBareCommandVersion } else { "unavailable" }
     $quotedInstaller = "'" + (Get-NormalizedPathEntry $PSCommandPath).Replace("'", "''") + "'"

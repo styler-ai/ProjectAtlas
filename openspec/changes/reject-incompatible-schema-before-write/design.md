@@ -2,6 +2,8 @@
 
 `projectatlas-db` already owns schema compatibility in `schema::preflight`. Every normal writable store open routes through `AtlasStore::open_with_binding_requirement`, which runs that read-only preflight before `open_writable_connection` can select create flags, establish WAL, configure write pragmas, run DDL, or enter migration. A stale v0.3.26 mirror violated this ordering, while the current source has the right ownership boundary but lacks a durable newer-schema/active-WAL regression and typed public adapter contract.
 
+Read-only navigation stores record telemetry through a separate short-lived writable connection. Event and seal DML already validate schema, root, and project identity inside their immediate transactions. Post-commit checkpoint maintenance previously checked only project identity before an autocommit singleton update, leaving that ancillary write outside the same invariant.
+
 The database is project-local SQLite accessed through `rusqlite`. Its authored purposes, health resolutions, telemetry, project identity, metadata, and schema objects are durable authority; derived index state is rebuildable, but incompatibility refusal is not authorized to mutate either class. CLI and MCP errors already share `AgentErrorKind` and related payload types in the CLI crate. The Windows installer already distinguishes verified versioned-runtime/config readiness from stable-mirror, parent, and bare-command readiness after `handoff-obsolete-mcp-runtime`.
 
 ## Goals / Non-Goals
@@ -9,6 +11,7 @@ The database is project-local SQLite accessed through `rusqlite`. Its authored p
 **Goals:**
 
 - Keep the single read-only schema preflight ahead of every writable SQLite open and every schema mutation path.
+- Keep every ancillary telemetry DML operation behind schema/root/identity validation in its owning immediate transaction.
 - Prove a current runtime refuses a database stamped with a newer schema without changing database bytes, WAL bytes, schema objects, metadata, or authored rows, including while a live connection retains uncheckpointed WAL state.
 - Give CLI and MCP the same machine-readable `schema_version_mismatch` kind and content-free version fields.
 - Prove the contract through the packaged CLI and real stdio MCP server, not only direct database calls.
@@ -19,7 +22,7 @@ The database is project-local SQLite accessed through `rusqlite`. Its authored p
 - Adding a schema object, schema version, migration, query index, crate, dependency, trait, framework, command, or MCP tool.
 - Making an immutable released v0.3.26 executable safe retroactively.
 - Opening, repairing, checkpointing, resetting, replacing, or downgrading a newer database after refusal.
-- Changing SQLite transaction ownership or the existing installer handoff/termination authority.
+- Changing SQLite transaction ownership outside the ancillary telemetry maintenance write or changing existing installer handoff/termination authority.
 - Duplicating `handoff-obsolete-mcp-runtime` task 4.1 or treating a local fixture as real installed-Codex process-handoff proof.
 - Adding a diagram for an ownership flow that remains unchanged.
 
@@ -30,6 +33,14 @@ The database is project-local SQLite accessed through `rusqlite`. Its authored p
 Retain `schema::preflight` as the sole compatibility classifier and `AtlasStore::open_with_binding_requirement` as the shared writable-open gate. A future schema remains a closed `DbError::SchemaVersion { found, expected }` result before `open_writable_connection`; sibling CLI and MCP callers do not receive their own schema guards.
 
 Adding adapter-local prechecks was rejected because another caller could still reach writable SQLite first. Adding a trait, migration framework, or second connection owner was rejected because variability is closed and the existing concrete enum/function boundary already expresses it.
+
+### Revalidate ancillary telemetry at the write transaction
+
+Keep telemetry's read-only compatibility preflight before its short-lived writable open, then use one private concrete helper for `BEGIN IMMEDIATE`, exact schema/root/project-identity validation, DML, and commit-or-lossless-rollback. Event recording and instance sealing reuse that helper. Due post-commit maintenance prechecks the binding before its passive checkpoint and revalidates inside the final immediate transaction that recomputes bounded retention pressure and updates `usage_retention_state`. The maintenance connection captures SQLite's connection-local `data_version` before checkpointing. Finalization subtracts the checkpoint-start counter only when that witness is unchanged; any other connection commit, including an overlapping checkpoint finalizer, conservatively preserves the complete current count. Busy or failed attempts also preserve the complete current count.
+
+SQLite cannot run a passive checkpoint while the same connection holds a writer transaction. The precheck prevents knowingly checkpointing a binding that is already incompatible, but it is not an atomic reservation across the checkpoint statement. A concurrent transition may make the checkpoint busy or may have compatible WAL frames processed by SQLite before the final transaction detects the changed binding. This passive engine maintenance is intentionally schema-independent; the stronger atomic invariant applies to ProjectAtlas DDL and DML, and the final maintenance DML always revalidates under its writer reservation.
+
+An extra deferred validation immediately after writable open was rejected because it would finish before the later writer transaction and would not make validation plus DML atomic. A trait, pool, retry loop, or transaction framework was rejected because the operation set is closed and the existing concrete connection owner is sufficient.
 
 ### Prove zero mutation with a live newer-schema WAL fixture
 
@@ -72,6 +83,8 @@ The installer continues to report partial success while the verified versioned r
 - **Packaged proof silently runs a workspace binary** -> verify and invoke the isolated installed artifact by absolute path and assert its exact runtime version before the refusal checks.
 - **Installer guidance names the target but not the command that remains stale** -> assert exact stale and verified paths/versions in the locked-mirror E2E output.
 - **The preflight becomes row-count dependent** -> keep inspection to bounded schema/metadata reads and compare representative small and large fixtures with SQLite progress/profile evidence and zero write/WAL growth.
+- **Post-commit telemetry maintenance crosses a schema transition** -> refuse an already-stale binding before checkpointing, treat the passive checkpoint as schema-independent engine maintenance, and revalidate under the same immediate transaction as the singleton update.
+- **A concurrent event or checkpoint finalizer commits after the checkpoint starts** -> compare the maintenance connection's `data_version` inside the final writer transaction; subtract the checkpoint-start count only when no other connection committed, otherwise preserve the complete current counter.
 
 ## Migration Plan
 
