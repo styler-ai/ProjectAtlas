@@ -6,8 +6,6 @@ use crate::atlas_map::{
     init_gitignore, lint_map, list_ignore_entries, load_atlas_config, load_atlas_config_for_root,
     remove_ignore_entry, write_map,
 };
-#[cfg(test)]
-use crate::runtime::run_scan_pipeline;
 use crate::runtime::{
     DEFAULT_HEALTH_LIMIT, INDEX_WORKER_SAFE_CEILING, IndexInitRequired, IndexProjectMismatch,
     IndexRefreshRequired, IndexVerificationIncomplete, InitBootstrapOptions, MAX_HEALTH_LIMIT,
@@ -29,6 +27,8 @@ use crate::runtime::{
     strip_legacy_purpose, telemetry_disabled, validate_purpose_review_admission,
     validated_indexed_file_key, watcher_status_report,
 };
+#[cfg(test)]
+use crate::runtime::{PURPOSE_CURATOR_RECOMMENDED_REASONING, run_scan_pipeline};
 use crate::token_tui::{
     TokenDashboardTheme, render_token_dashboard_plain_with_theme,
     render_token_trend_dashboard_plain_with_theme,
@@ -2665,6 +2665,10 @@ struct McpCompactBriefPurposeHandoff {
     /// Whether this report is intended for an agent harness.
     #[serde(skip_serializing_if = "is_true")]
     agent_harness_expected: bool,
+    /// Recommended host-relative reliable subagent tier selection.
+    recommended_subagent_reasoning: &'static str,
+    /// Single host-neutral selection instruction retained from the expanded handoff.
+    instructions: Vec<String>,
     /// Whether the current main agent may process the same bounded batch.
     #[serde(skip_serializing_if = "is_true")]
     main_agent_fallback: bool,
@@ -4026,6 +4030,8 @@ impl ProjectAtlasMcpServer {
     ) -> McpCompactBriefPurposeHandoff {
         McpCompactBriefPurposeHandoff {
             agent_harness_expected: handoff.agent_harness_expected,
+            recommended_subagent_reasoning: handoff.recommended_subagent_reasoning,
+            instructions: handoff.instructions.first().cloned().into_iter().collect(),
             main_agent_fallback: handoff.main_agent_fallback,
             server_started_curator: handoff.server_started_curator,
             silent_on_success: handoff.silent_on_success,
@@ -8906,7 +8912,9 @@ mod tests {
         require(
             text.contains("purpose_handoff:")
                 && text.contains("execution_owner: agent_host")
-                && text.contains("recommended_subagent_reasoning: lowest_host_enforced")
+                && text.contains(&format!(
+                    "recommended_subagent_reasoning: {PURPOSE_CURATOR_RECOMMENDED_REASONING}"
+                ))
                 && text.contains("main_agent_fallback: true")
                 && text.contains("server_started_curator: false")
                 && text.contains("silent_on_success: true")
@@ -9327,6 +9335,23 @@ mod tests {
         let compact_text =
             ProjectAtlasMcpServer::encode_named_payload(MCP_PAYLOAD_SESSION_BRIEF, &compact)?;
         require(
+            compact.purpose_handoff.as_ref().is_some_and(|handoff| {
+                handoff.recommended_subagent_reasoning == PURPOSE_CURATOR_RECOMMENDED_REASONING
+                    && handoff.instructions.len() == 1
+                    && handoff.instructions.first()
+                        == brief
+                            .purpose_handoff
+                            .as_ref()
+                            .and_then(|expanded| expanded.instructions.first())
+            }) && compact_text.contains(&format!(
+                "recommended_subagent_reasoning: {PURPOSE_CURATOR_RECOMMENDED_REASONING}"
+            )) && compact_text
+                .contains("lowest reliable reasoning and cost tier the host supports"),
+            &format!(
+                "compact actionable handoff lost its reliable-tier instruction: {compact_text}"
+            ),
+        )?;
+        require(
             compact
                 .blockers
                 .as_ref()
@@ -9340,7 +9365,6 @@ mod tests {
                 && !compact_text.contains("agent_harness_expected")
                 && !compact_text.contains("server_started_curator")
                 && !compact_text.contains("missing_purposes")
-                && !compact_text.contains("recommended_subagent_reasoning")
                 && compact_text.len() <= 4_096,
             &format!("compact session brief retained default-only chatter: {compact_text}"),
         )?;
@@ -9606,8 +9630,8 @@ mod tests {
             "session handoff was not host-owned",
         )?;
         require(
-            handoff.recommended_subagent_reasoning == "lowest_host_enforced",
-            "session handoff did not request the lowest host-enforced reasoning",
+            handoff.recommended_subagent_reasoning == PURPOSE_CURATOR_RECOMMENDED_REASONING,
+            "session handoff did not request the lowest reliable host-supported reasoning",
         )?;
         require(
             handoff.main_agent_fallback && !handoff.server_started_curator,

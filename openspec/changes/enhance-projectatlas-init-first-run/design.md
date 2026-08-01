@@ -9,7 +9,7 @@ cd your-project
 projectatlas init
 ```
 
-That one command should leave the repository ready for high-quality ProjectAtlas use: local config, DB, scan/index, symbol/text search, and a structured purpose-curation handoff. Because ProjectAtlas is normally used through the plugin mechanism, an agent harness will usually be present. The Rust binary should still remain deterministic and harness-agnostic: it prepares and reports the work, while the agent harness spawns low-reasoning subagents to create/review folder and file purposes through ProjectAtlas APIs.
+That one command should leave the repository ready for high-quality ProjectAtlas use: local config, DB, scan/index, symbol/text search, and a structured purpose-curation handoff. Because ProjectAtlas is normally used through the plugin mechanism, an agent harness will usually be present. The Rust binary should still remain deterministic and harness-agnostic: it prepares and reports the work, while the agent harness delegates purpose creation/review to bounded isolated subagents at the lowest reliable reasoning and cost tier the host supports through ProjectAtlas APIs. A fixed reliable subagent tier still delegates at that tier without a selector; reasoning selection is optional, and only absence of bounded isolated subagent execution selects the main-agent fallback.
 
 OpenSpec's `init` is a useful product pattern: validate the target, determine new-vs-extend mode, guard against wrong root, create/verify directories idempotently, generate tool artifacts, write config only if missing, and print next steps. ProjectAtlas should adapt that shape in Rust without depending on OpenSpec or npm.
 
@@ -48,7 +48,7 @@ The init implementation should be a typed orchestration over existing primitives
    - report counts, duration, warnings, and truncated/timeout state.
 5. Purpose handoff:
    - produce folder/file purpose queue counts,
-   - return clear harness instructions: spawn low-reasoning subagents for initial purpose creation and correction, apply via `atlas_purpose_review`/`projectatlas purpose review --apply`,
+   - return clear harness instructions: delegate initial purpose creation and correction under the reliable-tier handoff rule, apply via `atlas_purpose_review`/`projectatlas purpose review --apply`,
    - include machine-readable batches or next commands when possible.
 6. Success/next steps:
    - report statuses as `created`, `exists`, `verified`, `skipped`, or `failed`,
@@ -71,7 +71,7 @@ The tool description should change from config-only initialization to first-run 
 
 The plugin skill/guidance should say:
 
-- After `projectatlas init` returns a purpose handoff, spawn a subagent with low reasoning to create folder and file purposes for the initial queue.
+- After `projectatlas init` returns a purpose handoff, delegate the initial folder and file purpose queue under the reliable-tier handoff rule.
 - Subagents should apply purposes only through ProjectAtlas APIs/CLI, not by editing SQLite.
 - If an agent or subagent writes the purposes through the approved ProjectAtlas purpose API, those purposes are considered agent-reviewed.
 - During normal work, if an agent sees a purpose that is wrong, stale, vague, or generic, it can correct it opportunistically.
