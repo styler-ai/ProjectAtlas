@@ -17,12 +17,12 @@
 
 ## 4. Windows Locked-Mirror Recovery
 
-- [ ] 4.1 Extend the existing installer partial-convergence output using its bounded probes and captured readiness state to report the exact stale bare-command path/observed version, verified absolute runtime/target version, absolute verification/use command, restart applicability, and unlock/rerun/bare-command gate without broadening #411 handoff authority.
-- [ ] 4.2 On Windows, cover obsolete locked mirror, unavailable stale-version probe, already-current command, fresh-PATH shadowing, non-retireable lock-owner survival, config-only and runtime drift, verified versioned-runtime/generated-config use while locked, unlock plus installer rerun, target bare-command version, and bare token TUI success against the unchanged compatible database; do not claim `handoff-obsolete-mcp-runtime` task 4.1.
+- [x] 4.1 Extend the existing installer partial-convergence output using its bounded probes and captured readiness state to report the exact stale bare-command path/observed version, verified absolute runtime/target version, absolute verification/use command, restart applicability, and unlock/rerun/bare-command gate without broadening #411 handoff authority.
+- [x] 4.2 On Windows, cover obsolete locked mirror, unavailable stale-version probe, already-current command, fresh-PATH shadowing, non-retireable lock-owner survival, config-only and runtime drift, verified versioned-runtime/generated-config use while locked, unlock plus installer rerun, target bare-command version, and bare token TUI success against the unchanged compatible database; do not claim `handoff-obsolete-mcp-runtime` task 4.1.
 
 ## 5. Packaged, Performance, and Release Verification
 
 - [x] 5.1 Construct and install the official packaged runtime in an isolated destination, verify its exact version and absolute path, and prove both packaged CLI and real stdio MCP return the shared typed refusal with the complete active-WAL snapshot unchanged.
 - [x] 5.2 Profile newer-schema refusal on small and representative large row populations; confirm CPU, memory, SQLite reads, and elapsed work remain bounded by schema metadata with no table-sized scan, database/WAL write, checkpoint, or persistent growth.
 - [x] 5.3 With explicit 20-minute process timeouts, run `cargo fmt --check`, `cargo check --workspace --all-targets --all-features`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`, `cargo test --doc --all-features`, and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features`, plus focused database, CLI/MCP, packaged-runtime, and Windows installer tests.
-- [ ] 5.4 Run strict OpenSpec validation, `.github/scripts/issue-checklists.py`, applicable release/package gates, and authenticated live review-thread/Codex/Dependabot feedback reconciliation before task, issue, PR, or release transition.
+- [x] 5.4 Run strict OpenSpec validation, `.github/scripts/issue-checklists.py`, applicable release/package gates, and authenticated live review-thread/Codex/Dependabot feedback reconciliation before task, issue, PR, or release transition.
