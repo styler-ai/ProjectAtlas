@@ -2840,25 +2840,32 @@ function Test-ProjectAtlasCodexPluginReady {
         -or -not ($plugin.version -is [string]) `
         -or -not [string]::Equals($plugin.version, $runtimeVersion, [System.StringComparison]::Ordinal) `
         -or -not ($plugin.marketplaceSource.source -is [string]) `
-        -or -not (Test-ProjectAtlasOfficialMarketplaceSource $plugin.marketplaceSource.source) `
-        -or -not (Test-ProjectAtlasCodexPluginSourceManifest $plugin $runtimeVersion)) {
+        -or -not (Test-ProjectAtlasOfficialMarketplaceSource $plugin.marketplaceSource.source)) {
         return $false
     }
-    $pluginSourcePath = Get-ProjectAtlasCodexPluginSourcePath $plugin
-    if ([string]::IsNullOrWhiteSpace($pluginSourcePath) `
-        -or -not [System.IO.Path]::IsPathRooted($pluginSourcePath)) {
+    try {
+        if (-not (Test-ProjectAtlasCodexPluginSourceManifest $plugin $runtimeVersion)) {
+            return $false
+        }
+        $pluginSourcePath = Get-ProjectAtlasCodexPluginSourcePath $plugin
+        if ([string]::IsNullOrWhiteSpace($pluginSourcePath) `
+            -or -not [System.IO.Path]::IsPathRooted($pluginSourcePath)) {
+            return $false
+        }
+        $manifestPath = Join-Path $pluginSourcePath ".codex-plugin\plugin.json"
+        $skillPath = Join-Path $pluginSourcePath "skills\projectatlas\SKILL.md"
+        $installerPluginRoot = Split-Path -Parent $PSScriptRoot
+        $installerSkillPath = Join-Path $installerPluginRoot "skills\projectatlas\SKILL.md"
+        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) `
+            -or -not (Test-Path -LiteralPath $skillPath -PathType Leaf) `
+            -or -not (Test-Path -LiteralPath $installerSkillPath -PathType Leaf)) {
+            return $false
+        }
+        return (Get-ProjectAtlasSha256 $skillPath) -eq (Get-ProjectAtlasSha256 $installerSkillPath)
+    }
+    catch {
         return $false
     }
-    $manifestPath = Join-Path $pluginSourcePath ".codex-plugin\plugin.json"
-    $skillPath = Join-Path $pluginSourcePath "skills\projectatlas\SKILL.md"
-    $installerPluginRoot = Split-Path -Parent $PSScriptRoot
-    $installerSkillPath = Join-Path $installerPluginRoot "skills\projectatlas\SKILL.md"
-    if (-not (Test-Path -LiteralPath $manifestPath) `
-        -or -not (Test-Path -LiteralPath $skillPath) `
-        -or -not (Test-Path -LiteralPath $installerSkillPath)) {
-        return $false
-    }
-    return (Get-ProjectAtlasSha256 $skillPath) -eq (Get-ProjectAtlasSha256 $installerSkillPath)
 }
 
 function Test-ProjectAtlasCodexMcpRegistryReady {

@@ -8284,10 +8284,12 @@ public static class Program
 
 #[test]
 #[cfg(windows)]
-fn windows_installer_codex_plugin_and_marketplace_selection_require_exact_json_shapes()
+fn windows_installer_obsolete_mcp_handoff_requires_exact_codex_plugin_state()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let script = temp.path().join("test-codex-plugin-selection.ps1");
+    let script_dir = temp.path().join("scripts");
+    fs::create_dir_all(&script_dir)?;
+    let script = script_dir.join("test-codex-plugin-selection.ps1");
     fs::write(
         &script,
         r#"$ErrorActionPreference = "Stop"
@@ -8295,7 +8297,8 @@ $installerSource = Get-Content -Raw -LiteralPath $env:PROJECTATLAS_INSTALLER
 foreach ($functionName in @(
         "Test-ProjectAtlasJsonObject",
         "Get-ProjectAtlasCodexPlugin",
-        "Get-ProjectAtlasCodexMarketplace"
+        "Get-ProjectAtlasCodexMarketplace",
+        "Test-ProjectAtlasCodexPluginReady"
     )) {
     $functionMatch = [regex]::Match(
         $installerSource,
@@ -8401,7 +8404,49 @@ foreach ($payload in $invalidMarketplacePayloads) {
     }
     $caseIndex += 1
 }
-Write-Output "strict_plugin_and_marketplace_selection"
+$script:pluginPayload = [pscustomobject]@{ installed = @($validPlugin) }
+function Convert-ProjectAtlasVersionTag { return "0.4.2" }
+function Resolve-ProjectAtlasCodexCommand { return "C:\Codex\codex.exe" }
+function Get-ProjectAtlasCodexPlugin { return $validPlugin }
+function Test-ProjectAtlasOfficialMarketplaceSource { return $true }
+$script:sourceManifestError = $false
+function Test-ProjectAtlasCodexPluginSourceManifest {
+    if ($script:sourceManifestError) { throw "Unreadable plugin source manifest." }
+    return $true
+}
+$script:pluginSourcePath = $null
+function Get-ProjectAtlasCodexPluginSourcePath { return $script:pluginSourcePath }
+function Get-ProjectAtlasSha256 { throw "Unreadable plugin artifact." }
+$directoryArtifactRoot = Join-Path $env:PROJECTATLAS_PLUGIN_CACHE "directory-artifact"
+$unreadableArtifactRoot = Join-Path $env:PROJECTATLAS_PLUGIN_CACHE "unreadable-artifact"
+foreach ($pluginRoot in @($directoryArtifactRoot, $unreadableArtifactRoot)) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $pluginRoot ".codex-plugin") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $pluginRoot "skills\projectatlas") | Out-Null
+    Set-Content -LiteralPath (Join-Path $pluginRoot ".codex-plugin\plugin.json") -Value "{}"
+}
+New-Item -ItemType Directory -Force -Path (Join-Path $directoryArtifactRoot "skills\projectatlas\SKILL.md") | Out-Null
+Set-Content -LiteralPath (Join-Path $unreadableArtifactRoot "skills\projectatlas\SKILL.md") -Value "fixture"
+$installerSkillPath = Join-Path (Split-Path -Parent $PSScriptRoot) "skills\projectatlas\SKILL.md"
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $installerSkillPath) | Out-Null
+Set-Content -LiteralPath $installerSkillPath -Value "fixture"
+$script:pluginSourcePath = $directoryArtifactRoot
+if (Test-ProjectAtlasCodexPluginReady "0.4.2") {
+    throw "A plugin cache directory was accepted as a skill file."
+}
+$script:pluginSourcePath = $unreadableArtifactRoot
+if (Test-ProjectAtlasCodexPluginReady "0.4.2") {
+    throw "An unreadable plugin artifact was accepted as ready."
+}
+$script:sourceManifestError = $true
+if (Test-ProjectAtlasCodexPluginReady "0.4.2") {
+    throw "An unreadable plugin source manifest was accepted as ready."
+}
+$script:sourceManifestError = $false
+$script:pluginSourcePath = "C:\bad$([char]0)path"
+if (Test-ProjectAtlasCodexPluginReady "0.4.2") {
+    throw "A malformed plugin source path was accepted as ready."
+}
+Write-Output "strict_plugin_marketplace_and_readiness"
 "#,
     )?;
     let installer = workspace_root()?
@@ -8416,13 +8461,17 @@ Write-Output "strict_plugin_and_marketplace_selection"
         .arg("-File")
         .arg(&script)
         .env("PROJECTATLAS_INSTALLER", &installer)
+        .env(
+            "PROJECTATLAS_PLUGIN_CACHE",
+            temp.path().join("plugin-cache"),
+        )
         .output()?;
     if !output.status.success()
         || !String::from_utf8_lossy(&output.stdout)
-            .contains("strict_plugin_and_marketplace_selection")
+            .contains("strict_plugin_marketplace_and_readiness")
     {
         return Err(io::Error::other(format!(
-            "strict Codex plugin and marketplace selection coverage failed:\n{}\n{}",
+            "strict Codex plugin, marketplace, and readiness coverage failed:\n{}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ))
@@ -8433,7 +8482,7 @@ Write-Output "strict_plugin_and_marketplace_selection"
 
 #[test]
 #[cfg(windows)]
-fn windows_installer_generated_config_digest_is_bound_to_exact_validated_bytes()
+fn windows_installer_obsolete_mcp_handoff_binds_generated_config_digest_to_validated_bytes()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let project_root = temp.path().join(TEST_REPO_DIR);
@@ -8969,8 +9018,8 @@ finally {
 
 #[test]
 #[cfg(windows)]
-fn windows_installer_codex_identity_uses_trusted_authenticode_cmdlet() -> Result<(), Box<dyn Error>>
-{
+fn windows_installer_obsolete_mcp_handoff_requires_trusted_authenticode_cmdlet()
+-> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let codex = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
     fs::write(&codex, b"codex identity fixture")?;

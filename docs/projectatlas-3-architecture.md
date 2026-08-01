@@ -339,8 +339,9 @@ flowchart TD
     Owner -->|no| OwnerPartial[Typed partial: preserve every process]
     Owner -->|yes| Managed{Plugin and registry JSON<br/>have exact types and cardinality?}
     Managed -->|no| ReadinessPartial[Typed partial: preserve every process]
-    Managed -->|yes| Version[Reprobe the observed obsolete version and digest]
-    Version --> Late{Parent signature and digest, target runtime,<br/>three configs, plugin, and registry unchanged?}
+    Managed -->|yes| Version{Obsolete version and digest<br/>still match the observation?}
+    Version -->|no| ObsoletePartial[identity_changed_version or identity_changed_file:<br/>preserve every process]
+    Version -->|yes| Late{Parent signature and digest, target runtime,<br/>three configs, plugin, and registry unchanged?}
     Late -->|no| ReplacementPartial[replacement_readiness_changed:<br/>preserve every process]
     Late -->|yes| Handle[Hold child and Codex-parent handles;<br/>revalidate identity and image digests]
     Handle --> Outcome{Exact child retired<br/>or actually exited?}
