@@ -356,6 +356,7 @@ Selection uses one five-second Windows process snapshot. It records the child's
 creation time, parsed complete command, observed obsolete version, and SHA-256
 image identity together with its parent's process ID, creation time, absolute
 `codex.exe` path, complete command, and digest. The parent is eligible only when
+its observed creation time is no later than the child's and
 Windows resolves the module-qualified
 `Microsoft.PowerShell.Security\Get-AuthenticodeSignature` cmdlet from the trusted
 `$PSHOME\Modules\Microsoft.PowerShell.Security` tree, rejects session command
@@ -364,7 +365,11 @@ name `OpenAI OpCo, LLC`. Each generated config's semantics and SHA-256 come from
 one captured byte snapshot. Immediately before retirement, the installer rechecks
 the parent signature and digest, target runtime digest, all three captured config
 digests, and structured plugin/registry readiness; drift is the typed
-`replacement_readiness_changed` partial state. The native helper then keeps both
+`replacement_readiness_changed` partial state. Final reporting re-probes the
+target and rechecks all three config snapshots; uncertainty in that bundle reports
+`runtime_mcp_configs_ready=false` and suppresses integration-verified claims.
+Bounded JSON probes expose a payload only after owned process and temporary-file
+cleanup succeeds. The native helper then keeps both
 handles open while revalidating both identities and image digests. Only an actual
 missing or exited child can take the `exited` retry path. No fallback
 widens selection to an unsigned or non-Codex parent, executable name, another

@@ -35,7 +35,7 @@ The Windows installer SHALL parse `codex mcp get projectatlas --json` and requir
 - **THEN** registry readiness is false and the installer does not implicitly initialize, mutate, or reuse that other project's index
 
 ### Requirement: Obsolete process retirement is narrow and handle-bound
-The Windows installer SHALL inspect child and parent observations from one `Win32_Process` snapshot with a five-second operation timeout. It SHALL retire at most one obsolete stable-mirror process whose observed parent has an absolute `codex.exe` image and matching absolute command identity. Signature inspection SHALL resolve the module-qualified `Microsoft.PowerShell.Security\Get-AuthenticodeSignature` cmdlet from the trusted `$PSHOME\Modules\Microsoft.PowerShell.Security` tree and reject session command shadowing; the cmdlet SHALL report `Valid`, `SignatureType = Authenticode`, and signer simple name `OpenAI OpCo, LLC`. The installer SHALL capture the parent image digest and retire only after final child and parent creation-time, image-path, complete-command, relationship, and image-digest revalidation against held process handles, together with child MCP-mode and observed-version revalidation.
+The Windows installer SHALL inspect child and parent observations from one `Win32_Process` snapshot with a five-second operation timeout. It SHALL retire at most one obsolete stable-mirror process whose observed parent has an absolute `codex.exe` image, matching absolute command identity, and a creation time no later than the child's. Signature inspection SHALL resolve the module-qualified `Microsoft.PowerShell.Security\Get-AuthenticodeSignature` cmdlet from the trusted `$PSHOME\Modules\Microsoft.PowerShell.Security` tree and reject session command shadowing; the cmdlet SHALL report `Valid`, `SignatureType = Authenticode`, and signer simple name `OpenAI OpCo, LLC`. The installer SHALL capture the parent image digest and retire only after final child and parent creation-time, image-path, complete-command, relationship, and image-digest revalidation against held process handles, together with child MCP-mode and observed-version revalidation.
 
 #### Scenario: Exact obsolete MCP owner
 - **WHEN** exactly one obsolete stable-mirror process is running in MCP mode under an authentic observed Codex parent, the target runtime/plugin/registry are ready, and every final child and parent identity field still matches
@@ -49,16 +49,28 @@ The Windows installer SHALL inspect child and parent observations from one `Win3
 - **WHEN** no exact obsolete owner exists, the owner already runs the target version, inspection is denied, the parent is non-Codex, unsigned, signed by another signer, incomplete, or more than one candidate matches
 - **THEN** the installer reports a typed partial state and does not terminate any ProjectAtlas or Codex process
 
+#### Scenario: Observed parent was created after the child
+- **WHEN** an otherwise matching parent process has a creation time later than the MCP child
+- **THEN** the installer reports `unsafe_owner` and leaves both processes alive
+
 #### Scenario: Replacement readiness changes before retirement
 - **WHEN** the target runtime digest, any of the three generated-config digests, the parent signature or digest, or late plugin/registry readiness differs from the captured ready state
-- **THEN** the installer reports `replacement_readiness_changed` and leaves every process alive
+- **THEN** the installer reports `replacement_readiness_changed`, leaves every process alive, and keeps convergence partial
+
+#### Scenario: Runtime or generated config is not ready at final reporting
+- **WHEN** the target runtime cannot be reverified or any generated config is missing, unsafe, unreadable, or differs from its validated digest
+- **THEN** the installer keeps convergence partial, reports `runtime_mcp_configs_ready=false`, emits no generated-config integration-verified claim, and directs the operator to rerun the installer
 
 #### Scenario: Generated config validation and digest share one snapshot
 - **WHEN** the installer captures replacement readiness for a generated Codex, Claude Code, or OpenCode config
 - **THEN** it validates that config's semantics and computes its SHA-256 from the same bytes before later digest drift revalidation
 
 ### Requirement: Handoff convergence is bounded and truthful
-After an exact child retirement or an actual no-such-process/observed-exit result, the installer SHALL retry stable-mirror synchronization once, verify the resulting target runtime, and report complete or partial convergence without escalating process scope. Inspection and identity failures SHALL NOT be classified as `exited`, and the Codex parent SHALL never be terminated.
+After an exact child retirement or an actual no-such-process/observed-exit result, the installer SHALL retry stable-mirror synchronization once, verify the resulting target runtime, and report complete or partial convergence without escalating process scope. Bounded JSON probes SHALL emit a parsed payload only after process and temporary-file cleanup succeeds; cleanup uncertainty SHALL return an unready result rather than abort the installer. Inspection and identity failures SHALL NOT be classified as `exited`, and the Codex parent SHALL never be terminated.
+
+#### Scenario: Probe cleanup cannot be verified
+- **WHEN** a bounded runtime or integration probe returns valid JSON but its owned process or temporary-file cleanup cannot be verified within the bound
+- **THEN** the probe yields no ready payload and the installer reports a partial/unready result without terminating unexpectedly
 
 #### Scenario: Retry succeeds
 - **WHEN** the exact obsolete owner exits and the single mirror retry installs and verifies the target runtime

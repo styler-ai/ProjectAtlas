@@ -4389,6 +4389,7 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "TerminateProcess(handle, 0)",
         "Find-ProjectAtlasObsoleteStableMcpProcess",
         "Get-CimInstance -ClassName Win32_Process",
+        "ProjectAtlas Codex parent was created after the MCP child",
         "Invoke-ProjectAtlasObsoleteStableMcpHandoff",
         "ProjectAtlas convergence: update_state=",
         "obsolete_mcp_handoff=",
@@ -4452,6 +4453,11 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         r#"Write-ProjectAtlasMcpConfig $claudeMcpConfigPath "claude-code""#,
         r#"Write-ProjectAtlasMcpConfig $opencodeConfigPath "opencode""#,
         "Confirm-ProjectAtlasGeneratedMcpConfig",
+        "Test-ProjectAtlasRuntimeMcpConfigReadiness",
+        "Test-ProjectAtlasRuntime $RuntimePath $ExpectedVersion",
+        "$runtimeMcpConfigsReady = Test-ProjectAtlasRuntimeMcpConfigReadiness",
+        "$probeCleanupSucceeded = -not $probeCleanupFailure",
+        "if (-not $probeCleanupSucceeded)",
         "ProjectAtlas generated MCP config verified",
         "Write-ProjectAtlasWorkflowPinReport",
         "Stale ProjectAtlas workflow release pin",
@@ -4470,6 +4476,7 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Suspend-Process",
         "PROCESS_TERMINATE",
         r"System32\taskkill.exe",
+        "runtime_mcp_configs_ready=true",
     ] {
         if powershell_installer.contains(forbidden) {
             return Err(io::Error::other(format!(
@@ -4965,6 +4972,9 @@ foreach ($name in $names) {
     }
     Invoke-Expression $definition.Extent.Text
 }
+$boundedJsonDefinition = ($functions |
+    Where-Object Name -eq "Invoke-ProjectAtlasBoundedJsonCommand" |
+    Select-Object -First 1).Extent.Text
 $machineFirst = "$env:PROJECTATLAS_TEST_MACHINE_BIN;$env:PROJECTATLAS_TEST_USER_BIN"
 $userFirst = "$env:PROJECTATLAS_TEST_USER_BIN;$env:PROJECTATLAS_TEST_MACHINE_BIN"
 if (Test-ProjectAtlasBareCommandResolutionOnPath $machineFirst $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME) {
@@ -4979,6 +4989,98 @@ $unicodePayload = Invoke-ProjectAtlasBoundedJsonCommand `
 $expectedUnicodePath = "M$([char]0x00FC)nchen\$([char]0x8DEF)$([char]0x5F84)"
 if ($unicodePayload.unicode_path -ne $expectedUnicodePath) {
     throw "Bounded JSON command did not strictly decode BOM-less UTF-8 output: expected='$expectedUnicodePath' actual='$($unicodePayload.unicode_path)'"
+}
+$shortBoundedJsonDefinition = $boundedJsonDefinition.Replace(
+    '$probeTimeoutMs = 5000',
+    '$probeTimeoutMs = 100'
+)
+Invoke-Expression $shortBoundedJsonDefinition
+function Remove-Item {
+    [CmdletBinding()]
+    param(
+        [string[]]$LiteralPath,
+        [switch]$Force
+    )
+}
+$cleanupFailureProbe = [Diagnostics.Stopwatch]::StartNew()
+try {
+    $cleanupFailurePayload = Invoke-ProjectAtlasBoundedJsonCommand `
+        $env:PROJECTATLAS_TEST_UNICODE_JSON_RUNTIME `
+        ([string[]]@("runtime-info"))
+}
+finally {
+    $cleanupFailureProbe.Stop()
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath Function:\Remove-Item -Force
+    Invoke-Expression $boundedJsonDefinition
+}
+if ($null -ne $cleanupFailurePayload) {
+    throw "Bounded JSON command emitted a payload after cleanup could not be verified."
+}
+if ($cleanupFailureProbe.Elapsed -gt [TimeSpan]::FromSeconds(2)) {
+    throw "Cleanup failure probe exceeded its bounded tolerance: $($cleanupFailureProbe.Elapsed)"
+}
+$leftoverCommandProbeFiles = @(
+    Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
+        -Filter "projectatlas-command-probe-*" `
+        -File
+)
+if ($leftoverCommandProbeFiles.Count -ne 2) {
+    throw "Suppressed cleanup did not preserve both bounded-probe files: $($leftoverCommandProbeFiles.FullName -join ', ')"
+}
+Microsoft.PowerShell.Management\Remove-Item `
+    -LiteralPath $leftoverCommandProbeFiles.FullName `
+    -Force
+if (Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
+    -Filter "projectatlas-command-probe-*" `
+    -File) {
+    throw "Bounded JSON cleanup regression left temporary files."
+}
+Invoke-Expression $shortBoundedJsonDefinition
+function Remove-Item {
+    [CmdletBinding()]
+    param(
+        [string[]]$LiteralPath,
+        [switch]$Force
+    )
+    throw "Injected bounded-probe cleanup failure."
+}
+$cleanupExceptionProbe = [Diagnostics.Stopwatch]::StartNew()
+$cleanupException = $null
+$cleanupExceptionPayload = $null
+try {
+    $cleanupExceptionPayload = Invoke-ProjectAtlasBoundedJsonCommand `
+        $env:PROJECTATLAS_TEST_UNICODE_JSON_RUNTIME `
+        ([string[]]@("runtime-info"))
+}
+catch {
+    $cleanupException = $_
+}
+finally {
+    $cleanupExceptionProbe.Stop()
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath Function:\Remove-Item -Force
+    Invoke-Expression $boundedJsonDefinition
+    $cleanupExceptionFiles = @(
+        Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
+            -Filter "projectatlas-command-probe-*" `
+            -File
+    )
+    if ($cleanupExceptionFiles.Count -ne 0) {
+        Microsoft.PowerShell.Management\Remove-Item `
+            -LiteralPath $cleanupExceptionFiles.FullName `
+            -Force
+    }
+}
+if ($cleanupException) {
+    throw "Bounded JSON cleanup exception escaped: $cleanupException"
+}
+if ($null -ne $cleanupExceptionPayload) {
+    throw "Bounded JSON command emitted a payload after cleanup threw."
+}
+if ($cleanupExceptionFiles.Count -ne 2) {
+    throw "Injected cleanup exception did not preserve both bounded-probe files: $($cleanupExceptionFiles.FullName -join ', ')"
+}
+if ($cleanupExceptionProbe.Elapsed -gt [TimeSpan]::FromSeconds(2)) {
+    throw "Cleanup exception probe exceeded its bounded tolerance: $($cleanupExceptionProbe.Elapsed)"
 }
 foreach ($invalidRuntimeShape in @(
     $env:PROJECTATLAS_TEST_SINGLETON_RUNTIME_ROOT,
@@ -5052,7 +5154,7 @@ try {
     }
     $leftoverProbeFiles = @(
         Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
-            -Filter "projectatlas-runtime-probe-*" `
+            -Filter "projectatlas-command-probe-*" `
             -File |
         Select-Object -ExpandProperty FullName
     )
@@ -5102,7 +5204,7 @@ try {
     }
     $leftoverProbeFiles = @(
         Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
-            -Filter "projectatlas-runtime-probe-*" `
+            -Filter "projectatlas-command-probe-*" `
             -File |
         Select-Object -ExpandProperty FullName
     )
@@ -7834,24 +7936,28 @@ public static class Program
 }
 "#,
     )?;
-    let compile_output = StdCommand::new("powershell")
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-Command")
-        .arg(
-            "Add-Type -Path $env:PROJECTATLAS_FIXTURE_SOURCE -OutputAssembly $env:PROJECTATLAS_FIXTURE_RUNTIME -OutputType ConsoleApplication",
-        )
-        .env("PROJECTATLAS_FIXTURE_SOURCE", &fixture_source)
-        .env("PROJECTATLAS_FIXTURE_RUNTIME", &stable_runtime)
-        .output()?;
-    if !compile_output.status.success() {
-        return Err(io::Error::other(format!(
-            "failed to compile obsolete ProjectAtlas readiness fixture:\n{}",
-            String::from_utf8_lossy(&compile_output.stderr)
-        ))
-        .into());
-    }
+    let compile_obsolete_runtime = || -> Result<(), Box<dyn Error>> {
+        let output = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-Command")
+            .arg(
+                "Add-Type -Path $env:PROJECTATLAS_FIXTURE_SOURCE -OutputAssembly $env:PROJECTATLAS_FIXTURE_RUNTIME -OutputType ConsoleApplication",
+            )
+            .env("PROJECTATLAS_FIXTURE_SOURCE", &fixture_source)
+            .env("PROJECTATLAS_FIXTURE_RUNTIME", &stable_runtime)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "failed to compile obsolete ProjectAtlas readiness fixture:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        Ok(())
+    };
+    compile_obsolete_runtime()?;
 
     let db = atlas_dir.join("projectatlas.db");
     let codex_owner_fixture = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
@@ -7920,10 +8026,12 @@ public static class Program
         }))?,
     )?;
     let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
+    let config_drift_trigger = isolated_home.join("drift-generated-config");
+    let config_to_drift = atlas_dir.join("projectatlas.mcp.json");
     let fake_codex = isolated_home.join("codex.cmd");
     fs::write(
         &fake_codex,
-        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  type \"%PROJECTATLAS_FAKE_CODEX_PLUGIN_LIST%\"\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  if not exist \"%PROJECTATLAS_FAKE_CODEX_REGISTRY%\" exit /b 1\r\n  type \"%PROJECTATLAS_FAKE_CODEX_REGISTRY%\"\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n",
+        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  if exist \"%PROJECTATLAS_FAKE_CODEX_CONFIG_DRIFT_TRIGGER%\" (\r\n    echo {}>\"%PROJECTATLAS_FAKE_CODEX_CONFIG_TO_DRIFT%\"\r\n    del /q \"%PROJECTATLAS_FAKE_CODEX_CONFIG_DRIFT_TRIGGER%\"\r\n  )\r\n  type \"%PROJECTATLAS_FAKE_CODEX_PLUGIN_LIST%\"\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  if not exist \"%PROJECTATLAS_FAKE_CODEX_REGISTRY%\" exit /b 1\r\n  type \"%PROJECTATLAS_FAKE_CODEX_REGISTRY%\"\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n",
     )?;
     let stable_runtime_dir = stable_runtime
         .parent()
@@ -7978,9 +8086,74 @@ public static class Program
             .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
             .env("PROJECTATLAS_FAKE_CODEX_PLUGIN_LIST", &plugin_list)
             .env("PROJECTATLAS_FAKE_CODEX_REGISTRY", &registry)
+            .env(
+                "PROJECTATLAS_FAKE_CODEX_CONFIG_DRIFT_TRIGGER",
+                &config_drift_trigger,
+            )
+            .env("PROJECTATLAS_FAKE_CODEX_CONFIG_TO_DRIFT", &config_to_drift)
             .env("PROJECTATLAS_NO_TELEMETRY", "1")
             .output()
     };
+
+    let exact_registry = json!({
+        "name": "projectatlas",
+        "enabled": true,
+        "transport": {
+            "type": "stdio",
+            "command": &runtime,
+            "args": [
+                "--require-version", env!("CARGO_PKG_VERSION"),
+                "--db", &db,
+                "--config", atlas_dir.join("config.toml"),
+                "mcp"
+            ]
+        }
+    });
+    write_plugin_list(
+        env!("CARGO_PKG_VERSION"),
+        true,
+        "https://github.com/styler-ai/ProjectAtlas.git",
+    )?;
+    fs::write(&registry, serde_json::to_vec(&exact_registry)?)?;
+    fs::write(&config_drift_trigger, b"drift")?;
+    let no_handoff_drift_output = run_installer(&[])?;
+    let no_handoff_drift_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&no_handoff_drift_output.stdout),
+        String::from_utf8_lossy(&no_handoff_drift_output.stderr)
+    );
+    if !no_handoff_drift_output.status.success()
+        || !no_handoff_drift_text.contains("update_state=partial")
+        || !no_handoff_drift_text.contains("obsolete_mcp_handoff=not_required")
+        || !no_handoff_drift_text.contains("codex_plugin_ready=true codex_registry_ready=true")
+        || !no_handoff_drift_text.contains("runtime_mcp_configs_ready=false")
+        || !no_handoff_drift_text.contains("rerun this installer")
+        || no_handoff_drift_text.contains("integration verified through generated MCP config")
+        || no_handoff_drift_text.contains("The runtime and generated MCP configs are ready")
+    {
+        return Err(io::Error::other(format!(
+            "installer reported stale final runtime/config readiness without a handoff:\n{no_handoff_drift_text}"
+        ))
+        .into());
+    }
+    fs::write(
+        &plugin_list,
+        serde_json::to_vec(&json!({ "installed": [] }))?,
+    )?;
+    fs::write(
+        &registry,
+        serde_json::to_vec(&json!({
+            "name": "projectatlas",
+            "enabled": true,
+            "transport": {
+                "type": "stdio",
+                "command": &stable_runtime,
+                "args": ["--require-version", "0.3.26", "--db", "C:\\old\\projectatlas.db", "mcp"]
+            }
+        }))?,
+    )?;
+    fs::remove_file(&stable_runtime)?;
+    compile_obsolete_runtime()?;
 
     let (mut first_owner, first_obsolete_mcp_pid) = spawn_codex_owned_obsolete_mcp(
         &codex_owner_fixture,
@@ -8124,20 +8297,6 @@ public static class Program
             .into());
         }
 
-        let exact_registry = json!({
-            "name": "projectatlas",
-            "enabled": true,
-            "transport": {
-                "type": "stdio",
-                "command": runtime,
-                "args": [
-                    "--require-version", env!("CARGO_PKG_VERSION"),
-                    "--db", db,
-                    "--config", atlas_dir.join("config.toml"),
-                    "mcp"
-                ]
-            }
-        });
         for (label, malformed_registry) in [
             ("singleton-array-root", json!([exact_registry.clone()])),
             (
@@ -8168,6 +8327,28 @@ public static class Program
             }
         }
         fs::write(&registry, serde_json::to_vec(&exact_registry)?)?;
+        fs::write(&config_drift_trigger, b"drift")?;
+        let drift_output = run_installer(&[first_obsolete_mcp_pid.process_id, first_owner.id()])?;
+        let drift_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&drift_output.stdout),
+            String::from_utf8_lossy(&drift_output.stderr)
+        );
+        if !drift_output.status.success()
+            || !drift_text.contains("update_state=partial")
+            || !drift_text.contains("obsolete_mcp_handoff=replacement_readiness_changed")
+            || !drift_text.contains("runtime_mcp_configs_ready=false")
+            || !drift_text.contains("rerun this installer")
+            || drift_text.contains("integration verified through generated MCP config")
+            || drift_text.contains("The runtime and generated MCP configs are ready")
+            || !windows_process_is_alive(&first_obsolete_mcp_pid)?
+            || first_owner.try_wait()?.is_some()
+        {
+            return Err(io::Error::other(format!(
+                "installer reported stale final runtime/config readiness after config drift:\n{drift_text}"
+            ))
+            .into());
+        }
         let (owner, process_id) = spawn_codex_owned_obsolete_mcp(
             &codex_owner_fixture,
             &stable_runtime,
@@ -8539,6 +8720,8 @@ fn windows_installer_obsolete_mcp_handoff_binds_generated_config_digest_to_valid
         r#"$ErrorActionPreference = "Stop"
 $installerSource = Get-Content -Raw -LiteralPath $env:PROJECTATLAS_INSTALLER
 foreach ($functionName in @(
+        "Assert-ProjectAtlasDirectPath",
+        "Assert-ProjectAtlasDirectFilePath",
         "Convert-ProjectAtlasVersionTag",
         "Get-NormalizedPathEntry",
         "Get-ProjectAtlasComparablePath",
@@ -8546,10 +8729,12 @@ foreach ($functionName in @(
         "Test-ProjectAtlasArgumentsUseAbsolutePaths",
         "Test-ProjectAtlasExactArguments",
         "Assert-ProjectAtlasEquivalentPath",
+        "Get-ProjectAtlasSha256",
         "Get-ProjectAtlasSha256FromBytes",
         "Test-ProjectAtlasJsonObject",
         "Test-ProjectAtlasJsonStringArray",
-        "Confirm-ProjectAtlasGeneratedMcpConfig"
+        "Confirm-ProjectAtlasGeneratedMcpConfig",
+        "Test-ProjectAtlasRuntimeMcpConfigReadiness"
     )) {
     $match = [regex]::Match($installerSource, "(?ms)^function $functionName \{.*?^\}")
     if (-not $match.Success) { throw "Installer function missing: $functionName" }
@@ -8565,6 +8750,51 @@ $digest = Confirm-ProjectAtlasGeneratedMcpConfig `
     $env:PROJECTATLAS_FLAT_CONFIG `
     $env:PROJECTATLAS_PROJECT_ROOT
 Write-Output "validated_digest=$digest"
+$validatedBytes = [System.IO.File]::ReadAllBytes($env:PROJECTATLAS_GENERATED_CONFIG)
+function Test-ProjectAtlasRuntime { return $script:runtimeReady }
+$script:runtimeReady = $true
+$configPaths = [string[]]@($env:PROJECTATLAS_GENERATED_CONFIG)
+$expectedDigests = [string[]]@($digest)
+if (-not (Test-ProjectAtlasRuntimeMcpConfigReadiness `
+        $env:PROJECTATLAS_RUNTIME `
+        $env:PROJECTATLAS_VERSION `
+        $configPaths `
+        $expectedDigests)) {
+    throw "Validated runtime/config bundle was not ready."
+}
+[System.IO.File]::WriteAllBytes(
+    $env:PROJECTATLAS_GENERATED_CONFIG,
+    [System.IO.File]::ReadAllBytes($env:PROJECTATLAS_EXTRA_ARGUMENTS)
+)
+if (Test-ProjectAtlasRuntimeMcpConfigReadiness `
+    $env:PROJECTATLAS_RUNTIME `
+    $env:PROJECTATLAS_VERSION `
+    $configPaths `
+    $expectedDigests) {
+    throw "Changed generated config was reported ready."
+}
+[System.IO.File]::WriteAllBytes($env:PROJECTATLAS_GENERATED_CONFIG, $validatedBytes)
+$script:runtimeReady = $false
+if (Test-ProjectAtlasRuntimeMcpConfigReadiness `
+    $env:PROJECTATLAS_RUNTIME `
+    $env:PROJECTATLAS_VERSION `
+    $configPaths `
+    $expectedDigests) {
+    throw "Changed runtime readiness was reported ready."
+}
+$script:runtimeReady = $true
+Microsoft.PowerShell.Management\Remove-Item `
+    -LiteralPath $env:PROJECTATLAS_GENERATED_CONFIG `
+    -Force
+if (Test-ProjectAtlasRuntimeMcpConfigReadiness `
+    $env:PROJECTATLAS_RUNTIME `
+    $env:PROJECTATLAS_VERSION `
+    $configPaths `
+    $expectedDigests) {
+    throw "Missing generated config was reported ready."
+}
+[System.IO.File]::WriteAllBytes($env:PROJECTATLAS_GENERATED_CONFIG, $validatedBytes)
+Write-Output "final_runtime_config_drift_not_ready"
 foreach ($invalidBytes in @(
         [System.IO.File]::ReadAllBytes($env:PROJECTATLAS_EXTRA_ARGUMENTS),
         [System.IO.File]::ReadAllBytes($env:PROJECTATLAS_SINGLETON_ROOT),
@@ -8627,6 +8857,7 @@ Write-Output "invalid_snapshots_rejected"
     let expected_digest = sha256_hex(&valid_bytes);
     if !output.status.success()
         || !output_text.contains(&format!("validated_digest={expected_digest}"))
+        || !output_text.contains("final_runtime_config_drift_not_ready")
         || !output_text.contains("invalid_snapshots_rejected")
     {
         return Err(io::Error::other(format!(
@@ -8837,6 +9068,62 @@ try {
     if ($invalidPath.State -ne "inspection_failed" -or $owned.HasExited) {
         throw "Invalid identity input was misclassified as process exit: $($invalidPath.State)"
     }
+    $findMatch = [regex]::Match(
+        $installerSource,
+        "(?ms)^function Find-ProjectAtlasObsoleteStableMcpProcess \{.*?^\}"
+    )
+    if (-not $findMatch.Success) {
+        throw "Installer obsolete MCP finder function was not found."
+    }
+    Invoke-Expression $findMatch.Value
+    $syntheticStablePath = "C:\stable\projectatlas.exe"
+    $syntheticCodexPath = "C:\signed\codex.exe"
+    function Initialize-ProjectAtlasRuntimeProbe {}
+    function Get-CimInstance {
+        return @(
+            [pscustomobject]@{
+                ProcessId = 42
+                Name = "projectatlas.exe"
+                ExecutablePath = $syntheticStablePath
+                CommandLine = '"C:\stable\projectatlas.exe" --require-version 0.3.26 --db C:\repo\projectatlas.db --config C:\repo\config.toml mcp'
+                CreationDate = 100
+                ParentProcessId = 43
+            },
+            [pscustomobject]@{
+                ProcessId = 43
+                Name = "codex.exe"
+                ExecutablePath = $syntheticCodexPath
+                CommandLine = '"C:\signed\codex.exe" app-server'
+                CreationDate = 200
+                ParentProcessId = 1
+            }
+        )
+    }
+    function Convert-ProjectAtlasVersionTag {
+        param([string]$Version)
+        return $Version.TrimStart("v")
+    }
+    function Get-NormalizedPathEntry {
+        param([string]$Path)
+        return $Path.ToLowerInvariant()
+    }
+    function Test-ProjectAtlasArgumentsUseAbsolutePaths { return $true }
+    function Get-ProjectAtlasMcpLaunchArguments { return @() }
+    function Test-ProjectAtlasExactArguments { return $true }
+    function Convert-ProjectAtlasCimCreationFileTime {
+        param([object]$Value)
+        return [long]$Value
+    }
+    function Get-ProjectAtlasCodexImageIdentity { return ("c" * 64) }
+    $reusedParentSelection = Find-ProjectAtlasObsoleteStableMcpProcess `
+        $syntheticStablePath `
+        "C:\repo\projectatlas.db" `
+        "C:\repo\config.toml" `
+        "C:\repo\projectatlas.toml" `
+        "0.4.3"
+    if ($reusedParentSelection.State -ne "unsafe_owner" -or $owned.HasExited -or $parent.HasExited) {
+        throw "Parent created after its MCP child was not refused safely: $($reusedParentSelection.State)"
+    }
     $handoffMatch = [regex]::Match(
         $installerSource,
         "(?ms)^function Invoke-ProjectAtlasObsoleteStableMcpHandoff \{.*?^\}"
@@ -8979,7 +9266,7 @@ try {
     if ($accessDenied.State -ne "access_denied" -or $accessDenied.ErrorCode -ne 5) {
         throw "Access-denied process was not classified safely: $($accessDenied.State):$($accessDenied.ErrorCode)"
     }
-    Write-Output "identity_changed_creation identity_changed_path identity_changed_command identity_changed_version replacement_readiness_changed identity_changed_file identity_changed_parent identity_changed_parent_creation identity_changed_parent_path identity_changed_parent_command identity_changed_parent_file inspection_failed exited access_denied"
+    Write-Output "identity_changed_creation identity_changed_path identity_changed_command identity_changed_version replacement_readiness_changed identity_changed_file identity_changed_parent identity_changed_parent_creation identity_changed_parent_path identity_changed_parent_command identity_changed_parent_file parent_created_after_child inspection_failed exited access_denied"
 }
 finally {
     if (-not $owned.HasExited) {
@@ -9004,7 +9291,7 @@ finally {
         .output()?;
     if !output.status.success()
         || !String::from_utf8_lossy(&output.stdout)
-            .contains("identity_changed_creation identity_changed_path identity_changed_command identity_changed_version replacement_readiness_changed identity_changed_file identity_changed_parent identity_changed_parent_creation identity_changed_parent_path identity_changed_parent_command identity_changed_parent_file inspection_failed exited access_denied")
+            .contains("identity_changed_creation identity_changed_path identity_changed_command identity_changed_version replacement_readiness_changed identity_changed_file identity_changed_parent identity_changed_parent_creation identity_changed_parent_path identity_changed_parent_command identity_changed_parent_file parent_created_after_child inspection_failed exited access_denied")
     {
         return Err(io::Error::other(format!(
             "bounded process-retirement failure coverage failed:\n{}\n{}",
@@ -26220,19 +26507,29 @@ fn read_codex_owner_child_identity(
             .ok_or_else(|| io::Error::other("owner fixture omitted child executable path"))?,
     );
     let captured = capture_windows_process_identity(process_id)?;
-    if captured.creation_file_time_utc != owner_creation_file_time_utc
-        || !captured
-            .executable_path
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&owner_executable_path.to_string_lossy())
-        || !captured
-            .executable_path
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&stable_runtime.to_string_lossy())
+    if captured.process_id != process_id
+        || captured.creation_file_time_utc != owner_creation_file_time_utc
     {
-        return Err(io::Error::other(
-            "owner-published child identity did not match the current expected fixture",
-        )
+        return Err(io::Error::other(format!(
+            "owner-published child identity differed: published_pid={process_id} captured_pid={} published_creation={owner_creation_file_time_utc} captured_creation={}",
+            captured.process_id,
+            captured.creation_file_time_utc
+        ))
+        .into());
+    }
+    let owner_canonical = normalize_native_path_display(fs::canonicalize(&owner_executable_path)?);
+    let captured_canonical =
+        normalize_native_path_display(fs::canonicalize(&captured.executable_path)?);
+    let expected_canonical = normalize_native_path_display(fs::canonicalize(stable_runtime)?);
+    if !captured_canonical.eq_ignore_ascii_case(&owner_canonical)
+        || !captured_canonical.eq_ignore_ascii_case(&expected_canonical)
+    {
+        return Err(io::Error::other(format!(
+            "owner-published child path differed: published_raw={} captured_raw={} expected_raw={} published_canonical={owner_canonical} captured_canonical={captured_canonical} expected_canonical={expected_canonical}",
+            owner_executable_path.display(),
+            captured.executable_path.display(),
+            stable_runtime.display()
+        ))
         .into());
     }
     Ok(captured)

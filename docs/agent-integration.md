@@ -232,7 +232,8 @@ On Windows, a running obsolete MCP child can lock the stable LocalAppData
 mirror. The installer takes one Windows process snapshot with a five-second
 inspection bound and may hand off exactly one unambiguous stable-path process
 whose complete command ends in `mcp`. Its observed parent must have an absolute
-`codex.exe` image and matching absolute command identity. Signature inspection
+`codex.exe` image, matching absolute command identity, and a creation time no
+later than the child's. Signature inspection
 resolves the module-qualified
 `Microsoft.PowerShell.Security\Get-AuthenticodeSignature` cmdlet from the trusted
 `$PSHOME\Modules\Microsoft.PowerShell.Security` tree and rejects session command
@@ -245,7 +246,12 @@ semantic validation and SHA-256 to that same byte snapshot. Before invoking
 retirement, it revalidates the target runtime digest, all three captured config
 digests, the parent signature and digest, and late plugin/registry readiness.
 Any drift returns
-`replacement_readiness_changed`. The native helper then holds both process
+`replacement_readiness_changed`. Final reporting re-probes the target runtime
+and rechecks all three config snapshots; uncertainty in that runtime/config
+bundle keeps convergence partial, reports `runtime_mcp_configs_ready=false`, and suppresses integration-verified
+claims. Bounded JSON probes likewise emit a valid payload only after their owned
+process and temporary-file cleanup succeeds, so cleanup uncertainty becomes an
+unready result instead of aborting the installer. The native helper then holds both process
 handles while revalidating creation times, image paths, complete commands,
 parent relationship, and both image digests; it terminates only the exact child.
 A non-Codex, unsigned, wrong-signer, missing, current, inaccessible, ambiguous,
@@ -253,8 +259,8 @@ incomplete, changed, or unready identity preserves every process. Only an actual
 no-such-process or observed child exit returns `exited`; the installer performs
 one stable-mirror retry only after that actual exit or exact child retirement.
 The Codex parent is never terminated. A failed post-retirement retry reports
-`retry_failed`, while the versioned runtime and project-local configs remain
-usable in every partial state.
+`retry_failed` and preserves the versioned runtime plus project-local configs;
+any bundle that cannot be reverified is reported unready with rerun guidance.
 
 Local installer fixtures prove the selection, identity, readiness, failure, and
 retry-reporting contracts, but do not prove the real Codex parent/child

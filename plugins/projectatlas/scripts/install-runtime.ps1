@@ -1135,6 +1135,8 @@ function Invoke-ProjectAtlasBoundedJsonCommand {
     $standardError = Join-Path ([IO.Path]::GetTempPath()) "projectatlas-command-probe-$probeId.stderr"
     $probeFiles = @($standardOutput, $standardError)
     $process = $null
+    $probePayload = $null
+    $probeCleanupSucceeded = $false
     try {
         Initialize-ProjectAtlasRuntimeProbe
         $process = [ProjectAtlas.Installer.RuntimeProbeProcess]::Start(
@@ -1215,8 +1217,7 @@ function Invoke-ProjectAtlasBoundedJsonCommand {
         if (-not (Test-ProjectAtlasJsonObject $payload)) {
             return $null
         }
-        Write-Output -NoEnumerate $payload
-        return
+        $probePayload = $payload
     }
     catch {
         return $null
@@ -1233,22 +1234,29 @@ function Invoke-ProjectAtlasBoundedJsonCommand {
         }
         $cleanupClock = [Diagnostics.Stopwatch]::StartNew()
         $remainingProbeFiles = @($probeFiles)
-        do {
-            Remove-Item -LiteralPath $standardOutput, $standardError -Force -ErrorAction SilentlyContinue
-            $remainingProbeFiles = @($probeFiles | Where-Object { Test-Path -LiteralPath $_ })
-            if ($remainingProbeFiles.Count -eq 0) {
-                break
+        try {
+            do {
+                Remove-Item -LiteralPath $standardOutput, $standardError -Force -ErrorAction SilentlyContinue
+                $remainingProbeFiles = @($probeFiles | Where-Object { Test-Path -LiteralPath $_ })
+                if ($remainingProbeFiles.Count -eq 0) {
+                    break
+                }
+                Start-Sleep -Milliseconds 25
             }
-            Start-Sleep -Milliseconds 25
+            while ($cleanupClock.ElapsedMilliseconds -lt $probeTimeoutMs)
         }
-        while ($cleanupClock.ElapsedMilliseconds -lt $probeTimeoutMs)
-        if ($probeCleanupFailure) {
-            throw $probeCleanupFailure
+        catch {
+            if (-not $probeCleanupFailure) {
+                $probeCleanupFailure = $_
+            }
         }
-        if ($remainingProbeFiles.Count -ne 0) {
-            throw "ProjectAtlas command probe files were not removed within the cleanup bound: $($remainingProbeFiles -join ', ')"
-        }
+        $probeCleanupSucceeded = -not $probeCleanupFailure `
+            -and $remainingProbeFiles.Count -eq 0
     }
+    if (-not $probeCleanupSucceeded) {
+        return $null
+    }
+    Write-Output -NoEnumerate $probePayload
 }
 
 function Invoke-ProjectAtlasRuntimeInfo {
@@ -1541,6 +1549,11 @@ function Find-ProjectAtlasObsoleteStableMcpProcess {
                 -or [string]::IsNullOrWhiteSpace([string]$parent.CreationDate)) {
                 throw "ProjectAtlas Codex parent identity is incomplete."
             }
+            $creationFileTimeUtc = Convert-ProjectAtlasCimCreationFileTime ([object]$process.CreationDate)
+            $parentCreationFileTimeUtc = Convert-ProjectAtlasCimCreationFileTime ([object]$parent.CreationDate)
+            if ($parentCreationFileTimeUtc -gt $creationFileTimeUtc) {
+                throw "ProjectAtlas Codex parent was created after the MCP child."
+            }
             $parentArguments = @([ProjectAtlas.Installer.ObsoleteMcpProcess]::ParseCommandLine(
                     [string]$parent.CommandLine
                 ))
@@ -1558,11 +1571,11 @@ function Find-ProjectAtlasObsoleteStableMcpProcess {
             }
             $exactObsoleteProcesses += [pscustomobject]@{
                 ProcessId = [int]$process.ProcessId
-                CreationFileTimeUtc = Convert-ProjectAtlasCimCreationFileTime ([object]$process.CreationDate)
+                CreationFileTimeUtc = $creationFileTimeUtc
                 Arguments = [string[]]$arguments
                 InvokedVersion = $observedVersion
                 ParentProcessId = $parentProcessId
-                ParentCreationFileTimeUtc = Convert-ProjectAtlasCimCreationFileTime ([object]$parent.CreationDate)
+                ParentCreationFileTimeUtc = $parentCreationFileTimeUtc
                 ParentPath = $parentPath
                 ParentArguments = [string[]]$parentArguments
                 ParentImageSha256 = $parentImageSha256
@@ -2285,6 +2298,33 @@ function Confirm-ProjectAtlasGeneratedMcpConfig {
     }
     Write-Host "${Harness} ProjectAtlas generated MCP config verified for runtime $VerifiedPath and database $DbPath."
     return (Get-ProjectAtlasSha256FromBytes $configBytes)
+}
+
+function Test-ProjectAtlasRuntimeMcpConfigReadiness {
+    param(
+        [string]$RuntimePath,
+        [string]$ExpectedVersion,
+        [string[]]$ConfigPaths,
+        [string[]]$ExpectedSha256
+    )
+    try {
+        if (-not (Test-ProjectAtlasRuntime $RuntimePath $ExpectedVersion) `
+            -or $ConfigPaths.Count -eq 0 `
+            -or $ConfigPaths.Count -ne $ExpectedSha256.Count) {
+            return $false
+        }
+        for ($index = 0; $index -lt $ConfigPaths.Count; $index++) {
+            Assert-ProjectAtlasDirectFilePath $ConfigPaths[$index] "ProjectAtlas generated MCP config"
+            if ([string]::IsNullOrWhiteSpace($ExpectedSha256[$index]) `
+                -or (Get-ProjectAtlasSha256 $ConfigPaths[$index]) -ne $ExpectedSha256[$index]) {
+                return $false
+            }
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
 }
 
 function Resolve-ProjectAtlasCodexCommand {
@@ -3216,8 +3256,14 @@ $hostRestartRequired = -not $parentCliReady -and $futureProcessPathReady
 $hostRepairRequired = -not $parentCliReady -and -not $futureProcessPathReady
 $codexPluginReady = Test-ProjectAtlasCodexPluginReady $ProjectAtlasVersion
 $codexRegistryReady = Test-ProjectAtlasCodexMcpRegistryReady $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath
+$runtimeMcpConfigsReady = Test-ProjectAtlasRuntimeMcpConfigReadiness `
+    $projectAtlas `
+    $ProjectAtlasVersion `
+    ([string[]]@($mcpConfigPath, $claudeMcpConfigPath, $opencodeConfigPath)) `
+    ([string[]]@($mcpConfigSha256, $claudeMcpConfigSha256, $opencodeConfigSha256))
 $integrationVerificationRequired = $handoffState -ne "not_required" -or $codexIntegrationManaged
-$updateState = if ($stableMirrorReady `
+$updateState = if ($runtimeMcpConfigsReady `
+        -and $stableMirrorReady `
         -and (-not $integrationVerificationRequired -or ($codexPluginReady -and $codexRegistryReady))) {
     "complete"
 }
@@ -3232,13 +3278,20 @@ Write-Output "ProjectAtlas update preserved project state under $atlasDir; use r
 Write-Output "Project-local MCP config written: $mcpConfigPath"
 Write-Output "Project-local Claude Code MCP config written: $claudeMcpConfigPath"
 Write-Output "Project-local OpenCode MCP config written: $opencodeConfigPath"
-Write-Output "Claude Code ProjectAtlas integration verified through generated MCP config; restart Claude Code if an older session cached previous instructions."
-Write-Output "OpenCode ProjectAtlas integration verified through generated MCP config; restart OpenCode if an older session cached previous instructions."
+$runtimeMcpConfigGuidance = if ($runtimeMcpConfigsReady) {
+    Write-Output "Claude Code ProjectAtlas integration verified through generated MCP config; restart Claude Code if an older session cached previous instructions."
+    Write-Output "OpenCode ProjectAtlas integration verified through generated MCP config; restart OpenCode if an older session cached previous instructions."
+    "The runtime and generated MCP configs are ready through the verified absolute runtime."
+}
+else {
+    Write-Warning "ProjectAtlas runtime or generated MCP config readiness changed before final reporting; rerun this installer."
+    "The installed runtime and generated MCP configs could not be reverified; rerun this installer."
+}
 if ($hostRestartRequired) {
-    Write-Warning "Existing host restart required: the inherited bare 'projectatlas' command remains stale, but the verified runtime is first on the persisted fresh-process PATH. Restart the environment-owning Windows launcher or terminal session, then start a new Codex or shell; restarting only a child of an unchanged launcher can retain stale PATH. The runtime and generated MCP configs are already ready through the verified absolute runtime."
+    Write-Warning "Existing host restart required: the inherited bare 'projectatlas' command remains stale, but the verified runtime is first on the persisted fresh-process PATH. Restart the environment-owning Windows launcher or terminal session, then start a new Codex or shell; restarting only a child of an unchanged launcher can retain stale PATH. $runtimeMcpConfigGuidance"
 }
 elseif ($hostRepairRequired) {
-    Write-Warning "Existing host bare CLI is not ready, and restart alone will not repair it because this installation could not make the verified runtime the first bare command for a fresh process. The installer could not prove an exact retireable obsolete MCP owner; restart the owning host and rerun this installer, or configure $(Split-Path -Parent $projectAtlas) first on PATH. The runtime and generated MCP configs are ready through the verified absolute runtime."
+    Write-Warning "Existing host bare CLI is not ready, and restart alone will not repair it because this installation could not make the verified runtime the first bare command for a fresh process. The installer could not prove an exact retireable obsolete MCP owner; restart the owning host and rerun this installer, or configure $(Split-Path -Parent $projectAtlas) first on PATH. $runtimeMcpConfigGuidance"
 }
 Write-Output "ProjectAtlas convergence: update_state=$updateState stable_mirror_ready=$($stableMirrorReady.ToString().ToLowerInvariant()) obsolete_mcp_handoff=$handoffState codex_plugin_ready=$($codexPluginReady.ToString().ToLowerInvariant()) codex_registry_ready=$($codexRegistryReady.ToString().ToLowerInvariant())"
-Write-Output "ProjectAtlas readiness: runtime_mcp_configs_ready=true installer_cli_ready=$($installerCliReady.ToString().ToLowerInvariant()) parent_cli_ready=$($parentCliReady.ToString().ToLowerInvariant()) host_restart_required=$($hostRestartRequired.ToString().ToLowerInvariant())"
+Write-Output "ProjectAtlas readiness: runtime_mcp_configs_ready=$($runtimeMcpConfigsReady.ToString().ToLowerInvariant()) installer_cli_ready=$($installerCliReady.ToString().ToLowerInvariant()) parent_cli_ready=$($parentCliReady.ToString().ToLowerInvariant()) host_restart_required=$($hostRestartRequired.ToString().ToLowerInvariant())"
