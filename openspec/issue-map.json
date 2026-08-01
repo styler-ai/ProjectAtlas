@@ -27,6 +27,7 @@
     "fix-token-tui-reference-visual-regression": 304,
     "isolate-effective-git-config-stdin": 409,
     "isolate-linked-worktree-atlases": 382,
+    "manage-worktree-atlas-continuity": 430,
     "match-token-impact-reference-tui": 302,
     "migrate-released-database-layouts": 379,
     "pin-sql-fixture-line-endings": 401,
