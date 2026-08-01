@@ -1924,6 +1924,15 @@ function Test-ProjectAtlasBareCommandResolutionOnPath {
     }
 }
 
+function Test-ProjectAtlasPersistedBareCommandResolution {
+    param(
+        [string]$VerifiedPath
+    )
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    return (Test-ProjectAtlasBareCommandResolutionOnPath (@($machinePath, $userPath) -join ";") $VerifiedPath)
+}
+
 function Set-ProjectAtlasPathPrecedence {
     param(
         [string]$FilePath
@@ -1945,9 +1954,7 @@ function Set-ProjectAtlasPathPrecedence {
     $userEntries = @($userEntries | Where-Object { (Get-NormalizedPathEntry $_) -ne $normalizedRuntimeDir })
     $futureUserPath = (@($runtimeDir) + $userEntries) -join ";"
     [Environment]::SetEnvironmentVariable("Path", $futureUserPath, "User")
-    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    $freshProcessPath = @($machinePath, $futureUserPath) -join ";"
-    return (Test-ProjectAtlasBareCommandResolutionOnPath $freshProcessPath $FilePath)
+    return (Test-ProjectAtlasPersistedBareCommandResolution $FilePath)
 }
 
 function Confirm-ProjectAtlasBareCommandResolution {
@@ -2084,6 +2091,22 @@ function Get-ProjectAtlasMcpLaunchArguments {
         $launchArgs += @("--config", $FlatConfigPath)
     }
     $launchArgs += "mcp"
+    return $launchArgs
+}
+
+function Get-ProjectAtlasTokenLaunchArguments {
+    param(
+        [string]$DbPath,
+        [string]$ProjectConfigPath,
+        [string]$FlatConfigPath,
+        [string]$ExpectedVersion
+    )
+    $launchArgs = @(Get-ProjectAtlasMcpLaunchArguments $DbPath $ProjectConfigPath $FlatConfigPath $ExpectedVersion)
+    if ($launchArgs.Count -eq 0) {
+        return @()
+    }
+    $launchArgs[$launchArgs.Count - 1] = "token"
+    $launchArgs += @("--view", "tui")
     return $launchArgs
 }
 
@@ -3154,6 +3177,9 @@ Quarantine-ProjectAtlasStaleShims $projectAtlas $ProjectAtlasVersion
 if (-not $RuntimePath) {
     $futureProcessPathReady = Set-ProjectAtlasPathPrecedence $projectAtlas
 }
+else {
+    $futureProcessPathReady = Test-ProjectAtlasPersistedBareCommandResolution $projectAtlas
+}
 $effectiveInheritedProjectAtlasPath = $inheritedProjectAtlasPath
 if ([string]::IsNullOrWhiteSpace($effectiveInheritedProjectAtlasPath) -or -not (Test-Path -LiteralPath $effectiveInheritedProjectAtlasPath)) {
     $installerProcessPath = $env:Path
@@ -3339,12 +3365,15 @@ if ($lockedStaleCommandRecoveryRequired) {
     $quotedRuntimeVersion = "'" + $targetRuntimeVersion.Replace("'", "''") + "'"
     if ($verifiedRuntimeReady) {
         $quotedRuntime = "'" + $verifiedRuntimePath.Replace("'", "''") + "'"
-        Write-Warning "ProjectAtlas stale bare command: path=$staleBareCommandPath observed_version=$observedVersion ready=false; verified_runtime=$verifiedRuntimePath target_version=$targetRuntimeVersion."
+        $tokenArguments = @(Get-ProjectAtlasTokenLaunchArguments $dbPath $projectConfigPath $flatConfigPath $targetRuntimeVersion)
+        $quotedTokenArguments = ($tokenArguments | ForEach-Object { "'" + ([string]$_).Replace("'", "''") + "'" }) -join " "
+        Write-Output "ProjectAtlas stale bare command: path=$staleBareCommandPath observed_version=$observedVersion ready=false; verified_runtime=$verifiedRuntimePath target_version=$targetRuntimeVersion."
         Write-Output "ProjectAtlas verified absolute runtime command: & $quotedRuntime --require-version $quotedRuntimeVersion --format json runtime-info"
+        Write-Output "ProjectAtlas verified absolute runtime operation: & $quotedRuntime $quotedTokenArguments"
         Write-Warning "ProjectAtlas locked-mirror recovery: restart_can_repair_command_resolution=$($hostRestartRequired.ToString().ToLowerInvariant()). Wait for the lock owner to exit or release $stableMirrorPath; then rerun & $quotedInstaller -ProjectRoot $quotedProjectRoot -ProjectAtlasVersion $quotedReleaseVersion -RuntimePath $quotedRuntime. From $ProjectRoot, require both bare-command gates before declaring convergence: projectatlas --require-version $quotedRuntimeVersion --format json runtime-info; projectatlas --require-version $quotedRuntimeVersion token --view tui."
     }
     else {
-        Write-Warning "ProjectAtlas stale bare command: path=$staleBareCommandPath observed_version=$observedVersion ready=false; target_version=$targetRuntimeVersion."
+        Write-Output "ProjectAtlas stale bare command: path=$staleBareCommandPath observed_version=$observedVersion ready=false; target_version=$targetRuntimeVersion."
         Write-Warning "ProjectAtlas requested absolute runtime failed final verification: path=$verifiedRuntimePath target_version=$targetRuntimeVersion. Restore or replace that runtime and rerun & $quotedInstaller -ProjectRoot $quotedProjectRoot -ProjectAtlasVersion $quotedReleaseVersion; do not use it through -RuntimePath until verification succeeds."
     }
 }

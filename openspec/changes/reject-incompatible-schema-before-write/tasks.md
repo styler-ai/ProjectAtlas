@@ -17,8 +17,8 @@
 
 ## 4. Windows Locked-Mirror Recovery
 
-- [x] 4.1 Extend the existing installer partial-convergence output using its bounded probes and captured readiness state to report the exact stale bare-command path/observed version, verified absolute runtime/target version, absolute verification/use command, restart applicability, and unlock/rerun/bare-command gate without broadening #411 handoff authority.
-- [x] 4.2 On Windows, cover obsolete locked mirror, unavailable stale-version probe, already-current command, fresh-PATH shadowing, non-retireable lock-owner survival, config-only and runtime drift, verified versioned-runtime/generated-config use while locked, unlock plus installer rerun, target bare-command version, and bare token TUI success against the unchanged compatible database; do not claim `handoff-obsolete-mcp-runtime` task 4.1.
+- [ ] 4.1 Extend the existing installer partial-convergence output using its bounded probes and captured readiness state to report the exact stale bare-command path/observed version, verified absolute runtime/target version, absolute verification/use command, restart applicability, and unlock/rerun/bare-command gate without broadening #411 handoff authority.
+- [ ] 4.2 On Windows, cover obsolete locked mirror, unavailable stale-version probe, already-current command, fresh-PATH shadowing, non-retireable lock-owner survival, config-only and runtime drift, verified versioned-runtime/generated-config use while locked, unlock plus installer rerun, target bare-command version, and bare token TUI success against the unchanged compatible database; do not claim `handoff-obsolete-mcp-runtime` task 4.1.
 
 ## 5. Packaged, Performance, and Release Verification
 

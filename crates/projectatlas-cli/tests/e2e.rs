@@ -141,6 +141,12 @@ const NPM_SHIM_DIR: &str = "npm";
 #[cfg(windows)]
 const WINDOWS_SYSTEM32_DIR: &str = "System32";
 #[cfg(windows)]
+const WINDOWS_POWERSHELL_DIR: &str = "WindowsPowerShell";
+#[cfg(windows)]
+const WINDOWS_POWERSHELL_VERSION_DIR: &str = "v1.0";
+#[cfg(windows)]
+const WINDOWS_POWERSHELL_EXECUTABLE: &str = "powershell.exe";
+#[cfg(windows)]
 static WINDOWS_RELEASE_ASSET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(windows)]
@@ -4631,10 +4637,12 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "PROJECTATLAS_SKIP_USER_PATH_UPDATE",
         "Set-ProjectAtlasProcessPathPrecedence",
         "Test-ProjectAtlasBareCommandResolutionOnPath",
+        "Test-ProjectAtlasPersistedBareCommandResolution",
+        "Get-ProjectAtlasTokenLaunchArguments",
         r#"[Environment]::SetEnvironmentVariable("Path""#,
         r#"[Environment]::GetEnvironmentVariable("Path", "Machine")"#,
-        "$freshProcessPath = @($machinePath, $futureUserPath) -join \";\"",
-        "Test-ProjectAtlasBareCommandResolutionOnPath $freshProcessPath $FilePath",
+        "Test-ProjectAtlasPersistedBareCommandResolution $FilePath",
+        "$futureProcessPathReady = Test-ProjectAtlasPersistedBareCommandResolution $projectAtlas",
         "Confirm-ProjectAtlasBareCommandResolution",
         "Active process resolves bare projectatlas to verified runtime",
         "Restart Codex or the shell",
@@ -5073,8 +5081,18 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
     let temp = tempfile::tempdir()?;
     let machine_bin = temp.path().join("machine-bin");
     let user_bin = temp.path().join("user-bin");
+    let empty_bin = temp.path().join("empty-bin");
     fs::create_dir_all(&machine_bin)?;
     fs::create_dir_all(&user_bin)?;
+    fs::create_dir_all(&empty_bin)?;
+    let system_powershell = PathBuf::from(
+        std::env::var_os("SystemRoot")
+            .ok_or_else(|| io::Error::other("SystemRoot is unavailable"))?,
+    )
+    .join(WINDOWS_SYSTEM32_DIR)
+    .join(WINDOWS_POWERSHELL_DIR)
+    .join(WINDOWS_POWERSHELL_VERSION_DIR)
+    .join(WINDOWS_POWERSHELL_EXECUTABLE);
     fs::write(machine_bin.join("projectatlas.cmd"), "@exit /b 0\r\n")?;
     let verified_runtime = user_bin.join("projectatlas.cmd");
     fs::write(&verified_runtime, "@exit /b 0\r\n")?;
@@ -5191,6 +5209,7 @@ $names = @(
     "Split-PathList",
     "Sync-ProjectAtlasRuntimeToLocalAppData",
     "Test-ProjectAtlasBareCommandResolutionOnPath",
+    "Test-ProjectAtlasPersistedBareCommandResolution",
     "Test-ProjectAtlasJsonObject",
     "Test-ProjectAtlasRuntime",
     "Test-Truthy"
@@ -5217,6 +5236,9 @@ if (Test-ProjectAtlasBareCommandResolutionOnPath $machineFirst $env:PROJECTATLAS
 }
 if (-not (Test-ProjectAtlasBareCommandResolutionOnPath $userFirst $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME)) {
     throw "Verified runtime first on PATH was not classified as restart-recoverable"
+}
+if (Test-ProjectAtlasBareCommandResolutionOnPath $env:PROJECTATLAS_TEST_EMPTY_BIN $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME) {
+    throw "PATH without ProjectAtlas was incorrectly classified as restart-recoverable"
 }
 $unicodePayload = Invoke-ProjectAtlasBoundedJsonCommand `
     $env:PROJECTATLAS_TEST_UNICODE_JSON_RUNTIME `
@@ -5335,10 +5357,13 @@ if ($env:PROJECTATLAS_TEST_PERSIST_USER_PATH -eq "1") {
         if (-not (Set-ProjectAtlasPathPrecedence $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME)) {
             throw "Persisted User PATH was not classified as fresh-host ready"
         }
+        if (-not (Test-ProjectAtlasPersistedBareCommandResolution $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME)) {
+            throw "Supplied-runtime mode did not recognize the existing persisted User PATH"
+        }
         $persistedUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
         $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
         $env:Path = @($machinePath, $persistedUserPath) -join ";"
-        $freshChildPath = & powershell -NoProfile -Command `
+        $freshChildPath = & $env:PROJECTATLAS_TEST_SYSTEM_POWERSHELL -NoProfile -Command `
             "(Get-Command projectatlas -ErrorAction Stop).Source"
         if ($LASTEXITCODE -ne 0) {
             throw "Fresh child could not resolve projectatlas from persisted User PATH"
@@ -5516,6 +5541,8 @@ finally {
         .env("PROJECTATLAS_TEST_INSTALLER", installer)
         .env("PROJECTATLAS_TEST_MACHINE_BIN", &machine_bin)
         .env("PROJECTATLAS_TEST_USER_BIN", &user_bin)
+        .env("PROJECTATLAS_TEST_EMPTY_BIN", &empty_bin)
+        .env("PROJECTATLAS_TEST_SYSTEM_POWERSHELL", &system_powershell)
         .env("PROJECTATLAS_TEST_VERIFIED_RUNTIME", &verified_runtime)
         .env("PROJECTATLAS_TEST_HANGING_RUNTIME", &hanging_runtime)
         .env("PROJECTATLAS_TEST_FLOODING_RUNTIME", &flooding_runtime)
@@ -5721,6 +5748,16 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
             ))
             .into());
         }
+    }
+    let about_claim = "Every file not opened. Every folder not explored. ProjectAtlas guides coding agents with purpose metadata and an intelligent code graph, reducing token costs by over 90%.";
+    let about_qualification = "The \"over 90%\" figure is a workload-specific local estimate from the published audit, not a universal savings guarantee or provider-billing result; see [One Large-Application Audit](#one-large-application-audit).";
+    if readme.matches(about_claim).count() != 1
+        || !readme.contains(&format!("{about_claim}\n\n{about_qualification}"))
+    {
+        return Err(io::Error::other(
+            "README must retain the exact requested About claim once with its adjacent audit qualification",
+        )
+        .into());
     }
     for required in [
         "### Runtime installation and repair",
@@ -7020,6 +7057,138 @@ fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>
 
 #[test]
 #[cfg(windows)]
+fn windows_installer_recovery_operation_preserves_config_selection() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let outside = temp.path().join("outside");
+    fs::create_dir(&outside)?;
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let installer = workspace_root()?
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    let powershell = PathBuf::from(
+        std::env::var_os("SystemRoot")
+            .ok_or_else(|| io::Error::other("SystemRoot is unavailable"))?,
+    )
+    .join(WINDOWS_SYSTEM32_DIR)
+    .join(WINDOWS_POWERSHELL_DIR)
+    .join(WINDOWS_POWERSHELL_VERSION_DIR)
+    .join(WINDOWS_POWERSHELL_EXECUTABLE);
+    let script = temp.path().join("run-token-recovery.ps1");
+    fs::write(
+        &script,
+        r#"$ErrorActionPreference = "Stop"
+$installerSource = Get-Content -Raw -LiteralPath $env:PROJECTATLAS_TEST_INSTALLER
+foreach ($functionName in @(
+        "Convert-ProjectAtlasVersionTag",
+        "Get-ProjectAtlasMcpLaunchArguments",
+        "Get-ProjectAtlasTokenLaunchArguments"
+    )) {
+    $match = [regex]::Match($installerSource, "(?ms)^function $functionName \{.*?^\}")
+    if (-not $match.Success) { throw "Installer function missing: $functionName" }
+    Invoke-Expression $match.Value
+}
+$arguments = @(Get-ProjectAtlasTokenLaunchArguments `
+    $env:PROJECTATLAS_TEST_DB `
+    $env:PROJECTATLAS_TEST_NESTED_CONFIG `
+    $env:PROJECTATLAS_TEST_FLAT_CONFIG `
+    $env:PROJECTATLAS_TEST_VERSION)
+$expected = @(
+    "--require-version", $env:PROJECTATLAS_TEST_VERSION,
+    "--db", $env:PROJECTATLAS_TEST_DB
+)
+if (-not [string]::IsNullOrWhiteSpace($env:PROJECTATLAS_TEST_SELECTED_CONFIG)) {
+    $expected += @("--config", $env:PROJECTATLAS_TEST_SELECTED_CONFIG)
+}
+$expected += @("token", "--view", "tui")
+if (($arguments -join "`0") -cne ($expected -join "`0")) {
+    throw "Unexpected recovery arguments: $($arguments -join ' ')"
+}
+& $env:PROJECTATLAS_TEST_RUNTIME @arguments
+exit $LASTEXITCODE
+"#,
+    )?;
+
+    for layout in ["nested", "flat", "none"] {
+        let repo = temp.path().join(layout);
+        let atlas_dir = repo.join(ATLAS_DIR_NAME);
+        fs::create_dir_all(&atlas_dir)?;
+        let nested_config = atlas_dir.join("config.toml");
+        let flat_config = repo.join("projectatlas.toml");
+        let selected_config = match layout {
+            "nested" => Some(nested_config.as_path()),
+            "flat" => Some(flat_config.as_path()),
+            _ => None,
+        };
+        if let Some(config) = selected_config {
+            fs::write(config, "[project]\nroot = \".\"\n")?;
+        }
+        let db = atlas_dir.join("projectatlas.db");
+        let mut scan = StdCommand::new(&runtime);
+        scan.current_dir(&outside)
+            .args(["--require-version", env!("CARGO_PKG_VERSION")])
+            .args(["--format", "json"])
+            .arg("--db")
+            .arg(&db);
+        if let Some(config) = selected_config {
+            scan.arg("--config").arg(config);
+        }
+        let scan_output = scan.arg("scan").arg(&repo).output()?;
+        if !scan_output.status.success() {
+            return Err(io::Error::other(format!(
+                "{layout} recovery fixture scan failed: {}",
+                String::from_utf8_lossy(&scan_output.stderr)
+            ))
+            .into());
+        }
+        let before = mcp_database_snapshot(&db)?;
+        let output = StdCommand::new(&powershell)
+            .current_dir(&outside)
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
+            .env("PROJECTATLAS_TEST_INSTALLER", &installer)
+            .env("PROJECTATLAS_TEST_RUNTIME", &runtime)
+            .env("PROJECTATLAS_TEST_VERSION", env!("CARGO_PKG_VERSION"))
+            .env("PROJECTATLAS_TEST_DB", &db)
+            .env("PROJECTATLAS_TEST_NESTED_CONFIG", &nested_config)
+            .env("PROJECTATLAS_TEST_FLAT_CONFIG", &flat_config)
+            .env(
+                "PROJECTATLAS_TEST_SELECTED_CONFIG",
+                selected_config.unwrap_or_else(|| Path::new("")),
+            )
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "{layout} recovery operation failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        if mcp_database_snapshot(&db)? != before {
+            return Err(io::Error::other(format!(
+                "{layout} recovery operation changed the selected database"
+            ))
+            .into());
+        }
+        if outside
+            .join(ATLAS_DIR_NAME)
+            .join("projectatlas.db")
+            .exists()
+        {
+            return Err(io::Error::other(format!(
+                "{layout} recovery operation created an outside default database"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
 fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is_locked()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
@@ -7424,6 +7593,9 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             normalize_native_path_display(fs::canonicalize(&stable_runtime)?).replace('/', "\\");
         let versioned_runtime_diagnostic_path =
             normalize_native_path_display(fs::canonicalize(&versioned_runtime)?).replace('/', "\\");
+        let db_diagnostic_path = normalize_native_path_display(&db).replace('/', "\\");
+        let config_diagnostic_path =
+            normalize_native_path_display(atlas_dir.join("config.toml")).replace('/', "\\");
         for required in [
             format!(
                 "ProjectAtlas stale bare command: path={stable_runtime_diagnostic_path} observed_version=unavailable ready=false"
@@ -7437,6 +7609,13 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
                 "ProjectAtlas verified absolute runtime command: & '{}' --require-version '{}' --format json runtime-info",
                 versioned_runtime_diagnostic_path,
                 env!("CARGO_PKG_VERSION")
+            ),
+            format!(
+                "ProjectAtlas verified absolute runtime operation: & '{}' '--require-version' '{}' '--db' '{}' '--config' '{}' 'token' '--view' 'tui'",
+                versioned_runtime_diagnostic_path,
+                env!("CARGO_PKG_VERSION"),
+                db_diagnostic_path,
+                config_diagnostic_path
             ),
             "ProjectAtlas locked-mirror recovery: restart_can_repair_command_resolution=false"
                 .to_string(),
@@ -7479,13 +7658,85 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             ))
             .into());
         }
+        if std::env::var("PROJECTATLAS_TEST_DISPOSABLE_RUNNER").as_deref() == Ok("github-hosted") {
+            let restart_output = StdCommand::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    r#"
+$originalUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$exitCode = 1
+try {
+    $runtimeDir = Split-Path -Parent $env:PROJECTATLAS_TEST_RUNTIME
+    [Environment]::SetEnvironmentVariable("Path", (@($runtimeDir, $originalUserPath) -join ";"), "User")
+    & $env:PROJECTATLAS_TEST_INSTALLER `
+        -ProjectRoot $env:PROJECTATLAS_TEST_ROOT `
+        -ProjectAtlasVersion $env:PROJECTATLAS_TEST_VERSION `
+        -RuntimePath $env:PROJECTATLAS_TEST_RUNTIME
+    $exitCode = $LASTEXITCODE
+}
+finally {
+    [Environment]::SetEnvironmentVariable("Path", $originalUserPath, "User")
+}
+exit $exitCode
+"#,
+                ])
+                .env("PROJECTATLAS_TEST_INSTALLER", &standalone_installer)
+                .env("PROJECTATLAS_TEST_ROOT", &repo)
+                .env(
+                    "PROJECTATLAS_TEST_VERSION",
+                    format!("v{}", env!("CARGO_PKG_VERSION")),
+                )
+                .env("PROJECTATLAS_TEST_RUNTIME", &versioned_runtime)
+                .env("HOME", &isolated_home)
+                .env("USERPROFILE", &isolated_home)
+                .env("APPDATA", &app_data)
+                .env("LOCALAPPDATA", &local_app_data)
+                .env("PATH", &parent_path)
+                .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+                .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+                .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+                .env("PROJECTATLAS_FAKE_CODEX_STATE", &fake_codex_state)
+                .env(
+                    "PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE",
+                    &fake_codex_stale_registry,
+                )
+                .env(
+                    "PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT",
+                    &fake_codex_current_registry,
+                )
+                .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                .output()?;
+            let restart_text = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&restart_output.stdout),
+                String::from_utf8_lossy(&restart_output.stderr)
+            );
+            if !restart_output.status.success()
+                || !restart_text.contains(
+                    "ProjectAtlas locked-mirror recovery: restart_can_repair_command_resolution=true",
+                )
+                || !restart_text.contains("Existing host restart required:")
+                || !restart_text.contains("host_restart_required=true")
+                || restart_text.contains("restart alone will not repair it")
+            {
+                return Err(io::Error::other(format!(
+                    "supplied-runtime install did not recognize persisted fresh-host PATH readiness:\n{restart_text}"
+                ))
+                .into());
+            }
+        }
         let compatible_before = mcp_database_snapshot(&db)?;
         let versioned_token = StdCommand::new(&versioned_runtime)
-            .current_dir(&repo)
+            .current_dir(temp.path())
             .arg("--require-version")
             .arg(env!("CARGO_PKG_VERSION"))
             .arg("--db")
             .arg(&db)
+            .arg("--config")
+            .arg(atlas_dir.join("config.toml"))
             .args(["token", "--view", "tui"])
             .env("PROJECTATLAS_NO_TELEMETRY", "1")
             .output()?;
@@ -7499,6 +7750,17 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
         if mcp_database_snapshot(&db)? != compatible_before {
             return Err(io::Error::other(
                 "verified absolute runtime token TUI changed the compatible locked-mirror database",
+            )
+            .into());
+        }
+        if temp
+            .path()
+            .join(ATLAS_DIR_NAME)
+            .join("projectatlas.db")
+            .exists()
+        {
+            return Err(io::Error::other(
+                "verified absolute runtime operation created a default database outside the selected project",
             )
             .into());
         }
@@ -7947,11 +8209,19 @@ public static class Program
         .ok_or_else(|| io::Error::other("installer plugin root missing"))?;
     let installer = temp.path().join("install-runtime-owner-seam.ps1");
     write_installer_with_test_codex_identity_seam(&production_installer, &installer)?;
+    let powershell = PathBuf::from(
+        std::env::var_os("SystemRoot")
+            .ok_or_else(|| io::Error::other("SystemRoot is unavailable"))?,
+    )
+    .join(WINDOWS_SYSTEM32_DIR)
+    .join(WINDOWS_POWERSHELL_DIR)
+    .join(WINDOWS_POWERSHELL_VERSION_DIR)
+    .join(WINDOWS_POWERSHELL_EXECUTABLE);
     let run_installer = |process_ids: &[u32], process_path: &OsStr| {
         let mut process_ids = process_ids.to_vec();
         process_ids.push(std::process::id());
         let process_id_allowlist = windows_test_process_id_allowlist(&process_ids)?;
-        StdCommand::new("powershell")
+        StdCommand::new(&powershell)
             .arg("-NoProfile")
             .arg("-ExecutionPolicy")
             .arg("Bypass")
@@ -7990,7 +8260,7 @@ public static class Program
     };
 
     let run_production_installer = || {
-        StdCommand::new("powershell")
+        StdCommand::new(&powershell)
             .arg("-NoProfile")
             .arg("-ExecutionPolicy")
             .arg("Bypass")
@@ -8197,6 +8467,9 @@ public static class Program
             normalize_native_path_display(fs::canonicalize(&stable_runtime)?).replace('/', "\\");
         let runtime_diagnostic_path =
             normalize_native_path_display(fs::canonicalize(&runtime)?).replace('/', "\\");
+        let db_diagnostic_path = normalize_native_path_display(&db).replace('/', "\\");
+        let config_diagnostic_path =
+            normalize_native_path_display(atlas_dir.join("config.toml")).replace('/', "\\");
         for required in [
             format!(
                 "ProjectAtlas stale bare command: path={stable_runtime_diagnostic_path} observed_version=0.3.26 ready=false"
@@ -8210,6 +8483,13 @@ public static class Program
                 "ProjectAtlas verified absolute runtime command: & '{}' --require-version '{}' --format json runtime-info",
                 runtime_diagnostic_path,
                 env!("CARGO_PKG_VERSION")
+            ),
+            format!(
+                "ProjectAtlas verified absolute runtime operation: & '{}' '--require-version' '{}' '--db' '{}' '--config' '{}' 'token' '--view' 'tui'",
+                runtime_diagnostic_path,
+                env!("CARGO_PKG_VERSION"),
+                db_diagnostic_path,
+                config_diagnostic_path
             ),
             "ProjectAtlas locked-mirror recovery: restart_can_repair_command_resolution=false"
                 .to_string(),
@@ -8639,6 +8919,8 @@ public static class Program
             "ProjectAtlas PATH shadow report skipped because the requested absolute runtime failed final verification",
         )
         || no_handoff_runtime_drift_text.contains("ProjectAtlas verified absolute runtime command:")
+        || no_handoff_runtime_drift_text
+            .contains("ProjectAtlas verified absolute runtime operation:")
         || no_handoff_runtime_drift_text.contains("integration verified through generated MCP config")
         || no_handoff_runtime_drift_text
             .contains("The runtime and generated MCP configs are ready")
@@ -8908,6 +9190,8 @@ public static class Program
             || !normalized_drift_text
                 .contains(&format!("target_version={}", env!("CARGO_PKG_VERSION")))
             || !normalized_drift_text.contains("verified_runtime=")
+            || !normalized_drift_text
+                .contains("ProjectAtlas verified absolute runtime operation: & ")
             || !normalized_drift_text.contains(
                 "ProjectAtlas locked-mirror recovery: restart_can_repair_command_resolution=",
             )
@@ -8952,6 +9236,8 @@ public static class Program
             || normalized_runtime_drift_text.contains("verified_runtime=")
             || normalized_runtime_drift_text
                 .contains("ProjectAtlas verified absolute runtime command:")
+            || normalized_runtime_drift_text
+                .contains("ProjectAtlas verified absolute runtime operation:")
             || normalized_runtime_drift_text.contains(&format!(
                 "-RuntimePath '{runtime_diagnostic_path}'"
             ))
@@ -11243,13 +11529,13 @@ fn windows_installer_without_codex_reports_clean_skip() -> Result<(), Box<dyn Er
     );
     let powershell_dir = system_root
         .join(WINDOWS_SYSTEM32_DIR)
-        .join("WindowsPowerShell")
-        .join("v1.0");
+        .join(WINDOWS_POWERSHELL_DIR)
+        .join(WINDOWS_POWERSHELL_VERSION_DIR);
     let restricted_path = std::env::join_paths([
         system_root.join(WINDOWS_SYSTEM32_DIR),
         powershell_dir.clone(),
     ])?;
-    let output = StdCommand::new(powershell_dir.join("powershell.exe"))
+    let output = StdCommand::new(powershell_dir.join(WINDOWS_POWERSHELL_EXECUTABLE))
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")

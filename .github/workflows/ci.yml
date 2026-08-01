@@ -169,10 +169,17 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails --test e2e
 
+      - name: Windows recovery config selection E2E
+        if: matrix.label == 'windows'
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli windows_installer_recovery_operation_preserves_config_selection --test e2e -- --exact
+
       - name: Windows locked runtime update E2E
         if: matrix.label == 'windows'
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is_locked --test e2e
+        env:
+          PROJECTATLAS_TEST_DISPOSABLE_RUNNER: ${{ runner.environment }}
+        run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is_locked --test e2e -- --exact
 
       - name: Windows persisted User PATH E2E
         if: matrix.label == 'windows'
