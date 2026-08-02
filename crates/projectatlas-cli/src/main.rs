@@ -82,6 +82,8 @@ use std::fs;
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, RawFd};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 #[cfg(unix)]
@@ -1324,7 +1326,12 @@ enum Command {
     /// Acquire the POSIX installer's inherited update-lock descriptor.
     #[cfg(unix)]
     #[command(hide = true)]
-    AcquireInstallerLock,
+    AcquireInstallerLock {
+        /// Device identity captured from the trusted lock path before it was opened.
+        expected_device: u64,
+        /// Inode identity captured from the trusted lock path before it was opened.
+        expected_inode: u64,
+    },
     /// Manage purpose metadata stored in the durable index.
     Purpose {
         /// Purpose subcommand to run.
@@ -2808,13 +2815,20 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             print_output(cli.format, &render_runtime_info(&report), &report)?;
         }
         #[cfg(unix)]
-        Command::AcquireInstallerLock => {
-            acquire_installer_lock(INSTALLER_LOCK_FD, INSTALLER_LOCK_TIMEOUT).map_err(
-                |source| CliError::Io {
-                    path: PathBuf::from("/dev/fd/9"),
-                    source,
-                },
-            )?;
+        Command::AcquireInstallerLock {
+            expected_device,
+            expected_inode,
+        } => {
+            acquire_installer_lock(
+                INSTALLER_LOCK_FD,
+                expected_device,
+                expected_inode,
+                INSTALLER_LOCK_TIMEOUT,
+            )
+            .map_err(|source| CliError::Io {
+                path: PathBuf::from("/dev/fd/9"),
+                source,
+            })?;
         }
         Command::Purpose { command } => match command {
             PurposeCommand::Set { path, purpose } => {
@@ -4875,7 +4889,7 @@ fn cli_command_name(command: &Command) -> &'static str {
         Command::McpConfig { .. } => "mcp-config",
         Command::RuntimeInfo => "runtime-info",
         #[cfg(unix)]
-        Command::AcquireInstallerLock => "acquire-installer-lock",
+        Command::AcquireInstallerLock { .. } => "acquire-installer-lock",
         Command::Purpose { .. } => "purpose",
     }
 }
@@ -4886,16 +4900,28 @@ fn cli_command_name(command: &Command) -> &'static str {
     unsafe_code,
     reason = "the freshly exec'd single-threaded helper validates inherited FD 9 before making File its sole child-process owner"
 )]
-fn acquire_installer_lock(descriptor: RawFd, timeout: Duration) -> io::Result<()> {
+fn acquire_installer_lock(
+    descriptor: RawFd,
+    expected_device: u64,
+    expected_inode: u64,
+    timeout: Duration,
+) -> io::Result<()> {
     let descriptor_path = PathBuf::from(format!("/dev/fd/{descriptor}"));
     fs::metadata(&descriptor_path)?;
     // SAFETY: the hidden installer command is single-threaded here, and successful
     // `/dev/fd` metadata proves the inherited descriptor is open before ownership transfer.
     let file = unsafe { fs::File::from_raw_fd(descriptor) };
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "inherited installer lock descriptor is not a regular file",
+        ));
+    }
+    if metadata.dev() != expected_device || metadata.ino() != expected_inode {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "inherited installer lock descriptor identity changed",
         ));
     }
     let started = Instant::now();
@@ -5561,8 +5587,25 @@ mod tests {
             .write(true)
             .create_new(true)
             .open(&path)?;
+        let metadata = parent.metadata()?;
+        let mismatched_descriptor = parent.try_clone()?.into_raw_fd();
+        require_condition(
+            super::acquire_installer_lock(
+                mismatched_descriptor,
+                metadata.dev(),
+                metadata.ino() ^ 1,
+                std::time::Duration::ZERO,
+            )
+            .is_err(),
+            "installer lock accepted a descriptor with the wrong captured identity",
+        )?;
         let helper_descriptor = parent.try_clone()?.into_raw_fd();
-        super::acquire_installer_lock(helper_descriptor, std::time::Duration::ZERO)?;
+        super::acquire_installer_lock(
+            helper_descriptor,
+            metadata.dev(),
+            metadata.ino(),
+            std::time::Duration::ZERO,
+        )?;
 
         let contender = fs::OpenOptions::new().read(true).write(true).open(&path)?;
         require_condition(
@@ -5572,16 +5615,23 @@ mod tests {
         drop(parent);
         contender.try_lock()?;
 
-        let missing = super::acquire_installer_lock(-1, std::time::Duration::ZERO);
+        let missing = super::acquire_installer_lock(-1, 0, 0, std::time::Duration::ZERO);
         require_condition(
             missing.is_err(),
             "installer lock accepted a missing inherited descriptor",
         )?;
         let directory = fs::File::open(temp.path())?;
         let directory_descriptor = directory.as_raw_fd();
+        let directory_metadata = directory.metadata()?;
         let duplicate = directory.try_clone()?.into_raw_fd();
         require_condition(
-            super::acquire_installer_lock(duplicate, std::time::Duration::ZERO).is_err()
+            super::acquire_installer_lock(
+                duplicate,
+                directory_metadata.dev(),
+                directory_metadata.ino(),
+                std::time::Duration::ZERO,
+            )
+            .is_err()
                 && directory.as_raw_fd() == directory_descriptor,
             "installer lock accepted a directory or consumed the parent's descriptor",
         )?;

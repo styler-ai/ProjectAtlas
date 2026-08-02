@@ -372,7 +372,9 @@ acquire_codex_projectatlas_plugin_update_lock() {
   lock_acquired=false
   lock_platform=$(uname -s 2>/dev/null || true)
   if [ "$lock_platform" = Darwin ]; then
-    "$projectatlas_bin" acquire-installer-lock && lock_acquired=true
+    lock_device=${lock_identity%%:*}
+    lock_inode=${lock_identity#*:}
+    "$projectatlas_bin" acquire-installer-lock "$lock_device" "$lock_inode" && lock_acquired=true
   elif command -v flock >/dev/null 2>&1; then
     flock -w 30 9 && lock_acquired=true
   fi
@@ -383,10 +385,9 @@ acquire_codex_projectatlas_plugin_update_lock() {
   fi
 
   current_lock_identity=$(stat -c '%d:%i' -- "$lock_path" 2>/dev/null || stat -f '%d:%i' "$lock_path" 2>/dev/null || true)
-  descriptor_identity=$(stat -L -c '%d:%i' -- /dev/fd/9 2>/dev/null || stat -L -f '%d:%i' /dev/fd/9 2>/dev/null || true)
   current_lock_links=$(stat -c %h -- "$lock_path" 2>/dev/null || stat -f %l "$lock_path" 2>/dev/null || true)
   if [ -L "$lock_path" ] || [ ! -f "$lock_path" ] || [ "$current_lock_links" != 1 ] ||
-    [ "$current_lock_identity" != "$lock_identity" ] || [ "$descriptor_identity" != "$lock_identity" ]; then
+    [ "$current_lock_identity" != "$lock_identity" ]; then
     exec 9>&-
     printf "warning: Codex ProjectAtlas plugin update skipped: update lock changed while acquiring '%s'.\n" "$lock_path" >&2
     return 1
