@@ -54,8 +54,8 @@ const PROCESS_HELPER_TIMEOUT: Duration = Duration::from_secs(5);
 const PRODUCT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 /// Maximum time for one MCP response while a parser worker is suspended.
 const MCP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
-/// Maximum time for a canceled background task to become terminal.
-const MCP_TASK_CANCEL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum time for one background task to reach its required state.
+const MCP_TASK_STATE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bounded pending MCP protocol lines between the reader thread and test owner.
 const MCP_RESPONSE_QUEUE_CAPACITY: usize = 16;
 /// Short cooperative polling interval for process state.
@@ -320,60 +320,6 @@ impl ScanProcess {
             }
             thread::sleep(PROCESS_POLL_INTERVAL);
         }
-    }
-
-    /// Wait boundedly for scan failure while continuing to drain both pipes.
-    fn finish(mut self, timeout: Duration) -> io::Result<CapturedOutput> {
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .ok_or_else(|| io::Error::other("scan exit deadline overflowed"))?;
-        let status = loop {
-            let child = self
-                .child
-                .as_mut()
-                .ok_or_else(|| io::Error::other("scan child was already consumed"))?;
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
-            if Instant::now() >= deadline {
-                let runtime_cleanup =
-                    force_process_cleanup(&self.tracked_runtime, PROCESS_CLEANUP_TIMEOUT);
-                let child = self
-                    .child
-                    .as_mut()
-                    .ok_or_else(|| io::Error::other("scan child was already consumed"))?;
-                if let Err(source) = child.kill()
-                    && child.try_wait()?.is_none()
-                {
-                    return Err(source);
-                }
-                let status = child.wait()?;
-                let stdout = join_capture(self.stdout.take(), "stdout")?;
-                let stderr = join_capture(self.stderr.take(), "stderr")?;
-                self.child.take();
-                if runtime_cleanup.is_ok() {
-                    self.cleanup_armed = false;
-                }
-                return Err(io::Error::other(format!(
-                    "scan did not exit after worker termination: status={status}; runtime_cleanup={}\nstdout:\n{}\nstderr:\n{}",
-                    runtime_cleanup
-                        .as_ref()
-                        .map_or_else(ToString::to_string, |()| "complete".to_owned()),
-                    captured_stream_text(&stdout),
-                    captured_stream_text(&stderr)
-                )));
-            }
-            thread::sleep(PROCESS_POLL_INTERVAL);
-        };
-        let stdout = join_capture(self.stdout.take(), "stdout")?;
-        let stderr = join_capture(self.stderr.take(), "stderr")?;
-        self.child.take();
-        self.cleanup_armed = false;
-        Ok(CapturedOutput {
-            status,
-            stdout,
-            stderr,
-        })
     }
 }
 
@@ -762,9 +708,29 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
             OsStr::new(&artifact),
         ],
     )?;
-    run_json(&repo, &host, &[OsStr::new("scan")])?;
+    let mut mcp = McpProcess::spawn(&repo, &database, &host)?;
+    let baseline_task = mcp.call_tool(
+        "atlas_scan",
+        &serde_json::json!({"background": true, "max_workers": 1}),
+    )?;
+    let baseline_task_id = toon_scalar(&baseline_task, "task_id")
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "baseline background scan omitted task id: {baseline_task}"
+            ))
+        })?
+        .to_owned();
+    wait_for_mcp_task_state(
+        &mut mcp,
+        &baseline_task_id,
+        "complete",
+        MCP_TASK_STATE_TIMEOUT,
+    )?;
+    let runtime = wait_for_mcp_runtime_processes(&mut mcp, PROCESS_DISCOVERY_TIMEOUT)?;
+    let tracked = runtime.tracked();
+    mcp.track_runtime(&runtime);
 
-    let baseline_store = AtlasStore::open_read_only(&database)?;
+    let baseline_store = AtlasStore::open_read_only_for_project(&database, &repo)?;
     let baseline_publication = baseline_store
         .index_publication()?
         .ok_or_else(|| io::Error::other("baseline publication is missing"))?;
@@ -781,23 +747,86 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
 
     fs::create_dir(&pending_dir)?;
     let pending_source = pending_optional_source()?;
-    for index in 0..PENDING_OPTIONAL_FILE_COUNT {
-        fs::write(
-            pending_dir.join(format!("work-{index:04}.awk")),
-            pending_source.as_bytes(),
-        )?;
-    }
-
-    let mut scan = ScanProcess::spawn(&repo, &host)?;
-    let runtime = wait_for_runtime_processes(&mut scan, PROCESS_DISCOVERY_TIMEOUT)?;
-    let tracked = runtime.tracked();
+    fs::write(pending_dir.join("work-0000.awk"), pending_source)?;
     let mut suspended = SuspendedProcess::suspend(runtime.worker.clone())?;
+
+    let failed_task = mcp.call_tool(
+        "atlas_scan",
+        &serde_json::json!({"background": true, "max_workers": 1}),
+    )?;
+    let failed_task_id = toon_scalar(&failed_task, "task_id")
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "worker-failure scan omitted task id: {failed_task}"
+            ))
+        })?
+        .to_owned();
+    wait_for_mcp_task_state(&mut mcp, &failed_task_id, "running", MCP_TASK_STATE_TIMEOUT)?;
+
+    let overview = mcp.call_tool("atlas_overview", &serde_json::json!({}))?;
+    if !overview.contains("overview:") {
+        return Err(io::Error::other(format!(
+            "suspended optional worker blocked the retained overview: {overview}"
+        ))
+        .into());
+    }
+    let baseline_summary = mcp.call_tool(
+        "atlas_file_summary",
+        &serde_json::json!({"file": "src/baseline.awk", "compact": true}),
+    )?;
+    if !baseline_summary.contains("file_summary:") || !baseline_summary.contains("src/baseline.awk")
+    {
+        return Err(io::Error::other(format!(
+            "suspended optional worker hid the retained baseline summary: {baseline_summary}"
+        ))
+        .into());
+    }
+    let active_store = AtlasStore::open_read_only_for_project(&database, &repo)?;
+    let active_publication = active_store
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("suspended-scan publication is missing"))?;
+    let active_node = active_store
+        .load_node_by_path("src/baseline.awk")?
+        .ok_or_else(|| io::Error::other("suspended-scan baseline node is missing"))?;
+    let active_parse = active_store
+        .load_source_parse_metadata("src/baseline.awk")?
+        .ok_or_else(|| io::Error::other("suspended-scan baseline parse metadata is missing"))?;
+    if active_publication != baseline_publication
+        || active_node != baseline_node
+        || active_parse != baseline_parse
+        || active_store
+            .load_node_by_path("pending/work-0000.awk")?
+            .is_some()
+        || active_store
+            .load_source_parse_metadata("pending/work-0000.awk")?
+            .is_some()
+    {
+        return Err(io::Error::other(
+            "suspended worker changed the active generation or exposed pending facts",
+        )
+        .into());
+    }
+    drop(active_store);
+
     terminate_process(&runtime.worker)?;
-    let output = scan.finish(PROCESS_EXIT_TIMEOUT)?;
+    let failed_status =
+        wait_for_mcp_task_state(&mut mcp, &failed_task_id, "failed", MCP_TASK_STATE_TIMEOUT)?;
+    let task_error = toon_scalar(&failed_status, "error").ok_or_else(|| {
+        io::Error::other(format!(
+            "failed optional-parser task omitted its diagnostic: {failed_status}"
+        ))
+    })?;
+    if !is_optional_worker_failure_diagnostic(task_error) {
+        return Err(io::Error::other(format!(
+            "background scan did not report an optional-parser child/pipe/cleanup failure: {failed_status}"
+        ))
+        .into());
+    }
     wait_for_process_cleanup(&tracked, PROCESS_CLEANUP_TIMEOUT)?;
     suspended.disarm_after_exit();
-    require_optional_worker_failure(&output)?;
-    let retained_store = AtlasStore::open_read_only(&database)?;
+
+    verify_project_database(&database, &repo)?;
+    let retained_store = AtlasStore::open_read_only_for_project(&database, &repo)?;
     let retained_publication = retained_store
         .index_publication()?
         .ok_or_else(|| io::Error::other("retained publication is missing"))?;
@@ -827,6 +856,29 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
     }
     drop(retained_store);
 
+    if !mcp.is_running()? {
+        return Err(io::Error::other("MCP server exited with its contained worker").into());
+    }
+    let retained_overview = mcp.call_tool("atlas_overview", &serde_json::json!({}))?;
+    if !retained_overview.contains("overview:") {
+        return Err(io::Error::other(format!(
+            "MCP overview was unavailable after contained worker failure: {retained_overview}"
+        ))
+        .into());
+    }
+    let retained_summary = mcp.call_tool(
+        "atlas_file_summary",
+        &serde_json::json!({"file": "src/baseline.awk", "compact": true}),
+    )?;
+    if !retained_summary.contains("file_summary:") || !retained_summary.contains("src/baseline.awk")
+    {
+        return Err(io::Error::other(format!(
+            "MCP baseline summary was unavailable after contained worker failure: {retained_summary}"
+        ))
+        .into());
+    }
+
+    mcp.shutdown()?;
     run_json(
         &repo,
         &host,
@@ -1138,7 +1190,7 @@ fn stalled_worker_cancellation_preserves_mcp_reads_and_active_generation()
         ))
         .into());
     }
-    wait_for_canceled_mcp_task(&mut mcp, &task_id, MCP_TASK_CANCEL_TIMEOUT)?;
+    wait_for_canceled_mcp_task(&mut mcp, &task_id, MCP_TASK_STATE_TIMEOUT)?;
     wait_for_process_cleanup(&tracked, PROCESS_CLEANUP_TIMEOUT)?;
     suspended.disarm_after_exit();
 
@@ -1219,26 +1271,28 @@ fn run_json(repo: &Path, host: &HostState, arguments: &[&OsStr]) -> Result<Value
     serde_json::from_slice(&output.stdout.bytes).map_err(Into::into)
 }
 
-/// Require the exact worker/supervisor failure family rather than any non-zero scan exit.
-fn require_optional_worker_failure(output: &CapturedOutput) -> Result<(), Box<dyn Error>> {
-    let stderr = captured_stream_text(&output.stderr);
-    let diagnostic = stderr.to_ascii_lowercase();
-    let worker_failure = diagnostic.contains("optional parser child exited")
+/// Recognize only the contained optional-worker failure family across CLI and MCP diagnostics.
+fn is_optional_worker_failure_diagnostic(diagnostic: &str) -> bool {
+    let diagnostic = diagnostic.to_ascii_lowercase();
+    diagnostic.contains("optional parser child exited")
         || (diagnostic.contains("optional parser") && diagnostic.contains("i/o failed"))
         || diagnostic.contains("optional parser operation failed and cleanup also failed")
         || (diagnostic.contains("optional parser operation failed:")
             && diagnostic.contains("mandatory cleanup also failed"))
-        || diagnostic.contains("optional parser cleanup failed");
-    if !output.status.success() && worker_failure {
-        return Ok(());
-    }
-    Err(io::Error::other(format!(
-        "scan did not report an optional-parser child/pipe/cleanup failure: status={}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        captured_stream_text(&output.stdout),
-        stderr
-    ))
-    .into())
+        || diagnostic.contains("optional parser cleanup failed")
+}
+
+#[test]
+fn optional_worker_failure_diagnostic_rejects_unrelated_failures() {
+    assert!(is_optional_worker_failure_diagnostic(
+        "optional parser child exited with status 1"
+    ));
+    assert!(is_optional_worker_failure_diagnostic(
+        "optional parser I/O failed while reading the worker"
+    ));
+    assert!(!is_optional_worker_failure_diagnostic(
+        "background scan failed before parser selection"
+    ));
 }
 
 /// Run one owned subprocess with concurrent bounded stream draining and a hard wait ceiling.
@@ -1316,32 +1370,51 @@ fn toon_scalar<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
+/// Wait for one task record to reach an exact required state through real MCP polling.
+fn wait_for_mcp_task_state(
+    mcp: &mut McpProcess,
+    task_id: &str,
+    expected_state: &str,
+    timeout: Duration,
+) -> Result<String, Box<dyn Error>> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::other("MCP task state deadline overflowed"))?;
+    loop {
+        let status = mcp.call_tool(
+            "atlas_task_status",
+            &serde_json::json!({"task_id": task_id}),
+        )?;
+        let state = toon_scalar(&status, "state");
+        if state == Some(expected_state) {
+            return Ok(status);
+        }
+        if matches!(state, Some("complete" | "failed" | "canceled")) {
+            return Err(io::Error::other(format!(
+                "MCP task {task_id} reached {state:?} instead of {expected_state}: {status}"
+            ))
+            .into());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "MCP task {task_id} did not become {expected_state} within {timeout:?}: {status}"
+                ),
+            )
+            .into());
+        }
+        thread::sleep(PROCESS_POLL_INTERVAL);
+    }
+}
+
 /// Wait for one canceled task record through the real MCP status tool.
 fn wait_for_canceled_mcp_task(
     mcp: &mut McpProcess,
     task_id: &str,
     timeout: Duration,
 ) -> Result<(), Box<dyn Error>> {
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .ok_or_else(|| io::Error::other("MCP task cancellation deadline overflowed"))?;
-    loop {
-        let status = mcp.call_tool(
-            "atlas_task_status",
-            &serde_json::json!({"task_id": task_id}),
-        )?;
-        if toon_scalar(&status, "state") == Some("canceled") {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("MCP task {task_id} did not become canceled: {status}"),
-            )
-            .into());
-        }
-        thread::sleep(PROCESS_POLL_INTERVAL);
-    }
+    wait_for_mcp_task_state(mcp, task_id, "canceled", timeout).map(drop)
 }
 
 /// Drain one child pipe on its own bounded-lifetime thread.
