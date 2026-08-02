@@ -15,6 +15,10 @@ ProjectAtlas SHALL maintain one exact deduplicated lifetime savings total for th
 - **WHEN** two repositories use ProjectAtlas concurrently
 - **THEN** neither repository's report includes the other's events or aggregates
 
+#### Scenario: Team seed remains telemetry-free
+- **WHEN** CI seals or publishes a main seed and purpose promotions
+- **THEN** no repository-lifetime, worktree, session, process, task, event, aggregate, or private telemetry state is copied into the seed, manifest, promotion delta, Git, LFS, release, or cache artifact
+
 ### Requirement: Event admission is exactly-once under retries and concurrency
 ProjectAtlas SHALL allocate repository-ordered usage-instance identities, require contiguous per-instance event sequences, and retain compact admission high-water/closed-range state independently of evictable event payload so a retry cannot inflate totals.
 
@@ -28,7 +32,7 @@ ProjectAtlas SHALL allocate repository-ordered usage-instance identities, requir
 
 #### Scenario: Concurrent distinct events
 - **WHEN** multiple CLI/MCP processes in several worktrees publish distinct events concurrently
-- **THEN** every valid distinct event is counted once with bounded busy handling and no application-wide hidden lock
+- **THEN** every valid distinct event is attributed through its request-captured exact repository/worktree binding and counted once with bounded busy handling, no sibling bleed, and no application-wide hidden lock
 
 #### Scenario: Process dies during publication
 - **WHEN** the writer process terminates before commit
@@ -55,7 +59,7 @@ ProjectAtlas SHALL preserve the current conservative accounting layers, estimato
 
 #### Scenario: Human TUI shows scope
 - **WHEN** the token TUI renders repository-lifetime and selected-worktree values
-- **THEN** labels make both scopes unambiguous, version identity is exact, and narrow layouts do not silently substitute one scope for another
+- **THEN** labels make both scopes unambiguous, version identity and selected root/generation are exact, repository/worktree overview remains complete within declared bounds, and narrow layouts do not silently substitute or blend one scope or graph for another
 
 ### Requirement: Existing telemetry migrates without loss or double counting
 ProjectAtlas SHALL import compatible existing telemetry through consistent snapshots, source fingerprints, component reconciliation, atomic receipts, and preserved originals.
@@ -89,7 +93,7 @@ ProjectAtlas SHALL estimate and persist telemetry locally and SHALL not require 
 
 #### Scenario: Network is unavailable
 - **WHEN** the host has no GitHub or internet connectivity
-- **THEN** an already installed runtime records and reports local telemetry without destructive installer or marketplace mutation
+- **THEN** an already installed runtime records and reports local telemetry without requiring seed retrieval or destructive installer or marketplace mutation
 
 #### Scenario: Telemetry is disabled
 - **WHEN** the documented no-telemetry control is active

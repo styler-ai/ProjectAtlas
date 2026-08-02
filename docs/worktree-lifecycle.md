@@ -1,36 +1,47 @@
 # ProjectAtlas Worktree Lifecycle
 
-This document owns the planned v0.5.0 architecture for [issue #430](https://github.com/styler-ai/ProjectAtlas/issues/430). It separates branch-derived atlas state from repository-owned reviewed purposes and lifetime token telemetry. The design is planning-only until its OpenSpec tasks are implemented and verified.
+This document owns the dedicated planned v0.4.4 architecture for [issue #430](https://github.com/styler-ai/ProjectAtlas/issues/430). It separates immutable team seed publication, writable exact-root atlas state, source-controlled purpose promotion, and local lifetime token telemetry. The design is planning-only until v0.4.3 is released and its OpenSpec tasks are implemented and verified.
 
 ## System and Ownership
 
-Each checkout remains an exact source/index boundary. One continuity database belongs to the logical repository and contains no source graph.
+Each checkout remains an exact mutable source/index boundary. CI publishes one immutable portable main seed; each worktree receives a private writable copy. Local continuity contains no source graph, and team purpose knowledge crosses clones through semantic deltas rather than SQLite merging.
 
 ```mermaid
 flowchart TB
-    Host[CLI and MCP host]
-    Root[Typed repository and worktree discovery]
+    Host[One CLI and MCP control plane]
+    Root[Exact request selection]
 
-    subgraph Common[Logical repository continuity]
+    subgraph GitHub[GitHub team publication]
+        Delta[Mergeable purpose deltas]
+        Manifest[Seed manifest and attestation]
+        Seed[(immutable main seed)]
+        CI[Clean main CI sealer]
+        Delta --> CI --> Seed
+        CI --> Manifest
+    end
+
+    subgraph Common[Local repository continuity]
         Continuity[(continuity.db)]
-        Purposes[Reviewed purpose authority]
+        Purposes[Accepted local purposes]
         Telemetry[Deduplicated lifetime telemetry]
         Registry[Worktree and import receipts]
     end
 
     subgraph Main[Checked-out main worktree]
         MainSource[Main branch source]
-        MainAtlas[(worktree projectatlas.db)]
+        MainAtlas[(ignored active projectatlas.db)]
     end
 
     subgraph Issue[Checked-out issue worktree]
         IssueSource[Issue branch source]
-        IssueAtlas[(worktree projectatlas.db)]
+        IssueAtlas[(ignored active projectatlas.db)]
     end
 
     Host --> Root
     Root --> MainSource
     Root --> IssueSource
+    Seed -. verified private copy .-> MainAtlas
+    Seed -. verified private copy .-> IssueAtlas
     MainSource --> MainAtlas
     IssueSource --> IssueAtlas
     Root --> Registry
@@ -41,16 +52,76 @@ flowchart TB
     IssueAtlas -. exact-root freshness .-> Purposes
     MainAtlas -. usage event .-> Telemetry
     IssueAtlas -. usage event .-> Telemetry
+    Purposes -. review export .-> Delta
 
     MainAtlas ~~~ IssueAtlas
 ```
 
 Ownership rules:
 
-- Worktree databases own files, summaries, symbols, relations, generations, freshness, watcher state, and purpose suggestions for exactly one checkout.
-- The continuity database owns approved purpose revisions, logical worktree registrations, import receipts, telemetry event identity, exact retained aggregates, and repository-lifetime reporting.
+- The seed owns no mutable authority. Its exact bytes are a content-addressed, read-only publication of one clean complete main source fingerprint and portable accepted-purpose projection.
+- Worktree active databases own files, summaries, symbols, relations, generations, freshness, watcher/tasks, and purpose suggestions for exactly one checkout. They are ignored, disposable, and never merged.
+- The local continuity database owns accepted purpose revisions, logical worktree registrations, import receipts, telemetry event identity, exact retained aggregates, and repository-lifetime reporting for one clone/repository instance.
+- Source-controlled purpose deltas own durable team promotion evidence. Main CI admits only trusted records compatible with final merged source.
 - The continuity database never becomes a source atlas, including when it is stored by a bare/common Git manager.
+- Telemetry, sessions, processes, tasks, roots, WAL/SHM state, and other host-local data never enter the seed, manifest, purpose deltas, or Git.
 - Git remains authoritative for branches and worktrees; ProjectAtlas reports and protects its own state without silently mutating Git.
+
+## Seed Publication and Hydration
+
+The seed is copied, never shared writable. A missing or rejected seed is only a missed optimization: ProjectAtlas uses the existing local init/full-build path.
+
+```mermaid
+sequenceDiagram
+    participant Main as Clean main checkout
+    participant CI as CI sealer
+    participant Artifact as Immutable seed artifact
+    participant Init as Worktree init
+    participant Active as Exact-root active DB
+
+    Main->>CI: Complete generation and trusted purpose deltas
+    CI->>CI: Quiesce writers and checkpoint WAL
+    CI->>CI: Backup/VACUUM INTO portable allowlist
+    CI->>CI: Integrity, FK, schema, compatibility, read-only smoke
+    CI->>Artifact: Publish digest, attestation, and manifest
+
+    Init->>Artifact: Discover and verify nearest compatible seed
+    alt Compatible seed
+        Artifact-->>Init: Read-only payload
+        Init->>Active: Stage private copy/reflink and rebind identity
+        Init->>Active: Refresh exact additions, changes, removals, relations
+        Init->>Active: Atomically activate complete generation
+    else Missing, offline, corrupt, stale, or incompatible
+        Init->>Active: Ordinary local init/full build
+    end
+```
+
+Publication excludes its own seed/manifest paths from indexed input and binds a deterministic included-source tree fingerprint or an external exact source-commit artifact, avoiding a digest or commit that must contain itself. Normal Git, Git LFS, and a GitHub release/cache asset remain transport choices governed by measured size/history, retention, attestation, offline, and rollback policy.
+
+## Concurrent Routing and Manager UX
+
+One long-lived MCP server serves all registered worktrees. A root selection establishes one repository control root; selecting an exact checkout remains backward compatible by also selecting that worktree. Discovery uses structural Git common-directory/worktree metadata plus the validated continuity registry, never directory-name conventions. Users and agents can explicitly register additional exact worktree paths for outside-root or otherwise undiscoverable layouts after reciprocal identity validation; arbitrary descendant directories are never guessed to be worktrees. A nested cwd or request path auto-binds its containing worktree; a manager with one unambiguous active worktree may auto-select it, while a manager with several lists them all and requires a choice only for otherwise ambiguous source/graph work. Each request captures one exact root, active database, worktree identity, generation, and selection provenance before doing work.
+
+```mermaid
+flowchart LR
+    A[Agent in worktree A cwd/config]
+    B[Agent in worktree B cwd/config]
+    M[Manager-root CLI or TUI]
+    Router[Request-scoped selector]
+    ADB[(A active DB and generation)]
+    BDB[(B active DB and generation)]
+    Overview[Repository/worktree overview]
+
+    A -->|auto-bind A| Router
+    B -->|auto-bind B| Router
+    M -->|explicit/configured selection| Router
+    Router -->|exact A context| ADB
+    Router -->|exact B context| BDB
+    Router --> Overview
+    ADB -. never blended .- BDB
+```
+
+An explicit per-call selection wins; a prior call or process-global default cannot redirect concurrent work. Manager-root source/graph commands require explicit/configured selection and return the selected exact root/generation. The root token TUI shows the complete bounded repository/worktree overview, but its map always represents one visibly labeled selected worktree. Ordinary single-checkout roots auto-select themselves with unchanged zero-ceremony behavior.
 
 ## Worktree Lifecycle
 
@@ -97,34 +168,31 @@ When the Git executable is unavailable, structural root and database validation 
 
 ## Purpose Continuity
 
-Reviewed text is shared only after exact repository/path/content validation. Freshness always comes from the addressed worktree.
+Accepted local purpose text remains durable path responsibility across source/index changes. Team promotion is a separate content-bound event validated against final merged main.
 
 ```mermaid
 sequenceDiagram
     participant Agent
-    participant WorktreeA as Worktree A atlas
-    participant Service as Purpose service
-    participant Shared as Repository continuity
-    participant WorktreeB as Worktree B atlas
+    participant Local as Worktree and local continuity
+    participant PR as Purpose delta in pull request
+    participant CI as Final-main seed CI
+    participant Seed as Next immutable seed
 
-    Agent->>WorktreeA: Review purpose with state token
-    WorktreeA->>Service: Exact path and current content identity
-    Service->>Shared: Conditional approved revision write
-    Shared-->>Agent: Approved revision
-
-    Agent->>WorktreeB: Request purpose for same path
-    WorktreeB->>Service: Current worktree path and content identity
-    Service->>Shared: Read repository-approved revision
-    alt Content identity matches
-        Shared-->>WorktreeB: Approved purpose
-    else Path exists with changed content
-        Shared-->>WorktreeB: Stale reviewed purpose
-    else Path absent or rename ambiguous
-        Shared-->>WorktreeB: No current purpose or typed review guidance
+    Agent->>Local: Accept purpose with state token
+    Local-->>Agent: Durable local path responsibility
+    Local->>PR: Export deterministic path/content/approval/provenance delta
+    PR->>CI: Merge with source
+    CI->>CI: Validate trust and final-main path/content
+    alt Compatible promotion
+        CI->>CI: Import once and reuse exact-content facts
+        CI->>CI: Recompute affected final-main relations
+        CI->>Seed: Seal promoted purpose and complete graph
+    else Changed, overlap, rename, delete, branch-only, or untrusted
+        CI-->>Agent: Stale, inconclusive, or conflicted review work
     end
 ```
 
-Folder purposes may be reused when the normalized folder exists. File purposes require the approved content identity. Deleted and branch-only paths remain historical repository knowledge but never appear as current sibling source.
+No branch SQLite database, WAL, or graph is a merge input. Stacked pull requests need no special storage: rebase/retarget and sequential merges are handled by the same final-main identity checks. Absent paths keep accepted local purposes dormant; renames never transfer approval automatically.
 
 ## Repository Telemetry Publication
 
@@ -156,7 +224,7 @@ Repository reports read indexed aggregate rows rather than all retained events. 
 
 ## Retirement and Recovery
 
-ProjectAtlas retirement protects ProjectAtlas state and produces Git-authority guidance. It does not silently remove a branch or checkout.
+ProjectAtlas retirement protects ProjectAtlas state and produces Git-authority guidance. Startup, status, and watcher reconciliation automatically hide a provably externally removed worktree from active navigation while preserving its bounded identity, purposes, and lifetime telemetry. A pull-request merge or deleted remote branch is only retirement-readiness evidence; it never deletes a local checkout. Explicit retirement removes a validated existing or already-missing registration from the active list, but does not silently remove a branch or checkout.
 
 ```mermaid
 flowchart TD

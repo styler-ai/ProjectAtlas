@@ -11,20 +11,20 @@ ProjectAtlas SHALL store agent-reviewed purpose text and approval metadata once 
 - **WHEN** a caller attempts to bypass the purpose API or pairs an unvalidated continuity database
 - **THEN** ProjectAtlas rejects or ignores the untrusted write path and preserves the authoritative revision
 
-### Requirement: File purposes are content-aware
-ProjectAtlas SHALL project an approved file purpose as current only when repository identity, normalized path, and approved content identity match the selected worktree.
+### Requirement: Accepted file purposes remain path-authoritative
+ProjectAtlas SHALL keep an accepted purpose as durable authored responsibility for its logical repository and normalized path; source, summary, symbol, graph, scan, and watcher changes SHALL NOT demote it, while worktree-local path existence and source freshness remain separate facts.
 
 #### Scenario: Identical file inherits approval
-- **WHEN** two worktrees contain the same normalized file path with identical approved source content
+- **WHEN** two local worktrees share continuity authority and contain the same normalized accepted file path
 - **THEN** both report the same approved agent purpose without recreating it
 
-#### Scenario: Changed file becomes stale
-- **WHEN** a sibling branch changes the approved file's source content
-- **THEN** ProjectAtlas retains the reviewed text as stale context and requires deliberate review before treating it as current
+#### Scenario: Source changes after acceptance
+- **WHEN** a sibling branch changes source, summary, symbols, graph facts, or content identity at an accepted path
+- **THEN** ProjectAtlas retains the accepted purpose and separately reports derived freshness or an explicit repurposing review request
 
 #### Scenario: Branch-only file does not leak
 - **WHEN** an approved path exists only in one branch
-- **THEN** sibling worktrees that lack the path do not expose it as an indexed or current purpose row
+- **THEN** sibling worktrees that lack the path keep the purpose dormant and do not expose it as indexed sibling source
 
 ### Requirement: Folder purposes preserve path responsibility without sibling leakage
 ProjectAtlas SHALL reuse an approved folder purpose when the normalized folder path exists in the same logical repository and SHALL keep branch-local existence and repurposing evidence explicit.
@@ -40,6 +40,40 @@ ProjectAtlas SHALL reuse an approved folder purpose when the normalized folder p
 #### Scenario: Rename is ambiguous
 - **WHEN** a file or folder may have been renamed but exact bounded identity evidence is incomplete or conflicting
 - **THEN** ProjectAtlas does not transfer approval automatically and returns typed review guidance
+
+### Requirement: Pull requests carry deterministic purpose promotions
+ProjectAtlas SHALL export reviewed purpose promotions as durable mergeable semantic deltas keyed by portable logical repository identity, typed entity kind, normalized path, exact reviewed content identity, purpose revision, approval, and verifiable provenance rather than by local SQLite row identity.
+
+#### Scenario: Pull request adds a reviewed file
+- **WHEN** an agent approves the purpose of a new or changed file in a pull-request worktree
+- **THEN** ProjectAtlas emits a deterministically ordered promotion record whose logical identity and payload produce stable conflict behavior in source control without committing the local database
+
+#### Scenario: Different teammates produce compatible promotions
+- **WHEN** separate clones or team identities approve the same repository/path/content/purpose under compatible trust policy
+- **THEN** deterministic identity deduplicates the promotion while preserving sufficient approval provenance for CI to verify admission
+
+#### Scenario: Promotion provenance is untrusted
+- **WHEN** a promotion is malformed, forged, downgraded, from an untrusted actor/workflow, or fails repository policy
+- **THEN** main CI rejects or quarantines it typed and does not project it into the main seed as approved
+
+### Requirement: Main imports promotions against final merged source
+ProjectAtlas SHALL admit a promotion to the main purpose projection only after validating its portable repository, normalized path, exact reviewed content identity, approval revision/provenance, and policy against final merged main.
+
+#### Scenario: Promotion still matches main
+- **WHEN** a merged promotion's path and exact content identity match final main and no incompatible approved revision conflicts
+- **THEN** CI imports it once, preserves agent approval/provenance, and the next immutable main seed exposes the accepted purpose
+
+#### Scenario: Merge changes promoted content
+- **WHEN** overlap resolution, sequential merges, rebase, retarget, branch-only deletion, or later edits change or remove the promoted path/content before sealing
+- **THEN** CI preserves the delta as stale or inconclusive promotion evidence, does not guess or silently apply it, and requests review against final main
+
+#### Scenario: Rename or conflicting purpose is ambiguous
+- **WHEN** promotions overlap, a path is renamed, or different approved texts target the same final identity without a deterministic compatible revision relation
+- **THEN** CI preserves all provenance, refuses last-writer-wins transfer, and returns typed conflict work without merging branch graphs or databases
+
+#### Scenario: Stacked pull request changes its base
+- **WHEN** a stacked pull request is rebased, retargeted, or merged after its base
+- **THEN** its promotion is handled by the same final-main identity checks and needs no special stacked-PR database implementation
 
 ### Requirement: Purpose migration is idempotent and non-destructive
 ProjectAtlas SHALL import compatible approved purposes from existing worktree databases through consistent read-only snapshots, stable source fingerprints, atomic receipts, and preserved originals.
@@ -62,14 +96,14 @@ ProjectAtlas SHALL import compatible approved purposes from existing worktree da
 
 #### Scenario: Legacy approval lacks current content proof
 - **WHEN** an approved legacy purpose has a missing node, stale generation, deleted path, absent content hash, changed current bytes, or otherwise cannot bind path/content identity from one consistent snapshot
-- **THEN** ProjectAtlas preserves it as historical/unbound review context and never projects it as a current approved purpose without deliberate review
+- **THEN** ProjectAtlas preserves authenticated accepted path responsibility when its repository/path authority is proven, otherwise preserves it as historical/unbound context, and never fabricates a portable promotion without deliberate review
 
 ### Requirement: Purpose APIs remain exact-root and concurrency safe
 ProjectAtlas SHALL resolve worktree source freshness and repository purpose authority from one captured validated binding for each API request.
 
 #### Scenario: Interleaved MCP worktrees
 - **WHEN** one MCP process interleaves purpose reads and reviews for two explicit `project_path` values
-- **THEN** every response uses the addressed worktree's freshness with the shared repository revision and never process-global sibling state
+- **THEN** every response uses a request-captured exact-root binding with the shared local repository revision and never process-global sibling state
 
 #### Scenario: Concurrent approval revision
 - **WHEN** two agents conditionally review the same purpose revision concurrently
