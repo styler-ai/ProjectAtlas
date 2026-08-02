@@ -812,6 +812,7 @@ fn decode_repository_text<'a>(
     relative_path: &str,
     bytes: &'a [u8],
 ) -> Result<Option<Cow<'a, str>>, LintError> {
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
     if let Some(encoded) = bytes.strip_prefix(&[0xff, 0xfe]) {
         return decode_utf16(relative_path, encoded, u16::from_le_bytes).map(Some);
     }
@@ -1681,9 +1682,9 @@ mod tests {
         Ok(())
     }
 
-    /// BOM-marked UTF-16 scripts are source text, while binary Git files stay excluded.
+    /// BOM-marked source is text, while binary Git files stay excluded.
     #[test]
-    fn private_path_lint_scans_utf16_text() -> Result<(), Box<dyn std::error::Error>> {
+    fn private_path_lint_scans_text_encodings() -> Result<(), Box<dyn std::error::Error>> {
         let repository = tempfile::tempdir()?;
         let status = Command::new("git")
             .args(["init", "--quiet"])
@@ -1733,6 +1734,17 @@ mod tests {
             decode_repository_text("malformed.ps1", &[0xff, 0xfe, 0]).is_err(),
             "malformed UTF-16 source was accepted",
         )?;
+        let rules = private_path_rules()?;
+        for sample in private_path_samples()? {
+            let mut encoded = vec![0xef, 0xbb, 0xbf];
+            encoded.extend_from_slice(sample.as_bytes());
+            let decoded = decode_repository_text("bom.txt", &encoded)?
+                .ok_or_else(|| io::Error::other("UTF-8 BOM source was treated as binary"))?;
+            require(
+                lint_private_paths("bom.txt", &decoded, &rules).len() == 1,
+                "UTF-8 BOM hid a private path family at the start of source",
+            )?;
+        }
         Ok(())
     }
 

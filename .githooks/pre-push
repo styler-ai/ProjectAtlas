@@ -13,15 +13,15 @@ for git_variable in $(git rev-parse --local-env-vars); do
   unset "$git_variable"
 done
 
+cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+  private-path-updates "$1" < "$push_updates"
 python3 docs/benchmarks/harness/mcp_composition.py --self-test
 python3 .github/scripts/verify-manual-benchmark-policy.py
 python3 .github/scripts/verify-published-benchmark-locks.py
 cargo fmt --all --check
 cargo check --workspace --all-targets --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
-cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
-  private-path-updates "$1" < "$push_updates"
 cargo deny --locked --all-features check -D warnings
 cargo test --workspace --all-features --locked
 cargo test --doc --workspace --all-features --locked

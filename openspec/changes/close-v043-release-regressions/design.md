@@ -1,6 +1,6 @@
 ## Context
 
-The four failures share a release concern—an optional or bounded adapter discarded an already valid local state—but do not share production ownership. The graph database owns bounded current-generation reads, the CLI owns TUI preview orchestration and optional Git probes, the analysis service owns VCS-impact children, the TUI owns deterministic visual sampling, and each installer owns host-specific Codex mutation. The fixes must stay at those existing boundaries.
+The five failures share a release concern—an optional or bounded adapter discarded an already valid local state or release boundary—but do not share production ownership. The graph database owns bounded current-generation reads, the CLI owns TUI preview orchestration and optional Git probes, the analysis service owns VCS-impact children, the TUI owns deterministic visual sampling, each installer owns host-specific Codex mutation, and the repository linter plus workflows own source privacy before product builds. The fixes must stay at those existing boundaries.
 
 ## Goals / Non-Goals
 
@@ -10,6 +10,7 @@ The four failures share a release concern—an optional or bounded adapter disca
 - Keep structural/local ProjectAtlas navigation operational when Git is absent while preserving typed child failures.
 - Keep VCS-impact requests responsive while a persistent MCP host keeps its own stdin open.
 - Make failed official Codex plugin replacement locally reversible even when every network add fails.
+- Reject machine-local absolute paths in every Git-visible text encoding and every build-reachable revision before product compilation or publication.
 - Prove each behavior in the accumulated local and hosted v0.4.3 release gate.
 
 **Non-Goals:**
@@ -51,6 +52,14 @@ Successful updates, intentionally managed marketplaces, skip controls, and obsol
 
 Alternative rejected: remove-then-network-add plus network rollback is not reversible offline. Copying unvalidated or external trees weakens the installer trust boundary.
 
+### 4. Keep source privacy in one decoder and require it before every product build
+
+The repository linter strips UTF-8, UTF-16 little-endian, and UTF-16 big-endian BOMs at its shared text-decoding boundary, rejects malformed non-binary text, and applies the same private-path rules to tracked and non-ignored untracked source plus historical Git blobs. Diagnostics retain only repository-relative location and rule identity.
+
+CI, release, documentation, optional-parser construction, and pre-push run the current-tree policy before product compilation. Each independent hosted artifact path fetches complete history and scans its exact newly reachable range; downstream package, publish, and deploy jobs remain dependency-gated behind that result. The linter binary itself is the unavoidable policy bootstrap and does not compile a ProjectAtlas product crate.
+
+Alternative rejected: extension allowlists miss scripts and configuration, tip-only scans allow clean-tip evasion, and waiting on a concurrent CI run creates a race between independent workflows.
+
 ## Risks / Trade-offs
 
 - [Family-wide hub aggregation regresses latency] -> Use the existing covering index, bounded output, query-plan assertions, and representative cold/warm timing.
@@ -59,6 +68,7 @@ Alternative rejected: remove-then-network-add plus network rollback is not rever
 - [A persistent host masks another inherited-stdin child] -> Keep the 34-call MCP matrix input open through every response and retain the focused #409 regression.
 - [Installer snapshot follows hostile links or escapes ownership] -> Reuse exact official-source and containment validation before snapshot and restore.
 - [Restore overwrites newer successful state] -> Hold one cross-process lock per Codex root across inventory, snapshot, mutation, validation, and restore.
+- [A BOM or independent workflow bypasses source privacy] -> Normalize supported BOMs in the shared decoder and run current-tree plus range gates before every product build path.
 - [Concurrent release edits drift] -> Run focused checks first, then exact candidate/full hosted gates and automatic review at one head.
 
 ## Migration Plan

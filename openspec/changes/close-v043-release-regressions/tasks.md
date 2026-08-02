@@ -18,3 +18,9 @@
 - [x] 3.2 Add Windows and POSIX total-offline fault tests where every add/replacement attempt fails and assert exact preservation of prior marketplace, plugin, config, runtime, generated host state, skip behavior, and truthful failure reporting.
 - [x] 3.3 Reconcile obsolete-MCP handoff, locked-mirror, missing/stale/unofficial, successful update, security/trust-boundary, script syntax, and installer policy behavior without adding a dependency or framework.
 - [ ] 3.4 Run format, focused check/Clippy, installer trust/E2E suites, hosted Windows/POSIX release proof, independent edge review, and the accumulated v0.4 regression gate before release.
+
+## 4. Repository Source Privacy
+
+- [x] 4.1 Normalize UTF-8 and UTF-16 BOM text at the shared decoder, retain binary exclusion and malformed-text failure, and cover every private-path family with redacted diagnostics.
+- [x] 4.2 Run complete-current-tree and newly reachable history policy before product compilation in pre-push, CI, release, documentation, and optional-parser paths, with full-history checkout and fail-closed range selection.
+- [ ] 4.3 Run format, focused linter/workflow tests, the full accumulated release gate, hosted artifact paths, and independent privacy/edge review.

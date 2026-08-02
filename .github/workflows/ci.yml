@@ -40,6 +40,42 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
           rustup default "$RUSTUP_TOOLCHAIN"
 
+      - name: Repository source policy lints
+        timeout-minutes: 2
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          HISTORY_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HISTORY_HEAD: ${{ github.event.pull_request.head.sha || github.event.after || github.sha }}
+        run: |
+          set -euo pipefail
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+          case "$GITHUB_EVENT_NAME" in
+            pull_request|pull_request_review|pull_request_review_comment)
+              if [[ -z "$HISTORY_BASE" || -z "$HISTORY_HEAD" ]]; then
+                HISTORY_BASE="$(git rev-parse --verify HEAD^1)"
+                HISTORY_HEAD="$(git rev-parse --verify HEAD^2)"
+              fi
+              ;;
+            push)
+              [[ -n "$HISTORY_BASE" && -n "$HISTORY_HEAD" ]]
+              ;;
+            workflow_dispatch)
+              HISTORY_HEAD="$(git rev-parse --verify "$GITHUB_SHA^{commit}")"
+              HISTORY_BASE="$(git merge-base "origin/$DEFAULT_BRANCH" "$HISTORY_HEAD")"
+              if [[ "$HISTORY_BASE" == "$HISTORY_HEAD" ]]; then
+                HISTORY_BASE="$(git rev-parse --verify "$HISTORY_HEAD^1")"
+              fi
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+          if [[ "$HISTORY_HEAD" =~ ^0+$ ]]; then
+            exit 0
+          fi
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            private-path-range "$HISTORY_BASE" "$HISTORY_HEAD"
+
       - name: Install cargo-deny
         uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
         with:
@@ -101,37 +137,6 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-
-      - name: Repository source policy lints
-        timeout-minutes: 2
-        env:
-          HISTORY_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HISTORY_HEAD: ${{ github.event.pull_request.head.sha || github.event.after || github.sha }}
-        run: |
-          set -euo pipefail
-          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
-          case "$GITHUB_EVENT_NAME" in
-            pull_request|pull_request_review|pull_request_review_comment)
-              if [[ -z "$HISTORY_BASE" || -z "$HISTORY_HEAD" ]]; then
-                HISTORY_BASE="$(git rev-parse --verify HEAD^1)"
-                HISTORY_HEAD="$(git rev-parse --verify HEAD^2)"
-              fi
-              ;;
-            push)
-              [[ -n "$HISTORY_BASE" && -n "$HISTORY_HEAD" ]]
-              ;;
-            workflow_dispatch)
-              exit 0
-              ;;
-            *)
-              exit 1
-              ;;
-          esac
-          if [[ "$HISTORY_HEAD" =~ ^0+$ ]]; then
-            exit 0
-          fi
-          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
-            private-path-range "$HISTORY_BASE" "$HISTORY_HEAD"
 
       - name: Dependency policy
         run: cargo deny --locked --all-features check -D warnings

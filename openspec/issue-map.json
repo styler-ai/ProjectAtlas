@@ -28,6 +28,11 @@
           "issue": 433,
           "first_task": "3.1",
           "last_task": "3.4"
+        },
+        {
+          "issue": 435,
+          "first_task": "4.1",
+          "last_task": "4.3"
         }
       ]
     },

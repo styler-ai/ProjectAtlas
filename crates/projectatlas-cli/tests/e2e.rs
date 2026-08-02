@@ -118,6 +118,7 @@ const OPENSPEC_DIR_NAME: &str = "openspec";
 const AGENT_INTEGRATION_DOC_FILE_NAME: &str = "agent-integration.md";
 const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
 const OPTIONAL_PARSER_PACK_WORKFLOW_FILE_NAME: &str = "optional-parser-pack.yml";
+const AUTO_RELEASE_WORKFLOW_FILE_NAME: &str = "03-auto-release.yml";
 const CARGO_LOCK_FILE_NAME: &str = "Cargo.lock";
 const CODEX_CONFIG_DIR: &str = ".codex";
 const CODEX_PLUGIN_MANIFEST_DIR: &str = ".codex-plugin";
@@ -6132,6 +6133,12 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
             .join("workflows")
             .join("04-docs.yml"),
     )?;
+    let auto_release_workflow = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("workflows")
+            .join(AUTO_RELEASE_WORKFLOW_FILE_NAME),
+    )?;
     let pre_push = fs::read_to_string(
         workspace_root
             .join(GITHOOKS_DIR_NAME)
@@ -6261,18 +6268,62 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
             ))
             .into());
         }
+        let source_policy_position = verify.find("strict-strings").ok_or_else(|| {
+            io::Error::other(format!(
+                "{workflow_name} verify job has no repository source policy position"
+            ))
+        })?;
+        let workspace_build_position = verify.find("cargo check --workspace").ok_or_else(|| {
+            io::Error::other(format!(
+                "{workflow_name} verify job has no workspace check position"
+            ))
+        })?;
+        let history_policy_position = verify.find("private-path-range").ok_or_else(|| {
+            io::Error::other(format!(
+                "{workflow_name} verify job has no history policy position"
+            ))
+        })?;
+        if source_policy_position > workspace_build_position
+            || history_policy_position > workspace_build_position
+        {
+            return Err(io::Error::other(format!(
+                "{workflow_name} must reject current and historical private source before compiling the workspace"
+            ))
+            .into());
+        }
+        if !workflow.contains("fetch-depth: 0") || !verify.contains("private-path-range") {
+            return Err(io::Error::other(format!(
+                "{workflow_name} must inspect the complete current tree and newly reachable history"
+            ))
+            .into());
+        }
         if workflow_name == "ci"
-            && (!workflow.contains("fetch-depth: 0")
-                || !verify.contains("private-path-range \"$HISTORY_BASE\" \"$HISTORY_HEAD\"")
+            && (!verify.contains("private-path-range \"$HISTORY_BASE\" \"$HISTORY_HEAD\"")
                 || !verify.contains("github.event.pull_request.base.sha")
                 || !verify.contains("github.event.pull_request.head.sha")
+                || !verify.contains("github.event.before")
                 || !verify.contains("github.event.after")
                 || !verify.contains("git rev-parse --verify HEAD^1")
                 || !verify.contains("git rev-parse --verify HEAD^2")
+                || !verify.contains("git merge-base")
+                || !verify.contains("if [[ \"$HISTORY_BASE\" == \"$HISTORY_HEAD\" ]]")
+                || !verify.contains("\"$HISTORY_HEAD^1\"")
+                || !verify.contains("if [[ \"$HISTORY_HEAD\" =~ ^0+$ ]]")
                 || verify.contains("if [[ -n \"$HISTORY_BASE\""))
         {
             return Err(io::Error::other(
                 "CI must scan every newly reachable pull-request revision, not only the checked-out tip",
+            )
+            .into());
+        }
+        if workflow_name == "release"
+            && (!verify.contains("git merge-base")
+                || !verify.contains("if [[ \"$HISTORY_BASE\" == \"$HISTORY_HEAD\" ]]")
+                || !verify.contains("\"$HISTORY_HEAD^1\"")
+                || !verify.contains("$GITHUB_SHA^{commit}"))
+        {
+            return Err(io::Error::other(
+                "release must scan branch or promoted second-parent history before package jobs can start",
             )
             .into());
         }
@@ -6285,14 +6336,69 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
             }
         }
     }
-    for (workflow_name, workflow, job) in [
-        ("optional parser pack", &parser_pack_workflow, "construct"),
-        ("documentation", &docs_workflow, "deploy"),
+    for (workflow_name, workflow, job, first_build) in [
+        (
+            "optional parser pack",
+            &parser_pack_workflow,
+            "construct",
+            "cargo metadata",
+        ),
+        ("documentation", &docs_workflow, "deploy", "cargo doc"),
     ] {
         let build_job = workflow_job_block(workflow, job)?;
         if !build_job.contains("projectatlas-lints") || !build_job.contains("strict-strings") {
             return Err(io::Error::other(format!(
                 "{workflow_name} build must run repository source policy lints"
+            ))
+            .into());
+        }
+        if !workflow.contains("fetch-depth: 0")
+            || !build_job.contains("private-path-range")
+            || !build_job.contains("git merge-base")
+        {
+            return Err(io::Error::other(format!(
+                "{workflow_name} build must scan newly reachable history independently"
+            ))
+            .into());
+        }
+        let source_policy_position = build_job.find("strict-strings").ok_or_else(|| {
+            io::Error::other(format!(
+                "{workflow_name} build has no repository source policy position"
+            ))
+        })?;
+        let first_build_position = build_job.find(first_build).ok_or_else(|| {
+            io::Error::other(format!(
+                "{workflow_name} build has no expected build command {first_build:?}"
+            ))
+        })?;
+        let history_policy_position = build_job.find("private-path-range").ok_or_else(|| {
+            io::Error::other(format!(
+                "{workflow_name} build has no history policy position"
+            ))
+        })?;
+        if source_policy_position > first_build_position
+            || history_policy_position > first_build_position
+        {
+            return Err(io::Error::other(format!(
+                "{workflow_name} must reject current and historical private source before product build commands"
+            ))
+            .into());
+        }
+        let dispatch_fallback = if workflow_name == "optional parser pack" {
+            build_job.contains("if ($base -eq $head)")
+                && build_job.contains("\"$head^1\"")
+                && build_job.contains("github.event.pull_request.base.sha")
+                && build_job.contains("github.event.pull_request.head.sha")
+        } else {
+            build_job.contains("if [[ \"$HISTORY_BASE\" == \"$HISTORY_HEAD\" ]]")
+                && build_job.contains("\"$HISTORY_HEAD^1\"")
+                && build_job.contains("github.event.before")
+                && build_job.contains("github.event.after")
+                && build_job.contains("if [[ \"$HISTORY_HEAD\" =~ ^0+$ ]]")
+        };
+        if !dispatch_fallback {
+            return Err(io::Error::other(format!(
+                "{workflow_name} build must preserve exact push, pull-request, and default-head range selection"
             ))
             .into());
         }
@@ -6308,6 +6414,24 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
     {
         return Err(io::Error::other(
             "pre-push must scan every exact outgoing Git revision, not only the tip or working-tree bytes",
+        )
+        .into());
+    }
+    let pre_push_build = pre_push.find("cargo check --workspace");
+    if pre_push.find("strict-strings") > pre_push_build
+        || pre_push.find("private-path-updates") > pre_push_build
+    {
+        return Err(io::Error::other(
+            "pre-push must reject current and outgoing private source before compiling the workspace",
+        )
+        .into());
+    }
+    if !auto_release_workflow.contains("promotion_sha=\"$(git rev-parse HEAD^2)\"")
+        || !auto_release_workflow.contains("--ref main")
+        || !release_workflow.contains("\"$HISTORY_HEAD^1\"")
+    {
+        return Err(io::Error::other(
+            "auto-release and release must preserve the promoted second-parent privacy range",
         )
         .into());
     }
@@ -6543,7 +6667,8 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     let workspace_root = workspace_root()?;
     let workflow_dir = workspace_root.join(".github").join("workflows");
     let release_workflow = fs::read_to_string(workflow_dir.join("release.yml"))?;
-    let auto_release_workflow = fs::read_to_string(workflow_dir.join("03-auto-release.yml"))?;
+    let auto_release_workflow =
+        fs::read_to_string(workflow_dir.join(AUTO_RELEASE_WORKFLOW_FILE_NAME))?;
     let optional_parser_handoff_resolver = fs::read_to_string(
         workspace_root
             .join(".github")

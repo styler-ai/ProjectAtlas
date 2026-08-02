@@ -1,6 +1,6 @@
 ## Why
 
-The v0.4.3 candidate exposed four release-blocking reliability gaps: the token TUI sampled a sparse arbitrary graph prefix, ordinary local navigation failed when Git could not start, VCS impact inherited a persistent MCP client's stdin, and a fully offline Codex plugin update could remove a working integration. These fixes must ship together under the accumulated release gate without expanding feature scope.
+The v0.4.3 candidate exposed five release-blocking reliability gaps: the token TUI sampled a sparse arbitrary graph prefix, ordinary local navigation failed when Git could not start, VCS impact inherited a persistent MCP client's stdin, a fully offline Codex plugin update could remove a working integration, and private-path policy could be bypassed by UTF-8 BOM or an independent build workflow. These fixes must ship together under the accumulated release gate without expanding feature scope.
 
 ## What Changes
 
@@ -8,7 +8,8 @@ The v0.4.3 candidate exposed four release-blocking reliability gaps: the token T
 - Treat only a missing Git executable as unavailable for the optional effective-config probe so scan, overview, and persistent MCP navigation remain local; retain every other child-process failure and the #409 stdin/deadline contract.
 - Detach noninteractive VCS-impact Git children from host stdin, and keep shared MCP release-test input open until every required response arrives so the accumulated call matrix exercises the real persistent-host lifecycle.
 - Serialize each Codex root, capture validated official marketplace/plugin/config state before destructive installer updates, restore it locally when every replacement attempt fails, and fail closed when a crashed updater leaves recovery state behind.
-- Add focused unit, SQLite/query-plan, CLI, persistent MCP, linked-worktree, installer fault, and hosted release selectors for the four regressions.
+- Decode every Git-visible text encoding consistently and make current-tree plus newly reachable history privacy checks precede product compilation in every local and hosted build, package, documentation, and release path.
+- Add focused unit, SQLite/query-plan, CLI, persistent MCP, linked-worktree, installer fault, source-policy, and hosted release selectors for the five regressions.
 - Keep `docs/assets/token-impact-tui.png` unchanged.
 
 ## Capabilities
@@ -18,6 +19,7 @@ The v0.4.3 candidate exposed four release-blocking reliability gaps: the token T
 - `token-tui-atlas-preview`: Representative, deterministic, bounded full-project graph sampling for the human token dashboard.
 - `optional-git-runtime-probes`: Local ProjectAtlas operation and typed VCS degradation when the Git executable is unavailable.
 - `codex-installer-offline-preservation`: Non-destructive official Codex plugin updates when replacement and rollback acquisition are unavailable.
+- `repository-source-privacy`: Complete-tree and newly reachable history protection against committed machine-local absolute paths before product builds.
 
 ### Modified Capabilities
 
@@ -26,7 +28,7 @@ None. These are v0.4.3 regression contracts over existing TUI, runtime, installe
 ## Impact
 
 - Ready for v0.4.3 implementation and release proof only.
-- Affects the existing repository-graph read adapter, token TUI loader/sampler, optional Git-config and VCS-impact probes, Windows/POSIX installer scripts, owning Rust E2Es, and release workflow selectors.
+- Affects the existing repository-graph read adapter, token TUI loader/sampler, optional Git-config and VCS-impact probes, Windows/POSIX installer scripts, repository linter, owning Rust E2Es, and release workflow selectors.
 - No new crate, dependency, database schema/migration, MCP tool schema, graph publication rule, parser, network requirement, or README image.
 
 ## Non-Goals

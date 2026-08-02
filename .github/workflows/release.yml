@@ -38,11 +38,28 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
 
       - name: Setup Rust
         run: |
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
           rustup default "$RUSTUP_TOOLCHAIN"
+
+      - name: Repository source policy lints
+        timeout-minutes: 2
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+          HISTORY_HEAD="$(git rev-parse --verify "$GITHUB_SHA^{commit}")"
+          HISTORY_BASE="$(git merge-base "origin/$DEFAULT_BRANCH" "$HISTORY_HEAD")"
+          if [[ "$HISTORY_BASE" == "$HISTORY_HEAD" ]]; then
+            HISTORY_BASE="$(git rev-parse --verify "$HISTORY_HEAD^1")"
+          fi
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            private-path-range "$HISTORY_BASE" "$HISTORY_HEAD"
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
@@ -57,10 +74,6 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-
-      - name: Repository source policy lints
-        timeout-minutes: 2
-        run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 
       - name: Dependency policy
         run: cargo deny --locked --all-features check -D warnings
