@@ -7,10 +7,10 @@
 
 ## 2. Git-Optional Local Runtime
 
-- [x] 2.1 Degrade only executable-not-found from the optional effective Git-config probe while preserving permission, timeout, malformed-output, wait/output/cleanup, null-stdin, and deadline failures.
+- [x] 2.1 Degrade only executable-not-found from the optional effective Git-config probe and detach the shared noninteractive VCS-impact Git child from host stdin while preserving permission, timeout, malformed-output, wait/output/cleanup, cancellation, byte-bound, and deadline failures.
 - [x] 2.2 Add an installed-candidate no-Git E2E covering scan, overview, typed VCS unavailability, and one persistent MCP process serving session brief, overview, and file summary before shutdown.
-- [x] 2.3 Require the no-Git selector in Windows and Unix release jobs and rerun the #409 persistent-open-stdin plus wrong-root, missing-index, and local-atlas preservation regressions.
-- [ ] 2.4 Run format, focused check/Clippy, default/all-feature owning tests, hosted platform proof, and independent positive/negative/failure/compatibility edge review.
+- [x] 2.3 Require the no-Git selector in Windows and Unix release jobs, keep the shared MCP release-test input open through every required response, and rerun the 34-call matrix, #409 persistent-open-stdin, wrong-root, missing-index, and local-atlas preservation regressions.
+- [ ] 2.4 Run format, focused check/Clippy, default/all-feature owning tests, complete MCP call matrix, hosted platform proof, and independent positive/negative/failure/compatibility edge review.
 
 ## 3. Offline Installer Preservation
 

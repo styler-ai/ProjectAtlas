@@ -107,7 +107,13 @@ def candidate_path(value: str) -> Path:
 
 def redact_local_paths(value: Any) -> Any:
     if isinstance(value, dict):
-        return {key: redact_local_paths(item) for key, item in value.items()}
+        redacted = {}
+        for key, item in value.items():
+            redacted_key = redact_local_paths(key)
+            if redacted_key in redacted:
+                raise ValueError("private path redaction produced duplicate object keys")
+            redacted[redacted_key] = redact_local_paths(item)
+        return redacted
     if isinstance(value, list):
         return [redact_local_paths(item) for item in value]
     if not isinstance(value, str):

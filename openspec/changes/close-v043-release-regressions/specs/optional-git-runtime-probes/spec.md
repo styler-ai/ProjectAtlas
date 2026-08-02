@@ -31,8 +31,12 @@ ProjectAtlas SHALL treat only executable-not-found during the optional effective
 - **THEN** the existing #409 deadline, null-stdin, diagnostic, and cleanup behavior remains fail-closed
 
 ### Requirement: VCS-only operations degrade explicitly
-ProjectAtlas SHALL preserve typed VCS-unavailable evidence rather than claiming impact or repository facts that require native Git.
+ProjectAtlas SHALL run noninteractive VCS-impact Git children without inheriting host input and SHALL preserve typed VCS-unavailable evidence rather than claiming impact or repository facts that require native Git.
 
 #### Scenario: Impact request needs Git
 - **WHEN** VCS impact analysis is requested with no Git executable
 - **THEN** the operation returns typed Git-unavailable evidence while the last valid local atlas remains unchanged and readable
+
+#### Scenario: Persistent MCP requests working-tree impact
+- **WHEN** a persistent stdio MCP host keeps its input open while requesting working-tree impact
+- **THEN** the Git child uses null stdin and the impact response arrives before host shutdown within the existing output, cancellation, deadline, and cleanup bounds

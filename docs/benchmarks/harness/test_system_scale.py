@@ -1160,8 +1160,13 @@ time.sleep(60)
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "result.json"
             separator = chr(92)
-            foreign_path = separator.join(
-                (f"{chr(89)}:", "private-host", "artifact.txt")
+            foreign_path = (
+                separator * 2
+                + "?"
+                + separator
+                + "UNC"
+                + separator
+                + separator.join(("private-host", "share", "artifact.txt"))
             )
             with (
                 mock.patch("builtins.print") as report,
@@ -1173,6 +1178,7 @@ time.sleep(60)
                         "publication_eligible": False,
                         "path": str(system_scale.ROOT / "private"),
                         "foreign_path": foreign_path,
+                        "nested": [{foreign_path: foreign_path}],
                     },
                     output,
                 )
@@ -1183,6 +1189,9 @@ time.sleep(60)
                 result["path"], str(Path("{REPO_ROOT}") / "private")
             )
             self.assertEqual(result["foreign_path"], "{PRIVATE_PATH}")
+            self.assertEqual(
+                result["nested"], [{"{PRIVATE_PATH}": "{PRIVATE_PATH}"}]
+            )
             self.assertNotIn(
                 str(system_scale.ROOT), output.read_text(encoding="utf-8")
             )
@@ -1192,6 +1201,12 @@ time.sleep(60)
         samples = (
             separator.join((f"{chr(88)}:", "private-host", "artifact.txt")),
             separator * 2 + separator.join(("server", "share", "artifact.txt")),
+            separator * 2
+            + "?"
+            + separator
+            + "UNC"
+            + separator
+            + separator.join(("server", "share", "artifact.txt")),
             "/".join(("", "home", "example-user", "artifact.txt")),
             "/".join(("", "mnt", "x", "artifact.txt")),
             "/".join(("file:", "", "private-host", "share", "artifact.txt")),
@@ -1224,8 +1239,13 @@ time.sleep(60)
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "result.json"
             separator = chr(92)
-            private_path = separator.join(
-                (f"{chr(90)}:", "private-host", "artifact.txt")
+            private_path = (
+                separator * 2
+                + "?"
+                + separator
+                + "UNC"
+                + separator
+                + separator.join(("private-host", "share", "artifact.txt"))
             )
             with (
                 mock.patch.object(
@@ -1238,10 +1258,17 @@ time.sleep(60)
                 system_scale.write_result(
                     {"passed": True, "path": private_path}, output
                 )
-            self.assertIn("windows-drive-root", str(failure.exception))
+            self.assertIn("verbatim-network-root", str(failure.exception))
             self.assertNotIn(private_path, str(failure.exception))
             self.assertFalse(output.exists())
             self.assertFalse(output.with_name(f"{output.name}.tmp").exists())
+            other_private_path = private_path.replace("artifact", "other")
+            with self.assertRaises(ValueError) as collision:
+                system_scale.redact_local_paths(
+                    {private_path: 1, other_private_path: 2}
+                )
+            self.assertNotIn(private_path, str(collision.exception))
+            self.assertNotIn(other_private_path, str(collision.exception))
 
     def test_main_persists_stalled_mcp_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

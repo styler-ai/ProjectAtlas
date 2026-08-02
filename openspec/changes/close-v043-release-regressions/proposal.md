@@ -1,13 +1,14 @@
 ## Why
 
-The v0.4.3 candidate exposed three release-blocking reliability gaps: the token TUI sampled a sparse arbitrary graph prefix, ordinary local navigation failed when Git could not start, and a fully offline Codex plugin update could remove a working integration. These fixes must ship together under the accumulated release gate without expanding feature scope.
+The v0.4.3 candidate exposed four release-blocking reliability gaps: the token TUI sampled a sparse arbitrary graph prefix, ordinary local navigation failed when Git could not start, VCS impact inherited a persistent MCP client's stdin, and a fully offline Codex plugin update could remove a working integration. These fixes must ship together under the accumulated release gate without expanding feature scope.
 
 ## What Changes
 
 - Build the token TUI preview from bounded representative resolved hubs and adjacency across the complete current-generation relation families, while preserving exact worktree isolation and existing visual caps.
 - Treat only a missing Git executable as unavailable for the optional effective-config probe so scan, overview, and persistent MCP navigation remain local; retain every other child-process failure and the #409 stdin/deadline contract.
+- Detach noninteractive VCS-impact Git children from host stdin, and keep shared MCP release-test input open until every required response arrives so the accumulated call matrix exercises the real persistent-host lifecycle.
 - Serialize each Codex root, capture validated official marketplace/plugin/config state before destructive installer updates, restore it locally when every replacement attempt fails, and fail closed when a crashed updater leaves recovery state behind.
-- Add focused unit, SQLite/query-plan, CLI, persistent MCP, linked-worktree, installer fault, and hosted release selectors for the three regressions.
+- Add focused unit, SQLite/query-plan, CLI, persistent MCP, linked-worktree, installer fault, and hosted release selectors for the four regressions.
 - Keep `docs/assets/token-impact-tui.png` unchanged.
 
 ## Capabilities
@@ -25,7 +26,7 @@ None. These are v0.4.3 regression contracts over existing TUI, runtime, installe
 ## Impact
 
 - Ready for v0.4.3 implementation and release proof only.
-- Affects the existing repository-graph read adapter, token TUI loader/sampler, optional Git-config probe, Windows/POSIX installer scripts, owning Rust E2Es, and release workflow selectors.
+- Affects the existing repository-graph read adapter, token TUI loader/sampler, optional Git-config and VCS-impact probes, Windows/POSIX installer scripts, owning Rust E2Es, and release workflow selectors.
 - No new crate, dependency, database schema/migration, MCP tool schema, graph publication rule, parser, network requirement, or README image.
 
 ## Non-Goals

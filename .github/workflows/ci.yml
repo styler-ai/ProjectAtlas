@@ -32,6 +32,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
 
       - name: Setup Rust
         run: |
@@ -102,7 +104,34 @@ jobs:
 
       - name: Repository source policy lints
         timeout-minutes: 2
-        run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+        env:
+          HISTORY_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HISTORY_HEAD: ${{ github.event.pull_request.head.sha || github.event.after || github.sha }}
+        run: |
+          set -euo pipefail
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+          case "$GITHUB_EVENT_NAME" in
+            pull_request|pull_request_review|pull_request_review_comment)
+              if [[ -z "$HISTORY_BASE" || -z "$HISTORY_HEAD" ]]; then
+                HISTORY_BASE="$(git rev-parse --verify HEAD^1)"
+                HISTORY_HEAD="$(git rev-parse --verify HEAD^2)"
+              fi
+              ;;
+            push)
+              [[ -n "$HISTORY_BASE" && -n "$HISTORY_HEAD" ]]
+              ;;
+            workflow_dispatch)
+              exit 0
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+          if [[ "$HISTORY_HEAD" =~ ^0+$ ]]; then
+            exit 0
+          fi
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            private-path-range "$HISTORY_BASE" "$HISTORY_HEAD"
 
       - name: Dependency policy
         run: cargo deny --locked --all-features check -D warnings

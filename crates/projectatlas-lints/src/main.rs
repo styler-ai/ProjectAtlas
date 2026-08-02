@@ -12,6 +12,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::rc::Rc;
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
@@ -24,6 +25,8 @@ use syn::{
 const COMMAND_STRICT_STRINGS: &str = "strict-strings";
 /// Subcommand that scans the changed blobs described by standard pre-push rows.
 const COMMAND_PRIVATE_PATH_UPDATES: &str = "private-path-updates";
+/// Subcommand that scans newly reachable history relative to one published base.
+const COMMAND_PRIVATE_PATH_RANGE: &str = "private-path-range";
 /// Successful process exit.
 const EXIT_OK: u8 = 0;
 /// Lint failure process exit.
@@ -39,6 +42,10 @@ const PRIVATE_PATH_RULES: &[(&str, &str)] = &[
     (
         "windows-drive-root",
         r"(?i)(?:^|[^A-Za-z0-9_.+\-])(?P<path>[A-Z]:[\\/])",
+    ),
+    (
+        "verbatim-network-root",
+        r"(?i)(?:^|[^\\])(?P<path>\\{2,}\?\\+UNC\\+[A-Za-z0-9][A-Za-z0-9_.-]+\\+[A-Za-z0-9_$.-]+)",
     ),
     (
         "network-root",
@@ -285,7 +292,14 @@ fn run(args: impl IntoIterator<Item = OsString>, current_dir: &Path) -> Result<(
             let stdin = io::stdin();
             run_private_path_updates(current_dir, remote_name, stdin.lock())
         }
-        [other, ..] if other != COMMAND_STRICT_STRINGS && other != COMMAND_PRIVATE_PATH_UPDATES => {
+        [command, base, head] if command == COMMAND_PRIVATE_PATH_RANGE => {
+            run_private_path_range(current_dir, base, head)
+        }
+        [other, ..]
+            if other != COMMAND_STRICT_STRINGS
+                && other != COMMAND_PRIVATE_PATH_UPDATES
+                && other != COMMAND_PRIVATE_PATH_RANGE =>
+        {
             Err(LintError::Usage(format!(
                 "unknown projectatlas lint command {other:?}"
             )))
@@ -316,7 +330,7 @@ fn help() -> Result<(), LintError> {
     let mut stdout = io::stdout().lock();
     writeln!(
         stdout,
-        "Usage: cargo projectatlas-lints <command>\n\nCommands:\n  {COMMAND_STRICT_STRINGS}  Enforce ProjectAtlas string contracts and repository-wide private-path policy.\n  {COMMAND_PRIVATE_PATH_UPDATES} <remote>  Scan changed blobs from standard pre-push rows on stdin."
+        "Usage: cargo projectatlas-lints <command>\n\nCommands:\n  {COMMAND_STRICT_STRINGS}  Enforce ProjectAtlas string contracts and repository-wide private-path policy.\n  {COMMAND_PRIVATE_PATH_UPDATES} <remote>  Scan changed blobs from standard pre-push rows on stdin.\n  {COMMAND_PRIVATE_PATH_RANGE} <base> <head>  Scan newly reachable history while allowing unchanged private-path source occurrences already present at the published base."
     )
     .map_err(LintError::Io)
 }
@@ -364,6 +378,29 @@ fn run_private_path_updates(
     }
     let private_path_violations = lint_git_revisions_private_paths(root, &revisions)?;
     finish_lint(Vec::new(), private_path_violations)
+}
+
+/// Scan newly reachable history without re-reporting unchanged private-path source at the base.
+fn run_private_path_range(root: &Path, base: &str, head: &str) -> Result<(), LintError> {
+    if !is_full_git_object_id(base)
+        || !is_full_git_object_id(head)
+        || base.len() != head.len()
+        || head.bytes().all(|byte| byte == b'0')
+    {
+        return Err(LintError::InvalidPrePushUpdate);
+    }
+    let updates = format!("refs/heads/ci {head} refs/heads/ci {base}\n");
+    let revisions = outgoing_revisions(root, "", io::Cursor::new(updates))?;
+    let baseline = if base.bytes().all(|byte| byte == b'0') {
+        Vec::new()
+    } else {
+        lint_git_tree_private_paths(root, base)?
+    };
+    let outgoing = lint_git_revisions_private_paths(root, &revisions)?;
+    finish_lint(
+        Vec::new(),
+        private_paths_not_in_baseline(outgoing, &baseline),
+    )
 }
 
 /// Resolve every newly reachable revision from standard pre-push update rows.
@@ -535,7 +572,7 @@ fn lint_git_revisions_private_paths(
             code: changed.status.code(),
         });
     }
-    let mut blobs = BTreeMap::new();
+    let mut blobs = BTreeSet::new();
     let mut records = changed.stdout.split(|byte| *byte == 0);
     loop {
         let Some(metadata) = records.next() else {
@@ -565,15 +602,105 @@ fn lint_git_revisions_private_paths(
             continue;
         }
         let path = String::from_utf8(path.to_vec()).map_err(LintError::NonUtf8GitPath)?;
-        blobs.entry(new_object.to_string()).or_insert(path);
+        blobs.insert((new_object.to_string(), path));
     }
     lint_git_blobs(root, &blobs)
+}
+
+/// Scan every text blob in one exact Git tree.
+fn lint_git_tree_private_paths(
+    root: &Path,
+    revision: &str,
+) -> Result<Vec<PrivatePathViolation>, LintError> {
+    let output = Command::new("git")
+        .args(["ls-tree", "-r", "-z", "--full-tree", revision])
+        .current_dir(root)
+        .stderr(Stdio::null())
+        .output()
+        .map_err(LintError::ReadGitRevision)?;
+    if !output.status.success() {
+        return Err(LintError::GitRevisionCommandFailed {
+            operation: "baseline tree listing",
+            code: output.status.code(),
+        });
+    }
+    let mut blobs = BTreeSet::new();
+    for record in output.stdout.split(|byte| *byte == 0) {
+        if record.is_empty() {
+            continue;
+        }
+        let separator = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or(LintError::InvalidGitTreeEntry)?;
+        let metadata =
+            String::from_utf8(record[..separator].to_vec()).map_err(LintError::NonUtf8GitPath)?;
+        let path = String::from_utf8(record[separator + 1..].to_vec())
+            .map_err(LintError::NonUtf8GitPath)?;
+        let mut fields = metadata.split_whitespace();
+        let mode = fields.next().ok_or(LintError::InvalidGitTreeEntry)?;
+        let kind = fields.next().ok_or(LintError::InvalidGitTreeEntry)?;
+        let object = fields.next().ok_or(LintError::InvalidGitTreeEntry)?;
+        if fields.next().is_some() || !is_full_git_object_id(object) {
+            return Err(LintError::InvalidGitTreeEntry);
+        }
+        if kind == "blob" {
+            blobs.insert((object.to_string(), path));
+        } else if kind != "commit" || mode != "160000" {
+            return Err(LintError::InvalidGitTreeEntry);
+        }
+    }
+    lint_git_blobs(root, &blobs)
+}
+
+/// Keep only private path occurrences that exceed the unchanged published-base multiset.
+fn private_paths_not_in_baseline(
+    outgoing: Vec<PrivatePathViolation>,
+    baseline: &[PrivatePathViolation],
+) -> Vec<PrivatePathViolation> {
+    let mut baseline_counts = BTreeMap::new();
+    for violation in baseline {
+        *baseline_counts
+            .entry((
+                violation.path.clone(),
+                violation.kind,
+                violation.source_identity.clone(),
+            ))
+            .or_insert(0usize) += 1;
+    }
+    let mut admitted_by_blob = BTreeMap::new();
+    outgoing
+        .into_iter()
+        .filter(|violation| {
+            let Some(git_object) = violation.git_object.as_ref() else {
+                return true;
+            };
+            let baseline_count = baseline_counts
+                .get(&(
+                    violation.path.clone(),
+                    violation.kind,
+                    violation.source_identity.clone(),
+                ))
+                .copied()
+                .unwrap_or_default();
+            let admitted = admitted_by_blob
+                .entry((
+                    git_object.clone(),
+                    violation.path.clone(),
+                    violation.kind,
+                    violation.source_identity.clone(),
+                ))
+                .or_insert(0usize);
+            *admitted += 1;
+            *admitted > baseline_count
+        })
+        .collect()
 }
 
 /// Read a deduplicated set of Git blobs through one validated batch process.
 fn lint_git_blobs(
     root: &Path,
-    blobs: &BTreeMap<String, String>,
+    blobs: &BTreeSet<(String, String)>,
 ) -> Result<Vec<PrivatePathViolation>, LintError> {
     let rules = private_path_rules()?;
     let mut child = Command::new("git")
@@ -634,7 +761,11 @@ fn lint_git_blobs(
             return Err(LintError::InvalidGitObjectResponse);
         }
         if let Some(source) = decode_repository_text(relative_path, &bytes)? {
-            violations.extend(lint_private_paths(relative_path, &source, &rules));
+            let mut blob_violations = lint_private_paths(relative_path, &source, &rules);
+            for violation in &mut blob_violations {
+                violation.git_object = Some(object.clone());
+            }
+            violations.extend(blob_violations);
         }
     }
     drop(requests);
@@ -723,16 +854,22 @@ fn lint_private_paths(
 ) -> Vec<PrivatePathViolation> {
     let mut violations = Vec::new();
     for (line_index, line) in source.lines().enumerate() {
+        let mut source_identity = None;
         for rule in rules {
             for captures in rule.regex.captures_iter(line) {
                 let Some(path_match) = captures.name("path") else {
                     continue;
                 };
+                let source_identity = source_identity
+                    .get_or_insert_with(|| PrivatePathIdentity(Rc::from(line)))
+                    .clone();
                 violations.push(PrivatePathViolation {
                     path: relative_path.to_string(),
                     line: line_index + 1,
                     column: line[..path_match.start()].chars().count() + 1,
                     kind: rule.kind,
+                    source_identity,
+                    git_object: None,
                 });
             }
         }
@@ -843,7 +980,6 @@ struct PrivatePathRule {
 }
 
 /// One redacted private absolute-path violation.
-#[derive(Debug)]
 struct PrivatePathViolation {
     /// Repository-relative source path.
     path: String,
@@ -853,6 +989,26 @@ struct PrivatePathViolation {
     column: usize,
     /// Stable path-shape classification; never contains matched source text.
     kind: &'static str,
+    /// Non-formattable identity for the complete source line containing the private path.
+    source_identity: PrivatePathIdentity,
+    /// Git blob identity used to apply the baseline allowance independently per historical file.
+    git_object: Option<String>,
+}
+
+/// Exact identity that cannot expose the private source text through formatting.
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct PrivatePathIdentity(Rc<str>);
+
+impl fmt::Debug for PrivatePathViolation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PrivatePathViolation")
+            .field("path", &self.path)
+            .field("line", &self.line)
+            .field("column", &self.column)
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Display for PrivatePathViolation {
@@ -1318,14 +1474,15 @@ fn write_violations(
 #[cfg(test)]
 mod tests {
     use super::{
-        E2E_FIXTURE_PATH_LITERALS, MCP_PROJECT_SCHEMA_LITERALS, PathJoinLiteralRule,
+        E2E_FIXTURE_PATH_LITERALS, LintError, MCP_PROJECT_SCHEMA_LITERALS, PathJoinLiteralRule,
         StringLiteralRule, StringLiteralViolation, decode_repository_text,
-        lint_git_revisions_private_paths, lint_private_paths, lint_repeated_path_join_literals,
-        lint_repository_private_paths, lint_source, outgoing_revisions, private_path_rules,
-        run_strict_strings, write_violations,
+        lint_git_revisions_private_paths, lint_git_tree_private_paths, lint_private_paths,
+        lint_repeated_path_join_literals, lint_repository_private_paths, lint_source,
+        outgoing_revisions, private_path_rules, private_paths_not_in_baseline,
+        run_private_path_range, run_strict_strings, write_violations,
     };
     use std::fs;
-    use std::io;
+    use std::io::{self, Write};
     use std::path::Path;
     use std::process::Command;
 
@@ -1403,6 +1560,14 @@ mod tests {
             format!("{drive}:/{}/{}", "private-host", "workspace"),
             format!(
                 "{backslash}{backslash}{}{backslash}{}",
+                "private-host", "share"
+            ),
+            format!(
+                "{backslash}{backslash}?{backslash}UNC{backslash}{}{backslash}{}",
+                "private-host", "share"
+            ),
+            format!(
+                "{backslash}{backslash}{backslash}{backslash}?{backslash}{backslash}UNC{backslash}{backslash}{}{backslash}{backslash}{}",
                 "private-host", "share"
             ),
             ["", "", "private-host", "share"].join("/"),
@@ -1588,14 +1753,26 @@ mod tests {
                 .status;
             require(status.success(), "temporary Git setup failed")?;
         }
-        let sample = private_path_samples()?
-            .into_iter()
-            .next()
+        let samples = private_path_samples()?;
+        let sample = samples
+            .first()
             .ok_or_else(|| io::Error::other("private path sample is missing"))?;
+        let baseline_sample = samples
+            .get(1)
+            .ok_or_else(|| io::Error::other("baseline private path sample is missing"))?;
         let source_path = repository.path().join("privacy-check.ps1");
+        let legacy_path = repository.path().join("legacy.ps1");
+        let same_root_path = repository.path().join("same-root.ps1");
+        let same_root_sample = sample.replace("private-host", "private host");
+        let replacement_sample = same_root_sample.replace("workspace", "replacement");
         fs::write(&source_path, "$runtime = Join-Path $env:TEMP 'base'\n")?;
+        fs::write(&legacy_path, format!("$legacy = {baseline_sample:?}\n"))?;
+        fs::write(
+            &same_root_path,
+            format!("$runtime = {same_root_sample:?}\n"),
+        )?;
         let status = Command::new("git")
-            .args(["add", "privacy-check.ps1"])
+            .args(["add", "privacy-check.ps1", "legacy.ps1", "same-root.ps1"])
             .current_dir(repository.path())
             .output()?
             .status;
@@ -1612,6 +1789,32 @@ mod tests {
             .output()?;
         require(base.status.success(), "temporary Git base lookup failed")?;
         let base = String::from_utf8(base.stdout)?.trim().to_string();
+        fs::write(
+            &legacy_path,
+            format!("$legacy = {baseline_sample:?}\n# retained baseline text\n"),
+        )?;
+        let status = Command::new("git")
+            .args(["add", "legacy.ps1"])
+            .current_dir(repository.path())
+            .output()?
+            .status;
+        require(status.success(), "safe baseline edit could not be staged")?;
+        let status = Command::new("git")
+            .args(["commit", "--quiet", "-m", "retain published private text"])
+            .current_dir(repository.path())
+            .output()?
+            .status;
+        require(status.success(), "safe baseline edit commit failed")?;
+        let safe_head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repository.path())
+            .output()?;
+        require(safe_head.status.success(), "safe Git head lookup failed")?;
+        let safe_head = String::from_utf8(safe_head.stdout)?.trim().to_string();
+        require(
+            run_private_path_range(repository.path(), &base, &safe_head).is_ok(),
+            "unchanged private text already present at the published base was rejected",
+        )?;
         for (content, message, attributes) in [
             (
                 format!("$runtime = {sample:?}\n"),
@@ -1625,6 +1828,14 @@ mod tests {
             ),
         ] {
             fs::write(&source_path, content)?;
+            fs::write(
+                &same_root_path,
+                if message == "private intermediate" {
+                    format!("$runtime = {replacement_sample:?}\n")
+                } else {
+                    "$runtime = Join-Path $env:TEMP 'clean-tip'\n".to_string()
+                },
+            )?;
             if let Some(attributes) = attributes {
                 fs::write(repository.path().join(".gitattributes"), attributes)?;
             }
@@ -1644,9 +1855,10 @@ mod tests {
             &source_path,
             "$runtime = Join-Path $env:TEMP 'dirty-safe'\n",
         )?;
+        let working_tree_violations = lint_repository_private_paths(repository.path())?;
         require(
-            lint_repository_private_paths(repository.path())?.is_empty(),
-            "safe dirty overlay should remain clean",
+            working_tree_violations.len() == 1 && working_tree_violations[0].path == "legacy.ps1",
+            "safe dirty overlay must retain only the published-base private text",
         )?;
         let head = Command::new("git")
             .args(["rev-parse", "HEAD"])
@@ -1666,13 +1878,39 @@ mod tests {
             io::Cursor::new(updates),
         )?;
         require(
-            revisions.len() == 3,
+            revisions.len() == 4,
             "existing, new, duplicate, or deletion update selection regressed",
         )?;
         let violations = lint_git_revisions_private_paths(repository.path(), &revisions)?;
         require(
-            violations.len() == 1 && violations[0].path == "privacy-check.ps1",
-            "private intermediate revision was not found in the outgoing range",
+            violations.len() == 5,
+            &format!(
+                "raw outgoing scan must include introduced and inherited private text; found {}",
+                violations.len()
+            ),
+        )?;
+        let baseline = lint_git_tree_private_paths(repository.path(), &base)?;
+        let introduced = private_paths_not_in_baseline(violations, &baseline);
+        require(
+            introduced.len() == 2
+                && introduced
+                    .iter()
+                    .any(|violation| violation.path == "privacy-check.ps1")
+                && introduced
+                    .iter()
+                    .any(|violation| violation.path == "same-root.ps1"),
+            "range scan did not isolate private text introduced after the published base",
+        )?;
+        require(
+            run_private_path_range(repository.path(), &base, &head).is_err(),
+            "private intermediate revision was accepted by the hosted range gate",
+        )?;
+        require(
+            matches!(
+                run_private_path_range(repository.path(), &null_object, &head),
+                Err(LintError::Violations { .. })
+            ),
+            "a zero-base branch creation did not scan its complete reachable history",
         )?;
         require(
             outgoing_revisions(
@@ -1682,6 +1920,106 @@ mod tests {
             )
             .is_err(),
             "malformed pre-push input was accepted",
+        )?;
+        Ok(())
+    }
+
+    /// SHA-256 history keeps distinct paths even when they share one private blob.
+    #[test]
+    fn private_path_lint_scans_sha256_history() -> Result<(), Box<dyn std::error::Error>> {
+        let repository = tempfile::tempdir()?;
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(repository.path())
+                .output()
+        };
+        if !git(&["init", "--quiet", "--object-format=sha256"])?
+            .status
+            .success()
+        {
+            writeln!(
+                io::stderr().lock(),
+                "skipped: installed Git does not support SHA-256 repositories"
+            )?;
+            return Ok(());
+        }
+        for args in [
+            &["config", "user.name", "ProjectAtlas Test"][..],
+            &["config", "user.email", "projectatlas@example.invalid"][..],
+        ] {
+            require(git(args)?.status.success(), "SHA-256 Git setup failed")?;
+        }
+        fs::write(repository.path().join("baseline.txt"), "safe\n")?;
+        require(
+            git(&["add", "baseline.txt"])?.status.success()
+                && git(&["commit", "--quiet", "-m", "clean base"])?
+                    .status
+                    .success(),
+            "SHA-256 Git base commit failed",
+        )?;
+        let base = git(&["rev-parse", "HEAD"])?;
+        require(base.status.success(), "SHA-256 Git base lookup failed")?;
+        let base = String::from_utf8(base.stdout)?.trim().to_string();
+        require(base.len() == 64, "Git did not create SHA-256 object ids")?;
+
+        let sample = private_path_samples()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::other("private path sample is missing"))?;
+        let private_source = format!("$runtime = {sample:?}\n");
+        for path in ["first.ps1", "second.ps1"] {
+            fs::write(repository.path().join(path), &private_source)?;
+        }
+        require(
+            git(&["add", "first.ps1", "second.ps1"])?.status.success()
+                && git(&["commit", "--quiet", "-m", "private intermediate"])?
+                    .status
+                    .success(),
+            "SHA-256 private intermediate commit failed",
+        )?;
+        for path in ["first.ps1", "second.ps1"] {
+            fs::write(repository.path().join(path), "$runtime = $env:TEMP\n")?;
+        }
+        require(
+            git(&["add", "first.ps1", "second.ps1"])?.status.success()
+                && git(&["commit", "--quiet", "-m", "clean tip"])?
+                    .status
+                    .success(),
+            "SHA-256 clean tip commit failed",
+        )?;
+        let head = git(&["rev-parse", "HEAD"])?;
+        require(head.status.success(), "SHA-256 Git head lookup failed")?;
+        let head = String::from_utf8(head.stdout)?.trim().to_string();
+        require(head.len() == 64, "SHA-256 Git head has the wrong width")?;
+
+        let updates = format!("refs/heads/feature {head} refs/heads/feature {base}\n");
+        let revisions = outgoing_revisions(repository.path(), "", io::Cursor::new(updates))?;
+        let baseline = lint_git_tree_private_paths(repository.path(), &base)?;
+        let introduced = private_paths_not_in_baseline(
+            lint_git_revisions_private_paths(repository.path(), &revisions)?,
+            &baseline,
+        );
+        require(
+            introduced.len() == 2
+                && introduced.iter().any(|item| item.path == "first.ps1")
+                && introduced.iter().any(|item| item.path == "second.ps1"),
+            "SHA-256 range scan deduplicated distinct paths sharing one private blob",
+        )?;
+        require(
+            matches!(
+                run_private_path_range(repository.path(), &base, &head),
+                Err(LintError::Violations { .. })
+            ),
+            "SHA-256 intermediate private revision passed the range gate",
+        )?;
+        let null_object = "0".repeat(64);
+        require(
+            matches!(
+                run_private_path_range(repository.path(), &null_object, &head),
+                Err(LintError::Violations { .. })
+            ),
+            "SHA-256 zero-base history passed the range gate",
         )?;
         Ok(())
     }
@@ -1696,6 +2034,8 @@ mod tests {
             line: 1,
             column: 1,
             kind: "windows-drive-root",
+            source_identity: super::PrivatePathIdentity(std::rc::Rc::from("")),
+            git_object: None,
         };
         let mut diagnostics = Vec::new();
         write_violations(&mut diagnostics, &[], &[private_path])?;

@@ -436,7 +436,10 @@ pub(super) fn load_vcs_paths(
 /// Build one Git command bound to the explicitly selected repository root.
 pub(super) fn git_command(root: &Path) -> Command {
     let mut command = Command::new("git");
-    command.current_dir(root).env("GIT_OPTIONAL_LOCKS", "0");
+    command
+        .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null());
     clear_git_repository_environment(&mut command);
     command
 }

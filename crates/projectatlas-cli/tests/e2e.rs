@@ -6261,6 +6261,21 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
             ))
             .into());
         }
+        if workflow_name == "ci"
+            && (!workflow.contains("fetch-depth: 0")
+                || !verify.contains("private-path-range \"$HISTORY_BASE\" \"$HISTORY_HEAD\"")
+                || !verify.contains("github.event.pull_request.base.sha")
+                || !verify.contains("github.event.pull_request.head.sha")
+                || !verify.contains("github.event.after")
+                || !verify.contains("git rev-parse --verify HEAD^1")
+                || !verify.contains("git rev-parse --verify HEAD^2")
+                || verify.contains("if [[ -n \"$HISTORY_BASE\""))
+        {
+            return Err(io::Error::other(
+                "CI must scan every newly reachable pull-request revision, not only the checked-out tip",
+            )
+            .into());
+        }
         for run in workflow_job_runs(workflow, "verify")? {
             if command_runs_projectatlas_maintenance(&run) {
                 return Err(io::Error::other(format!(
@@ -27970,7 +27985,7 @@ fn run_mcp_stdio(
     run_mcp_stdio_with_env(executable, cwd, args, messages, &[])
 }
 
-/// Launch a real MCP stdio child with explicit per-process environment controls.
+/// Launch a real MCP stdio child and close stdin only after every request has a response.
 fn run_mcp_stdio_with_env(
     executable: &std::path::Path,
     cwd: &std::path::Path,
@@ -27978,6 +27993,13 @@ fn run_mcp_stdio_with_env(
     messages: &[impl AsRef<str>],
     environment: &[(&str, Option<&str>)],
 ) -> Result<String, Box<dyn Error>> {
+    let mut expected_responses = BTreeSet::new();
+    for message in messages {
+        let request: Value = serde_json::from_str(message.as_ref())?;
+        if let Some(id) = request.get("id") {
+            expected_responses.insert(id.to_string());
+        }
+    }
     let input = format!(
         "{}\n",
         messages
@@ -28001,14 +28023,10 @@ fn run_mcp_stdio_with_env(
         }
     }
     let mut child = command.spawn()?;
-
     let mut stdin = child
         .stdin
         .take()
         .ok_or_else(|| io::Error::other("mcp stdin was not piped"))?;
-    stdin.write_all(input.as_bytes())?;
-    drop(stdin);
-
     let mut stdout_pipe = child
         .stdout
         .take()
@@ -28017,9 +28035,18 @@ fn run_mcp_stdio_with_env(
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("mcp stderr was not piped"))?;
+    let (response_sender, response_receiver) = mpsc::channel();
     let stdout_reader = thread::spawn(move || -> io::Result<Vec<u8>> {
+        let mut reader = BufReader::new(&mut stdout_pipe);
         let mut output = Vec::new();
-        stdout_pipe.read_to_end(&mut output)?;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line)? == 0 {
+                break;
+            }
+            output.extend_from_slice(line.as_bytes());
+            drop(response_sender.send(line));
+        }
         Ok(output)
     });
     let stderr_reader = thread::spawn(move || -> io::Result<Vec<u8>> {
@@ -28027,6 +28054,52 @@ fn run_mcp_stdio_with_env(
         stderr_pipe.read_to_end(&mut output)?;
         Ok(output)
     });
+
+    let response_result = (|| -> Result<(), Box<dyn Error>> {
+        stdin.write_all(input.as_bytes())?;
+        stdin.flush()?;
+        let mut response_deadline = Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .ok_or_else(|| io::Error::other("MCP response deadline overflowed"))?;
+        while !expected_responses.is_empty() {
+            let remaining = response_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "projectatlas mcp did not answer request ids before shutdown: {expected_responses:?}"
+                    ),
+                )
+                .into());
+            }
+            let line = response_receiver
+                .recv_timeout(remaining)
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Timeout => io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "projectatlas mcp response deadline elapsed with request ids pending: {expected_responses:?}"
+                        ),
+                    ),
+                    mpsc::RecvTimeoutError::Disconnected => io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "projectatlas mcp closed before answering every request",
+                    ),
+                })?;
+            let response: Value = serde_json::from_str(line.trim())?;
+            if response
+                .get("id")
+                .is_some_and(|id| expected_responses.remove(&id.to_string()))
+            {
+                response_deadline = Instant::now()
+                    .checked_add(Duration::from_secs(10))
+                    .ok_or_else(|| io::Error::other("MCP response deadline overflowed"))?;
+            }
+        }
+        Ok(())
+    })();
+    drop(stdin);
+    drop(response_receiver);
 
     let started = Instant::now();
     let status = loop {
@@ -28056,6 +28129,7 @@ fn run_mcp_stdio_with_env(
     let stderr = stderr_reader
         .join()
         .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
+    response_result?;
     if !status.success() {
         return Err(io::Error::other(format!(
             "projectatlas mcp failed: {}",

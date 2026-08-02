@@ -674,6 +674,11 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
         source_dir.join("baseline.awk"),
         "BEGIN { print \"baseline\" }\n",
     )?;
+    fs::create_dir(&pending_dir)?;
+    fs::write(
+        pending_dir.join("work-0000.awk"),
+        pending_optional_source()?,
+    )?;
 
     run_json(&repo, &host, &[OsStr::new("init")])?;
     let mut pack_cleanup = PackCleanup::new(&repo, &host);
@@ -740,14 +745,17 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
     let baseline_parse = baseline_store
         .load_source_parse_metadata("src/baseline.awk")?
         .ok_or_else(|| io::Error::other("baseline optional parse metadata is missing"))?;
+    let baseline_pending_node = baseline_store
+        .load_node_by_path("pending/work-0000.awk")?
+        .ok_or_else(|| io::Error::other("baseline pending node is missing"))?;
+    let baseline_pending_parse = baseline_store
+        .load_source_parse_metadata("pending/work-0000.awk")?
+        .ok_or_else(|| io::Error::other("baseline pending parse metadata is missing"))?;
     if baseline_parse.parser != ParserKind::TreeSitter {
         return Err(io::Error::other("baseline optional source was not grammar parsed").into());
     }
     drop(baseline_store);
 
-    fs::create_dir(&pending_dir)?;
-    let pending_source = pending_optional_source()?;
-    fs::write(pending_dir.join("work-0000.awk"), pending_source)?;
     let mut suspended = SuspendedProcess::suspend(runtime.worker.clone())?;
 
     let failed_task = mcp.call_tool(
@@ -791,18 +799,20 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
     let active_parse = active_store
         .load_source_parse_metadata("src/baseline.awk")?
         .ok_or_else(|| io::Error::other("suspended-scan baseline parse metadata is missing"))?;
+    let active_pending_node = active_store
+        .load_node_by_path("pending/work-0000.awk")?
+        .ok_or_else(|| io::Error::other("suspended-scan pending node is missing"))?;
+    let active_pending_parse = active_store
+        .load_source_parse_metadata("pending/work-0000.awk")?
+        .ok_or_else(|| io::Error::other("suspended-scan pending parse metadata is missing"))?;
     if active_publication != baseline_publication
         || active_node != baseline_node
         || active_parse != baseline_parse
-        || active_store
-            .load_node_by_path("pending/work-0000.awk")?
-            .is_some()
-        || active_store
-            .load_source_parse_metadata("pending/work-0000.awk")?
-            .is_some()
+        || active_pending_node != baseline_pending_node
+        || active_pending_parse != baseline_pending_parse
     {
         return Err(io::Error::other(
-            "suspended worker changed the active generation or exposed pending facts",
+            "suspended worker changed the active generation or indexed facts",
         )
         .into());
     }
@@ -836,23 +846,22 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
     let retained_parse = retained_store
         .load_source_parse_metadata("src/baseline.awk")?
         .ok_or_else(|| io::Error::other("retained baseline parse metadata is missing"))?;
+    let retained_pending_node = retained_store
+        .load_node_by_path("pending/work-0000.awk")?
+        .ok_or_else(|| io::Error::other("retained pending node is missing"))?;
+    let retained_pending_parse = retained_store
+        .load_source_parse_metadata("pending/work-0000.awk")?
+        .ok_or_else(|| io::Error::other("retained pending parse metadata is missing"))?;
     if retained_publication != baseline_publication
         || retained_node != baseline_node
         || retained_parse != baseline_parse
+        || retained_pending_node != baseline_pending_node
+        || retained_pending_parse != baseline_pending_parse
     {
         return Err(io::Error::other(
             "worker crash changed the active generation or its baseline facts",
         )
         .into());
-    }
-    if retained_store
-        .load_node_by_path("pending/work-0000.awk")?
-        .is_some()
-        || retained_store
-            .load_source_parse_metadata("pending/work-0000.awk")?
-            .is_some()
-    {
-        return Err(io::Error::other("worker crash exposed uncommitted pending source").into());
     }
     drop(retained_store);
 
