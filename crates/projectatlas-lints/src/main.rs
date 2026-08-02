@@ -38,6 +38,12 @@ const EXIT_USAGE: u8 = 2;
 const PRIVATE_PATH_RULE_ID: &str = "private-absolute-path";
 /// Maximum redacted private-path diagnostics retained from one complete scan.
 const PRIVATE_PATH_DIAGNOSTIC_LIMIT: usize = 100;
+/// Maximum exact occurrence groups retained for one history comparison.
+const PRIVATE_PATH_COMPARISON_GROUP_LIMIT: usize = 4_096;
+/// Maximum conservatively charged identity bytes retained for history comparison.
+const PRIVATE_PATH_COMPARISON_IDENTITY_BYTE_LIMIT: usize = 1_048_576;
+/// Domain separator for source-free private-path line identities.
+const PRIVATE_PATH_SOURCE_IDENTITY_DOMAIN: &[u8] = b"projectatlas.private-path-line.v1\0";
 
 /// Private absolute-path shapes forbidden in every Git-visible text file.
 const PRIVATE_PATH_RULES: &[(&str, &str)] = &[
@@ -661,31 +667,35 @@ fn private_paths_not_in_baseline(
     outgoing: PrivatePathFindings,
     baseline: &PrivatePathFindings,
 ) -> Result<PrivatePathFindings, LintError> {
+    let baseline_total = baseline.total;
+    let outgoing_total = outgoing.total;
+    let capacity_error = || LintError::PrivatePathComparisonCapacityExceeded {
+        baseline_total,
+        outgoing_total,
+        group_limit: PRIVATE_PATH_COMPARISON_GROUP_LIMIT,
+        identity_byte_limit: PRIVATE_PATH_COMPARISON_IDENTITY_BYTE_LIMIT,
+    };
     let baseline_groups = baseline
         .comparison
         .as_ref()
-        .ok_or(LintError::PrivatePathComparisonUnavailable)?;
+        .ok_or(LintError::PrivatePathComparisonUnavailable)?
+        .groups()
+        .ok_or_else(capacity_error)?;
     let outgoing_groups = outgoing
         .comparison
-        .ok_or(LintError::PrivatePathComparisonUnavailable)?;
+        .ok_or(LintError::PrivatePathComparisonUnavailable)?
+        .into_groups()
+        .ok_or_else(capacity_error)?;
     let mut baseline_counts = BTreeMap::new();
     for (key, group) in baseline_groups {
         *baseline_counts
-            .entry((
-                Rc::clone(&key.path),
-                key.kind,
-                Rc::clone(&key.source_identity),
-            ))
+            .entry((Rc::clone(&key.path), key.kind, key.source_identity))
             .or_insert(0usize) += group.count;
     }
     let mut introduced = PrivatePathFindings::default();
     for (key, group) in outgoing_groups {
         let baseline_count = baseline_counts
-            .get(&(
-                Rc::clone(&key.path),
-                key.kind,
-                Rc::clone(&key.source_identity),
-            ))
+            .get(&(Rc::clone(&key.path), key.kind, key.source_identity))
             .copied()
             .unwrap_or_default();
         if group.count > baseline_count {
@@ -884,7 +894,7 @@ fn lint_private_paths_with_history(
     let comparison_path = git_object.map(|_| Rc::<str>::from(relative_path));
     let comparison_object = git_object.map(Rc::<str>::from);
     for (line_index, line) in source.lines().enumerate() {
-        let mut source_identity: Option<Rc<str>> = None;
+        let mut source_identity = None;
         for rule in rules {
             for captures in rule.regex.captures_iter(line) {
                 let Some(path_match) = captures.name("path") else {
@@ -894,9 +904,8 @@ fn lint_private_paths_with_history(
                     (Some(path), Some(git_object)) => Some(PrivatePathOccurrenceKey {
                         path: Rc::clone(path),
                         kind: rule.kind,
-                        source_identity: Rc::clone(
-                            source_identity.get_or_insert_with(|| Rc::from(line)),
-                        ),
+                        source_identity: *source_identity
+                            .get_or_insert_with(|| private_path_source_identity(line)),
                         git_object: Rc::clone(git_object),
                     }),
                     _ => None,
@@ -914,6 +923,14 @@ fn lint_private_paths_with_history(
         }
     }
     violations
+}
+
+/// Derive a fixed-size identity without retaining private source text.
+fn private_path_source_identity(line: &str) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(PRIVATE_PATH_SOURCE_IDENTITY_DOMAIN);
+    hasher.update(line.as_bytes());
+    *hasher.finalize().as_bytes()
 }
 
 /// Parse one Rust source file and return strict string-contract violations.
@@ -1038,7 +1055,7 @@ struct PrivatePathFindings {
     /// First deterministic diagnostics retained for actionable output.
     samples: Vec<PrivatePathViolation>,
     /// Exact compact occurrence groups retained only for published-base comparison.
-    comparison: Option<BTreeMap<PrivatePathOccurrenceKey, PrivatePathOccurrenceGroup>>,
+    comparison: Option<PrivatePathComparison>,
 }
 
 impl fmt::Debug for PrivatePathFindings {
@@ -1049,7 +1066,17 @@ impl fmt::Debug for PrivatePathFindings {
             .field("samples", &self.samples)
             .field(
                 "comparison_groups",
-                &self.comparison.as_ref().map(BTreeMap::len),
+                &self
+                    .comparison
+                    .as_ref()
+                    .and_then(PrivatePathComparison::group_count),
+            )
+            .field(
+                "comparison_capacity_exceeded",
+                &self
+                    .comparison
+                    .as_ref()
+                    .is_some_and(PrivatePathComparison::capacity_exceeded),
             )
             .finish()
     }
@@ -1059,7 +1086,7 @@ impl PrivatePathFindings {
     /// Create findings that also retain exact history-comparison identities.
     fn with_comparison() -> Self {
         Self {
-            comparison: Some(BTreeMap::new()),
+            comparison: Some(PrivatePathComparison::exact()),
             ..Self::default()
         }
     }
@@ -1072,12 +1099,14 @@ impl PrivatePathFindings {
     ) {
         self.total = self.total.saturating_add(1);
         if let (Some(comparison), Some(key)) = (&mut self.comparison, comparison_key) {
-            let group = comparison.entry(key).or_insert(PrivatePathOccurrenceGroup {
-                count: 0,
-                line: violation.line,
-                column: violation.column,
-            });
-            group.count = group.count.saturating_add(1);
+            comparison.push(
+                key,
+                PrivatePathOccurrenceGroup {
+                    count: 1,
+                    line: violation.line,
+                    column: violation.column,
+                },
+            );
         }
         if self.samples.len() < PRIVATE_PATH_DIAGNOSTIC_LIMIT {
             self.samples.push(violation);
@@ -1114,14 +1143,7 @@ impl PrivatePathFindings {
             .extend(other.samples.into_iter().take(remaining));
         match (&mut self.comparison, other.comparison) {
             (Some(comparison), Some(other)) => {
-                for (key, other_group) in other {
-                    let group = comparison.entry(key).or_insert(PrivatePathOccurrenceGroup {
-                        count: 0,
-                        line: other_group.line,
-                        column: other_group.column,
-                    });
-                    group.count = group.count.saturating_add(other_group.count);
-                }
+                comparison.extend(other);
             }
             (None, None) => {}
             _ => self.comparison = None,
@@ -1167,8 +1189,8 @@ struct PrivatePathOccurrenceKey {
     path: Rc<str>,
     /// Stable private-path rule family.
     kind: &'static str,
-    /// Shared exact source line, preserving the existing allowance semantics.
-    source_identity: Rc<str>,
+    /// Fixed-size full-line identity preserving the existing allowance semantics.
+    source_identity: [u8; 32],
     /// Git blob identity that keeps each historical file version independent.
     git_object: Rc<str>,
 }
@@ -1181,6 +1203,100 @@ struct PrivatePathOccurrenceGroup {
     line: usize,
     /// First one-based source column in that group.
     column: usize,
+}
+
+/// Closed exact-or-saturated state for bounded history comparison.
+enum PrivatePathComparison {
+    /// Exact groups retained within both declared bounds.
+    Exact {
+        /// Deterministic occurrence groups.
+        groups: BTreeMap<PrivatePathOccurrenceKey, PrivatePathOccurrenceGroup>,
+        /// Conservative identity-byte charge across inserted groups.
+        retained_identity_bytes: usize,
+    },
+    /// At least one comparison bound was exceeded; the range must fail closed.
+    CapacityExceeded,
+}
+
+impl PrivatePathComparison {
+    /// Create an empty exact comparison state.
+    fn exact() -> Self {
+        Self::Exact {
+            groups: BTreeMap::new(),
+            retained_identity_bytes: 0,
+        }
+    }
+
+    /// Record one group or discard exact state when either bound is exceeded.
+    fn push(&mut self, key: PrivatePathOccurrenceKey, incoming: PrivatePathOccurrenceGroup) {
+        let Self::Exact {
+            groups,
+            retained_identity_bytes,
+        } = self
+        else {
+            return;
+        };
+        if let Some(group) = groups.get_mut(&key) {
+            group.count = group.count.saturating_add(incoming.count);
+            return;
+        }
+        let identity_bytes = std::mem::size_of::<PrivatePathOccurrenceKey>()
+            .saturating_add(std::mem::size_of::<PrivatePathOccurrenceGroup>())
+            .saturating_add(key.path.len())
+            .saturating_add(key.git_object.len());
+        let Some(next_identity_bytes) = retained_identity_bytes.checked_add(identity_bytes) else {
+            *self = Self::CapacityExceeded;
+            return;
+        };
+        if groups.len() >= PRIVATE_PATH_COMPARISON_GROUP_LIMIT
+            || next_identity_bytes > PRIVATE_PATH_COMPARISON_IDENTITY_BYTE_LIMIT
+        {
+            *self = Self::CapacityExceeded;
+            return;
+        }
+        groups.insert(key, incoming);
+        *retained_identity_bytes = next_identity_bytes;
+    }
+
+    /// Merge one completed bounded comparison.
+    fn extend(&mut self, other: Self) {
+        let Self::Exact { groups, .. } = other else {
+            *self = Self::CapacityExceeded;
+            return;
+        };
+        for (key, group) in groups {
+            self.push(key, group);
+        }
+    }
+
+    /// Borrow exact groups or fail the history gate after saturation.
+    fn groups(&self) -> Option<&BTreeMap<PrivatePathOccurrenceKey, PrivatePathOccurrenceGroup>> {
+        match self {
+            Self::Exact { groups, .. } => Some(groups),
+            Self::CapacityExceeded => None,
+        }
+    }
+
+    /// Consume exact groups or fail the history gate after saturation.
+    fn into_groups(self) -> Option<BTreeMap<PrivatePathOccurrenceKey, PrivatePathOccurrenceGroup>> {
+        match self {
+            Self::Exact { groups, .. } => Some(groups),
+            Self::CapacityExceeded => None,
+        }
+    }
+
+    /// Return the exact group count when comparison remains exact.
+    fn group_count(&self) -> Option<usize> {
+        match self {
+            Self::Exact { groups, .. } => Some(groups.len()),
+            Self::CapacityExceeded => None,
+        }
+    }
+
+    /// Return whether comparison saturated and must fail closed.
+    fn capacity_exceeded(&self) -> bool {
+        matches!(self, Self::CapacityExceeded)
+    }
 }
 
 impl fmt::Debug for PrivatePathViolation {
@@ -1523,6 +1639,17 @@ enum LintError {
     InvalidPrivatePathRule(regex::Error),
     /// Internal history scan omitted the exact comparison identities it requires.
     PrivatePathComparisonUnavailable,
+    /// Exact history comparison exceeded its independent memory bounds.
+    PrivatePathComparisonCapacityExceeded {
+        /// Complete private-path count in the published baseline tree.
+        baseline_total: usize,
+        /// Complete private-path count across newly reachable revisions.
+        outgoing_total: usize,
+        /// Maximum retained exact comparison groups.
+        group_limit: usize,
+        /// Maximum conservatively charged identity bytes.
+        identity_byte_limit: usize,
+    },
     /// Repository source-policy violations.
     Violations {
         /// Strict string-contract violations.
@@ -1606,6 +1733,17 @@ impl Display for LintError {
                     "private-path history comparison state is unavailable"
                 )
             }
+            Self::PrivatePathComparisonCapacityExceeded {
+                baseline_total,
+                outgoing_total,
+                group_limit,
+                identity_byte_limit,
+            } => {
+                write!(
+                    formatter,
+                    "private-path history comparison exceeded its bounded capacity: baseline_count={baseline_total}, outgoing_count={outgoing_total}, group_limit={group_limit}, identity_byte_limit={identity_byte_limit}"
+                )
+            }
             Self::Violations {
                 string_literals,
                 private_paths,
@@ -1639,6 +1777,7 @@ impl std::error::Error for LintError {
             | Self::InvalidGitObjectResponse
             | Self::NonUtf8Text(_)
             | Self::PrivatePathComparisonUnavailable
+            | Self::PrivatePathComparisonCapacityExceeded { .. }
             | Self::Violations { .. } => None,
         }
     }
@@ -1675,16 +1814,18 @@ fn write_violations(
 mod tests {
     use super::{
         E2E_FIXTURE_PATH_LITERALS, LintError, MCP_PROJECT_SCHEMA_LITERALS, PathJoinLiteralRule,
-        StringLiteralRule, StringLiteralViolation, decode_repository_text,
+        StringLiteralRule, StringLiteralViolation, decode_repository_text, lint_git_blobs,
         lint_git_revisions_private_paths, lint_git_tree_private_paths, lint_private_paths,
         lint_repeated_path_join_literals, lint_repository_private_paths, lint_source,
         outgoing_revisions, private_path_rules, private_paths_not_in_baseline,
         run_private_path_range, run_strict_strings, write_violations,
     };
+    use std::collections::BTreeSet;
     use std::fs;
     use std::io::{self, Write};
     use std::path::Path;
     use std::process::Command;
+    use std::rc::Rc;
 
     /// Rule used by parser-focused unit tests.
     const TEST_RULE: StringLiteralRule = StringLiteralRule {
@@ -1891,7 +2032,7 @@ mod tests {
             super::PRIVATE_PATH_DIAGNOSTIC_LIMIT + 1,
         ] {
             let baseline_source = (0..total)
-                .map(|_| retained.as_str())
+                .map(|index| format!("legacy_{index} = {retained:?}"))
                 .collect::<Vec<_>>()
                 .join("\n");
             let baseline = super::lint_private_paths_with_history(
@@ -1931,8 +2072,19 @@ mod tests {
                 private_paths_not_in_baseline(outgoing, &baseline)?.is_empty(),
                 "unchanged published-base occurrences were rejected at the diagnostic boundary",
             )?;
+            let changed_context = baseline_source.replacen("legacy_0", "changed_0", 1);
+            let changed_context = super::lint_private_paths_with_history(
+                "legacy.ps1",
+                &changed_context,
+                &rules,
+                Some("changed-context-object"),
+            );
+            require(
+                private_paths_not_in_baseline(changed_context, &baseline)?.total == 1,
+                "history identity ignored changed non-private source-line context",
+            )?;
 
-            let changed_source = format!("{baseline_source}\n{introduced}");
+            let changed_source = format!("{baseline_source}\nintroduced = {introduced:?}");
             let outgoing = super::lint_private_paths_with_history(
                 "legacy.ps1",
                 &changed_source,
@@ -1945,6 +2097,197 @@ mod tests {
                 "introduced history occurrence was hidden above the diagnostic boundary",
             )?;
         }
+        Ok(())
+    }
+
+    /// Distinct history identities saturate independently of diagnostic sampling.
+    #[test]
+    fn private_path_history_comparison_is_bounded_and_redacted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let sample = private_path_samples()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::other("private path sample is missing"))?;
+        let total = super::PRIVATE_PATH_COMPARISON_GROUP_LIMIT + 1;
+        let source = (0..total)
+            .map(|index| format!("private_{index} = {sample:?}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let findings = super::lint_private_paths_with_history(
+            "history.ps1",
+            &source,
+            &private_path_rules()?,
+            Some("history-object"),
+        );
+        require(
+            findings.total == total
+                && findings.samples.len() == super::PRIVATE_PATH_DIAGNOSTIC_LIMIT
+                && findings
+                    .comparison
+                    .as_ref()
+                    .is_some_and(super::PrivatePathComparison::capacity_exceeded),
+            "history comparison did not fail closed at its independent group bound",
+        )?;
+        let debug = format!("{findings:?}");
+        require(
+            !debug.contains(&sample)
+                && debug.contains("comparison_capacity_exceeded: true")
+                && !debug.contains("history-object"),
+            "bounded history state disclosed private source or Git identity",
+        )?;
+        let baseline = super::PrivatePathFindings::with_comparison();
+        let Err(error) = private_paths_not_in_baseline(findings, &baseline) else {
+            return Err(io::Error::other("saturated history comparison was accepted").into());
+        };
+        require(
+            matches!(
+                &error,
+                LintError::PrivatePathComparisonCapacityExceeded {
+                    baseline_total: 0,
+                    outgoing_total,
+                    group_limit,
+                    identity_byte_limit,
+                } if *outgoing_total == total
+                    && *group_limit == super::PRIVATE_PATH_COMPARISON_GROUP_LIMIT
+                    && *identity_byte_limit == super::PRIVATE_PATH_COMPARISON_IDENTITY_BYTE_LIMIT
+            ) && !error.to_string().contains(&sample)
+                && !format!("{error:?}").contains(&sample),
+            "capacity failure omitted safe bounds/counts or disclosed source",
+        )?;
+        Ok(())
+    }
+
+    /// Conservative identity-byte charging fails closed before retained keys grow unbounded.
+    #[test]
+    fn private_path_history_comparison_byte_budget_fails_closed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut comparison = super::PrivatePathComparison::exact();
+        let path =
+            Rc::<str>::from("p".repeat(super::PRIVATE_PATH_COMPARISON_IDENTITY_BYTE_LIMIT / 2));
+        for discriminator in 0..3 {
+            comparison.push(
+                super::PrivatePathOccurrenceKey {
+                    path: Rc::clone(&path),
+                    kind: "test-private-path",
+                    source_identity: [discriminator; 32],
+                    git_object: Rc::from("0123456789012345678901234567890123456789"),
+                },
+                super::PrivatePathOccurrenceGroup {
+                    count: 1,
+                    line: 1,
+                    column: 1,
+                },
+            );
+        }
+        require(
+            comparison.capacity_exceeded(),
+            "history comparison retained identities beyond its byte budget",
+        )?;
+        Ok(())
+    }
+
+    /// Several individually exact Git blobs fail closed when their merged history exceeds bounds.
+    #[test]
+    fn private_path_history_capacity_fails_closed_across_outgoing_git_blobs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = tempfile::tempdir()?;
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(repository.path())
+                .output()
+        };
+        for args in [
+            &["init", "--quiet"][..],
+            &["config", "user.name", "ProjectAtlas Test"][..],
+            &["config", "user.email", "projectatlas@example.invalid"][..],
+        ] {
+            require(git(args)?.status.success(), "temporary Git setup failed")?;
+        }
+        let source_path = repository.path().join("history.ps1");
+        fs::write(&source_path, "safe\n")?;
+        require(
+            git(&["add", "history.ps1"])?.status.success()
+                && git(&["commit", "--quiet", "-m", "clean base"])?
+                    .status
+                    .success(),
+            "temporary Git base commit failed",
+        )?;
+        let base = git(&["rev-parse", "HEAD"])?;
+        require(base.status.success(), "temporary Git base lookup failed")?;
+        let base = String::from_utf8(base.stdout)?.trim().to_string();
+        let sample = private_path_samples()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::other("private path sample is missing"))?;
+        let per_blob = super::PRIVATE_PATH_COMPARISON_GROUP_LIMIT / 2 + 1;
+        let mut private_objects = Vec::new();
+        for (prefix, message) in [
+            ("first_private", "first private history"),
+            ("second_private", "second private history"),
+        ] {
+            let source = (0..per_blob)
+                .map(|index| format!("{prefix}_{index} = {sample:?}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            fs::write(&source_path, source)?;
+            require(
+                git(&["add", "history.ps1"])?.status.success()
+                    && git(&["commit", "--quiet", "-m", message])?.status.success(),
+                "temporary private Git commit failed",
+            )?;
+            let object = git(&["rev-parse", "HEAD:history.ps1"])?;
+            require(object.status.success(), "private Git blob lookup failed")?;
+            private_objects.push(String::from_utf8(object.stdout)?.trim().to_string());
+        }
+        for object in &private_objects {
+            let blobs = BTreeSet::from([(object.clone(), "history.ps1".to_string())]);
+            let findings = lint_git_blobs(repository.path(), &blobs, true)?;
+            require(
+                findings.total == per_blob
+                    && findings
+                        .comparison
+                        .as_ref()
+                        .and_then(super::PrivatePathComparison::group_count)
+                        == Some(per_blob),
+                "an individual Git blob exceeded the comparison bound",
+            )?;
+        }
+        fs::write(&source_path, "safe tip\n")?;
+        require(
+            git(&["add", "history.ps1"])?.status.success()
+                && git(&["commit", "--quiet", "-m", "clean tip"])?
+                    .status
+                    .success(),
+            "temporary clean-tip commit failed",
+        )?;
+        let head = git(&["rev-parse", "HEAD"])?;
+        require(head.status.success(), "temporary Git head lookup failed")?;
+        let head = String::from_utf8(head.stdout)?.trim().to_string();
+        let Err(error) = run_private_path_range(repository.path(), &base, &head) else {
+            return Err(io::Error::other("merged outgoing Git history exceeded no bound").into());
+        };
+        let total = per_blob * private_objects.len();
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        require(
+            matches!(
+                &error,
+                LintError::PrivatePathComparisonCapacityExceeded {
+                    baseline_total: 0,
+                    outgoing_total,
+                    group_limit,
+                    identity_byte_limit,
+                } if *outgoing_total == total
+                    && *group_limit == super::PRIVATE_PATH_COMPARISON_GROUP_LIMIT
+                    && *identity_byte_limit == super::PRIVATE_PATH_COMPARISON_IDENTITY_BYTE_LIMIT
+            ) && !display.contains(&sample)
+                && !debug.contains(&sample)
+                && private_objects
+                    .iter()
+                    .all(|object| !display.contains(object) && !debug.contains(object)),
+            "merged Git capacity failure omitted safe counts/bounds or disclosed source identity",
+        )?;
         Ok(())
     }
 

@@ -133,12 +133,14 @@ const CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME: &str = ".projectatlas-plugin-update.lo
 const CODEX_FIXTURE_EXECUTABLE_FILE_NAME: &str = "codex.exe";
 #[cfg(unix)]
 const POSIX_CODEX_EXECUTABLE_FILE_NAME: &str = "codex";
+#[cfg(unix)]
+const POSIX_FIND_EXECUTABLE_FILE_NAME: &str = "find";
 const FAKE_CODEX_LOG_FILE: &str = "fake-codex.log";
 #[cfg(windows)]
 const FAKE_CODEX_PLUGIN_CACHE_DIR: &str = "plugin-cache";
 const FAKE_CODEX_JUNCTION_TARGET_DIR: &str = "junction-target";
 const FAKE_CODEX_CLEANUP_SNAPSHOT_TARGET_DIR: &str = "cleanup-snapshot-target";
-#[cfg(windows)]
+#[cfg(any(windows, unix))]
 const INSTALLER_CANARY_FILE_NAME: &str = "canary.txt";
 #[cfg(unix)]
 const INSTALLER_OUTSIDE_SENTINEL_FILE_NAME: &str = "sentinel";
@@ -12603,11 +12605,13 @@ fn posix_plugin_lock_rejects_indirection_and_survives_crash() -> Result<(), Box<
     fs::create_dir(&lock_root)?;
     let lock_path = lock_root.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME);
     let harness = temp.path().join("verify-plugin-lock-crash.sh");
+    let runtime = mcp_contract_executable();
     fs::write(
         &harness,
         format!(
             r#"#!/bin/sh
 set -eu
+projectatlas_bin=${{PROJECTATLAS_TEST_RUNTIME:?}}
 codex_plugin_update_lock_path=
 codex_plugin_update_lock_root=
 codex_plugin_update_lock_identity=
@@ -12638,15 +12642,18 @@ esac
             &installer_source[acquire_start..acquire_end]
         ),
     )?;
+    let harness_command = || {
+        let mut command = StdCommand::new("sh");
+        command
+            .arg(&harness)
+            .env("PROJECTATLAS_TEST_RUNTIME", &runtime);
+        command
+    };
 
     let outside = temp.path().join("outside-lock-target");
     fs::write(&outside, b"outside sentinel\n")?;
     symlink(&outside, &lock_path)?;
-    let symlink_output = StdCommand::new("sh")
-        .arg(&harness)
-        .arg("once")
-        .arg(&lock_root)
-        .output()?;
+    let symlink_output = harness_command().arg("once").arg(&lock_root).output()?;
     if symlink_output.status.success() || fs::read(&outside)? != b"outside sentinel\n" {
         return Err(
             io::Error::other("POSIX plugin lock accepted or changed a symlink target").into(),
@@ -12655,11 +12662,7 @@ esac
     fs::remove_file(&lock_path)?;
 
     fs::hard_link(&outside, &lock_path)?;
-    let hard_link_output = StdCommand::new("sh")
-        .arg(&harness)
-        .arg("once")
-        .arg(&lock_root)
-        .output()?;
+    let hard_link_output = harness_command().arg("once").arg(&lock_root).output()?;
     if hard_link_output.status.success() || fs::read(&outside)? != b"outside sentinel\n" {
         return Err(
             io::Error::other("POSIX plugin lock accepted or changed a hard-link target").into(),
@@ -12668,11 +12671,7 @@ esac
     fs::remove_file(&lock_path)?;
 
     fs::create_dir(&lock_path)?;
-    let directory_output = StdCommand::new("sh")
-        .arg(&harness)
-        .arg("once")
-        .arg(&lock_root)
-        .output()?;
+    let directory_output = harness_command().arg("once").arg(&lock_root).output()?;
     if directory_output.status.success() {
         return Err(io::Error::other("POSIX plugin lock accepted a directory").into());
     }
@@ -12681,21 +12680,23 @@ esac
     let fake_path = temp.path().join(FAKE_PATH_DIR);
     fs::create_dir(&fake_path)?;
     write_executable_script(&fake_path.join("flock"), "#!/bin/sh\nexit 1\n")?;
-    let unavailable_output = StdCommand::new("sh")
-        .arg(&harness)
-        .arg("once")
-        .arg(&lock_root)
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                fake_path.display(),
-                std::env::var_os("PATH")
-                    .unwrap_or_default()
-                    .to_string_lossy()
-            ),
-        )
-        .output()?;
+    let fake_runtime = fake_path.join("projectatlas");
+    write_executable_script(&fake_runtime, "#!/bin/sh\nexit 1\n")?;
+    let mut unavailable_command = harness_command();
+    unavailable_command.arg("once").arg(&lock_root).env(
+        "PATH",
+        format!(
+            "{}:{}",
+            fake_path.display(),
+            std::env::var_os("PATH")
+                .unwrap_or_default()
+                .to_string_lossy()
+        ),
+    );
+    if cfg!(target_os = "macos") {
+        unavailable_command.env("PROJECTATLAS_TEST_RUNTIME", &fake_runtime);
+    }
+    let unavailable_output = unavailable_command.output()?;
     if unavailable_output.status.success() {
         return Err(io::Error::other(
             "POSIX plugin lock proceeded after its native primitive failed",
@@ -12705,8 +12706,7 @@ esac
 
     fs::write(&lock_path, b"orphaned owner\n")?;
 
-    let mut owner = StdCommand::new("sh")
-        .arg(&harness)
+    let mut owner = harness_command()
         .arg("hold")
         .arg(&lock_root)
         .stdin(Stdio::piped())
@@ -12733,11 +12733,7 @@ esac
     owner.kill()?;
     owner.wait()?;
 
-    let output = StdCommand::new("sh")
-        .arg(&harness)
-        .arg("once")
-        .arg(&lock_root)
-        .output()?;
+    let output = harness_command().arg("once").arg(&lock_root).output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "POSIX plugin lock remained held after its owner crashed:\n{}\n{}",
@@ -12756,8 +12752,7 @@ esac
 
     let child_ready = temp.path().join("surviving-child-ready");
     let child_release = temp.path().join("release-surviving-child");
-    let survivor_output = StdCommand::new("sh")
-        .arg(&harness)
+    let survivor_output = harness_command()
         .arg("survivor")
         .arg(&lock_root)
         .arg(&child_ready)
@@ -12824,11 +12819,7 @@ esac
         )
         .into());
     }
-    let child_release_output = StdCommand::new("sh")
-        .arg(&harness)
-        .arg("once")
-        .arg(&lock_root)
-        .output()?;
+    let child_release_output = harness_command().arg("once").arg(&lock_root).output()?;
     if !child_release_output.status.success() {
         return Err(io::Error::other(format!(
             "POSIX plugin lock could not be reacquired after releasing the mutation child:\n{}\n{}",
@@ -12838,11 +12829,7 @@ esac
         .into());
     }
 
-    let swap_output = StdCommand::new("sh")
-        .arg(&harness)
-        .arg("swap")
-        .arg(&lock_root)
-        .output()?;
+    let swap_output = harness_command().arg("swap").arg(&lock_root).output()?;
     if !swap_output.status.success()
         || !lock_root.join("held-lock").is_file()
         || !lock_path.is_file()
@@ -13417,9 +13404,20 @@ fn posix_plugin_restore_rejects_hostile_paths_and_retains_recovery_state()
         "late-snapshot-source-symlink",
         "destination-ancestor-symlink",
         "destination-removal-failure",
+        "destination-mounted-subtree",
+        "snapshot-source-mounted-subtree",
+        "cleanup-mounted-snapshot",
+        "mount-after-permission-preflight",
+        "mount-inventory-unavailable",
         "config-destination-directory",
         "prior-absent-config-removal-failure",
     ] {
+        assert_posix_plugin_restore_rejects_hostile_path(fault)?;
+    }
+    #[cfg(target_os = "linux")]
+    assert_posix_plugin_restore_rejects_hostile_path("mount-inventory-malformed")?;
+    #[cfg(target_os = "macos")]
+    for fault in ["mount-probe-unavailable", "mount-descendant-unavailable"] {
         assert_posix_plugin_restore_rejects_hostile_path(fault)?;
     }
     Ok(())
@@ -13452,14 +13450,20 @@ fn assert_posix_plugin_restore_rejects_hostile_path(fault: &str) -> Result<(), B
             ),
         )?;
     }
-    let (_, plugin_source, installed_cache) = write_fake_codex_projectatlas_integration(
-        &codex_dir,
-        "0.0.1",
-        "0.0.1",
-        "prior offline ProjectAtlas skill\n",
-    )?;
+    let (marketplace_root, plugin_source, installed_cache) =
+        write_fake_codex_projectatlas_integration(
+            &codex_dir,
+            "0.0.1",
+            "0.0.1",
+            "prior offline ProjectAtlas skill\n",
+        )?;
+    let mounted_subtree = plugin_source.join("mounted-tree");
+    let mount_canary = mounted_subtree.join(INSTALLER_CANARY_FILE_NAME);
+    fs::create_dir(&mounted_subtree)?;
+    fs::write(&mount_canary, b"mounted state\n")?;
     let live_source_before = repository_filesystem_snapshot(&plugin_source)?;
     let live_cache_before = repository_filesystem_snapshot(&installed_cache)?;
+    let snapshot_mount_relative = mounted_subtree.strip_prefix(&marketplace_root)?;
     let plugin_source_json = serde_json::to_string(&plugin_source.to_string_lossy())?;
     let stale_plugin_json = format!(
         r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.0.1","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{plugin_source_json}}}}}],"available":[]}}"#
@@ -13498,6 +13502,27 @@ if [ "${1:-}" = plugin ] && { [ "${2:-}" = remove ] || { [ "${2:-}" = marketplac
       printf '%s\n' untrusted > "$PROJECTATLAS_FAKE_CODEX_CONFIG" || exit 18
       chmod 500 -- "$CODEX_HOME" || exit 19
       ;;
+    destination-mounted-subtree|mount-inventory-unavailable|mount-inventory-malformed)
+      printf '%s\n' "$PROJECTATLAS_FAKE_MOUNT_TARGET" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 22
+      : > "$PROJECTATLAS_FAKE_MOUNT_ACTIVE"
+      ;;
+    mount-after-permission-preflight)
+      printf '%s\n' "$PROJECTATLAS_FAKE_MOUNT_TARGET" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 22
+      ;;
+    snapshot-source-mounted-subtree)
+      printf '%s\n' "$snapshot/marketplace-root/$PROJECTATLAS_FAKE_SNAPSHOT_MOUNT_RELATIVE" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 23
+      : > "$PROJECTATLAS_FAKE_MOUNT_ACTIVE"
+      ;;
+    mount-probe-unavailable)
+      printf '%s\n' "$snapshot" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 23
+      : > "$PROJECTATLAS_FAKE_MOUNT_ACTIVE"
+      ;;
+    mount-descendant-unavailable)
+      printf '%s\n' "$snapshot/marketplace-root/$PROJECTATLAS_FAKE_SNAPSHOT_MOUNT_RELATIVE" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 23
+      : > "$PROJECTATLAS_FAKE_MOUNT_ACTIVE"
+      ;;
+    cleanup-mounted-snapshot)
+      ;;
     *) exit 17 ;;
   esac
   exit 0
@@ -13511,7 +13536,9 @@ exit 0
     write_executable_script(
         &fake_path.join("cp"),
         r#"#!/usr/bin/env sh
-/bin/cp "$@" || exit $?
+PATH=$PROJECTATLAS_FAKE_REAL_PATH
+export PATH
+cp "$@" || exit $?
 if [ "${PROJECTATLAS_FAKE_RESTORE_FAULT:-}" = late-snapshot-source-symlink ]; then
   case "${3:-}" in
     */.projectatlas-plugin-state.*/marketplace-root)
@@ -13523,8 +13550,99 @@ if [ "${PROJECTATLAS_FAKE_RESTORE_FAULT:-}" = late-snapshot-source-symlink ]; th
 fi
 "#,
     )?;
+    write_executable_script(
+        &fake_path.join(POSIX_FIND_EXECUTABLE_FILE_NAME),
+        r#"#!/usr/bin/env sh
+"$PROJECTATLAS_FAKE_REAL_FIND" "$@"
+status=$?
+if [ "$status" -eq 0 ] &&
+  [ "${PROJECTATLAS_FAKE_RESTORE_FAULT:-}" = mount-after-permission-preflight ] &&
+  [ "${2:-}" = -type ] && [ "${3:-}" = d ]; then
+  printf '%s\n' "$PROJECTATLAS_FAKE_MOUNT_TARGET" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 24
+  : > "$PROJECTATLAS_FAKE_MOUNT_ACTIVE"
+fi
+exit "$status"
+"#,
+    )?;
+    write_executable_script(
+        &fake_path.join("mv"),
+        r#"#!/usr/bin/env sh
+PATH=$PROJECTATLAS_FAKE_REAL_PATH
+export PATH
+mv "$@" || exit $?
+if [ "${PROJECTATLAS_FAKE_RESTORE_FAULT:-}" = cleanup-mounted-snapshot ] &&
+  [ "${1:-}" = -f ] && [ "${2:-}" = -- ] &&
+  [ "${4:-}" = "$PROJECTATLAS_FAKE_CODEX_CONFIG" ]; then
+  snapshot=$(find "$CODEX_HOME" -maxdepth 1 -type d -name '.projectatlas-plugin-state.*' -print -quit)
+  [ -n "$snapshot" ] || exit 25
+  printf '%s\n' "$snapshot/marketplace-root/$PROJECTATLAS_FAKE_SNAPSHOT_MOUNT_RELATIVE" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 26
+  : > "$PROJECTATLAS_FAKE_MOUNT_ACTIVE"
+fi
+"#,
+    )?;
+    #[cfg(target_os = "linux")]
+    write_executable_script(
+        &fake_path.join("findmnt"),
+        r#"#!/usr/bin/env sh
+if [ ! -e "$PROJECTATLAS_FAKE_MOUNT_ACTIVE" ]; then
+  PATH=$PROJECTATLAS_FAKE_REAL_PATH
+  export PATH
+  exec findmnt "$@"
+fi
+if [ "$PROJECTATLAS_FAKE_RESTORE_FAULT" = mount-inventory-unavailable ]; then
+  exit 1
+fi
+if [ "$PROJECTATLAS_FAKE_RESTORE_FAULT" = mount-inventory-malformed ]; then
+  printf '%s\n' '{"filesystems":[{"source":"untrusted"}]}'
+  exit 0
+fi
+target=$(cat "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE") || exit 1
+jq -n \
+  --arg root "$PROJECTATLAS_FAKE_MOUNT_ROOT" \
+  --arg target "$target" \
+  '{filesystems: [{target: $root}, {target: $target}]}'
+"#,
+    )?;
+    #[cfg(target_os = "macos")]
+    write_executable_script(
+        &fake_path.join("stat"),
+        r#"#!/usr/bin/env sh
+if [ -e "$PROJECTATLAS_FAKE_MOUNT_ACTIVE" ] &&
+  [ "${1:-}" = -f ] && [ "${2:-}" = %d ]; then
+  if [ "$PROJECTATLAS_FAKE_RESTORE_FAULT" = mount-inventory-unavailable ]; then
+    exit 1
+  fi
+  target=$(cat "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE") || exit 1
+  if { [ "$PROJECTATLAS_FAKE_RESTORE_FAULT" = mount-probe-unavailable ] ||
+      [ "$PROJECTATLAS_FAKE_RESTORE_FAULT" = mount-descendant-unavailable ]; } &&
+    [ "${3:-}" = "$target" ]; then
+    exit 1
+  fi
+  case "${3:-}/" in
+    "$target/"|"$target"/*)
+      printf '%s\n' 2
+      ;;
+    *)
+      printf '%s\n' 1
+      ;;
+  esac
+  exit 0
+fi
+PATH=$PROJECTATLAS_FAKE_REAL_PATH
+export PATH
+exec stat "$@"
+"#,
+    )?;
 
     let runtime = mcp_contract_executable();
+    let inherited_path = std::env::var_os("PATH")
+        .ok_or_else(|| io::Error::other("POSIX hostile restore test requires PATH"))?;
+    let real_find = std::env::split_paths(&inherited_path)
+        .map(|directory| directory.join(POSIX_FIND_EXECUTABLE_FILE_NAME))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| io::Error::other("POSIX hostile restore test requires find"))?;
+    let mount_active = temp.path().join("mount-active");
+    let mount_target_file = temp.path().join("mount-target");
     let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
         &workspace_root()?,
         &repo,
@@ -13535,6 +13653,16 @@ fi
     command
         .env("PROJECTATLAS_FAKE_RESTORE_FAULT", fault)
         .env("PROJECTATLAS_FAKE_OUTSIDE", &outside)
+        .env("PROJECTATLAS_FAKE_REAL_PATH", &inherited_path)
+        .env("PROJECTATLAS_FAKE_REAL_FIND", &real_find)
+        .env("PROJECTATLAS_FAKE_MOUNT_ACTIVE", &mount_active)
+        .env("PROJECTATLAS_FAKE_MOUNT_ROOT", &codex_dir)
+        .env("PROJECTATLAS_FAKE_MOUNT_TARGET", &mounted_subtree)
+        .env("PROJECTATLAS_FAKE_MOUNT_TARGET_FILE", &mount_target_file)
+        .env(
+            "PROJECTATLAS_FAKE_SNAPSHOT_MOUNT_RELATIVE",
+            snapshot_mount_relative,
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let output = wait_for_plugin_installer_output(
@@ -13548,9 +13676,30 @@ fi
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    if !output_text.contains("could not be restored completely") {
+    let expected_failure = match fault {
+        "cleanup-mounted-snapshot" => "state snapshot cleanup failed",
+        "mount-inventory-malformed" => "mount inventory is malformed",
+        "mount-inventory-unavailable"
+        | "mount-probe-unavailable"
+        | "mount-descendant-unavailable" => "mount inventory cannot be read",
+        _ => "could not be restored completely",
+    };
+    if !output_text.contains(expected_failure) {
         return Err(io::Error::other(format!(
             "POSIX installer accepted hostile restore fault {fault:?}:\n{output_text}"
+        ))
+        .into());
+    }
+    if matches!(
+        fault,
+        "destination-mounted-subtree"
+            | "snapshot-source-mounted-subtree"
+            | "cleanup-mounted-snapshot"
+            | "mount-after-permission-preflight"
+    ) && !output_text.contains("mounted filesystem")
+    {
+        return Err(io::Error::other(format!(
+            "POSIX restore mount fault {fault:?} omitted its observed-mount diagnostic:\n{output_text}"
         ))
         .into());
     }
@@ -13584,6 +13733,32 @@ fi
         return Err(io::Error::other(
             "POSIX restore changed live state before rejecting a late-swapped snapshot source",
         )
+        .into());
+    }
+    if matches!(
+        fault,
+        "destination-mounted-subtree"
+            | "snapshot-source-mounted-subtree"
+            | "cleanup-mounted-snapshot"
+            | "mount-after-permission-preflight"
+            | "mount-inventory-unavailable"
+            | "mount-inventory-malformed"
+            | "mount-probe-unavailable"
+            | "mount-descendant-unavailable"
+    ) && (repository_filesystem_snapshot(&plugin_source)? != live_source_before
+        || repository_filesystem_snapshot(&installed_cache)? != live_cache_before
+        || fs::read(&mount_canary)? != b"mounted state\n")
+    {
+        return Err(io::Error::other(format!(
+            "POSIX restore mutated live state after mount validation fault {fault:?}"
+        ))
+        .into());
+    }
+    let calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
+    if calls.contains("mcp remove projectatlas") || calls.contains("mcp add projectatlas") {
+        return Err(io::Error::other(format!(
+            "POSIX hostile restore fault {fault:?} mutated MCP state:\n{calls}"
+        ))
         .into());
     }
     if fault == "destination-removal-failure" && plugin_source.exists() {

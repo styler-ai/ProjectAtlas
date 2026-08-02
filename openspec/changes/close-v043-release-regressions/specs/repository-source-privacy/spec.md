@@ -24,6 +24,8 @@ ProjectAtlas SHALL reject machine-local absolute paths in tracked and non-ignore
 #### Scenario: Hostile source contains many private paths
 - **WHEN** a complete current-tree or history scan finds more private paths than the diagnostic limit
 - **THEN** the gate reports the complete count and emits only a bounded redacted sample while exact published-base comparison remains independent of that diagnostic limit
+- **AND WHEN** exact history comparison exceeds its independent memory bounds
+- **THEN** the gate reports complete raw baseline and outgoing counts plus the declared bounds, fails closed, and does not claim an unknowable exact introduced count
 
 ### Requirement: Newly reachable history cannot hide private paths
 ProjectAtlas SHALL scan every newly reachable revision and path identity before accepting a push, pull request, package, parser pack, documentation deployment, or release.

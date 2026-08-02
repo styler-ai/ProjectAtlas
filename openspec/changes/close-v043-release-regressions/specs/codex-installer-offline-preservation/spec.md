@@ -22,6 +22,10 @@ The installer SHALL snapshot and restore only validated official Codex-owned pat
 - **WHEN** a marketplace/plugin/config path is a symlink, junction, reparse point, traversal, hard-link hazard, or otherwise outside validated ownership
 - **THEN** snapshot or restore fails before destructive mutation and preserves the existing target
 
+#### Scenario: A POSIX restore tree contains a mounted filesystem
+- **WHEN** valid platform inventory reports a stable mount at, above, or below a recovery source, restore destination, or retained snapshot, or mount inventory is malformed or unavailable
+- **THEN** recursive copy, deletion, or cleanup fails closed, existing mounted content remains unchanged, the recovery snapshot is retained, and the diagnostic distinguishes unavailable or malformed inventory from an observed mount boundary
+
 #### Scenario: Marketplace is intentionally managed or unofficial
 - **WHEN** the configured source is non-official or documented skip controls declare external management
 - **THEN** the installer retains existing skip/non-mutation behavior and does not capture or replace that marketplace

@@ -80,8 +80,12 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::fd::{FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 use thiserror::Error;
 use token_tui::{
     TokenAtlasPreview, TokenDashboardTheme, render_token_dashboard_with_atlas,
@@ -95,6 +99,15 @@ use token_tui::{render_token_dashboard, render_token_dashboard_with_atlas_at_wid
 const DEFAULT_DB_PATH: &str = ".projectatlas/projectatlas.db";
 /// Whole-operation deadline for the optional live token-dashboard graph read.
 const TOKEN_ATLAS_READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// Inherited descriptor validated and opened by the POSIX installer.
+#[cfg(unix)]
+const INSTALLER_LOCK_FD: RawFd = 9;
+/// Maximum time the installer waits for another updater.
+#[cfg(unix)]
+const INSTALLER_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+/// Poll cadence for the standard-library nonblocking file lock.
+#[cfg(unix)]
+const INSTALLER_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// `ProjectAtlas` major architecture version.
 const PROJECTATLAS_MAJOR_VERSION: u8 = 3;
 /// Default caller-visible compatibility label for token telemetry.
@@ -1308,6 +1321,10 @@ enum Command {
     },
     /// Print structured runtime identity and capability information.
     RuntimeInfo,
+    /// Acquire the POSIX installer's inherited update-lock descriptor.
+    #[cfg(unix)]
+    #[command(hide = true)]
+    AcquireInstallerLock,
     /// Manage purpose metadata stored in the durable index.
     Purpose {
         /// Purpose subcommand to run.
@@ -2789,6 +2806,15 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         Command::RuntimeInfo => {
             let report = build_runtime_info();
             print_output(cli.format, &render_runtime_info(&report), &report)?;
+        }
+        #[cfg(unix)]
+        Command::AcquireInstallerLock => {
+            acquire_installer_lock(INSTALLER_LOCK_FD, INSTALLER_LOCK_TIMEOUT).map_err(
+                |source| CliError::Io {
+                    path: PathBuf::from("/dev/fd/9"),
+                    source,
+                },
+            )?;
         }
         Command::Purpose { command } => match command {
             PurposeCommand::Set { path, purpose } => {
@@ -4848,7 +4874,49 @@ fn cli_command_name(command: &Command) -> &'static str {
         Command::Mcp { .. } => "mcp",
         Command::McpConfig { .. } => "mcp-config",
         Command::RuntimeInfo => "runtime-info",
+        #[cfg(unix)]
+        Command::AcquireInstallerLock => "acquire-installer-lock",
         Command::Purpose { .. } => "purpose",
+    }
+}
+
+/// Acquire one inherited installer file lock without reopening its authority path.
+#[cfg(unix)]
+#[expect(
+    unsafe_code,
+    reason = "the freshly exec'd single-threaded helper validates inherited FD 9 before making File its sole child-process owner"
+)]
+fn acquire_installer_lock(descriptor: RawFd, timeout: Duration) -> io::Result<()> {
+    let descriptor_path = PathBuf::from(format!("/dev/fd/{descriptor}"));
+    fs::metadata(&descriptor_path)?;
+    // SAFETY: the hidden installer command is single-threaded here, and successful
+    // `/dev/fd` metadata proves the inherited descriptor is open before ownership transfer.
+    let file = unsafe { fs::File::from_raw_fd(descriptor) };
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "inherited installer lock descriptor is not a regular file",
+        ));
+    }
+    let started = Instant::now();
+    let deadline = started.checked_add(timeout).unwrap_or(started);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(fs::TryLockError::WouldBlock) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "another installer owns the update lock",
+                    ));
+                }
+                std::thread::sleep(
+                    INSTALLER_LOCK_POLL_INTERVAL.min(deadline.saturating_duration_since(now)),
+                );
+            }
+            Err(fs::TryLockError::Error(source)) => return Err(source),
+        }
     }
 }
 
@@ -4917,6 +4985,8 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use std::io;
+    #[cfg(unix)]
+    use std::os::fd::{AsRawFd, IntoRawFd};
     use std::path::{Path, PathBuf};
 
     /// Minimal MCP client handler for in-process routing tests.
@@ -5477,6 +5547,43 @@ mod tests {
                 && toon.contains("not-installed")
                 && toon.contains("compatible semantic"),
             "CLI TOON lost typed semantic capability state",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installer_lock_uses_the_inherited_open_file_description() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("installer.lock");
+        let parent = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let helper_descriptor = parent.try_clone()?.into_raw_fd();
+        super::acquire_installer_lock(helper_descriptor, std::time::Duration::ZERO)?;
+
+        let contender = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        require_condition(
+            matches!(contender.try_lock(), Err(fs::TryLockError::WouldBlock)),
+            "closing the helper copy released the parent installer's inherited lock",
+        )?;
+        drop(parent);
+        contender.try_lock()?;
+
+        let missing = super::acquire_installer_lock(-1, std::time::Duration::ZERO);
+        require_condition(
+            missing.is_err(),
+            "installer lock accepted a missing inherited descriptor",
+        )?;
+        let directory = fs::File::open(temp.path())?;
+        let directory_descriptor = directory.as_raw_fd();
+        let duplicate = directory.try_clone()?.into_raw_fd();
+        require_condition(
+            super::acquire_installer_lock(duplicate, std::time::Duration::ZERO).is_err()
+                && directory.as_raw_fd() == directory_descriptor,
+            "installer lock accepted a directory or consumed the parent's descriptor",
         )?;
         Ok(())
     }

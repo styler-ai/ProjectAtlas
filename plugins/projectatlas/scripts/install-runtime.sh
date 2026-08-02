@@ -370,10 +370,11 @@ acquire_codex_projectatlas_plugin_update_lock() {
 
   exec 9<> "$lock_path" || return 1
   lock_acquired=false
-  if command -v flock >/dev/null 2>&1; then
+  lock_platform=$(uname -s 2>/dev/null || true)
+  if [ "$lock_platform" = Darwin ]; then
+    "$projectatlas_bin" acquire-installer-lock && lock_acquired=true
+  elif command -v flock >/dev/null 2>&1; then
     flock -w 30 9 && lock_acquired=true
-  elif command -v lockf >/dev/null 2>&1; then
-    lockf -s -t 30 9 && lock_acquired=true
   fi
   if [ "$lock_acquired" != true ]; then
     exec 9>&-
@@ -436,15 +437,8 @@ clear_codex_projectatlas_snapshot() {
       printf "warning: Codex ProjectAtlas state snapshot cleanup refused/path changed at '%s': path is not a direct removable snapshot.\n" "$snapshot_cleanup_path" >&2
       return 1
     fi
-    if ! find "$snapshot_cleanup_path" -type d -exec sh -c '
-      for snapshot_cleanup_directory do
-        [ -w "$snapshot_cleanup_directory" ] && [ -x "$snapshot_cleanup_directory" ] || exit 1
-      done
-    ' sh {} +; then
-      printf "warning: Codex ProjectAtlas state snapshot cleanup failed; retained at '%s': snapshot tree is not removable.\n" "$snapshot_cleanup_path" >&2
-      return 1
-    fi
-    if ! rm -rf -- "$snapshot_cleanup_path" || [ -e "$snapshot_cleanup_path" ]; then
+    if ! remove_codex_tree \
+      "$snapshot_cleanup_path" "Codex recovery snapshot" "$codex_state_snapshot_root"; then
       printf "warning: Codex ProjectAtlas state snapshot cleanup failed; retained at '%s': removal did not complete.\n" "$snapshot_cleanup_path" >&2
       return 1
     fi
@@ -524,6 +518,110 @@ validate_codex_projectatlas_destination_ancestry() {
       return 1
       ;;
   esac
+  validate_codex_mounts "$destination_path" "$destination_description" "$destination_root"
+}
+
+validate_codex_mounts() {
+  mount_candidate=$1
+  mount_description=$2
+  mount_root=$3
+  mount_platform=$(uname -s 2>/dev/null || true)
+  case "$mount_platform" in
+    Linux)
+      if ! command -v findmnt >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+        printf 'warning: Codex ProjectAtlas plugin update skipped: %s mount ownership cannot be established.\n' "$mount_description" >&2
+        return 1
+      fi
+      mount_inventory=$(findmnt --json --list --output TARGET 2>/dev/null) || {
+        printf 'warning: Codex ProjectAtlas plugin update skipped: %s mount inventory cannot be read.\n' "$mount_description" >&2
+        return 1
+      }
+      mount_targets=$(printf '%s\n' "$mount_inventory" | jq -c '
+          (if type != "object" or ((.filesystems? | type) != "array") then
+             error("invalid findmnt inventory")
+           elif (.filesystems | length) == 0
+             or any(.filesystems[];
+               type != "object"
+                 or ((.target? | type) != "string")
+                 or (.target | startswith("/") | not)) then
+             error("invalid findmnt filesystem row")
+           else
+             [.filesystems[].target]
+           end)
+        ' 2>/dev/null) || {
+        printf 'warning: Codex ProjectAtlas plugin update skipped: %s mount inventory is malformed.\n' "$mount_description" >&2
+        return 1
+      }
+      if ! printf '%s\n' "$mount_targets" | jq -e \
+        --arg root "$mount_root" --arg candidate "$mount_candidate" '
+          . as $targets
+          | any($targets[];
+              . as $target
+              | $target == "/"
+                or $target == $root
+                or ($root | startswith($target + "/")))
+            and all($targets[];
+              . as $target
+              | (((($target | startswith($root + "/"))
+                    and (($target == $candidate)
+                      or ($candidate | startswith($target + "/"))
+                      or ($target | startswith($candidate + "/"))))) | not))
+        ' >/dev/null 2>&1; then
+        printf 'warning: Codex ProjectAtlas plugin update skipped: %s crosses or contains a mounted filesystem.\n' "$mount_description" >&2
+        return 1
+      fi
+      ;;
+    Darwin)
+      if ! command -v stat >/dev/null 2>&1 || ! command -v find >/dev/null 2>&1; then
+        printf 'warning: Codex ProjectAtlas plugin update skipped: %s mount ownership cannot be established.\n' "$mount_description" >&2
+        return 1
+      fi
+      mount_root_identity=$(stat -f %d "$mount_root" 2>/dev/null) || {
+        printf 'warning: Codex ProjectAtlas plugin update skipped: %s mount inventory cannot be read.\n' "$mount_description" >&2
+        return 1
+      }
+      mount_probe=$mount_candidate
+      while [ ! -e "$mount_probe" ] && [ ! -L "$mount_probe" ]; do
+        mount_parent=$(dirname -- "$mount_probe")
+        if [ "$mount_parent" = "$mount_probe" ]; then
+          return 1
+        fi
+        mount_probe=$mount_parent
+      done
+      mount_probe_identity=$(stat -f %d "$mount_probe" 2>/dev/null) || {
+        printf 'warning: Codex ProjectAtlas plugin update skipped: %s mount inventory cannot be read.\n' "$mount_description" >&2
+        return 1
+      }
+      if [ "$mount_probe_identity" != "$mount_root_identity" ]; then
+        printf 'warning: Codex ProjectAtlas plugin update skipped: %s crosses a mounted filesystem.\n' "$mount_description" >&2
+        return 1
+      fi
+      if [ -d "$mount_candidate" ]; then
+        invalid_mount=$(find -x "$mount_candidate" -type d ! -exec sh -c '
+          [ "$(stat -f %d "$2" 2>/dev/null)" = "$1" ]
+        ' sh "$mount_root_identity" {} \; -print -quit) || {
+          printf 'warning: Codex ProjectAtlas plugin update skipped: %s mount inventory cannot be read.\n' "$mount_description" >&2
+          return 1
+        }
+        if [ -n "$invalid_mount" ]; then
+          invalid_mount_identity=$(stat -f %d "$invalid_mount" 2>/dev/null) || {
+            printf 'warning: Codex ProjectAtlas plugin update skipped: %s mount inventory cannot be read.\n' "$mount_description" >&2
+            return 1
+          }
+          if [ "$invalid_mount_identity" != "$mount_root_identity" ]; then
+            printf 'warning: Codex ProjectAtlas plugin update skipped: %s contains a mounted filesystem.\n' "$mount_description" >&2
+          else
+            printf 'warning: Codex ProjectAtlas plugin update skipped: %s mount inventory changed while it was read.\n' "$mount_description" >&2
+          fi
+          return 1
+        fi
+      fi
+      ;;
+    *)
+      printf 'warning: Codex ProjectAtlas plugin update skipped: %s mount ownership is unsupported on this host.\n' "$mount_description" >&2
+      return 1
+      ;;
+  esac
 }
 
 validate_codex_projectatlas_snapshot_directory() {
@@ -545,14 +643,43 @@ validate_codex_projectatlas_snapshot_directory() {
       return 1
       ;;
   esac
-  if find "$snapshot_directory_resolved" -type l -print -quit | grep . >/dev/null 2>&1; then
+  validate_codex_mounts \
+    "$snapshot_directory_resolved" "$snapshot_directory_description" "$snapshot_directory_root" || return 1
+  snapshot_directory_symlink=$(find "$snapshot_directory_resolved" -type l -print -quit) || return 1
+  if [ -n "$snapshot_directory_symlink" ]; then
     printf 'warning: Codex ProjectAtlas plugin update skipped: %s contains a symbolic link.\n' "$snapshot_directory_description" >&2
     return 1
   fi
-  if find "$snapshot_directory_resolved" -type f -links +1 -print -quit | grep . >/dev/null 2>&1; then
+  snapshot_directory_hard_link=$(find "$snapshot_directory_resolved" -type f -links +1 -print -quit) || return 1
+  if [ -n "$snapshot_directory_hard_link" ]; then
     printf 'warning: Codex ProjectAtlas plugin update skipped: %s contains a hard-linked file.\n' "$snapshot_directory_description" >&2
     return 1
   fi
+}
+
+remove_codex_tree() {
+  remove_tree_path=$1
+  remove_tree_description=$2
+  remove_tree_root=$3
+  validate_codex_projectatlas_snapshot_directory \
+    "$remove_tree_path" "$remove_tree_description" "$remove_tree_root" || return 1
+  if ! find "$remove_tree_path" -type d -exec sh -c '
+    for remove_tree_directory do
+      [ -w "$remove_tree_directory" ] && [ -x "$remove_tree_directory" ] || exit 1
+    done
+  ' sh {} +; then
+    printf 'warning: Codex ProjectAtlas plugin update skipped: %s tree is not removable.\n' "$remove_tree_description" >&2
+    return 1
+  fi
+  validate_codex_mounts \
+    "$remove_tree_path" "$remove_tree_description" "$remove_tree_root" || return 1
+  remove_tree_platform=$(uname -s 2>/dev/null || true)
+  case "$remove_tree_platform" in
+    Linux) find "$remove_tree_path" -xdev -depth -delete || return 1 ;;
+    Darwin) find -x "$remove_tree_path" -depth -delete || return 1 ;;
+    *) return 1 ;;
+  esac
+  [ ! -e "$remove_tree_path" ] && [ ! -L "$remove_tree_path" ]
 }
 
 stage_codex_projectatlas_snapshot() {
@@ -672,32 +799,32 @@ stage_codex_projectatlas_snapshot() {
 
   snapshot_dir=$(mktemp -d "$codex_root/.projectatlas-plugin-state.XXXXXX") || return 1
   chmod 700 "$snapshot_dir" || {
-    if ! rm -rf -- "$snapshot_dir"; then
+    if ! remove_codex_tree "$snapshot_dir" "Codex recovery snapshot" "$codex_root"; then
       printf "warning: Codex ProjectAtlas state snapshot cleanup failed; retained at '%s'.\n" "$snapshot_dir" >&2
     fi
     return 1
   }
   if [ "$config_existed" = true ] && ! cp -p -- "$config_path" "$snapshot_dir/config.toml"; then
-    if ! rm -rf -- "$snapshot_dir"; then
+    if ! remove_codex_tree "$snapshot_dir" "Codex recovery snapshot" "$codex_root"; then
       printf "warning: Codex ProjectAtlas state snapshot cleanup failed; retained at '%s'.\n" "$snapshot_dir" >&2
     fi
     return 1
   fi
   if [ "$marketplace_root_existed" = true ] && ! cp -pPR -- "$expected_marketplace_root" "$snapshot_dir/marketplace-root"; then
-    if ! rm -rf -- "$snapshot_dir"; then
+    if ! remove_codex_tree "$snapshot_dir" "Codex recovery snapshot" "$codex_root"; then
       printf "warning: Codex ProjectAtlas state snapshot cleanup failed; retained at '%s'.\n" "$snapshot_dir" >&2
     fi
     return 1
   fi
   if [ "$plugin_cache_existed" = true ] && ! cp -pPR -- "$plugin_cache_root" "$snapshot_dir/plugin-cache"; then
-    if ! rm -rf -- "$snapshot_dir"; then
+    if ! remove_codex_tree "$snapshot_dir" "Codex recovery snapshot" "$codex_root"; then
       printf "warning: Codex ProjectAtlas state snapshot cleanup failed; retained at '%s'.\n" "$snapshot_dir" >&2
     fi
     return 1
   fi
   if [ "$expected_plugin_cache_existed" = true ] && [ "$cache_paths_match" != true ] &&
     ! cp -pPR -- "$expected_plugin_cache_path" "$snapshot_dir/expected-plugin-cache"; then
-    if ! rm -rf -- "$snapshot_dir"; then
+    if ! remove_codex_tree "$snapshot_dir" "Codex recovery snapshot" "$codex_root"; then
       printf "warning: Codex ProjectAtlas state snapshot cleanup failed; retained at '%s'.\n" "$snapshot_dir" >&2
     fi
     return 1
@@ -740,14 +867,15 @@ restore_codex_projectatlas_snapshot_directory() {
     return 1
   fi
   if [ -d "$restore_directory_destination" ]; then
-    validate_codex_projectatlas_snapshot_directory \
+    remove_codex_tree \
       "$restore_directory_destination" "Codex snapshot restore destination" "$codex_state_snapshot_root" || return 1
   fi
-  rm -rf -- "$restore_directory_destination" || return 1
   if [ -e "$restore_directory_destination" ] || [ -L "$restore_directory_destination" ]; then
     return 1
   fi
   if [ "$restore_directory_existed" = true ]; then
+    validate_codex_projectatlas_snapshot_directory \
+      "$restore_directory_snapshot" "Codex snapshot restore source" "$codex_state_snapshot_dir" || return 1
     cp -pPR -- "$restore_directory_snapshot" "$restore_directory_destination" || return 1
   fi
 }

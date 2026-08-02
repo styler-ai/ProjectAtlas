@@ -1820,6 +1820,7 @@ dependencies = [
 name = "projectatlas-lints"
 version = "0.4.3"
 dependencies = [
+ "blake3",
  "proc-macro2",
  "regex",
  "syn",
