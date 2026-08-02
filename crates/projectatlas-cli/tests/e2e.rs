@@ -130,9 +130,11 @@ const CODEX_FIXTURE_EXECUTABLE_FILE_NAME: &str = "codex.exe";
 #[cfg(unix)]
 const POSIX_CODEX_EXECUTABLE_FILE_NAME: &str = "codex";
 const FAKE_CODEX_LOG_FILE: &str = "fake-codex.log";
+#[cfg(windows)]
 const FAKE_CODEX_PLUGIN_CACHE_DIR: &str = "plugin-cache";
 const FAKE_CODEX_JUNCTION_TARGET_DIR: &str = "junction-target";
 const FAKE_CODEX_CLEANUP_SNAPSHOT_TARGET_DIR: &str = "cleanup-snapshot-target";
+#[cfg(windows)]
 const INSTALLER_CANARY_FILE_NAME: &str = "canary.txt";
 #[cfg(unix)]
 const INSTALLER_OUTSIDE_SENTINEL_FILE_NAME: &str = "sentinel";
@@ -12838,14 +12840,10 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
     fs::create_dir(&empty_path)?;
     let calls = temp.path().join("calls.txt");
     let fake_codex = temp.path().join(POSIX_CODEX_EXECUTABLE_FILE_NAME);
-    fs::write(
+    write_executable_script(
         &fake_codex,
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nprintf '%s\\n' '{\"installed\":[{\"pluginId\":\"projectatlas@projectatlas\",\"name\":\"projectatlas\",\"marketplaceName\":\"projectatlas\",\"version\":\"0.0.1\",\"installed\":true,\"enabled\":true},{\"pluginId\":\"other@other\",\"marketplaceSource\":{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"},\"source\":{\"path\":\"/tmp/projectatlas\"}}],\"available\":[]}'\n",
     )?;
-    use std::os::unix::fs::PermissionsExt;
-    let mut permissions = fs::metadata(&fake_codex)?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&fake_codex, permissions)?;
     let wrapper = temp.path().join("verify-no-jq.sh");
     fs::write(
         &wrapper,
@@ -13050,15 +13048,14 @@ fi
         ))
         .into());
     }
-    if fault == "late-snapshot-source-symlink" {
-        if repository_filesystem_snapshot(&plugin_source)? != live_source_before
-            || repository_filesystem_snapshot(&installed_cache)? != live_cache_before
-        {
-            return Err(io::Error::other(
-                "POSIX restore changed live state before rejecting a late-swapped snapshot source",
-            )
-            .into());
-        }
+    if fault == "late-snapshot-source-symlink"
+        && (repository_filesystem_snapshot(&plugin_source)? != live_source_before
+            || repository_filesystem_snapshot(&installed_cache)? != live_cache_before)
+    {
+        return Err(io::Error::other(
+            "POSIX restore changed live state before rejecting a late-swapped snapshot source",
+        )
+        .into());
     }
     if fault == "destination-removal-failure" && plugin_source.exists() {
         fs::set_permissions(&plugin_source, fs::Permissions::from_mode(0o700))?;
