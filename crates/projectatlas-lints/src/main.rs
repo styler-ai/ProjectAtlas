@@ -819,9 +819,11 @@ fn decode_repository_text<'a>(
     if let Some(encoded) = bytes.strip_prefix(&[0xfe, 0xff]) {
         return decode_utf16(relative_path, encoded, u16::from_be_bytes).map(Some);
     }
+    if bytes.contains(&0) {
+        return Ok(None);
+    }
     match std::str::from_utf8(bytes) {
         Ok(source) => Ok(Some(Cow::Borrowed(source))),
-        Err(_) if bytes.contains(&0) => Ok(None),
         Err(_) => Err(LintError::NonUtf8Text(relative_path.to_string())),
     }
 }
@@ -1629,7 +1631,7 @@ mod tests {
 
     /// Tracked and non-ignored untracked files are scanned while ignored state is excluded.
     #[test]
-    fn private_path_lint_scans_untracked_script_files() -> Result<(), Box<dyn std::error::Error>> {
+    fn private_path_lint_scans_visible_paths() -> Result<(), Box<dyn std::error::Error>> {
         let repository = tempfile::tempdir()?;
         let status = Command::new("git")
             .args(["init", "--quiet"])
@@ -1654,6 +1656,12 @@ mod tests {
             repository.path().join("tracked.rs"),
             format!("const RUNTIME: &str = {tracked_sample:?};\n"),
         )?;
+        fs::write(
+            repository.path().join("extensionless"),
+            format!("{sample}\n"),
+        )?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(sample, repository.path().join("private-link"))?;
         fs::write(repository.path().join(".gitignore"), "ignored.txt\n")?;
         fs::write(repository.path().join("ignored.txt"), format!("{sample}\n"))?;
         let status = Command::new("git")
@@ -1664,7 +1672,7 @@ mod tests {
         require(status.success(), "temporary Git files could not be staged")?;
         let violations = lint_repository_private_paths(repository.path())?;
         require(
-            violations.len() == 2,
+            violations.len() == if cfg!(unix) { 4 } else { 3 },
             "tracked or non-ignored untracked private path was not rejected",
         )?;
         require(
@@ -1674,6 +1682,13 @@ mod tests {
                 && violations
                     .iter()
                     .any(|violation| violation.path == "tracked.rs")
+                && violations
+                    .iter()
+                    .any(|violation| violation.path == "extensionless")
+                && (!cfg!(unix)
+                    || violations
+                        .iter()
+                        .any(|violation| violation.path == "private-link"))
                 && violations
                     .iter()
                     .all(|violation| violation.path != "ignored.txt"),
@@ -1705,9 +1720,12 @@ mod tests {
             encoded.extend_from_slice(&unit.to_le_bytes());
             encoded_be.extend_from_slice(&unit.to_be_bytes());
         }
+        let mut binary = vec![0];
+        binary.extend_from_slice(sample.as_bytes());
+        binary.push(0);
         fs::write(repository.path().join("privacy-check.ps1"), encoded)?;
         fs::write(repository.path().join("privacy-check-be.ps1"), encoded_be)?;
-        fs::write(repository.path().join("asset.bin"), [0x89, 0, 0xff, 0])?;
+        fs::write(repository.path().join("asset.bin"), binary)?;
         let status = Command::new("git")
             .args([
                 "add",
@@ -1733,6 +1751,10 @@ mod tests {
         require(
             decode_repository_text("malformed.ps1", &[0xff, 0xfe, 0]).is_err(),
             "malformed UTF-16 source was accepted",
+        )?;
+        require(
+            decode_repository_text("malformed.txt", &[0xff]).is_err(),
+            "malformed non-binary UTF-8 source was accepted",
         )?;
         let rules = private_path_rules()?;
         for sample in private_path_samples()? {
