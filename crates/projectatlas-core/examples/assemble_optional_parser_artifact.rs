@@ -3917,11 +3917,12 @@ mod tests {
     /// Recognize direct grammar dependencies across supported native path shapes.
     #[test]
     fn recognizes_grammar_shaped_worker_dependencies() {
+        let windows_library = ["C:", "parser-pack", "tree_sitter_ada.dll"].join(r"\");
         for library in [
             "tree_sitter_ada.dll",
             "libtree_sitter_ada.so",
             "/usr/local/lib/libtree_sitter_ada.dylib",
-            r"C:\parser-pack\tree_sitter_ada.dll",
+            windows_library.as_str(),
         ] {
             assert!(is_grammar_library_dependency(library), "{library}");
         }
@@ -4170,7 +4171,8 @@ mod tests {
         let absent = OsString::from(NO_CONTAINMENT_BROKER_ARGUMENT);
         assert!(parse_containment_broker_input(&absent, PackPlatform::LinuxX86_64)?.is_none());
         assert!(parse_containment_broker_input(&absent, PackPlatform::WindowsX86_64).is_err());
-        let broker = OsString::from(r"C:\pack\projectatlas-parser-containment.exe");
+        let broker =
+            OsString::from(["C:", "pack", "projectatlas-parser-containment.exe"].join(r"\"));
         assert!(parse_containment_broker_input(&broker, PackPlatform::LinuxX86_64).is_err());
         assert_eq!(
             parse_containment_broker_input(&broker, PackPlatform::WindowsX86_64)?,

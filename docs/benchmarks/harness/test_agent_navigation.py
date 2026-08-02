@@ -248,7 +248,7 @@ class AgentNavigationHarnessTests(unittest.TestCase):
                 "plain": {},
             },
         }
-        fixture = Path("C:/fixture")
+        fixture = Path.cwd() / "fixture"
         executable = str(Path(__file__).resolve())
         with patch.dict("os.environ", {"PROJECTATLAS_TEST_EXECUTABLE": executable}):
             projectatlas, projectatlas_prompt = build_command(
@@ -310,22 +310,40 @@ class AgentNavigationHarnessTests(unittest.TestCase):
             root = Path(directory)
             output = root / "result.json"
             journal = root / "result.json.journal.jsonl"
+            separator = chr(92)
+            repository = f"{chr(88)}:{separator}repository"
             powershell = Path(
-                r"C:\Program Files\WindowsApps"
-                r"\Microsoft.PowerShell_7.6.4.0_x64__8wekyb3d8bbwe\pwsh.exe"
+                separator.join(
+                    (
+                        f"{chr(88)}:",
+                        "Program Files",
+                        "WindowsApps",
+                        "Microsoft.PowerShell_test",
+                        "pwsh.exe",
+                    )
+                )
             )
+            escaped_root = repository.replace(separator, separator * 2)
+            nested_escaped_root = repository.replace(separator, separator * 4)
+            foreign_path = separator.join((f"{chr(89)}:", "private", "artifact.txt"))
+            escaped_foreign_path = foreign_path.replace(separator, separator * 4)
             with (
-                patch("agent_navigation.ROOT", Path(r"X:\repository")),
+                patch("agent_navigation.ROOT", Path(repository)),
                 patch("agent_navigation.POWERSHELL", str(powershell)),
+                patch("builtins.print") as report,
             ):
                 append_checkpoint({"run_id": "one"}, journal)
                 append_checkpoint(
                     {
                         "run_id": "two",
                         "path": str(Path.home() / "private"),
-                        "escaped_root": r"X:\\repository\\fixture",
-                        "nested_escaped_root": r"X:\\\\repository\\\\fixture",
+                        "escaped_root": escaped_root + separator * 2 + "fixture",
+                        "nested_escaped_root": nested_escaped_root
+                        + separator * 4
+                        + "fixture",
                         "powershell": str(powershell),
+                        "foreign_path": foreign_path,
+                        "escaped_foreign_path": escaped_foreign_path,
                     },
                     journal,
                 )
@@ -333,12 +351,17 @@ class AgentNavigationHarnessTests(unittest.TestCase):
                     {
                         "complete": True,
                         "path": str(Path.home() / "private"),
-                        "escaped_root": r"X:\\repository\\fixture",
-                        "nested_escaped_root": r"X:\\\\repository\\\\fixture",
+                        "escaped_root": escaped_root + separator * 2 + "fixture",
+                        "nested_escaped_root": nested_escaped_root
+                        + separator * 4
+                        + "fixture",
                         "powershell": str(powershell),
+                        "foreign_path": foreign_path,
+                        "escaped_foreign_path": escaped_foreign_path,
                     },
                     output,
                 )
+            report.assert_called_once_with(output.name)
             self.assertEqual(
                 [
                     json.loads(line)["run_id"]
@@ -352,11 +375,37 @@ class AgentNavigationHarnessTests(unittest.TestCase):
             self.assertEqual(saved["escaped_root"], r"{REPO_ROOT}\\fixture")
             self.assertEqual(saved["nested_escaped_root"], r"{REPO_ROOT}\\\\fixture")
             self.assertEqual(saved["powershell"], "{POWERSHELL}")
+            self.assertEqual(saved["foreign_path"], "{PRIVATE_PATH}")
+            self.assertEqual(saved["escaped_foreign_path"], "{PRIVATE_PATH}")
             self.assertEqual(
                 json.loads(journal.read_text().splitlines()[1])["path"],
                 expected_private_path,
             )
             self.assertFalse((root / "result.json.tmp").exists())
+
+    def test_result_and_checkpoint_refuse_unredacted_private_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "result.json"
+            journal = root / "result.json.journal.jsonl"
+            separator = chr(92)
+            private_path = separator.join(
+                (f"{chr(90)}:", "private-host", "artifact.txt")
+            )
+            with patch(
+                "agent_navigation.redact_private_absolute_paths",
+                side_effect=lambda value: value,
+            ):
+                with self.assertRaises(ValueError) as write_failure:
+                    write_result({"path": private_path}, output)
+                with self.assertRaises(ValueError) as checkpoint_failure:
+                    append_checkpoint({"path": private_path}, journal)
+            for failure in (write_failure.exception, checkpoint_failure.exception):
+                self.assertIn("windows-drive-root", str(failure))
+                self.assertNotIn(private_path, str(failure))
+            self.assertFalse(output.exists())
+            self.assertFalse(output.with_name(f"{output.name}.tmp").exists())
+            self.assertFalse(journal.exists())
 
     def test_candidate_checkout_requires_a_committed_lock_and_clean_tree(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -460,10 +509,13 @@ class AgentNavigationHarnessTests(unittest.TestCase):
                         str(output),
                     ],
                 ),
-                self.assertRaises(SystemExit),
+                self.assertRaises(SystemExit) as failure,
             ):
                 agent_navigation_main()
             self.assertFalse(output.exists())
+            message = str(failure.exception)
+            self.assertNotIn(str(output), message)
+            self.assertNotIn(str(journal), message)
 
 
 if __name__ == "__main__":

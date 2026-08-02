@@ -1708,15 +1708,17 @@ mod tests {
     /// Derive the pack root from the executable rather than the current directory.
     #[test]
     fn pack_root_is_executable_relative() -> Result<(), Box<dyn std::error::Error>> {
-        let executable = if cfg!(windows) {
-            Path::new(r"C:\ProjectAtlas\pack\projectatlas-parser-worker.exe")
+        let temp = tempfile::tempdir()?;
+        let executable_name = if cfg!(windows) {
+            "projectatlas-parser-worker.exe"
         } else {
-            Path::new("/opt/projectatlas/pack/projectatlas-parser-worker")
+            "projectatlas-parser-worker"
         };
-        let expected = executable
-            .parent()
-            .ok_or_else(|| WorkerStartupError::MissingExecutableParent(executable.into()))?;
-        let actual = executable_pack_root(executable)?;
+        let executable = temp.path().join("pack").join(executable_name);
+        let expected = executable.parent().ok_or_else(|| {
+            WorkerStartupError::MissingExecutableParent(executable.as_path().into())
+        })?;
+        let actual = executable_pack_root(&executable)?;
         require(actual == expected, "pack root was not executable-relative")?;
         Ok(())
     }

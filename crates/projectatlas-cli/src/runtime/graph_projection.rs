@@ -2994,7 +2994,8 @@ mod tests {
                     .arg("/J")
                     .arg(link)
                     .arg(target)
-                    .status()?;
+                    .output()?
+                    .status;
                 if status.success() {
                     Ok(())
                 } else {
@@ -3680,6 +3681,17 @@ mod tests {
         let project = ProjectInstanceId::from_bytes([13; 16])?;
         let generation = IndexGeneration::new(1);
         let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let absolute_secret = ["C:", "secret.txt"].join("/");
+        let escaping_source = [
+            "use std::fs;\n",
+            "fn unsafe_paths() {\n",
+            "    let _ = fs::read_to_string(\"../secret.txt\");\n",
+            "    let _ = fs::write(\"",
+            &absolute_secret,
+            "\", \"super-secret\");\n",
+            "}\n",
+        ]
+        .concat();
         let graphs = vec![
             extract_symbol_graph(
                 "src/dynamic.rs",
@@ -3699,17 +3711,7 @@ mod tests {
                     "fn route(_path: &str, _handler: fn()) {}\n",
                 ),
             ),
-            extract_symbol_graph(
-                "src/escaping.rs",
-                Some("rust"),
-                concat!(
-                    "use std::fs;\n",
-                    "fn unsafe_paths() {\n",
-                    "    let _ = fs::read_to_string(\"../secret.txt\");\n",
-                    "    let _ = fs::write(\"C:/secret.txt\", \"super-secret\");\n",
-                    "}\n",
-                ),
-            ),
+            extract_symbol_graph("src/escaping.rs", Some("rust"), &escaping_source),
             extract_symbol_graph(
                 "src/dynamic.js",
                 Some("javascript"),

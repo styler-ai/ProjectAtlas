@@ -4945,7 +4945,8 @@ mod tests {
                     .arg("/J")
                     .arg(link)
                     .arg(target)
-                    .status()?;
+                    .output()?
+                    .status;
                 if status.success() {
                     Ok(())
                 } else {

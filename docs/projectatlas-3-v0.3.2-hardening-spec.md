@@ -110,8 +110,8 @@ declarations when both exist.
 
 ### Problem
 
-The CLI and DB currently each normalize Windows extended path prefixes such as
-`\\?\C:\...` and `\\?\UNC\...`. This is small duplication, but it sits on a
+The CLI and DB currently each normalize Windows extended drive and UNC path
+prefixes. This is small duplication, but it sits on a
 cross-platform boundary and should not drift.
 
 ### Required Design
@@ -126,8 +126,8 @@ pub fn normalize_native_path_display_str(path: &str) -> String
 The helper must:
 
 - replace host separators with `/`
-- remove `\\?\` / `//?/` prefixes
-- convert `\\?\UNC\server\share` to `//server/share`
+- remove Windows extended-path device prefixes in either separator style
+- convert extended UNC paths to conventional UNC display paths
 - preserve ordinary POSIX paths
 - preserve ordinary relative paths
 

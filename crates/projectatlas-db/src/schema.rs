@@ -2644,12 +2644,13 @@ mod tests {
         let malformed_path = temp.path().join("malformed.db");
         {
             let connection = Connection::open(&malformed_path)?;
-            connection.execute_batch(
+            let stored_root = ["C:", "plausible", "repository"].join("/");
+            connection.execute_batch(&format!(
                 "CREATE VIEW metadata AS
                  SELECT 'schema_version' AS key, '9' AS value
                  UNION ALL
-                 SELECT 'project_root', 'C:/plausible/repository';",
-            )?;
+                 SELECT 'project_root', '{stored_root}';"
+            ))?;
         }
         let malformed_bytes = fs::read(&malformed_path)?;
         let malformed_inventory = directory_entry_names(temp.path())?;

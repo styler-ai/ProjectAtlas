@@ -58,7 +58,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-      - name: Rust source contract lints
+      - name: Repository source policy lints
         timeout-minutes: 2
         run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 

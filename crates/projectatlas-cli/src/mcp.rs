@@ -9007,7 +9007,8 @@ mod tests {
     #[test]
     fn session_brief_recommendations_preserve_per_call_project_path()
     -> Result<(), Box<dyn std::error::Error>> {
-        let project_path = "F:/example/repo-b".to_string();
+        let temp = tempfile::tempdir()?;
+        let project_path = normalize_native_path_display(temp.path().join("repo-b"));
         let recommendations = ProjectAtlasMcpServer::indexed_project_recommendations(
             "startup",
             Some(NavigationNextCall {

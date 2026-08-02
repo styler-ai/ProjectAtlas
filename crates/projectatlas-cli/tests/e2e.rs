@@ -117,6 +117,7 @@ const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
 const OPENSPEC_DIR_NAME: &str = "openspec";
 const AGENT_INTEGRATION_DOC_FILE_NAME: &str = "agent-integration.md";
 const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
+const OPTIONAL_PARSER_PACK_WORKFLOW_FILE_NAME: &str = "optional-parser-pack.yml";
 const CARGO_LOCK_FILE_NAME: &str = "Cargo.lock";
 const CODEX_CONFIG_DIR: &str = ".codex";
 const CODEX_PLUGIN_MANIFEST_DIR: &str = ".codex-plugin";
@@ -6116,6 +6117,18 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
             .join("workflows")
             .join("release.yml"),
     )?;
+    let parser_pack_workflow = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("workflows")
+            .join(OPTIONAL_PARSER_PACK_WORKFLOW_FILE_NAME),
+    )?;
+    let docs_workflow = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("workflows")
+            .join("04-docs.yml"),
+    )?;
     let pre_push = fs::read_to_string(
         workspace_root
             .join(GITHOOKS_DIR_NAME)
@@ -6241,7 +6254,7 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
         }
         if !verify.contains("projectatlas-lints") || !verify.contains("strict-strings") {
             return Err(io::Error::other(format!(
-                "{workflow_name} verify job must run strict ProjectAtlas source string lints"
+                "{workflow_name} verify job must run repository source policy lints"
             ))
             .into());
         }
@@ -6253,6 +6266,32 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
                 .into());
             }
         }
+    }
+    for (workflow_name, workflow, job) in [
+        ("optional parser pack", &parser_pack_workflow, "construct"),
+        ("documentation", &docs_workflow, "deploy"),
+    ] {
+        let build_job = workflow_job_block(workflow, job)?;
+        if !build_job.contains("projectatlas-lints") || !build_job.contains("strict-strings") {
+            return Err(io::Error::other(format!(
+                "{workflow_name} build must run repository source policy lints"
+            ))
+            .into());
+        }
+    }
+    if !pre_push.contains("projectatlas-lints") || !pre_push.contains("strict-strings") {
+        return Err(io::Error::other(
+            "pre-push must run the same repository source policy lint as hosted builds",
+        )
+        .into());
+    }
+    if !pre_push.contains("private-path-updates \"$1\" < \"$push_updates\"")
+        || !pre_push.contains("cat > \"$push_updates\"")
+    {
+        return Err(io::Error::other(
+            "pre-push must scan every exact outgoing Git revision, not only the tip or working-tree bytes",
+        )
+        .into());
     }
     for maintenance in ["init", "scan", "purpose", "parity", "lint"] {
         for command in [
@@ -6494,7 +6533,7 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
             .join("resolve-optional-parser-handoff.py"),
     )?;
     let optional_parser_workflow =
-        fs::read_to_string(workflow_dir.join("optional-parser-pack.yml"))?;
+        fs::read_to_string(workflow_dir.join(OPTIONAL_PARSER_PACK_WORKFLOW_FILE_NAME))?;
     let ci_workflow = fs::read_to_string(workflow_dir.join("ci.yml"))?;
     let dependabot = fs::read_to_string(workspace_root.join(".github").join("dependabot.yml"))?;
     let deny = fs::read_to_string(workspace_root.join("deny.toml"))?;
@@ -7840,7 +7879,11 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             "transport": {
                 "type": "stdio",
                 "command": stable_runtime,
-                "args": ["--require-version", "0.3.15", "--db", "C:\\old\\.projectatlas\\projectatlas.db", "mcp"]
+                "args": [
+                    "--require-version", "0.3.15",
+                    "--db", temp.path().join("old").join(ATLAS_DIR_NAME).join("projectatlas.db"),
+                    "mcp"
+                ]
             }
         }))?,
     )?;
@@ -8877,7 +8920,11 @@ public static class Program
             "transport": {
                 "type": "stdio",
                 "command": stable_runtime,
-                "args": ["--require-version", "0.3.26", "--db", "C:\\old\\.projectatlas\\projectatlas.db", "mcp"]
+                "args": [
+                    "--require-version", "0.3.26",
+                    "--db", isolated_home.join("old").join(ATLAS_DIR_NAME).join("projectatlas.db"),
+                    "mcp"
+                ]
             }
         }))?,
     )?;
@@ -9483,7 +9530,11 @@ public static class Program
             "transport": {
                 "type": "stdio",
                 "command": stable_runtime,
-                "args": ["--require-version", "0.3.26", "--db", "C:\\old\\projectatlas.db", "mcp"]
+                "args": [
+                    "--require-version", "0.3.26",
+                    "--db", temp.path().join("old").join("projectatlas.db"),
+                    "mcp"
+                ]
             }
         }))?,
     )?;
@@ -9703,7 +9754,11 @@ public static class Program
             "transport": {
                 "type": "stdio",
                 "command": &stable_runtime,
-                "args": ["--require-version", "0.3.26", "--db", "C:\\old\\projectatlas.db", "mcp"]
+                "args": [
+                    "--require-version", "0.3.26",
+                    "--db", temp.path().join("old").join("projectatlas.db"),
+                    "mcp"
+                ]
             }
         }))?,
     )?;
@@ -10231,7 +10286,9 @@ if ((Get-ProjectAtlasCodexPluginSourceManifestVersion $validPlugin) -eq "0.4.2" 
 }
 $script:pluginPayload = [pscustomobject]@{ installed = @($validPlugin); available = @() }
 function Convert-ProjectAtlasVersionTag { return "0.4.2" }
-function Resolve-ProjectAtlasCodexCommand { return "C:\Codex\codex.exe" }
+function Resolve-ProjectAtlasCodexCommand {
+    return Join-Path ([IO.Path]::GetTempPath()) "codex\codex.exe"
+}
 function Get-ProjectAtlasCodexPlugin { return $validPlugin }
 function Test-ProjectAtlasOfficialMarketplaceSource { return $true }
 $script:sourceManifestError = $false
@@ -10267,7 +10324,7 @@ if (Test-ProjectAtlasCodexPluginReady "0.4.2") {
     throw "An unreadable plugin source manifest was accepted as ready."
 }
 $script:sourceManifestError = $false
-$script:pluginSourcePath = "C:\bad$([char]0)path"
+$script:pluginSourcePath = Join-Path ([IO.Path]::GetTempPath()) ("bad" + [char]0 + "path")
 if (Test-ProjectAtlasCodexPluginReady "0.4.2") {
     throw "A malformed plugin source path was accepted as ready."
 }
@@ -10705,8 +10762,15 @@ try {
         throw "Installer obsolete MCP finder function was not found."
     }
     Invoke-Expression $findMatch.Value
-    $syntheticStablePath = "C:\stable\projectatlas.exe"
-    $syntheticCodexPath = "C:\signed\codex.exe"
+    $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ("projectatlas-obsolete-mcp-" + $PID)
+    $syntheticStablePath = Join-Path $fixtureRoot "stable\projectatlas.exe"
+    $syntheticCodexPath = Join-Path $fixtureRoot "signed\codex.exe"
+    $fixtureDatabase = Join-Path $fixtureRoot "repo\.projectatlas\projectatlas.db"
+    $fixtureConfig = Join-Path $fixtureRoot "repo\.projectatlas\config.toml"
+    $fixtureProjectConfig = Join-Path $fixtureRoot "repo\projectatlas.toml"
+    $fixtureMcpConfig = Join-Path $fixtureRoot "repo\.projectatlas\projectatlas.mcp.json"
+    $fixtureClaudeMcpConfig = Join-Path $fixtureRoot "repo\.projectatlas\projectatlas.claude.mcp.json"
+    $fixtureOpenCodeMcpConfig = Join-Path $fixtureRoot "repo\.projectatlas\projectatlas.opencode.json"
     function Initialize-ProjectAtlasRuntimeProbe {}
     function Get-CimInstance {
         return @(
@@ -10714,7 +10778,7 @@ try {
                 ProcessId = 42
                 Name = "projectatlas.exe"
                 ExecutablePath = $syntheticStablePath
-                CommandLine = '"C:\stable\projectatlas.exe" --require-version 0.3.26 --db C:\repo\projectatlas.db --config C:\repo\config.toml mcp'
+                CommandLine = ('"{0}" --require-version 0.3.26 --db "{1}" --config "{2}" mcp' -f $syntheticStablePath, $fixtureDatabase, $fixtureConfig)
                 CreationDate = 100
                 ParentProcessId = 43
             },
@@ -10722,7 +10786,7 @@ try {
                 ProcessId = 43
                 Name = "codex.exe"
                 ExecutablePath = $syntheticCodexPath
-                CommandLine = '"C:\signed\codex.exe" app-server'
+                CommandLine = ('"{0}" app-server' -f $syntheticCodexPath)
                 CreationDate = 200
                 ParentProcessId = 1
             }
@@ -10746,9 +10810,9 @@ try {
     function Get-ProjectAtlasCodexImageIdentity { return ("c" * 64) }
     $reusedParentSelection = Find-ProjectAtlasObsoleteStableMcpProcess `
         $syntheticStablePath `
-        "C:\repo\projectatlas.db" `
-        "C:\repo\config.toml" `
-        "C:\repo\projectatlas.toml" `
+        $fixtureDatabase `
+        $fixtureConfig `
+        $fixtureProjectConfig `
         "0.4.3"
     if ($reusedParentSelection.State -ne "unsafe_owner" -or $owned.HasExited -or $parent.HasExited) {
         throw "Parent created after its MCP child was not refused safely: $($reusedParentSelection.State)"
@@ -10780,12 +10844,12 @@ try {
         $hostPath `
         $hostPath `
         "0.4.3" `
-        "C:\repo\.projectatlas\projectatlas.db" `
-        "C:\repo\.projectatlas\config.toml" `
-        "C:\repo\projectatlas.toml" `
-        "C:\repo\.projectatlas\projectatlas.mcp.json" `
-        "C:\repo\.projectatlas\projectatlas.claude.mcp.json" `
-        "C:\repo\.projectatlas\projectatlas.opencode.json" `
+        $fixtureDatabase `
+        $fixtureConfig `
+        $fixtureProjectConfig `
+        $fixtureMcpConfig `
+        $fixtureClaudeMcpConfig `
+        $fixtureOpenCodeMcpConfig `
         ("b" * 64) `
         ("b" * 64) `
         ("b" * 64)
@@ -10796,12 +10860,12 @@ try {
         $hostPath `
         $hostPath `
         "0.4.3" `
-        "C:\repo\.projectatlas\projectatlas.db" `
-        "C:\repo\.projectatlas\config.toml" `
-        "C:\repo\projectatlas.toml" `
-        "C:\repo\.projectatlas\projectatlas.mcp.json" `
-        "C:\repo\.projectatlas\projectatlas.claude.mcp.json" `
-        "C:\repo\.projectatlas\projectatlas.opencode.json" `
+        $fixtureDatabase `
+        $fixtureConfig `
+        $fixtureProjectConfig `
+        $fixtureMcpConfig `
+        $fixtureClaudeMcpConfig `
+        $fixtureOpenCodeMcpConfig `
         ("e" * 64) `
         ("e" * 64) `
         ("e" * 64)
@@ -10829,12 +10893,12 @@ try {
         $hostPath `
         $hostPath `
         "0.4.3" `
-        "C:\repo\.projectatlas\projectatlas.db" `
-        "C:\repo\.projectatlas\config.toml" `
-        "C:\repo\projectatlas.toml" `
-        "C:\repo\.projectatlas\projectatlas.mcp.json" `
-        "C:\repo\.projectatlas\projectatlas.claude.mcp.json" `
-        "C:\repo\.projectatlas\projectatlas.opencode.json" `
+        $fixtureDatabase `
+        $fixtureConfig `
+        $fixtureProjectConfig `
+        $fixtureMcpConfig `
+        $fixtureClaudeMcpConfig `
+        $fixtureOpenCodeMcpConfig `
         ("b" * 64) `
         ("b" * 64) `
         ("b" * 64)
@@ -10847,12 +10911,12 @@ try {
         $hostPath `
         $hostPath `
         "0.4.3" `
-        "C:\repo\.projectatlas\projectatlas.db" `
-        "C:\repo\.projectatlas\config.toml" `
-        "C:\repo\projectatlas.toml" `
-        "C:\repo\.projectatlas\projectatlas.mcp.json" `
-        "C:\repo\.projectatlas\projectatlas.claude.mcp.json" `
-        "C:\repo\.projectatlas\projectatlas.opencode.json" `
+        $fixtureDatabase `
+        $fixtureConfig `
+        $fixtureProjectConfig `
+        $fixtureMcpConfig `
+        $fixtureClaudeMcpConfig `
+        $fixtureOpenCodeMcpConfig `
         ("b" * 64) `
         ("b" * 64) `
         ("b" * 64)
@@ -11203,11 +11267,14 @@ foreach ($functionName in @(
     }
     Invoke-Expression $match.Value
 }
-$runtime = "C:\ProjectAtlas\runtime\projectatlas.exe"
+$fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) "projectatlas-registry"
+$runtime = Join-Path $fixtureRoot "runtime\projectatlas.exe"
+$database = Join-Path $fixtureRoot "repo\.projectatlas\projectatlas.db"
+$config = Join-Path $fixtureRoot "repo\.projectatlas\config.toml"
 $arguments = @(
     "--require-version", "0.4.1",
-    "--db", "C:\repo\.projectatlas\projectatlas.db",
-    "--config", "C:\repo\.projectatlas\config.toml",
+    "--db", $database,
+    "--config", $config,
     "mcp"
 )
 $exact = [pscustomobject]@{
@@ -11290,9 +11357,9 @@ if (Test-ProjectAtlasCodexMcpRegistryEntry $substringValue $runtime $arguments) 
 }
 $reordered = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
 $reordered.transport.args = @(
-    "--db", "C:\repo\.projectatlas\projectatlas.db",
+    "--db", $database,
     "--require-version", "0.4.1",
-    "--config", "C:\repo\.projectatlas\config.toml",
+    "--config", $config,
     "mcp"
 )
 if (Test-ProjectAtlasCodexMcpRegistryEntry $reordered $runtime $arguments) {
@@ -11530,8 +11597,12 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
             "enabled": true,
             "transport": {
                 "type": "stdio",
-                "command": if cfg!(windows) { "C:\\stale\\ProjectAtlas\\bin\\projectatlas.exe" } else { "/stale/ProjectAtlas/bin/projectatlas" },
-                "args": ["--require-version", "0.0.1", "--db", if cfg!(windows) { "C:\\stale-repo\\.projectatlas\\projectatlas.db" } else { "/stale-repo/.projectatlas/projectatlas.db" }, "mcp"]
+                "command": &stale_runtime,
+                "args": [
+                    "--require-version", "0.0.1",
+                    "--db", temp.path().join("stale-repo").join(ATLAS_DIR_NAME).join("projectatlas.db"),
+                    "mcp"
+                ]
             }
         }))?,
     )?;
@@ -13711,8 +13782,12 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
             "enabled": true,
             "transport": {
                 "type": "stdio",
-                "command": "C:\\Users\\shaun_tyler\\AppData\\Local\\ProjectAtlas\\bin\\projectatlas.exe",
-                "args": ["--require-version", "0.3.10", "--db", "C:\\projects\\io.pasx.kai\\.projectatlas\\projectatlas.db", "mcp"]
+                "command": &stable_runtime,
+                "args": [
+                    "--require-version", "0.3.10",
+                    "--db", temp.path().join("stale-project").join(ATLAS_DIR_NAME).join("projectatlas.db"),
+                    "mcp"
+                ]
             }
         }))?,
     )?;
@@ -29335,7 +29410,11 @@ fn workflow_job_runs(workflow: &str, job: &str) -> Result<Vec<String>, Box<dyn E
 fn command_runs_projectatlas_maintenance(command: &str) -> bool {
     const MAINTENANCE_COMMANDS: [&str; 5] = ["init", "scan", "purpose", "parity", "lint"];
 
-    let command = command.replace("\\\r\n", " ").replace("\\\n", " ");
+    let continued_crlf = format!("{}{}", '\\', "\r\n");
+    let continued_lf = format!("{}{}", '\\', '\n');
+    let command = command
+        .replace(&continued_crlf, " ")
+        .replace(&continued_lf, " ");
     command
         .lines()
         .flat_map(|line| line.split([';', '|', '&']))

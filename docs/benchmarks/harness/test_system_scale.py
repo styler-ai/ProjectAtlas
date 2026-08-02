@@ -124,16 +124,23 @@ class SystemScaleHarnessTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows extended-path behavior")
     def test_remove_tree_preserves_extended_paths_and_converts_unc_paths(self) -> None:
         metadata = mock.Mock(st_mode=stat.S_IFDIR, st_file_attributes=0)
+        separator = chr(92)
+        device_root = separator * 2 + "?" + separator
+        drive_parent = device_root + f"{chr(67)}:" + separator + "benchmark"
+        network_parent = separator * 2 + separator.join(("server", "share", "benchmark"))
         cases = (
             (
-                Path(r"\\?\C:\benchmark\child"),
-                Path(r"\\?\C:\benchmark"),
-                r"\\?\C:\benchmark\child",
+                Path(drive_parent + separator + "child"),
+                Path(drive_parent),
+                drive_parent + separator + "child",
             ),
             (
-                Path(r"\\server\share\benchmark\child"),
-                Path(r"\\server\share\benchmark"),
-                r"\\?\UNC\server\share\benchmark\child",
+                Path(network_parent + separator + "child"),
+                Path(network_parent),
+                device_root
+                + "UNC"
+                + separator
+                + separator.join(("server", "share", "benchmark", "child")),
             ),
         )
         for path, parent, expected in cases:
@@ -1152,23 +1159,89 @@ time.sleep(60)
     def test_failed_result_is_persisted_before_nonzero_exit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "result.json"
-            with self.assertRaisesRegex(SystemExit, "1"):
+            separator = chr(92)
+            foreign_path = separator.join(
+                (f"{chr(89)}:", "private-host", "artifact.txt")
+            )
+            with (
+                mock.patch("builtins.print") as report,
+                self.assertRaisesRegex(SystemExit, "1"),
+            ):
                 system_scale.write_result(
                     {
                         "passed": False,
                         "publication_eligible": False,
                         "path": str(system_scale.ROOT / "private"),
+                        "foreign_path": foreign_path,
                     },
                     output,
                 )
+            report.assert_called_once_with(output.name)
             result = json.loads(output.read_text(encoding="utf-8"))
             self.assertFalse(result["passed"])
             self.assertEqual(
                 result["path"], str(Path("{REPO_ROOT}") / "private")
             )
+            self.assertEqual(result["foreign_path"], "{PRIVATE_PATH}")
             self.assertNotIn(
                 str(system_scale.ROOT), output.read_text(encoding="utf-8")
             )
+
+    def test_structural_private_path_redaction_preserves_urls(self) -> None:
+        separator = chr(92)
+        samples = (
+            separator.join((f"{chr(88)}:", "private-host", "artifact.txt")),
+            separator * 2 + separator.join(("server", "share", "artifact.txt")),
+            "/".join(("", "home", "example-user", "artifact.txt")),
+            "/".join(("", "mnt", "x", "artifact.txt")),
+            "/".join(("file:", "", "private-host", "share", "artifact.txt")),
+            "/".join(
+                ("file:", "", "", "home", "example-user", "artifact.txt")
+            ),
+        )
+        for sample in samples:
+            with self.subTest(sample=sample):
+                self.assertEqual(
+                    system_scale.redact_private_absolute_paths(sample),
+                    "{PRIVATE_PATH}",
+                )
+        url = "https://example.com/private/artifact.txt"
+        self.assertEqual(system_scale.redact_private_absolute_paths(url), url)
+        escaped_relative = "." + separator * 2 + separator.join(("src", "lib.rs"))
+        self.assertEqual(
+            system_scale.redact_private_absolute_paths(escaped_relative),
+            escaped_relative,
+        )
+        escaped_line_ending = separator * 2 + "r" + separator * 2 + "n"
+        object_namespace = separator * 2 + "BaseNamedObjects" + separator * 2
+        for portable in (escaped_line_ending, object_namespace):
+            self.assertEqual(
+                system_scale.redact_private_absolute_paths(portable),
+                portable,
+            )
+
+    def test_result_write_refuses_unredacted_private_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "result.json"
+            separator = chr(92)
+            private_path = separator.join(
+                (f"{chr(90)}:", "private-host", "artifact.txt")
+            )
+            with (
+                mock.patch.object(
+                    system_scale,
+                    "redact_private_absolute_paths",
+                    side_effect=lambda value: value,
+                ),
+                self.assertRaises(ValueError) as failure,
+            ):
+                system_scale.write_result(
+                    {"passed": True, "path": private_path}, output
+                )
+            self.assertIn("windows-drive-root", str(failure.exception))
+            self.assertNotIn(private_path, str(failure.exception))
+            self.assertFalse(output.exists())
+            self.assertFalse(output.with_name(f"{output.name}.tmp").exists())
 
     def test_main_persists_stalled_mcp_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

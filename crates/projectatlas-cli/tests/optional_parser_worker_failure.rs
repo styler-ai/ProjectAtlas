@@ -2058,7 +2058,7 @@ fn terminate_process(process: &ProcessIdentity) -> Result<(), Box<dyn Error>> {
         (WINDOWS_TERMINATE_NAME_ENV, process.name.clone()),
         (WINDOWS_TERMINATE_STARTED_ENV, process.started.clone()),
     ];
-    let mut command = windows_powershell(WINDOWS_TERMINATE_PROCESS);
+    let mut command = windows_powershell(WINDOWS_TERMINATE_PROCESS)?;
     for (name, value) in environment {
         command.env(name, value);
     }
@@ -2102,7 +2102,7 @@ fn control_windows_process(
         (WINDOWS_CONTROL_STARTED_ENV, process.started.clone()),
         (WINDOWS_CONTROL_OPERATION_ENV, operation.to_owned()),
     ];
-    let mut command = windows_powershell(WINDOWS_CONTROL_PROCESS);
+    let mut command = windows_powershell(WINDOWS_CONTROL_PROCESS)?;
     for (name, value) in environment {
         command.env(name, value);
     }
@@ -2130,7 +2130,7 @@ fn powershell_processes(
     timeout: Duration,
     operation: &'static str,
 ) -> Result<Vec<ProcessIdentity>, Box<dyn Error>> {
-    let mut command = windows_powershell(script);
+    let mut command = windows_powershell(script)?;
     for (name, value) in environment {
         command.env(name, value);
     }
@@ -2151,8 +2151,9 @@ fn powershell_processes(
 
 /// Build the inbox Windows `PowerShell` command without trusting PATH.
 #[cfg(target_os = "windows")]
-fn windows_powershell(script: &str) -> Command {
-    let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+fn windows_powershell(script: &str) -> Result<Command, Box<dyn Error>> {
+    let system_root = std::env::var_os("SystemRoot")
+        .ok_or_else(|| io::Error::other("SystemRoot is unavailable"))?;
     let executable = PathBuf::from(system_root)
         .join("System32")
         .join("WindowsPowerShell")
@@ -2170,5 +2171,5 @@ fn windows_powershell(script: &str) -> Command {
             script,
         ])
         .stdin(Stdio::null());
-    command
+    Ok(command)
 }

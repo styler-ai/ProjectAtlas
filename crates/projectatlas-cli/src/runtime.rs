@@ -10609,10 +10609,19 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
     #[cfg(windows)]
     #[test]
     fn extended_windows_watch_roots_keep_deleted_paths_in_scope() -> Result<(), Box<dyn Error>> {
-        let root = Path::new(r"\\?\C:\repo");
-        let deleted = Path::new(r"C:\repo\src\deleted.rs");
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let deleted = root.join("src").join("deleted.rs");
+        let root_text = root
+            .to_str()
+            .ok_or_else(|| io::Error::other("temporary path is not UTF-8"))?;
+        let extended_root = if root_text.starts_with(r"\\?\") {
+            root
+        } else {
+            PathBuf::from(format!(r"\\?\{root_text}"))
+        };
         require_eq(
-            &normalized_deleted_path(root, deleted)?,
+            &normalized_deleted_path(&extended_root, &deleted)?,
             &Some("src/deleted.rs".to_string()),
             "extended root deleted path",
         )?;

@@ -1821,7 +1821,9 @@ name = "projectatlas-lints"
 version = "0.4.3"
 dependencies = [
  "proc-macro2",
+ "regex",
  "syn",
+ "tempfile",
 ]
 
 [[package]]

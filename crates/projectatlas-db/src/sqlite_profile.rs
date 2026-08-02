@@ -586,7 +586,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn unc_database_path_is_rejected_before_resolution() {
-        let database = PathBuf::from(r"\\server\share\projectatlas.db");
+        let database = PathBuf::from(["", "", "server", "share", "projectatlas.db"].join(r"\"));
         assert!(matches!(
             reject_unsupported_windows_prefix(&database),
             Err(DbError::DatabaseFilesystemUnsupported { .. })

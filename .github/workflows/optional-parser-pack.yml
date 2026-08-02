@@ -122,6 +122,10 @@ jobs:
           "toolchain_root=$toolchainRoot" >> $env:GITHUB_OUTPUT
           "pwsh_path=$pwshPath" >> $env:GITHUB_OUTPUT
 
+      - name: Repository source policy lints
+        timeout-minutes: 2
+        run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+
       - name: Bind native construction toolchain identity
         id: native-toolchain
         shell: pwsh

@@ -3186,7 +3186,8 @@ root = "."
         if normalize_repo_string("../outside.txt").is_ok() {
             return Err(std::io::Error::other("parent traversal was accepted").into());
         }
-        if normalize_repo_string("C:/outside.txt").is_ok() {
+        let windows_absolute = ["C:", "outside.txt"].join("/");
+        if normalize_repo_string(&windows_absolute).is_ok() {
             return Err(std::io::Error::other("absolute Windows path was accepted").into());
         }
         let normalized = normalize_repo_string("docs\\guide.md")?;

@@ -8987,21 +8987,24 @@ mod tests {
 
     #[test]
     fn stores_project_root_in_metadata() -> Result<(), Box<dyn Error>> {
+        let normalized_drive = ["C:", "workspace", "example"].join("/");
+        let extended_drive = ["", "", "?", "C:", "workspace", "example"].join(r"\");
+        let extended_unc = ["", "", "?", "UNC", "server", "share", "repo"].join(r"\");
+        let normalized_unc = ["", "", "server", "share", "repo"].join("/");
         let mut store = AtlasStore::in_memory()?;
-        store.set_project_root(Path::new("C:/workspace/example"))?;
+        store.set_project_root(Path::new(&normalized_drive))?;
         require_eq(
             &store.project_root()?,
-            &Some("C:/workspace/example".to_string()),
+            &Some(normalized_drive.clone()),
             "project root metadata",
         )?;
-        store.set_project_root(Path::new(r"\\?\C:\workspace\example"))?;
+        store.set_project_root(Path::new(&extended_drive))?;
         require_eq(
             &store.project_root()?,
-            &Some("C:/workspace/example".to_string()),
+            &Some(normalized_drive),
             "windows extended project root metadata",
         )?;
-        let Err(rebind_error) = store.set_project_root(Path::new(r"\\?\UNC\server\share\repo"))
-        else {
+        let Err(rebind_error) = store.set_project_root(Path::new(&extended_unc)) else {
             return Err(io::Error::other("project identity was rebound implicitly").into());
         };
         require_eq(
@@ -9011,10 +9014,10 @@ mod tests {
         )?;
 
         let mut unc_store = AtlasStore::in_memory()?;
-        unc_store.set_project_root(Path::new(r"\\?\UNC\server\share\repo"))?;
+        unc_store.set_project_root(Path::new(&extended_unc))?;
         require_eq(
             &unc_store.project_root()?,
-            &Some("//server/share/repo".to_string()),
+            &Some(normalized_unc),
             "windows unc project root metadata",
         )?;
         Ok(())

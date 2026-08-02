@@ -30,6 +30,10 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      - name: Repository source policy lints
+        timeout-minutes: 2
+        run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+
       - name: Build rustdoc
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 
