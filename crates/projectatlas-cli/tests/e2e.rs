@@ -125,6 +125,7 @@ const CODEX_PLUGIN_MANIFEST_DIR: &str = ".codex-plugin";
 const CODEX_MARKETPLACE_METADATA_DIR: &str = ".agents";
 const CODEX_MARKETPLACE_INSTALL_RECORD_FILE_NAME: &str = ".codex-marketplace-install.json";
 const CODEX_MARKETPLACE_MANIFEST_FILE_NAME: &str = "marketplace.json";
+#[cfg(windows)]
 const CODEX_MARKETPLACE_SNAPSHOT_DIR_NAME: &str = "marketplace-root";
 const CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME: &str = "runtime-integration.json";
 const CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME: &str = ".projectatlas-plugin-update.lock";
