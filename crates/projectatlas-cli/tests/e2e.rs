@@ -13243,18 +13243,13 @@ fn windows_plugin_restore_rejects_cache_junction_and_retains_recovery_snapshot()
         })
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
-    let retained_snapshot_name = snapshots
-        .first()
-        .and_then(|snapshot| snapshot.file_name())
-        .ok_or_else(|| io::Error::other("retained recovery snapshot has no directory name"))?;
-    let unwrapped_output = output_text.replace(['\r', '\n'], "");
     if snapshots.len() != 1
         || !snapshots[0]
             .join(FAKE_CODEX_PLUGIN_CACHE_DIR)
             .join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME)
             .is_file()
         || !output_text.contains("could not be restored completely")
-        || !unwrapped_output.contains(retained_snapshot_name.to_string_lossy().as_ref())
+        || !output_contains_path_name(&output_text, &snapshots[0])
     {
         return Err(io::Error::other(format!(
             "junction-swapped second restore destination did not retain one usable recovery snapshot:\n{output_text}\nsnapshots={snapshots:#?}"
@@ -13442,7 +13437,7 @@ fn windows_plugin_snapshot_cleanup_refuses_path_swap_without_outside_deletion()
         || fs::read_to_string(cleanup_target.join("outside-canary.txt"))? != "outside state\r\n"
         || !output_text.contains("state snapshot cleanup refused/path changed at")
         || output_text.contains("state snapshot cleanup failed; retained at")
-        || !output_text.contains(&snapshot_links[0].to_string_lossy().to_string())
+        || !output_contains_path_name(&output_text, &snapshot_links[0])
         || !output_text.contains(&format!(
             "Codex ProjectAtlas plugin marketplace updated to {release_tag}."
         ))
@@ -13559,7 +13554,7 @@ fn windows_plugin_snapshot_cleanup_failure_retains_usable_direct_snapshot()
         || !snapshots[0].join("marketplace.json").is_file()
         || !snapshots[0].join("marketplace-install.json").is_file()
         || !output_text.contains("state snapshot cleanup failed; retained at")
-        || !output_text.contains(&snapshots[0].to_string_lossy().to_string())
+        || !output_contains_path_name(&output_text, &snapshots[0])
         || output_text.contains("state snapshot cleanup refused/path changed at")
         || !output_text.contains(&format!(
             "Codex ProjectAtlas plugin marketplace updated to {release_tag}."
@@ -26542,6 +26537,14 @@ fn repository_filesystem_snapshot(repo: &Path) -> Result<BTreeMap<String, String
     let mut snapshot = BTreeMap::new();
     visit(repo, repo, &mut snapshot)?;
     Ok(snapshot)
+}
+
+fn output_contains_path_name(output: &str, path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        output
+            .replace(['\r', '\n'], "")
+            .contains(name.to_string_lossy().as_ref())
+    })
 }
 
 /// Require exact effects across the enclosing contract fixture, including explicit output paths.
