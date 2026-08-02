@@ -382,7 +382,7 @@ acquire_codex_projectatlas_plugin_update_lock() {
   fi
 
   current_lock_identity=$(stat -c '%d:%i' -- "$lock_path" 2>/dev/null || stat -f '%d:%i' "$lock_path" 2>/dev/null || true)
-  descriptor_identity=$(stat -c '%d:%i' -- /dev/fd/9 2>/dev/null || stat -f '%d:%i' /dev/fd/9 2>/dev/null || true)
+  descriptor_identity=$(stat -L -c '%d:%i' -- /dev/fd/9 2>/dev/null || stat -L -f '%d:%i' /dev/fd/9 2>/dev/null || true)
   current_lock_links=$(stat -c %h -- "$lock_path" 2>/dev/null || stat -f %l "$lock_path" 2>/dev/null || true)
   if [ -L "$lock_path" ] || [ ! -f "$lock_path" ] || [ "$current_lock_links" != 1 ] ||
     [ "$current_lock_identity" != "$lock_identity" ] || [ "$descriptor_identity" != "$lock_identity" ]; then
