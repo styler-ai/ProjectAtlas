@@ -221,11 +221,11 @@ jobs:
           if ($contracts.Count -ne 1) {
             throw "Expected one compiled packaged contract runner, found $($contracts.Count)."
           }
-          & $contracts[0].FullName persistent_mcp_stdin_does_not_block_repository_startup_probes --exact --nocapture
+          & $contracts[0].FullName persistent_mcp_stdin_does_not_block_repository_startup_probes --exact --include-ignored --nocapture
           if ($LASTEXITCODE -ne 0) {
             throw "Persistent MCP Git config stdin release regression failed with exit code $LASTEXITCODE."
           }
-          & $contracts[0].FullName mcp_advertised_tools_own_their_real_sqlite_effects --exact --nocapture
+          & $contracts[0].FullName mcp_advertised_tools_own_their_real_sqlite_effects --exact --include-ignored --nocapture
           if ($LASTEXITCODE -ne 0) {
             throw "Advertised MCP tool contract release regression failed with exit code $LASTEXITCODE."
           }
@@ -233,7 +233,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Bare-root database preflight release regression failed with exit code $LASTEXITCODE."
           }
-          & $contracts[0].FullName generated_mcp_config_preserves_explicit_conventional_database_authority --exact --nocapture
+          & $contracts[0].FullName generated_mcp_config_preserves_explicit_conventional_database_authority --exact --include-ignored --nocapture
           if ($LASTEXITCODE -ne 0) {
             throw "Generated MCP database authority release regression failed with exit code $LASTEXITCODE."
           }
@@ -360,19 +360,56 @@ jobs:
           require_args(command[1:])
           require(Path(opencode["cwd"]).resolve() == root, "opencode cwd mismatch")
           PY
-          chmod +x contract-artifacts/projectatlas-packaged-contract
-          PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
-          PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
-            contract-artifacts/projectatlas-packaged-contract \
-              mcp_advertised_tools_own_their_real_sqlite_effects --exact --nocapture
-          PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
-          PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
-            contract-artifacts/projectatlas-packaged-contract \
-              packaged_cli_surface_preserves_v0326_routes_and_defaults --exact --nocapture
-          PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
-          PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
-            contract-artifacts/projectatlas-packaged-contract \
-              packaged_cli_commands_own_their_real_sqlite_effects --exact --nocapture
+          contract="contract-artifacts/projectatlas-packaged-contract"
+          chmod +x "$contract"
+          if ! inventory="$("$contract" --list)"; then
+            echo "Packaged contract inventory failed." >&2
+            exit 1
+          fi
+          for test in \
+            mcp_advertised_tools_own_their_real_sqlite_effects \
+            packaged_cli_surface_preserves_v0326_routes_and_defaults \
+            packaged_cli_commands_own_their_real_sqlite_effects
+          do
+            matches="$(printf '%s\n' "$inventory" | awk -v expected="${test}: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
+            if [ "$matches" -ne 1 ]; then
+              echo "Packaged contract inventory must contain exactly one '${test}: test' line; found $matches." >&2
+              exit 1
+            fi
+            PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
+            PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
+              "$contract" "$test" --exact --include-ignored --nocapture
+          done
+
+      - name: Installed-candidate regression and upgrade contracts
+        timeout-minutes: 10
+        env:
+          PROJECTATLAS_NO_TELEMETRY: "1"
+        run: |
+          set -euo pipefail
+          runtime="$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas"
+          contract="contract-artifacts/projectatlas-packaged-contract"
+          chmod +x "$contract"
+          if ! inventory="$("$contract" --list)"; then
+            echo "Installed-candidate contract inventory failed." >&2
+            exit 1
+          fi
+          for test in \
+            installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui \
+            persistent_mcp_stdin_does_not_block_repository_startup_probes \
+            compiler_config_utf8_bom_refreshes_through_cli_and_mcp \
+            supported_predecessor_recovery_preserves_explicit_database_selection \
+            plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp
+          do
+            matches="$(printf '%s\n' "$inventory" | awk -v expected="${test}: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
+            if [ "$matches" -ne 1 ]; then
+              echo "Installed-candidate contract inventory must contain exactly one '${test}: test' line; found $matches." >&2
+              exit 1
+            fi
+            PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
+            PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
+              "$contract" "$test" --exact --include-ignored --nocapture
+          done
 
   prepublish-installer-smoke-windows:
     name: prepublish installer smoke windows-x64
@@ -462,17 +499,53 @@ jobs:
           $env:PROJECTATLAS_MCP_CONTRACT_EXECUTABLE = $expectedRuntime
           $env:PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT = [System.IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE "plugins\projectatlas"))
           $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.exe"
-          & $contractRunner mcp_advertised_tools_own_their_real_sqlite_effects --exact --nocapture
+          $inventory = @(& $contractRunner --list)
           if ($LASTEXITCODE -ne 0) {
-            throw "Packaged MCP contract failed with exit code $LASTEXITCODE."
+            throw "Packaged contract inventory failed with exit code $LASTEXITCODE."
           }
-          & $contractRunner packaged_cli_surface_preserves_v0326_routes_and_defaults --exact --nocapture
-          if ($LASTEXITCODE -ne 0) {
-            throw "Packaged CLI surface contract failed with exit code $LASTEXITCODE."
+          foreach ($test in @(
+            "mcp_advertised_tools_own_their_real_sqlite_effects",
+            "packaged_cli_surface_preserves_v0326_routes_and_defaults",
+            "packaged_cli_commands_own_their_real_sqlite_effects"
+          )) {
+            $matches = @($inventory | Where-Object { $_ -ceq "${test}: test" }).Count
+            if ($matches -ne 1) {
+              throw "Packaged contract inventory must contain exactly one '${test}: test' line; found $matches."
+            }
+            & $contractRunner $test --exact --include-ignored --nocapture
+            if ($LASTEXITCODE -ne 0) {
+              throw "Packaged contract '$test' failed with exit code $LASTEXITCODE."
+            }
           }
-          & $contractRunner packaged_cli_commands_own_their_real_sqlite_effects --exact --nocapture
+
+      - name: Installed-candidate regression and upgrade contracts
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          PROJECTATLAS_NO_TELEMETRY: "1"
+        run: |
+          $env:PROJECTATLAS_MCP_CONTRACT_EXECUTABLE = Join-Path $env:RUNNER_TEMP "projectatlas-prepublish\projectatlas.exe"
+          $env:PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT = Join-Path $env:GITHUB_WORKSPACE "plugins\projectatlas"
+          $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.exe"
+          $inventory = @(& $contractRunner --list)
           if ($LASTEXITCODE -ne 0) {
-            throw "Packaged CLI behavior contract failed with exit code $LASTEXITCODE."
+            throw "Installed-candidate contract inventory failed with exit code $LASTEXITCODE."
+          }
+          foreach ($test in @(
+            "installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui",
+            "persistent_mcp_stdin_does_not_block_repository_startup_probes",
+            "compiler_config_utf8_bom_refreshes_through_cli_and_mcp",
+            "supported_predecessor_recovery_preserves_explicit_database_selection",
+            "plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp"
+          )) {
+            $matches = @($inventory | Where-Object { $_ -ceq "${test}: test" }).Count
+            if ($matches -ne 1) {
+              throw "Installed-candidate contract inventory must contain exactly one '${test}: test' line; found $matches."
+            }
+            & $contractRunner $test --exact --include-ignored --nocapture
+            if ($LASTEXITCODE -ne 0) {
+              throw "Installed-candidate contract '$test' failed with exit code $LASTEXITCODE."
+            }
           }
 
   parser-pack-assets:

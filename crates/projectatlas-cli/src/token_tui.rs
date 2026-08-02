@@ -2652,6 +2652,33 @@ mod tests {
     }
 
     #[test]
+    fn overview_dashboard_renders_complete_version_footer_at_supported_widths() {
+        let overview = sample_overview();
+        let expected_footer = format!("ProjectAtlas v{}", env!("CARGO_PKG_VERSION"));
+
+        for width in [80, 140, 200] {
+            let buffer = render_overview_buffer_at_width(&overview, Some("s"), width);
+            let rows = (0..buffer.area.height)
+                .map(|y| line_symbols(&buffer, y))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row.contains(&expected_footer))
+                    .count(),
+                1,
+                "{width}-column overview must contain exactly one complete version footer"
+            );
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row.matches("ProjectAtlas v").count())
+                    .sum::<usize>(),
+                1,
+                "{width}-column overview must not duplicate or clip the version footer"
+            );
+        }
+    }
+
+    #[test]
     fn overview_dashboard_light_theme_remaps_semantic_palette() {
         let overview = sample_overview();
         let dashboard =
