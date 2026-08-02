@@ -11638,7 +11638,7 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
     )?;
 
     let workspace_root = workspace_root()?;
-    let installer_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+    let installer_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
         &repo,
         &runtime,
@@ -11871,6 +11871,7 @@ fn plugin_update_skips_non_official_codex_marketplace() -> Result<(), Box<dyn Er
     let fake_path = temp.path().join(FAKE_PATH_DIR);
     fs::create_dir(&fake_path)?;
     let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    fs::create_dir_all(isolated_home.join(CODEX_CONFIG_DIR))?;
     let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
     let stale_plugin_json = r#"{"installed":[{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.0.1"}],"available":[]}"#;
     let fake_codex_script = if cfg!(windows) {
@@ -11886,7 +11887,7 @@ fn plugin_update_skips_non_official_codex_marketplace() -> Result<(), Box<dyn Er
 
     let workspace_root = workspace_root()?;
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
-    let installer_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+    let installer_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
         &repo,
         &runtime,
@@ -11972,7 +11973,7 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_windows_repairs_
 
     let workspace_root = workspace_root()?;
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
-    let installer_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+    let installer_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
         &repo,
         &runtime,
@@ -12017,7 +12018,7 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_windows_repairs_
             fs::remove_file(&plugin_skill)?;
         }
         fs::write(&fake_codex_log, b"")?;
-        let repair_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+        let repair_output = run_plugin_installer_with_codex_fixture(
             &workspace_root,
             &repo,
             &runtime,
@@ -12116,7 +12117,7 @@ fn plugin_update_repairs_current_codex_plugin_with_stale_source_manifest()
 
     let workspace_root = workspace_root()?;
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
-    let installer_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+    let installer_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
         &repo,
         &runtime,
@@ -12270,7 +12271,7 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
 
     let workspace_root = workspace_root()?;
     let runtime = mcp_contract_executable();
-    let installer_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+    let installer_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
         &repo,
         &runtime,
@@ -12618,6 +12619,7 @@ fn assert_plugin_update_refuses_retained_recovery_state_before_mutation()
     fs::create_dir(&repo)?;
     fs::create_dir(&fake_path)?;
     fs::create_dir_all(&codex_dir)?;
+    fs::write(isolated_home.join(FAKE_CODEX_LOG_FILE), b"")?;
     let retained_snapshot = codex_dir.join(if cfg!(windows) {
         ".projectatlas-plugin-state-crashed"
     } else {
@@ -12634,7 +12636,7 @@ fn assert_plugin_update_refuses_retained_recovery_state_before_mutation()
     write_executable_script(&fake_codex, fake_codex_script)?;
 
     let runtime = mcp_contract_executable();
-    let output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+    let output = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
         &runtime,
@@ -12776,7 +12778,7 @@ fn assert_plugin_update_refuses_unavailable_or_ambiguous_inventory() -> Result<(
         write_executable_script(&fake_codex, &fake_codex_script)?;
         let state_before = repository_filesystem_snapshot(&codex_dir)?;
         let runtime = mcp_contract_executable();
-        let output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+        let output = run_plugin_installer_with_codex_fixture(
             &workspace_root()?,
             &repo,
             &runtime,
@@ -13116,7 +13118,7 @@ fn windows_plugin_restore_rejects_config_directory_and_retains_recovery_snapshot
     write_executable_script(&fake_codex, &fake_codex_script)?;
 
     let runtime = mcp_contract_executable();
-    let output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+    let output = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
         &runtime,
@@ -13212,7 +13214,7 @@ fn windows_plugin_restore_rejects_cache_junction_and_retains_recovery_snapshot()
     write_executable_script(&fake_codex, &fake_script)?;
 
     let runtime = mcp_contract_executable();
-    let output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+    let output = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
         &runtime,
@@ -13320,7 +13322,7 @@ fn windows_plugin_snapshot_rejects_reparse_above_codex_home_before_mutation()
         ),
     )?;
     let runtime = mcp_contract_executable();
-    let output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+    let output = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
         &runtime,
@@ -13397,7 +13399,7 @@ fn windows_plugin_snapshot_cleanup_refuses_path_swap_without_outside_deletion()
         ),
     )?;
     let runtime = mcp_contract_executable();
-    let output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+    let output = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
         &runtime,
@@ -13487,7 +13489,7 @@ fn windows_plugin_snapshot_cleanup_failure_retains_usable_direct_snapshot()
     )?;
 
     let runtime = mcp_contract_executable();
-    let output_result = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+    let output_result = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
         &runtime,
@@ -30151,8 +30153,8 @@ fn run_projectatlas_plugin_installer(
     run_projectatlas_plugin_installer_with_optional_path(workspace_root, repo, runtime, None)
 }
 
-/// Run the bundled plugin installer with a PATH shadow and isolated user-local dirs.
-fn run_projectatlas_plugin_installer_with_path_shadow_and_home(
+/// Run the bundled plugin installer against the isolated Codex fixture.
+fn run_plugin_installer_with_codex_fixture(
     workspace_root: &Path,
     repo: &Path,
     runtime: &Path,
