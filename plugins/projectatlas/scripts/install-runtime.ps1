@@ -1258,7 +1258,7 @@ function Invoke-ProjectAtlasBoundedJsonCommand {
     if (-not $probeCleanupSucceeded) {
         return $null
     }
-    Write-Output -NoEnumerate $probePayload
+    return $probePayload
 }
 
 function Invoke-ProjectAtlasRuntimeInfo {

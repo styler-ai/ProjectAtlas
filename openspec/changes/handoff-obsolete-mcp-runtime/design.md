@@ -41,4 +41,4 @@ Ship the installer and tests together. Existing installs require no state or sch
 
 ## Open Questions
 
-- The release gate still needs a real installed Codex host to confirm parent survival, child replacement, exact target version, and successful MCP initialization after handoff.
+None. The v0.4.3 release gate confirmed parent survival, obsolete-child replacement, the exact target version, and successful MCP initialization in a real installed Codex host.

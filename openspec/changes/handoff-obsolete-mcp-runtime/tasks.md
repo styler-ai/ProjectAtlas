@@ -19,4 +19,4 @@
 
 ## 4. Release Gate
 
-- [ ] 4.1 Verify the exact release version in a real installed Codex host: parent survives, obsolete child is replaced, and MCP initialization succeeds.
+- [x] 4.1 Verify the exact release version in a real installed Codex host: parent survives, obsolete child is replaced, and MCP initialization succeeds.

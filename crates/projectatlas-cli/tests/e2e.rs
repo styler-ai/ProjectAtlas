@@ -5504,7 +5504,7 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
         .join("projectatlas")
         .join("scripts")
         .join("install-runtime.ps1");
-    let output = StdCommand::new("powershell")
+    let output = StdCommand::new("pwsh")
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
@@ -5570,6 +5570,9 @@ $unicodePayload = Invoke-ProjectAtlasBoundedJsonCommand `
 $expectedUnicodePath = "M$([char]0x00FC)nchen\$([char]0x8DEF)$([char]0x5F84)"
 if ($unicodePayload.unicode_path -ne $expectedUnicodePath) {
     throw "Bounded JSON command did not strictly decode BOM-less UTF-8 output: expected='$expectedUnicodePath' actual='$($unicodePayload.unicode_path)'"
+}
+if (-not (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_UNICODE_JSON_RUNTIME "0.4.1")) {
+    throw "Valid structured runtime probe was rejected"
 }
 $shortBoundedJsonDefinition = $boundedJsonDefinition.Replace(
     '$probeTimeoutMs = 5000',

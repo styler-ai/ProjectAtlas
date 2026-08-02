@@ -1326,7 +1326,7 @@ mod tests {
     };
     use std::fs;
     use std::io;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::Command;
 
     /// Rule used by parser-focused unit tests.
@@ -1473,25 +1473,16 @@ mod tests {
             status.success(),
             "temporary Git repository initialization failed",
         )?;
-        let rules = private_path_rules()?;
-        let sample = [
-            std::env::var_os("USERPROFILE").map(PathBuf::from),
-            std::env::var_os("HOME").map(PathBuf::from),
-            Some(std::env::temp_dir()),
-        ]
-        .into_iter()
-        .flatten()
-        .filter_map(|path| path.to_str().map(str::to_owned))
-        .find(|path| !lint_private_paths("runtime-path", path, &rules).is_empty())
-        .or_else(|| private_path_samples().ok()?.into_iter().next())
-        .ok_or_else(|| io::Error::other("private path sample is missing"))?;
+        let samples = private_path_samples()?;
+        let sample = samples
+            .get(4)
+            .ok_or_else(|| io::Error::other("untracked private path sample is missing"))?;
         fs::write(
             repository.path().join("privacy-check.ps1"),
             format!("$runtime = {sample:?}\n"),
         )?;
-        let tracked_sample = private_path_samples()?
-            .into_iter()
-            .nth(1)
+        let tracked_sample = samples
+            .get(1)
             .ok_or_else(|| io::Error::other("tracked private path sample is missing"))?;
         fs::write(
             repository.path().join("tracked.rs"),
