@@ -1,6 +1,6 @@
 ## 1. Full-Project Atlas Preview
 
-- [x] 1.1 Replace arbitrary relation-prefix loading with bounded indexed resolved-hub and adjacency reads across complete current-generation relation families, including query-plan, corrupt-row, unresolved, containment, self, zero-limit, and continuation coverage.
+- [x] 1.1 Replace arbitrary relation-prefix loading with bounded indexed resolved-hub and adjacency reads across complete current-generation relation families, including query-plan, selected-page corruption, unresolved, containment, self, zero-limit, and continuation coverage without per-read whole-generation validation.
 - [x] 1.2 Seed each family deterministically and separate connected-component/branch discovery from final TUI node, link, and degree admission, covering high-degree articulation, disconnected, below-cap, 189-hidden, and 190/200/220 rendering behavior.
 - [x] 1.3 Prove exact selected-worktree isolation through the real linked-worktree CLI/MCP E2E and keep summaries, relation surfaces, schema/publication behavior, and the checked-in README image unchanged.
 - [ ] 1.4 Run format, focused check/Clippy, owning DB/CLI tests, query-plan assertions, exact candidate cold/warm 200-column Windows QA, independent edge review, and the accumulated release gate.
@@ -21,6 +21,6 @@
 
 ## 4. Repository Source Privacy
 
-- [x] 4.1 Normalize UTF-8 and UTF-16 BOM text at the shared decoder, retain binary exclusion and malformed-text failure, and cover every private-path family with redacted diagnostics.
+- [x] 4.1 Normalize UTF-8 and UTF-16 BOM text at the shared decoder, retain binary exclusion and malformed-text failure, cover named and root-owned home paths with URI boundaries, and bound redacted diagnostics while preserving complete counts and exact published-base comparison.
 - [x] 4.2 Run complete-current-tree and newly reachable history policy before product compilation in pre-push, CI, release, documentation, and optional-parser paths, with full-history checkout and fail-closed range selection.
 - [ ] 4.3 Run format, focused linter/workflow tests, the full accumulated release gate, hosted artifact paths, and independent privacy/edge review.

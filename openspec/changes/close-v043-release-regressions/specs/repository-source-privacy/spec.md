@@ -11,11 +11,19 @@ ProjectAtlas SHALL reject machine-local absolute paths in tracked and non-ignore
 - **WHEN** a script, workflow, configuration file, document, symlink target, or extensionless text file contains a forbidden machine-local path
 - **THEN** the same repository policy rejects it without an extension allowlist
 
+#### Scenario: A root-owned Unix home is committed
+- **WHEN** Git-visible text contains a root home path or its file URI form
+- **THEN** the Unix home policy rejects it like every named-user home path
+
 #### Scenario: Binary or malformed source is inspected
 - **WHEN** a Git-visible file is binary
 - **THEN** it remains outside the text policy
 - **AND WHEN** a non-binary source encoding is malformed
 - **THEN** the gate fails closed without echoing its private bytes
+
+#### Scenario: Hostile source contains many private paths
+- **WHEN** a complete current-tree or history scan finds more private paths than the diagnostic limit
+- **THEN** the gate reports the complete count and emits only a bounded redacted sample while exact published-base comparison remains independent of that diagnostic limit
 
 ### Requirement: Newly reachable history cannot hide private paths
 ProjectAtlas SHALL scan every newly reachable revision and path identity before accepting a push, pull request, package, parser pack, documentation deployment, or release.

@@ -24,7 +24,7 @@ The five failures share a release concern—an optional or bounded adapter disca
 
 ### 1. Rank representative graph seeds in SQLite and keep Rust expansion bounded
 
-The database reads high-degree endpoints across the complete current-generation relation family, restricted to locally resolved, non-self, non-containment rows, using the existing relation-family/resolution index. It returns only a small deterministic hub page. Existing source/target adjacency indexes provide bounded continuation pages.
+The database reads high-degree endpoints across the complete current-generation relation family, restricted to locally resolved, non-self, non-containment rows, using the existing relation-family/resolution index. It returns only a small deterministic hub page. Existing source/target adjacency indexes provide bounded continuation pages. Returned hub entities plus every selected adjacency row, endpoint, and truncation sentinel use the canonical decoders and fail as one requested page; rows outside that page are not redundantly decoded by each preview read.
 
 The CLI seeds each family from four ranked hubs and reuses two bounded adjacency rounds. The TUI chooses the largest connected component and ranks candidates by reachable branch size before applying the unchanged 12-link visual degree cap. Final 48-node and 64-link caps remain rendering limits rather than discovery limits.
 
@@ -46,6 +46,8 @@ The shared release-test batch helper now derives the request IDs it must observe
 
 Each installer serializes inventory, snapshot, mutation, validation, and restore for the selected Codex root, then captures the validated official marketplace/plugin source tree and exact Codex config bytes inside Codex-owned containment before the first remove or replacement operation. Restore validates containment and writes those local bytes directly while the installer still owns that lock; it never follows links, trusts an unofficial source, or calls the network. Generated ProjectAtlas runtime/MCP/config state remains separately authoritative and is not rolled back by a failed plugin acquisition.
 
+POSIX keeps one direct, single-link lock inode per Codex root and holds its descriptor with the platform lock utility (`flock` on Linux or `lockf` on macOS). Release closes the descriptor without unlinking the inode, so abrupt process death is kernel-recoverable and cannot strand a stale PID, hard-link claim, or renamed successor path. Synchronous mutation children inherit the descriptor, conservatively excluding a successor until the in-flight child exits. Missing lock support and any path, owner, link-count, or descriptor-identity mismatch fail closed before Codex mutation.
+
 If a terminated updater leaves a recovery snapshot, the next updater fails closed before plugin mutation and retains that state for explicit inspection. Automatic replay is intentionally excluded because the snapshot alone cannot prove whether the prior updater died before or after a successful replacement.
 
 Successful updates, intentionally managed marketplaces, skip controls, and obsolete-MCP handoff keep their existing behavior. Windows and POSIX use equivalent state transitions in their existing scripts rather than a shared framework.
@@ -54,7 +56,7 @@ Alternative rejected: remove-then-network-add plus network rollback is not rever
 
 ### 4. Keep source privacy in one decoder and require it before every product build
 
-The repository linter strips UTF-8, UTF-16 little-endian, and UTF-16 big-endian BOMs at its shared text-decoding boundary, rejects malformed non-binary text, and applies the same private-path rules to tracked and non-ignored untracked source plus historical Git blobs. Diagnostics retain only repository-relative location and rule identity.
+The repository linter strips UTF-8, UTF-16 little-endian, and UTF-16 big-endian BOMs at its shared text-decoding boundary, rejects malformed non-binary text, and applies the same private-path rules, including root-owned Unix homes with real URI-token boundaries, to tracked and non-ignored untracked source plus historical Git blobs. It counts the complete scan while retaining only a bounded redacted diagnostic sample; exact published-base identity counts remain separate from that presentation bound. Diagnostics retain only repository-relative location and rule identity.
 
 CI, release, documentation, optional-parser construction, and pre-push run the current-tree policy before product compilation. Each independent hosted artifact path fetches complete history and scans its exact newly reachable range; downstream package, publish, and deploy jobs remain dependency-gated behind that result. The linter binary itself is the unavoidable policy bootstrap and does not compile a ProjectAtlas product crate.
 

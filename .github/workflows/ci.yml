@@ -229,6 +229,11 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli posix_plugin_restore_rejects_hostile_paths_and_retains_recovery_state --test e2e -- --exact
 
+      - name: POSIX plugin lock crash and trust-boundary E2E
+        if: matrix.label != 'windows'
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli posix_plugin_lock_rejects_indirection_and_survives_crash --test e2e -- --exact
+
       - name: Windows plugin snapshot trust-boundary E2E
         if: matrix.label == 'windows'
         timeout-minutes: 5

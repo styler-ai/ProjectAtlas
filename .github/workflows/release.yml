@@ -180,6 +180,7 @@ jobs:
             echo "Compiled packaged contract runner was not found" >&2
             exit 1
           fi
+          "$contract" posix_plugin_lock_rejects_indirection_and_survives_crash --exact --include-ignored --nocapture
           mkdir -p contract-artifacts
           cp "$contract" contract-artifacts/projectatlas-packaged-contract
 

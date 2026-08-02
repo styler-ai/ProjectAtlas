@@ -2642,7 +2642,20 @@ function New-ProjectAtlasCodexStateSnapshot {
         if ($ExpectedVersion -notmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$') {
             throw "expected projectatlas plugin version cannot identify its Codex cache safely"
         }
-        $expectedMarketplaceRoot = Join-Path $codexRoot ".tmp\marketplaces\projectatlas"
+        $expectedMarketplaceRoot = [System.IO.Path]::GetFullPath(
+            (Join-Path $codexRoot ".tmp\marketplaces\projectatlas")
+        )
+        Assert-ProjectAtlasCodexDirectAncestry `
+            $expectedMarketplaceRoot `
+            "ProjectAtlas marketplace root" `
+            $codexRoot
+        $marketplaceRootExisted = Test-Path -LiteralPath $expectedMarketplaceRoot
+        if ($marketplaceRootExisted) {
+            Assert-ProjectAtlasCodexRestorableDirectory `
+                $expectedMarketplaceRoot `
+                "ProjectAtlas marketplace root" `
+                $codexRoot
+        }
         $expectedPluginSourcePath = Join-Path $expectedMarketplaceRoot "plugins\projectatlas"
         $pluginSourcePath = [System.IO.Path]::GetFullPath($expectedPluginSourcePath)
         Assert-ProjectAtlasCodexDirectAncestry `
@@ -2750,8 +2763,8 @@ function New-ProjectAtlasCodexStateSnapshot {
         if ($configExisted) {
             [System.IO.File]::Copy($configPath, (Join-Path $snapshotRoot "config.toml"), $false)
         }
-        if ($pluginSourceExisted) {
-            Copy-Item -LiteralPath $pluginSourcePath -Destination (Join-Path $snapshotRoot "plugin-source") -Recurse -Force
+        if ($marketplaceRootExisted) {
+            Copy-Item -LiteralPath $expectedMarketplaceRoot -Destination (Join-Path $snapshotRoot "marketplace-root") -Recurse -Force
         }
         if ($pluginCacheExisted) {
             Copy-Item -LiteralPath $pluginCachePath -Destination (Join-Path $snapshotRoot "plugin-cache") -Recurse -Force
@@ -2764,36 +2777,18 @@ function New-ProjectAtlasCodexStateSnapshot {
         if ($expectedPluginCacheExisted -and -not $cachePathsMatch) {
             Copy-Item -LiteralPath $expectedPluginCachePath -Destination (Join-Path $snapshotRoot "expected-plugin-cache") -Recurse -Force
         }
-        if ($marketplaceManifestExisted) {
-            [System.IO.File]::Copy(
-                $marketplaceManifestPath,
-                (Join-Path $snapshotRoot "marketplace.json"),
-                $false
-            )
-        }
-        if ($marketplaceInstallRecordExisted) {
-            [System.IO.File]::Copy(
-                $marketplaceInstallRecordPath,
-                (Join-Path $snapshotRoot "marketplace-install.json"),
-                $false
-            )
-        }
         return [pscustomobject]@{
             Root                         = $snapshotRoot
             ConfigPath                   = $configPath
             ConfigExisted                = $configExisted
             CodexRoot                    = $codexRoot
-            PluginSourcePath             = $pluginSourcePath
-            PluginSourceExisted          = $pluginSourceExisted
+            MarketplaceRootPath          = $expectedMarketplaceRoot
+            MarketplaceRootExisted       = $marketplaceRootExisted
             PluginCachePath              = $pluginCachePath
             PluginCacheExisted           = $pluginCacheExisted
             ExpectedPluginCachePath      = $expectedPluginCachePath
             ExpectedPluginCacheExisted   = $expectedPluginCacheExisted
             CachePathsMatch              = $cachePathsMatch
-            MarketplaceManifestPath      = $marketplaceManifestPath
-            MarketplaceManifestExisted   = $marketplaceManifestExisted
-            MarketplaceInstallRecordPath = $marketplaceInstallRecordPath
-            MarketplaceInstallRecordExisted = $marketplaceInstallRecordExisted
         }
     }
     catch {
@@ -2828,10 +2823,10 @@ function Restore-ProjectAtlasCodexStateSnapshot {
         Assert-ProjectAtlasCodexDirectAncestry $Snapshot.Root "Codex state snapshot" $currentCodexRoot
         $directoryRestores = @(
                     [pscustomobject]@{
-                        Destination = $Snapshot.PluginSourcePath
-                        Snapshot    = (Join-Path $Snapshot.Root "plugin-source")
-                        Description = "Codex plugin source"
-                        Existed     = $Snapshot.PluginSourceExisted
+                        Destination = $Snapshot.MarketplaceRootPath
+                        Snapshot    = (Join-Path $Snapshot.Root "marketplace-root")
+                        Description = "ProjectAtlas marketplace root"
+                        Existed     = $Snapshot.MarketplaceRootExisted
                     },
                     [pscustomobject]@{
                         Destination = $Snapshot.PluginCachePath
@@ -2884,56 +2879,6 @@ function Restore-ProjectAtlasCodexStateSnapshot {
                         -Destination $directoryRestore.Destination `
                         -Recurse `
                         -Force
-                }
-            }
-            foreach ($fileRestore in @(
-                    [pscustomobject]@{
-                        Destination = $Snapshot.MarketplaceManifestPath
-                        Snapshot    = (Join-Path $Snapshot.Root "marketplace.json")
-                        Description = "ProjectAtlas marketplace manifest"
-                        Existed     = $Snapshot.MarketplaceManifestExisted
-                    },
-                    [pscustomobject]@{
-                        Destination = $Snapshot.MarketplaceInstallRecordPath
-                        Snapshot    = (Join-Path $Snapshot.Root "marketplace-install.json")
-                        Description = "ProjectAtlas marketplace install record"
-                        Existed     = $Snapshot.MarketplaceInstallRecordExisted
-                    }
-                )) {
-                if ($fileRestore.Existed) {
-                Assert-ProjectAtlasCodexRestorableFile `
-                    $fileRestore.Snapshot `
-                    ($fileRestore.Description + " snapshot") `
-                    $currentCodexRoot
-                }
-                Assert-ProjectAtlasCodexDirectAncestry `
-                    $fileRestore.Destination `
-                    $fileRestore.Description `
-                    $currentCodexRoot
-                $destinationParent = Split-Path -Parent $fileRestore.Destination
-                New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
-                Assert-ProjectAtlasCodexDirectAncestry `
-                    $fileRestore.Destination `
-                    $fileRestore.Description `
-                    $currentCodexRoot
-                if (Test-Path -LiteralPath $fileRestore.Destination) {
-                    Assert-ProjectAtlasCodexRestorableFile `
-                        $fileRestore.Destination `
-                        $fileRestore.Description `
-                        $currentCodexRoot
-                    if (-not $fileRestore.Existed) {
-                        Remove-Item -LiteralPath $fileRestore.Destination -Force
-                        if (Test-Path -LiteralPath $fileRestore.Destination) {
-                            throw "$($fileRestore.Description) removal did not complete"
-                        }
-                    }
-                }
-                if ($fileRestore.Existed) {
-                    $temporaryPath = $fileRestore.Destination + ".projectatlas-restore-" + [guid]::NewGuid().ToString("N")
-                    Assert-ProjectAtlasCodexDirectAncestry $temporaryPath $fileRestore.Description $currentCodexRoot
-                    [System.IO.File]::Copy($fileRestore.Snapshot, $temporaryPath, $false)
-                    Assert-ProjectAtlasCodexDirectAncestry $fileRestore.Destination $fileRestore.Description $currentCodexRoot
-                    Move-Item -LiteralPath $temporaryPath -Destination $fileRestore.Destination -Force
                 }
             }
         if ($Snapshot.ConfigExisted) {

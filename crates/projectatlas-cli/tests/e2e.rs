@@ -125,6 +125,7 @@ const CODEX_PLUGIN_MANIFEST_DIR: &str = ".codex-plugin";
 const CODEX_MARKETPLACE_METADATA_DIR: &str = ".agents";
 const CODEX_MARKETPLACE_INSTALL_RECORD_FILE_NAME: &str = ".codex-marketplace-install.json";
 const CODEX_MARKETPLACE_MANIFEST_FILE_NAME: &str = "marketplace.json";
+const CODEX_MARKETPLACE_SNAPSHOT_DIR_NAME: &str = "marketplace-root";
 const CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME: &str = "runtime-integration.json";
 const CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME: &str = ".projectatlas-plugin-update.lock";
 #[cfg(windows)]
@@ -12443,11 +12444,18 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
             ),
         )?;
     }
-    let (_, plugin_source, installed_cache) = write_fake_codex_projectatlas_integration(
-        &codex_dir,
-        "0.0.1",
-        "0.0.1",
-        "prior offline ProjectAtlas skill\n",
+    let (marketplace_root, plugin_source, installed_cache) =
+        write_fake_codex_projectatlas_integration(
+            &codex_dir,
+            "0.0.1",
+            "0.0.1",
+            "prior offline ProjectAtlas skill\n",
+        )?;
+    let unrelated_marketplace_state = marketplace_root.join("retained-state");
+    fs::create_dir_all(unrelated_marketplace_state.join("empty-directory"))?;
+    fs::write(
+        unrelated_marketplace_state.join("metadata.bin"),
+        b"unrelated validated marketplace bytes\n",
     )?;
     let prior_runtime_integration =
         r#"{"runtime":"old-projectatlas-runtime","version":"0.0.1","config":"prior"}"#;
@@ -12459,6 +12467,8 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
         installed_cache.join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME),
         prior_runtime_integration,
     )?;
+    #[cfg(unix)]
+    prepare_plugin_lock(&codex_dir)?;
     let state_before = repository_filesystem_snapshot(&codex_dir)?;
     let plugin_source_json = serde_json::to_string(&plugin_source.to_string_lossy())?;
     let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
@@ -12562,6 +12572,300 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
     Ok(())
 }
 
+#[cfg(unix)]
+fn prepare_plugin_lock(codex_dir: &Path) -> Result<(), Box<dyn Error>> {
+    fs::write(codex_dir.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME), b"")?;
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn posix_plugin_lock_rejects_indirection_and_survives_crash() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::{MetadataExt, symlink};
+
+    let installer = workspace_root()?
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.sh");
+    let installer_source = fs::read_to_string(installer)?;
+    let acquire_start = installer_source
+        .find("acquire_codex_projectatlas_plugin_update_lock() {")
+        .ok_or_else(|| io::Error::other("POSIX plugin update lock acquisition function missing"))?;
+    let acquire_end = installer_source[acquire_start..]
+        .find("\nclear_codex_projectatlas_snapshot() {")
+        .map(|offset| acquire_start + offset)
+        .ok_or_else(|| io::Error::other("POSIX plugin update lock functions boundary drifted"))?;
+
+    let temp = tempfile::tempdir()?;
+    let lock_root = temp.path().join("codex-root");
+    fs::create_dir(&lock_root)?;
+    let lock_path = lock_root.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME);
+    let harness = temp.path().join("verify-plugin-lock-crash.sh");
+    fs::write(
+        &harness,
+        format!(
+            r#"#!/bin/sh
+set -eu
+codex_plugin_update_lock_path=
+codex_plugin_update_lock_root=
+codex_plugin_update_lock_identity=
+{}
+mode=$1
+lock_root=$2
+acquire_codex_projectatlas_plugin_update_lock "$lock_root"
+case "$mode" in
+  hold)
+    printf '%s\n' ready
+    read -r ignored
+    ;;
+  survivor)
+    sh -c 'printf "%s\n" "$$" > "$1"; while [ ! -e "$2" ]; do sleep 1; done' sh "$3" "$4" >/dev/null 2>&1 &
+    ;;
+  swap)
+    mv -- "$lock_root/{CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME}" "$lock_root/held-lock"
+    : > "$lock_root/{CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME}"
+    if release_codex_projectatlas_plugin_update_lock; then exit 21; fi
+    [ -f "$lock_root/held-lock" ]
+    [ -f "$lock_root/{CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME}" ]
+    ;;
+  *)
+    release_codex_projectatlas_plugin_update_lock
+    ;;
+esac
+"#,
+            &installer_source[acquire_start..acquire_end]
+        ),
+    )?;
+
+    let outside = temp.path().join("outside-lock-target");
+    fs::write(&outside, b"outside sentinel\n")?;
+    symlink(&outside, &lock_path)?;
+    let symlink_output = StdCommand::new("sh")
+        .arg(&harness)
+        .arg("once")
+        .arg(&lock_root)
+        .output()?;
+    if symlink_output.status.success() || fs::read(&outside)? != b"outside sentinel\n" {
+        return Err(
+            io::Error::other("POSIX plugin lock accepted or changed a symlink target").into(),
+        );
+    }
+    fs::remove_file(&lock_path)?;
+
+    fs::hard_link(&outside, &lock_path)?;
+    let hard_link_output = StdCommand::new("sh")
+        .arg(&harness)
+        .arg("once")
+        .arg(&lock_root)
+        .output()?;
+    if hard_link_output.status.success() || fs::read(&outside)? != b"outside sentinel\n" {
+        return Err(
+            io::Error::other("POSIX plugin lock accepted or changed a hard-link target").into(),
+        );
+    }
+    fs::remove_file(&lock_path)?;
+
+    fs::create_dir(&lock_path)?;
+    let directory_output = StdCommand::new("sh")
+        .arg(&harness)
+        .arg("once")
+        .arg(&lock_root)
+        .output()?;
+    if directory_output.status.success() {
+        return Err(io::Error::other("POSIX plugin lock accepted a directory").into());
+    }
+    fs::remove_dir(&lock_path)?;
+
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    fs::create_dir(&fake_path)?;
+    write_executable_script(&fake_path.join("flock"), "#!/bin/sh\nexit 1\n")?;
+    let unavailable_output = StdCommand::new("sh")
+        .arg(&harness)
+        .arg("once")
+        .arg(&lock_root)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                fake_path.display(),
+                std::env::var_os("PATH")
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ),
+        )
+        .output()?;
+    if unavailable_output.status.success() {
+        return Err(io::Error::other(
+            "POSIX plugin lock proceeded after its native primitive failed",
+        )
+        .into());
+    }
+
+    fs::write(&lock_path, b"orphaned owner\n")?;
+
+    let mut owner = StdCommand::new("sh")
+        .arg(&harness)
+        .arg("hold")
+        .arg(&lock_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut ready = String::new();
+    BufReader::new(
+        owner
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("POSIX lock owner stdout missing"))?,
+    )
+    .read_line(&mut ready)?;
+    if ready.trim() != "ready" {
+        let output = owner.wait_with_output()?;
+        return Err(io::Error::other(format!(
+            "POSIX lock owner did not acquire the lock:\n{}\n{}",
+            ready,
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    owner.kill()?;
+    owner.wait()?;
+
+    let output = StdCommand::new("sh")
+        .arg(&harness)
+        .arg("once")
+        .arg(&lock_root)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "POSIX plugin lock remained held after its owner crashed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let metadata = fs::symlink_metadata(&lock_path)?;
+    if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+        return Err(io::Error::other(
+            "POSIX plugin lock did not remain one direct reusable file after crash recovery",
+        )
+        .into());
+    }
+
+    let child_ready = temp.path().join("surviving-child-ready");
+    let child_release = temp.path().join("release-surviving-child");
+    let survivor_output = StdCommand::new("sh")
+        .arg(&harness)
+        .arg("survivor")
+        .arg(&lock_root)
+        .arg(&child_ready)
+        .arg(&child_release)
+        .output()?;
+    if !survivor_output.status.success() {
+        return Err(io::Error::other(format!(
+            "POSIX lock owner could not leave a mutation child running:\n{}\n{}",
+            String::from_utf8_lossy(&survivor_output.stdout),
+            String::from_utf8_lossy(&survivor_output.stderr)
+        ))
+        .into());
+    }
+    let child_deadline = Instant::now() + Duration::from_secs(2);
+    while !child_ready.is_file() && Instant::now() < child_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if !child_ready.is_file() {
+        return Err(io::Error::other("POSIX mutation child did not report readiness").into());
+    }
+    let try_native_lock = || -> io::Result<std::process::Output> {
+        if cfg!(target_os = "macos") {
+            StdCommand::new("lockf")
+                .args(["-k", "-s", "-t", "0"])
+                .arg(&lock_path)
+                .arg("true")
+                .output()
+        } else {
+            StdCommand::new("flock")
+                .arg("-n")
+                .arg(&lock_path)
+                .arg("true")
+                .output()
+        }
+    };
+    if try_native_lock()?.status.success() {
+        return Err(io::Error::other(
+            "POSIX plugin lock was released while the mutation child still held its descriptor",
+        )
+        .into());
+    }
+    fs::write(&child_release, b"release\n")?;
+    let release_deadline = Instant::now() + Duration::from_secs(3);
+    let mut release_probe = try_native_lock()?;
+    while !release_probe.status.success() && Instant::now() < release_deadline {
+        thread::sleep(Duration::from_millis(10));
+        release_probe = try_native_lock()?;
+    }
+    if !release_probe.status.success() {
+        return Err(io::Error::other(format!(
+            "POSIX plugin lock remained held after releasing the mutation child:\n{}\n{}",
+            String::from_utf8_lossy(&release_probe.stdout),
+            String::from_utf8_lossy(&release_probe.stderr)
+        ))
+        .into());
+    }
+    let released_metadata = fs::symlink_metadata(&lock_path)?;
+    if released_metadata.dev() != metadata.dev()
+        || released_metadata.ino() != metadata.ino()
+        || released_metadata.nlink() != 1
+    {
+        return Err(io::Error::other(
+            "POSIX native lock probe replaced or linked the persistent lock inode",
+        )
+        .into());
+    }
+    let child_release_output = StdCommand::new("sh")
+        .arg(&harness)
+        .arg("once")
+        .arg(&lock_root)
+        .output()?;
+    if !child_release_output.status.success() {
+        return Err(io::Error::other(format!(
+            "POSIX plugin lock could not be reacquired after releasing the mutation child:\n{}\n{}",
+            String::from_utf8_lossy(&child_release_output.stdout),
+            String::from_utf8_lossy(&child_release_output.stderr)
+        ))
+        .into());
+    }
+
+    let swap_output = StdCommand::new("sh")
+        .arg(&harness)
+        .arg("swap")
+        .arg(&lock_root)
+        .output()?;
+    if !swap_output.status.success()
+        || !lock_root.join("held-lock").is_file()
+        || !lock_path.is_file()
+    {
+        return Err(io::Error::other(format!(
+            "POSIX plugin lock release removed or accepted a replacement path:\n{}\n{}",
+            String::from_utf8_lossy(&swap_output.stdout),
+            String::from_utf8_lossy(&swap_output.stderr)
+        ))
+        .into());
+    }
+    if fs::read_dir(&lock_root)?.any(|entry| {
+        entry.is_ok_and(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".projectatlas-plugin-update-candidate")
+                || name.starts_with(".projectatlas-plugin-update.lock.stale")
+        })
+    }) {
+        return Err(io::Error::other("POSIX plugin lock crash recovery left lock debris").into());
+    }
+    Ok(())
+}
+
 #[test]
 #[cfg(windows)]
 fn windows_plugin_update_serializes_restore_before_the_next_installer_reads_state()
@@ -12601,12 +12905,9 @@ fn assert_plugin_update_serializes_restore_before_the_next_installer_reads_state
         "0.0.1",
         "prior offline ProjectAtlas skill\n",
     )?;
-    let state_before = repository_filesystem_snapshot(&codex_dir)?;
     #[cfg(unix)]
-    {
-        let stale_lock = codex_dir.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME);
-        fs::write(stale_lock, b"99999999\n")?;
-    }
+    prepare_plugin_lock(&codex_dir)?;
+    let state_before = repository_filesystem_snapshot(&codex_dir)?;
     let plugin_source_json = serde_json::to_string(&plugin_source.to_string_lossy())?;
     let stale_plugin_json = format!(
         r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.0.1","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{plugin_source_json}}}}}],"available":[]}}"#
@@ -12798,7 +13099,7 @@ exit 0
         ))
         .into());
     }
-    if codex_dir.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME).exists()
+    if (cfg!(windows) && codex_dir.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME).exists())
         || fs::read_dir(&codex_dir)?.any(|entry| {
             entry.is_ok_and(|entry| {
                 entry
@@ -12893,8 +13194,10 @@ fn assert_plugin_update_refuses_retained_recovery_state_before_mutation()
             .into());
         }
     }
+    let lock_exists = codex_dir.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME).is_file();
     if !retained_snapshot.join("config.toml").is_file()
-        || codex_dir.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME).exists()
+        || (cfg!(windows) && lock_exists)
+        || (cfg!(unix) && !lock_exists)
     {
         return Err(io::Error::other(
             "installer changed retained recovery state or left its update lock behind",
@@ -12997,6 +13300,8 @@ fn assert_plugin_update_refuses_unavailable_or_ambiguous_inventory() -> Result<(
             )
         };
         write_executable_script(&fake_codex, &fake_codex_script)?;
+        #[cfg(unix)]
+        prepare_plugin_lock(&codex_dir)?;
         let state_before = repository_filesystem_snapshot(&codex_dir)?;
         let runtime = mcp_contract_executable();
         let output = run_plugin_installer_with_codex_fixture(
@@ -13208,7 +13513,7 @@ exit 0
 /bin/cp "$@" || exit $?
 if [ "${PROJECTATLAS_FAKE_RESTORE_FAULT:-}" = late-snapshot-source-symlink ]; then
   case "${3:-}" in
-    */.projectatlas-plugin-state.*/plugin-source)
+    */.projectatlas-plugin-state.*/marketplace-root)
       snapshot=$(dirname -- "${3:-}")
       rm -rf -- "$snapshot/plugin-cache" || exit 20
       ln -s -- "$PROJECTATLAS_FAKE_OUTSIDE" "$snapshot/plugin-cache" || exit 21
@@ -13529,6 +13834,8 @@ fn windows_plugin_snapshot_rejects_reparse_above_codex_home_before_mutation()
         env!("CARGO_PKG_VERSION"),
         "stale ProjectAtlas skill\n",
     )?;
+    #[cfg(unix)]
+    prepare_plugin_lock(&codex_dir)?;
     let state_before = repository_filesystem_snapshot(&codex_dir)?;
     let plugin_source_json = serde_json::to_string(&plugin_source.to_string_lossy())?;
     let installed_json = format!(
@@ -13758,15 +14065,25 @@ fn windows_plugin_snapshot_cleanup_failure_retains_usable_direct_snapshot()
     if snapshots.len() != 1
         || !snapshots[0].join("config.toml").is_file()
         || !snapshots[0]
-            .join("plugin-source")
+            .join(CODEX_MARKETPLACE_SNAPSHOT_DIR_NAME)
+            .join("plugins")
+            .join("projectatlas")
             .join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME)
             .is_file()
         || !snapshots[0]
             .join(FAKE_CODEX_PLUGIN_CACHE_DIR)
             .join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME)
             .is_file()
-        || !snapshots[0].join("marketplace.json").is_file()
-        || !snapshots[0].join("marketplace-install.json").is_file()
+        || !snapshots[0]
+            .join(CODEX_MARKETPLACE_SNAPSHOT_DIR_NAME)
+            .join(CODEX_MARKETPLACE_METADATA_DIR)
+            .join("plugins")
+            .join(CODEX_MARKETPLACE_MANIFEST_FILE_NAME)
+            .is_file()
+        || !snapshots[0]
+            .join(CODEX_MARKETPLACE_SNAPSHOT_DIR_NAME)
+            .join(CODEX_MARKETPLACE_INSTALL_RECORD_FILE_NAME)
+            .is_file()
         || !output_text.contains("state snapshot cleanup failed; retained at")
         || !output_contains_path_name(&output_text, &snapshots[0])
         || output_text.contains("state snapshot cleanup refused/path changed at")

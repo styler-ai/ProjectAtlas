@@ -36,6 +36,8 @@ const EXIT_USAGE: u8 = 2;
 
 /// Stable identifier for the repository-wide private absolute-path rule.
 const PRIVATE_PATH_RULE_ID: &str = "private-absolute-path";
+/// Maximum redacted private-path diagnostics retained from one complete scan.
+const PRIVATE_PATH_DIAGNOSTIC_LIMIT: usize = 100;
 
 /// Private absolute-path shapes forbidden in every Git-visible text file.
 const PRIVATE_PATH_RULES: &[(&str, &str)] = &[
@@ -53,15 +55,15 @@ const PRIVATE_PATH_RULES: &[(&str, &str)] = &[
     ),
     (
         "file-network-root",
-        r#"(?i)file:(?P<path>/{2}[^\s\\/:"'`<>]+/)"#,
+        r#"(?i)(?:^|[^A-Za-z0-9+.-])file:(?P<path>/{2}[^\s\\/:"'`<>]+/)"#,
     ),
     (
         "file-user-home-root",
-        r#"(?i)file:(?P<path>/{2,3}(?:home|Users)/[^/\s"'`<>]+(?:/|$))"#,
+        r#"(?i)(?:^|[^A-Za-z0-9+.-])file:(?P<path>/{2,3}(?:(?:home|Users)/[^/\s"'`<>]+|root)(?:/|$))"#,
     ),
     (
         "user-home-root",
-        r#"(?:^|[\s"'`(=:\[])(?P<path>/(?:home|Users)/[^/\s"'`<>]+(?:/|$))"#,
+        r#"(?:^|[\s"'`(=:\[])(?P<path>/(?:(?:home|Users)/[^/\s"'`<>]+|root)(?:/|$))"#,
     ),
     (
         "wsl-drive-root",
@@ -374,9 +376,9 @@ fn run_private_path_updates(
 ) -> Result<(), LintError> {
     let revisions = outgoing_revisions(root, remote_name, reader)?;
     if revisions.is_empty() {
-        return finish_lint(Vec::new(), Vec::new());
+        return finish_lint(Vec::new(), PrivatePathFindings::default());
     }
-    let private_path_violations = lint_git_revisions_private_paths(root, &revisions)?;
+    let private_path_violations = lint_git_revisions_private_paths(root, &revisions, false)?;
     finish_lint(Vec::new(), private_path_violations)
 }
 
@@ -392,14 +394,14 @@ fn run_private_path_range(root: &Path, base: &str, head: &str) -> Result<(), Lin
     let updates = format!("refs/heads/ci {head} refs/heads/ci {base}\n");
     let revisions = outgoing_revisions(root, "", io::Cursor::new(updates))?;
     let baseline = if base.bytes().all(|byte| byte == b'0') {
-        Vec::new()
+        PrivatePathFindings::with_comparison()
     } else {
         lint_git_tree_private_paths(root, base)?
     };
-    let outgoing = lint_git_revisions_private_paths(root, &revisions)?;
+    let outgoing = lint_git_revisions_private_paths(root, &revisions, true)?;
     finish_lint(
         Vec::new(),
-        private_paths_not_in_baseline(outgoing, &baseline),
+        private_paths_not_in_baseline(outgoing, &baseline)?,
     )
 }
 
@@ -462,7 +464,7 @@ fn outgoing_revisions(
 /// Return success output or the collected source-policy failure.
 fn finish_lint(
     string_violations: Vec<StringLiteralViolation>,
-    private_path_violations: Vec<PrivatePathViolation>,
+    private_path_violations: PrivatePathFindings,
 ) -> Result<(), LintError> {
     if string_violations.is_empty() && private_path_violations.is_empty() {
         let mut stdout = io::stdout().lock();
@@ -492,9 +494,9 @@ fn private_path_rules() -> Result<Vec<PrivatePathRule>, LintError> {
 }
 
 /// Scan every Git-visible supported text file without emitting matched private text.
-fn lint_repository_private_paths(root: &Path) -> Result<Vec<PrivatePathViolation>, LintError> {
+fn lint_repository_private_paths(root: &Path) -> Result<PrivatePathFindings, LintError> {
     let rules = private_path_rules()?;
-    let mut violations = Vec::new();
+    let mut violations = PrivatePathFindings::default();
     for relative_path in git_visible_paths(root)? {
         let path = root.join(&relative_path);
         let metadata = match fs::symlink_metadata(&path) {
@@ -536,7 +538,8 @@ fn lint_repository_private_paths(root: &Path) -> Result<Vec<PrivatePathViolation
 fn lint_git_revisions_private_paths(
     root: &Path,
     revisions: &[String],
-) -> Result<Vec<PrivatePathViolation>, LintError> {
+    retain_comparison: bool,
+) -> Result<PrivatePathFindings, LintError> {
     let mut diff = Command::new("git")
         .args([
             "diff-tree",
@@ -604,14 +607,14 @@ fn lint_git_revisions_private_paths(
         let path = String::from_utf8(path.to_vec()).map_err(LintError::NonUtf8GitPath)?;
         blobs.insert((new_object.to_string(), path));
     }
-    lint_git_blobs(root, &blobs)
+    lint_git_blobs(root, &blobs, retain_comparison)
 }
 
 /// Scan every text blob in one exact Git tree.
 fn lint_git_tree_private_paths(
     root: &Path,
     revision: &str,
-) -> Result<Vec<PrivatePathViolation>, LintError> {
+) -> Result<PrivatePathFindings, LintError> {
     let output = Command::new("git")
         .args(["ls-tree", "-r", "-z", "--full-tree", revision])
         .current_dir(root)
@@ -650,58 +653,60 @@ fn lint_git_tree_private_paths(
             return Err(LintError::InvalidGitTreeEntry);
         }
     }
-    lint_git_blobs(root, &blobs)
+    lint_git_blobs(root, &blobs, true)
 }
 
 /// Keep only private path occurrences that exceed the unchanged published-base multiset.
 fn private_paths_not_in_baseline(
-    outgoing: Vec<PrivatePathViolation>,
-    baseline: &[PrivatePathViolation],
-) -> Vec<PrivatePathViolation> {
+    outgoing: PrivatePathFindings,
+    baseline: &PrivatePathFindings,
+) -> Result<PrivatePathFindings, LintError> {
+    let baseline_groups = baseline
+        .comparison
+        .as_ref()
+        .ok_or(LintError::PrivatePathComparisonUnavailable)?;
+    let outgoing_groups = outgoing
+        .comparison
+        .ok_or(LintError::PrivatePathComparisonUnavailable)?;
     let mut baseline_counts = BTreeMap::new();
-    for violation in baseline {
+    for (key, group) in baseline_groups {
         *baseline_counts
             .entry((
-                violation.path.clone(),
-                violation.kind,
-                violation.source_identity.clone(),
+                Rc::clone(&key.path),
+                key.kind,
+                Rc::clone(&key.source_identity),
             ))
-            .or_insert(0usize) += 1;
+            .or_insert(0usize) += group.count;
     }
-    let mut admitted_by_blob = BTreeMap::new();
-    outgoing
-        .into_iter()
-        .filter(|violation| {
-            let Some(git_object) = violation.git_object.as_ref() else {
-                return true;
-            };
-            let baseline_count = baseline_counts
-                .get(&(
-                    violation.path.clone(),
-                    violation.kind,
-                    violation.source_identity.clone(),
-                ))
-                .copied()
-                .unwrap_or_default();
-            let admitted = admitted_by_blob
-                .entry((
-                    git_object.clone(),
-                    violation.path.clone(),
-                    violation.kind,
-                    violation.source_identity.clone(),
-                ))
-                .or_insert(0usize);
-            *admitted += 1;
-            *admitted > baseline_count
-        })
-        .collect()
+    let mut introduced = PrivatePathFindings::default();
+    for (key, group) in outgoing_groups {
+        let baseline_count = baseline_counts
+            .get(&(
+                Rc::clone(&key.path),
+                key.kind,
+                Rc::clone(&key.source_identity),
+            ))
+            .copied()
+            .unwrap_or_default();
+        if group.count > baseline_count {
+            introduced.push_group(
+                key.path.as_ref(),
+                group.line,
+                group.column,
+                key.kind,
+                group.count - baseline_count,
+            );
+        }
+    }
+    Ok(introduced)
 }
 
 /// Read a deduplicated set of Git blobs through one validated batch process.
 fn lint_git_blobs(
     root: &Path,
     blobs: &BTreeSet<(String, String)>,
-) -> Result<Vec<PrivatePathViolation>, LintError> {
+    retain_comparison: bool,
+) -> Result<PrivatePathFindings, LintError> {
     let rules = private_path_rules()?;
     let mut child = Command::new("git")
         .args(["cat-file", "--batch"])
@@ -721,7 +726,11 @@ fn lint_git_blobs(
         .ok_or(LintError::MissingGitObjectStream)?;
     let mut requests = BufWriter::new(stdin);
     let mut responses = BufReader::new(stdout);
-    let mut violations = Vec::new();
+    let mut violations = if retain_comparison {
+        PrivatePathFindings::with_comparison()
+    } else {
+        PrivatePathFindings::default()
+    };
     for (object, relative_path) in blobs {
         writeln!(requests, "{object}").map_err(LintError::ReadGitRevision)?;
         requests.flush().map_err(LintError::ReadGitRevision)?;
@@ -761,10 +770,12 @@ fn lint_git_blobs(
             return Err(LintError::InvalidGitObjectResponse);
         }
         if let Some(source) = decode_repository_text(relative_path, &bytes)? {
-            let mut blob_violations = lint_private_paths(relative_path, &source, &rules);
-            for violation in &mut blob_violations {
-                violation.git_object = Some(object.clone());
-            }
+            let blob_violations = lint_private_paths_with_history(
+                relative_path,
+                &source,
+                &rules,
+                retain_comparison.then_some(object.as_str()),
+            );
             violations.extend(blob_violations);
         }
     }
@@ -854,26 +865,51 @@ fn lint_private_paths(
     relative_path: &str,
     source: &str,
     rules: &[PrivatePathRule],
-) -> Vec<PrivatePathViolation> {
-    let mut violations = Vec::new();
+) -> PrivatePathFindings {
+    lint_private_paths_with_history(relative_path, source, rules, None)
+}
+
+/// Find private paths and optionally retain exact identities for history comparison.
+fn lint_private_paths_with_history(
+    relative_path: &str,
+    source: &str,
+    rules: &[PrivatePathRule],
+    git_object: Option<&str>,
+) -> PrivatePathFindings {
+    let mut violations = if git_object.is_some() {
+        PrivatePathFindings::with_comparison()
+    } else {
+        PrivatePathFindings::default()
+    };
+    let comparison_path = git_object.map(|_| Rc::<str>::from(relative_path));
+    let comparison_object = git_object.map(Rc::<str>::from);
     for (line_index, line) in source.lines().enumerate() {
-        let mut source_identity = None;
+        let mut source_identity: Option<Rc<str>> = None;
         for rule in rules {
             for captures in rule.regex.captures_iter(line) {
                 let Some(path_match) = captures.name("path") else {
                     continue;
                 };
-                let source_identity = source_identity
-                    .get_or_insert_with(|| PrivatePathIdentity(Rc::from(line)))
-                    .clone();
-                violations.push(PrivatePathViolation {
-                    path: relative_path.to_string(),
-                    line: line_index + 1,
-                    column: line[..path_match.start()].chars().count() + 1,
-                    kind: rule.kind,
-                    source_identity,
-                    git_object: None,
-                });
+                let comparison_key = match (&comparison_path, &comparison_object) {
+                    (Some(path), Some(git_object)) => Some(PrivatePathOccurrenceKey {
+                        path: Rc::clone(path),
+                        kind: rule.kind,
+                        source_identity: Rc::clone(
+                            source_identity.get_or_insert_with(|| Rc::from(line)),
+                        ),
+                        git_object: Rc::clone(git_object),
+                    }),
+                    _ => None,
+                };
+                violations.push(
+                    PrivatePathViolation {
+                        path: relative_path.to_string(),
+                        line: line_index + 1,
+                        column: line[..path_match.start()].chars().count() + 1,
+                        kind: rule.kind,
+                    },
+                    comparison_key,
+                );
             }
         }
     }
@@ -992,15 +1028,160 @@ struct PrivatePathViolation {
     column: usize,
     /// Stable path-shape classification; never contains matched source text.
     kind: &'static str,
-    /// Non-formattable identity for the complete source line containing the private path.
-    source_identity: PrivatePathIdentity,
-    /// Git blob identity used to apply the baseline allowance independently per historical file.
-    git_object: Option<String>,
 }
 
-/// Exact identity that cannot expose the private source text through formatting.
-#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
-struct PrivatePathIdentity(Rc<str>);
+/// Complete violation count with a bounded redacted diagnostic sample.
+#[derive(Default)]
+struct PrivatePathFindings {
+    /// Total matches found across the complete scan.
+    total: usize,
+    /// First deterministic diagnostics retained for actionable output.
+    samples: Vec<PrivatePathViolation>,
+    /// Exact compact occurrence groups retained only for published-base comparison.
+    comparison: Option<BTreeMap<PrivatePathOccurrenceKey, PrivatePathOccurrenceGroup>>,
+}
+
+impl fmt::Debug for PrivatePathFindings {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PrivatePathFindings")
+            .field("total", &self.total)
+            .field("samples", &self.samples)
+            .field(
+                "comparison_groups",
+                &self.comparison.as_ref().map(BTreeMap::len),
+            )
+            .finish()
+    }
+}
+
+impl PrivatePathFindings {
+    /// Create findings that also retain exact history-comparison identities.
+    fn with_comparison() -> Self {
+        Self {
+            comparison: Some(BTreeMap::new()),
+            ..Self::default()
+        }
+    }
+
+    /// Record one match without allowing diagnostic memory or output to grow unbounded.
+    fn push(
+        &mut self,
+        violation: PrivatePathViolation,
+        comparison_key: Option<PrivatePathOccurrenceKey>,
+    ) {
+        self.total = self.total.saturating_add(1);
+        if let (Some(comparison), Some(key)) = (&mut self.comparison, comparison_key) {
+            let group = comparison.entry(key).or_insert(PrivatePathOccurrenceGroup {
+                count: 0,
+                line: violation.line,
+                column: violation.column,
+            });
+            group.count = group.count.saturating_add(1);
+        }
+        if self.samples.len() < PRIVATE_PATH_DIAGNOSTIC_LIMIT {
+            self.samples.push(violation);
+        }
+    }
+
+    /// Record a compared occurrence group while retaining only bounded diagnostics.
+    fn push_group(
+        &mut self,
+        path: &str,
+        line: usize,
+        column: usize,
+        kind: &'static str,
+        count: usize,
+    ) {
+        self.total = self.total.saturating_add(count);
+        let remaining = PRIVATE_PATH_DIAGNOSTIC_LIMIT.saturating_sub(self.samples.len());
+        self.samples.extend(
+            std::iter::repeat_with(|| PrivatePathViolation {
+                path: path.to_string(),
+                line,
+                column,
+                kind,
+            })
+            .take(count.min(remaining)),
+        );
+    }
+
+    /// Merge one completed scan while retaining the global diagnostic bound.
+    fn extend(&mut self, other: Self) {
+        self.total = self.total.saturating_add(other.total);
+        let remaining = PRIVATE_PATH_DIAGNOSTIC_LIMIT.saturating_sub(self.samples.len());
+        self.samples
+            .extend(other.samples.into_iter().take(remaining));
+        match (&mut self.comparison, other.comparison) {
+            (Some(comparison), Some(other)) => {
+                for (key, other_group) in other {
+                    let group = comparison.entry(key).or_insert(PrivatePathOccurrenceGroup {
+                        count: 0,
+                        line: other_group.line,
+                        column: other_group.column,
+                    });
+                    group.count = group.count.saturating_add(other_group.count);
+                }
+            }
+            (None, None) => {}
+            _ => self.comparison = None,
+        }
+    }
+
+    /// Return whether the complete scan found no violations.
+    fn is_empty(&self) -> bool {
+        self.total == 0
+    }
+
+    /// Return whether some violations were omitted from the diagnostic sample.
+    fn is_truncated(&self) -> bool {
+        self.total > self.samples.len()
+    }
+
+    /// Return the complete violation count.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.total
+    }
+
+    /// Iterate over the bounded diagnostic sample.
+    #[cfg(test)]
+    fn iter(&self) -> std::slice::Iter<'_, PrivatePathViolation> {
+        self.samples.iter()
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Index<usize> for PrivatePathFindings {
+    type Output = PrivatePathViolation;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.samples[index]
+    }
+}
+
+/// Exact non-formattable identity used only by published-base comparison.
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+struct PrivatePathOccurrenceKey {
+    /// Shared repository-relative path.
+    path: Rc<str>,
+    /// Stable private-path rule family.
+    kind: &'static str,
+    /// Shared exact source line, preserving the existing allowance semantics.
+    source_identity: Rc<str>,
+    /// Git blob identity that keeps each historical file version independent.
+    git_object: Rc<str>,
+}
+
+/// Count and first redacted location for one exact historical occurrence group.
+struct PrivatePathOccurrenceGroup {
+    /// Exact multiplicity within one Git blob and path.
+    count: usize,
+    /// First one-based source line in that group.
+    line: usize,
+    /// First one-based source column in that group.
+    column: usize,
+}
 
 impl fmt::Debug for PrivatePathViolation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1340,12 +1521,14 @@ enum LintError {
     },
     /// A built-in private-path rule did not compile.
     InvalidPrivatePathRule(regex::Error),
+    /// Internal history scan omitted the exact comparison identities it requires.
+    PrivatePathComparisonUnavailable,
     /// Repository source-policy violations.
     Violations {
         /// Strict string-contract violations.
         string_literals: Vec<StringLiteralViolation>,
         /// Redacted private absolute-path violations.
-        private_paths: Vec<PrivatePathViolation>,
+        private_paths: PrivatePathFindings,
     },
 }
 
@@ -1417,13 +1600,19 @@ impl Display for LintError {
             Self::InvalidPrivatePathRule(_) => {
                 write!(formatter, "built-in private absolute-path rule is invalid")
             }
+            Self::PrivatePathComparisonUnavailable => {
+                write!(
+                    formatter,
+                    "private-path history comparison state is unavailable"
+                )
+            }
             Self::Violations {
                 string_literals,
                 private_paths,
             } => write!(
                 formatter,
                 "{} repository source-policy violations",
-                string_literals.len() + private_paths.len()
+                string_literals.len().saturating_add(private_paths.total)
             ),
         }
     }
@@ -1449,6 +1638,7 @@ impl std::error::Error for LintError {
             | Self::InvalidPrePushUpdate
             | Self::InvalidGitObjectResponse
             | Self::NonUtf8Text(_)
+            | Self::PrivatePathComparisonUnavailable
             | Self::Violations { .. } => None,
         }
     }
@@ -1458,18 +1648,25 @@ impl std::error::Error for LintError {
 fn write_violations(
     writer: &mut impl Write,
     string_literals: &[StringLiteralViolation],
-    private_paths: &[PrivatePathViolation],
+    private_paths: &PrivatePathFindings,
 ) -> io::Result<()> {
     writeln!(
         writer,
         "projectatlas-lints: {} repository source-policy violation(s)",
-        string_literals.len() + private_paths.len()
+        string_literals.len().saturating_add(private_paths.total)
     )?;
     for violation in string_literals {
         writeln!(writer, "{violation}")?;
     }
-    for violation in private_paths {
+    for violation in &private_paths.samples {
         writeln!(writer, "{violation}")?;
+    }
+    if private_paths.is_truncated() {
+        writeln!(
+            writer,
+            "{} additional private-path violation(s) omitted",
+            private_paths.total - private_paths.samples.len()
+        )?;
     }
     Ok(())
 }
@@ -1576,9 +1773,13 @@ mod tests {
             ["", "", "private-host", "share"].join("/"),
             ["", "home", "example-user", "workspace"].join("/"),
             ["", "Users", "example-user", "workspace"].join("/"),
+            ["", "root", "workspace"].join("/"),
+            ["", "root"].join("/"),
             ["", "mnt", "x", "workspace"].join("/"),
             ["file:", "", "private-host", "share"].join("/"),
             ["file:", "", "", "home", "example-user", "workspace"].join("/"),
+            ["file:", "", "", "root", "workspace"].join("/"),
+            ["file:", "", "", "root"].join("/"),
         ])
     }
 
@@ -1620,12 +1821,130 @@ mod tests {
             "scripts/install-runtime.ps1\n<project-root>/scripts/install-runtime.sh\n\
              $HOME/.local/bin\n%USERPROFILE%{backslash}AppData{backslash}Local\n\
              https://example.com/downloads/runtime\n\
+             {}\n{}\n{}\n{}\n{}\n{}\n\
              \"{backslash}{backslash}Sessions{backslash}{backslash}\"\n\
-             \"{backslash}{backslash}r{backslash}{backslash}n\""
+             \"{backslash}{backslash}r{backslash}{backslash}n\"",
+            ["profile:", "", "", "root", "workspace"].join("/"),
+            ["notfile:", "", "", "root", "workspace"].join("/"),
+            ["", "rooted", "workspace"].join("/"),
+            ["file:", "", "", "rooted", "workspace"].join("/"),
+            ["project", "root", "workspace"].join("/"),
+            ["https:", "", "example.invalid", "root", "workspace"].join("/"),
         );
         let rules = private_path_rules()?;
         let violations = lint_private_paths("docs/example.md", &source, &rules);
         require(violations.is_empty(), "portable path form was rejected")?;
+        Ok(())
+    }
+
+    /// Large hostile files fail with an exact count and bounded redacted diagnostics.
+    #[test]
+    fn private_path_diagnostics_are_bounded() -> Result<(), Box<dyn std::error::Error>> {
+        let sample = private_path_samples()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::other("private path sample is missing"))?;
+        let total = super::PRIVATE_PATH_DIAGNOSTIC_LIMIT + 7;
+        let source = (0..total)
+            .map(|_| sample.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let findings =
+            lint_private_paths("scripts/privacy-check.ps1", &source, &private_path_rules()?);
+        require(
+            findings.total == total,
+            "complete violation count was truncated",
+        )?;
+        require(
+            findings.samples.len() == super::PRIVATE_PATH_DIAGNOSTIC_LIMIT,
+            "diagnostic sample exceeded its bound",
+        )?;
+        require(
+            findings.comparison.is_none(),
+            "ordinary source scan retained history-comparison identities",
+        )?;
+        let mut diagnostics = Vec::new();
+        write_violations(&mut diagnostics, &[], &findings)?;
+        let diagnostics = String::from_utf8(diagnostics)?;
+        require(
+            diagnostics.contains("7 additional private-path violation(s) omitted")
+                && !diagnostics.contains(&sample),
+            "bounded diagnostic summary was incomplete or disclosed matched source",
+        )?;
+        Ok(())
+    }
+
+    /// Published-base allowance remains exact above the diagnostic sample bound.
+    #[test]
+    fn private_path_history_allowance_exceeds_diagnostic_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let samples = private_path_samples()?;
+        let retained = samples
+            .first()
+            .ok_or_else(|| io::Error::other("retained private path sample is missing"))?;
+        let introduced = samples
+            .get(1)
+            .ok_or_else(|| io::Error::other("introduced private path sample is missing"))?;
+        let rules = private_path_rules()?;
+        for total in [
+            super::PRIVATE_PATH_DIAGNOSTIC_LIMIT,
+            super::PRIVATE_PATH_DIAGNOSTIC_LIMIT + 1,
+        ] {
+            let baseline_source = (0..total)
+                .map(|_| retained.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let baseline = super::lint_private_paths_with_history(
+                "legacy.ps1",
+                &baseline_source,
+                &rules,
+                Some("base-object"),
+            );
+            let debug = format!("{baseline:?}");
+            require(
+                !debug.contains(retained),
+                "history finding Debug output disclosed a private source identity",
+            )?;
+            let error_debug = format!(
+                "{:?}",
+                LintError::Violations {
+                    string_literals: Vec::new(),
+                    private_paths: super::lint_private_paths_with_history(
+                        "legacy.ps1",
+                        &baseline_source,
+                        &rules,
+                        Some("debug-object"),
+                    ),
+                }
+            );
+            require(
+                !error_debug.contains(retained),
+                "lint error Debug output disclosed a private source identity",
+            )?;
+            let outgoing = super::lint_private_paths_with_history(
+                "legacy.ps1",
+                &baseline_source,
+                &rules,
+                Some("head-object"),
+            );
+            require(
+                private_paths_not_in_baseline(outgoing, &baseline)?.is_empty(),
+                "unchanged published-base occurrences were rejected at the diagnostic boundary",
+            )?;
+
+            let changed_source = format!("{baseline_source}\n{introduced}");
+            let outgoing = super::lint_private_paths_with_history(
+                "legacy.ps1",
+                &changed_source,
+                &rules,
+                Some("changed-object"),
+            );
+            let findings = private_paths_not_in_baseline(outgoing, &baseline)?;
+            require(
+                findings.total == 1 && findings.samples.len() == 1,
+                "introduced history occurrence was hidden above the diagnostic boundary",
+            )?;
+        }
         Ok(())
     }
 
@@ -1915,7 +2234,13 @@ mod tests {
             revisions.len() == 4,
             "existing, new, duplicate, or deletion update selection regressed",
         )?;
-        let violations = lint_git_revisions_private_paths(repository.path(), &revisions)?;
+        let violations = lint_git_revisions_private_paths(repository.path(), &revisions, true)?;
+        let update_findings =
+            lint_git_revisions_private_paths(repository.path(), &revisions, false)?;
+        require(
+            update_findings.comparison.is_none() && update_findings.total == violations.total,
+            "ordinary update scan retained comparison identities or lost complete counts",
+        )?;
         require(
             violations.len() == 5,
             &format!(
@@ -1924,7 +2249,7 @@ mod tests {
             ),
         )?;
         let baseline = lint_git_tree_private_paths(repository.path(), &base)?;
-        let introduced = private_paths_not_in_baseline(violations, &baseline);
+        let introduced = private_paths_not_in_baseline(violations, &baseline)?;
         require(
             introduced.len() == 2
                 && introduced
@@ -2031,9 +2356,9 @@ mod tests {
         let revisions = outgoing_revisions(repository.path(), "", io::Cursor::new(updates))?;
         let baseline = lint_git_tree_private_paths(repository.path(), &base)?;
         let introduced = private_paths_not_in_baseline(
-            lint_git_revisions_private_paths(repository.path(), &revisions)?,
+            lint_git_revisions_private_paths(repository.path(), &revisions, true)?,
             &baseline,
-        );
+        )?;
         require(
             introduced.len() == 2
                 && introduced.iter().any(|item| item.path == "first.ps1")
@@ -2068,11 +2393,17 @@ mod tests {
             line: 1,
             column: 1,
             kind: "windows-drive-root",
-            source_identity: super::PrivatePathIdentity(std::rc::Rc::from("")),
-            git_object: None,
         };
         let mut diagnostics = Vec::new();
-        write_violations(&mut diagnostics, &[], &[private_path])?;
+        write_violations(
+            &mut diagnostics,
+            &[],
+            &super::PrivatePathFindings {
+                total: 1,
+                samples: vec![private_path],
+                comparison: None,
+            },
+        )?;
         let diagnostics = String::from_utf8(diagnostics)?;
         require(
             !diagnostics.contains("\n::error::") && diagnostics.contains("\\n::error::"),

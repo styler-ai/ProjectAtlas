@@ -45,8 +45,12 @@ The installers SHALL serialize inventory, snapshot, mutation, validation, and re
 - **THEN** the second installer reads plugin state only after the first installer has either validated success or completed local restoration
 
 #### Scenario: A POSIX lock owner terminated
-- **WHEN** a direct contained update lock records a process that no longer exists
-- **THEN** the installer reclaims that exact stale lock safely before entering the serialized operation
+- **WHEN** an installer holding the direct contained update-lock descriptor exits or is terminated
+- **THEN** the kernel releases the lock, a successor acquires the same persistent inode without stale-path reclamation, and redirected or multiply linked lock paths remain rejected
+
+#### Scenario: A mutation child survives its installer parent
+- **WHEN** a synchronous mutation child inherits the update-lock descriptor and the installer parent terminates
+- **THEN** a successor remains excluded until that child exits, then acquires the persistent lock normally
 
 #### Scenario: A terminated updater left recovery state
 - **WHEN** a later installer acquires the Codex-root lock and finds retained ProjectAtlas plugin recovery state

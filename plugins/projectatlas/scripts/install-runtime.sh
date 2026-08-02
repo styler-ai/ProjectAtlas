@@ -338,92 +338,61 @@ codex_projectatlas_marketplace_ref() {
 codex_state_snapshot_dir=
 codex_state_snapshot_config_path=
 codex_state_snapshot_config_existed=false
-codex_state_snapshot_plugin_path=
-codex_state_snapshot_plugin_existed=false
+codex_state_snapshot_marketplace_root_path=
+codex_state_snapshot_marketplace_root_existed=false
 codex_state_snapshot_plugin_cache_path=
 codex_state_snapshot_plugin_cache_existed=false
 codex_state_snapshot_expected_plugin_cache_path=
 codex_state_snapshot_expected_plugin_cache_existed=false
 codex_state_snapshot_cache_paths_match=false
-codex_state_snapshot_marketplace_manifest_path=
-codex_state_snapshot_marketplace_manifest_existed=false
-codex_state_snapshot_marketplace_install_record_path=
-codex_state_snapshot_marketplace_install_record_existed=false
 codex_state_snapshot_root=
 codex_plugin_update_preserved_prior_state=false
 codex_plugin_update_lock_path=
 codex_plugin_update_lock_root=
+codex_plugin_update_lock_identity=
 
 acquire_codex_projectatlas_plugin_update_lock() {
   lock_root=$1
   lock_path=$lock_root/.projectatlas-plugin-update.lock
-  lock_candidate=$(mktemp "$lock_root/.projectatlas-plugin-update-candidate.XXXXXX") || return 1
-  chmod 600 "$lock_candidate" || {
-    rm -f -- "$lock_candidate" 2>/dev/null || true
+  if [ ! -e "$lock_path" ] && [ ! -L "$lock_path" ]; then
+    (umask 077 && set -C && : > "$lock_path") 2>/dev/null || true
+  fi
+  lock_parent_resolved=$(CDPATH= cd -P -- "$(dirname -- "$lock_path")" 2>/dev/null && pwd -P) || return 1
+  lock_identity=$(stat -c '%d:%i' -- "$lock_path" 2>/dev/null || stat -f '%d:%i' "$lock_path" 2>/dev/null || true)
+  lock_links=$(stat -c %h -- "$lock_path" 2>/dev/null || stat -f %l "$lock_path" 2>/dev/null || true)
+  lock_owner_uid=$(stat -c %u -- "$lock_path" 2>/dev/null || stat -f %u "$lock_path" 2>/dev/null || true)
+  if [ "$lock_parent_resolved" != "$lock_root" ] || [ -L "$lock_path" ] ||
+    [ ! -f "$lock_path" ] || [ -z "$lock_identity" ] || [ "$lock_links" != 1 ] ||
+    [ "$lock_owner_uid" != "$(id -u)" ]; then
+    printf "warning: Codex ProjectAtlas plugin update skipped: update lock at '%s' is not a trusted direct file.\n" "$lock_path" >&2
     return 1
-  }
-  printf '%s\n' "$$" > "$lock_candidate" || {
-    rm -f -- "$lock_candidate" 2>/dev/null || true
+  fi
+
+  exec 9<> "$lock_path" || return 1
+  lock_acquired=false
+  if command -v flock >/dev/null 2>&1; then
+    flock -w 30 9 && lock_acquired=true
+  elif command -v lockf >/dev/null 2>&1; then
+    lockf -s -t 30 9 && lock_acquired=true
+  fi
+  if [ "$lock_acquired" != true ]; then
+    exec 9>&-
+    printf '%s\n' "warning: Codex ProjectAtlas plugin update skipped: another installer owns the update lock or no supported lock utility is available." >&2
     return 1
-  }
-  lock_attempt=0
-  while ! ln -- "$lock_candidate" "$lock_path" 2>/dev/null; do
-    if [ -L "$lock_path" ] || { [ -e "$lock_path" ] && [ ! -f "$lock_path" ]; }; then
-      printf "warning: Codex ProjectAtlas plugin update skipped: update lock at '%s' is not a direct file.\n" "$lock_path" >&2
-      rm -f -- "$lock_candidate" 2>/dev/null || true
-      return 1
-    fi
-    lock_owner=
-    if [ -f "$lock_path" ] && [ ! -L "$lock_path" ]; then
-      lock_owner=$(cat -- "$lock_path" 2>/dev/null || true)
-    fi
-    case "$lock_owner" in
-      ''|*[!0-9]*)
-        if [ -e "$lock_path" ] || [ -L "$lock_path" ]; then
-          printf "warning: Codex ProjectAtlas plugin update skipped: update lock at '%s' has an invalid owner.\n" "$lock_path" >&2
-          rm -f -- "$lock_candidate" 2>/dev/null || true
-          return 1
-        fi
-        ;;
-      *)
-        if ! kill -0 "$lock_owner" 2>/dev/null; then
-          stale_lock_path=$lock_path.stale.$$.${lock_attempt}
-          if [ -e "$stale_lock_path" ] || [ -L "$stale_lock_path" ]; then
-            printf "warning: Codex ProjectAtlas plugin update skipped: stale update lock quarantine already exists at '%s'.\n" "$stale_lock_path" >&2
-            rm -f -- "$lock_candidate" 2>/dev/null || true
-            return 1
-          fi
-          if mv -- "$lock_path" "$stale_lock_path" 2>/dev/null; then
-            stale_lock_owner=
-            if [ -f "$stale_lock_path" ] && [ ! -L "$stale_lock_path" ]; then
-              stale_lock_owner=$(cat -- "$stale_lock_path" 2>/dev/null || true)
-            fi
-            if [ "$stale_lock_owner" != "$lock_owner" ] || kill -0 "$stale_lock_owner" 2>/dev/null ||
-              ! rm -f -- "$stale_lock_path"; then
-              printf "warning: Codex ProjectAtlas plugin update skipped: stale update lock at '%s' could not be removed safely.\n" "$stale_lock_path" >&2
-              rm -f -- "$lock_candidate" 2>/dev/null || true
-              return 1
-            fi
-            continue
-          fi
-        fi
-        ;;
-    esac
-    lock_attempt=$((lock_attempt + 1))
-    if [ "$lock_attempt" -ge 30 ]; then
-      printf '%s\n' "warning: Codex ProjectAtlas plugin update skipped: another installer still owns the update lock." >&2
-      rm -f -- "$lock_candidate" 2>/dev/null || true
-      return 1
-    fi
-    sleep 1
-  done
-  if ! rm -f -- "$lock_candidate"; then
-    rm -f -- "$lock_path" 2>/dev/null || true
-    printf "warning: Codex ProjectAtlas plugin update lock candidate cleanup failed at '%s'.\n" "$lock_candidate" >&2
+  fi
+
+  current_lock_identity=$(stat -c '%d:%i' -- "$lock_path" 2>/dev/null || stat -f '%d:%i' "$lock_path" 2>/dev/null || true)
+  descriptor_identity=$(stat -c '%d:%i' -- /dev/fd/9 2>/dev/null || stat -f '%d:%i' /dev/fd/9 2>/dev/null || true)
+  current_lock_links=$(stat -c %h -- "$lock_path" 2>/dev/null || stat -f %l "$lock_path" 2>/dev/null || true)
+  if [ -L "$lock_path" ] || [ ! -f "$lock_path" ] || [ "$current_lock_links" != 1 ] ||
+    [ "$current_lock_identity" != "$lock_identity" ] || [ "$descriptor_identity" != "$lock_identity" ]; then
+    exec 9>&-
+    printf "warning: Codex ProjectAtlas plugin update skipped: update lock changed while acquiring '%s'.\n" "$lock_path" >&2
     return 1
   fi
   codex_plugin_update_lock_path=$lock_path
   codex_plugin_update_lock_root=$lock_root
+  codex_plugin_update_lock_identity=$lock_identity
 }
 
 release_codex_projectatlas_plugin_update_lock() {
@@ -431,21 +400,26 @@ release_codex_projectatlas_plugin_update_lock() {
     return 0
   fi
   lock_parent=$(dirname -- "$codex_plugin_update_lock_path")
-  lock_parent_resolved=$(CDPATH= cd -P -- "$lock_parent" 2>/dev/null && pwd -P) || return 1
-  lock_owner=
+  lock_parent_resolved=$(CDPATH= cd -P -- "$lock_parent" 2>/dev/null && pwd -P) || lock_parent_resolved=
+  lock_identity=
   if [ -f "$codex_plugin_update_lock_path" ] && [ ! -L "$codex_plugin_update_lock_path" ]; then
-    lock_owner=$(cat -- "$codex_plugin_update_lock_path" 2>/dev/null || true)
+    lock_identity=$(stat -c '%d:%i' -- "$codex_plugin_update_lock_path" 2>/dev/null || stat -f '%d:%i' "$codex_plugin_update_lock_path" 2>/dev/null || true)
   fi
   lock_links=$(stat -c %h -- "$codex_plugin_update_lock_path" 2>/dev/null || stat -f %l "$codex_plugin_update_lock_path" 2>/dev/null || true)
+  lock_release_valid=true
   if [ "$lock_parent_resolved" != "$codex_plugin_update_lock_root" ] ||
     [ -L "$codex_plugin_update_lock_path" ] || [ ! -f "$codex_plugin_update_lock_path" ] ||
-    [ "$lock_owner" != "$$" ] || [ "$lock_links" != 1 ] ||
-    ! rm -f -- "$codex_plugin_update_lock_path"; then
-    printf "warning: Codex ProjectAtlas plugin update lock cleanup refused/path changed at '%s'.\n" "$codex_plugin_update_lock_path" >&2
-    return 1
+    [ "$lock_identity" != "$codex_plugin_update_lock_identity" ] || [ "$lock_links" != 1 ]; then
+    lock_release_valid=false
   fi
+  exec 9>&-
   codex_plugin_update_lock_path=
   codex_plugin_update_lock_root=
+  codex_plugin_update_lock_identity=
+  if [ "$lock_release_valid" != true ]; then
+    printf "warning: Codex ProjectAtlas plugin update lock cleanup refused/path changed at '%s'.\n" "$lock_parent/.projectatlas-plugin-update.lock" >&2
+    return 1
+  fi
 }
 
 clear_codex_projectatlas_snapshot() {
@@ -478,17 +452,13 @@ clear_codex_projectatlas_snapshot() {
   codex_state_snapshot_dir=
   codex_state_snapshot_config_path=
   codex_state_snapshot_config_existed=false
-  codex_state_snapshot_plugin_path=
-  codex_state_snapshot_plugin_existed=false
+  codex_state_snapshot_marketplace_root_path=
+  codex_state_snapshot_marketplace_root_existed=false
   codex_state_snapshot_plugin_cache_path=
   codex_state_snapshot_plugin_cache_existed=false
   codex_state_snapshot_expected_plugin_cache_path=
   codex_state_snapshot_expected_plugin_cache_existed=false
   codex_state_snapshot_cache_paths_match=false
-  codex_state_snapshot_marketplace_manifest_path=
-  codex_state_snapshot_marketplace_manifest_existed=false
-  codex_state_snapshot_marketplace_install_record_path=
-  codex_state_snapshot_marketplace_install_record_existed=false
   codex_state_snapshot_root=
   return 0
 }
@@ -620,6 +590,13 @@ stage_codex_projectatlas_snapshot() {
       ;;
   esac
   expected_marketplace_root=$codex_root/.tmp/marketplaces/projectatlas
+  validate_codex_projectatlas_destination_ancestry "$expected_marketplace_root" "ProjectAtlas marketplace root" "$codex_root" || return 1
+  marketplace_root_existed=false
+  if [ -e "$expected_marketplace_root" ] || [ -L "$expected_marketplace_root" ]; then
+    validate_codex_projectatlas_snapshot_directory "$expected_marketplace_root" "ProjectAtlas marketplace root" "$codex_root" || return 1
+    expected_marketplace_root=$(CDPATH= cd -P -- "$expected_marketplace_root" 2>/dev/null && pwd -P) || return 1
+    marketplace_root_existed=true
+  fi
   expected_plugin_source_root=$expected_marketplace_root/plugins/projectatlas
   plugin_source_root=$expected_plugin_source_root
   validate_codex_projectatlas_destination_ancestry "$plugin_source_root" "installed projectatlas plugin source" "$codex_root" || return 1
@@ -706,7 +683,7 @@ stage_codex_projectatlas_snapshot() {
     fi
     return 1
   fi
-  if [ "$plugin_source_existed" = true ] && ! cp -pPR -- "$plugin_source_root" "$snapshot_dir/plugin-source"; then
+  if [ "$marketplace_root_existed" = true ] && ! cp -pPR -- "$expected_marketplace_root" "$snapshot_dir/marketplace-root"; then
     if ! rm -rf -- "$snapshot_dir"; then
       printf "warning: Codex ProjectAtlas state snapshot cleanup failed; retained at '%s'.\n" "$snapshot_dir" >&2
     fi
@@ -725,33 +702,16 @@ stage_codex_projectatlas_snapshot() {
     fi
     return 1
   fi
-  if [ "$marketplace_manifest_existed" = true ] && ! cp -p -- "$marketplace_manifest_path" "$snapshot_dir/marketplace.json"; then
-    if ! rm -rf -- "$snapshot_dir"; then
-      printf "warning: Codex ProjectAtlas state snapshot cleanup failed; retained at '%s'.\n" "$snapshot_dir" >&2
-    fi
-    return 1
-  fi
-  if [ "$marketplace_install_record_existed" = true ] && ! cp -p -- "$marketplace_install_record_path" "$snapshot_dir/marketplace-install.json"; then
-    if ! rm -rf -- "$snapshot_dir"; then
-      printf "warning: Codex ProjectAtlas state snapshot cleanup failed; retained at '%s'.\n" "$snapshot_dir" >&2
-    fi
-    return 1
-  fi
-
   codex_state_snapshot_dir=$snapshot_dir
   codex_state_snapshot_config_path=$config_path
   codex_state_snapshot_config_existed=$config_existed
-  codex_state_snapshot_plugin_path=$plugin_source_root
-  codex_state_snapshot_plugin_existed=$plugin_source_existed
+  codex_state_snapshot_marketplace_root_path=$expected_marketplace_root
+  codex_state_snapshot_marketplace_root_existed=$marketplace_root_existed
   codex_state_snapshot_plugin_cache_path=$plugin_cache_root
   codex_state_snapshot_plugin_cache_existed=$plugin_cache_existed
   codex_state_snapshot_expected_plugin_cache_path=$expected_plugin_cache_path
   codex_state_snapshot_expected_plugin_cache_existed=$expected_plugin_cache_existed
   codex_state_snapshot_cache_paths_match=$cache_paths_match
-  codex_state_snapshot_marketplace_manifest_path=$marketplace_manifest_path
-  codex_state_snapshot_marketplace_manifest_existed=$marketplace_manifest_existed
-  codex_state_snapshot_marketplace_install_record_path=$marketplace_install_record_path
-  codex_state_snapshot_marketplace_install_record_existed=$marketplace_install_record_existed
   codex_state_snapshot_root=$codex_root
 }
 
@@ -836,9 +796,9 @@ restore_codex_projectatlas_snapshot() {
     return 1
   fi
   restore_codex_projectatlas_snapshot_directory \
-    "$codex_state_snapshot_dir/plugin-source" \
-    "$codex_state_snapshot_plugin_path" \
-    "$codex_state_snapshot_plugin_existed" || return 1
+    "$codex_state_snapshot_dir/marketplace-root" \
+    "$codex_state_snapshot_marketplace_root_path" \
+    "$codex_state_snapshot_marketplace_root_existed" || return 1
   if [ -n "$codex_state_snapshot_plugin_cache_path" ]; then
     restore_codex_projectatlas_snapshot_directory \
       "$codex_state_snapshot_dir/plugin-cache" \
@@ -851,14 +811,6 @@ restore_codex_projectatlas_snapshot() {
       "$codex_state_snapshot_expected_plugin_cache_path" \
       "$codex_state_snapshot_expected_plugin_cache_existed" || return 1
   fi
-  restore_codex_projectatlas_snapshot_file \
-    "$codex_state_snapshot_dir/marketplace.json" \
-    "$codex_state_snapshot_marketplace_manifest_path" \
-    "$codex_state_snapshot_marketplace_manifest_existed" || return 1
-  restore_codex_projectatlas_snapshot_file \
-    "$codex_state_snapshot_dir/marketplace-install.json" \
-    "$codex_state_snapshot_marketplace_install_record_path" \
-    "$codex_state_snapshot_marketplace_install_record_existed" || return 1
   restore_codex_projectatlas_snapshot_file \
     "$codex_state_snapshot_dir/config.toml" \
     "$codex_state_snapshot_config_path" \

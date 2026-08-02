@@ -26,9 +26,10 @@ ProjectAtlas SHALL preserve the existing Canvas, layout, palette, width threshol
 - **WHEN** sibling worktrees contain branch-only nodes or resolved relationships
 - **THEN** each TUI preview uses only its explicitly selected worktree atlas and no sibling relation leaks
 
-#### Scenario: Missing or corrupt graph evidence
-- **WHEN** the current graph generation is unavailable, incomplete, or contains an invalid normalized row
-- **THEN** the preview stays hidden or the read fails as a whole according to existing typed state and never invents or partially trusts graph facts
+#### Scenario: Missing or corrupt bounded graph evidence
+- **WHEN** the current graph generation is unavailable or incomplete, or a selected hub entity, adjacency row, endpoint, or truncation sentinel is invalid
+- **THEN** the preview stays hidden or that requested page fails as a whole according to existing typed state and never returns partial bounded evidence
+- **AND** normalized rows outside the requested page are validated only if a continuation addresses them; the preview does not repeat a whole-generation integrity audit before each bounded read
 
 ### Requirement: Reference visual remains unchanged
 ProjectAtlas SHALL fix live preview correctness without replacing the checked-in README token TUI image.
