@@ -26539,6 +26539,7 @@ fn repository_filesystem_snapshot(repo: &Path) -> Result<BTreeMap<String, String
     Ok(snapshot)
 }
 
+#[cfg(windows)]
 fn output_contains_path_name(output: &str, path: &Path) -> bool {
     path.file_name().is_some_and(|name| {
         output
