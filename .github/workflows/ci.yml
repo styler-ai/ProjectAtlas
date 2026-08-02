@@ -169,6 +169,48 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails --test e2e
 
+      - name: Plugin update total-offline preservation E2E
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli plugin_update_preserves_prior_integration_when_all_replacement_adds_fail --test e2e
+
+      - name: Plugin update strict inventory E2E
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli plugin_update_refuses_unavailable_or_ambiguous_inventory --test e2e
+
+      - name: POSIX plugin inventory no-jq E2E
+        if: matrix.label != 'windows'
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli posix_plugin_inventory_without_jq_rejects_split_object_fields --test e2e -- --exact
+
+      - name: Plugin update concurrent rollback serialization E2E
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli plugin_update_serializes_restore_before_the_next_installer_reads_state --test e2e
+
+      - name: Plugin update retained recovery refusal E2E
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli plugin_update_refuses_retained_recovery_state_before_mutation --test e2e
+
+      - name: POSIX plugin restore trust-boundary E2E
+        if: matrix.label != 'windows'
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli posix_plugin_restore_rejects_hostile_paths_and_retains_recovery_state --test e2e -- --exact
+
+      - name: Windows plugin snapshot trust-boundary E2E
+        if: matrix.label == 'windows'
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          cargo test --locked -p projectatlas-cli windows_plugin_restore_rejects_cache_junction_and_retains_recovery_snapshot --test e2e -- --exact
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p projectatlas-cli windows_plugin_snapshot_rejects_reparse_above_codex_home_before_mutation --test e2e -- --exact
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p projectatlas-cli windows_plugin_snapshot_cleanup_refuses_path_swap_without_outside_deletion --test e2e -- --exact
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p projectatlas-cli windows_plugin_snapshot_cleanup_failure_retains_usable_direct_snapshot --test e2e -- --exact
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p projectatlas-cli windows_plugin_restore_rejects_config_directory_and_retains_recovery_snapshot --test e2e -- --exact
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Windows recovery config selection E2E
         if: matrix.label == 'windows'
         timeout-minutes: 5

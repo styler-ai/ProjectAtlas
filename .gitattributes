@@ -8,6 +8,7 @@
 *.md text eol=lf
 *.rs text eol=lf
 *.sh text eol=lf
+*.sha256 text eol=lf
 *.sql text eol=lf
 *.toml text eol=lf
 *.toon text eol=lf
