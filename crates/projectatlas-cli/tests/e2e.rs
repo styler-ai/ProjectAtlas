@@ -12210,6 +12210,13 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
     let fake_path = temp.path().join(FAKE_PATH_DIR);
     fs::create_dir(&fake_path)?;
     let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    #[cfg(unix)]
+    {
+        // Exercise the `/var` to `/private/var` shape used by macOS temporary homes.
+        let resolved_home = temp.path().join("resolved-home");
+        fs::create_dir(&resolved_home)?;
+        std::os::unix::fs::symlink(resolved_home, &isolated_home)?;
+    }
     let codex_dir = isolated_home.join(CODEX_CONFIG_DIR);
     fs::create_dir_all(&codex_dir)?;
     let expected_release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
@@ -12334,7 +12341,7 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
     let state_after = repository_filesystem_snapshot(&codex_dir)?;
     if state_after != state_before {
         return Err(io::Error::other(format!(
-            "failed replacement changed prior Codex marketplace/plugin/config/runtime state for {previous_ref}:\nbefore={state_before:#?}\nafter={state_after:#?}\ncalls:\n{fake_codex_calls}"
+            "failed replacement changed prior Codex marketplace/plugin/config/runtime state for {previous_ref}:\nbefore={state_before:#?}\nafter={state_after:#?}\ncalls:\n{fake_codex_calls}\ninstaller output:\n{installer_output_text}"
         ))
         .into());
     }
@@ -13236,13 +13243,18 @@ fn windows_plugin_restore_rejects_cache_junction_and_retains_recovery_snapshot()
         })
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
+    let retained_snapshot_name = snapshots
+        .first()
+        .and_then(|snapshot| snapshot.file_name())
+        .ok_or_else(|| io::Error::other("retained recovery snapshot has no directory name"))?;
+    let unwrapped_output = output_text.replace(['\r', '\n'], "");
     if snapshots.len() != 1
         || !snapshots[0]
             .join(FAKE_CODEX_PLUGIN_CACHE_DIR)
             .join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME)
             .is_file()
         || !output_text.contains("could not be restored completely")
-        || !output_text.contains(&snapshots[0].to_string_lossy().to_string())
+        || !unwrapped_output.contains(retained_snapshot_name.to_string_lossy().as_ref())
     {
         return Err(io::Error::other(format!(
             "junction-swapped second restore destination did not retain one usable recovery snapshot:\n{output_text}\nsnapshots={snapshots:#?}"

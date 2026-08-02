@@ -599,6 +599,7 @@ stage_codex_projectatlas_snapshot() {
     printf '%s\n' "warning: Codex ProjectAtlas plugin update skipped: existing Codex config root cannot be validated." >&2
     return 1
   }
+  config_path=$codex_root/${config_path##*/}
   config_existed=false
   if [ -f "$config_path" ]; then
     config_existed=true
