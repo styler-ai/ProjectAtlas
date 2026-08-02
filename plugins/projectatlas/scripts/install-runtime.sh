@@ -739,6 +739,10 @@ restore_codex_projectatlas_snapshot_directory() {
   if [ -L "$restore_directory_destination" ] || { [ -e "$restore_directory_destination" ] && [ ! -d "$restore_directory_destination" ]; }; then
     return 1
   fi
+  if [ -d "$restore_directory_destination" ]; then
+    validate_codex_projectatlas_snapshot_directory \
+      "$restore_directory_destination" "Codex snapshot restore destination" "$codex_state_snapshot_root" || return 1
+  fi
   rm -rf -- "$restore_directory_destination" || return 1
   if [ -e "$restore_directory_destination" ] || [ -L "$restore_directory_destination" ]; then
     return 1
