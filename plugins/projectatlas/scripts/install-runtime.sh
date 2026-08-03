@@ -1246,6 +1246,18 @@ update_codex_plugin_locked() {
     codex_plugin_update_preserved_prior_state=true
     return 0
   fi
+  if [ -d "$codex_state_snapshot_marketplace_root_path/.git" ] &&
+    ! git -C "$codex_state_snapshot_marketplace_root_path" rev-parse --verify --quiet "refs/tags/$release_tag^{commit}" >/dev/null 2>&1 &&
+    ! git -C "$codex_state_snapshot_marketplace_root_path" fetch --force --no-tags https://github.com/styler-ai/ProjectAtlas.git "refs/tags/$release_tag:refs/tags/$release_tag" >/dev/null 2>&1; then
+    printf 'warning: Codex ProjectAtlas plugin update failed: could not fetch release tag %s.\n' "$release_tag" >&2
+    codex_plugin_update_preserved_prior_state=true
+    if restore_codex_projectatlas_snapshot; then
+      clear_codex_projectatlas_snapshot || true
+    else
+      printf "warning: Codex ProjectAtlas release-tag fetch failed and its preserved local state could not be restored completely; the recovery snapshot was retained at '%s'.\n" "$codex_state_snapshot_dir" >&2
+    fi
+    return 0
+  fi
   update_succeeded=false
   restore_succeeded=false
   if ! "$codex_bin" plugin marketplace remove projectatlas --json >/dev/null 2>&1; then

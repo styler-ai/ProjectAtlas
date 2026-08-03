@@ -4980,6 +4980,7 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Codex ProjectAtlas plugin skill verified",
         "Codex does not expose the active in-process ProjectAtlas skill path",
         "plugin marketplace add styler-ai/ProjectAtlas --ref",
+        "refs/tags/${releaseTag}:refs/tags/${releaseTag}",
         "Update-ProjectAtlasCodexMcpRegistry",
         "Test-ProjectAtlasCodexPluginReady",
         "Test-ProjectAtlasCodexMcpRegistryReady",
@@ -5074,6 +5075,7 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Codex ProjectAtlas plugin skill verified",
         "Codex does not expose the active in-process ProjectAtlas skill path",
         "plugin marketplace add styler-ai/ProjectAtlas --ref",
+        "refs/tags/$release_tag:refs/tags/$release_tag",
         "update_codex_mcp_registry",
         "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE",
         "PROJECTATLAS_CODEX_COMMAND",
@@ -5110,6 +5112,16 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             ))
             .into());
         }
+    }
+    let posix_tag_fetch_failure = posix_installer
+        .split("could not fetch release tag %s.")
+        .nth(1)
+        .and_then(|tail| tail.split("return 0").next())
+        .ok_or_else(|| io::Error::other("POSIX release-tag fetch failure branch missing"))?;
+    if !posix_tag_fetch_failure.contains("restore_codex_projectatlas_snapshot") {
+        return Err(
+            io::Error::other("POSIX release-tag fetch failure must restore its snapshot").into(),
+        );
     }
     for forbidden in [
         r#"sed -n 's/.*"mcpServers""#,
