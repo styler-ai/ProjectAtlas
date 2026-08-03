@@ -320,7 +320,7 @@ fn run_strict_strings(root: &Path) -> Result<(), LintError> {
     }
 }
 
-/// Reject machine-specific paths from the current tracked UTF-8 tree.
+/// Reject machine-specific paths from the tracked worktree and committed `HEAD`.
 fn lint_repository_private_paths(root: &Path) -> Result<Vec<StringLiteralViolation>, LintError> {
     let output = Command::new("git")
         .args(["ls-files", "-z"])
@@ -363,6 +363,34 @@ fn lint_repository_private_paths(root: &Path) -> Result<Vec<StringLiteralViolati
             source
         };
         violations.extend(lint_private_path_source(relative_path, &source, &rules));
+    }
+
+    let dirty = Command::new("git")
+        .args(["diff", "--name-only", "-z", "--no-renames", "HEAD", "--"])
+        .current_dir(root)
+        .output()
+        .map_err(LintError::ListGitFiles)?;
+    if !dirty.status.success() {
+        return Err(LintError::GitFileListFailed(dirty.status.code()));
+    }
+    for raw_path in dirty
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let relative_path = std::str::from_utf8(raw_path).map_err(LintError::NonUtf8GitPath)?;
+        let committed = Command::new("git")
+            .args(["cat-file", "blob"])
+            .arg(format!("HEAD:{relative_path}"))
+            .current_dir(root)
+            .output()
+            .map_err(LintError::ListGitFiles)?;
+        let Ok(source) = String::from_utf8(committed.stdout) else {
+            continue;
+        };
+        if committed.status.success() {
+            violations.extend(lint_private_path_source(relative_path, &source, &rules));
+        }
     }
     Ok(violations)
 }
@@ -923,7 +951,7 @@ mod tests {
         Ok(())
     }
 
-    /// The current-tree rule scans tracked symlinks, accepts portable fixtures, and redacts findings.
+    /// Dirty worktree state cannot hide committed paths, portable fixtures pass, and findings redact.
     #[test]
     fn private_path_lint_is_redacted_and_fixture_aware() -> Result<(), Box<dyn std::error::Error>> {
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -973,6 +1001,32 @@ mod tests {
                     .status()?
                     .success(),
                 "temporary Git repository staging failed",
+            )?;
+            require(
+                Command::new("git")
+                    .args([
+                        "-c",
+                        "user.name=ProjectAtlas Tests",
+                        "-c",
+                        "user.email=projectatlas-tests@example.invalid",
+                        "commit",
+                        "--quiet",
+                        "-m",
+                        "private path fixture",
+                    ])
+                    .current_dir(&repo)
+                    .status()?
+                    .success(),
+                "temporary Git repository commit failed",
+            )?;
+            fs::write(repo.join("private.txt"), "checkout = <project-root>\n")?;
+            require(
+                Command::new("git")
+                    .args(["rm", "--cached", "--quiet", "private-link"])
+                    .current_dir(&repo)
+                    .status()?
+                    .success(),
+                "temporary dirty tracked state setup failed",
             )?;
 
             let violations = lint_repository_private_paths(&repo)?;
