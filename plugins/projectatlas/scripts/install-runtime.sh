@@ -374,9 +374,9 @@ acquire_codex_projectatlas_plugin_update_lock() {
   lock_device=${lock_identity%%:*}
   lock_inode=${lock_identity#*:}
   if [ "$lock_platform" = Darwin ]; then
-    "$projectatlas_bin" acquire-installer-lock "$lock_device" "$lock_inode" && lock_acquired=true
+    "$projectatlas_bin" acquire-installer-lock "$lock_device" "$lock_inode" <&9 && lock_acquired=true
   elif command -v flock >/dev/null 2>&1; then
-    "$projectatlas_bin" acquire-installer-lock "$lock_device" "$lock_inode" &&
+    "$projectatlas_bin" acquire-installer-lock "$lock_device" "$lock_inode" <&9 &&
       flock -w 30 9 && lock_acquired=true
   fi
   if [ "$lock_acquired" != true ]; then

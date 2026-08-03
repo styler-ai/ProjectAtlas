@@ -41,7 +41,6 @@ cli-core = [
     "dep:cssparser",
     "dep:getrandom",
     "dep:jsonc-parser",
-    "dep:libc",
     "dep:notify",
     "dep:pulldown-cmark",
     "dep:projectatlas-db",
@@ -121,9 +120,6 @@ tree-sitter = { workspace = true, optional = true }
 tree-sitter-language-pack = { workspace = true, optional = true }
 yaml-rust2 = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
-
-[target.'cfg(unix)'.dependencies]
-libc = { workspace = true, optional = true }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 landlock = { workspace = true, optional = true }

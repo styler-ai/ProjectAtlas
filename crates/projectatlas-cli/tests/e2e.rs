@@ -12406,6 +12406,69 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
 
     let workspace_root = workspace_root()?;
     let runtime = mcp_contract_executable();
+    let verify_separate_state =
+        previous_ref == expected_release_tag && config_existed && !replacement_has_blank_source;
+    let generated_state_before = if verify_separate_state {
+        let mut skip_command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            &repo,
+            &runtime,
+            Some(&fake_path),
+            Some(&isolated_home),
+        )?;
+        skip_command
+            .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1");
+        let skip_output = require_successful_plugin_installer_output(skip_command.output()?)?;
+        let skip_output_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&skip_output.stdout),
+            String::from_utf8_lossy(&skip_output.stderr)
+        );
+        let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
+        let skip_codex_calls = if fake_codex_log.exists() {
+            fs::read_to_string(&fake_codex_log)?
+        } else {
+            String::new()
+        };
+        let skipped_codex_state = repository_filesystem_snapshot(&codex_dir)?;
+        if !skip_output_text.contains(
+            "Codex ProjectAtlas plugin update skipped by PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE.",
+        ) || skipped_codex_state != state_before
+            || skip_codex_calls.lines().any(|call| {
+                [
+                    "plugin remove ",
+                    "plugin add ",
+                    "plugin marketplace remove ",
+                    "plugin marketplace add ",
+                ]
+                .iter()
+                .any(|mutation| call.starts_with(mutation))
+            })
+        {
+            return Err(io::Error::other(format!(
+                "explicit plugin skip mutated Codex state or hid its diagnostic:\n{skip_output_text}\nfake Codex calls:\n{skip_codex_calls}"
+            ))
+            .into());
+        }
+        if fake_codex_log.exists() {
+            fs::remove_file(fake_codex_log)?;
+        }
+        Some(repository_filesystem_snapshot(&repo)?)
+    } else {
+        None
+    };
+    #[cfg(windows)]
+    let runtime_state_before = if verify_separate_state {
+        Some(repository_filesystem_snapshot(
+            &isolated_home
+                .join("AppData")
+                .join("Local")
+                .join(PROJECTATLAS_LOCAL_APPDATA_DIR),
+        )?)
+    } else {
+        None
+    };
     let installer_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
         &repo,
@@ -12458,9 +12521,19 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
             .into());
         }
     }
-    if fake_codex_calls.contains(forbidden_add) {
+    let prior_ref_add =
+        format!("plugin marketplace add styler-ai/ProjectAtlas --ref {previous_ref} --json");
+    if fake_codex_calls
+        .lines()
+        .filter(|call| *call == required_add.as_str())
+        .count()
+        != 1
+        || (previous_ref != expected_release_tag
+            && fake_codex_calls.lines().any(|call| call == prior_ref_add))
+        || fake_codex_calls.contains(forbidden_add)
+    {
         return Err(io::Error::other(format!(
-            "failed replacement attempted a network rollback through {forbidden_add:?}:\n{fake_codex_calls}"
+            "failed replacement repeated acquisition or attempted network rollback:\n{fake_codex_calls}"
         ))
         .into());
     }
@@ -12478,6 +12551,30 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
             "failed replacement changed prior Codex marketplace/plugin/config/runtime state for {previous_ref}:\nbefore={state_before:#?}\nafter={state_after:#?}\ncalls:\n{fake_codex_calls}\ninstaller output:\n{installer_output_text}"
         ))
         .into());
+    }
+    if let Some(generated_state_before) = generated_state_before {
+        let generated_state_after = repository_filesystem_snapshot(&repo)?;
+        if generated_state_after != generated_state_before {
+            return Err(io::Error::other(format!(
+                "failed replacement changed generated ProjectAtlas host state:\nbefore={generated_state_before:#?}\nafter={generated_state_after:#?}"
+            ))
+            .into());
+        }
+    }
+    #[cfg(windows)]
+    if let Some(runtime_state_before) = runtime_state_before {
+        let runtime_state_after = repository_filesystem_snapshot(
+            &isolated_home
+                .join("AppData")
+                .join("Local")
+                .join(PROJECTATLAS_LOCAL_APPDATA_DIR),
+        )?;
+        if runtime_state_after != runtime_state_before {
+            return Err(io::Error::other(format!(
+                "failed replacement changed the verified Windows runtime state:\nbefore={runtime_state_before:#?}\nafter={runtime_state_after:#?}"
+            ))
+            .into());
+        }
     }
     Ok(())
 }

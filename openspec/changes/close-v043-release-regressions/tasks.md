@@ -14,7 +14,7 @@
 
 ## 3. Offline Installer Preservation
 
-- [ ] 3.1 Serialize each Codex root, capture validated official Codex marketplace/plugin/config state before destructive Windows/POSIX replacement, and restore locally on failure without lost updates, network rollback, path escape, link traversal, or mutation of intentionally managed sources.
+- [x] 3.1 Serialize each Codex root, capture validated official Codex marketplace/plugin/config state before destructive Windows/POSIX replacement, and restore locally on failure without lost updates, network rollback, path escape, link traversal, or mutation of intentionally managed sources.
 - [ ] 3.2 Add Windows and POSIX total-offline fault tests where every add/replacement attempt fails and assert exact preservation of prior marketplace, plugin, config, runtime, generated host state, skip behavior, and truthful failure reporting.
 - [ ] 3.3 Reconcile obsolete-MCP handoff, locked-mirror, missing/stale/unofficial, successful update, security/trust-boundary, script syntax, and installer policy behavior without adding a dependency or framework.
 - [ ] 3.4 Run format, focused check/Clippy, installer trust/E2E suites, hosted Windows/POSIX release proof, independent edge review, and the accumulated v0.4 regression gate before release.
