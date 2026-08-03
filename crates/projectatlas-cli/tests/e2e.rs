@@ -117,15 +117,35 @@ const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
 const OPENSPEC_DIR_NAME: &str = "openspec";
 const AGENT_INTEGRATION_DOC_FILE_NAME: &str = "agent-integration.md";
 const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
+const OPTIONAL_PARSER_PACK_WORKFLOW_FILE_NAME: &str = "optional-parser-pack.yml";
+const AUTO_RELEASE_WORKFLOW_FILE_NAME: &str = "03-auto-release.yml";
 const CARGO_LOCK_FILE_NAME: &str = "Cargo.lock";
 const CODEX_CONFIG_DIR: &str = ".codex";
 const CODEX_PLUGIN_MANIFEST_DIR: &str = ".codex-plugin";
+const CODEX_MARKETPLACE_METADATA_DIR: &str = ".agents";
+const CODEX_MARKETPLACE_INSTALL_RECORD_FILE_NAME: &str = ".codex-marketplace-install.json";
+const CODEX_MARKETPLACE_MANIFEST_FILE_NAME: &str = "marketplace.json";
+#[cfg(windows)]
+const CODEX_MARKETPLACE_SNAPSHOT_DIR_NAME: &str = "marketplace-root";
+const CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME: &str = "runtime-integration.json";
+const CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME: &str = ".projectatlas-plugin-update.lock";
 #[cfg(windows)]
 const CODEX_FIXTURE_EXECUTABLE_FILE_NAME: &str = "codex.exe";
+#[cfg(unix)]
+const POSIX_CODEX_EXECUTABLE_FILE_NAME: &str = "codex";
+#[cfg(unix)]
+const POSIX_FIND_EXECUTABLE_FILE_NAME: &str = "find";
+#[cfg(unix)]
+const POSIX_FLOCK_EXECUTABLE_FILE_NAME: &str = "flock";
 const FAKE_CODEX_LOG_FILE: &str = "fake-codex.log";
+#[cfg(windows)]
 const FAKE_CODEX_PLUGIN_CACHE_DIR: &str = "plugin-cache";
-const FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_FILE: &str = "plugin-add-failed.marker";
-const FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_ENV: &str = "PROJECTATLAS_FAKE_FAILURE_MARKER";
+const FAKE_CODEX_JUNCTION_TARGET_DIR: &str = "junction-target";
+const FAKE_CODEX_CLEANUP_SNAPSHOT_TARGET_DIR: &str = "cleanup-snapshot-target";
+#[cfg(any(windows, unix))]
+const INSTALLER_CANARY_FILE_NAME: &str = "canary.txt";
+#[cfg(unix)]
+const INSTALLER_OUTSIDE_SENTINEL_FILE_NAME: &str = "sentinel";
 #[cfg(windows)]
 const FAKE_CODEX_PLUGIN_LIST_FILE_NAME: &str = "codex-plugin-list.json";
 const FAKE_CODEX_REGISTRY_CURRENT_FILE_NAME: &str = "codex-registry-current.json";
@@ -1293,6 +1313,195 @@ fn persistent_mcp_stdin_does_not_block_repository_startup_probes() -> Result<(),
         .into());
     }
     session.shutdown()
+}
+
+#[test]
+fn installed_candidate_without_git_keeps_navigation_and_typed_vcs_unavailability()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("primary-checkout-without-git");
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn entry() {}\n",
+    )?;
+    git_success(&repo, &["init", "--quiet"])?;
+    if !fs::metadata(repo.join(GIT_DIR_NAME))?.is_dir() {
+        return Err(io::Error::other("no-Git fixture is not an ordinary primary checkout").into());
+    }
+
+    let executable = mcp_contract_executable();
+    if !executable.is_absolute() {
+        return Err(io::Error::other(format!(
+            "no-Git contract requires an absolute candidate executable: {}",
+            executable.display()
+        ))
+        .into());
+    }
+    let restricted_bin = temp.path().join("path-without-git");
+    fs::create_dir(&restricted_bin)?;
+    let restricted_path = std::env::join_paths([restricted_bin])?;
+    let restricted_path_text = restricted_path
+        .to_str()
+        .ok_or_else(|| io::Error::other("restricted no-Git PATH is not UTF-8"))?;
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+
+    let missing_index = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .env("PATH", &restricted_path)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--db")
+        .arg(&database)
+        .args(["--format", "json", "overview"])
+        .output()?;
+    if missing_index.status.success() {
+        return Err(io::Error::other("no-Git overview reused state without a local index").into());
+    }
+    let missing_index_error: Value = serde_json::from_slice(&missing_index.stderr)?;
+    let expected_project_root =
+        projectatlas_core::normalize_native_path_display(repo.canonicalize()?);
+    let expected_database = projectatlas_core::normalize_native_path_display(&database);
+    require_json_string(&missing_index_error, &["error", "kind"], "init_required")?;
+    require_json_string(
+        &missing_index_error,
+        &["error", "init_required", "project_root"],
+        &expected_project_root,
+    )?;
+    require_json_string(
+        &missing_index_error,
+        &["error", "init_required", "database"],
+        &expected_database,
+    )?;
+    require_json_string(
+        &missing_index_error,
+        &["error", "next", "project_path"],
+        &expected_project_root,
+    )?;
+    if repo.join(ATLAS_DIR_NAME).exists() {
+        return Err(
+            io::Error::other("no-Git init_required probe created local atlas state").into(),
+        );
+    }
+
+    for arguments in [
+        vec![
+            "--db".to_string(),
+            database.display().to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+            "scan".to_string(),
+            ".".to_string(),
+        ],
+        vec![
+            "--db".to_string(),
+            database.display().to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+            "overview".to_string(),
+        ],
+    ] {
+        let output = StdCommand::new(&executable)
+            .current_dir(&repo)
+            .env("PATH", &restricted_path)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(&arguments)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "installed candidate failed without Git for {arguments:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        serde_json::from_slice::<Value>(&output.stdout)?;
+    }
+
+    let project_path = repo.to_string_lossy().to_string();
+    let (mut session, _initialized) = McpContractSession::spawn_initialized(
+        &executable,
+        &repo,
+        &database,
+        &[
+            ("PROJECTATLAS_NO_TELEMETRY", Some("1")),
+            ("PATH", Some(restricted_path_text)),
+        ],
+    )?;
+    let operation_result = (|| -> Result<(), Box<dyn Error>> {
+        for (tool, arguments, expected) in [
+            (
+                "atlas_session_brief",
+                json!({"project_path": project_path, "query": "src/lib.rs", "compact": true}),
+                "session_brief:",
+            ),
+            (
+                "atlas_overview",
+                json!({"project_path": project_path}),
+                "overview:",
+            ),
+            (
+                "atlas_file_summary",
+                json!({"project_path": project_path, "file": "src/lib.rs", "compact": true}),
+                "file_summary:",
+            ),
+        ] {
+            let text = session.call_tool(tool, &arguments)?;
+            if !text.contains(expected) {
+                return Err(io::Error::other(format!(
+                    "{tool} failed local navigation without Git: {text}"
+                ))
+                .into());
+            }
+        }
+
+        let atlas_before_vcs = mcp_database_snapshot(&database)?;
+        let impact_text = session.call_tool(
+            "atlas_symbol_relations",
+            &json!({
+                "project_path": project_path,
+                "view": "analysis",
+                "analysis_mode": "impact",
+                "vcs": "working_tree",
+                "file": "src/lib.rs",
+                "symbol": "entry",
+                "direction": "outbound",
+                "depth": 2,
+                "limit": 50,
+                "output_bytes": 65_536
+            }),
+        )?;
+        let impact: Value = toon_format::decode_default(&impact_text)?;
+        require_json_string(
+            &impact,
+            &["symbol_relations", "vcs", "state"],
+            "unavailable",
+        )?;
+        let reason = json_at(&impact, &["symbol_relations", "vcs", "reason"])?
+            .as_str()
+            .ok_or_else(|| io::Error::other("typed VCS unavailability omitted its reason"))?;
+        if !reason.contains("git could not start") {
+            return Err(io::Error::other(format!(
+                "missing Git did not remain typed VCS-only unavailability: {impact_text}"
+            ))
+            .into());
+        }
+        if mcp_database_snapshot(&database)? != atlas_before_vcs {
+            return Err(
+                io::Error::other("missing-Git VCS analysis changed local atlas state").into(),
+            );
+        }
+        let readable = session.call_tool(
+            "atlas_file_summary",
+            &json!({"project_path": project_path, "file": "src/lib.rs", "compact": true}),
+        )?;
+        if !readable.contains("file_summary:") {
+            return Err(io::Error::other(format!(
+                "local atlas was unreadable after missing-Git VCS analysis: {readable}"
+            ))
+            .into());
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())
 }
 
 #[cfg(feature = "optional-parser-supervisor")]
@@ -3301,7 +3510,7 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
     fs::write(repo.join(".gitignore"), ".projectatlas/\n/ignored-tree/\n")?;
     fs::write(
         repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
-        "pub fn main_checkout_marker() {}\n",
+        "pub fn main_checkout_marker() { main_checkout_leaf(); }\npub fn main_checkout_leaf() {}\n",
     )?;
     fs::write(
         repo.join(SRC_DIR_NAME)
@@ -3367,7 +3576,7 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
     }
     fs::write(
         linked.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
-        "pub fn linked_feature_marker() {}\n",
+        "pub fn linked_feature_marker() { linked_feature_leaf(); }\npub fn linked_feature_second() { linked_feature_leaf(); }\npub fn linked_feature_leaf() {}\n",
     )?;
     fs::write(
         linked.join(SRC_DIR_NAME).join(FEATURE_ONLY_RS_FILE_NAME),
@@ -3571,6 +3780,26 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
         PurposeSource::Agent,
     )?;
     drop(linked_store);
+    for (selected, expected, sibling, label) in [
+        (&repo, "2 nodes • 1 links", "3 nodes • 2 links", "main"),
+        (&linked, "3 nodes • 2 links", "2 nodes • 1 links", "linked"),
+    ] {
+        let output = Command::cargo_bin("projectatlas")?
+            .current_dir(selected)
+            .env("COLUMNS", "200")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(["token", "--view", "tui"])
+            .output()?;
+        let dashboard = String::from_utf8(output.stdout)?;
+        if !output.status.success() || !dashboard.contains(expected) || dashboard.contains(sibling)
+        {
+            return Err(io::Error::other(format!(
+                "{label} public token TUI crossed its selected worktree: status={:?} expected={expected:?} sibling={sibling:?} output={dashboard}",
+                output.status.code(),
+            ))
+            .into());
+        }
+    }
     let main_purpose = AtlasStore::open_for_project(&main_db, &repo)?
         .load_node_by_path("src/lib.rs")?
         .ok_or_else(|| io::Error::other("main source missing after purpose write"))?;
@@ -4958,6 +5187,11 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "plugin_update_leaves_current_codex_marketplace_untouched",
         "plugin_update_repairs_current_codex_plugin_with_stale_source_manifest",
         "plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails",
+        "plugin_update_preserves_prior_integration_when_all_replacement_adds_fail",
+        "plugin_update_refuses_unavailable_or_ambiguous_inventory",
+        "plugin_update_serializes_restore_before_the_next_installer_reads_state",
+        "windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized",
+        "plugin_update_refuses_retained_recovery_state_before_mutation",
     ] {
         if !e2e_smoke.contains(required) {
             return Err(io::Error::other(format!(
@@ -4993,6 +5227,22 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             "Windows CI smoke must run the stale Codex MCP registry repair regression",
         )
         .into());
+    }
+    for required in [
+        "posix_plugin_inventory_without_jq_rejects_split_object_fields",
+        "posix_plugin_restore_rejects_hostile_paths_and_retains_recovery_state",
+        "windows_plugin_restore_rejects_cache_junction_and_retains_recovery_snapshot",
+        "windows_plugin_restore_rejects_config_directory_and_retains_recovery_snapshot",
+        "windows_plugin_snapshot_rejects_reparse_above_codex_home_before_mutation",
+        "windows_plugin_snapshot_cleanup_refuses_path_swap_without_outside_deletion",
+        "windows_plugin_snapshot_cleanup_failure_retains_usable_direct_snapshot",
+    ] {
+        if !e2e_smoke.contains(required) {
+            return Err(io::Error::other(format!(
+                "multi-OS CI smoke omitted installer trust-boundary regression {required}"
+            ))
+            .into());
+        }
     }
     if posix_installer.contains("--package projectatlas-cli") {
         return Err(io::Error::other(
@@ -5262,7 +5512,7 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
         .join("projectatlas")
         .join("scripts")
         .join("install-runtime.ps1");
-    let output = StdCommand::new("powershell")
+    let output = StdCommand::new("pwsh")
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
@@ -5328,6 +5578,9 @@ $unicodePayload = Invoke-ProjectAtlasBoundedJsonCommand `
 $expectedUnicodePath = "M$([char]0x00FC)nchen\$([char]0x8DEF)$([char]0x5F84)"
 if ($unicodePayload.unicode_path -ne $expectedUnicodePath) {
     throw "Bounded JSON command did not strictly decode BOM-less UTF-8 output: expected='$expectedUnicodePath' actual='$($unicodePayload.unicode_path)'"
+}
+if (-not (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_UNICODE_JSON_RUNTIME "0.4.1")) {
+    throw "Valid structured runtime probe was rejected"
 }
 $shortBoundedJsonDefinition = $boundedJsonDefinition.Replace(
     '$probeTimeoutMs = 5000',
@@ -5726,7 +5979,6 @@ fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<
         }
     }
     for path in [
-        "AGENTS.md",
         "templates/AGENTS.md",
         "plugins/projectatlas/skills/projectatlas/SKILL.md",
         "docs/agent-integration.md",
@@ -5875,6 +6127,24 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
             .join("workflows")
             .join("release.yml"),
     )?;
+    let parser_pack_workflow = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("workflows")
+            .join(OPTIONAL_PARSER_PACK_WORKFLOW_FILE_NAME),
+    )?;
+    let docs_workflow = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("workflows")
+            .join("04-docs.yml"),
+    )?;
+    let auto_release_workflow = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("workflows")
+            .join(AUTO_RELEASE_WORKFLOW_FILE_NAME),
+    )?;
     let pre_push = fs::read_to_string(
         workspace_root
             .join(GITHOOKS_DIR_NAME)
@@ -6000,9 +6270,33 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
         }
         if !verify.contains("projectatlas-lints") || !verify.contains("strict-strings") {
             return Err(io::Error::other(format!(
-                "{workflow_name} verify job must run strict ProjectAtlas source string lints"
+                "{workflow_name} verify job must run repository source policy lints"
             ))
             .into());
+        }
+        let source_policy_position = verify.find("strict-strings").ok_or_else(|| {
+            io::Error::other(format!(
+                "{workflow_name} verify job has no repository source policy position"
+            ))
+        })?;
+        let workspace_build_position = verify.find("cargo check --workspace").ok_or_else(|| {
+            io::Error::other(format!(
+                "{workflow_name} verify job has no workspace check position"
+            ))
+        })?;
+        if source_policy_position > workspace_build_position {
+            return Err(io::Error::other(format!(
+                "{workflow_name} must reject private source before compiling the workspace"
+            ))
+            .into());
+        }
+        for forbidden in ["private-path-range", "select-private-history-range.py"] {
+            if workflow.contains(forbidden) {
+                return Err(io::Error::other(format!(
+                    "{workflow_name} must not restore obsolete source-history policy {forbidden:?}"
+                ))
+                .into());
+            }
         }
         for run in workflow_job_runs(workflow, "verify")? {
             if command_runs_projectatlas_maintenance(&run) {
@@ -6012,6 +6306,73 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
                 .into());
             }
         }
+    }
+    for (workflow_name, workflow, job, first_build) in [
+        (
+            "optional parser pack",
+            &parser_pack_workflow,
+            "construct",
+            "cargo metadata",
+        ),
+        ("documentation", &docs_workflow, "deploy", "cargo doc"),
+    ] {
+        let build_job = workflow_job_block(workflow, job)?;
+        if !build_job.contains("projectatlas-lints") || !build_job.contains("strict-strings") {
+            return Err(io::Error::other(format!(
+                "{workflow_name} build must run repository source policy lints"
+            ))
+            .into());
+        }
+        let source_policy_position = build_job.find("strict-strings").ok_or_else(|| {
+            io::Error::other(format!(
+                "{workflow_name} build has no repository source policy position"
+            ))
+        })?;
+        let first_build_position = build_job.find(first_build).ok_or_else(|| {
+            io::Error::other(format!(
+                "{workflow_name} build has no expected build command {first_build:?}"
+            ))
+        })?;
+        if source_policy_position > first_build_position {
+            return Err(io::Error::other(format!(
+                "{workflow_name} must reject private source before product build commands"
+            ))
+            .into());
+        }
+        for forbidden in ["private-path-range", "select-private-history-range.py"] {
+            if build_job.contains(forbidden) {
+                return Err(io::Error::other(format!(
+                    "{workflow_name} must not restore obsolete source-history policy {forbidden:?}"
+                ))
+                .into());
+            }
+        }
+    }
+    if !pre_push.contains("projectatlas-lints") || !pre_push.contains("strict-strings") {
+        return Err(io::Error::other(
+            "pre-push must run the same repository source policy lint as hosted builds",
+        )
+        .into());
+    }
+    let pre_push_build = pre_push.find("cargo check --workspace");
+    if pre_push.find("strict-strings") > pre_push_build {
+        return Err(io::Error::other(
+            "pre-push must reject private source before compiling the workspace",
+        )
+        .into());
+    }
+    for forbidden in ["private-path-updates", "private-path-range"] {
+        if pre_push.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "pre-push must not restore obsolete source-history policy {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    if !auto_release_workflow.contains("promotion_sha=\"$(git rev-parse HEAD^2)\"")
+        || !auto_release_workflow.contains("--ref main")
+    {
+        return Err(io::Error::other("auto-release must preserve promotion identity").into());
     }
     for maintenance in ["init", "scan", "purpose", "parity", "lint"] {
         for command in [
@@ -6046,7 +6407,6 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
     }
 
     let guidance_paths = [
-        "AGENTS.md",
         "templates/AGENTS.md",
         "plugins/projectatlas/skills/projectatlas/SKILL.md",
         "docs/workflow.md",
@@ -6245,7 +6605,8 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     let workspace_root = workspace_root()?;
     let workflow_dir = workspace_root.join(".github").join("workflows");
     let release_workflow = fs::read_to_string(workflow_dir.join("release.yml"))?;
-    let auto_release_workflow = fs::read_to_string(workflow_dir.join("03-auto-release.yml"))?;
+    let auto_release_workflow =
+        fs::read_to_string(workflow_dir.join(AUTO_RELEASE_WORKFLOW_FILE_NAME))?;
     let optional_parser_handoff_resolver = fs::read_to_string(
         workspace_root
             .join(".github")
@@ -6253,7 +6614,7 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
             .join("resolve-optional-parser-handoff.py"),
     )?;
     let optional_parser_workflow =
-        fs::read_to_string(workflow_dir.join("optional-parser-pack.yml"))?;
+        fs::read_to_string(workflow_dir.join(OPTIONAL_PARSER_PACK_WORKFLOW_FILE_NAME))?;
     let ci_workflow = fs::read_to_string(workflow_dir.join("ci.yml"))?;
     let dependabot = fs::read_to_string(workspace_root.join(".github").join("dependabot.yml"))?;
     let deny = fs::read_to_string(workspace_root.join("deny.toml"))?;
@@ -6733,7 +7094,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .join(ISSUE_TEMPLATE_DIR_NAME)
             .join("improvement_request.yml"),
     )?;
-    let agent_rules = fs::read_to_string(workspace_root.join("AGENTS.md"))?;
     let workflow_docs =
         fs::read_to_string(workspace_root.join("docs").join(WORKFLOW_DOC_FILE_NAME))?;
     let toolchain = fs::read_to_string(workspace_root.join("rust-toolchain.toml"))?;
@@ -6805,9 +7165,9 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "OpenSpec tasks:",
         "commit/SHA permalink evidence",
     ] {
-        if !agent_rules.contains(required) || !workflow_docs.contains(required) {
+        if !workflow_docs.contains(required) {
             return Err(io::Error::other(format!(
-                "agent and workflow guidance are missing lean issue contract {required:?}"
+                "workflow guidance is missing lean issue contract {required:?}"
             ))
             .into());
         }
@@ -6997,7 +7357,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             })?;
         for contract in [
             "mcp_advertised_tools_own_their_real_sqlite_effects",
-            "packaged_cli_surface_preserves_v0326_routes_and_defaults",
+            "mcp_tools_list_preserves_frozen_contracts_without_index_state",
+            "packaged_cli_surface_preserves_frozen_routes_and_defaults",
             "packaged_cli_commands_own_their_real_sqlite_effects",
         ] {
             if !packaged_step.contains(contract) {
@@ -7019,13 +7380,41 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         for contract in [
             "installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui",
             "persistent_mcp_stdin_does_not_block_repository_startup_probes",
+            "installed_candidate_without_git_keeps_navigation_and_typed_vcs_unavailability",
             "compiler_config_utf8_bom_refreshes_through_cli_and_mcp",
             "supported_predecessor_recovery_preserves_explicit_database_selection",
             "plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp",
+            "plugin_update_preserves_prior_integration_when_all_replacement_adds_fail",
+            "plugin_update_refuses_unavailable_or_ambiguous_inventory",
+            "plugin_update_serializes_restore_before_the_next_installer_reads_state",
+            "plugin_update_refuses_retained_recovery_state_before_mutation",
         ] {
             if !installed_candidate_step.contains(contract) {
                 return Err(io::Error::other(format!(
                     "{job} installed-candidate step omitted regression or upgrade contract {contract:?}"
+                ))
+                .into());
+            }
+        }
+        let platform_contracts: &[&str] = if job == "Unix" {
+            &[
+                "posix_plugin_inventory_without_jq_rejects_split_object_fields",
+                "posix_plugin_restore_rejects_hostile_paths_and_retains_recovery_state",
+            ]
+        } else {
+            &[
+                "windows_plugin_restore_rejects_cache_junction_and_retains_recovery_snapshot",
+                "windows_plugin_snapshot_rejects_reparse_above_codex_home_before_mutation",
+                "windows_plugin_snapshot_cleanup_refuses_path_swap_without_outside_deletion",
+                "windows_plugin_snapshot_cleanup_failure_retains_usable_direct_snapshot",
+                "windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized",
+                "windows_plugin_restore_rejects_config_directory_and_retains_recovery_snapshot",
+            ]
+        };
+        for contract in platform_contracts {
+            if !installed_candidate_step.contains(contract) {
+                return Err(io::Error::other(format!(
+                    "{job} installed-candidate step omitted platform contract {contract:?}"
                 ))
                 .into());
             }
@@ -7184,7 +7573,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "required committed OpenSpec permalinks",
     ] {
         for (name, content) in [
-            ("AGENTS", agent_rules.as_str()),
             ("workflow docs", workflow_docs.as_str()),
             ("#309 tasks", tasks.as_str()),
         ] {
@@ -7229,7 +7617,7 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
     let workspace_root = workspace_root()?;
-    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let runtime = mcp_contract_executable();
     let installer_output = run_projectatlas_plugin_installer(&workspace_root, &repo, &runtime)?;
     let installer_output_text = format!(
         "{}{}",
@@ -9835,6 +10223,8 @@ fn windows_installer_obsolete_mcp_handoff_requires_exact_codex_plugin_state()
 $installerSource = Get-Content -Raw -LiteralPath $env:PROJECTATLAS_INSTALLER
 foreach ($functionName in @(
         "Test-ProjectAtlasJsonObject",
+        "Test-ProjectAtlasOfficialMarketplaceSource",
+        "Get-ProjectAtlasCodexPluginInventory",
         "Get-ProjectAtlasCodexPlugin",
         "Get-ProjectAtlasCodexMarketplace",
         "Get-ProjectAtlasCodexPluginSourcePath",
@@ -9867,7 +10257,7 @@ $validPlugin = [pscustomobject]@{
     }
     source = [pscustomobject]@{ path = $env:PROJECTATLAS_PLUGIN_CACHE }
 }
-$script:pluginPayload = [pscustomobject]@{ installed = @($validPlugin) }
+$script:pluginPayload = [pscustomobject]@{ installed = @($validPlugin); available = @() }
 if ($null -eq (Get-ProjectAtlasCodexPlugin "codex.exe")) {
     throw "Exact singleton ProjectAtlas plugin was rejected."
 }
@@ -9958,7 +10348,7 @@ if ((Get-ProjectAtlasCodexPluginSourceManifestVersion $validPlugin) -eq "0.4.2" 
     -or (Test-ProjectAtlasCodexPluginSourceManifest $validPlugin "0.4.2")) {
     throw "Singleton-array plugin source manifest was accepted."
 }
-$script:pluginPayload = [pscustomobject]@{ installed = @($validPlugin) }
+$script:pluginPayload = [pscustomobject]@{ installed = @($validPlugin); available = @() }
 function Convert-ProjectAtlasVersionTag { return "0.4.2" }
 function Resolve-ProjectAtlasCodexCommand { return "C:\Codex\codex.exe" }
 function Get-ProjectAtlasCodexPlugin { return $validPlugin }
@@ -10018,7 +10408,7 @@ Write-Output "strict_plugin_marketplace_and_readiness"
             .env("PROJECTATLAS_INSTALLER", &installer)
             .env(
                 "PROJECTATLAS_PLUGIN_CACHE",
-                temp.path().join("plugin-cache"),
+                temp.path().join(FAKE_CODEX_PLUGIN_CACHE_DIR),
             )
             .output()?;
         if !output.status.success()
@@ -11062,6 +11452,79 @@ Write-Output "exact_json_registry_contract_verified"
     Ok(())
 }
 
+fn fake_codex_projectatlas_marketplace_root(codex_dir: &Path) -> PathBuf {
+    codex_dir
+        .join(".tmp")
+        .join("marketplaces")
+        .join("projectatlas")
+}
+
+fn fake_codex_projectatlas_plugin_source(codex_dir: &Path) -> PathBuf {
+    fake_codex_projectatlas_marketplace_root(codex_dir)
+        .join("plugins")
+        .join("projectatlas")
+}
+
+fn fake_codex_projectatlas_installed_cache(codex_dir: &Path, version: &str) -> PathBuf {
+    codex_dir
+        .join("plugins")
+        .join("cache")
+        .join("projectatlas")
+        .join("projectatlas")
+        .join(version)
+}
+
+fn write_fake_codex_projectatlas_integration(
+    codex_dir: &Path,
+    installed_version: &str,
+    source_manifest_version: &str,
+    skill_content: &str,
+) -> Result<(PathBuf, PathBuf, PathBuf), Box<dyn Error>> {
+    let marketplace_root = fake_codex_projectatlas_marketplace_root(codex_dir);
+    let plugin_source = fake_codex_projectatlas_plugin_source(codex_dir);
+    let installed_cache = fake_codex_projectatlas_installed_cache(codex_dir, installed_version);
+    let marketplace_manifest = marketplace_root
+        .join(CODEX_MARKETPLACE_METADATA_DIR)
+        .join("plugins")
+        .join(CODEX_MARKETPLACE_MANIFEST_FILE_NAME);
+    fs::create_dir_all(
+        marketplace_manifest
+            .parent()
+            .ok_or_else(|| io::Error::other("fake marketplace manifest parent missing"))?,
+    )?;
+    fs::write(
+        &marketplace_manifest,
+        r#"{"name":"projectatlas","plugins":[{"name":"projectatlas","source":{"source":"local","path":"./plugins/projectatlas"},"policy":{"installation":"AVAILABLE","authentication":"ON_INSTALL"}}]}"#,
+    )?;
+    fs::write(
+        marketplace_root.join(CODEX_MARKETPLACE_INSTALL_RECORD_FILE_NAME),
+        format!(
+            r#"{{"source_type":"git","source":"https://github.com/styler-ai/ProjectAtlas.git","ref_name":"v{installed_version}","sparse_paths":[],"revision":"prior-revision"}}"#
+        ),
+    )?;
+    for (root, manifest_version) in [
+        (&plugin_source, source_manifest_version),
+        (&installed_cache, installed_version),
+    ] {
+        fs::create_dir_all(root.join(CODEX_PLUGIN_MANIFEST_DIR))?;
+        fs::create_dir_all(
+            root.join(PROJECTATLAS_SKILL_DIR)
+                .join(PROJECTATLAS_SKILL_NAME),
+        )?;
+        fs::write(
+            root.join(CODEX_PLUGIN_MANIFEST_DIR).join("plugin.json"),
+            format!(r#"{{"name":"projectatlas","version":"{manifest_version}"}}"#),
+        )?;
+        fs::write(
+            root.join(PROJECTATLAS_SKILL_DIR)
+                .join(PROJECTATLAS_SKILL_NAME)
+                .join(SKILL_FILE_NAME),
+            skill_content,
+        )?;
+    }
+    Ok((marketplace_root, plugin_source, installed_cache))
+}
+
 #[test]
 fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result<(), Box<dyn Error>>
 {
@@ -11165,37 +11628,19 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
     let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
     let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = stale_runtime_dir.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
-    let fake_plugin_cache = isolated_home
-        .join(FAKE_CODEX_PLUGIN_CACHE_DIR)
-        .join("projectatlas");
-    fs::create_dir_all(fake_plugin_cache.join(CODEX_PLUGIN_MANIFEST_DIR))?;
-    fs::create_dir_all(
-        fake_plugin_cache
-            .join(PROJECTATLAS_SKILL_DIR)
-            .join(PROJECTATLAS_SKILL_NAME),
-    )?;
-    fs::write(
-        fake_plugin_cache
-            .join(CODEX_PLUGIN_MANIFEST_DIR)
-            .join("plugin.json"),
-        format!(
-            r#"{{"name":"projectatlas","version":"{}"}}"#,
-            env!("CARGO_PKG_VERSION")
-        ),
-    )?;
-    fs::write(
-        fake_plugin_cache
-            .join(PROJECTATLAS_SKILL_DIR)
-            .join(PROJECTATLAS_SKILL_NAME)
-            .join(SKILL_FILE_NAME),
+    let codex_dir = isolated_home.join(CODEX_CONFIG_DIR);
+    let (_, fake_plugin_source, _) = write_fake_codex_projectatlas_integration(
+        &codex_dir,
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_VERSION"),
         FAKE_CODEX_SKILL_CONTENT,
     )?;
-    let fake_plugin_cache_json =
-        serde_json::to_string(&fake_plugin_cache.to_string_lossy().to_string())?;
+    let fake_plugin_source_json =
+        serde_json::to_string(&fake_plugin_source.to_string_lossy().to_string())?;
     let plugin_list_json = format!(
         r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{}}}}}],"available":[]}}"#,
         env!("CARGO_PKG_VERSION"),
-        fake_plugin_cache_json
+        fake_plugin_source_json
     );
     fs::write(
         isolated_home.join(FAKE_CODEX_REGISTRY_STALE_FILE_NAME),
@@ -11312,7 +11757,7 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
     )?;
 
     let workspace_root = workspace_root()?;
-    let installer_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+    let installer_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
         &repo,
         &runtime,
@@ -11545,6 +11990,7 @@ fn plugin_update_skips_non_official_codex_marketplace() -> Result<(), Box<dyn Er
     let fake_path = temp.path().join(FAKE_PATH_DIR);
     fs::create_dir(&fake_path)?;
     let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    fs::create_dir_all(isolated_home.join(CODEX_CONFIG_DIR))?;
     let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
     let stale_plugin_json = r#"{"installed":[{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.0.1"}],"available":[]}"#;
     let fake_codex_script = if cfg!(windows) {
@@ -11560,7 +12006,7 @@ fn plugin_update_skips_non_official_codex_marketplace() -> Result<(), Box<dyn Er
 
     let workspace_root = workspace_root()?;
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
-    let installer_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+    let installer_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
         &repo,
         &runtime,
@@ -11598,7 +12044,7 @@ fn plugin_update_skips_non_official_codex_marketplace() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn plugin_update_leaves_current_codex_marketplace_untouched_and_windows_repairs_stale_skill()
+fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_skill()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
@@ -11615,36 +12061,23 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_windows_repairs_
             "[marketplaces.projectatlas]\nsource_type = \"git\"\nsource = \"https://github.com/styler-ai/ProjectAtlas.git\"\nref = \"{expected_release_tag}\"\n"
         ),
     )?;
-    let fake_plugin_cache = isolated_home
-        .join(FAKE_CODEX_PLUGIN_CACHE_DIR)
-        .join("projectatlas");
-    fs::create_dir_all(fake_plugin_cache.join(CODEX_PLUGIN_MANIFEST_DIR))?;
-    fs::create_dir_all(
-        fake_plugin_cache
-            .join(PROJECTATLAS_SKILL_DIR)
-            .join(PROJECTATLAS_SKILL_NAME),
+    let (_, fake_plugin_source, _) = write_fake_codex_projectatlas_integration(
+        &codex_dir,
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_VERSION"),
+        FAKE_CODEX_SKILL_CONTENT,
     )?;
-    fs::write(
-        fake_plugin_cache
-            .join(CODEX_PLUGIN_MANIFEST_DIR)
-            .join("plugin.json"),
-        format!(
-            r#"{{"name":"projectatlas","version":"{}"}}"#,
-            env!("CARGO_PKG_VERSION")
-        ),
-    )?;
-    let plugin_skill = fake_plugin_cache
+    let plugin_skill = fake_plugin_source
         .join(PROJECTATLAS_SKILL_DIR)
         .join(PROJECTATLAS_SKILL_NAME)
         .join(SKILL_FILE_NAME);
-    fs::write(&plugin_skill, FAKE_CODEX_SKILL_CONTENT)?;
-    let fake_plugin_cache_json =
-        serde_json::to_string(&fake_plugin_cache.to_string_lossy().to_string())?;
+    let fake_plugin_source_json =
+        serde_json::to_string(&fake_plugin_source.to_string_lossy().to_string())?;
     let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
     let plugin_list_json = format!(
         r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{}}}}}],"available":[]}}"#,
         env!("CARGO_PKG_VERSION"),
-        fake_plugin_cache_json
+        fake_plugin_source_json
     );
     let fake_codex_script = if cfg!(windows) {
         format!(
@@ -11659,7 +12092,7 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_windows_repairs_
 
     let workspace_root = workspace_root()?;
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
-    let installer_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+    let installer_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
         &repo,
         &runtime,
@@ -11694,9 +12127,6 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_windows_repairs_
             .into());
         }
     }
-    if !cfg!(windows) {
-        return Ok(());
-    }
     for (label, skill_bytes) in [("missing", None), ("stale", Some(&b"stale skill"[..]))] {
         if let Some(skill_bytes) = skill_bytes {
             fs::write(&plugin_skill, skill_bytes)?;
@@ -11704,7 +12134,7 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_windows_repairs_
             fs::remove_file(&plugin_skill)?;
         }
         fs::write(&fake_codex_log, b"")?;
-        let repair_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+        let repair_output = run_plugin_installer_with_codex_fixture(
             &workspace_root,
             &repo,
             &runtime,
@@ -11769,36 +12199,22 @@ fn plugin_update_repairs_current_codex_plugin_with_stale_source_manifest()
             "[marketplaces.projectatlas]\nsource_type = \"git\"\nsource = \"https://github.com/styler-ai/ProjectAtlas.git\"\nref = \"{expected_release_tag}\"\n"
         ),
     )?;
-    let fake_plugin_cache = isolated_home
-        .join(FAKE_CODEX_PLUGIN_CACHE_DIR)
-        .join("projectatlas");
-    fs::create_dir_all(fake_plugin_cache.join(CODEX_PLUGIN_MANIFEST_DIR))?;
-    fs::create_dir_all(
-        fake_plugin_cache
-            .join(PROJECTATLAS_SKILL_DIR)
-            .join(PROJECTATLAS_SKILL_NAME),
-    )?;
-    let manifest_path = fake_plugin_cache
-        .join(CODEX_PLUGIN_MANIFEST_DIR)
-        .join("plugin.json");
-    fs::write(
-        &manifest_path,
-        r#"{"name":"projectatlas","version":"0.0.1"}"#,
-    )?;
-    fs::write(
-        fake_plugin_cache
-            .join(PROJECTATLAS_SKILL_DIR)
-            .join(PROJECTATLAS_SKILL_NAME)
-            .join(SKILL_FILE_NAME),
+    let (_, fake_plugin_source, _) = write_fake_codex_projectatlas_integration(
+        &codex_dir,
+        env!("CARGO_PKG_VERSION"),
+        "0.0.1",
         FAKE_CODEX_SKILL_CONTENT,
     )?;
-    let fake_plugin_cache_json =
-        serde_json::to_string(&fake_plugin_cache.to_string_lossy().to_string())?;
+    let manifest_path = fake_plugin_source
+        .join(CODEX_PLUGIN_MANIFEST_DIR)
+        .join("plugin.json");
+    let fake_plugin_source_json =
+        serde_json::to_string(&fake_plugin_source.to_string_lossy().to_string())?;
     let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
     let plugin_list_json = format!(
         r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{}}}}}],"available":[]}}"#,
         env!("CARGO_PKG_VERSION"),
-        fake_plugin_cache_json
+        fake_plugin_source_json
     );
     let current_manifest_json = format!(
         r#"{{"name":"projectatlas","version":"{}"}}"#,
@@ -11817,7 +12233,7 @@ fn plugin_update_repairs_current_codex_plugin_with_stale_source_manifest()
 
     let workspace_root = workspace_root()?;
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
-    let installer_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+    let installer_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
         &repo,
         &runtime,
@@ -11875,11 +12291,760 @@ fn plugin_update_repairs_current_codex_plugin_with_stale_source_manifest()
 }
 
 #[test]
-fn plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails()
+#[cfg(windows)]
+fn windows_plugin_update_preserves_prior_integration_when_all_replacement_adds_fail()
 -> Result<(), Box<dyn Error>> {
+    assert_plugin_update_preserves_prior_integration_when_all_replacement_adds_fail()
+}
+
+#[test]
+#[cfg(unix)]
+fn posix_plugin_update_preserves_prior_integration_when_all_replacement_adds_fail()
+-> Result<(), Box<dyn Error>> {
+    assert_plugin_update_preserves_prior_integration_when_all_replacement_adds_fail()
+}
+
+fn assert_plugin_update_preserves_prior_integration_when_all_replacement_adds_fail()
+-> Result<(), Box<dyn Error>> {
+    let expected_release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    for previous_ref in [expected_release_tag.as_str(), "v0.0.1"] {
+        assert_failed_codex_replacement_preserves_prior_integration(previous_ref, true, false)?;
+    }
+    assert_failed_codex_replacement_preserves_prior_integration("v0.0.1", false, false)?;
+    assert_failed_codex_replacement_preserves_prior_integration(&expected_release_tag, true, true)?;
+    Ok(())
+}
+
+fn assert_failed_codex_replacement_preserves_prior_integration(
+    previous_ref: &str,
+    config_existed: bool,
+    replacement_has_blank_source: bool,
+) -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    fs::create_dir(&fake_path)?;
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    #[cfg(unix)]
+    {
+        // Exercise the `/var` to `/private/var` shape used by macOS temporary homes.
+        let resolved_home = temp.path().join("resolved-home");
+        fs::create_dir(&resolved_home)?;
+        std::os::unix::fs::symlink(resolved_home, &isolated_home)?;
+    }
+    let codex_dir = isolated_home.join(CODEX_CONFIG_DIR);
+    fs::create_dir_all(&codex_dir)?;
+    let expected_release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let codex_config = codex_dir.join("config.toml");
+    if config_existed {
+        fs::write(
+            &codex_config,
+            format!(
+                "[marketplaces.projectatlas]\nsource_type = \"git\"\nsource = \"https://github.com/styler-ai/ProjectAtlas.git\"\nref = \"{previous_ref}\"\n\n[plugins.\"projectatlas@projectatlas\"]\nenabled = true\n\n[mcp_servers.projectatlas]\ncommand = \"old-projectatlas-runtime\"\nargs = [\"--require-version\", \"0.0.1\", \"mcp\"]\n"
+            ),
+        )?;
+    }
+    let (marketplace_root, plugin_source, installed_cache) =
+        write_fake_codex_projectatlas_integration(
+            &codex_dir,
+            "0.0.1",
+            "0.0.1",
+            "prior offline ProjectAtlas skill\n",
+        )?;
+    let unrelated_marketplace_state = marketplace_root.join("retained-state");
+    fs::create_dir_all(unrelated_marketplace_state.join("empty-directory"))?;
+    fs::write(
+        unrelated_marketplace_state.join("metadata.bin"),
+        b"unrelated validated marketplace bytes\n",
+    )?;
+    let prior_runtime_integration =
+        r#"{"runtime":"old-projectatlas-runtime","version":"0.0.1","config":"prior"}"#;
+    fs::write(
+        plugin_source.join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME),
+        prior_runtime_integration,
+    )?;
+    fs::write(
+        installed_cache.join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME),
+        prior_runtime_integration,
+    )?;
+    #[cfg(unix)]
+    prepare_plugin_lock(&codex_dir)?;
+    let state_before = repository_filesystem_snapshot(&codex_dir)?;
+    let plugin_source_json = serde_json::to_string(&plugin_source.to_string_lossy())?;
+    let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+    let stale_plugin_json = format!(
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.0.1","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{plugin_source_json}}}}}],"available":[]}}"#
+    );
+    let blank_source_plugin_json = format!(
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":""}}}}],"available":[]}}"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    let windows_replacement = if replacement_has_blank_source {
+        ">\"%PROJECTATLAS_FAKE_CODEX_STATE%\" echo blank-source\r\nexit /b 0"
+    } else {
+        "exit /b 1"
+    };
+    let posix_replacement = if replacement_has_blank_source {
+        "printf '%s\\n' blank-source > \"$PROJECTATLAS_FAKE_CODEX_STATE\"\nexit 0"
+    } else {
+        "exit 1"
+    };
+    let fake_codex_script = if cfg!(windows) {
+        format!(
+            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" goto plugin_list\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"remove\" goto destructive_marketplace_remove\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"remove\" goto destructive_plugin_remove\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"add\" goto replacement_failure\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"add\" goto replacement_failure\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n:plugin_list\r\nif exist \"%PROJECTATLAS_FAKE_CODEX_STATE%\" (\r\n  echo {blank_source_plugin_json}\r\n  exit /b 0\r\n)\r\nif not exist \"%PROJECTATLAS_FAKE_MARKETPLACE_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_MARKETPLACE_INSTALL_RECORD%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_RUNTIME_INTEGRATION%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_SKILL%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_RUNTIME_INTEGRATION%\" goto plugin_absent\r\necho {stale_plugin_json}\r\nexit /b 0\r\n:plugin_absent\r\necho {{\"installed\":[],\"available\":[]}}\r\nexit /b 0\r\n:destructive_marketplace_remove\r\n>\"%PROJECTATLAS_FAKE_CODEX_CONFIG%\" echo mutated=true\r\nif exist \"%PROJECTATLAS_FAKE_MARKETPLACE_ROOT%\" rmdir /s /q \"%PROJECTATLAS_FAKE_MARKETPLACE_ROOT%\"\r\nexit /b 0\r\n:destructive_plugin_remove\r\n>\"%PROJECTATLAS_FAKE_CODEX_CONFIG%\" echo mutated=true\r\nif exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" rmdir /s /q \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\"\r\nexit /b 0\r\n:replacement_failure\r\n{windows_replacement}\r\n"
+        )
+    } else {
+        format!(
+            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  if [ -f \"$PROJECTATLAS_FAKE_CODEX_STATE\" ]; then\n    printf '%s\\n' '{blank_source_plugin_json}'\n  elif [ -f \"$PROJECTATLAS_FAKE_MARKETPLACE_MANIFEST\" ] && [ -f \"$PROJECTATLAS_FAKE_MARKETPLACE_INSTALL_RECORD\" ] && [ -f \"$PROJECTATLAS_FAKE_PLUGIN_MANIFEST\" ] && [ -f \"$PROJECTATLAS_FAKE_PLUGIN_SKILL\" ] && [ -f \"$PROJECTATLAS_FAKE_PLUGIN_RUNTIME_INTEGRATION\" ] && [ -f \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_MANIFEST\" ] && [ -f \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_SKILL\" ] && [ -f \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_RUNTIME_INTEGRATION\" ]; then\n    printf '%s\\n' '{stale_plugin_json}'\n  else\n    printf '%s\\n' '{{\"installed\":[],\"available\":[]}}'\n  fi\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"remove\" ]; then\n  printf '%s\\n' 'mutated=true' > \"$PROJECTATLAS_FAKE_CODEX_CONFIG\"\n  rm -rf -- \"$PROJECTATLAS_FAKE_MARKETPLACE_ROOT\"\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"remove\" ]; then\n  printf '%s\\n' 'mutated=true' > \"$PROJECTATLAS_FAKE_CODEX_CONFIG\"\n  rm -rf -- \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT\"\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && {{ [ \"${{2:-}}\" = \"add\" ] || {{ [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"add\" ]; }}; }}; then\n  {posix_replacement}\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  exit 1\nfi\nexit 0\n"
+        )
+    };
+    write_executable_script(&fake_codex, &fake_codex_script)?;
+
+    let workspace_root = workspace_root()?;
+    let runtime = mcp_contract_executable();
+    let verify_separate_state =
+        previous_ref == expected_release_tag && config_existed && !replacement_has_blank_source;
+    let generated_state_before = if verify_separate_state {
+        let mut skip_command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            &repo,
+            &runtime,
+            Some(&fake_path),
+            Some(&isolated_home),
+        )?;
+        skip_command
+            .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1");
+        let skip_output = require_successful_plugin_installer_output(skip_command.output()?)?;
+        let skip_output_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&skip_output.stdout),
+            String::from_utf8_lossy(&skip_output.stderr)
+        );
+        let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
+        let skip_codex_calls = if fake_codex_log.exists() {
+            fs::read_to_string(&fake_codex_log)?
+        } else {
+            String::new()
+        };
+        let skipped_codex_state = repository_filesystem_snapshot(&codex_dir)?;
+        if !skip_output_text.contains(
+            "Codex ProjectAtlas plugin update skipped by PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE.",
+        ) || skipped_codex_state != state_before
+            || skip_codex_calls.lines().any(|call| {
+                [
+                    "plugin remove ",
+                    "plugin add ",
+                    "plugin marketplace remove ",
+                    "plugin marketplace add ",
+                ]
+                .iter()
+                .any(|mutation| call.starts_with(mutation))
+            })
+        {
+            return Err(io::Error::other(format!(
+                "explicit plugin skip mutated Codex state or hid its diagnostic:\n{skip_output_text}\nfake Codex calls:\n{skip_codex_calls}"
+            ))
+            .into());
+        }
+        if fake_codex_log.exists() {
+            fs::remove_file(fake_codex_log)?;
+        }
+        Some(repository_filesystem_snapshot(&repo)?)
+    } else {
+        None
+    };
+    #[cfg(windows)]
+    let runtime_state_before = if verify_separate_state {
+        Some(repository_filesystem_snapshot(
+            &isolated_home
+                .join("AppData")
+                .join("Local")
+                .join(PROJECTATLAS_LOCAL_APPDATA_DIR),
+        )?)
+    } else {
+        None
+    };
+    let installer_output = run_plugin_installer_with_codex_fixture(
+        &workspace_root,
+        &repo,
+        &runtime,
+        &fake_path,
+        &isolated_home,
+    )?;
+    let installer_output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&installer_output.stdout),
+        String::from_utf8_lossy(&installer_output.stderr)
+    );
+    let fake_codex_calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
+    if !installer_output_text.contains("Codex ProjectAtlas plugin update failed")
+        || !installer_output_text.contains(
+            "Codex MCP registry update skipped: no global projectatlas MCP server is configured",
+        )
+    {
+        return Err(io::Error::other(format!(
+            "installer did not preserve the plugin while checking the independent MCP registry:\n{installer_output_text}\nfake Codex calls:\n{fake_codex_calls}"
+        ))
+        .into());
+    }
+    if !fake_codex_calls.contains("mcp get projectatlas") {
+        return Err(io::Error::other(format!(
+            "failed plugin replacement suppressed independent MCP registry convergence:\n{fake_codex_calls}"
+        ))
+        .into());
+    }
+    let (required_remove, required_add, forbidden_add) = if previous_ref == expected_release_tag {
+        (
+            "plugin remove projectatlas --marketplace projectatlas --json",
+            "plugin add projectatlas --marketplace projectatlas --json".to_string(),
+            "plugin marketplace add",
+        )
+    } else {
+        (
+            "plugin marketplace remove projectatlas --json",
+            format!(
+                "plugin marketplace add styler-ai/ProjectAtlas --ref {expected_release_tag} --json"
+            ),
+            "plugin add projectatlas --marketplace projectatlas",
+        )
+    };
+    for required in [required_remove, required_add.as_str()] {
+        if !fake_codex_calls.contains(required) {
+            return Err(io::Error::other(format!(
+                "failed replacement omitted required call {required:?}:\n{fake_codex_calls}"
+            ))
+            .into());
+        }
+    }
+    let prior_ref_add =
+        format!("plugin marketplace add styler-ai/ProjectAtlas --ref {previous_ref} --json");
+    if fake_codex_calls
+        .lines()
+        .filter(|call| *call == required_add.as_str())
+        .count()
+        != 1
+        || (previous_ref != expected_release_tag
+            && fake_codex_calls.lines().any(|call| call == prior_ref_add))
+        || fake_codex_calls.contains(forbidden_add)
+    {
+        return Err(io::Error::other(format!(
+            "failed replacement repeated acquisition or attempted network rollback:\n{fake_codex_calls}"
+        ))
+        .into());
+    }
+    if fake_codex_calls.contains("mcp remove projectatlas")
+        || fake_codex_calls.contains("mcp add projectatlas")
+    {
+        return Err(io::Error::other(format!(
+            "failed plugin replacement mutated the prior MCP runtime integration:\n{fake_codex_calls}"
+        ))
+        .into());
+    }
+    let state_after = repository_filesystem_snapshot(&codex_dir)?;
+    if state_after != state_before {
+        return Err(io::Error::other(format!(
+            "failed replacement changed prior Codex marketplace/plugin/config/runtime state for {previous_ref}:\nbefore={state_before:#?}\nafter={state_after:#?}\ncalls:\n{fake_codex_calls}\ninstaller output:\n{installer_output_text}"
+        ))
+        .into());
+    }
+    if let Some(generated_state_before) = generated_state_before {
+        let generated_state_after = repository_filesystem_snapshot(&repo)?;
+        if generated_state_after != generated_state_before {
+            return Err(io::Error::other(format!(
+                "failed replacement changed generated ProjectAtlas host state:\nbefore={generated_state_before:#?}\nafter={generated_state_after:#?}"
+            ))
+            .into());
+        }
+    }
+    #[cfg(windows)]
+    if let Some(runtime_state_before) = runtime_state_before {
+        let runtime_state_after = repository_filesystem_snapshot(
+            &isolated_home
+                .join("AppData")
+                .join("Local")
+                .join(PROJECTATLAS_LOCAL_APPDATA_DIR),
+        )?;
+        if runtime_state_after != runtime_state_before {
+            return Err(io::Error::other(format!(
+                "failed replacement changed the verified Windows runtime state:\nbefore={runtime_state_before:#?}\nafter={runtime_state_after:#?}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn prepare_plugin_lock(codex_dir: &Path) -> Result<(), Box<dyn Error>> {
+    fs::write(codex_dir.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME), b"")?;
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn posix_plugin_lock_rejects_indirection_and_survives_crash() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::{MetadataExt, symlink};
+
+    let installer = workspace_root()?
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.sh");
+    let installer_source = fs::read_to_string(installer)?;
+    let acquire_start = installer_source
+        .find("acquire_codex_projectatlas_plugin_update_lock() {")
+        .ok_or_else(|| io::Error::other("POSIX plugin update lock acquisition function missing"))?;
+    let acquire_end = installer_source[acquire_start..]
+        .find("\nclear_codex_projectatlas_snapshot() {")
+        .map(|offset| acquire_start + offset)
+        .ok_or_else(|| io::Error::other("POSIX plugin update lock functions boundary drifted"))?;
+
+    let temp = tempfile::tempdir()?;
+    let lock_root = temp.path().join("codex-root");
+    fs::create_dir(&lock_root)?;
+    let lock_root = fs::canonicalize(lock_root)?;
+    let lock_path = lock_root.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME);
+    let harness = temp.path().join("verify-plugin-lock-crash.sh");
+    let runtime = mcp_contract_executable();
+    fs::write(
+        &harness,
+        format!(
+            r#"#!/bin/sh
+set -eu
+projectatlas_bin=${{PROJECTATLAS_TEST_RUNTIME:?}}
+codex_plugin_update_lock_path=
+codex_plugin_update_lock_root=
+codex_plugin_update_lock_identity=
+{}
+mode=$1
+lock_root=$2
+acquire_codex_projectatlas_plugin_update_lock "$lock_root"
+case "$mode" in
+  hold)
+    printf '%s\n' ready
+    read -r ignored
+    ;;
+  survivor)
+    sh -c 'printf "%s\n" "$$" > "$1"; while [ ! -e "$2" ]; do sleep 1; done' sh "$3" "$4" >/dev/null 2>&1 &
+    ;;
+  swap)
+    mv -- "$lock_root/{CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME}" "$lock_root/held-lock"
+    : > "$lock_root/{CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME}"
+    if release_codex_projectatlas_plugin_update_lock; then exit 21; fi
+    [ -f "$lock_root/held-lock" ]
+    [ -f "$lock_root/{CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME}" ]
+    ;;
+  *)
+    release_codex_projectatlas_plugin_update_lock
+    ;;
+esac
+"#,
+            &installer_source[acquire_start..acquire_end]
+        ),
+    )?;
+    let harness_command = || {
+        let mut command = StdCommand::new("sh");
+        command
+            .arg(&harness)
+            .env("PROJECTATLAS_TEST_RUNTIME", &runtime);
+        command
+    };
+
+    let outside = temp.path().join("outside-lock-target");
+    fs::write(&outside, b"outside sentinel\n")?;
+    symlink(&outside, &lock_path)?;
+    let symlink_output = harness_command().arg("once").arg(&lock_root).output()?;
+    if symlink_output.status.success() || fs::read(&outside)? != b"outside sentinel\n" {
+        return Err(
+            io::Error::other("POSIX plugin lock accepted or changed a symlink target").into(),
+        );
+    }
+    fs::remove_file(&lock_path)?;
+
+    fs::hard_link(&outside, &lock_path)?;
+    let hard_link_output = harness_command().arg("once").arg(&lock_root).output()?;
+    if hard_link_output.status.success() || fs::read(&outside)? != b"outside sentinel\n" {
+        return Err(
+            io::Error::other("POSIX plugin lock accepted or changed a hard-link target").into(),
+        );
+    }
+    fs::remove_file(&lock_path)?;
+
+    fs::create_dir(&lock_path)?;
+    let directory_output = harness_command().arg("once").arg(&lock_root).output()?;
+    if directory_output.status.success() {
+        return Err(io::Error::other("POSIX plugin lock accepted a directory").into());
+    }
+    fs::remove_dir(&lock_path)?;
+
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    fs::create_dir(&fake_path)?;
+    write_executable_script(
+        &fake_path.join(POSIX_FLOCK_EXECUTABLE_FILE_NAME),
+        "#!/bin/sh\nexit 1\n",
+    )?;
+    let fake_runtime = fake_path.join("projectatlas");
+    write_executable_script(&fake_runtime, "#!/bin/sh\nexit 1\n")?;
+    let mut unavailable_command = harness_command();
+    unavailable_command.arg("once").arg(&lock_root).env(
+        "PATH",
+        format!(
+            "{}:{}",
+            fake_path.display(),
+            std::env::var_os("PATH")
+                .unwrap_or_default()
+                .to_string_lossy()
+        ),
+    );
+    if cfg!(target_os = "macos") {
+        unavailable_command.env("PROJECTATLAS_TEST_RUNTIME", &fake_runtime);
+    }
+    let unavailable_output = unavailable_command.output()?;
+    if unavailable_output.status.success() {
+        return Err(io::Error::other(
+            "POSIX plugin lock proceeded after its native primitive failed",
+        )
+        .into());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let original_metadata = fs::metadata(&lock_path)?;
+        let descriptor_swap_path = temp.path().join("descriptor-swap-path");
+        fs::create_dir(&descriptor_swap_path)?;
+        let captured_lock = lock_root.join("captured-lock");
+        let detached_lock = lock_root.join("detached-lock");
+        let replacement_lock = lock_root.join("replacement-lock");
+        let flock_called = lock_root.join("flock-called");
+        fs::write(&replacement_lock, b"replacement lock\n")?;
+        let replacement_metadata = fs::metadata(&replacement_lock)?;
+        if original_metadata.dev() == replacement_metadata.dev()
+            && original_metadata.ino() == replacement_metadata.ino()
+        {
+            return Err(io::Error::other("Linux descriptor-swap fixture reused one inode").into());
+        }
+        write_executable_script(
+            &descriptor_swap_path.join("id"),
+            r#"#!/bin/sh
+mv -- "$PROJECTATLAS_TEST_LOCK_PATH" "$PROJECTATLAS_TEST_CAPTURED_LOCK"
+mv -- "$PROJECTATLAS_TEST_REPLACEMENT_LOCK" "$PROJECTATLAS_TEST_LOCK_PATH"
+printf '%s\n' "$PROJECTATLAS_TEST_UID"
+"#,
+        )?;
+        write_executable_script(
+            &descriptor_swap_path.join("uname"),
+            r#"#!/bin/sh
+mv -- "$PROJECTATLAS_TEST_LOCK_PATH" "$PROJECTATLAS_TEST_DETACHED_LOCK"
+mv -- "$PROJECTATLAS_TEST_CAPTURED_LOCK" "$PROJECTATLAS_TEST_LOCK_PATH"
+printf '%s\n' Linux
+"#,
+        )?;
+        write_executable_script(
+            &descriptor_swap_path.join(POSIX_FLOCK_EXECUTABLE_FILE_NAME),
+            r#"#!/bin/sh
+: > "$PROJECTATLAS_TEST_FLOCK_CALLED"
+exit 0
+"#,
+        )?;
+        let descriptor_swap_output = harness_command()
+            .arg("once")
+            .arg(&lock_root)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    descriptor_swap_path.display(),
+                    std::env::var_os("PATH")
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                ),
+            )
+            .env("PROJECTATLAS_TEST_LOCK_PATH", &lock_path)
+            .env("PROJECTATLAS_TEST_CAPTURED_LOCK", &captured_lock)
+            .env("PROJECTATLAS_TEST_REPLACEMENT_LOCK", &replacement_lock)
+            .env("PROJECTATLAS_TEST_DETACHED_LOCK", &detached_lock)
+            .env("PROJECTATLAS_TEST_FLOCK_CALLED", &flock_called)
+            .env("PROJECTATLAS_TEST_UID", original_metadata.uid().to_string())
+            .output()?;
+        let restored_metadata = fs::metadata(&lock_path)?;
+        let detached_metadata = fs::metadata(&detached_lock)?;
+        if descriptor_swap_output.status.success()
+            || flock_called.exists()
+            || restored_metadata.dev() != original_metadata.dev()
+            || restored_metadata.ino() != original_metadata.ino()
+            || restored_metadata.nlink() != 1
+            || detached_metadata.dev() != replacement_metadata.dev()
+            || detached_metadata.ino() != replacement_metadata.ino()
+        {
+            return Err(io::Error::other(format!(
+                "Linux plugin lock accepted a swapped inherited descriptor:\n{}\n{}",
+                String::from_utf8_lossy(&descriptor_swap_output.stdout),
+                String::from_utf8_lossy(&descriptor_swap_output.stderr)
+            ))
+            .into());
+        }
+        fs::remove_file(&detached_lock)?;
+    }
+
+    fs::write(&lock_path, b"orphaned owner\n")?;
+
+    let mut owner = harness_command()
+        .arg("hold")
+        .arg(&lock_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut ready = String::new();
+    BufReader::new(
+        owner
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("POSIX lock owner stdout missing"))?,
+    )
+    .read_line(&mut ready)?;
+    if ready.trim() != "ready" {
+        let output = owner.wait_with_output()?;
+        return Err(io::Error::other(format!(
+            "POSIX lock owner did not acquire the lock:\n{}\n{}",
+            ready,
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    owner.kill()?;
+    owner.wait()?;
+
+    let output = harness_command().arg("once").arg(&lock_root).output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "POSIX plugin lock remained held after its owner crashed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let metadata = fs::symlink_metadata(&lock_path)?;
+    if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+        return Err(io::Error::other(
+            "POSIX plugin lock did not remain one direct reusable file after crash recovery",
+        )
+        .into());
+    }
+
+    let child_ready = temp.path().join("surviving-child-ready");
+    let child_release = temp.path().join("release-surviving-child");
+    let survivor_output = harness_command()
+        .arg("survivor")
+        .arg(&lock_root)
+        .arg(&child_ready)
+        .arg(&child_release)
+        .output()?;
+    if !survivor_output.status.success() {
+        return Err(io::Error::other(format!(
+            "POSIX lock owner could not leave a mutation child running:\n{}\n{}",
+            String::from_utf8_lossy(&survivor_output.stdout),
+            String::from_utf8_lossy(&survivor_output.stderr)
+        ))
+        .into());
+    }
+    let child_deadline = Instant::now() + Duration::from_secs(2);
+    while !child_ready.is_file() && Instant::now() < child_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if !child_ready.is_file() {
+        return Err(io::Error::other("POSIX mutation child did not report readiness").into());
+    }
+    let try_native_lock = || -> io::Result<bool> {
+        let contender = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        match contender.try_lock() {
+            Ok(()) => Ok(true),
+            Err(fs::TryLockError::WouldBlock) => Ok(false),
+            Err(fs::TryLockError::Error(source)) => Err(source),
+        }
+    };
+    if try_native_lock()? {
+        return Err(io::Error::other(
+            "POSIX plugin lock was released while the mutation child still held its descriptor",
+        )
+        .into());
+    }
+    fs::write(&child_release, b"release\n")?;
+    let release_deadline = Instant::now() + Duration::from_secs(3);
+    let mut release_probe = try_native_lock()?;
+    while !release_probe && Instant::now() < release_deadline {
+        thread::sleep(Duration::from_millis(10));
+        release_probe = try_native_lock()?;
+    }
+    if !release_probe {
+        return Err(io::Error::other(
+            "POSIX plugin lock remained held after releasing the mutation child",
+        )
+        .into());
+    }
+    let released_metadata = fs::symlink_metadata(&lock_path)?;
+    if released_metadata.dev() != metadata.dev()
+        || released_metadata.ino() != metadata.ino()
+        || released_metadata.nlink() != 1
+    {
+        return Err(io::Error::other(
+            "POSIX native lock probe replaced or linked the persistent lock inode",
+        )
+        .into());
+    }
+    let child_release_output = harness_command().arg("once").arg(&lock_root).output()?;
+    if !child_release_output.status.success() {
+        return Err(io::Error::other(format!(
+            "POSIX plugin lock could not be reacquired after releasing the mutation child:\n{}\n{}",
+            String::from_utf8_lossy(&child_release_output.stdout),
+            String::from_utf8_lossy(&child_release_output.stderr)
+        ))
+        .into());
+    }
+
+    let swap_output = harness_command().arg("swap").arg(&lock_root).output()?;
+    if !swap_output.status.success()
+        || !lock_root.join("held-lock").is_file()
+        || !lock_path.is_file()
+    {
+        return Err(io::Error::other(format!(
+            "POSIX plugin lock release removed or accepted a replacement path:\n{}\n{}",
+            String::from_utf8_lossy(&swap_output.stdout),
+            String::from_utf8_lossy(&swap_output.stderr)
+        ))
+        .into());
+    }
+    if fs::read_dir(&lock_root)?.any(|entry| {
+        entry.is_ok_and(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".projectatlas-plugin-update-candidate")
+                || name.starts_with(".projectatlas-plugin-update.lock.stale")
+        })
+    }) {
+        return Err(io::Error::other("POSIX plugin lock crash recovery left lock debris").into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+struct WindowsSubstitutedDirectory {
+    drive: String,
+    root: PathBuf,
+    active: bool,
+}
+
+#[cfg(windows)]
+impl WindowsSubstitutedDirectory {
+    fn create(target: &Path) -> Result<Self, Box<dyn Error>> {
+        for letter in (b'D'..=b'Z').rev() {
+            let drive = format!("{}:", char::from(letter));
+            let root = PathBuf::from(format!(r"{drive}\"));
+            if root.exists() {
+                continue;
+            }
+            let status = StdCommand::new("subst.exe")
+                .arg(&drive)
+                .arg(target)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?;
+            if status.success() {
+                return Ok(Self {
+                    drive,
+                    root,
+                    active: true,
+                });
+            }
+        }
+        Err(io::Error::other("Windows alias test could not reserve a substituted drive").into())
+    }
+
+    fn release(mut self) -> Result<(), Box<dyn Error>> {
+        let status = StdCommand::new("subst.exe")
+            .args([self.drive.as_str(), "/D"])
+            .status()?;
+        if !status.success() {
+            return Err(io::Error::other(format!(
+                "Windows alias test could not release substituted drive {}",
+                self.drive
+            ))
+            .into());
+        }
+        self.active = false;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsSubstitutedDirectory {
+    fn drop(&mut self) {
+        if self.active {
+            drop(
+                StdCommand::new("subst.exe")
+                    .args([self.drive.as_str(), "/D"])
+                    .status(),
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_short_path(path: &Path) -> Result<Option<PathBuf>, Box<dyn Error>> {
+    let path_text = path.to_string_lossy();
+    let command_path = path_text.strip_prefix(r"\\?\").unwrap_or(&path_text);
+    let command = format!(r#"for %I in ("{command_path}") do @echo %~sI"#);
+    let output = StdCommand::new("cmd.exe")
+        .args(["/D", "/C", &command])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "Windows alias test could not query the short path for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let short_path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if short_path.as_os_str().is_empty()
+        || !short_path.exists()
+        || !short_path.to_string_lossy().contains('~')
+        || short_path
+            .to_string_lossy()
+            .eq_ignore_ascii_case(command_path)
+    {
+        Ok(None)
+    } else {
+        Ok(Some(short_path))
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_plugin_update_serializes_restore_before_the_next_installer_reads_state()
+-> Result<(), Box<dyn Error>> {
+    assert_plugin_update_serializes_restore_before_the_next_installer_reads_state()
+}
+
+#[test]
+#[cfg(unix)]
+fn posix_plugin_update_serializes_restore_before_the_next_installer_reads_state()
+-> Result<(), Box<dyn Error>> {
+    assert_plugin_update_serializes_restore_before_the_next_installer_reads_state()
+}
+
+fn assert_plugin_update_serializes_restore_before_the_next_installer_reads_state()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let first_repo = temp.path().join("first-repo");
+    let second_repo = temp.path().join("second-repo");
+    fs::create_dir(&first_repo)?;
+    fs::create_dir(&second_repo)?;
     let fake_path = temp.path().join(FAKE_PATH_DIR);
     fs::create_dir(&fake_path)?;
     let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
@@ -11892,76 +13057,1533 @@ fn plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails()
             "[marketplaces.projectatlas]\nsource_type = \"git\"\nsource = \"https://github.com/styler-ai/ProjectAtlas.git\"\nref = \"{expected_release_tag}\"\n"
         ),
     )?;
-    let failure_marker = isolated_home.join(FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_FILE);
+    let (_, plugin_source, _) = write_fake_codex_projectatlas_integration(
+        &codex_dir,
+        "0.0.1",
+        "0.0.1",
+        "prior offline ProjectAtlas skill\n",
+    )?;
+    #[cfg(windows)]
+    let current_drive_alias = WindowsSubstitutedDirectory::create(&codex_dir)?;
+    #[cfg(windows)]
+    let aliased_codex_dir =
+        windows_short_path(&codex_dir)?.unwrap_or_else(|| current_drive_alias.root.clone());
+    #[cfg(windows)]
+    {
+        let physical_config_path = codex_dir.join("config.toml");
+        let aliased_config_path = aliased_codex_dir.join("config.toml");
+        let physical_config = fs::canonicalize(&physical_config_path).map_err(|error| {
+            io::Error::other(format!(
+                "could not canonicalize physical Windows config path {}: {error}",
+                physical_config_path.display()
+            ))
+        })?;
+        let aliased_config = fs::canonicalize(&aliased_config_path).map_err(|error| {
+            io::Error::other(format!(
+                "could not canonicalize aliased Windows config path {}: {error}",
+                aliased_config_path.display()
+            ))
+        })?;
+        if aliased_codex_dir
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&codex_dir.to_string_lossy())
+            || !aliased_config
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&physical_config.to_string_lossy())
+        {
+            return Err(io::Error::other(format!(
+                "Windows concurrency fixture did not address one physical Codex root through distinct aliases: physical={}, alias={}",
+                codex_dir.display(),
+                aliased_codex_dir.display()
+            ))
+            .into());
+        }
+    }
+    #[cfg(unix)]
+    prepare_plugin_lock(&codex_dir)?;
+    let state_before = repository_filesystem_snapshot(&codex_dir)?;
+    let plugin_source_json = serde_json::to_string(&plugin_source.to_string_lossy())?;
+    let stale_plugin_json = format!(
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.0.1","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{plugin_source_json}}}}}],"available":[]}}"#
+    );
     let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
-    let stale_plugin_json = r#"{"installed":[{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.0.1"}],"available":[]}"#;
     let fake_codex_script = if cfg!(windows) {
-        format!(
-            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" (\r\n  echo {stale_plugin_json}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"add\" (\r\n  if exist \"%PROJECTATLAS_FAKE_FAILURE_MARKER%\" exit /b 0\r\n  echo failed>\"%PROJECTATLAS_FAKE_FAILURE_MARKER%\"\r\n  goto plugin_add_failure\r\n)\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n:plugin_add_failure\r\nexit /b 1\r\n"
-        )
+        r#"@echo off
+echo %PROJECTATLAS_FAKE_INSTALLER_ROLE% %*>>"%PROJECTATLAS_FAKE_CODEX_LOG%"
+if "%~1"=="plugin" if "%~2"=="marketplace" if "%~3"=="list" goto marketplace_list
+if "%~1"=="plugin" if "%~2"=="list" (
+  >"%PROJECTATLAS_FAKE_INVENTORY_OUTPUT%" echo __STALE_PLUGIN_JSON__
+  type "%PROJECTATLAS_FAKE_INVENTORY_OUTPUT%"
+  exit /b 0
+)
+if "%~1"=="plugin" if "%~2"=="remove" goto plugin_remove
+if "%~1"=="plugin" if "%~2"=="add" exit /b 1
+if "%~1"=="mcp" if "%~2"=="get" exit /b 1
+exit /b 0
+:marketplace_list
+if "%PROJECTATLAS_FAKE_INSTALLER_ROLE%"=="B" goto second_marketplace_list
+echo {"marketplaces":[{"name":"projectatlas","marketplaceSource":{"source":"https://github.com/styler-ai/ProjectAtlas.git"}}]}
+exit /b 0
+:second_marketplace_list
+if not exist "%PROJECTATLAS_FAKE_CODEX_CONFIG%" goto second_saw_mutation
+if not exist "%PROJECTATLAS_FAKE_PLUGIN_MANIFEST%" goto second_saw_mutation
+if not exist "%PROJECTATLAS_FAKE_PLUGIN_SKILL%" goto second_saw_mutation
+if not exist "%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_MANIFEST%" goto second_saw_mutation
+if not exist "%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_SKILL%" goto second_saw_mutation
+>"%PROJECTATLAS_FAKE_SECOND_OBSERVED%" echo restored
+goto second_marketplace_response
+:second_saw_mutation
+>"%PROJECTATLAS_FAKE_SECOND_OBSERVED%" echo mutated
+:second_marketplace_response
+echo {"marketplaces":[]}
+exit /b 0
+:plugin_remove
+>"%PROJECTATLAS_FAKE_CODEX_CONFIG%" echo mutated=true
+if exist "%PROJECTATLAS_FAKE_PLUGIN_ROOT%" rmdir /s /q "%PROJECTATLAS_FAKE_PLUGIN_ROOT%"
+if exist "%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%" rmdir /s /q "%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%"
+>"%PROJECTATLAS_FAKE_FIRST_MUTATED%" echo mutated
+:wait_for_release
+if not exist "%PROJECTATLAS_FAKE_RELEASE_FIRST%" (
+  >nul 2>nul ping 127.0.0.1 -n 2
+  goto wait_for_release
+)
+exit /b 0
+"#
+        .replace("__STALE_PLUGIN_JSON__", &stale_plugin_json)
     } else {
-        format!(
-            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{stale_plugin_json}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"add\" ]; then\n  if [ ! -f \"$PROJECTATLAS_FAKE_FAILURE_MARKER\" ]; then\n    printf '%s\\n' failed > \"$PROJECTATLAS_FAKE_FAILURE_MARKER\"\n    exit 1\n  fi\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  exit 1\nfi\nexit 0\n"
-        )
+        r#"#!/usr/bin/env sh
+printf '%s %s\n' "${PROJECTATLAS_FAKE_INSTALLER_ROLE:-unknown}" "$*" >> "$PROJECTATLAS_FAKE_CODEX_LOG"
+if [ "${1:-}" = "plugin" ] && [ "${2:-}" = "marketplace" ] && [ "${3:-}" = "list" ]; then
+  if [ "${PROJECTATLAS_FAKE_INSTALLER_ROLE:-}" = B ]; then
+    if [ -f "$PROJECTATLAS_FAKE_CODEX_CONFIG" ] &&
+      [ -f "$PROJECTATLAS_FAKE_PLUGIN_MANIFEST" ] &&
+      [ -f "$PROJECTATLAS_FAKE_PLUGIN_SKILL" ] &&
+      [ -f "$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_MANIFEST" ] &&
+      [ -f "$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_SKILL" ]; then
+      printf '%s\n' restored > "$PROJECTATLAS_FAKE_SECOND_OBSERVED"
+    else
+      printf '%s\n' mutated > "$PROJECTATLAS_FAKE_SECOND_OBSERVED"
+    fi
+    printf '%s\n' '{"marketplaces":[]}'
+  else
+    printf '%s\n' '{"marketplaces":[{"name":"projectatlas","marketplaceSource":{"source":"https://github.com/styler-ai/ProjectAtlas.git"}}]}'
+  fi
+  exit 0
+fi
+if [ "${1:-}" = "plugin" ] && [ "${2:-}" = "list" ]; then
+  printf '%s\n' '__STALE_PLUGIN_JSON__' > "$PROJECTATLAS_FAKE_INVENTORY_OUTPUT"
+  cat -- "$PROJECTATLAS_FAKE_INVENTORY_OUTPUT"
+  exit 0
+fi
+if [ "${1:-}" = "plugin" ] && [ "${2:-}" = "remove" ]; then
+  printf '%s\n' mutated=true > "$PROJECTATLAS_FAKE_CODEX_CONFIG"
+  rm -rf -- "$PROJECTATLAS_FAKE_PLUGIN_ROOT" "$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT"
+  printf '%s\n' mutated > "$PROJECTATLAS_FAKE_FIRST_MUTATED"
+  while [ ! -f "$PROJECTATLAS_FAKE_RELEASE_FIRST" ]; do sleep 0.1; done
+  exit 0
+fi
+if [ "${1:-}" = "plugin" ] && [ "${2:-}" = "add" ]; then exit 1; fi
+if [ "${1:-}" = "mcp" ] && [ "${2:-}" = "get" ]; then exit 1; fi
+exit 0
+"#
+        .replace("__STALE_PLUGIN_JSON__", &stale_plugin_json)
     };
     write_executable_script(&fake_codex, &fake_codex_script)?;
 
     let workspace_root = workspace_root()?;
-    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
-    let installer_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+    let runtime = mcp_contract_executable();
+    let first_mutated = isolated_home.join("first-mutated");
+    let release_first = isolated_home.join("release-first");
+    let second_observed = isolated_home.join("second-observed");
+    let inventory_output = isolated_home.join("inventory-output.json");
+    let mut first_command = projectatlas_plugin_installer_command_with_optional_path_and_home(
         &workspace_root,
+        &first_repo,
+        &runtime,
+        Some(&fake_path),
+        Some(&isolated_home),
+    )?;
+    let mut second_command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+        &workspace_root,
+        &second_repo,
+        &runtime,
+        Some(&fake_path),
+        Some(&isolated_home),
+    )?;
+    for command in [&mut first_command, &mut second_command] {
+        command
+            .env("PROJECTATLAS_FAKE_FIRST_MUTATED", &first_mutated)
+            .env("PROJECTATLAS_FAKE_RELEASE_FIRST", &release_first)
+            .env("PROJECTATLAS_FAKE_SECOND_OBSERVED", &second_observed)
+            .env("PROJECTATLAS_FAKE_INVENTORY_OUTPUT", &inventory_output)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+    }
+    first_command.env("PROJECTATLAS_FAKE_INSTALLER_ROLE", "A");
+    second_command.env("PROJECTATLAS_FAKE_INSTALLER_ROLE", "B");
+    #[cfg(windows)]
+    {
+        first_command.current_dir(&first_repo);
+        second_command
+            .current_dir(&current_drive_alias.root)
+            .env("CODEX_HOME", &aliased_codex_dir);
+        let first_drive = first_repo
+            .components()
+            .next()
+            .ok_or_else(|| io::Error::other("first Windows installer current drive is missing"))?;
+        let second_drive = current_drive_alias
+            .root
+            .components()
+            .next()
+            .ok_or_else(|| io::Error::other("second Windows installer current drive is missing"))?;
+        if first_drive
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&second_drive.as_os_str().to_string_lossy())
+        {
+            return Err(io::Error::other(
+                "Windows alias fixture did not give the installers different current drives",
+            )
+            .into());
+        }
+    }
+
+    let mut first_child = first_command.spawn()?;
+    let first_deadline = Instant::now() + Duration::from_secs(15);
+    while !first_mutated.is_file() {
+        if let Some(status) = first_child.try_wait()? {
+            let output = first_child.wait_with_output()?;
+            let inventory = fs::read_to_string(&inventory_output).unwrap_or_default();
+            let calls =
+                fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE)).unwrap_or_default();
+            return Err(io::Error::other(format!(
+                "first installer exited before its destructive operation was held: {status}\nstdout:\n{}\nstderr:\n{}\ninventory:\n{inventory}\ncalls:\n{calls}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        if Instant::now() >= first_deadline {
+            drop(first_child.kill());
+            drop(first_child.wait());
+            return Err(io::Error::other(
+                "first installer did not enter its held destructive operation",
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    let second_child = second_command.spawn()?;
+    let second_config = second_repo
+        .join(ATLAS_DIR_NAME)
+        .join("projectatlas.opencode.json");
+    let second_ready_deadline = Instant::now() + Duration::from_secs(15);
+    while !second_config.is_file() && Instant::now() < second_ready_deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    thread::sleep(Duration::from_secs(1));
+    let calls_while_first_held = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
+    let queued_result = if !second_config.is_file() {
+        Err(io::Error::other(
+            "second installer did not reach its final generated-config boundary before the lock assertion",
+        ))
+    } else if second_observed.exists()
+        || calls_while_first_held.contains("B plugin marketplace list")
+    {
+        Err(io::Error::other(format!(
+            "second installer read Codex state before the first rollback completed:\n{calls_while_first_held}"
+        )))
+    } else {
+        Ok(())
+    };
+    fs::write(&release_first, b"release")?;
+    let first_output =
+        wait_for_plugin_installer_output(first_child, "first", Duration::from_secs(45))?;
+    let second_output =
+        wait_for_plugin_installer_output(second_child, "second", Duration::from_secs(45))?;
+    queued_result?;
+    require_successful_plugin_installer_output(first_output)?;
+    require_successful_plugin_installer_output(second_output)?;
+
+    if fs::read_to_string(&second_observed)?.trim() != "restored" {
+        return Err(io::Error::other(
+            "second installer observed the first installer's incomplete mutation",
+        )
+        .into());
+    }
+    let state_after = repository_filesystem_snapshot(&codex_dir)?;
+    if state_after != state_before {
+        return Err(io::Error::other(format!(
+            "serialized failed replacement did not restore exact prior state:\nbefore={state_before:#?}\nafter={state_after:#?}"
+        ))
+        .into());
+    }
+    if (cfg!(windows) && codex_dir.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME).exists())
+        || fs::read_dir(&codex_dir)?.any(|entry| {
+            entry.is_ok_and(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".projectatlas-plugin-state")
+            })
+        })
+    {
+        return Err(io::Error::other(
+            "serialized installer left an update lock or recovery snapshot behind",
+        )
+        .into());
+    }
+    #[cfg(windows)]
+    current_drive_alias.release()?;
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    fs::create_dir(&repo)?;
+    fs::create_dir(&fake_path)?;
+    fs::create_dir(&isolated_home)?;
+    let fake_codex = fake_path.join("codex.cmd");
+    write_executable_script(
+        &fake_codex,
+        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nexit /b 1\r\n",
+    )?;
+    let blocked_ancestor = isolated_home.join("blocked-codex-root");
+    fs::write(&blocked_ancestor, b"not a directory\n")?;
+    let invalid_codex_home = blocked_ancestor.join(CODEX_CONFIG_DIR);
+    let calls = isolated_home.join(FAKE_CODEX_LOG_FILE);
+    let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+        &workspace_root()?,
+        &repo,
+        &mcp_contract_executable(),
+        Some(&fake_path),
+        Some(&isolated_home),
+    )?;
+    command
+        .env("CODEX_HOME", &invalid_codex_home)
+        .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = require_successful_plugin_installer_output(command.output()?)?;
+    let output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let normalized_output_text = output_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !normalized_output_text.contains("update lock could not be acquired safely")
+        || !normalized_output_text.contains("non-directory ancestor")
+    {
+        return Err(io::Error::other(format!(
+            "Windows installer omitted the canonical lock failure diagnostic:\n{output_text}"
+        ))
+        .into());
+    }
+    if fs::read_to_string(&blocked_ancestor)? != "not a directory\n" || invalid_codex_home.exists()
+    {
+        return Err(io::Error::other(
+            "Windows installer mutated the rejected Codex root or its blocking ancestor",
+        )
+        .into());
+    }
+    let codex_calls = fs::read_to_string(calls).unwrap_or_default();
+    if [
+        "plugin remove",
+        "plugin add",
+        "plugin marketplace remove",
+        "plugin marketplace add",
+    ]
+    .iter()
+    .any(|mutation| codex_calls.lines().any(|call| call.starts_with(mutation)))
+    {
+        return Err(io::Error::other(format!(
+            "Windows installer reached a Codex mutation after canonical lock failure:\n{codex_calls}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_plugin_update_refuses_retained_recovery_state_before_mutation()
+-> Result<(), Box<dyn Error>> {
+    assert_plugin_update_refuses_retained_recovery_state_before_mutation()
+}
+
+#[test]
+#[cfg(unix)]
+fn posix_plugin_update_refuses_retained_recovery_state_before_mutation()
+-> Result<(), Box<dyn Error>> {
+    assert_plugin_update_refuses_retained_recovery_state_before_mutation()
+}
+
+fn assert_plugin_update_refuses_retained_recovery_state_before_mutation()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    let codex_dir = isolated_home.join(CODEX_CONFIG_DIR);
+    fs::create_dir(&repo)?;
+    fs::create_dir(&fake_path)?;
+    fs::create_dir_all(&codex_dir)?;
+    fs::write(isolated_home.join(FAKE_CODEX_LOG_FILE), b"")?;
+    let retained_snapshot = codex_dir.join(if cfg!(windows) {
+        ".projectatlas-plugin-state-crashed"
+    } else {
+        ".projectatlas-plugin-state.crashed"
+    });
+    fs::create_dir(&retained_snapshot)?;
+    fs::write(retained_snapshot.join("config.toml"), b"prior=true\n")?;
+    let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+    let fake_codex_script = if cfg!(windows) {
+        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nexit /b 1\r\n"
+    } else {
+        "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nexit 1\n"
+    };
+    write_executable_script(&fake_codex, fake_codex_script)?;
+
+    let runtime = mcp_contract_executable();
+    let output = run_plugin_installer_with_codex_fixture(
+        &workspace_root()?,
         &repo,
         &runtime,
         &fake_path,
         &isolated_home,
     )?;
-    let installer_output_text = format!(
+    let output_text = format!(
         "{}\n{}",
-        String::from_utf8_lossy(&installer_output.stdout),
-        String::from_utf8_lossy(&installer_output.stderr)
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    let normalized_installer_output = installer_output_text
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let fake_codex_calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
-    if !failure_marker.exists() {
-        return Err(io::Error::other(format!(
-            "fake Codex plugin add failure was not exercised:\n{fake_codex_calls}"
-        ))
-        .into());
-    }
-    if !normalized_installer_output
-        .contains("Codex ProjectAtlas plugin update failed: could not install projectatlas plugin")
+    let normalized_output_text = output_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !normalized_output_text.contains("retained recovery state requires inspection")
+        || !normalized_output_text.contains(
+            "Codex MCP registry update skipped: no global projectatlas MCP server is configured",
+        )
     {
         return Err(io::Error::other(format!(
-            "installer did not report the failed plugin reinstall:\n{installer_output_text}\nfake Codex calls:\n{fake_codex_calls}"
+            "installer did not fail closed for retained crash recovery state:\n{output_text}"
         ))
         .into());
     }
-    if fake_codex_calls
-        .matches("plugin add projectatlas --marketplace projectatlas --json")
-        .count()
-        < 2
-    {
-        return Err(io::Error::other(format!(
-            "installer did not retry plugin add during restore:\n{fake_codex_calls}"
-        ))
-        .into());
-    }
-    let restore_marketplace_call = format!(
-        "plugin marketplace add https://github.com/styler-ai/ProjectAtlas.git --ref {expected_release_tag} --json"
-    );
-    for required in [
-        "plugin marketplace remove projectatlas --json",
-        restore_marketplace_call.as_str(),
+    let calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
+    for forbidden in [
+        "plugin add",
+        "plugin remove",
+        "plugin marketplace add",
+        "plugin marketplace remove",
     ] {
-        if !fake_codex_calls.contains(required) {
+        if calls.contains(forbidden) {
             return Err(io::Error::other(format!(
-                "installer did not restore marketplace with call {required:?}:\n{fake_codex_calls}"
+                "installer mutated Codex before addressing retained recovery state through {forbidden:?}:\n{calls}"
             ))
             .into());
         }
+    }
+    if !calls.contains("mcp get projectatlas") {
+        return Err(io::Error::other(format!(
+            "retained plugin recovery state suppressed independent MCP registry convergence:\n{calls}"
+        ))
+        .into());
+    }
+    let lock_exists = codex_dir.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME).is_file();
+    if !retained_snapshot.join("config.toml").is_file()
+        || (cfg!(windows) && lock_exists)
+        || (cfg!(unix) && !lock_exists)
+    {
+        return Err(io::Error::other(
+            "installer changed retained recovery state or left its update lock behind",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_plugin_update_refuses_unavailable_or_ambiguous_inventory() -> Result<(), Box<dyn Error>>
+{
+    assert_plugin_update_refuses_unavailable_or_ambiguous_inventory()
+}
+
+#[test]
+#[cfg(unix)]
+fn posix_plugin_update_refuses_unavailable_or_ambiguous_inventory() -> Result<(), Box<dyn Error>> {
+    assert_plugin_update_refuses_unavailable_or_ambiguous_inventory()
+}
+
+fn assert_plugin_update_refuses_unavailable_or_ambiguous_inventory() -> Result<(), Box<dyn Error>> {
+    for inventory_case in [
+        "nonzero",
+        "malformed",
+        "duplicate",
+        "blank-version",
+        "invalid-version",
+        "blank-marketplace-source",
+        "unofficial-marketplace-source",
+        "blank-source-path",
+        "relative-source-path",
+    ] {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join(TEST_REPO_DIR);
+        fs::create_dir(&repo)?;
+        let fake_path = temp.path().join(FAKE_PATH_DIR);
+        fs::create_dir(&fake_path)?;
+        let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+        let codex_dir = isolated_home.join(CODEX_CONFIG_DIR);
+        fs::create_dir_all(&codex_dir)?;
+        fs::write(
+            codex_dir.join("config.toml"),
+            "[marketplaces.projectatlas]\nsource_type = \"git\"\nsource = \"https://github.com/styler-ai/ProjectAtlas.git\"\nref = \"v0.0.1\"\n",
+        )?;
+        let (_, plugin_source, _) = write_fake_codex_projectatlas_integration(
+            &codex_dir,
+            "0.0.1",
+            "0.0.1",
+            "prior offline ProjectAtlas skill\n",
+        )?;
+        let plugin_source_json = serde_json::to_string(&plugin_source.to_string_lossy())?;
+        let inventory_version = match inventory_case {
+            "blank-version" => "",
+            "invalid-version" => "../0.0.1",
+            _ => "0.0.1",
+        };
+        let inventory_marketplace_source = match inventory_case {
+            "blank-marketplace-source" => "",
+            "unofficial-marketplace-source" => "https://github.com/example/ProjectAtlas.git",
+            _ => "https://github.com/styler-ai/ProjectAtlas.git",
+        };
+        let inventory_source_path = match inventory_case {
+            "blank-source-path" => "\"\"".to_string(),
+            "relative-source-path" => "\"plugins/projectatlas\"".to_string(),
+            _ => plugin_source_json,
+        };
+        let plugin_entry = format!(
+            r#"{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":{},"installed":true,"enabled":true,"marketplaceSource":{{"source":{}}},"source":{{"path":{inventory_source_path}}}}}"#,
+            serde_json::to_string(inventory_version)?,
+            serde_json::to_string(inventory_marketplace_source)?,
+        );
+        let inventory_json = match inventory_case {
+            "malformed" => "not-json".to_string(),
+            "duplicate" => {
+                format!(r#"{{"installed":[{plugin_entry},{plugin_entry}],"available":[]}}"#)
+            }
+            "nonzero" => String::new(),
+            _ => format!(r#"{{"installed":[{plugin_entry}],"available":[]}}"#),
+        };
+        let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+        let fake_codex_script = if cfg!(windows) {
+            format!(
+                "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" (\r\n  {inventory_command}\r\n)\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n",
+                inventory_command = if inventory_case == "nonzero" {
+                    "exit /b 17".to_string()
+                } else {
+                    format!("echo {inventory_json}\r\n  exit /b 0")
+                }
+            )
+        } else {
+            format!(
+                "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  {inventory_command}\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then exit 1; fi\nexit 0\n",
+                inventory_command = if inventory_case == "nonzero" {
+                    "exit 17".to_string()
+                } else {
+                    format!("printf '%s\\n' '{inventory_json}'\n  exit 0")
+                }
+            )
+        };
+        write_executable_script(&fake_codex, &fake_codex_script)?;
+        #[cfg(unix)]
+        prepare_plugin_lock(&codex_dir)?;
+        let state_before = repository_filesystem_snapshot(&codex_dir)?;
+        let runtime = mcp_contract_executable();
+        let output = run_plugin_installer_with_codex_fixture(
+            &workspace_root()?,
+            &repo,
+            &runtime,
+            &fake_path,
+            &isolated_home,
+        )?;
+        let output_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let normalized_output_text = output_text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
+        if !normalized_output_text
+            .contains("installed plugin inventory could not be verified completely")
+            || calls.contains("plugin remove projectatlas")
+            || calls.contains("plugin add projectatlas")
+            || calls.contains("plugin marketplace remove projectatlas")
+            || calls.contains("plugin marketplace add")
+        {
+            return Err(io::Error::other(format!(
+                "{inventory_case} inventory was not rejected before destructive mutation:\n{output_text}\ncalls:\n{calls}"
+            ))
+            .into());
+        }
+        let state_after = repository_filesystem_snapshot(&codex_dir)?;
+        if state_after != state_before {
+            return Err(io::Error::other(format!(
+                "{inventory_case} inventory changed prior Codex state:\nbefore={state_before:#?}\nafter={state_after:#?}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(), Box<dyn Error>> {
+    let installer = workspace_root()?
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.sh");
+    let installer_source = fs::read_to_string(&installer)?;
+    let official_start = installer_source
+        .find("official_projectatlas_marketplace_source() {")
+        .ok_or_else(|| io::Error::other("POSIX installer omitted official source validator"))?;
+    let official_end = installer_source[official_start..]
+        .find("\ncodex_config_path() {")
+        .map(|offset| official_start + offset)
+        .ok_or_else(|| io::Error::other("POSIX official source validator boundary drifted"))?;
+    let inventory_start = installer_source
+        .find("codex_projectatlas_inventory_complete=false")
+        .ok_or_else(|| io::Error::other("POSIX installer omitted plugin inventory state"))?;
+    let inventory_end = installer_source[inventory_start..]
+        .find("\ncodex_projectatlas_plugin_version() {")
+        .map(|offset| inventory_start + offset)
+        .ok_or_else(|| io::Error::other("POSIX plugin inventory boundary drifted"))?;
+
+    let temp = tempfile::tempdir()?;
+    let empty_path = temp.path().join("path-without-jq");
+    fs::create_dir(&empty_path)?;
+    let calls = temp.path().join("calls.txt");
+    let fake_codex = temp.path().join(POSIX_CODEX_EXECUTABLE_FILE_NAME);
+    write_executable_script(
+        &fake_codex,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nprintf '%s\\n' '{\"installed\":[{\"pluginId\":\"projectatlas@projectatlas\",\"name\":\"projectatlas\",\"marketplaceName\":\"projectatlas\",\"version\":\"0.0.1\",\"installed\":true,\"enabled\":true},{\"pluginId\":\"other@other\",\"marketplaceSource\":{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"},\"source\":{\"path\":\"/tmp/projectatlas\"}}],\"available\":[]}'\n",
+    )?;
+    let wrapper = temp.path().join("verify-no-jq.sh");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nset -eu\n{}\n{}\nPATH=$1\ncodex_bin=$2\nif load_codex_projectatlas_plugin_inventory; then\n  exit 17\nfi\n[ \"$codex_projectatlas_inventory_complete\" = false ]\n",
+            &installer_source[official_start..official_end],
+            &installer_source[inventory_start..inventory_end]
+        ),
+    )?;
+    let output = StdCommand::new("bash")
+        .arg(&wrapper)
+        .arg(&empty_path)
+        .arg(&fake_codex)
+        .env("PROJECTATLAS_FAKE_CODEX_LOG", &calls)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "POSIX no-jq inventory did not fail closed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let calls = fs::read_to_string(calls)?;
+    if calls.trim() != "plugin list --marketplace projectatlas --json"
+        || calls.contains(" remove ")
+        || calls.contains(" add ")
+    {
+        return Err(io::Error::other(format!(
+            "POSIX no-jq split-object inventory reached mutation or rollback:\n{calls}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn posix_plugin_restore_rejects_hostile_paths_and_retains_recovery_state()
+-> Result<(), Box<dyn Error>> {
+    for fault in [
+        "late-snapshot-source-symlink",
+        "destination-ancestor-symlink",
+        "destination-removal-failure",
+        "destination-mounted-subtree",
+        "snapshot-source-mounted-subtree",
+        "cleanup-mounted-snapshot",
+        "mount-after-permission-preflight",
+        "mount-inventory-unavailable",
+        "config-destination-directory",
+        "prior-absent-config-removal-failure",
+    ] {
+        assert_posix_plugin_restore_rejects_hostile_path(fault)?;
+    }
+    #[cfg(target_os = "linux")]
+    assert_posix_plugin_restore_rejects_hostile_path("mount-inventory-malformed")?;
+    #[cfg(target_os = "macos")]
+    for fault in ["mount-probe-unavailable", "mount-descendant-unavailable"] {
+        assert_posix_plugin_restore_rejects_hostile_path(fault)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn assert_posix_plugin_restore_rejects_hostile_path(fault: &str) -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    let codex_dir = isolated_home.join(CODEX_CONFIG_DIR);
+    let outside = temp.path().join("outside-codex-home");
+    fs::create_dir(&repo)?;
+    fs::create_dir(&fake_path)?;
+    fs::create_dir_all(&codex_dir)?;
+    fs::create_dir(&outside)?;
+    fs::write(
+        outside.join(INSTALLER_OUTSIDE_SENTINEL_FILE_NAME),
+        b"outside\n",
+    )?;
+    if fault != "prior-absent-config-removal-failure" {
+        fs::write(
+            codex_dir.join("config.toml"),
+            format!(
+                "[marketplaces.projectatlas]\nsource_type = \"git\"\nsource = \"https://github.com/styler-ai/ProjectAtlas.git\"\nref = \"v{}\"\n",
+                env!("CARGO_PKG_VERSION")
+            ),
+        )?;
+    }
+    let (marketplace_root, plugin_source, installed_cache) =
+        write_fake_codex_projectatlas_integration(
+            &codex_dir,
+            "0.0.1",
+            "0.0.1",
+            "prior offline ProjectAtlas skill\n",
+        )?;
+    let mounted_subtree = plugin_source.join("mounted-tree");
+    let mount_canary = mounted_subtree.join(INSTALLER_CANARY_FILE_NAME);
+    fs::create_dir(&mounted_subtree)?;
+    fs::write(&mount_canary, b"mounted state\n")?;
+    let live_source_before = repository_filesystem_snapshot(&plugin_source)?;
+    let live_cache_before = repository_filesystem_snapshot(&installed_cache)?;
+    let snapshot_mount_relative = mounted_subtree.strip_prefix(&marketplace_root)?;
+    let plugin_source_json = serde_json::to_string(&plugin_source.to_string_lossy())?;
+    let stale_plugin_json = format!(
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.0.1","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{plugin_source_json}}}}}],"available":[]}}"#
+    );
+    let fake_codex = fake_path.join(POSIX_CODEX_EXECUTABLE_FILE_NAME);
+    let fake_codex_script = r#"#!/usr/bin/env sh
+printf '%s\n' "$*" >> "$PROJECTATLAS_FAKE_CODEX_LOG"
+if [ "${1:-}" = plugin ] && [ "${2:-}" = marketplace ] && [ "${3:-}" = list ]; then
+  printf '%s\n' '{"marketplaces":[{"name":"projectatlas","marketplaceSource":{"source":"https://github.com/styler-ai/ProjectAtlas.git"}}]}'
+  exit 0
+fi
+if [ "${1:-}" = plugin ] && [ "${2:-}" = list ]; then
+  printf '%s\n' '__STALE_PLUGIN_JSON__'
+  exit 0
+fi
+if [ "${1:-}" = plugin ] && { [ "${2:-}" = remove ] || { [ "${2:-}" = marketplace ] && [ "${3:-}" = remove ]; }; }; then
+  snapshot=$(find "$CODEX_HOME" -maxdepth 1 -type d -name '.projectatlas-plugin-state.*' -print -quit)
+  [ -n "$snapshot" ] || exit 9
+  case "$PROJECTATLAS_FAKE_RESTORE_FAULT" in
+    late-snapshot-source-symlink)
+      rm -rf -- "$PROJECTATLAS_FAKE_PLUGIN_ROOT" || exit 10
+      ;;
+    destination-ancestor-symlink)
+      plugin_parent=$(dirname -- "$PROJECTATLAS_FAKE_PLUGIN_ROOT")
+      rm -rf -- "$plugin_parent" || exit 12
+      ln -s -- "$PROJECTATLAS_FAKE_OUTSIDE" "$plugin_parent" || exit 13
+      ;;
+    destination-removal-failure)
+      chmod 500 -- "$PROJECTATLAS_FAKE_PLUGIN_ROOT" || exit 14
+      ;;
+    config-destination-directory)
+      rm -f -- "$PROJECTATLAS_FAKE_CODEX_CONFIG" || exit 15
+      mkdir -- "$PROJECTATLAS_FAKE_CODEX_CONFIG" || exit 16
+      ;;
+    prior-absent-config-removal-failure)
+      printf '%s\n' untrusted > "$PROJECTATLAS_FAKE_CODEX_CONFIG" || exit 18
+      chmod 500 -- "$CODEX_HOME" || exit 19
+      ;;
+    destination-mounted-subtree|mount-inventory-unavailable|mount-inventory-malformed)
+      printf '%s\n' "$PROJECTATLAS_FAKE_MOUNT_TARGET" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 22
+      : > "$PROJECTATLAS_FAKE_MOUNT_ACTIVE"
+      ;;
+    mount-after-permission-preflight)
+      printf '%s\n' "$PROJECTATLAS_FAKE_MOUNT_TARGET" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 22
+      ;;
+    snapshot-source-mounted-subtree)
+      printf '%s\n' "$snapshot/marketplace-root/$PROJECTATLAS_FAKE_SNAPSHOT_MOUNT_RELATIVE" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 23
+      : > "$PROJECTATLAS_FAKE_MOUNT_ACTIVE"
+      ;;
+    mount-probe-unavailable)
+      printf '%s\n' "$snapshot" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 23
+      : > "$PROJECTATLAS_FAKE_MOUNT_ACTIVE"
+      ;;
+    mount-descendant-unavailable)
+      printf '%s\n' "$snapshot/marketplace-root/$PROJECTATLAS_FAKE_SNAPSHOT_MOUNT_RELATIVE" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 23
+      : > "$PROJECTATLAS_FAKE_MOUNT_ACTIVE"
+      ;;
+    cleanup-mounted-snapshot)
+      ;;
+    *) exit 17 ;;
+  esac
+  exit 0
+fi
+if [ "${1:-}" = plugin ] && { [ "${2:-}" = add ] || { [ "${2:-}" = marketplace ] && [ "${3:-}" = add ]; }; }; then exit 1; fi
+if [ "${1:-}" = mcp ] && [ "${2:-}" = get ]; then exit 1; fi
+exit 0
+"#
+    .replace("__STALE_PLUGIN_JSON__", &stale_plugin_json);
+    write_executable_script(&fake_codex, &fake_codex_script)?;
+    write_executable_script(
+        &fake_path.join("cp"),
+        r#"#!/usr/bin/env sh
+PATH=$PROJECTATLAS_FAKE_REAL_PATH
+export PATH
+cp "$@" || exit $?
+if [ "${PROJECTATLAS_FAKE_RESTORE_FAULT:-}" = late-snapshot-source-symlink ]; then
+  case "${3:-}" in
+    */.projectatlas-plugin-state.*/marketplace-root)
+      snapshot=$(dirname -- "${3:-}")
+      rm -rf -- "$snapshot/plugin-cache" || exit 20
+      ln -s -- "$PROJECTATLAS_FAKE_OUTSIDE" "$snapshot/plugin-cache" || exit 21
+      ;;
+  esac
+fi
+if [ "${PROJECTATLAS_FAKE_RESTORE_FAULT:-}" = cleanup-mounted-snapshot ] &&
+  [ "${1:-}" = -p ] && [ "${2:-}" = -- ]; then
+  case "${4##*/}" in
+    config.toml.projectatlas-restore.*)
+      snapshot=$(find "$CODEX_HOME" -maxdepth 1 -type d -name '.projectatlas-plugin-state.*' -print -quit)
+      [ -n "$snapshot" ] || exit 25
+      printf '%s\n' "$snapshot/marketplace-root/$PROJECTATLAS_FAKE_SNAPSHOT_MOUNT_RELATIVE" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 26
+      : > "$PROJECTATLAS_FAKE_MOUNT_ACTIVE"
+      ;;
+  esac
+fi
+"#,
+    )?;
+    write_executable_script(
+        &fake_path.join(POSIX_FIND_EXECUTABLE_FILE_NAME),
+        r#"#!/usr/bin/env sh
+"$PROJECTATLAS_FAKE_REAL_FIND" "$@"
+status=$?
+if [ "$status" -eq 0 ] &&
+  [ "${PROJECTATLAS_FAKE_RESTORE_FAULT:-}" = mount-after-permission-preflight ] &&
+  [ "${2:-}" = -type ] && [ "${3:-}" = d ]; then
+  printf '%s\n' "$PROJECTATLAS_FAKE_MOUNT_TARGET" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 24
+  : > "$PROJECTATLAS_FAKE_MOUNT_ACTIVE"
+fi
+exit "$status"
+"#,
+    )?;
+    #[cfg(target_os = "linux")]
+    write_executable_script(
+        &fake_path.join("findmnt"),
+        r#"#!/usr/bin/env sh
+if [ ! -e "$PROJECTATLAS_FAKE_MOUNT_ACTIVE" ]; then
+  PATH=$PROJECTATLAS_FAKE_REAL_PATH
+  export PATH
+  exec findmnt "$@"
+fi
+if [ "$PROJECTATLAS_FAKE_RESTORE_FAULT" = mount-inventory-unavailable ]; then
+  exit 1
+fi
+if [ "$PROJECTATLAS_FAKE_RESTORE_FAULT" = mount-inventory-malformed ]; then
+  printf '%s\n' '{"filesystems":[{"source":"untrusted"}]}'
+  exit 0
+fi
+target=$(cat "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE") || exit 1
+jq -n \
+  --arg root "$PROJECTATLAS_FAKE_MOUNT_ROOT" \
+  --arg target "$target" \
+  '{filesystems: [{target: $root}, {target: $target}]}'
+"#,
+    )?;
+    #[cfg(target_os = "macos")]
+    write_executable_script(
+        &fake_path.join("stat"),
+        r#"#!/usr/bin/env sh
+if [ -e "$PROJECTATLAS_FAKE_MOUNT_ACTIVE" ] &&
+  [ "${1:-}" = -f ] && [ "${2:-}" = %d ]; then
+  if [ "$PROJECTATLAS_FAKE_RESTORE_FAULT" = mount-inventory-unavailable ]; then
+    exit 1
+  fi
+  target=$(cat "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE") || exit 1
+  target=$(CDPATH= cd -P -- "$target" 2>/dev/null && pwd -P) || exit 1
+  probe=$(CDPATH= cd -P -- "${3:-}" 2>/dev/null && pwd -P) || exit 1
+  if { [ "$PROJECTATLAS_FAKE_RESTORE_FAULT" = mount-probe-unavailable ] ||
+      [ "$PROJECTATLAS_FAKE_RESTORE_FAULT" = mount-descendant-unavailable ]; } &&
+    [ "$probe" = "$target" ]; then
+    exit 1
+  fi
+  case "$probe/" in
+    "$target/"|"$target"/*)
+      printf '%s\n' 2
+      ;;
+    *)
+      printf '%s\n' 1
+      ;;
+  esac
+  exit 0
+fi
+PATH=$PROJECTATLAS_FAKE_REAL_PATH
+export PATH
+exec stat "$@"
+"#,
+    )?;
+
+    let runtime = mcp_contract_executable();
+    let inherited_path = std::env::var_os("PATH")
+        .ok_or_else(|| io::Error::other("POSIX hostile restore test requires PATH"))?;
+    let real_find = std::env::split_paths(&inherited_path)
+        .map(|directory| directory.join(POSIX_FIND_EXECUTABLE_FILE_NAME))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| io::Error::other("POSIX hostile restore test requires find"))?;
+    let mount_active = temp.path().join("mount-active");
+    let mount_target_file = temp.path().join("mount-target");
+    let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+        &workspace_root()?,
+        &repo,
+        &runtime,
+        Some(&fake_path),
+        Some(&isolated_home),
+    )?;
+    command
+        .env("PROJECTATLAS_FAKE_RESTORE_FAULT", fault)
+        .env("PROJECTATLAS_FAKE_OUTSIDE", &outside)
+        .env("PROJECTATLAS_FAKE_REAL_PATH", &inherited_path)
+        .env("PROJECTATLAS_FAKE_REAL_FIND", &real_find)
+        .env("PROJECTATLAS_FAKE_MOUNT_ACTIVE", &mount_active)
+        .env("PROJECTATLAS_FAKE_MOUNT_ROOT", &codex_dir)
+        .env("PROJECTATLAS_FAKE_MOUNT_TARGET", &mounted_subtree)
+        .env("PROJECTATLAS_FAKE_MOUNT_TARGET_FILE", &mount_target_file)
+        .env(
+            "PROJECTATLAS_FAKE_SNAPSHOT_MOUNT_RELATIVE",
+            snapshot_mount_relative,
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_for_plugin_installer_output(
+        command.spawn()?,
+        "hostile POSIX restore",
+        Duration::from_secs(45),
+    )?;
+    let output = require_successful_plugin_installer_output(output)?;
+    let output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected_failure = match fault {
+        "cleanup-mounted-snapshot" => "state snapshot cleanup failed",
+        "mount-inventory-malformed" => "mount inventory is malformed",
+        "mount-inventory-unavailable"
+        | "mount-probe-unavailable"
+        | "mount-descendant-unavailable" => "mount inventory cannot be read",
+        _ => "could not be restored completely",
+    };
+    if !output_text.contains(expected_failure) {
+        return Err(io::Error::other(format!(
+            "POSIX installer accepted hostile restore fault {fault:?}:\n{output_text}"
+        ))
+        .into());
+    }
+    if matches!(
+        fault,
+        "destination-mounted-subtree"
+            | "snapshot-source-mounted-subtree"
+            | "cleanup-mounted-snapshot"
+            | "mount-after-permission-preflight"
+    ) && !output_text.contains("mounted filesystem")
+    {
+        return Err(io::Error::other(format!(
+            "POSIX restore mount fault {fault:?} omitted its observed-mount diagnostic:\n{output_text}"
+        ))
+        .into());
+    }
+    let snapshots = fs::read_dir(&codex_dir)?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".projectatlas-plugin-state.")
+        })
+        .count();
+    if snapshots != 1 {
+        return Err(io::Error::other(format!(
+            "POSIX hostile restore fault {fault:?} did not retain exactly one recovery snapshot"
+        ))
+        .into());
+    }
+    if fs::read(outside.join(INSTALLER_OUTSIDE_SENTINEL_FILE_NAME))? != b"outside\n"
+        || fs::read_dir(&outside)?.count() != 1
+    {
+        return Err(io::Error::other(format!(
+            "POSIX hostile restore fault {fault:?} mutated outside CODEX_HOME"
+        ))
+        .into());
+    }
+    if fault == "late-snapshot-source-symlink"
+        && (repository_filesystem_snapshot(&plugin_source)? != live_source_before
+            || repository_filesystem_snapshot(&installed_cache)? != live_cache_before)
+    {
+        return Err(io::Error::other(
+            "POSIX restore changed live state before rejecting a late-swapped snapshot source",
+        )
+        .into());
+    }
+    if matches!(
+        fault,
+        "destination-mounted-subtree"
+            | "snapshot-source-mounted-subtree"
+            | "cleanup-mounted-snapshot"
+            | "mount-after-permission-preflight"
+            | "mount-inventory-unavailable"
+            | "mount-inventory-malformed"
+            | "mount-probe-unavailable"
+            | "mount-descendant-unavailable"
+    ) && (repository_filesystem_snapshot(&plugin_source)? != live_source_before
+        || repository_filesystem_snapshot(&installed_cache)? != live_cache_before
+        || fs::read(&mount_canary)? != b"mounted state\n")
+    {
+        return Err(io::Error::other(format!(
+            "POSIX restore mutated live state after mount validation fault {fault:?}"
+        ))
+        .into());
+    }
+    let calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
+    if calls.contains("mcp remove projectatlas") || calls.contains("mcp add projectatlas") {
+        return Err(io::Error::other(format!(
+            "POSIX hostile restore fault {fault:?} mutated MCP state:\n{calls}"
+        ))
+        .into());
+    }
+    if fault == "destination-removal-failure" && plugin_source.exists() {
+        fs::set_permissions(&plugin_source, fs::Permissions::from_mode(0o700))?;
+    }
+    if fault == "config-destination-directory"
+        && fs::read_dir(codex_dir.join("config.toml"))?
+            .next()
+            .is_some()
+    {
+        return Err(io::Error::other(
+            "POSIX config restore nested a temporary file inside the hostile destination directory",
+        )
+        .into());
+    }
+    if fault == "prior-absent-config-removal-failure" {
+        fs::set_permissions(&codex_dir, fs::Permissions::from_mode(0o700))?;
+        let lock = codex_dir.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME);
+        if lock.exists() {
+            fs::remove_file(lock)?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_plugin_restore_rejects_config_directory_and_retains_recovery_snapshot()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    let codex_dir = isolated_home.join(CODEX_CONFIG_DIR);
+    fs::create_dir(&repo)?;
+    fs::create_dir(&fake_path)?;
+    fs::create_dir_all(&codex_dir)?;
+    fs::write(
+        codex_dir.join("config.toml"),
+        format!(
+            "[marketplaces.projectatlas]\nsource_type = \"git\"\nsource = \"https://github.com/styler-ai/ProjectAtlas.git\"\nref = \"v{}\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )?;
+    let (_, plugin_source, _) = write_fake_codex_projectatlas_integration(
+        &codex_dir,
+        "0.0.1",
+        "0.0.1",
+        "prior offline ProjectAtlas skill\n",
+    )?;
+    let plugin_source_json = serde_json::to_string(&plugin_source.to_string_lossy())?;
+    let stale_plugin_json = format!(
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.0.1","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{plugin_source_json}}}}}],"available":[]}}"#
+    );
+    let fake_codex = fake_path.join("codex.cmd");
+    let fake_codex_script = format!(
+        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" (\r\n  echo {stale_plugin_json}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"remove\" (\r\n  del /f /q \"%PROJECTATLAS_FAKE_CODEX_CONFIG%\" >nul 2>nul\r\n  mkdir \"%PROJECTATLAS_FAKE_CODEX_CONFIG%\"\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"add\" exit /b 1\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n"
+    );
+    write_executable_script(&fake_codex, &fake_codex_script)?;
+
+    let runtime = mcp_contract_executable();
+    let output = run_plugin_installer_with_codex_fixture(
+        &workspace_root()?,
+        &repo,
+        &runtime,
+        &fake_path,
+        &isolated_home,
+    )?;
+    let output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if !output_text.contains("could not be restored completely") {
+        return Err(io::Error::other(format!(
+            "Windows installer accepted a config directory as restored state:\n{output_text}"
+        ))
+        .into());
+    }
+    let config_path = codex_dir.join("config.toml");
+    if !config_path.is_dir() || fs::read_dir(&config_path)?.next().is_some() {
+        return Err(io::Error::other(
+            "Windows config restore changed the hostile destination or nested a temporary file inside it",
+        )
+        .into());
+    }
+    let snapshots = fs::read_dir(&codex_dir)?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".projectatlas-plugin-state-")
+        })
+        .count();
+    if snapshots != 1 {
+        return Err(io::Error::other(
+            "Windows config restore failure did not retain exactly one recovery snapshot",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_plugin_restore_rejects_cache_junction_and_retains_recovery_snapshot()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    fs::create_dir(&fake_path)?;
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    let codex_dir = isolated_home.join(CODEX_CONFIG_DIR);
+    fs::create_dir_all(&codex_dir)?;
+    let release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let codex_config = codex_dir.join("config.toml");
+    fs::write(
+        &codex_config,
+        format!(
+            "[marketplaces.projectatlas]\nsource_type = \"git\"\nsource = \"https://github.com/styler-ai/ProjectAtlas.git\"\nref = \"{release_tag}\"\n"
+        ),
+    )?;
+    let (_, plugin_source, installed_cache) = write_fake_codex_projectatlas_integration(
+        &codex_dir,
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_VERSION"),
+        "stale ProjectAtlas skill\n",
+    )?;
+    let runtime_integration = "prior offline runtime integration\n";
+    fs::write(
+        plugin_source.join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME),
+        runtime_integration,
+    )?;
+    fs::write(
+        installed_cache.join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME),
+        runtime_integration,
+    )?;
+    let junction_target = isolated_home.join(FAKE_CODEX_JUNCTION_TARGET_DIR);
+    fs::create_dir_all(&junction_target)?;
+    fs::write(
+        junction_target.join(INSTALLER_CANARY_FILE_NAME),
+        "outside state\n",
+    )?;
+    let plugin_source_json = serde_json::to_string(&plugin_source.to_string_lossy())?;
+    let installed_json = format!(
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{plugin_source_json}}}}}],"available":[]}}"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    let fake_codex = fake_path.join("codex.cmd");
+    let fake_script = format!(
+        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" goto plugin_list\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"remove\" goto plugin_remove\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"add\" goto plugin_add\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n:plugin_list\r\nif not exist \"%PROJECTATLAS_FAKE_MARKETPLACE_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_MARKETPLACE_INSTALL_RECORD%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_RUNTIME_INTEGRATION%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_SKILL%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_RUNTIME_INTEGRATION%\" goto plugin_absent\r\necho {installed_json}\r\nexit /b 0\r\n:plugin_absent\r\necho {{\"installed\":[],\"available\":[]}}\r\nexit /b 0\r\n:plugin_remove\r\n>\"%PROJECTATLAS_FAKE_CODEX_CONFIG%\" echo mutated=true\r\nif exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" rmdir /s /q \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\"\r\nexit /b 0\r\n:plugin_add\r\nmklink /J \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" \"%PROJECTATLAS_FAKE_JUNCTION_TARGET%\" >nul\r\nexit /b 1\r\n"
+    );
+    write_executable_script(&fake_codex, &fake_script)?;
+
+    let runtime = mcp_contract_executable();
+    let output = run_plugin_installer_with_codex_fixture(
+        &workspace_root()?,
+        &repo,
+        &runtime,
+        &fake_path,
+        &isolated_home,
+    )?;
+    let output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let snapshots = fs::read_dir(&codex_dir)?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".projectatlas-plugin-state-")
+        })
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    if snapshots.len() != 1
+        || !snapshots[0]
+            .join(FAKE_CODEX_PLUGIN_CACHE_DIR)
+            .join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME)
+            .is_file()
+        || !output_text.contains("could not be restored completely")
+        || !output_contains_path_name(&output_text, &snapshots[0])
+    {
+        return Err(io::Error::other(format!(
+            "junction-swapped second restore destination did not retain one usable recovery snapshot:\n{output_text}\nsnapshots={snapshots:#?}"
+        ))
+        .into());
+    }
+    if fs::read_to_string(junction_target.join(INSTALLER_CANARY_FILE_NAME))? != "outside state\n" {
+        return Err(io::Error::other("junction restore modified the outside canary").into());
+    }
+    let calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
+    if calls.contains("mcp remove projectatlas") || calls.contains("mcp add projectatlas") {
+        return Err(io::Error::other(format!(
+            "partial plugin restore mutated MCP state:\n{calls}"
+        ))
+        .into());
+    }
+    fs::remove_dir(&installed_cache)?;
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_plugin_snapshot_rejects_reparse_above_codex_home_before_mutation()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    fs::create_dir(&fake_path)?;
+    let real_home_parent = temp.path().join("real-home-parent");
+    let linked_home_parent = temp.path().join("linked-home-parent");
+    fs::create_dir(&real_home_parent)?;
+    fs::write(
+        real_home_parent.join(INSTALLER_CANARY_FILE_NAME),
+        "outside state\n",
+    )?;
+    let link_output = StdCommand::new("cmd")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(&linked_home_parent)
+        .arg(&real_home_parent)
+        .output()?;
+    if !link_output.status.success() {
+        return Err(io::Error::other(format!(
+            "failed to create ancestor junction above CODEX_HOME:\n{}\n{}",
+            String::from_utf8_lossy(&link_output.stdout),
+            String::from_utf8_lossy(&link_output.stderr)
+        ))
+        .into());
+    }
+    let isolated_home = linked_home_parent.join(ISOLATED_HOME_DIR);
+    let codex_dir = isolated_home.join(CODEX_CONFIG_DIR);
+    fs::create_dir_all(&codex_dir)?;
+    let release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    fs::write(
+        codex_dir.join("config.toml"),
+        format!(
+            "[marketplaces.projectatlas]\nsource_type = \"git\"\nsource = \"https://github.com/styler-ai/ProjectAtlas.git\"\nref = \"{release_tag}\"\n"
+        ),
+    )?;
+    let (_, plugin_source, _) = write_fake_codex_projectatlas_integration(
+        &codex_dir,
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_VERSION"),
+        "stale ProjectAtlas skill\n",
+    )?;
+    #[cfg(unix)]
+    prepare_plugin_lock(&codex_dir)?;
+    let state_before = repository_filesystem_snapshot(&codex_dir)?;
+    let plugin_source_json = serde_json::to_string(&plugin_source.to_string_lossy())?;
+    let installed_json = format!(
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{plugin_source_json}}}}}],"available":[]}}"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    let fake_codex = fake_path.join("codex.cmd");
+    write_executable_script(
+        &fake_codex,
+        &format!(
+            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" (\r\n  echo {installed_json}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n"
+        ),
+    )?;
+    let runtime = mcp_contract_executable();
+    let output = run_plugin_installer_with_codex_fixture(
+        &workspace_root()?,
+        &repo,
+        &runtime,
+        &fake_path,
+        &isolated_home,
+    )?;
+    let output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let normalized_output_text = output_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
+    if !normalized_output_text.contains("reparse point in its Codex-root ancestry")
+        || calls.contains("plugin remove projectatlas")
+        || calls.contains("plugin add projectatlas")
+        || calls.contains("plugin marketplace remove projectatlas")
+        || calls.contains("plugin marketplace add")
+        || repository_filesystem_snapshot(&codex_dir)? != state_before
+        || fs::read_to_string(real_home_parent.join(INSTALLER_CANARY_FILE_NAME))?
+            != "outside state\n"
+    {
+        return Err(io::Error::other(format!(
+            "reparse ancestor above CODEX_HOME was not rejected before mutation:\n{output_text}\ncalls:\n{calls}"
+        ))
+        .into());
+    }
+    fs::remove_dir(&linked_home_parent)?;
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_plugin_snapshot_cleanup_refuses_path_swap_without_outside_deletion()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    fs::create_dir(&fake_path)?;
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    let codex_dir = isolated_home.join(CODEX_CONFIG_DIR);
+    fs::create_dir_all(&codex_dir)?;
+    let release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    fs::write(
+        codex_dir.join("config.toml"),
+        format!(
+            "[marketplaces.projectatlas]\nsource_type = \"git\"\nsource = \"https://github.com/styler-ai/ProjectAtlas.git\"\nref = \"{release_tag}\"\n"
+        ),
+    )?;
+    let (_, plugin_source, installed_cache) = write_fake_codex_projectatlas_integration(
+        &codex_dir,
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_VERSION"),
+        "stale ProjectAtlas skill\n",
+    )?;
+    fs::write(
+        plugin_source.join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME),
+        "current runtime integration\n",
+    )?;
+    fs::write(
+        installed_cache.join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME),
+        "current runtime integration\n",
+    )?;
+    let plugin_source_json = serde_json::to_string(&plugin_source.to_string_lossy())?;
+    let installed_json = format!(
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{plugin_source_json}}}}}],"available":[]}}"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    let fake_codex = fake_path.join("codex.cmd");
+    write_executable_script(
+        &fake_codex,
+        &format!(
+            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" goto plugin_list\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"remove\" goto plugin_remove\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"add\" goto plugin_add\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n:plugin_list\r\nif not exist \"%PROJECTATLAS_FAKE_MARKETPLACE_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_MARKETPLACE_INSTALL_RECORD%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_RUNTIME_INTEGRATION%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_SKILL%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_RUNTIME_INTEGRATION%\" goto plugin_absent\r\necho {installed_json}\r\nexit /b 0\r\n:plugin_absent\r\necho {{\"installed\":[],\"available\":[]}}\r\nexit /b 0\r\n:plugin_remove\r\nif exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" rmdir /s /q \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\"\r\nexit /b 0\r\n:plugin_add\r\ncopy /y \"%PROJECTATLAS_PACKAGED_SKILL%\" \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" >nul\r\nxcopy /e /i /q /y \"%PROJECTATLAS_FAKE_PLUGIN_ROOT%\" \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" >nul\r\nfor /d %%D in (\"%CODEX_HOME%\\.projectatlas-plugin-state-*\") do (\r\n  move \"%%~fD\" \"%PROJECTATLAS_FAKE_CLEANUP_SNAPSHOT_TARGET%\" >nul\r\n  >\"%PROJECTATLAS_FAKE_CLEANUP_SNAPSHOT_TARGET%\\outside-canary.txt\" echo outside state\r\n  mklink /J \"%%~fD\" \"%PROJECTATLAS_FAKE_CLEANUP_SNAPSHOT_TARGET%\" >nul\r\n)\r\nexit /b 0\r\n"
+        ),
+    )?;
+    let runtime = mcp_contract_executable();
+    let output = run_plugin_installer_with_codex_fixture(
+        &workspace_root()?,
+        &repo,
+        &runtime,
+        &fake_path,
+        &isolated_home,
+    )?;
+    let output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cleanup_target = isolated_home.join(FAKE_CODEX_CLEANUP_SNAPSHOT_TARGET_DIR);
+    let snapshot_links = fs::read_dir(&codex_dir)?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".projectatlas-plugin-state-")
+        })
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    if snapshot_links.len() != 1
+        || !cleanup_target
+            .join(FAKE_CODEX_PLUGIN_CACHE_DIR)
+            .join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME)
+            .is_file()
+        || fs::read_to_string(cleanup_target.join("outside-canary.txt"))? != "outside state\r\n"
+        || !output_text.contains("state snapshot cleanup refused/path changed at")
+        || output_text.contains("state snapshot cleanup failed; retained at")
+        || !output_contains_path_name(&output_text, &snapshot_links[0])
+        || !output_text.contains(&format!(
+            "Codex ProjectAtlas plugin marketplace updated to {release_tag}."
+        ))
+    {
+        return Err(io::Error::other(format!(
+            "successful update did not refuse a swapped cleanup path truthfully:\n{output_text}\nlinks={snapshot_links:#?}\ntarget={cleanup_target:?}"
+        ))
+        .into());
+    }
+    fs::remove_dir(&snapshot_links[0])?;
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_plugin_snapshot_cleanup_failure_retains_usable_direct_snapshot()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    fs::create_dir(&fake_path)?;
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    let codex_dir = isolated_home.join(CODEX_CONFIG_DIR);
+    fs::create_dir_all(&codex_dir)?;
+    let release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    fs::write(
+        codex_dir.join("config.toml"),
+        format!(
+            "[marketplaces.projectatlas]\nsource_type = \"git\"\nsource = \"https://github.com/styler-ai/ProjectAtlas.git\"\nref = \"{release_tag}\"\n"
+        ),
+    )?;
+    let (_, plugin_source, installed_cache) = write_fake_codex_projectatlas_integration(
+        &codex_dir,
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_VERSION"),
+        "stale ProjectAtlas skill\n",
+    )?;
+    for root in [&plugin_source, &installed_cache] {
+        fs::write(
+            root.join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME),
+            "current runtime integration\n",
+        )?;
+    }
+    let plugin_source_json = serde_json::to_string(&plugin_source.to_string_lossy())?;
+    let installed_json = format!(
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{plugin_source_json}}}}}],"available":[]}}"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    let fake_codex = fake_path.join("codex.cmd");
+    write_executable_script(
+        &fake_codex,
+        &format!(
+            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" goto plugin_list\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"remove\" goto plugin_remove\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"add\" goto plugin_add\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n:plugin_list\r\nif not exist \"%PROJECTATLAS_FAKE_MARKETPLACE_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_MARKETPLACE_INSTALL_RECORD%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_RUNTIME_INTEGRATION%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_SKILL%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_RUNTIME_INTEGRATION%\" goto plugin_absent\r\necho {installed_json}\r\nexit /b 0\r\n:plugin_absent\r\necho {{\"installed\":[],\"available\":[]}}\r\nexit /b 0\r\n:plugin_remove\r\nif exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" rmdir /s /q \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\"\r\nexit /b 0\r\n:plugin_add\r\ncopy /y \"%PROJECTATLAS_PACKAGED_SKILL%\" \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" >nul\r\nxcopy /e /i /q /y \"%PROJECTATLAS_FAKE_PLUGIN_ROOT%\" \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" >nul\r\nfor /d %%D in (\"%CODEX_HOME%\\.projectatlas-plugin-state-*\") do (\r\n  icacls \"%%~fD\" /deny \"*S-1-1-0:(OI)(CI)(DE,DC)\" /T /C >nul\r\n  if errorlevel 1 exit /b 19\r\n)\r\nexit /b 0\r\n"
+        ),
+    )?;
+
+    let runtime = mcp_contract_executable();
+    let output_result = run_plugin_installer_with_codex_fixture(
+        &workspace_root()?,
+        &repo,
+        &runtime,
+        &fake_path,
+        &isolated_home,
+    );
+    let snapshots = fs::read_dir(&codex_dir)?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".projectatlas-plugin-state-")
+        })
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    let mut acl_restore_failures = Vec::new();
+    for snapshot in &snapshots {
+        let restore = StdCommand::new("icacls")
+            .arg(snapshot)
+            .args(["/remove:d", "*S-1-1-0", "/T", "/C"])
+            .output()?;
+        if !restore.status.success() {
+            acl_restore_failures.push(format!(
+                "{}:\n{}\n{}",
+                snapshot.display(),
+                String::from_utf8_lossy(&restore.stdout),
+                String::from_utf8_lossy(&restore.stderr)
+            ));
+        }
+    }
+    if !acl_restore_failures.is_empty() {
+        return Err(io::Error::other(format!(
+            "failed to restore cleanup-fault ACLs:\n{}",
+            acl_restore_failures.join("\n")
+        ))
+        .into());
+    }
+    let output = output_result?;
+    let output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if snapshots.len() != 1
+        || !snapshots[0].join("config.toml").is_file()
+        || !snapshots[0]
+            .join(CODEX_MARKETPLACE_SNAPSHOT_DIR_NAME)
+            .join("plugins")
+            .join("projectatlas")
+            .join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME)
+            .is_file()
+        || !snapshots[0]
+            .join(FAKE_CODEX_PLUGIN_CACHE_DIR)
+            .join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME)
+            .is_file()
+        || !snapshots[0]
+            .join(CODEX_MARKETPLACE_SNAPSHOT_DIR_NAME)
+            .join(CODEX_MARKETPLACE_METADATA_DIR)
+            .join("plugins")
+            .join(CODEX_MARKETPLACE_MANIFEST_FILE_NAME)
+            .is_file()
+        || !snapshots[0]
+            .join(CODEX_MARKETPLACE_SNAPSHOT_DIR_NAME)
+            .join(CODEX_MARKETPLACE_INSTALL_RECORD_FILE_NAME)
+            .is_file()
+        || !output_text.contains("state snapshot cleanup failed; retained at")
+        || !output_contains_path_name(&output_text, &snapshots[0])
+        || output_text.contains("state snapshot cleanup refused/path changed at")
+        || !output_text.contains(&format!(
+            "Codex ProjectAtlas plugin marketplace updated to {release_tag}."
+        ))
+    {
+        return Err(io::Error::other(format!(
+            "direct cleanup failure did not retain one complete usable recovery snapshot:\n{output_text}\nsnapshots={snapshots:#?}"
+        ))
+        .into());
     }
     Ok(())
 }
@@ -12109,8 +14731,12 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
             "enabled": true,
             "transport": {
                 "type": "stdio",
-                "command": "C:\\Users\\shaun_tyler\\AppData\\Local\\ProjectAtlas\\bin\\projectatlas.exe",
-                "args": ["--require-version", "0.3.10", "--db", "C:\\projects\\io.pasx.kai\\.projectatlas\\projectatlas.db", "mcp"]
+                "command": &stable_runtime,
+                "args": [
+                    "--require-version", "0.3.10",
+                    "--db", temp.path().join("stale-project").join(ATLAS_DIR_NAME).join("projectatlas.db"),
+                    "mcp"
+                ]
             }
         }))?,
     )?;
@@ -14630,8 +17256,7 @@ fn json_values_equivalent(left: &Value, right: &Value) -> bool {
 }
 
 #[test]
-fn mcp_tools_list_exposes_self_contained_codex_input_schemas_without_index_state()
--> Result<(), Box<dyn Error>> {
+fn mcp_tools_list_preserves_frozen_contracts_without_index_state() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
@@ -14640,6 +17265,7 @@ fn mcp_tools_list_exposes_self_contained_codex_input_schemas_without_index_state
     let executable = mcp_contract_executable();
 
     let inventory = run_mcp_contract_inventory(&executable, &repo, &database)?;
+    assert_frozen_mcp_surfaces_compatible(&inventory)?;
     let response = mcp_response(&inventory, 2)?;
     let tools = response
         .get("result")
@@ -15463,7 +18089,7 @@ fn real_scan_resolves_import_alias_called_by_across_core_languages() -> Result<(
 }
 
 #[test]
-fn packaged_cli_surface_preserves_v0326_routes_and_defaults() -> Result<(), Box<dyn Error>> {
+fn packaged_cli_surface_preserves_frozen_routes_and_defaults() -> Result<(), Box<dyn Error>> {
     let executable = mcp_contract_executable();
     assert_mcp_contract_runtime_and_skill(&executable)?;
     let fixture: Value = serde_json::from_str(include_str!("fixtures/cli-surfaces.json"))?;
@@ -15471,7 +18097,6 @@ fn packaged_cli_surface_preserves_v0326_routes_and_defaults() -> Result<(), Box<
     let current = fixture
         .get(&current_key)
         .ok_or_else(|| io::Error::other(format!("CLI fixture omitted {current_key}")))?;
-    let legacy = json_at(&fixture, &["v0.3.26"])?;
     let current_commands = cli_surface_strings(current, &["commands"])?;
     let root_help = cli_help_surface(&executable, "")?;
     if !root_help.help_present {
@@ -15546,43 +18171,58 @@ fn packaged_cli_surface_preserves_v0326_routes_and_defaults() -> Result<(), Box<
         }
     }
 
-    let legacy_commands = cli_surface_strings(legacy, &["commands"])?;
-    if !legacy_commands
-        .iter()
-        .all(|command| current_commands.contains(command))
-    {
-        return Err(io::Error::other(format!(
-            "packaged CLI removed a v0.3.26 command: current={current_commands:?} legacy={legacy_commands:?}"
-        ))
-        .into());
-    }
-    let legacy_subcommands = json_at(legacy, &["subcommands"])?
-        .as_object()
-        .ok_or_else(|| io::Error::other("legacy CLI subcommands fixture was not an object"))?;
-    for (parent, expected) in legacy_subcommands {
-        let expected = cli_value_strings(expected, parent)?;
-        let advertised = cli_help_surface(&executable, parent)?.subcommands;
-        if !expected
+    for legacy_version in ["v0.3.26", "v0.4.0"] {
+        let legacy = json_at(&fixture, &[legacy_version])?;
+        let legacy_commands = cli_surface_strings(legacy, &["commands"])?;
+        if !legacy_commands
             .iter()
-            .all(|subcommand| advertised.contains(subcommand))
+            .all(|command| current_commands.contains(command))
         {
             return Err(io::Error::other(format!(
-                "packaged CLI removed a v0.3.26 {parent} route: advertised={advertised:?} legacy={expected:?}"
+                "packaged CLI removed a {legacy_version} command: current={current_commands:?} legacy={legacy_commands:?}"
             ))
             .into());
         }
-    }
-    let legacy_defaults = json_at(legacy, &["defaults"])?
-        .as_object()
-        .ok_or_else(|| io::Error::other("legacy CLI defaults fixture was not an object"))?;
-    for (route, expected) in legacy_defaults {
-        let expected = cli_value_strings(expected, route)?;
-        let advertised = cli_help_surface(&executable, route)?.defaults;
-        if !ordered_subsequence(&expected, &advertised) {
-            return Err(io::Error::other(format!(
-                "packaged CLI removed or reordered a v0.3.26 default for {route:?}: advertised={advertised:?} legacy={expected:?}"
-            ))
-            .into());
+        let legacy_subcommands = json_at(legacy, &["subcommands"])?
+            .as_object()
+            .ok_or_else(|| io::Error::other("legacy CLI subcommands fixture was not an object"))?;
+        for (parent, expected) in legacy_subcommands {
+            let expected = cli_value_strings(expected, parent)?;
+            let advertised = cli_help_surface(&executable, parent)?.subcommands;
+            if !expected
+                .iter()
+                .all(|subcommand| advertised.contains(subcommand))
+            {
+                return Err(io::Error::other(format!(
+                    "packaged CLI removed a {legacy_version} {parent} route: advertised={advertised:?} legacy={expected:?}"
+                ))
+                .into());
+            }
+        }
+        if let Some(legacy_actions) = legacy.get("actions").and_then(Value::as_object) {
+            for (route, expected) in legacy_actions {
+                let expected = cli_value_strings(expected, route)?;
+                let advertised = cli_help_surface(&executable, route)?.possible_values;
+                if !expected.iter().all(|action| advertised.contains(action)) {
+                    return Err(io::Error::other(format!(
+                        "packaged CLI removed a {legacy_version} {route} action: advertised={advertised:?} legacy={expected:?}"
+                    ))
+                    .into());
+                }
+            }
+        }
+        let legacy_defaults = json_at(legacy, &["defaults"])?
+            .as_object()
+            .ok_or_else(|| io::Error::other("legacy CLI defaults fixture was not an object"))?;
+        for (route, expected) in legacy_defaults {
+            let expected = cli_value_strings(expected, route)?;
+            let advertised = cli_help_surface(&executable, route)?.defaults;
+            if !ordered_subsequence(&expected, &advertised) {
+                return Err(io::Error::other(format!(
+                    "packaged CLI removed or reordered a {legacy_version} default for {route:?}: advertised={advertised:?} legacy={expected:?}"
+                ))
+                .into());
+            }
         }
     }
     Ok(())
@@ -16652,7 +19292,7 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
     ];
 
     let inventory = run_mcp_contract_inventory(&executable, &repo, &db)?;
-    assert_legacy_mcp_surface_compatible(&inventory)?;
+    assert_frozen_mcp_surfaces_compatible(&inventory)?;
     let tools_response = mcp_response(&inventory, 2)?;
     let tools = tools_response
         .get("result")
@@ -17038,7 +19678,7 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         ],
         &messages,
     )?;
-    assert_legacy_mcp_surface_compatible(&stdout)?;
+    assert_frozen_mcp_surfaces_compatible(&stdout)?;
     let session_brief_text = mcp_tool_text(&stdout, 19)?;
     let analysis_text = mcp_tool_text(&stdout, 23)?;
     let next_call_text = mcp_tool_text(&stdout, 24)?;
@@ -24923,6 +27563,15 @@ fn repository_filesystem_snapshot(repo: &Path) -> Result<BTreeMap<String, String
     Ok(snapshot)
 }
 
+#[cfg(windows)]
+fn output_contains_path_name(output: &str, path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        output
+            .replace(['\r', '\n'], "")
+            .contains(name.to_string_lossy().as_ref())
+    })
+}
+
 /// Require exact effects across the enclosing contract fixture, including explicit output paths.
 fn assert_cli_contract_outer_filesystem_delta(
     name: &str,
@@ -26267,7 +28916,7 @@ fn run_mcp_stdio(
     run_mcp_stdio_with_env(executable, cwd, args, messages, &[])
 }
 
-/// Launch a real MCP stdio child with explicit per-process environment controls.
+/// Launch a real MCP stdio child and close stdin only after every request has a response.
 fn run_mcp_stdio_with_env(
     executable: &std::path::Path,
     cwd: &std::path::Path,
@@ -26275,6 +28924,13 @@ fn run_mcp_stdio_with_env(
     messages: &[impl AsRef<str>],
     environment: &[(&str, Option<&str>)],
 ) -> Result<String, Box<dyn Error>> {
+    let mut expected_responses = BTreeSet::new();
+    for message in messages {
+        let request: Value = serde_json::from_str(message.as_ref())?;
+        if let Some(id) = request.get("id") {
+            expected_responses.insert(id.to_string());
+        }
+    }
     let input = format!(
         "{}\n",
         messages
@@ -26298,14 +28954,10 @@ fn run_mcp_stdio_with_env(
         }
     }
     let mut child = command.spawn()?;
-
     let mut stdin = child
         .stdin
         .take()
         .ok_or_else(|| io::Error::other("mcp stdin was not piped"))?;
-    stdin.write_all(input.as_bytes())?;
-    drop(stdin);
-
     let mut stdout_pipe = child
         .stdout
         .take()
@@ -26314,9 +28966,18 @@ fn run_mcp_stdio_with_env(
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("mcp stderr was not piped"))?;
+    let (response_sender, response_receiver) = mpsc::channel();
     let stdout_reader = thread::spawn(move || -> io::Result<Vec<u8>> {
+        let mut reader = BufReader::new(&mut stdout_pipe);
         let mut output = Vec::new();
-        stdout_pipe.read_to_end(&mut output)?;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line)? == 0 {
+                break;
+            }
+            output.extend_from_slice(line.as_bytes());
+            drop(response_sender.send(line));
+        }
         Ok(output)
     });
     let stderr_reader = thread::spawn(move || -> io::Result<Vec<u8>> {
@@ -26324,6 +28985,52 @@ fn run_mcp_stdio_with_env(
         stderr_pipe.read_to_end(&mut output)?;
         Ok(output)
     });
+
+    let response_result = (|| -> Result<(), Box<dyn Error>> {
+        stdin.write_all(input.as_bytes())?;
+        stdin.flush()?;
+        let mut response_deadline = Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .ok_or_else(|| io::Error::other("MCP response deadline overflowed"))?;
+        while !expected_responses.is_empty() {
+            let remaining = response_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "projectatlas mcp did not answer request ids before shutdown: {expected_responses:?}"
+                    ),
+                )
+                .into());
+            }
+            let line = response_receiver
+                .recv_timeout(remaining)
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Timeout => io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "projectatlas mcp response deadline elapsed with request ids pending: {expected_responses:?}"
+                        ),
+                    ),
+                    mpsc::RecvTimeoutError::Disconnected => io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "projectatlas mcp closed before answering every request",
+                    ),
+                })?;
+            let response: Value = serde_json::from_str(line.trim())?;
+            if response
+                .get("id")
+                .is_some_and(|id| expected_responses.remove(&id.to_string()))
+            {
+                response_deadline = Instant::now()
+                    .checked_add(Duration::from_secs(10))
+                    .ok_or_else(|| io::Error::other("MCP response deadline overflowed"))?;
+            }
+        }
+        Ok(())
+    })();
+    drop(stdin);
+    drop(response_receiver);
 
     let started = Instant::now();
     let status = loop {
@@ -26353,6 +29060,7 @@ fn run_mcp_stdio_with_env(
     let stderr = stderr_reader
         .join()
         .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
+    response_result?;
     if !status.success() {
         return Err(io::Error::other(format!(
             "projectatlas mcp failed: {}",
@@ -26394,8 +29102,8 @@ fn mcp_response(stdout: &str, id: i64) -> Result<Value, Box<dyn Error>> {
     Err(io::Error::other(format!("MCP response {id} is missing")).into())
 }
 
-/// Prove that every frozen v0.3.26 tool and request-schema contract remains intact.
-fn assert_legacy_mcp_surface_compatible(stdout: &str) -> Result<(), Box<dyn Error>> {
+/// Prove that every frozen v0.3.26 and v0.4.0 MCP contract remains intact.
+fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Error>> {
     let baseline: Value = serde_json::from_str(include_str!("fixtures/mcp-v0.3.26-tools.json"))?;
     let baseline_tools = baseline
         .get("tools")
@@ -26441,6 +29149,44 @@ fn assert_legacy_mcp_surface_compatible(stdout: &str) -> Result<(), Box<dyn Erro
             current_tool
                 .get("inputSchema")
                 .ok_or_else(|| io::Error::other(format!("current schema missing for {name}")))?,
+        )?;
+    }
+    let v040: Value = serde_json::from_str(include_str!("fixtures/mcp-v0.4.0-schema-delta.json"))?;
+    for (field, expected) in [
+        ("base", "v0.3.26"),
+        ("release", "v0.4.0"),
+        (
+            "windows_release_sha256",
+            "09423b83011ab14fc2254f7ee29edae4c1fc797df167d345aefa1ef9d8bfbcda",
+        ),
+    ] {
+        require_json_string(&v040, &[field], expected)?;
+    }
+    if v040.get("normalization")
+        != Some(&json!([
+            "atlas_purpose_review.inputSchema.properties.items.items",
+            "atlas_root_set.inputSchema.properties.transition",
+            "atlas_search.inputSchema.properties.retrieval_mode"
+        ]))
+    {
+        return Err(io::Error::other(
+            "frozen v0.4.0 MCP delta does not declare its exact representation-only normalizations",
+        )
+        .into());
+    }
+    let v040_tools = v040
+        .get("tools")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("frozen v0.4.0 MCP delta has no tools object"))?;
+    for (name, baseline_schema) in v040_tools {
+        let current_schema = current_by_name
+            .get(name.as_str())
+            .and_then(|tool| tool.get("inputSchema"))
+            .ok_or_else(|| io::Error::other(format!("current MCP tool {name} is missing")))?;
+        assert_json_contract_subset(
+            &format!("{name}.inputSchema"),
+            baseline_schema,
+            current_schema,
         )?;
     }
     for name in [
@@ -28506,8 +31252,8 @@ fn run_projectatlas_plugin_installer(
     run_projectatlas_plugin_installer_with_optional_path(workspace_root, repo, runtime, None)
 }
 
-/// Run the bundled plugin installer with a PATH shadow and isolated user-local dirs.
-fn run_projectatlas_plugin_installer_with_path_shadow_and_home(
+/// Run the bundled plugin installer against the isolated Codex fixture.
+fn run_plugin_installer_with_codex_fixture(
     workspace_root: &Path,
     repo: &Path,
     runtime: &Path,
@@ -28547,6 +31293,24 @@ fn run_projectatlas_plugin_installer_with_optional_path_and_home(
     path_shadow: Option<&Path>,
     home: Option<&Path>,
 ) -> Result<std::process::Output, Box<dyn Error>> {
+    let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+        workspace_root,
+        repo,
+        runtime,
+        path_shadow,
+        home,
+    )?;
+    require_successful_plugin_installer_output(command.output()?)
+}
+
+/// Build the bundled plugin installer command for tests that need process coordination.
+fn projectatlas_plugin_installer_command_with_optional_path_and_home(
+    workspace_root: &Path,
+    repo: &Path,
+    runtime: &Path,
+    path_shadow: Option<&Path>,
+    home: Option<&Path>,
+) -> Result<StdCommand, Box<dyn Error>> {
     let mut command = if cfg!(windows) {
         let mut command = StdCommand::new("powershell");
         command
@@ -28601,11 +31365,21 @@ fn run_projectatlas_plugin_installer_with_optional_path_and_home(
     if let Some(home) = home {
         let app_data = home.join("AppData").join("Roaming");
         let local_app_data = home.join("AppData").join("Local");
+        let codex_dir = home.join(CODEX_CONFIG_DIR);
+        let fake_plugin_source = fake_codex_projectatlas_plugin_source(&codex_dir);
+        let current_plugin_cache =
+            fake_codex_projectatlas_installed_cache(&codex_dir, env!("CARGO_PKG_VERSION"));
+        let fake_installed_plugin_cache = if current_plugin_cache.exists() {
+            current_plugin_cache
+        } else {
+            fake_codex_projectatlas_installed_cache(&codex_dir, "0.0.1")
+        };
         fs::create_dir_all(&app_data)?;
         fs::create_dir_all(&local_app_data)?;
         command
             .env("HOME", home)
             .env("USERPROFILE", home)
+            .env("CODEX_HOME", &codex_dir)
             .env("APPDATA", app_data)
             .env("LOCALAPPDATA", local_app_data)
             .env(
@@ -28613,23 +31387,71 @@ fn run_projectatlas_plugin_installer_with_optional_path_and_home(
                 home.join(FAKE_CODEX_LOG_FILE),
             )
             .env(
-                FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_ENV,
-                home.join(FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_FILE),
+                "PROJECTATLAS_FAKE_CODEX_CONFIG",
+                codex_dir.join("config.toml"),
+            )
+            .env("PROJECTATLAS_FAKE_PLUGIN_ROOT", &fake_plugin_source)
+            .env(
+                "PROJECTATLAS_FAKE_MARKETPLACE_ROOT",
+                fake_codex_projectatlas_marketplace_root(&codex_dir),
+            )
+            .env(
+                "PROJECTATLAS_FAKE_MARKETPLACE_MANIFEST",
+                fake_codex_projectatlas_marketplace_root(&codex_dir)
+                    .join(CODEX_MARKETPLACE_METADATA_DIR)
+                    .join("plugins")
+                    .join(CODEX_MARKETPLACE_MANIFEST_FILE_NAME),
+            )
+            .env(
+                "PROJECTATLAS_FAKE_MARKETPLACE_INSTALL_RECORD",
+                fake_codex_projectatlas_marketplace_root(&codex_dir)
+                    .join(CODEX_MARKETPLACE_INSTALL_RECORD_FILE_NAME),
+            )
+            .env(
+                "PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT",
+                &fake_installed_plugin_cache,
             )
             .env(
                 "PROJECTATLAS_FAKE_PLUGIN_MANIFEST",
-                home.join(FAKE_CODEX_PLUGIN_CACHE_DIR)
-                    .join("projectatlas")
+                fake_plugin_source
                     .join(CODEX_PLUGIN_MANIFEST_DIR)
                     .join("plugin.json"),
             )
             .env(
                 "PROJECTATLAS_FAKE_PLUGIN_SKILL",
-                home.join(FAKE_CODEX_PLUGIN_CACHE_DIR)
-                    .join("projectatlas")
+                fake_plugin_source
                     .join(PROJECTATLAS_SKILL_DIR)
                     .join(PROJECTATLAS_SKILL_NAME)
                     .join(SKILL_FILE_NAME),
+            )
+            .env(
+                "PROJECTATLAS_FAKE_PLUGIN_RUNTIME_INTEGRATION",
+                fake_plugin_source.join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME),
+            )
+            .env(
+                "PROJECTATLAS_FAKE_INSTALLED_PLUGIN_MANIFEST",
+                fake_installed_plugin_cache
+                    .join(CODEX_PLUGIN_MANIFEST_DIR)
+                    .join("plugin.json"),
+            )
+            .env(
+                "PROJECTATLAS_FAKE_INSTALLED_PLUGIN_SKILL",
+                fake_installed_plugin_cache
+                    .join(PROJECTATLAS_SKILL_DIR)
+                    .join(PROJECTATLAS_SKILL_NAME)
+                    .join(SKILL_FILE_NAME),
+            )
+            .env(
+                "PROJECTATLAS_FAKE_INSTALLED_PLUGIN_RUNTIME_INTEGRATION",
+                fake_installed_plugin_cache.join(CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME),
+            )
+            .env(
+                "PROJECTATLAS_FAKE_JUNCTION_TARGET",
+                home.join(FAKE_CODEX_JUNCTION_TARGET_DIR),
+            )
+            .env(
+                "PROJECTATLAS_FAKE_CLEANUP_SNAPSHOT_TARGET",
+                home.join(FAKE_CODEX_CLEANUP_SNAPSHOT_TARGET_DIR),
             )
             .env(
                 "PROJECTATLAS_PACKAGED_SKILL",
@@ -28657,7 +31479,38 @@ fn run_projectatlas_plugin_installer_with_optional_path_and_home(
             }
         }
     }
-    let output = command.output()?;
+    Ok(command)
+}
+
+/// Collect one coordinated installer process under an explicit deadline.
+fn wait_for_plugin_installer_output(
+    mut child: Child,
+    label: &str,
+    timeout: Duration,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(child.wait_with_output()?);
+        }
+        if Instant::now() >= deadline {
+            drop(child.kill());
+            let output = child.wait_with_output()?;
+            return Err(io::Error::other(format!(
+                "{label} plugin installer exceeded {timeout:?}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Require a plugin installer process to exit successfully and preserve its output.
+fn require_successful_plugin_installer_output(
+    output: std::process::Output,
+) -> Result<std::process::Output, Box<dyn Error>> {
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "plugin installer failed\nstdout:\n{}\nstderr:\n{}",

@@ -44,6 +44,10 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
           rustup default "$RUSTUP_TOOLCHAIN"
 
+      - name: Repository source policy lints
+        timeout-minutes: 2
+        run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+
       - name: Install cargo-deny
         uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
         with:
@@ -57,10 +61,6 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-
-      - name: Rust source contract lints
-        timeout-minutes: 2
-        run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 
       - name: Dependency policy
         run: cargo deny --locked --all-features check -D warnings
@@ -167,6 +167,7 @@ jobs:
             echo "Compiled packaged contract runner was not found" >&2
             exit 1
           fi
+          "$contract" posix_plugin_lock_rejects_indirection_and_survives_crash --exact --include-ignored --nocapture
           mkdir -p contract-artifacts
           cp "$contract" contract-artifacts/projectatlas-packaged-contract
 
@@ -368,7 +369,8 @@ jobs:
           fi
           for test in \
             mcp_advertised_tools_own_their_real_sqlite_effects \
-            packaged_cli_surface_preserves_v0326_routes_and_defaults \
+            mcp_tools_list_preserves_frozen_contracts_without_index_state \
+            packaged_cli_surface_preserves_frozen_routes_and_defaults \
             packaged_cli_commands_own_their_real_sqlite_effects
           do
             matches="$(printf '%s\n' "$inventory" | awk -v expected="${test}: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
@@ -397,9 +399,17 @@ jobs:
           for test in \
             installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui \
             persistent_mcp_stdin_does_not_block_repository_startup_probes \
+            installed_candidate_without_git_keeps_navigation_and_typed_vcs_unavailability \
             compiler_config_utf8_bom_refreshes_through_cli_and_mcp \
             supported_predecessor_recovery_preserves_explicit_database_selection \
-            plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp
+            plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp \
+            posix_plugin_update_preserves_prior_integration_when_all_replacement_adds_fail \
+            posix_plugin_update_refuses_unavailable_or_ambiguous_inventory \
+            posix_plugin_inventory_without_jq_rejects_split_object_fields \
+            posix_plugin_update_serializes_restore_before_the_next_installer_reads_state \
+            posix_plugin_update_refuses_retained_recovery_state_before_mutation \
+            posix_plugin_restore_rejects_hostile_paths_and_retains_recovery_state \
+            posix_plugin_lock_rejects_indirection_and_survives_crash
           do
             matches="$(printf '%s\n' "$inventory" | awk -v expected="${test}: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
             if [ "$matches" -ne 1 ]; then
@@ -505,7 +515,8 @@ jobs:
           }
           foreach ($test in @(
             "mcp_advertised_tools_own_their_real_sqlite_effects",
-            "packaged_cli_surface_preserves_v0326_routes_and_defaults",
+            "mcp_tools_list_preserves_frozen_contracts_without_index_state",
+            "packaged_cli_surface_preserves_frozen_routes_and_defaults",
             "packaged_cli_commands_own_their_real_sqlite_effects"
           )) {
             $matches = @($inventory | Where-Object { $_ -ceq "${test}: test" }).Count
@@ -534,9 +545,20 @@ jobs:
           foreach ($test in @(
             "installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui",
             "persistent_mcp_stdin_does_not_block_repository_startup_probes",
+            "installed_candidate_without_git_keeps_navigation_and_typed_vcs_unavailability",
             "compiler_config_utf8_bom_refreshes_through_cli_and_mcp",
             "supported_predecessor_recovery_preserves_explicit_database_selection",
-            "plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp"
+            "plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp",
+            "windows_plugin_update_preserves_prior_integration_when_all_replacement_adds_fail",
+            "windows_plugin_update_refuses_unavailable_or_ambiguous_inventory",
+            "windows_plugin_restore_rejects_cache_junction_and_retains_recovery_snapshot",
+            "windows_plugin_snapshot_rejects_reparse_above_codex_home_before_mutation",
+            "windows_plugin_snapshot_cleanup_refuses_path_swap_without_outside_deletion",
+            "windows_plugin_snapshot_cleanup_failure_retains_usable_direct_snapshot",
+            "windows_plugin_update_serializes_restore_before_the_next_installer_reads_state",
+            "windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized",
+            "windows_plugin_update_refuses_retained_recovery_state_before_mutation",
+            "windows_plugin_restore_rejects_config_directory_and_retains_recovery_snapshot"
           )) {
             $matches = @($inventory | Where-Object { $_ -ceq "${test}: test" }).Count
             if ($matches -ne 1) {

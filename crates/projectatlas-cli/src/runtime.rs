@@ -1982,11 +1982,15 @@ fn is_bare_git_control_root(root: &Path) -> Result<bool, CliError> {
 }
 
 /// Query Git's effective local `core.bare` value, including configured includes.
+///
+/// A missing Git executable leaves an ordinary checkout non-bare. Every failure
+/// after a child starts remains an error so timeouts, invalid output, and cleanup
+/// behavior retain their existing semantics.
 fn effective_git_config_bare_setting(
     control_root: &Path,
     config: &Path,
 ) -> Result<Option<bool>, CliError> {
-    let mut child = StdCommand::new("git")
+    let child = StdCommand::new("git")
         .arg("--git-dir")
         .arg(normalize_native_path_display(control_root))
         .args([
@@ -2000,11 +2004,17 @@ fn effective_git_config_bare_setting(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|source| CliError::Io {
-            path: config.to_path_buf(),
-            source,
-        })?;
+        .spawn();
+    let mut child = match child {
+        Ok(child) => child,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(CliError::Io {
+                path: config.to_path_buf(),
+                source,
+            });
+        }
+    };
     let deadline = Instant::now() + GIT_CONFIG_QUERY_TIMEOUT;
     loop {
         match child.try_wait().map_err(|source| CliError::Io {

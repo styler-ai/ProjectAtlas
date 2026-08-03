@@ -1,4 +1,5 @@
 # Local agent/workspace state
+/AGENTS.md
 .codex/
 .playwright-cli/
 /.worktrees/

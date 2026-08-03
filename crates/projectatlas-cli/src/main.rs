@@ -20,8 +20,7 @@ use projectatlas_cli::optional_parser_lifecycle::{
     OptionalParserPackLifecycle, OptionalParserPackLifecycleError,
 };
 use projectatlas_core::graph::{
-    ConfidenceClass, GraphEntityKey, GraphLimits, GraphRelationKind, LogicalRelation,
-    RepositoryFilePath,
+    ConfidenceClass, GraphLimits, GraphRelationKind, LogicalRelation, RepositoryFilePath,
 };
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
@@ -40,7 +39,7 @@ use projectatlas_core::{
 use projectatlas_db::{
     AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, ProjectRootTransition,
     ProjectRootTransitionResult, RepositoryCoverageQuery, RepositoryGraphDirection,
-    RepositoryGraphRelationQuery, verify_project_database,
+    verify_project_database,
 };
 use projectatlas_service::{
     COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CodeSliceBudget, CodeSliceDraft, CoverageDiscoveryReport,
@@ -81,19 +80,33 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::fd::AsFd;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 use thiserror::Error;
-#[cfg(test)]
-use token_tui::render_token_dashboard;
 use token_tui::{
     TokenAtlasPreview, TokenDashboardTheme, render_token_dashboard_with_atlas,
     render_token_trend_dashboard_with_theme, token_atlas_network_relation,
     token_dashboard_wants_atlas,
 };
+#[cfg(test)]
+use token_tui::{render_token_dashboard, render_token_dashboard_with_atlas_at_width};
 
 /// Default relative path for the `SQLite` index.
 const DEFAULT_DB_PATH: &str = ".projectatlas/projectatlas.db";
+/// Whole-operation deadline for the optional live token-dashboard graph read.
+const TOKEN_ATLAS_READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// Maximum time the installer waits for another updater.
+#[cfg(unix)]
+const INSTALLER_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+/// Poll cadence for the standard-library nonblocking file lock.
+#[cfg(unix)]
+const INSTALLER_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// `ProjectAtlas` major architecture version.
 const PROJECTATLAS_MAJOR_VERSION: u8 = 3;
 /// Default caller-visible compatibility label for token telemetry.
@@ -1307,6 +1320,15 @@ enum Command {
     },
     /// Print structured runtime identity and capability information.
     RuntimeInfo,
+    /// Acquire the POSIX installer's update-lock descriptor inherited through stdin.
+    #[cfg(unix)]
+    #[command(hide = true)]
+    AcquireInstallerLock {
+        /// Device identity captured from the trusted lock path before it was opened.
+        expected_device: u64,
+        /// Inode identity captured from the trusted lock path before it was opened.
+        expected_inode: u64,
+    },
     /// Manage purpose metadata stored in the durable index.
     Purpose {
         /// Purpose subcommand to run.
@@ -2788,6 +2810,28 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         Command::RuntimeInfo => {
             let report = build_runtime_info();
             print_output(cli.format, &render_runtime_info(&report), &report)?;
+        }
+        #[cfg(unix)]
+        Command::AcquireInstallerLock {
+            expected_device,
+            expected_inode,
+        } => {
+            io::stdin()
+                .as_fd()
+                .try_clone_to_owned()
+                .map(fs::File::from)
+                .and_then(|lock_file| {
+                    acquire_installer_lock(
+                        &lock_file,
+                        *expected_device,
+                        *expected_inode,
+                        INSTALLER_LOCK_TIMEOUT,
+                    )
+                })
+                .map_err(|source| CliError::Io {
+                    path: PathBuf::from("inherited installer lock standard input"),
+                    source,
+                })?;
         }
         Command::Purpose { command } => match command {
             PurposeCommand::Set { path, purpose } => {
@@ -4574,76 +4618,56 @@ fn build_token_calibration(
 
 /// Load the tiny optional atlas preview through existing indexed relation-family reads.
 fn load_token_atlas_preview(store: &AtlasStore) -> TokenAtlasPreview {
-    let Some((relations, truncated)) = load_token_atlas_relations(store) else {
+    let control = IndexWorkControl::new(
+        projectatlas_core::IndexCancellation::new(),
+        Some(TOKEN_ATLAS_READ_TIMEOUT),
+    );
+    let Some((relations, truncated)) = load_token_atlas_relations(store, &control) else {
         return TokenAtlasPreview::unavailable();
     };
     TokenAtlasPreview::from_relations(&relations, truncated)
 }
 
 /// Load the bounded resolved-relation input owned by the optional atlas preview.
-fn load_token_atlas_relations(store: &AtlasStore) -> Option<(Vec<LogicalRelation>, bool)> {
-    const RELATIONS_PER_FAMILY: u32 = 128;
+fn load_token_atlas_relations(
+    store: &AtlasStore,
+    control: &IndexWorkControl,
+) -> Option<(Vec<LogicalRelation>, bool)> {
     const ADJACENCY_ROWS_PER_ROUND: usize = 512;
     const ADJACENCY_ROUNDS: usize = 2;
     const ADJACENCY_FRONTIER_MAX: usize = 128;
     const SEEDS_PER_RELATION_FAMILY: usize = 4;
+    const FIRST_ROUND_ROWS_PER_SEED: usize = 16;
 
     let network_relation_kinds = GraphRelationKind::ALL
         .into_iter()
         .filter(|relation| token_atlas_network_relation(*relation))
         .collect::<Vec<_>>();
-    let mut relations = Vec::with_capacity(
-        network_relation_kinds.len() * usize::try_from(RELATIONS_PER_FAMILY).unwrap_or_default(),
-    );
+    let mut relations = Vec::new();
     let mut adjacency_relation_kinds = Vec::new();
+    let mut seeds = Vec::new();
+    let mut seen = BTreeSet::new();
     let mut truncated = false;
     for &relation in &network_relation_kinds {
-        let Ok(page) = store.repository_graph_relations(
-            RepositoryGraphRelationQuery::Family { relation },
-            RELATIONS_PER_FAMILY,
+        let Ok(page) = store.repository_graph_resolved_relation_hubs(
+            relation,
+            u32::try_from(SEEDS_PER_RELATION_FAMILY).unwrap_or(1),
+            Some(control),
         ) else {
             return None;
         };
-        if page.truncated {
+        if !page.rows.is_empty() {
             adjacency_relation_kinds.push(relation);
         }
         truncated |= page.truncated;
-        relations.extend(page.rows);
-    }
-    let mut degrees_by_kind = BTreeMap::<String, BTreeMap<String, (GraphEntityKey, usize)>>::new();
-    for relation in &relations {
-        let Some(target) = relation.resolution().resolved_target() else {
-            continue;
-        };
-        let degrees = degrees_by_kind
-            .entry(relation.kind().as_str().to_string())
-            .or_default();
-        for endpoint in [relation.source(), target] {
-            let entry = degrees
-                .entry(endpoint.digest().to_string())
-                .or_insert_with(|| (endpoint.clone(), 0));
-            entry.1 += 1;
+        for seed in page.rows {
+            if seen.insert(seed.key().digest().to_string()) {
+                seeds.push(seed.key().clone());
+            }
         }
     }
-    let mut seeds = BTreeMap::new();
-    for degrees in degrees_by_kind.into_values() {
-        let mut ranked = degrees.into_values().collect::<Vec<_>>();
-        ranked.sort_by(|left, right| {
-            right
-                .1
-                .cmp(&left.1)
-                .then_with(|| left.0.digest().cmp(right.0.digest()))
-        });
-        for (seed, _) in ranked.into_iter().take(SEEDS_PER_RELATION_FAMILY) {
-            seeds.insert(seed.digest().to_string(), seed);
-        }
-    }
-    let mut frontier = seeds.into_values().collect::<Vec<_>>();
-    let mut seen = frontier
-        .iter()
-        .map(|seed| seed.digest().to_string())
-        .collect::<BTreeSet<_>>();
-    for _ in 0..ADJACENCY_ROUNDS {
+    let mut frontier = seeds;
+    for round in 0..ADJACENCY_ROUNDS {
         if frontier.is_empty() {
             break;
         }
@@ -4652,10 +4676,7 @@ fn load_token_atlas_relations(store: &AtlasStore) -> Option<(Vec<LogicalRelation
             RepositoryGraphDirection::Outbound,
             RepositoryGraphDirection::Inbound,
         ] {
-            let page_limit = ((GraphLimits::MAX_ROWS as usize + 1) / frontier.len())
-                .saturating_sub(1)
-                .clamp(1, ADJACENCY_ROWS_PER_ROUND);
-            let mut remaining_rows = page_limit;
+            let mut remaining_rows = ADJACENCY_ROWS_PER_ROUND;
             for (index, &relation_kind) in adjacency_relation_kinds.iter().enumerate() {
                 if remaining_rows == 0 {
                     truncated = true;
@@ -4663,28 +4684,43 @@ fn load_token_atlas_relations(store: &AtlasStore) -> Option<(Vec<LogicalRelation
                 }
                 let remaining_families = adjacency_relation_kinds.len() - index;
                 let family_limit = remaining_rows.div_ceil(remaining_families);
-                let Ok(page) = store.repository_graph_adjacency_page_filtered(
-                    &frontier,
-                    direction,
-                    Some(relation_kind),
-                    None,
-                    u32::try_from(family_limit).unwrap_or(1),
-                    None,
-                ) else {
-                    return None;
-                };
-                truncated |= page.truncated;
-                remaining_rows = remaining_rows.saturating_sub(page.rows.len());
-                for row in page.rows {
-                    let relation = row.detail.relation;
-                    if let Some(target) = relation.resolution().resolved_target() {
-                        for endpoint in [relation.source(), target] {
-                            if seen.insert(endpoint.digest().to_string()) {
-                                next.insert(endpoint.digest().to_string(), endpoint.clone());
+                let frontier_batches: Vec<_> = frontier.iter().map(std::slice::from_ref).collect();
+                let mut family_rows = family_limit;
+                let mut remaining_batches = frontier_batches.len();
+                for batch in frontier_batches {
+                    if family_rows == 0 {
+                        truncated = true;
+                        break;
+                    }
+                    let mut batch_limit = family_rows.div_ceil(remaining_batches);
+                    if round == 0 {
+                        batch_limit = batch_limit.min(FIRST_ROUND_ROWS_PER_SEED);
+                    }
+                    let Ok(page) = store.repository_graph_resolved_adjacency_page(
+                        batch,
+                        direction,
+                        relation_kind,
+                        None,
+                        u32::try_from(batch_limit).unwrap_or(1),
+                        Some(control),
+                    ) else {
+                        return None;
+                    };
+                    remaining_batches -= 1;
+                    truncated |= page.truncated;
+                    family_rows = family_rows.saturating_sub(page.rows.len());
+                    remaining_rows = remaining_rows.saturating_sub(page.rows.len());
+                    for row in page.rows {
+                        let relation = row.detail.relation;
+                        if let Some(target) = relation.resolution().resolved_target() {
+                            for endpoint in [relation.source(), target] {
+                                if seen.insert(endpoint.digest().to_string()) {
+                                    next.insert(endpoint.digest().to_string(), endpoint.clone());
+                                }
                             }
                         }
+                        relations.push(relation);
                     }
-                    relations.push(relation);
                 }
             }
         }
@@ -4867,7 +4903,52 @@ fn cli_command_name(command: &Command) -> &'static str {
         Command::Mcp { .. } => "mcp",
         Command::McpConfig { .. } => "mcp-config",
         Command::RuntimeInfo => "runtime-info",
+        #[cfg(unix)]
+        Command::AcquireInstallerLock { .. } => "acquire-installer-lock",
         Command::Purpose { .. } => "purpose",
+    }
+}
+
+/// Acquire one inherited installer file lock without reopening its authority path.
+#[cfg(unix)]
+fn acquire_installer_lock(
+    file: &fs::File,
+    expected_device: u64,
+    expected_inode: u64,
+    timeout: Duration,
+) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "inherited installer lock descriptor is not a regular file",
+        ));
+    }
+    if metadata.dev() != expected_device || metadata.ino() != expected_inode {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "inherited installer lock descriptor identity changed",
+        ));
+    }
+    let started = Instant::now();
+    let deadline = started.checked_add(timeout).unwrap_or(started);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(fs::TryLockError::WouldBlock) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "another installer owns the update lock",
+                    ));
+                }
+                std::thread::sleep(
+                    INSTALLER_LOCK_POLL_INTERVAL.min(deadline.saturating_duration_since(now)),
+                );
+            }
+            Err(fs::TryLockError::Error(source)) => return Err(source),
+        }
     }
 }
 
@@ -4906,7 +4987,8 @@ mod tests {
         Cli, CliError, Command, GraphRelationKind, OutputFormat,
         SCHEMA_MIGRATION_REQUIRED_RECOVERY, SCHEMA_VERSION_MISMATCH_RECOVERY, SearchRetrievalMode,
         SearchRetrievalModeArg, ServiceError, build_runtime_info, controlled_named_output,
-        load_token_atlas_relations, render_cli_error, render_token_dashboard,
+        load_token_atlas_preview, load_token_atlas_relations, render_cli_error,
+        render_token_dashboard, render_token_dashboard_with_atlas_at_width,
         schema_migration_required_payload, schema_version_mismatch_payload, serialized_output,
         token_atlas_network_relation, truthy_env,
     };
@@ -4915,8 +4997,8 @@ mod tests {
     use clap::Parser as _;
     use notify::EventKind;
     use projectatlas_core::graph::{
-        Completeness, ConfidenceClass, EntitySelector, GraphEntity, LogicalRelation,
-        RelationResolution, RepositoryFilePath,
+        Completeness, ConfidenceClass, EntitySelector, GraphEntity, GraphIdentityText,
+        LogicalRelation, RelationResolution, RepositoryFilePath,
     };
     use projectatlas_core::symbols::{
         CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
@@ -4926,7 +5008,7 @@ mod tests {
         IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
         Node, NodeKind, normalize_native_path_display,
     };
-    use projectatlas_db::{AtlasStore, DbError, RepositoryGraphDirection};
+    use projectatlas_db::{AtlasStore, DbError, RepositoryGraphRelationQuery};
     use projectatlas_fs::ScanOptions;
     use rmcp::model::{CallToolRequestParams, ClientInfo};
     use rmcp::{ClientHandler, ServiceExt};
@@ -4935,6 +5017,8 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use std::io;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
 
     /// Minimal MCP client handler for in-process routing tests.
@@ -5498,6 +5582,88 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn installer_lock_uses_the_inherited_open_file_description() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("installer.lock");
+        let parent = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let metadata = parent.metadata()?;
+        require_condition(
+            super::acquire_installer_lock(
+                &parent.try_clone()?,
+                metadata.dev(),
+                metadata.ino() ^ 1,
+                std::time::Duration::ZERO,
+            )
+            .is_err(),
+            "installer lock accepted a descriptor with the wrong captured identity",
+        )?;
+        super::acquire_installer_lock(
+            &parent.try_clone()?,
+            metadata.dev(),
+            metadata.ino(),
+            std::time::Duration::ZERO,
+        )?;
+
+        let contender = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        require_condition(
+            matches!(contender.try_lock(), Err(fs::TryLockError::WouldBlock)),
+            "closing the helper copy released the parent installer's inherited lock",
+        )?;
+        drop(parent);
+        contender.try_lock()?;
+
+        let blocked = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        let blocked_result = super::acquire_installer_lock(
+            &blocked,
+            metadata.dev(),
+            metadata.ino(),
+            std::time::Duration::ZERO,
+        );
+        require_condition(
+            blocked_result.is_err_and(|source| source.kind() == io::ErrorKind::TimedOut),
+            "installer lock did not preserve its bounded contention timeout",
+        )?;
+
+        let directory = fs::File::open(temp.path())?;
+        let directory_metadata = directory.metadata()?;
+        require_condition(
+            super::acquire_installer_lock(
+                &directory,
+                directory_metadata.dev(),
+                directory_metadata.ino(),
+                std::time::Duration::ZERO,
+            )
+            .is_err(),
+            "installer lock accepted a directory",
+        )?;
+
+        let detached_path = temp.path().join("detached-installer.lock");
+        let detached = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&detached_path)?;
+        fs::remove_file(&detached_path)?;
+        let detached_metadata = detached.metadata()?;
+        require_condition(
+            detached_metadata.nlink() == 0,
+            "installer lock pathless-descriptor fixture remained linked",
+        )?;
+        super::acquire_installer_lock(
+            &detached,
+            detached_metadata.dev(),
+            detached_metadata.ino(),
+            std::time::Duration::ZERO,
+        )?;
+        Ok(())
+    }
+
     #[cfg(feature = "optional-parser-supervisor")]
     #[test]
     fn parser_pack_cli_exposes_every_explicit_lifecycle_operation() -> Result<(), Box<dyn Error>> {
@@ -5846,10 +6012,14 @@ mod tests {
     }
 
     #[test]
-    fn token_atlas_loader_filters_containment_before_paging() -> Result<(), Box<dyn Error>> {
-        const FAMILY_PAGE_ROWS: usize = 128;
-        const ADJACENCY_PAGE_ROWS: u32 = 512;
-
+    fn token_atlas_loader_ranks_resolved_hubs_before_bounded_rendering()
+    -> Result<(), Box<dyn Error>> {
+        const UNRESOLVED_PREFIX_ROWS: usize = 129;
+        const BRANCHES: usize = 15;
+        const LEAVES_PER_BRANCH: usize = 3;
+        const DENSE_HUBS: usize = 4;
+        const DENSE_LEAVES_PER_HUB: usize = 200;
+        const ADVERSARY_LEAVES: usize = 128;
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("token-atlas-loader");
         fs::create_dir_all(root.join("src"))?;
@@ -5889,45 +6059,144 @@ mod tests {
             Ok(graph_entity)
         };
         let source = add_file_entity("src/source.rs".to_string())?;
-        let mut imports = Vec::with_capacity(FAMILY_PAGE_ROWS + 1);
-        for index in 0..=FAMILY_PAGE_ROWS {
+        let mut resolved_calls = Vec::new();
+        let mut dense_hubs = Vec::new();
+        for hub_index in 0..DENSE_HUBS {
+            let hub = add_file_entity(format!("src/dense-{hub_index}-hub.rs"))?;
+            for leaf in 0..DENSE_LEAVES_PER_HUB {
+                let leaf = add_file_entity(format!("src/dense-{hub_index}-leaf-{leaf:03}.rs"))?;
+                resolved_calls.push(LogicalRelation::new(
+                    &hub,
+                    GraphRelationKind::Legacy(RelationKind::Calls),
+                    RelationResolution::resolved(&leaf)?,
+                    ConfidenceClass::Exact,
+                    Completeness::Complete,
+                    generation,
+                )?);
+            }
+            dense_hubs.push(hub);
+        }
+        resolved_calls.push(LogicalRelation::new(
+            &source,
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            RelationResolution::resolved(&dense_hubs[0])?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )?);
+        let mut branch_roots = Vec::with_capacity(BRANCHES);
+        for branch in 0..BRANCHES {
+            let branch_root = add_file_entity(format!("src/branch-{branch:02}-root.rs"))?;
+            resolved_calls.push(LogicalRelation::new(
+                &source,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::resolved(&branch_root)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?);
+            branch_roots.push(branch_root.clone());
+            let mut leaves = Vec::new();
+            for leaf in 0..LEAVES_PER_BRANCH {
+                let entity = add_file_entity(format!("src/branch-{branch:02}-leaf-{leaf}.rs"))?;
+                resolved_calls.push(LogicalRelation::new(
+                    &branch_root,
+                    GraphRelationKind::Legacy(RelationKind::Calls),
+                    RelationResolution::resolved(&entity)?,
+                    ConfidenceClass::Exact,
+                    Completeness::Complete,
+                    generation,
+                )?);
+                leaves.push(entity);
+            }
+            for (left, right) in [(0, 1), (1, 2), (2, 0), (1, 0), (2, 1), (0, 2)] {
+                resolved_calls.push(LogicalRelation::new(
+                    &leaves[left],
+                    GraphRelationKind::Legacy(RelationKind::Calls),
+                    RelationResolution::resolved(&leaves[right])?,
+                    ConfidenceClass::Exact,
+                    Completeness::Complete,
+                    generation,
+                )?);
+            }
+        }
+        branch_roots.sort_by_key(|branch| branch.key().digest().to_string());
+        let adversary_branch = &branch_roots[0];
+        let later_branch = &branch_roots[1];
+        let later_branch_edge = resolved_calls
+            .iter()
+            .filter(|relation| relation.source() == later_branch.key())
+            .min_by_key(|relation| relation.key().digest().to_string())
+            .cloned()
+            .ok_or("later branch edge fixture is missing")?;
+        for leaf in 0..ADVERSARY_LEAVES {
+            let entity = add_file_entity(format!("src/adversary-leaf-{leaf:03}.rs"))?;
+            resolved_calls.push(LogicalRelation::new(
+                adversary_branch,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::resolved(&entity)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?);
+        }
+        let mut resolved_import = None;
+        for index in 0..1_000 {
             let target = add_file_entity(format!("src/import-target-{index:03}.rs"))?;
-            imports.push(LogicalRelation::new(
+            let relation = LogicalRelation::new(
                 &source,
                 GraphRelationKind::Legacy(RelationKind::Imports),
                 RelationResolution::resolved(&target)?,
                 ConfidenceClass::Exact,
                 Completeness::Complete,
                 generation,
-            )?);
+            )?;
+            if relation.key().digest().starts_with('f') {
+                resolved_import = Some(relation);
+                break;
+            }
         }
-        imports.sort_by(|left, right| left.key().digest().cmp(right.key().digest()));
-        let hidden_import = imports
-            .last()
-            .cloned()
-            .ok_or("token atlas import fixture is empty")?;
-        let call_target = add_file_entity("src/call-target.rs".to_string())?;
-        let calls = LogicalRelation::new(
+        let resolved_import = resolved_import.ok_or(
+            "could not construct a deterministic resolved relation after the prefix boundary",
+        )?;
+        let mut unresolved_imports = Vec::with_capacity(UNRESOLVED_PREFIX_ROWS);
+        for index in 0..1_000 {
+            let relation = LogicalRelation::new(
+                &source,
+                GraphRelationKind::Legacy(RelationKind::Imports),
+                RelationResolution::Unresolved {
+                    reference: GraphIdentityText::new(format!("missing-import-{index:04}"))?,
+                },
+                ConfidenceClass::Low,
+                Completeness::Partial,
+                generation,
+            )?;
+            if relation.key().digest() < resolved_import.key().digest() {
+                unresolved_imports.push(relation);
+                if unresolved_imports.len() == UNRESOLVED_PREFIX_ROWS {
+                    break;
+                }
+            }
+        }
+        if unresolved_imports.len() != UNRESOLVED_PREFIX_ROWS {
+            return Err(io::Error::other(
+                "could not construct the deterministic unresolved relation-key prefix",
+            )
+            .into());
+        }
+        let contained = add_file_entity("src/contained.rs".to_string())?;
+        let containment = LogicalRelation::new(
             &source,
-            GraphRelationKind::Legacy(RelationKind::Calls),
-            RelationResolution::resolved(&call_target)?,
+            GraphRelationKind::Legacy(RelationKind::Contains),
+            RelationResolution::resolved(&contained)?,
             ConfidenceClass::Exact,
             Completeness::Complete,
             generation,
         )?;
-        let mut graph_relations = imports;
-        graph_relations.push(calls);
-        for index in 0..=ADJACENCY_PAGE_ROWS {
-            let target = add_file_entity(format!("src/contained-{index:03}.rs"))?;
-            graph_relations.push(LogicalRelation::new(
-                &source,
-                GraphRelationKind::Legacy(RelationKind::Contains),
-                RelationResolution::resolved(&target)?,
-                ConfidenceClass::Exact,
-                Completeness::Complete,
-                generation,
-            )?);
-        }
+        let mut graph_relations = unresolved_imports;
+        graph_relations.push(resolved_import.clone());
+        graph_relations.extend(resolved_calls);
+        graph_relations.push(containment);
         let mut publication = store.begin_index_publication("token-atlas-loader")?;
         publication.begin_scan_replacement()?;
         publication.upsert_scan_node_batch(&nodes)?;
@@ -5935,43 +6204,94 @@ mod tests {
         publication.replace_repository_graph(project, &entities, &graph_relations, &[], &[])?;
         publication.complete()?;
 
-        let raw = store.repository_graph_adjacency_page(
-            &[source.key().clone()],
-            RepositoryGraphDirection::Outbound,
-            None,
-            ADJACENCY_PAGE_ROWS,
-            None,
+        let raw = store.repository_graph_relations(
+            RepositoryGraphRelationQuery::Family {
+                relation: GraphRelationKind::Legacy(RelationKind::Imports),
+            },
+            128,
         )?;
         if !raw.truncated {
-            return Err(io::Error::other("raw adjacency fixture was not truncated").into());
-        }
-        if !raw.rows.iter().any(|row| {
-            row.detail.relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
-        }) {
-            return Err(io::Error::other("raw adjacency omitted containment fixture").into());
+            return Err(io::Error::other("raw relation-family fixture was not truncated").into());
         }
         if raw
             .rows
             .iter()
-            .any(|row| row.detail.relation.key() == hidden_import.key())
+            .any(|relation| relation.resolution().resolved_target().is_some())
         {
-            return Err(
-                io::Error::other("raw adjacency unexpectedly reached hidden import").into(),
-            );
+            return Err(io::Error::other(
+                "raw relation-key prefix unexpectedly reached a resolved relation",
+            )
+            .into());
         }
-        let (relations, _) = load_token_atlas_relations(&store)
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let (relations, truncated) = load_token_atlas_relations(&store, &control)
             .ok_or("token atlas relation loader unexpectedly failed")?;
-        if !relations
-            .iter()
-            .any(|relation| relation.key() == hidden_import.key())
-        {
-            return Err(io::Error::other("token atlas omitted paged network relation").into());
+        if !truncated {
+            return Err(io::Error::other("token atlas omitted bounded-source state").into());
+        }
+        if !relations.iter().all(|relation| {
+            relation.resolution().resolved_target().is_some()
+                && token_atlas_network_relation(relation.kind())
+        }) {
+            return Err(io::Error::other(
+                "token atlas retained unresolved or containment relations",
+            )
+            .into());
+        }
+        for hub in &dense_hubs {
+            if !relations
+                .iter()
+                .any(|relation| relation.source() == hub.key())
+            {
+                return Err(io::Error::other(
+                    "token atlas adjacency budget omitted a ranked dense hub",
+                )
+                .into());
+            }
         }
         if !relations
             .iter()
-            .all(|relation| token_atlas_network_relation(relation.kind()))
+            .any(|relation| relation.key() == later_branch_edge.key())
         {
-            return Err(io::Error::other("token atlas retained containment").into());
+            return Err(io::Error::other(
+                "token atlas adjacency budget omitted a later second-round branch",
+            )
+            .into());
+        }
+        if !relations
+            .iter()
+            .any(|relation| relation.key() == resolved_import.key())
+        {
+            return Err(io::Error::other(
+                "token atlas did not recover the resolved relation behind the unresolved prefix",
+            )
+            .into());
+        }
+        let atlas = load_token_atlas_preview(&store);
+        let dashboard = render_token_dashboard_with_atlas_at_width(
+            &TokenOverview::from_estimated_totals(4, 16_000, 4_000),
+            Some("resolved-loader"),
+            &atlas,
+            200,
+        );
+        if !dashboard.contains("48 nodes •") {
+            let status = dashboard
+                .lines()
+                .find(|line| line.contains(" nodes • "))
+                .unwrap_or("atlas status line missing");
+            return Err(io::Error::other(format!(
+                "resolved full-family atlas did not fill the bounded 200x50 node preview: {status}"
+            ))
+            .into());
+        }
+        let cancellation = IndexCancellation::new();
+        cancellation.cancel();
+        let cancelled = IndexWorkControl::new(cancellation, None);
+        if load_token_atlas_relations(&store, &cancelled).is_some() {
+            return Err(io::Error::other(
+                "token atlas loader ignored its shared cancellation boundary",
+            )
+            .into());
         }
         Ok(())
     }

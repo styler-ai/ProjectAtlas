@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 proc-macro2.workspace = true
+regex.workspace = true
 syn.workspace = true
 
 [lints]

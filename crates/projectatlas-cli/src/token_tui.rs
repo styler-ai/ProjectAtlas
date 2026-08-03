@@ -273,6 +273,22 @@ impl TokenAtlasPreview {
                 available: true,
             };
         };
+        let omitted_disconnected = candidates.iter().any(|edge| {
+            !largest_component.contains(&edge.source) || !largest_component.contains(&edge.target)
+        });
+        candidates.retain(|edge| {
+            largest_component.contains(&edge.source) && largest_component.contains(&edge.target)
+        });
+        let mut branch_reach = BTreeMap::<String, BTreeMap<String, usize>>::new();
+        for edge in &candidates {
+            for (blocked, start) in [(&edge.source, &edge.target), (&edge.target, &edge.source)] {
+                let reach = atlas_branch_reach(&adjacency, blocked, start);
+                branch_reach
+                    .entry(blocked.clone())
+                    .or_default()
+                    .insert(start.clone(), reach);
+            }
+        }
         let mut nodes = BTreeSet::from([hub]);
         let mut edges = Vec::new();
         let mut selected_degrees = BTreeMap::<String, usize>::new();
@@ -291,13 +307,36 @@ impl TokenAtlasPreview {
             };
             let next_index = candidates
                 .iter()
-                .position(|edge| {
+                .enumerate()
+                .filter_map(|(index, edge)| {
                     let source_selected = nodes.contains(&edge.source);
                     let target_selected = nodes.contains(&edge.target);
-                    source_selected != target_selected
-                        && nodes.len() < ATLAS_PREVIEW_MAX_NODES
-                        && can_admit(edge)
+                    if source_selected == target_selected
+                        || nodes.len() >= ATLAS_PREVIEW_MAX_NODES
+                        || !can_admit(edge)
+                    {
+                        return None;
+                    }
+                    let (selected, unselected) = if source_selected {
+                        (&edge.source, &edge.target)
+                    } else {
+                        (&edge.target, &edge.source)
+                    };
+                    let reach = branch_reach
+                        .get(selected)
+                        .and_then(|by_neighbor| by_neighbor.get(unselected))
+                        .copied()
+                        .unwrap_or_default();
+                    let expansion_degree = degrees.get(unselected).copied().unwrap_or_default();
+                    Some((index, reach, expansion_degree))
                 })
+                .max_by(|left, right| {
+                    left.1
+                        .cmp(&right.1)
+                        .then_with(|| left.2.cmp(&right.2))
+                        .then_with(|| right.0.cmp(&left.0))
+                })
+                .map(|(index, _, _)| index)
                 .or_else(|| {
                     candidates.iter().position(|edge| {
                         nodes.contains(&edge.source)
@@ -317,7 +356,7 @@ impl TokenAtlasPreview {
         }
         Self {
             edges,
-            truncated: source_truncated || !candidates.is_empty(),
+            truncated: source_truncated || omitted_disconnected || !candidates.is_empty(),
             available: true,
         }
     }
@@ -330,6 +369,26 @@ impl TokenAtlasPreview {
             .collect::<BTreeSet<_>>()
             .len()
     }
+}
+
+/// Count one candidate branch without crossing back through its selected endpoint.
+fn atlas_branch_reach(
+    adjacency: &BTreeMap<String, BTreeSet<String>>,
+    blocked: &str,
+    start: &str,
+) -> usize {
+    let mut visited = BTreeSet::from([start.to_string()]);
+    let mut frontier = VecDeque::from([start.to_string()]);
+    while let Some(node) = frontier.pop_front() {
+        if let Some(neighbors) = adjacency.get(&node) {
+            for neighbor in neighbors {
+                if neighbor != blocked && visited.insert(neighbor.clone()) {
+                    frontier.push_back(neighbor.clone());
+                }
+            }
+        }
+    }
+    visited.len()
 }
 
 /// Light terminal palette preserving the same semantic color roles.
@@ -384,6 +443,21 @@ pub(crate) fn render_token_dashboard_with_atlas(
     let width = dashboard_width().clamp(80, DASHBOARD_MAX_WIDTH) as u16;
     with_token_theme(theme, || {
         render_dashboard_to_ansi_string(width, DASHBOARD_HEIGHT, |frame| {
+            render_overview_frame_with_atlas(frame, overview, session, Some(atlas));
+        })
+    })
+}
+
+/// Render one deterministic test dashboard with an explicit atlas width.
+#[cfg(test)]
+pub(crate) fn render_token_dashboard_with_atlas_at_width(
+    overview: &TokenOverview,
+    session: Option<&str>,
+    atlas: &TokenAtlasPreview,
+    width: u16,
+) -> String {
+    with_token_theme(TokenDashboardTheme::Dark, || {
+        render_dashboard_to_string(width, DASHBOARD_HEIGHT, |frame| {
             render_overview_frame_with_atlas(frame, overview, session, Some(atlas));
         })
     })
@@ -3230,6 +3304,68 @@ mod tests {
                 .all(|node| node.x.abs() < ATLAS_CANVAS_X_BOUND
                     && node.y.abs() < ATLAS_CANVAS_Y_BOUND)
         );
+    }
+
+    #[test]
+    fn atlas_preview_discovers_expanding_branches_before_applying_visual_degree_limits() {
+        let kind = GraphRelationKind::Legacy(RelationKind::Calls);
+        let mut relations = Vec::new();
+        for branch in 0..16 {
+            let root = format!("branch-{branch:02}-root");
+            relations.push(("hub".to_string(), root.clone(), kind));
+            let leaves = (0..3)
+                .map(|leaf| format!("branch-{branch:02}-leaf-{leaf}"))
+                .collect::<Vec<_>>();
+            for leaf in &leaves {
+                relations.push((root.clone(), leaf.clone(), kind));
+            }
+            for (left, right) in [(0, 1), (1, 2), (2, 0)] {
+                relations.push((leaves[left].clone(), leaves[right].clone(), kind));
+            }
+        }
+
+        let atlas = TokenAtlasPreview::from_resolved_edges(relations, false);
+        assert_eq!(atlas.node_count(), ATLAS_PREVIEW_MAX_NODES);
+        assert_eq!(atlas.edges.len(), ATLAS_PREVIEW_MAX_EDGES);
+        assert!(atlas.truncated);
+        let mut selected_degrees = BTreeMap::<&str, usize>::new();
+        for edge in &atlas.edges {
+            *selected_degrees.entry(&edge.source).or_default() += 1;
+            *selected_degrees.entry(&edge.target).or_default() += 1;
+        }
+        assert!(
+            selected_degrees
+                .values()
+                .all(|degree| *degree <= ATLAS_PREVIEW_MAX_NODE_DEGREE)
+        );
+
+        let narrow =
+            render_overview_buffer_with_atlas_at_width(&sample_overview(), None, &atlas, 189);
+        assert!(!buffer_to_string(&narrow).contains(&reference_title("ATLAS MAP")));
+        for width in [190, 200, 220] {
+            let buffer =
+                render_overview_buffer_with_atlas_at_width(&sample_overview(), None, &atlas, width);
+            let dashboard = buffer_to_string(&buffer);
+            assert!(dashboard.contains("48 nodes • 64 links"));
+            let atlas_start = TOKEN_IMPACT_COLUMN_WIDTH + 2;
+            let midpoint_x = atlas_start + (width - atlas_start) / 2;
+            let midpoint_y = DASHBOARD_HEIGHT / 2;
+            let quadrants = (0..buffer.area.height)
+                .flat_map(|y| (atlas_start..buffer.area.width).map(move |x| (x, y)))
+                .filter_map(|(x, y)| {
+                    buffer.cell((x, y)).and_then(|cell| {
+                        cell.symbol()
+                            .chars()
+                            .any(|character| ('\u{2801}'..='\u{28ff}').contains(&character))
+                            .then_some((x >= midpoint_x, y >= midpoint_y))
+                    })
+                })
+                .collect::<BTreeSet<_>>();
+            assert!(
+                quadrants.len() >= 3,
+                "atlas should retain visible density across the panel at width {width}: {quadrants:?}"
+            );
+        }
     }
 
     #[test]

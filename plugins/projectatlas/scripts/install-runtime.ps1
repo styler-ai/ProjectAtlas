@@ -120,6 +120,8 @@ namespace ProjectAtlas.Installer
         private const uint CreateAlways = 2;
         private const uint OpenExisting = 3;
         private const uint FileAttributeNormal = 0x00000080;
+        private const uint FileFlagBackupSemantics = 0x02000000;
+        private const uint VolumeNameNt = 0x00000002;
         private const uint JobObjectBasicAccountingInformation = 1;
         private const uint JobObjectExtendedLimitInformation = 9;
         private const uint JobObjectLimitKillOnJobClose = 0x00002000;
@@ -235,6 +237,13 @@ namespace ProjectAtlas.Installer
             IntPtr templateFile);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandle(
+            IntPtr file,
+            StringBuilder path,
+            uint pathLength,
+            uint flags);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool CreateProcessW(
             string applicationName,
@@ -335,6 +344,56 @@ namespace ProjectAtlas.Installer
             this.standardInput = standardInput;
             this.standardOutput = standardOutput;
             this.standardError = standardError;
+        }
+
+        public static string GetCanonicalDirectoryPath(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path))
+                throw new ArgumentException("Directory path is required.", "path");
+
+            SecurityAttributes attributes = new SecurityAttributes();
+            attributes.Length = Marshal.SizeOf(typeof(SecurityAttributes));
+            IntPtr directory = CreateFile(
+                Path.GetFullPath(path),
+                0,
+                FileShareRead | FileShareWrite | FileShareDelete,
+                ref attributes,
+                OpenExisting,
+                FileFlagBackupSemantics,
+                IntPtr.Zero);
+            if (directory == new IntPtr(-1))
+                throw Win32Failure("open directory for canonical identity");
+            try
+            {
+                StringBuilder canonicalPath = new StringBuilder(512);
+                uint length = GetFinalPathNameByHandle(
+                    directory,
+                    canonicalPath,
+                    (uint)canonicalPath.Capacity,
+                    VolumeNameNt);
+                if (length == 0)
+                    throw Win32Failure("resolve canonical directory identity");
+                if (length >= canonicalPath.Capacity)
+                {
+                    if (length >= Int32.MaxValue)
+                        throw new InvalidOperationException("Canonical directory identity is too long.");
+                    canonicalPath = new StringBuilder((int)length + 1);
+                    length = GetFinalPathNameByHandle(
+                        directory,
+                        canonicalPath,
+                        (uint)canonicalPath.Capacity,
+                        VolumeNameNt);
+                    if (length == 0)
+                        throw Win32Failure("resolve canonical directory identity");
+                    if (length >= canonicalPath.Capacity)
+                        throw new InvalidOperationException("Canonical directory identity changed while it was read.");
+                }
+                return canonicalPath.ToString();
+            }
+            finally
+            {
+                CloseHandleChecked(directory, "close canonical directory identity handle");
+            }
         }
 
         public static RuntimeProbeProcess Start(
@@ -1258,7 +1317,7 @@ function Invoke-ProjectAtlasBoundedJsonCommand {
     if (-not $probeCleanupSucceeded) {
         return $null
     }
-    Write-Output -NoEnumerate $probePayload
+    return $probePayload
 }
 
 function Invoke-ProjectAtlasRuntimeInfo {
@@ -2443,45 +2502,564 @@ function Get-ProjectAtlasCodexMarketplaceRef {
     return $null
 }
 
-function Restore-ProjectAtlasCodexMarketplace {
+function Test-ProjectAtlasCodexContainedPath {
     param(
-        [string]$CodexCommandPath,
-        [string]$PreviousSource,
-        [string]$PreviousRef
+        [string]$Path,
+        [string]$Root
     )
-    if ([string]::IsNullOrWhiteSpace($PreviousSource)) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Root)) {
+        return $false
+    }
+    $fullRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $prefix = $fullRoot + [System.IO.Path]::DirectorySeparatorChar
+    return $fullPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Assert-ProjectAtlasCodexDirectAncestry {
+    param(
+        [string]$Path,
+        [string]$Description,
+        [string]$CodexRoot
+    )
+    $fullRoot = [System.IO.Path]::GetFullPath($CodexRoot).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if (-not [string]::Equals($fullPath, $fullRoot, [System.StringComparison]::OrdinalIgnoreCase) `
+        -and -not (Test-ProjectAtlasCodexContainedPath $fullPath $fullRoot)) {
+        throw "$Description '$Path' is outside the Codex state root '$CodexRoot'"
+    }
+
+    $currentPath = $fullRoot
+    while (-not [string]::IsNullOrWhiteSpace($currentPath)) {
+        $item = Get-Item -Force -LiteralPath $currentPath -ErrorAction SilentlyContinue
+        if ($item -and (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            throw "$Description has a symlink, junction, or reparse point in its Codex-root ancestry: $currentPath"
+        }
+        $parentPath = Split-Path -Parent $currentPath
+        if ([string]::IsNullOrWhiteSpace($parentPath) `
+            -or [string]::Equals($parentPath, $currentPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            break
+        }
+        $currentPath = $parentPath
+    }
+    if ([string]::Equals($fullPath, $fullRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
         return
     }
-    & $CodexCommandPath plugin marketplace remove projectatlas --json | Out-Null
-    $restoreArgs = @("plugin", "marketplace", "add", $PreviousSource)
-    if (-not [string]::IsNullOrWhiteSpace($PreviousRef)) {
-        $restoreArgs += @("--ref", $PreviousRef)
-    }
-    $restoreArgs += "--json"
-    & $CodexCommandPath @restoreArgs | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        & $CodexCommandPath plugin add projectatlas --marketplace projectatlas --json | Out-Null
+    $relativePath = $fullPath.Substring($fullRoot.Length).TrimStart(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+
+    $currentPath = $fullRoot
+    $segments = $relativePath.Split(
+        [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar),
+        [System.StringSplitOptions]::RemoveEmptyEntries
+    )
+    for ($index = 0; $index -lt $segments.Count; $index++) {
+        $currentPath = Join-Path $currentPath $segments[$index]
+        $item = Get-Item -Force -LiteralPath $currentPath -ErrorAction SilentlyContinue
+        if (-not $item) {
+            continue
+        }
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$Description has a symlink, junction, or reparse point in its Codex-root ancestry: $currentPath"
+        }
+        if ($index -lt ($segments.Count - 1) -and -not ($item -is [System.IO.DirectoryInfo])) {
+            throw "$Description has a non-directory ancestor: $currentPath"
+        }
     }
 }
 
-function Get-ProjectAtlasCodexPlugin {
+function Assert-ProjectAtlasCodexRestorableFile {
+    param(
+        [string]$Path,
+        [string]$Description,
+        [string]$CodexRoot
+    )
+    Assert-ProjectAtlasCodexDirectAncestry $Path $Description $CodexRoot
+    Assert-ProjectAtlasDirectFilePath $Path $Description
+    $item = Get-Item -Force -LiteralPath $Path -ErrorAction Stop
+    if ($item.PSObject.Properties.Name -contains "LinkType" `
+        -and [string]::Equals($item.LinkType, "HardLink", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Description is hard linked"
+    }
+}
+
+function Assert-ProjectAtlasCodexRestorableDirectory {
+    param(
+        [string]$Path,
+        [string]$Description,
+        [string]$CodexRoot
+    )
+    Assert-ProjectAtlasCodexDirectAncestry $Path $Description $CodexRoot
+    $rootItem = Get-Item -Force -LiteralPath $Path -ErrorAction Stop
+    if (-not ($rootItem -is [System.IO.DirectoryInfo]) `
+        -or (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "$Description is not a direct directory"
+    }
+    foreach ($item in Get-ChildItem -Force -LiteralPath $Path -Recurse) {
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$Description contains a reparse point"
+        }
+        if ($item.PSObject.Properties.Name -contains "LinkType" `
+            -and [string]::Equals($item.LinkType, "HardLink", [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "$Description contains a hard-linked file"
+        }
+    }
+}
+
+function Enter-ProjectAtlasCodexPluginUpdateLock {
+    param(
+        [string]$ConfigPath
+    )
+    $mutex = $null
+    try {
+        if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
+            throw "Codex config path cannot be resolved"
+        }
+        $codexRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $ConfigPath))
+        $existingRoot = $codexRoot
+        $missingRootSegments = [System.Collections.Generic.List[string]]::new()
+        while (-not [System.IO.Directory]::Exists($existingRoot)) {
+            if ([System.IO.File]::Exists($existingRoot)) {
+                throw "Codex state root has a non-directory ancestor: $existingRoot"
+            }
+            $trimmedRoot = $existingRoot.TrimEnd(
+                [System.IO.Path]::DirectorySeparatorChar,
+                [System.IO.Path]::AltDirectorySeparatorChar
+            )
+            $leaf = [System.IO.Path]::GetFileName($trimmedRoot)
+            $parent = [System.IO.Path]::GetDirectoryName($trimmedRoot)
+            if ([string]::IsNullOrWhiteSpace($leaf) -or [string]::IsNullOrWhiteSpace($parent)) {
+                throw "Codex state root has no existing directory ancestor"
+            }
+            $missingRootSegments.Insert(0, $leaf)
+            $existingRoot = $parent
+        }
+        Initialize-ProjectAtlasRuntimeProbe
+        $canonicalRoot = [ProjectAtlas.Installer.RuntimeProbeProcess]::GetCanonicalDirectoryPath($existingRoot)
+        foreach ($segment in $missingRootSegments) {
+            $canonicalRoot = $canonicalRoot.TrimEnd(
+                [System.IO.Path]::DirectorySeparatorChar,
+                [System.IO.Path]::AltDirectorySeparatorChar
+            ) + [System.IO.Path]::DirectorySeparatorChar + $segment
+        }
+        $normalizedRoot = $canonicalRoot.TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        ).ToUpperInvariant()
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $digest = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($normalizedRoot))
+        }
+        finally {
+            $sha256.Dispose()
+        }
+        $digestText = ([System.BitConverter]::ToString($digest)).Replace("-", "")
+        $mutex = [System.Threading.Mutex]::new(
+            $false,
+            "Global\ProjectAtlas-CodexPluginUpdate-$digestText"
+        )
+        $acquired = $false
+        try {
+            $acquired = $mutex.WaitOne([System.TimeSpan]::FromSeconds(30))
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            $acquired = $true
+        }
+        if (-not $acquired) {
+            $mutex.Dispose()
+            Write-Warning "Codex ProjectAtlas plugin update skipped: another installer still owns the update lock."
+            return $null
+        }
+        return [pscustomobject]@{
+            Mutex = $mutex
+            Root = $codexRoot
+        }
+    }
+    catch {
+        if ($mutex) {
+            $mutex.Dispose()
+        }
+        Write-Warning "Codex ProjectAtlas plugin update skipped: the update lock could not be acquired safely: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Exit-ProjectAtlasCodexPluginUpdateLock {
+    param(
+        [object]$Lock
+    )
+    if (-not $Lock -or -not $Lock.Mutex) {
+        return
+    }
+    try {
+        $Lock.Mutex.ReleaseMutex()
+    }
+    finally {
+        $Lock.Mutex.Dispose()
+    }
+}
+
+function New-ProjectAtlasCodexStateSnapshot {
+    param(
+        [object]$ProjectAtlasPlugin,
+        [string]$ExpectedVersion
+    )
+    $configPath = Get-ProjectAtlasCodexConfigPath
+    if ([string]::IsNullOrWhiteSpace($configPath)) {
+        Write-Warning "Codex ProjectAtlas plugin update skipped: Codex config path cannot be resolved."
+        return $null
+    }
+    $snapshotRoot = $null
+    $codexRoot = $null
+    try {
+        $configExisted = Test-Path -LiteralPath $configPath
+        $codexRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $configPath))
+        Assert-ProjectAtlasCodexDirectAncestry $configPath "Codex config" $codexRoot
+        if ($configExisted) {
+            Assert-ProjectAtlasCodexRestorableFile $configPath "Codex config" $codexRoot
+        }
+
+        if ($ExpectedVersion -notmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$') {
+            throw "expected projectatlas plugin version cannot identify its Codex cache safely"
+        }
+        $expectedMarketplaceRoot = [System.IO.Path]::GetFullPath(
+            (Join-Path $codexRoot ".tmp\marketplaces\projectatlas")
+        )
+        Assert-ProjectAtlasCodexDirectAncestry `
+            $expectedMarketplaceRoot `
+            "ProjectAtlas marketplace root" `
+            $codexRoot
+        $marketplaceRootExisted = Test-Path -LiteralPath $expectedMarketplaceRoot
+        if ($marketplaceRootExisted) {
+            Assert-ProjectAtlasCodexRestorableDirectory `
+                $expectedMarketplaceRoot `
+                "ProjectAtlas marketplace root" `
+                $codexRoot
+        }
+        $expectedPluginSourcePath = Join-Path $expectedMarketplaceRoot "plugins\projectatlas"
+        $pluginSourcePath = [System.IO.Path]::GetFullPath($expectedPluginSourcePath)
+        Assert-ProjectAtlasCodexDirectAncestry `
+            $pluginSourcePath `
+            "installed projectatlas plugin source" `
+            $codexRoot
+        $reportedPluginSourcePath = Get-ProjectAtlasCodexPluginSourcePath $ProjectAtlasPlugin
+        if ($ProjectAtlasPlugin -and [string]::IsNullOrWhiteSpace($reportedPluginSourcePath)) {
+            throw "installed projectatlas plugin source path is unavailable"
+        }
+        if ($ProjectAtlasPlugin -and -not [string]::Equals(
+                [System.IO.Path]::GetFullPath($reportedPluginSourcePath),
+                $pluginSourcePath,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "installed projectatlas plugin source does not use the expected Codex marketplace layout"
+        }
+
+        $pluginSourceExisted = Test-Path -LiteralPath $pluginSourcePath
+        if ($pluginSourceExisted) {
+            Assert-ProjectAtlasCodexRestorableDirectory `
+                $pluginSourcePath `
+                "installed projectatlas plugin source" `
+                $codexRoot
+        }
+        elseif ($ProjectAtlasPlugin) {
+            throw "installed projectatlas plugin source is missing"
+        }
+
+        $pluginCachePath = $null
+        $pluginCacheExisted = $false
+        if ($ProjectAtlasPlugin) {
+            if (-not ($ProjectAtlasPlugin.version -is [string]) `
+                -or $ProjectAtlasPlugin.version -notmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$') {
+                throw "installed projectatlas plugin version cannot identify its Codex cache safely"
+            }
+            $pluginCachePath = Join-Path $codexRoot (
+                "plugins\cache\projectatlas\projectatlas\" + $ProjectAtlasPlugin.version
+            )
+            $pluginCacheExisted = Test-Path -LiteralPath $pluginCachePath
+            if (-not $pluginCacheExisted) {
+                throw "installed projectatlas plugin cache is missing"
+            }
+            Assert-ProjectAtlasCodexRestorableDirectory `
+                $pluginCachePath `
+                "installed projectatlas plugin cache" `
+                $codexRoot
+        }
+        $expectedPluginCachePath = Join-Path $codexRoot (
+            "plugins\cache\projectatlas\projectatlas\" + $ExpectedVersion
+        )
+        Assert-ProjectAtlasCodexDirectAncestry `
+            $expectedPluginCachePath `
+            "expected projectatlas plugin cache" `
+            $codexRoot
+        $expectedPluginCacheExisted = Test-Path -LiteralPath $expectedPluginCachePath
+        if ($expectedPluginCacheExisted `
+            -and ($null -eq $pluginCachePath `
+                -or -not [string]::Equals(
+                    [System.IO.Path]::GetFullPath($expectedPluginCachePath),
+                    [System.IO.Path]::GetFullPath($pluginCachePath),
+                    [System.StringComparison]::OrdinalIgnoreCase
+                ))) {
+            Assert-ProjectAtlasCodexRestorableDirectory `
+                $expectedPluginCachePath `
+                "expected projectatlas plugin cache" `
+                $codexRoot
+        }
+
+        $marketplaceManifestPath = Join-Path $expectedMarketplaceRoot ".agents\plugins\marketplace.json"
+        $marketplaceInstallRecordPath = Join-Path $expectedMarketplaceRoot ".codex-marketplace-install.json"
+        Assert-ProjectAtlasCodexDirectAncestry `
+            $marketplaceManifestPath `
+            "ProjectAtlas marketplace manifest" `
+            $codexRoot
+        Assert-ProjectAtlasCodexDirectAncestry `
+            $marketplaceInstallRecordPath `
+            "ProjectAtlas marketplace install record" `
+            $codexRoot
+        $marketplaceManifestExisted = Test-Path -LiteralPath $marketplaceManifestPath
+        $marketplaceInstallRecordExisted = Test-Path -LiteralPath $marketplaceInstallRecordPath
+        if ($marketplaceManifestExisted) {
+            Assert-ProjectAtlasCodexRestorableFile `
+                $marketplaceManifestPath `
+                "ProjectAtlas marketplace manifest" `
+                $codexRoot
+        }
+        elseif ($ProjectAtlasPlugin) {
+            throw "ProjectAtlas marketplace manifest is missing"
+        }
+        if ($marketplaceInstallRecordExisted) {
+            Assert-ProjectAtlasCodexRestorableFile `
+                $marketplaceInstallRecordPath `
+                "ProjectAtlas marketplace install record" `
+                $codexRoot
+        }
+        elseif ($ProjectAtlasPlugin) {
+            throw "ProjectAtlas marketplace install record is missing"
+        }
+
+        $snapshotRoot = Join-Path $codexRoot (".projectatlas-plugin-state-" + [guid]::NewGuid().ToString("N"))
+        Assert-ProjectAtlasCodexDirectAncestry $snapshotRoot "Codex state snapshot" $codexRoot
+        New-Item -ItemType Directory -Path $snapshotRoot -ErrorAction Stop | Out-Null
+        Assert-ProjectAtlasCodexDirectAncestry $snapshotRoot "Codex state snapshot" $codexRoot
+        if ($configExisted) {
+            [System.IO.File]::Copy($configPath, (Join-Path $snapshotRoot "config.toml"), $false)
+        }
+        if ($marketplaceRootExisted) {
+            Copy-Item -LiteralPath $expectedMarketplaceRoot -Destination (Join-Path $snapshotRoot "marketplace-root") -Recurse -Force
+        }
+        if ($pluginCacheExisted) {
+            Copy-Item -LiteralPath $pluginCachePath -Destination (Join-Path $snapshotRoot "plugin-cache") -Recurse -Force
+        }
+        $cachePathsMatch = $pluginCachePath -and [string]::Equals(
+            [System.IO.Path]::GetFullPath($pluginCachePath),
+            [System.IO.Path]::GetFullPath($expectedPluginCachePath),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+        if ($expectedPluginCacheExisted -and -not $cachePathsMatch) {
+            Copy-Item -LiteralPath $expectedPluginCachePath -Destination (Join-Path $snapshotRoot "expected-plugin-cache") -Recurse -Force
+        }
+        return [pscustomobject]@{
+            Root                         = $snapshotRoot
+            ConfigPath                   = $configPath
+            ConfigExisted                = $configExisted
+            CodexRoot                    = $codexRoot
+            MarketplaceRootPath          = $expectedMarketplaceRoot
+            MarketplaceRootExisted       = $marketplaceRootExisted
+            PluginCachePath              = $pluginCachePath
+            PluginCacheExisted           = $pluginCacheExisted
+            ExpectedPluginCachePath      = $expectedPluginCachePath
+            ExpectedPluginCacheExisted   = $expectedPluginCacheExisted
+            CachePathsMatch              = $cachePathsMatch
+        }
+    }
+    catch {
+        if ($snapshotRoot -and (Test-Path -LiteralPath $snapshotRoot)) {
+            Remove-ProjectAtlasCodexStateSnapshot ([pscustomobject]@{
+                    Root      = $snapshotRoot
+                    CodexRoot = $codexRoot
+                }) | Out-Null
+        }
+        Write-Warning "Codex ProjectAtlas plugin update skipped: existing integration could not be preserved safely: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Restore-ProjectAtlasCodexStateSnapshot {
+    param(
+        [object]$Snapshot
+    )
+    try {
+        if (-not $Snapshot -or -not (Test-Path -LiteralPath $Snapshot.Root)) {
+            return $false
+        }
+        $currentCodexRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $Snapshot.ConfigPath))
+        if (-not [string]::Equals(
+                $currentCodexRoot,
+                $Snapshot.CodexRoot,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )) {
+            return $false
+        }
+        Assert-ProjectAtlasDirectPath $currentCodexRoot "Codex state root"
+        Assert-ProjectAtlasCodexDirectAncestry $Snapshot.Root "Codex state snapshot" $currentCodexRoot
+        $directoryRestores = @(
+                    [pscustomobject]@{
+                        Destination = $Snapshot.MarketplaceRootPath
+                        Snapshot    = (Join-Path $Snapshot.Root "marketplace-root")
+                        Description = "ProjectAtlas marketplace root"
+                        Existed     = $Snapshot.MarketplaceRootExisted
+                    },
+                    [pscustomobject]@{
+                        Destination = $Snapshot.PluginCachePath
+                        Snapshot    = (Join-Path $Snapshot.Root "plugin-cache")
+                        Description = "Codex plugin cache"
+                        Existed     = $Snapshot.PluginCacheExisted
+                    }
+                )
+        if (-not $Snapshot.CachePathsMatch) {
+            $directoryRestores += [pscustomobject]@{
+                Destination = $Snapshot.ExpectedPluginCachePath
+                Snapshot    = (Join-Path $Snapshot.Root "expected-plugin-cache")
+                Description = "expected Codex plugin cache"
+                Existed     = $Snapshot.ExpectedPluginCacheExisted
+            }
+        }
+        foreach ($directoryRestore in @($directoryRestores | Where-Object {
+                    -not [string]::IsNullOrWhiteSpace($_.Destination)
+                })) {
+                if ($directoryRestore.Existed) {
+                Assert-ProjectAtlasCodexRestorableDirectory `
+                    $directoryRestore.Snapshot `
+                    ($directoryRestore.Description + " snapshot") `
+                    $currentCodexRoot
+                }
+                Assert-ProjectAtlasCodexDirectAncestry `
+                    $directoryRestore.Destination `
+                    $directoryRestore.Description `
+                    $currentCodexRoot
+                $destinationParent = Split-Path -Parent $directoryRestore.Destination
+                New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+                Assert-ProjectAtlasCodexDirectAncestry `
+                    $directoryRestore.Destination `
+                    $directoryRestore.Description `
+                    $currentCodexRoot
+                if (Test-Path -LiteralPath $directoryRestore.Destination) {
+                    Assert-ProjectAtlasCodexRestorableDirectory `
+                        $directoryRestore.Destination `
+                        $directoryRestore.Description `
+                        $currentCodexRoot
+                    Remove-Item -LiteralPath $directoryRestore.Destination -Recurse -Force
+                }
+                Assert-ProjectAtlasCodexDirectAncestry `
+                    $directoryRestore.Destination `
+                    $directoryRestore.Description `
+                    $currentCodexRoot
+                if ($directoryRestore.Existed) {
+                    Copy-Item `
+                        -LiteralPath $directoryRestore.Snapshot `
+                        -Destination $directoryRestore.Destination `
+                        -Recurse `
+                        -Force
+                }
+            }
+        if ($Snapshot.ConfigExisted) {
+            Assert-ProjectAtlasCodexRestorableFile `
+                (Join-Path $Snapshot.Root "config.toml") `
+                "Codex config snapshot" `
+                $currentCodexRoot
+            Assert-ProjectAtlasCodexDirectAncestry $Snapshot.ConfigPath "Codex config" $currentCodexRoot
+            if (Test-Path -LiteralPath $Snapshot.ConfigPath) {
+                Assert-ProjectAtlasCodexRestorableFile $Snapshot.ConfigPath "Codex config" $currentCodexRoot
+            }
+            $temporaryConfigPath = $Snapshot.ConfigPath + ".projectatlas-restore-" + [guid]::NewGuid().ToString("N")
+            Assert-ProjectAtlasCodexDirectAncestry $temporaryConfigPath "Codex config" $currentCodexRoot
+            [System.IO.File]::Copy((Join-Path $Snapshot.Root "config.toml"), $temporaryConfigPath, $false)
+            Assert-ProjectAtlasCodexDirectAncestry $Snapshot.ConfigPath "Codex config" $currentCodexRoot
+            Move-Item -LiteralPath $temporaryConfigPath -Destination $Snapshot.ConfigPath -Force
+        }
+        elseif (Test-Path -LiteralPath $Snapshot.ConfigPath) {
+            Assert-ProjectAtlasCodexRestorableFile $Snapshot.ConfigPath "Codex config" $currentCodexRoot
+            Remove-Item -LiteralPath $Snapshot.ConfigPath -Force
+            if (Test-Path -LiteralPath $Snapshot.ConfigPath) {
+                throw "Codex config removal did not complete"
+            }
+        }
+        return $true
+    }
+    catch {
+        Write-Warning "Codex ProjectAtlas plugin update failed and its preserved local state could not be restored completely; the recovery snapshot was retained at '$($Snapshot.Root)': $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Remove-ProjectAtlasCodexStateSnapshot {
+    param(
+        [object]$Snapshot
+    )
+    if (-not $Snapshot -or -not (Get-Item -Force -LiteralPath $Snapshot.Root -ErrorAction SilentlyContinue)) {
+        return $true
+    }
+    try {
+        Assert-ProjectAtlasCodexRestorableDirectory `
+            $Snapshot.Root `
+            "Codex state snapshot" `
+            $Snapshot.CodexRoot
+    }
+    catch {
+        Write-Warning "Codex ProjectAtlas state snapshot cleanup refused/path changed at '$($Snapshot.Root)': $($_.Exception.Message)"
+        return $false
+    }
+    try {
+        Remove-Item -LiteralPath $Snapshot.Root -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $Snapshot.Root) {
+            throw "snapshot still exists after cleanup"
+        }
+        return $true
+    }
+    catch {
+        try {
+            Assert-ProjectAtlasCodexRestorableDirectory `
+                $Snapshot.Root `
+                "Codex state snapshot" `
+                $Snapshot.CodexRoot
+            Write-Warning "Codex ProjectAtlas state snapshot cleanup failed; retained at '$($Snapshot.Root)': $($_.Exception.Message)"
+        }
+        catch {
+            Write-Warning "Codex ProjectAtlas state snapshot cleanup failed and no trusted retained path can be reported at '$($Snapshot.Root)'."
+        }
+        return $false
+    }
+}
+
+function Get-ProjectAtlasCodexPluginInventory {
     param(
         [string]$CodexCommandPath
     )
+    $unavailable = [pscustomobject]@{
+        Complete = $false
+        Plugin   = $null
+    }
     try {
         $plugins = Invoke-ProjectAtlasBoundedJsonCommand `
             $CodexCommandPath `
             ([string[]]@("plugin", "list", "--marketplace", "projectatlas", "--json"))
         if (-not (Test-ProjectAtlasJsonObject $plugins)) {
-            return $null
+            return $unavailable
         }
         if (-not ($plugins.installed -is [System.Collections.IList])) {
-            return $null
+            return $unavailable
         }
         $projectAtlasPlugins = @()
         foreach ($pluginEntry in $plugins.installed) {
             if (-not (Test-ProjectAtlasJsonObject $pluginEntry)) {
-                return $null
+                return $unavailable
             }
             $projectAtlasIndicator = ($pluginEntry.pluginId -is [string] `
                     -and [string]::Equals($pluginEntry.pluginId, "projectatlas@projectatlas", [System.StringComparison]::Ordinal)) `
@@ -2493,8 +3071,14 @@ function Get-ProjectAtlasCodexPlugin {
                 $projectAtlasPlugins += $pluginEntry
             }
         }
+        if ($projectAtlasPlugins.Count -eq 0) {
+            return [pscustomobject]@{
+                Complete = $true
+                Plugin   = $null
+            }
+        }
         if ($projectAtlasPlugins.Count -ne 1) {
-            return $null
+            return $unavailable
         }
         $plugin = $projectAtlasPlugins[0]
         if (-not ($plugin.pluginId -is [string]) `
@@ -2508,16 +3092,35 @@ function Get-ProjectAtlasCodexPlugin {
             -or -not $plugin.installed `
             -or -not ($plugin.enabled -is [bool]) `
             -or -not $plugin.enabled `
+            -or [string]::IsNullOrWhiteSpace($plugin.version) `
+            -or $plugin.version -notmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$' `
             -or -not (Test-ProjectAtlasJsonObject $plugin.marketplaceSource) `
             -or -not ($plugin.marketplaceSource.source -is [string]) `
+            -or -not (Test-ProjectAtlasOfficialMarketplaceSource $plugin.marketplaceSource.source) `
             -or -not (Test-ProjectAtlasJsonObject $plugin.source) `
-            -or -not ($plugin.source.path -is [string])) {
-            return $null
+            -or -not ($plugin.source.path -is [string]) `
+            -or [string]::IsNullOrWhiteSpace($plugin.source.path) `
+            -or -not [System.IO.Path]::IsPathRooted($plugin.source.path)) {
+            return $unavailable
         }
-        return $plugin
+        return [pscustomobject]@{
+            Complete = $true
+            Plugin   = $plugin
+        }
     }
     catch {
-        return $null
+        return $unavailable
+    }
+    return $unavailable
+}
+
+function Get-ProjectAtlasCodexPlugin {
+    param(
+        [string]$CodexCommandPath
+    )
+    $inventory = Get-ProjectAtlasCodexPluginInventory $CodexCommandPath
+    if ($inventory.Complete) {
+        return $inventory.Plugin
     }
     return $null
 }
@@ -2586,7 +3189,7 @@ function Test-ProjectAtlasCodexPluginSourceManifest {
     )
     $pluginSourcePath = Get-ProjectAtlasCodexPluginSourcePath $ProjectAtlasPlugin
     if ([string]::IsNullOrWhiteSpace($pluginSourcePath)) {
-        return $true
+        return $false
     }
     return (Get-ProjectAtlasCodexPluginSourceManifestVersion $ProjectAtlasPlugin) -eq $ExpectedVersion
 }
@@ -2663,6 +3266,8 @@ function Get-ProjectAtlasCodexMarketplace {
     return $marketplace
 }
 
+$script:ProjectAtlasCodexPluginUpdatePreservedPriorState = $false
+
 function Update-ProjectAtlasCodexPlugin {
     param(
         [string]$ExpectedVersion
@@ -2680,7 +3285,27 @@ function Update-ProjectAtlasCodexPlugin {
     if (-not $codexCommandPath) {
         return
     }
+    $updateLock = Enter-ProjectAtlasCodexPluginUpdateLock (Get-ProjectAtlasCodexConfigPath)
+    if (-not $updateLock) {
+        $script:ProjectAtlasCodexPluginUpdatePreservedPriorState = $true
+        return
+    }
     try {
+        $retainedSnapshot = $null
+        if (Test-Path -LiteralPath $updateLock.Root) {
+            Assert-ProjectAtlasDirectPath $updateLock.Root "Codex state root"
+            $retainedSnapshot = Get-ChildItem `
+                -Force `
+                -LiteralPath $updateLock.Root `
+                -Filter ".projectatlas-plugin-state-*" `
+                -ErrorAction Stop `
+                | Select-Object -First 1
+        }
+        if ($retainedSnapshot) {
+            $script:ProjectAtlasCodexPluginUpdatePreservedPriorState = $true
+            Write-Warning "Codex ProjectAtlas plugin update skipped: retained recovery state requires inspection at '$($retainedSnapshot.FullName)'."
+            return
+        }
         $marketplacePayload = Invoke-ProjectAtlasBoundedJsonCommand `
             $codexCommandPath `
             ([string[]]@("plugin", "marketplace", "list", "--json"))
@@ -2701,7 +3326,13 @@ function Update-ProjectAtlasCodexPlugin {
 
         $releaseTag = "v$runtimeVersion"
         $previousRef = Get-ProjectAtlasCodexMarketplaceRef
-        $projectAtlasPlugin = Get-ProjectAtlasCodexPlugin $codexCommandPath
+        $pluginInventory = Get-ProjectAtlasCodexPluginInventory $codexCommandPath
+        if (-not $pluginInventory.Complete) {
+            $script:ProjectAtlasCodexPluginUpdatePreservedPriorState = $true
+            Write-Warning "Codex ProjectAtlas plugin update skipped: installed plugin inventory could not be verified completely; the existing official integration was not changed."
+            return
+        }
+        $projectAtlasPlugin = $pluginInventory.Plugin
         $currentPluginVersion = if ($projectAtlasPlugin -and $projectAtlasPlugin.version -is [string]) { $projectAtlasPlugin.version } else { $null }
         $currentSourceManifestMatches = Test-ProjectAtlasCodexPluginSourceManifest $projectAtlasPlugin $runtimeVersion
         $currentPluginReady = Test-ProjectAtlasCodexPluginReady $ExpectedVersion
@@ -2713,7 +3344,15 @@ function Update-ProjectAtlasCodexPlugin {
             Confirm-ProjectAtlasCodexSkillArtifact $codexCommandPath $ExpectedVersion
             return
         }
-        if ($previousRef -eq $releaseTag) {
+        $stateSnapshot = New-ProjectAtlasCodexStateSnapshot $projectAtlasPlugin $runtimeVersion
+        if (-not $stateSnapshot) {
+            $script:ProjectAtlasCodexPluginUpdatePreservedPriorState = $true
+            return
+        }
+        $updateSucceeded = $false
+        $restoreSucceeded = $false
+        try {
+            if ($previousRef -eq $releaseTag) {
             if ($currentPluginVersion -eq $runtimeVersion -and -not $currentSourceManifestMatches) {
                 $sourceManifestVersion = Get-ProjectAtlasCodexPluginSourceManifestVersion $projectAtlasPlugin
                 Write-Output "Codex ProjectAtlas plugin source manifest version '$sourceManifestVersion' does not match $runtimeVersion; refreshing official projectatlas plugin cache."
@@ -2725,22 +3364,25 @@ function Update-ProjectAtlasCodexPlugin {
             & $codexCommandPath plugin add projectatlas --marketplace projectatlas --json | Out-Null
             if ($LASTEXITCODE -ne 0) {
                 Write-Warning "Codex ProjectAtlas plugin update failed: could not install projectatlas plugin at $releaseTag."
-                Restore-ProjectAtlasCodexMarketplace $codexCommandPath $source $previousRef
                 return
             }
-            $installedVersion = Get-ProjectAtlasCodexPluginVersion $codexCommandPath
+            $installedInventory = Get-ProjectAtlasCodexPluginInventory $codexCommandPath
+            if (-not $installedInventory.Complete -or -not $installedInventory.Plugin) {
+                Write-Warning "Codex ProjectAtlas plugin update failed: installed plugin inventory could not be verified completely after refresh."
+                return
+            }
+            $installedVersion = $installedInventory.Plugin.version
             if ($installedVersion -ne $runtimeVersion) {
                 Write-Warning "Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '$installedVersion' does not match $runtimeVersion."
-                Restore-ProjectAtlasCodexMarketplace $codexCommandPath $source $previousRef
                 return
             }
-            $installedPlugin = Get-ProjectAtlasCodexPlugin $codexCommandPath
+            $installedPlugin = $installedInventory.Plugin
             if (-not (Test-ProjectAtlasCodexPluginSourceManifest $installedPlugin $runtimeVersion)) {
                 $sourceManifestVersion = Get-ProjectAtlasCodexPluginSourceManifestVersion $installedPlugin
                 Write-Warning "Codex ProjectAtlas plugin update failed: source manifest version '$sourceManifestVersion' does not match $runtimeVersion after refresh."
-                Restore-ProjectAtlasCodexMarketplace $codexCommandPath $source $previousRef
                 return
             }
+            $updateSucceeded = $true
             Write-Output "Codex ProjectAtlas plugin marketplace updated to $releaseTag."
             Confirm-ProjectAtlasCodexSkillArtifact $codexCommandPath $ExpectedVersion
             return
@@ -2754,34 +3396,50 @@ function Update-ProjectAtlasCodexPlugin {
         & $codexCommandPath plugin marketplace add styler-ai/ProjectAtlas --ref $releaseTag --json | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "Codex ProjectAtlas plugin update failed: could not add projectatlas marketplace at $releaseTag."
-            Restore-ProjectAtlasCodexMarketplace $codexCommandPath $source $previousRef
             return
         }
         & $codexCommandPath plugin remove projectatlas --marketplace projectatlas --json | Out-Null
         & $codexCommandPath plugin add projectatlas --marketplace projectatlas --json | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "Codex ProjectAtlas plugin update failed: could not install projectatlas plugin at $releaseTag."
-            Restore-ProjectAtlasCodexMarketplace $codexCommandPath $source $previousRef
             return
         }
-        $installedVersion = Get-ProjectAtlasCodexPluginVersion $codexCommandPath
+        $installedInventory = Get-ProjectAtlasCodexPluginInventory $codexCommandPath
+        if (-not $installedInventory.Complete -or -not $installedInventory.Plugin) {
+            Write-Warning "Codex ProjectAtlas plugin update failed: installed plugin inventory could not be verified completely after refresh."
+            return
+        }
+        $installedVersion = $installedInventory.Plugin.version
         if ($installedVersion -ne $runtimeVersion) {
             Write-Warning "Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '$installedVersion' does not match $runtimeVersion."
-            Restore-ProjectAtlasCodexMarketplace $codexCommandPath $source $previousRef
             return
         }
-        $installedPlugin = Get-ProjectAtlasCodexPlugin $codexCommandPath
+        $installedPlugin = $installedInventory.Plugin
         if (-not (Test-ProjectAtlasCodexPluginSourceManifest $installedPlugin $runtimeVersion)) {
             $sourceManifestVersion = Get-ProjectAtlasCodexPluginSourceManifestVersion $installedPlugin
             Write-Warning "Codex ProjectAtlas plugin update failed: source manifest version '$sourceManifestVersion' does not match $runtimeVersion after refresh."
-            Restore-ProjectAtlasCodexMarketplace $codexCommandPath $source $previousRef
             return
         }
+        $updateSucceeded = $true
         Write-Output "Codex ProjectAtlas plugin marketplace updated to $releaseTag."
         Confirm-ProjectAtlasCodexSkillArtifact $codexCommandPath $ExpectedVersion
+        }
+        finally {
+            if (-not $updateSucceeded) {
+                $script:ProjectAtlasCodexPluginUpdatePreservedPriorState = $true
+                $restoreSucceeded = Restore-ProjectAtlasCodexStateSnapshot $stateSnapshot
+            }
+            if ($updateSucceeded -or $restoreSucceeded) {
+                Remove-ProjectAtlasCodexStateSnapshot $stateSnapshot | Out-Null
+            }
+        }
     }
     catch {
+        $script:ProjectAtlasCodexPluginUpdatePreservedPriorState = $true
         Write-Warning "Codex ProjectAtlas plugin update failed: $($_.Exception.Message)"
+    }
+    finally {
+        Exit-ProjectAtlasCodexPluginUpdateLock $updateLock
     }
 }
 

@@ -46,6 +46,8 @@ pub struct RepositoryGraphStagingGuard<'store> {
 const GRAPH_STAGING_MARKER_KEY: &str = "repository_graph_staging";
 /// Current disposable graph-staging marker value.
 const GRAPH_STAGING_MARKER_VALUE: &str = "v1";
+/// Persisted local-resolution status admitted by resolved graph previews.
+const RESOLUTION_STATUS_RESOLVED: &str = "resolved";
 
 /// One bounded page of typed normalized graph rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -376,6 +378,9 @@ pub struct RepositoryGraphAdjacencyContinuation {
     direction: RepositoryGraphDirection,
     /// Optional exact relation family whose stable order produced this keyset.
     relation: Option<GraphRelationKind>,
+    /// Whether the request admitted only exact local resolutions.
+    #[serde(default, skip_serializing_if = "is_default")]
+    resolved_only: bool,
     /// Ordered frontier identity whose result order produced this keyset.
     frontier: Vec<[u8; 32]>,
     /// Zero-based frontier position of the last returned relation.
@@ -1693,6 +1698,76 @@ impl AtlasStore {
         })
     }
 
+    /// Load the highest-degree resolved endpoints for one relation family.
+    ///
+    /// Ranking considers every exact local resolution from the current
+    /// publication while hydrating only the requested bounded endpoint page.
+    /// Self-relations are excluded because they cannot expand a preview.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid limits, cancellation, `SQLite` failure, or
+    /// any corrupt entity row in the complete page.
+    pub fn repository_graph_resolved_relation_hubs(
+        &self,
+        relation: GraphRelationKind,
+        limit: u32,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphPage<GraphEntity>> {
+        if let Some(control) = control {
+            control.check(IndexWorkStage::RepositoryTraversal)?;
+        }
+        let limit_plus_one = validated_limit_plus_one(
+            limit,
+            GraphLimits::MAX_ROWS,
+            "resolved graph hub rows must be nonzero and within the product ceiling",
+        )?;
+        let Some(generation) = self.repository_graph_generation()? else {
+            return Ok(empty_page());
+        };
+        let project =
+            load_project_identity(&self.connection)?.ok_or(DbError::GraphPublicationUnavailable)?;
+        let (scope, kind) = relation_parts(relation);
+        let raw_keys = with_sqlite_read_progress(
+            &self.connection,
+            control,
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                let mut statement = self
+                    .connection
+                    .prepare_cached(resolved_relation_hub_keys_sql())?;
+                let mut rows = statement.query(params![
+                    &project.as_bytes()[..],
+                    scope,
+                    kind,
+                    RESOLUTION_STATUS_RESOLVED,
+                    limit_plus_one,
+                ])?;
+                let mut keys = Vec::new();
+                while let Some(row) = rows.next()? {
+                    keys.push(row.get::<_, Vec<u8>>(0)?);
+                }
+                Ok(keys)
+            },
+        )?;
+        let keys = raw_keys
+            .into_iter()
+            .map(|key| fixed_bytes::<32>("graph_entities.entity_key", key))
+            .collect::<DbResult<Vec<_>>>()?;
+        let mut entities =
+            load_graph_entities_by_digest_metered(self, &keys, project, generation, control, None)?;
+        let ordered = keys
+            .into_iter()
+            .map(|key| {
+                entities.remove(&key).ok_or(DbError::GraphRowShape {
+                    table: "graph_relations",
+                    reason: "ranked resolved endpoint entity is missing",
+                })
+            })
+            .collect::<DbResult<Vec<_>>>()?;
+        page_from_raw(ordered, limit, Ok)
+    }
+
     /// Load a bounded relation page with unique endpoint hydration.
     ///
     /// # Errors
@@ -1967,6 +2042,36 @@ impl AtlasStore {
             .page)
     }
 
+    /// Load one bounded exact-family adjacency page containing only local resolutions.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same fail-closed errors as
+    /// [`Self::repository_graph_adjacency_page_filtered`] and binds the local
+    /// resolution filter to continuation state.
+    pub fn repository_graph_resolved_adjacency_page(
+        &self,
+        frontier: &[GraphEntityKey],
+        direction: RepositoryGraphDirection,
+        relation: GraphRelationKind,
+        continuation: Option<&RepositoryGraphAdjacencyContinuation>,
+        limit: u32,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphAdjacencyPage> {
+        Ok(self
+            .repository_graph_adjacency_page_filtered_by_resolution_bounded(
+                frontier,
+                direction,
+                Some(relation),
+                true,
+                continuation,
+                limit,
+                maximum_repository_graph_read_budget()?,
+                control,
+            )?
+            .page)
+    }
+
     /// Load one family-filtered adjacency page and report exact database work.
     ///
     /// # Errors
@@ -1979,6 +2084,30 @@ impl AtlasStore {
         frontier: &[GraphEntityKey],
         direction: RepositoryGraphDirection,
         relation: Option<GraphRelationKind>,
+        continuation: Option<&RepositoryGraphAdjacencyContinuation>,
+        limit: u32,
+        budget: RepositoryGraphReadBudget,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphAdjacencyReadPage> {
+        self.repository_graph_adjacency_page_filtered_by_resolution_bounded(
+            frontier,
+            direction,
+            relation,
+            false,
+            continuation,
+            limit,
+            budget,
+            control,
+        )
+    }
+
+    /// Load one optionally family- and local-resolution-filtered adjacency page.
+    fn repository_graph_adjacency_page_filtered_by_resolution_bounded(
+        &self,
+        frontier: &[GraphEntityKey],
+        direction: RepositoryGraphDirection,
+        relation: Option<GraphRelationKind>,
+        resolved_only: bool,
         continuation: Option<&RepositoryGraphAdjacencyContinuation>,
         limit: u32,
         budget: RepositoryGraphReadBudget,
@@ -2065,6 +2194,7 @@ impl AtlasStore {
                 || continuation.generation != generation
                 || continuation.direction != direction
                 || continuation.relation != relation
+                || continuation.resolved_only != resolved_only
                 || continuation.frontier != frontier_digests
                 || continuation.frontier_index as usize >= frontier.len())
         {
@@ -2087,12 +2217,21 @@ impl AtlasStore {
             }
             .into());
         }
+        if resolved_only && relation.is_none() {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "resolved graph adjacency requires an exact relation family",
+            }
+            .into());
+        }
 
         let bindings_per_frontier = if relation.is_some() { 4 } else { 2 };
         let mut bindings = Vec::with_capacity(
             active_frontier * bindings_per_frontier + continuation.map_or(2, |_| 5),
         );
         bindings.push(Value::Blob(project.as_bytes().to_vec()));
+        if resolved_only {
+            bindings.push(Value::Text(RESOLUTION_STATUS_RESOLVED.to_string()));
+        }
         for (index, digest) in frontier_digests.iter().enumerate().skip(continuation_index) {
             bindings.push(Value::Blob(digest.to_vec()));
             if let Some(relation) = relation {
@@ -2116,6 +2255,7 @@ impl AtlasStore {
             direction,
             continuation.map(|value| value.frontier_index as usize),
             relation.is_some(),
+            resolved_only,
         );
         let raw = with_sqlite_read_progress(
             &self.connection,
@@ -2140,6 +2280,7 @@ impl AtlasStore {
                 generation,
                 direction,
                 relation,
+                resolved_only,
                 frontier: frontier_digests,
                 frontier_index: last.frontier_index,
                 relation_scope: last.relation.relation_scope.clone(),
@@ -5006,12 +5147,49 @@ fn validate_entity_row_shape(row: &EntityRow) -> DbResult<()> {
     Ok(())
 }
 
+/// Build the key-only endpoint-ranking query used by resolved graph previews.
+fn resolved_relation_hub_keys_sql() -> &'static str {
+    "WITH endpoints(entity_key) AS (
+         SELECT relation.source_entity_key
+           FROM graph_relations AS relation INDEXED BY idx_graph_relations_kind_resolution
+          WHERE relation.project_instance_id = ?1
+            AND relation.relation_scope = ?2
+            AND relation.relation_kind = ?3
+            AND relation.resolution_status = ?4
+            AND relation.target_entity_key IS NOT NULL
+            AND relation.source_entity_key <> relation.target_entity_key
+         UNION ALL
+         SELECT relation.target_entity_key
+           FROM graph_relations AS relation INDEXED BY idx_graph_relations_kind_resolution
+          WHERE relation.project_instance_id = ?1
+            AND relation.relation_scope = ?2
+            AND relation.relation_kind = ?3
+            AND relation.resolution_status = ?4
+            AND relation.target_entity_key IS NOT NULL
+            AND relation.source_entity_key <> relation.target_entity_key
+     ), endpoint_degrees(entity_key, degree) AS (
+         SELECT entity_key, COUNT(*)
+           FROM endpoints
+          GROUP BY entity_key
+     )
+     SELECT entity_key
+       FROM endpoint_degrees
+      ORDER BY endpoint_degrees.degree DESC, endpoint_degrees.entity_key
+      LIMIT ?5"
+}
+
+/// Return whether an optionally serialized graph-request field is its default.
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    value == &T::default()
+}
+
 /// Build one direction-owned batched adjacency statement.
 fn adjacency_relation_sql(
     frontier_count: usize,
     direction: RepositoryGraphDirection,
     continuation_index: Option<usize>,
     relation_filter: bool,
+    resolved_only: bool,
 ) -> String {
     let (key_column, index_name) = match direction {
         RepositoryGraphDirection::Outbound => {
@@ -5021,9 +5199,20 @@ fn adjacency_relation_sql(
             ("target_entity_key", "idx_graph_relations_target_kind")
         }
     };
-    let request = "request(project_instance_id) AS (VALUES (?))";
+    let request = if resolved_only {
+        "request(project_instance_id, resolution_status) AS (VALUES (?, ?))"
+    } else {
+        "request(project_instance_id) AS (VALUES (?))"
+    };
     let relation_filter = if relation_filter {
         "AND relation.relation_scope = ? AND relation.relation_kind = ?"
+    } else {
+        ""
+    };
+    let resolution_filter = if resolved_only {
+        "AND relation.resolution_status = request.resolution_status
+         AND relation.target_entity_key IS NOT NULL
+         AND relation.source_entity_key <> relation.target_entity_key"
     } else {
         ""
     };
@@ -5050,6 +5239,7 @@ fn adjacency_relation_sql(
                       WHERE relation.{key_column} = ?
                         AND relation.project_instance_id = request.project_instance_id
                         {relation_filter}
+                        {resolution_filter}
                         {continuation}
                       ORDER BY relation.relation_scope, relation.relation_kind,
                                relation.relation_key
@@ -7511,6 +7701,522 @@ mod tests {
     }
 
     #[test]
+    fn resolved_relation_hubs_rank_the_complete_family_through_the_resolution_index()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("resolved-relation-hubs");
+        fs::create_dir_all(&root)?;
+        let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), &root)?;
+        let fixture = publish_fixture(&mut store, "resolved-relation-hubs")?;
+
+        let calls = store.repository_graph_resolved_relation_hubs(
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            2,
+            None,
+        )?;
+        let expected = BTreeSet::from([
+            fixture.relations[0].source().digest().to_string(),
+            fixture.relations[0]
+                .resolution()
+                .resolved_target()
+                .ok_or_else(|| io::Error::other("resolved fixture target is missing"))?
+                .digest()
+                .to_string(),
+        ]);
+        let actual = calls
+            .rows
+            .iter()
+            .map(|entity| entity.key().digest().to_string())
+            .collect::<BTreeSet<_>>();
+        require_eq(&actual, &expected, "resolved relation hubs")?;
+        require_eq(&calls.truncated, &false, "resolved hub truncation")?;
+
+        let one = store.repository_graph_resolved_relation_hubs(
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            1,
+            None,
+        )?;
+        require_eq(&one.rows.len(), &1, "bounded resolved hub count")?;
+        require_eq(&one.truncated, &true, "bounded resolved hub overflow")?;
+        let unresolved = store.repository_graph_resolved_relation_hubs(
+            GraphRelationKind::Extended(ExtendedRelationKind::Configures),
+            2,
+            None,
+        )?;
+        require_eq(&unresolved.rows.len(), &0, "unresolved hub exclusion")?;
+        let external = store.repository_graph_resolved_relation_hubs(
+            GraphRelationKind::Legacy(RelationKind::DependsOn),
+            2,
+            None,
+        )?;
+        require_eq(&external.rows.len(), &0, "external hub exclusion")?;
+
+        let invalid = require_db_error(
+            store.repository_graph_resolved_relation_hubs(
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                0,
+                None,
+            ),
+            "zero resolved hub limit succeeded",
+        )?;
+        require(
+            matches!(
+                invalid,
+                DbError::GraphContract(GraphContractError::InvalidLimits { .. })
+            ),
+            &format!("zero resolved hub limit returned {invalid}"),
+        )?;
+
+        let mut statement = store.connection.prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            resolved_relation_hub_keys_sql()
+        ))?;
+        let details = statement
+            .query_map(
+                params![
+                    &fixture.project.as_bytes()[..],
+                    "legacy",
+                    "calls",
+                    RESOLUTION_STATUS_RESOLVED,
+                    3_i64,
+                ],
+                |row| row.get::<_, String>(3),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        require(
+            details
+                .iter()
+                .filter(|detail| detail.contains("idx_graph_relations_kind_resolution"))
+                .count()
+                >= 2
+                && details
+                    .iter()
+                    .all(|detail| !detail.contains("SCAN graph_relations"))
+                && details
+                    .iter()
+                    .all(|detail| !detail.contains("graph_entities")),
+            &format!(
+                "resolved hub ranking did not limit indexed endpoint keys before hydration: {details:?}"
+            ),
+        )?;
+        let cancellation = projectatlas_core::IndexCancellation::new();
+        cancellation.cancel();
+        let cancelled = IndexWorkControl::new(cancellation, None);
+        let error = require_db_error(
+            store.repository_graph_resolved_relation_hubs(
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                2,
+                Some(&cancelled),
+            ),
+            "cancelled resolved hub ranking succeeded",
+        )?;
+        require(
+            matches!(
+                error,
+                DbError::IndexWork(projectatlas_core::IndexWorkFailure::Cancelled {
+                    stage: IndexWorkStage::RepositoryTraversal
+                })
+            ),
+            &format!("resolved hub cancellation was not typed: {error}"),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_preview_reads_bound_work_and_reject_corruption_when_paged()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("resolved-preview-bounds");
+        fs::create_dir_all(&root)?;
+        let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), &root)?;
+        let fixture =
+            publish_detailed_relation_trace_fixture(&mut store, "resolved-preview-bounds")?;
+        let source = fixture.source;
+        let calls = GraphRelationKind::Legacy(RelationKind::Calls);
+        let (_, hub_statements) = trace_statements(&mut store, |store| {
+            store.repository_graph_resolved_relation_hubs(calls, 1, None)
+        })?;
+        require(
+            hub_statements.iter().all(|statement| {
+                !statement.contains("ORDER BY relation.relation_key")
+                    && !statement.contains("relation.canonical_identity")
+            }),
+            &format!("resolved hub lookup reconstructed omitted relation rows: {hub_statements:?}"),
+        )?;
+
+        let budget = RepositoryGraphReadBudget::new(
+            1,
+            1,
+            RepositoryGraphReadBudget::MAX_DECODED_BYTES,
+            3,
+            2,
+        )?;
+        let (first, adjacency_statements) = trace_statements(&mut store, |store| {
+            store.repository_graph_adjacency_page_filtered_by_resolution_bounded(
+                &[source.key().clone()],
+                RepositoryGraphDirection::Outbound,
+                Some(calls),
+                true,
+                None,
+                1,
+                budget,
+                None,
+            )
+        })?;
+        require(
+            first.page.truncated
+                && first.page.rows.len() == 1
+                && first.page.continuation.is_some()
+                && first.work.requested_rows == 1
+                && first.work.returned_rows == 1
+                && first.work.hydrated_entities <= 3
+                && adjacency_statements.iter().all(|statement| {
+                    !statement.contains("ORDER BY relation.relation_key")
+                        || statement.contains("UNION ALL")
+                }),
+            &format!(
+                "resolved adjacency exceeded its bounded evidence query: work={:?}, statements={adjacency_statements:?}",
+                first.work
+            ),
+        )?;
+
+        let expired = IndexWorkControl::with_deadline(
+            projectatlas_core::IndexCancellation::new(),
+            Instant::now(),
+        );
+        for error in [
+            require_db_error(
+                store.repository_graph_resolved_relation_hubs(calls, 1, Some(&expired)),
+                "expired resolved hub lookup succeeded",
+            )?,
+            require_db_error(
+                store.repository_graph_resolved_adjacency_page(
+                    &[source.key().clone()],
+                    RepositoryGraphDirection::Outbound,
+                    calls,
+                    None,
+                    1,
+                    Some(&expired),
+                ),
+                "expired resolved adjacency lookup succeeded",
+            )?,
+        ] {
+            require(
+                matches!(
+                    error,
+                    DbError::IndexWork(projectatlas_core::IndexWorkFailure::DeadlineExceeded {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    })
+                ),
+                &format!("resolved preview deadline was not typed: {error}"),
+            )?;
+        }
+
+        let continuation = first
+            .page
+            .continuation
+            .ok_or_else(|| io::Error::other("resolved preview continuation is missing"))?;
+        let mut relations = fixture.relations;
+        relations.sort_by(|left, right| left.key().digest().cmp(right.key().digest()));
+        let corrupt = relations
+            .get(2)
+            .ok_or_else(|| io::Error::other("late-page corruption relation is missing"))?;
+        let corrupt_key = corrupt.key().digest_bytes()?;
+        store
+            .connection
+            .execute_batch("PRAGMA ignore_check_constraints = ON")?;
+        store.connection.execute(
+            "UPDATE graph_relations
+                SET canonical_identity = 'contradictory late-page relation'
+              WHERE relation_key = ?1",
+            [&corrupt_key[..]],
+        )?;
+        let healthy_first = store.repository_graph_resolved_adjacency_page(
+            &[source.key().clone()],
+            RepositoryGraphDirection::Outbound,
+            calls,
+            None,
+            1,
+            None,
+        )?;
+        require(
+            healthy_first.rows.len() == 1 && healthy_first.continuation.is_some(),
+            "corruption outside the bounded evidence page hid the healthy first page",
+        )?;
+        let error = require_db_error(
+            store.repository_graph_resolved_adjacency_page(
+                &[source.key().clone()],
+                RepositoryGraphDirection::Outbound,
+                calls,
+                Some(&continuation),
+                1,
+                None,
+            ),
+            "late-page corrupt relation returned a partial adjacency page",
+        )?;
+        require(
+            matches!(
+                error,
+                DbError::GraphContract(GraphContractError::StableKeyCollision { .. })
+            ),
+            &format!("late-page corrupt relation returned {error}"),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_preview_reads_reject_selected_relation_and_endpoint_corruption()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("resolved-preview-corruption");
+        fs::create_dir_all(&root)?;
+        let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), &root)?;
+        let fixture =
+            publish_detailed_relation_trace_fixture(&mut store, "resolved-preview-corruption")?;
+        let source = fixture.source;
+        let mut relations = fixture.relations;
+
+        let calls = GraphRelationKind::Legacy(RelationKind::Calls);
+        let healthy_hubs = store.repository_graph_resolved_relation_hubs(calls, 1, None)?;
+        require(
+            healthy_hubs.truncated
+                && healthy_hubs.rows.len() == 1
+                && healthy_hubs.rows[0].key() == source.key(),
+            "healthy corruption fixture did not rank its source hub first",
+        )?;
+        let healthy_adjacency = store.repository_graph_resolved_adjacency_page(
+            &[source.key().clone()],
+            RepositoryGraphDirection::Outbound,
+            calls,
+            None,
+            1,
+            None,
+        )?;
+        require(
+            healthy_adjacency.truncated && healthy_adjacency.rows.len() == 1,
+            "healthy corruption fixture did not retain its adjacency sentinel",
+        )?;
+
+        relations.sort_by(|left, right| left.key().digest().cmp(right.key().digest()));
+        let top = relations
+            .first()
+            .ok_or_else(|| io::Error::other("top corruption relation is missing"))?;
+        let source_key = source.key().digest_bytes()?;
+        let top_key = top.key().digest_bytes()?;
+        let top_target_key = top
+            .resolution()
+            .resolved_target()
+            .ok_or_else(|| io::Error::other("top corruption target is missing"))?;
+        let top_target = top_target_key.digest_bytes()?;
+        store.connection.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             PRAGMA ignore_check_constraints = ON;",
+        )?;
+        store.connection.execute(
+            "UPDATE graph_relations
+                SET canonical_identity = 'contradictory visible relation identity'
+              WHERE relation_key = ?1",
+            [&top_key[..]],
+        )?;
+        let visible_identity = require_db_error(
+            store.repository_graph_resolved_adjacency_page(
+                &[source.key().clone()],
+                RepositoryGraphDirection::Outbound,
+                calls,
+                None,
+                1,
+                None,
+            ),
+            "visible canonical-identity corruption returned an adjacency page",
+        )?;
+        require(
+            matches!(
+                visible_identity,
+                DbError::GraphContract(GraphContractError::StableKeyCollision { .. })
+            ),
+            &format!("visible canonical-identity corruption returned {visible_identity}"),
+        )?;
+        store.connection.execute(
+            "UPDATE graph_relations SET canonical_identity = ?1 WHERE relation_key = ?2",
+            params![top.key().canonical_identity(), &top_key[..]],
+        )?;
+
+        let visible_wrong_digest = [0_u8; 32];
+        store.connection.execute(
+            "UPDATE graph_relations SET relation_key = ?1 WHERE relation_key = ?2",
+            params![&visible_wrong_digest[..], &top_key[..]],
+        )?;
+        let visible_digest = require_db_error(
+            store.repository_graph_resolved_adjacency_page(
+                &[source.key().clone()],
+                RepositoryGraphDirection::Outbound,
+                calls,
+                None,
+                1,
+                None,
+            ),
+            "visible well-typed wrong digest returned an adjacency page",
+        )?;
+        require(
+            matches!(
+                visible_digest,
+                DbError::GraphContract(GraphContractError::InvalidStableKeyDigest)
+            ),
+            &format!("visible well-typed wrong digest returned {visible_digest}"),
+        )?;
+        store.connection.execute(
+            "UPDATE graph_relations SET relation_key = ?1 WHERE canonical_identity = ?2",
+            params![&top_key[..], top.key().canonical_identity()],
+        )?;
+
+        store.connection.execute(
+            "UPDATE graph_entities SET canonical_identity = '' WHERE entity_key = ?1",
+            [&source_key[..]],
+        )?;
+        let top_hub_endpoint = require_db_error(
+            store.repository_graph_resolved_relation_hubs(calls, 1, None),
+            "top-ranked corrupt hub endpoint returned a partial page",
+        )?;
+        require(
+            matches!(top_hub_endpoint, DbError::GraphContract(_)),
+            &format!("top-ranked corrupt hub endpoint returned {top_hub_endpoint}"),
+        )?;
+        store.connection.execute(
+            "UPDATE graph_entities SET canonical_identity = ?1 WHERE entity_key = ?2",
+            params![source.key().canonical_identity(), &source_key[..]],
+        )?;
+
+        store.connection.execute(
+            "UPDATE graph_entities SET canonical_identity = '' WHERE entity_key = ?1",
+            [&top_target[..]],
+        )?;
+        let top_adjacency_endpoint = require_db_error(
+            store.repository_graph_resolved_adjacency_page(
+                &[source.key().clone()],
+                RepositoryGraphDirection::Outbound,
+                calls,
+                None,
+                1,
+                None,
+            ),
+            "top-page corrupt adjacency endpoint returned a partial page",
+        )?;
+        require(
+            matches!(top_adjacency_endpoint, DbError::GraphContract(_)),
+            &format!("top-page corrupt adjacency endpoint returned {top_adjacency_endpoint}"),
+        )?;
+        store.connection.execute(
+            "UPDATE graph_entities SET canonical_identity = ?1 WHERE entity_key = ?2",
+            params![top_target_key.canonical_identity(), &top_target[..]],
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_adjacency_filters_self_edges_before_limits_and_binds_its_cursor()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("resolved-adjacency-self-edge");
+        fs::create_dir_all(&root)?;
+        let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), &root)?;
+        let fixture = publish_fixture(&mut store, "resolved-adjacency-self-edge")?;
+        let generation = IndexGeneration::new(1);
+        let calls = GraphRelationKind::Legacy(RelationKind::Calls);
+        let mut selected = None;
+        for index in 0..1_000 {
+            let source_name = format!("self_edge_source_{index}");
+            let target_name = format!("self_edge_target_{index}");
+            let symbol = |name: &str| -> Result<GraphEntity, Box<dyn Error>> {
+                Ok(GraphEntity::new(
+                    fixture.project,
+                    EntitySelector::Symbol {
+                        symbol: SymbolSelector {
+                            file: RepositoryFilePath::new(Path::new("src/Äuth.rs"))?,
+                            name: GraphIdentityText::new(name)?,
+                            kind: SymbolKind::Function,
+                            parent: None,
+                            signature: GraphIdentityText::new(format!("{name}()"))?,
+                        },
+                    },
+                    generation,
+                )?)
+            };
+            let source = symbol(&source_name)?;
+            let target = symbol(&target_name)?;
+            let self_relation = LogicalRelation::new(
+                &source,
+                calls,
+                RelationResolution::resolved(&source)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?;
+            let useful = LogicalRelation::new(
+                &source,
+                calls,
+                RelationResolution::resolved(&target)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?;
+            if self_relation.key().digest() < useful.key().digest() {
+                selected = Some((source, target, self_relation, useful));
+                break;
+            }
+        }
+        let (source, target, self_relation, useful) = selected
+            .ok_or_else(|| io::Error::other("could not order a self edge before a useful edge"))?;
+        insert_entities(&store.connection, fixture.project, [&source, &target])?;
+        insert_relations(
+            &store.connection,
+            fixture.project,
+            &[self_relation.clone(), useful.clone()],
+        )?;
+
+        let frontier = [source.key().clone()];
+        let first = store.repository_graph_resolved_adjacency_page(
+            &frontier,
+            RepositoryGraphDirection::Outbound,
+            calls,
+            None,
+            1,
+            None,
+        )?;
+        require(
+            first.rows.len() == 1
+                && first.rows[0].detail.relation.key() == useful.key()
+                && first.rows[0].detail.relation.key() != self_relation.key(),
+            "self relation consumed the resolved adjacency limit before a useful edge",
+        )?;
+
+        let cancellation = projectatlas_core::IndexCancellation::new();
+        cancellation.cancel();
+        let cancelled = IndexWorkControl::new(cancellation, None);
+        let cancellation_error = require_db_error(
+            store.repository_graph_resolved_adjacency_page(
+                &frontier,
+                RepositoryGraphDirection::Outbound,
+                calls,
+                None,
+                1,
+                Some(&cancelled),
+            ),
+            "cancelled resolved adjacency succeeded",
+        )?;
+        require(
+            matches!(
+                cancellation_error,
+                DbError::IndexWork(projectatlas_core::IndexWorkFailure::Cancelled {
+                    stage: IndexWorkStage::RepositoryTraversal
+                })
+            ),
+            &format!("resolved adjacency cancellation was not typed: {cancellation_error}"),
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn repository_graph_staging_checkpoints_ownership_before_graph_writes()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -9228,6 +9934,73 @@ mod tests {
             !filtered.truncated && filtered.continuation.is_none(),
             "filtered adjacency unexpectedly truncated its complete family",
         )?;
+        let resolved = store.repository_graph_resolved_adjacency_page(
+            &outbound_frontier,
+            RepositoryGraphDirection::Outbound,
+            calls,
+            None,
+            10,
+            None,
+        )?;
+        require_eq(
+            &resolved
+                .rows
+                .iter()
+                .map(|row| row.detail.relation.clone())
+                .collect::<Vec<_>>(),
+            &expected_calls,
+            "resolved adjacency versus exact local family selection",
+        )?;
+        let unresolved = store.repository_graph_resolved_adjacency_page(
+            &outbound_frontier,
+            RepositoryGraphDirection::Outbound,
+            GraphRelationKind::Extended(ExtendedRelationKind::Configures),
+            None,
+            10,
+            None,
+        )?;
+        require_eq(
+            &unresolved.rows.len(),
+            &0,
+            "resolved adjacency retained unresolved rows",
+        )?;
+        let external_only = store.repository_graph_resolved_adjacency_page(
+            &outbound_frontier,
+            RepositoryGraphDirection::Outbound,
+            GraphRelationKind::Legacy(RelationKind::DependsOn),
+            None,
+            10,
+            None,
+        )?;
+        require_eq(
+            &external_only.rows.len(),
+            &0,
+            "resolved adjacency retained external rows",
+        )?;
+        let mut resolved_cursor = continuation.clone();
+        resolved_cursor.relation = Some(calls);
+        resolved_cursor.resolved_only = true;
+        let encoded = serde_json::to_string(&resolved_cursor)?;
+        let decoded: RepositoryGraphAdjacencyContinuation = serde_json::from_str(&encoded)?;
+        require(
+            encoded.contains("\"resolved_only\":true") && decoded == resolved_cursor,
+            "resolved adjacency cursor did not preserve its mode through serde",
+        )?;
+        let resolved_mode_mismatch = require_db_error(
+            store.repository_graph_adjacency_page_filtered(
+                &outbound_frontier,
+                RepositoryGraphDirection::Outbound,
+                Some(calls),
+                Some(&decoded),
+                1,
+                None,
+            ),
+            "resolved adjacency cursor was accepted by ordinary adjacency",
+        )?;
+        require(
+            matches!(resolved_mode_mismatch, DbError::GraphContract(_)),
+            &format!("resolved cursor mismatch returned {resolved_mode_mismatch}"),
+        )?;
 
         let inbound_frontier = vec![symbol.key().clone(), external.key().clone()];
         let inbound = store.repository_graph_adjacency_page(
@@ -9264,7 +10037,7 @@ mod tests {
             for continuation_index in [None, Some(0)] {
                 let sql = format!(
                     "EXPLAIN QUERY PLAN {}",
-                    adjacency_relation_sql(2, direction, continuation_index, false)
+                    adjacency_relation_sql(2, direction, continuation_index, false, false)
                 );
                 let mut statement = store.connection.prepare(&sql)?;
                 let mut bindings = vec![Value::Blob(fixture.project.as_bytes().to_vec())];
@@ -9301,7 +10074,7 @@ mod tests {
             let (scope, kind) = relation_parts(calls);
             let filtered_sql = format!(
                 "EXPLAIN QUERY PLAN {}",
-                adjacency_relation_sql(2, direction, None, true)
+                adjacency_relation_sql(2, direction, None, true, false)
             );
             let mut filtered_statement = store.connection.prepare(&filtered_sql)?;
             let filtered_bindings = [
@@ -9330,6 +10103,41 @@ mod tests {
                         .all(|detail| !detail.contains("SCAN relation")),
                 &format!(
                     "filtered {direction:?} adjacency plan did not own its index: {filtered_details:?}"
+                ),
+            )?;
+
+            let resolved_sql = format!(
+                "EXPLAIN QUERY PLAN {}",
+                adjacency_relation_sql(2, direction, None, true, true)
+            );
+            let mut resolved_statement = store.connection.prepare(&resolved_sql)?;
+            let resolved_bindings = [
+                Value::Blob(fixture.project.as_bytes().to_vec()),
+                Value::Text(RESOLUTION_STATUS_RESOLVED.to_string()),
+                Value::Blob(source.key().digest_bytes()?.to_vec()),
+                Value::Text(scope.to_string()),
+                Value::Text(kind.to_string()),
+                Value::Integer(11),
+                Value::Blob(symbol.key().digest_bytes()?.to_vec()),
+                Value::Text(scope.to_string()),
+                Value::Text(kind.to_string()),
+                Value::Integer(11),
+                Value::Integer(11),
+            ];
+            let resolved_details = resolved_statement
+                .query_map(params_from_iter(resolved_bindings.iter()), |row| {
+                    row.get::<_, String>(3)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            require(
+                resolved_details
+                    .iter()
+                    .any(|detail| detail.contains(expected_index))
+                    && resolved_details
+                        .iter()
+                        .all(|detail| !detail.contains("SCAN relation")),
+                &format!(
+                    "resolved {direction:?} adjacency plan did not own its index: {resolved_details:?}"
                 ),
             )?;
         }
@@ -11014,6 +11822,7 @@ mod tests {
             generation,
             direction: RepositoryGraphDirection::Outbound,
             relation: None,
+            resolved_only: false,
             frontier: vec![source_digest, external_digest],
             frontier_index: 1,
             relation_scope: String::new(),
@@ -11052,6 +11861,7 @@ mod tests {
             generation,
             direction: RepositoryGraphDirection::Outbound,
             relation: None,
+            resolved_only: false,
             frontier: vec![source_digest],
             frontier_index: 0,
             relation_scope: "legacy".to_string(),

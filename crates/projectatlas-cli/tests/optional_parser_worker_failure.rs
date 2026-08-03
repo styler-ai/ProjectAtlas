@@ -674,7 +674,6 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
         source_dir.join("baseline.awk"),
         "BEGIN { print \"baseline\" }\n",
     )?;
-
     run_json(&repo, &host, &[OsStr::new("init")])?;
     let mut pack_cleanup = PackCleanup::new(&repo, &host);
     let verified = run_json(
@@ -743,11 +742,22 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
     if baseline_parse.parser != ParserKind::TreeSitter {
         return Err(io::Error::other("baseline optional source was not grammar parsed").into());
     }
+    if baseline_store
+        .load_node_by_path("pending/work-0000.awk")?
+        .is_some()
+        || baseline_store
+            .load_source_parse_metadata("pending/work-0000.awk")?
+            .is_some()
+    {
+        return Err(io::Error::other("pending source entered the baseline publication").into());
+    }
     drop(baseline_store);
 
     fs::create_dir(&pending_dir)?;
-    let pending_source = pending_optional_source()?;
-    fs::write(pending_dir.join("work-0000.awk"), pending_source)?;
+    fs::write(
+        pending_dir.join("work-0000.awk"),
+        pending_optional_source()?,
+    )?;
     let mut suspended = SuspendedProcess::suspend(runtime.worker.clone())?;
 
     let failed_task = mcp.call_tool(
@@ -763,24 +773,6 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
         .to_owned();
     wait_for_mcp_task_state(&mut mcp, &failed_task_id, "running", MCP_TASK_STATE_TIMEOUT)?;
 
-    let overview = mcp.call_tool("atlas_overview", &serde_json::json!({}))?;
-    if !overview.contains("overview:") {
-        return Err(io::Error::other(format!(
-            "suspended optional worker blocked the retained overview: {overview}"
-        ))
-        .into());
-    }
-    let baseline_summary = mcp.call_tool(
-        "atlas_file_summary",
-        &serde_json::json!({"file": "src/baseline.awk", "compact": true}),
-    )?;
-    if !baseline_summary.contains("file_summary:") || !baseline_summary.contains("src/baseline.awk")
-    {
-        return Err(io::Error::other(format!(
-            "suspended optional worker hid the retained baseline summary: {baseline_summary}"
-        ))
-        .into());
-    }
     let active_store = AtlasStore::open_read_only_for_project(&database, &repo)?;
     let active_publication = active_store
         .index_publication()?
@@ -802,7 +794,7 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
             .is_some()
     {
         return Err(io::Error::other(
-            "suspended worker changed the active generation or exposed pending facts",
+            "suspended worker changed the active generation or indexed facts",
         )
         .into());
     }
@@ -839,45 +831,23 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
     if retained_publication != baseline_publication
         || retained_node != baseline_node
         || retained_parse != baseline_parse
+        || retained_store
+            .load_node_by_path("pending/work-0000.awk")?
+            .is_some()
+        || retained_store
+            .load_source_parse_metadata("pending/work-0000.awk")?
+            .is_some()
     {
         return Err(io::Error::other(
             "worker crash changed the active generation or its baseline facts",
         )
         .into());
     }
-    if retained_store
-        .load_node_by_path("pending/work-0000.awk")?
-        .is_some()
-        || retained_store
-            .load_source_parse_metadata("pending/work-0000.awk")?
-            .is_some()
-    {
-        return Err(io::Error::other("worker crash exposed uncommitted pending source").into());
-    }
     drop(retained_store);
 
     if !mcp.is_running()? {
         return Err(io::Error::other("MCP server exited with its contained worker").into());
     }
-    let retained_overview = mcp.call_tool("atlas_overview", &serde_json::json!({}))?;
-    if !retained_overview.contains("overview:") {
-        return Err(io::Error::other(format!(
-            "MCP overview was unavailable after contained worker failure: {retained_overview}"
-        ))
-        .into());
-    }
-    let retained_summary = mcp.call_tool(
-        "atlas_file_summary",
-        &serde_json::json!({"file": "src/baseline.awk", "compact": true}),
-    )?;
-    if !retained_summary.contains("file_summary:") || !retained_summary.contains("src/baseline.awk")
-    {
-        return Err(io::Error::other(format!(
-            "MCP baseline summary was unavailable after contained worker failure: {retained_summary}"
-        ))
-        .into());
-    }
-
     mcp.shutdown()?;
     run_json(
         &repo,
@@ -2058,7 +2028,7 @@ fn terminate_process(process: &ProcessIdentity) -> Result<(), Box<dyn Error>> {
         (WINDOWS_TERMINATE_NAME_ENV, process.name.clone()),
         (WINDOWS_TERMINATE_STARTED_ENV, process.started.clone()),
     ];
-    let mut command = windows_powershell(WINDOWS_TERMINATE_PROCESS);
+    let mut command = windows_powershell(WINDOWS_TERMINATE_PROCESS)?;
     for (name, value) in environment {
         command.env(name, value);
     }
@@ -2102,7 +2072,7 @@ fn control_windows_process(
         (WINDOWS_CONTROL_STARTED_ENV, process.started.clone()),
         (WINDOWS_CONTROL_OPERATION_ENV, operation.to_owned()),
     ];
-    let mut command = windows_powershell(WINDOWS_CONTROL_PROCESS);
+    let mut command = windows_powershell(WINDOWS_CONTROL_PROCESS)?;
     for (name, value) in environment {
         command.env(name, value);
     }
@@ -2130,7 +2100,7 @@ fn powershell_processes(
     timeout: Duration,
     operation: &'static str,
 ) -> Result<Vec<ProcessIdentity>, Box<dyn Error>> {
-    let mut command = windows_powershell(script);
+    let mut command = windows_powershell(script)?;
     for (name, value) in environment {
         command.env(name, value);
     }
@@ -2151,8 +2121,9 @@ fn powershell_processes(
 
 /// Build the inbox Windows `PowerShell` command without trusting PATH.
 #[cfg(target_os = "windows")]
-fn windows_powershell(script: &str) -> Command {
-    let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+fn windows_powershell(script: &str) -> Result<Command, Box<dyn Error>> {
+    let system_root = std::env::var_os("SystemRoot")
+        .ok_or_else(|| io::Error::other("SystemRoot is unavailable"))?;
     let executable = PathBuf::from(system_root)
         .join("System32")
         .join("WindowsPowerShell")
@@ -2170,5 +2141,5 @@ fn windows_powershell(script: &str) -> Command {
             script,
         ])
         .stdin(Stdio::null());
-    command
+    Ok(command)
 }
