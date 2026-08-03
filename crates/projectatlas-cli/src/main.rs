@@ -4636,6 +4636,7 @@ fn load_token_atlas_relations(
     const ADJACENCY_ROUNDS: usize = 2;
     const ADJACENCY_FRONTIER_MAX: usize = 128;
     const SEEDS_PER_RELATION_FAMILY: usize = 4;
+    const FIRST_ROUND_ROWS_PER_SEED: usize = 16;
 
     let network_relation_kinds = GraphRelationKind::ALL
         .into_iter()
@@ -4643,7 +4644,8 @@ fn load_token_atlas_relations(
         .collect::<Vec<_>>();
     let mut relations = Vec::new();
     let mut adjacency_relation_kinds = Vec::new();
-    let mut seeds = BTreeMap::new();
+    let mut seeds = Vec::new();
+    let mut seen = BTreeSet::new();
     let mut truncated = false;
     for &relation in &network_relation_kinds {
         let Ok(page) = store.repository_graph_resolved_relation_hubs(
@@ -4658,15 +4660,13 @@ fn load_token_atlas_relations(
         }
         truncated |= page.truncated;
         for seed in page.rows {
-            seeds.insert(seed.key().digest().to_string(), seed.key().clone());
+            if seen.insert(seed.key().digest().to_string()) {
+                seeds.push(seed.key().clone());
+            }
         }
     }
-    let mut frontier = seeds.into_values().collect::<Vec<_>>();
-    let mut seen = frontier
-        .iter()
-        .map(|seed| seed.digest().to_string())
-        .collect::<BTreeSet<_>>();
-    for _ in 0..ADJACENCY_ROUNDS {
+    let mut frontier = seeds;
+    for round in 0..ADJACENCY_ROUNDS {
         if frontier.is_empty() {
             break;
         }
@@ -4686,28 +4686,47 @@ fn load_token_atlas_relations(
                 }
                 let remaining_families = adjacency_relation_kinds.len() - index;
                 let family_limit = remaining_rows.div_ceil(remaining_families);
-                let Ok(page) = store.repository_graph_resolved_adjacency_page(
-                    &frontier,
-                    direction,
-                    relation_kind,
-                    None,
-                    u32::try_from(family_limit).unwrap_or(1),
-                    Some(control),
-                ) else {
-                    return None;
+                let frontier_batches = if round == 0 {
+                    frontier.iter().map(std::slice::from_ref).collect()
+                } else {
+                    vec![frontier.as_slice()]
                 };
-                truncated |= page.truncated;
-                remaining_rows = remaining_rows.saturating_sub(page.rows.len());
-                for row in page.rows {
-                    let relation = row.detail.relation;
-                    if let Some(target) = relation.resolution().resolved_target() {
-                        for endpoint in [relation.source(), target] {
-                            if seen.insert(endpoint.digest().to_string()) {
-                                next.insert(endpoint.digest().to_string(), endpoint.clone());
+                let mut family_rows = family_limit;
+                let mut remaining_batches = frontier_batches.len();
+                for batch in frontier_batches {
+                    if family_rows == 0 {
+                        truncated = true;
+                        break;
+                    }
+                    let mut batch_limit = family_rows.div_ceil(remaining_batches);
+                    if round == 0 {
+                        batch_limit = batch_limit.min(FIRST_ROUND_ROWS_PER_SEED);
+                    }
+                    let Ok(page) = store.repository_graph_resolved_adjacency_page(
+                        batch,
+                        direction,
+                        relation_kind,
+                        None,
+                        u32::try_from(batch_limit).unwrap_or(1),
+                        Some(control),
+                    ) else {
+                        return None;
+                    };
+                    remaining_batches -= 1;
+                    truncated |= page.truncated;
+                    family_rows = family_rows.saturating_sub(page.rows.len());
+                    remaining_rows = remaining_rows.saturating_sub(page.rows.len());
+                    for row in page.rows {
+                        let relation = row.detail.relation;
+                        if let Some(target) = relation.resolution().resolved_target() {
+                            for endpoint in [relation.source(), target] {
+                                if seen.insert(endpoint.digest().to_string()) {
+                                    next.insert(endpoint.digest().to_string(), endpoint.clone());
+                                }
                             }
                         }
+                        relations.push(relation);
                     }
-                    relations.push(relation);
                 }
             }
         }
@@ -6030,6 +6049,8 @@ mod tests {
         const UNRESOLVED_PREFIX_ROWS: usize = 129;
         const BRANCHES: usize = 16;
         const LEAVES_PER_BRANCH: usize = 3;
+        const DENSE_HUBS: usize = 2;
+        const DENSE_LEAVES_PER_HUB: usize = 300;
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("token-atlas-loader");
         fs::create_dir_all(root.join("src"))?;
@@ -6070,6 +6091,22 @@ mod tests {
         };
         let source = add_file_entity("src/source.rs".to_string())?;
         let mut resolved_calls = Vec::new();
+        let mut dense_hubs = Vec::new();
+        for hub_index in 0..DENSE_HUBS {
+            let hub = add_file_entity(format!("src/dense-{hub_index}-hub.rs"))?;
+            for leaf in 0..DENSE_LEAVES_PER_HUB {
+                let leaf = add_file_entity(format!("src/dense-{hub_index}-leaf-{leaf:03}.rs"))?;
+                resolved_calls.push(LogicalRelation::new(
+                    &hub,
+                    GraphRelationKind::Legacy(RelationKind::Calls),
+                    RelationResolution::resolved(&leaf)?,
+                    ConfidenceClass::Exact,
+                    Completeness::Complete,
+                    generation,
+                )?);
+            }
+            dense_hubs.push(hub);
+        }
         for branch in 0..BRANCHES {
             let branch_root = add_file_entity(format!("src/branch-{branch:02}-root.rs"))?;
             resolved_calls.push(LogicalRelation::new(
@@ -6201,6 +6238,17 @@ mod tests {
                 "token atlas retained unresolved or containment relations",
             )
             .into());
+        }
+        for hub in &dense_hubs {
+            if !relations
+                .iter()
+                .any(|relation| relation.source() == hub.key())
+            {
+                return Err(io::Error::other(
+                    "token atlas adjacency budget omitted a ranked dense hub",
+                )
+                .into());
+            }
         }
         if !relations
             .iter()
