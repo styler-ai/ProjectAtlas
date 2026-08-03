@@ -4687,11 +4687,7 @@ fn load_token_atlas_relations(
                 }
                 let remaining_families = adjacency_relation_kinds.len() - index;
                 let family_limit = remaining_rows.div_ceil(remaining_families);
-                let frontier_batches = if round == 0 {
-                    frontier.iter().map(std::slice::from_ref).collect()
-                } else {
-                    vec![frontier.as_slice()]
-                };
+                let frontier_batches: Vec<_> = frontier.iter().map(std::slice::from_ref).collect();
                 let mut family_rows = family_limit;
                 let mut remaining_batches = frontier_batches.len();
                 for batch in frontier_batches {
@@ -6022,10 +6018,11 @@ mod tests {
     fn token_atlas_loader_ranks_resolved_hubs_before_bounded_rendering()
     -> Result<(), Box<dyn Error>> {
         const UNRESOLVED_PREFIX_ROWS: usize = 129;
-        const BRANCHES: usize = 16;
+        const BRANCHES: usize = 15;
         const LEAVES_PER_BRANCH: usize = 3;
-        const DENSE_HUBS: usize = 2;
-        const DENSE_LEAVES_PER_HUB: usize = 300;
+        const DENSE_HUBS: usize = 4;
+        const DENSE_LEAVES_PER_HUB: usize = 200;
+        const ADVERSARY_LEAVES: usize = 128;
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("token-atlas-loader");
         fs::create_dir_all(root.join("src"))?;
@@ -6082,6 +6079,15 @@ mod tests {
             }
             dense_hubs.push(hub);
         }
+        resolved_calls.push(LogicalRelation::new(
+            &source,
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            RelationResolution::resolved(&dense_hubs[0])?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )?);
+        let mut branch_roots = Vec::with_capacity(BRANCHES);
         for branch in 0..BRANCHES {
             let branch_root = add_file_entity(format!("src/branch-{branch:02}-root.rs"))?;
             resolved_calls.push(LogicalRelation::new(
@@ -6092,6 +6098,7 @@ mod tests {
                 Completeness::Complete,
                 generation,
             )?);
+            branch_roots.push(branch_root.clone());
             let mut leaves = Vec::new();
             for leaf in 0..LEAVES_PER_BRANCH {
                 let entity = add_file_entity(format!("src/branch-{branch:02}-leaf-{leaf}.rs"))?;
@@ -6115,6 +6122,26 @@ mod tests {
                     generation,
                 )?);
             }
+        }
+        branch_roots.sort_by_key(|branch| branch.key().digest().to_string());
+        let adversary_branch = &branch_roots[0];
+        let later_branch = &branch_roots[1];
+        let later_branch_edge = resolved_calls
+            .iter()
+            .filter(|relation| relation.source() == later_branch.key())
+            .min_by_key(|relation| relation.key().digest().to_string())
+            .cloned()
+            .ok_or("later branch edge fixture is missing")?;
+        for leaf in 0..ADVERSARY_LEAVES {
+            let entity = add_file_entity(format!("src/adversary-leaf-{leaf:03}.rs"))?;
+            resolved_calls.push(LogicalRelation::new(
+                adversary_branch,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::resolved(&entity)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?);
         }
         let mut resolved_import = None;
         for index in 0..1_000 {
@@ -6224,6 +6251,15 @@ mod tests {
                 )
                 .into());
             }
+        }
+        if !relations
+            .iter()
+            .any(|relation| relation.key() == later_branch_edge.key())
+        {
+            return Err(io::Error::other(
+                "token atlas adjacency budget omitted a later second-round branch",
+            )
+            .into());
         }
         if !relations
             .iter()
