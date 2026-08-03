@@ -135,6 +135,8 @@ const CODEX_FIXTURE_EXECUTABLE_FILE_NAME: &str = "codex.exe";
 const POSIX_CODEX_EXECUTABLE_FILE_NAME: &str = "codex";
 #[cfg(unix)]
 const POSIX_FIND_EXECUTABLE_FILE_NAME: &str = "find";
+#[cfg(unix)]
+const POSIX_FLOCK_EXECUTABLE_FILE_NAME: &str = "flock";
 const FAKE_CODEX_LOG_FILE: &str = "fake-codex.log";
 #[cfg(windows)]
 const FAKE_CODEX_PLUGIN_CACHE_DIR: &str = "plugin-cache";
@@ -5188,6 +5190,7 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "plugin_update_preserves_prior_integration_when_all_replacement_adds_fail",
         "plugin_update_refuses_unavailable_or_ambiguous_inventory",
         "plugin_update_serializes_restore_before_the_next_installer_reads_state",
+        "windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized",
         "plugin_update_refuses_retained_recovery_state_before_mutation",
     ] {
         if !e2e_smoke.contains(required) {
@@ -7474,6 +7477,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
                 "windows_plugin_snapshot_rejects_reparse_above_codex_home_before_mutation",
                 "windows_plugin_snapshot_cleanup_refuses_path_swap_without_outside_deletion",
                 "windows_plugin_snapshot_cleanup_failure_retains_usable_direct_snapshot",
+                "windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized",
                 "windows_plugin_restore_rejects_config_directory_and_retains_recovery_snapshot",
             ]
         };
@@ -12679,7 +12683,10 @@ esac
 
     let fake_path = temp.path().join(FAKE_PATH_DIR);
     fs::create_dir(&fake_path)?;
-    write_executable_script(&fake_path.join("flock"), "#!/bin/sh\nexit 1\n")?;
+    write_executable_script(
+        &fake_path.join(POSIX_FLOCK_EXECUTABLE_FILE_NAME),
+        "#!/bin/sh\nexit 1\n",
+    )?;
     let fake_runtime = fake_path.join("projectatlas");
     write_executable_script(&fake_runtime, "#!/bin/sh\nexit 1\n")?;
     let mut unavailable_command = harness_command();
@@ -12702,6 +12709,85 @@ esac
             "POSIX plugin lock proceeded after its native primitive failed",
         )
         .into());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let original_metadata = fs::metadata(&lock_path)?;
+        let descriptor_swap_path = temp.path().join("descriptor-swap-path");
+        fs::create_dir(&descriptor_swap_path)?;
+        let captured_lock = lock_root.join("captured-lock");
+        let detached_lock = lock_root.join("detached-lock");
+        let replacement_lock = lock_root.join("replacement-lock");
+        let flock_called = lock_root.join("flock-called");
+        fs::write(&replacement_lock, b"replacement lock\n")?;
+        let replacement_metadata = fs::metadata(&replacement_lock)?;
+        if original_metadata.dev() == replacement_metadata.dev()
+            && original_metadata.ino() == replacement_metadata.ino()
+        {
+            return Err(io::Error::other("Linux descriptor-swap fixture reused one inode").into());
+        }
+        write_executable_script(
+            &descriptor_swap_path.join("id"),
+            r#"#!/bin/sh
+mv -- "$PROJECTATLAS_TEST_LOCK_PATH" "$PROJECTATLAS_TEST_CAPTURED_LOCK"
+mv -- "$PROJECTATLAS_TEST_REPLACEMENT_LOCK" "$PROJECTATLAS_TEST_LOCK_PATH"
+printf '%s\n' "$PROJECTATLAS_TEST_UID"
+"#,
+        )?;
+        write_executable_script(
+            &descriptor_swap_path.join("uname"),
+            r#"#!/bin/sh
+mv -- "$PROJECTATLAS_TEST_LOCK_PATH" "$PROJECTATLAS_TEST_DETACHED_LOCK"
+mv -- "$PROJECTATLAS_TEST_CAPTURED_LOCK" "$PROJECTATLAS_TEST_LOCK_PATH"
+printf '%s\n' Linux
+"#,
+        )?;
+        write_executable_script(
+            &descriptor_swap_path.join(POSIX_FLOCK_EXECUTABLE_FILE_NAME),
+            r#"#!/bin/sh
+: > "$PROJECTATLAS_TEST_FLOCK_CALLED"
+exit 0
+"#,
+        )?;
+        let descriptor_swap_output = harness_command()
+            .arg("once")
+            .arg(&lock_root)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    descriptor_swap_path.display(),
+                    std::env::var_os("PATH")
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                ),
+            )
+            .env("PROJECTATLAS_TEST_LOCK_PATH", &lock_path)
+            .env("PROJECTATLAS_TEST_CAPTURED_LOCK", &captured_lock)
+            .env("PROJECTATLAS_TEST_REPLACEMENT_LOCK", &replacement_lock)
+            .env("PROJECTATLAS_TEST_DETACHED_LOCK", &detached_lock)
+            .env("PROJECTATLAS_TEST_FLOCK_CALLED", &flock_called)
+            .env("PROJECTATLAS_TEST_UID", original_metadata.uid().to_string())
+            .output()?;
+        let restored_metadata = fs::metadata(&lock_path)?;
+        let detached_metadata = fs::metadata(&detached_lock)?;
+        if descriptor_swap_output.status.success()
+            || flock_called.exists()
+            || restored_metadata.dev() != original_metadata.dev()
+            || restored_metadata.ino() != original_metadata.ino()
+            || restored_metadata.nlink() != 1
+            || detached_metadata.dev() != replacement_metadata.dev()
+            || detached_metadata.ino() != replacement_metadata.ino()
+        {
+            return Err(io::Error::other(format!(
+                "Linux plugin lock accepted a swapped inherited descriptor:\n{}\n{}",
+                String::from_utf8_lossy(&descriptor_swap_output.stdout),
+                String::from_utf8_lossy(&descriptor_swap_output.stderr)
+            ))
+            .into());
+        }
+        fs::remove_file(&detached_lock)?;
     }
 
     fs::write(&lock_path, b"orphaned owner\n")?;
@@ -12854,6 +12940,98 @@ esac
     Ok(())
 }
 
+#[cfg(windows)]
+struct WindowsSubstitutedDirectory {
+    drive: String,
+    root: PathBuf,
+    active: bool,
+}
+
+#[cfg(windows)]
+impl WindowsSubstitutedDirectory {
+    fn create(target: &Path) -> Result<Self, Box<dyn Error>> {
+        for letter in (b'D'..=b'Z').rev() {
+            let drive = format!("{}:", char::from(letter));
+            let root = PathBuf::from(format!(r"{drive}\"));
+            if root.exists() {
+                continue;
+            }
+            let status = StdCommand::new("subst.exe")
+                .arg(&drive)
+                .arg(target)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?;
+            if status.success() {
+                return Ok(Self {
+                    drive,
+                    root,
+                    active: true,
+                });
+            }
+        }
+        Err(io::Error::other("Windows alias test could not reserve a substituted drive").into())
+    }
+
+    fn release(mut self) -> Result<(), Box<dyn Error>> {
+        let status = StdCommand::new("subst.exe")
+            .args([self.drive.as_str(), "/D"])
+            .status()?;
+        if !status.success() {
+            return Err(io::Error::other(format!(
+                "Windows alias test could not release substituted drive {}",
+                self.drive
+            ))
+            .into());
+        }
+        self.active = false;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsSubstitutedDirectory {
+    fn drop(&mut self) {
+        if self.active {
+            drop(
+                StdCommand::new("subst.exe")
+                    .args([self.drive.as_str(), "/D"])
+                    .status(),
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_short_path(path: &Path) -> Result<Option<PathBuf>, Box<dyn Error>> {
+    let path_text = path.to_string_lossy();
+    let command_path = path_text.strip_prefix(r"\\?\").unwrap_or(&path_text);
+    let command = format!(r#"for %I in ("{command_path}") do @echo %~sI"#);
+    let output = StdCommand::new("cmd.exe")
+        .args(["/D", "/C", &command])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "Windows alias test could not query the short path for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let short_path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if short_path.as_os_str().is_empty()
+        || !short_path.exists()
+        || !short_path.to_string_lossy().contains('~')
+        || short_path
+            .to_string_lossy()
+            .eq_ignore_ascii_case(command_path)
+    {
+        Ok(None)
+    } else {
+        Ok(Some(short_path))
+    }
+}
+
 #[test]
 #[cfg(windows)]
 fn windows_plugin_update_serializes_restore_before_the_next_installer_reads_state()
@@ -12893,6 +13071,42 @@ fn assert_plugin_update_serializes_restore_before_the_next_installer_reads_state
         "0.0.1",
         "prior offline ProjectAtlas skill\n",
     )?;
+    #[cfg(windows)]
+    let current_drive_alias = WindowsSubstitutedDirectory::create(&codex_dir)?;
+    #[cfg(windows)]
+    let aliased_codex_dir =
+        windows_short_path(&codex_dir)?.unwrap_or_else(|| current_drive_alias.root.clone());
+    #[cfg(windows)]
+    {
+        let physical_config_path = codex_dir.join("config.toml");
+        let aliased_config_path = aliased_codex_dir.join("config.toml");
+        let physical_config = fs::canonicalize(&physical_config_path).map_err(|error| {
+            io::Error::other(format!(
+                "could not canonicalize physical Windows config path {}: {error}",
+                physical_config_path.display()
+            ))
+        })?;
+        let aliased_config = fs::canonicalize(&aliased_config_path).map_err(|error| {
+            io::Error::other(format!(
+                "could not canonicalize aliased Windows config path {}: {error}",
+                aliased_config_path.display()
+            ))
+        })?;
+        if aliased_codex_dir
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&codex_dir.to_string_lossy())
+            || !aliased_config
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&physical_config.to_string_lossy())
+        {
+            return Err(io::Error::other(format!(
+                "Windows concurrency fixture did not address one physical Codex root through distinct aliases: physical={}, alias={}",
+                codex_dir.display(),
+                aliased_codex_dir.display()
+            ))
+            .into());
+        }
+    }
     #[cfg(unix)]
     prepare_plugin_lock(&codex_dir)?;
     let state_before = repository_filesystem_snapshot(&codex_dir)?;
@@ -13015,6 +13229,32 @@ exit 0
     }
     first_command.env("PROJECTATLAS_FAKE_INSTALLER_ROLE", "A");
     second_command.env("PROJECTATLAS_FAKE_INSTALLER_ROLE", "B");
+    #[cfg(windows)]
+    {
+        first_command.current_dir(&first_repo);
+        second_command
+            .current_dir(&current_drive_alias.root)
+            .env("CODEX_HOME", &aliased_codex_dir);
+        let first_drive = first_repo
+            .components()
+            .next()
+            .ok_or_else(|| io::Error::other("first Windows installer current drive is missing"))?;
+        let second_drive = current_drive_alias
+            .root
+            .components()
+            .next()
+            .ok_or_else(|| io::Error::other("second Windows installer current drive is missing"))?;
+        if first_drive
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&second_drive.as_os_str().to_string_lossy())
+        {
+            return Err(io::Error::other(
+                "Windows alias fixture did not give the installers different current drives",
+            )
+            .into());
+        }
+    }
 
     let mut first_child = first_command.spawn()?;
     let first_deadline = Instant::now() + Duration::from_secs(15);
@@ -13102,6 +13342,80 @@ exit 0
         )
         .into());
     }
+    #[cfg(windows)]
+    current_drive_alias.release()?;
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    fs::create_dir(&repo)?;
+    fs::create_dir(&fake_path)?;
+    fs::create_dir(&isolated_home)?;
+    let fake_codex = fake_path.join("codex.cmd");
+    write_executable_script(
+        &fake_codex,
+        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nexit /b 1\r\n",
+    )?;
+    let blocked_ancestor = isolated_home.join("blocked-codex-root");
+    fs::write(&blocked_ancestor, b"not a directory\n")?;
+    let invalid_codex_home = blocked_ancestor.join(CODEX_CONFIG_DIR);
+    let calls = isolated_home.join(FAKE_CODEX_LOG_FILE);
+    let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+        &workspace_root()?,
+        &repo,
+        &mcp_contract_executable(),
+        Some(&fake_path),
+        Some(&isolated_home),
+    )?;
+    command
+        .env("CODEX_HOME", &invalid_codex_home)
+        .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = require_successful_plugin_installer_output(command.output()?)?;
+    let output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let normalized_output_text = output_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !normalized_output_text.contains("update lock could not be acquired safely")
+        || !normalized_output_text.contains("non-directory ancestor")
+    {
+        return Err(io::Error::other(format!(
+            "Windows installer omitted the canonical lock failure diagnostic:\n{output_text}"
+        ))
+        .into());
+    }
+    if fs::read_to_string(&blocked_ancestor)? != "not a directory\n" || invalid_codex_home.exists()
+    {
+        return Err(io::Error::other(
+            "Windows installer mutated the rejected Codex root or its blocking ancestor",
+        )
+        .into());
+    }
+    let codex_calls = fs::read_to_string(calls).unwrap_or_default();
+    if [
+        "plugin remove",
+        "plugin add",
+        "plugin marketplace remove",
+        "plugin marketplace add",
+    ]
+    .iter()
+    .any(|mutation| codex_calls.lines().any(|call| call.starts_with(mutation)))
+    {
+        return Err(io::Error::other(format!(
+            "Windows installer reached a Codex mutation after canonical lock failure:\n{codex_calls}"
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -13158,8 +13472,9 @@ fn assert_plugin_update_refuses_retained_recovery_state_before_mutation()
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    if !output_text.contains("retained recovery state requires inspection")
-        || !output_text.contains(
+    let normalized_output_text = output_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !normalized_output_text.contains("retained recovery state requires inspection")
+        || !normalized_output_text.contains(
             "Codex MCP registry update skipped because the prior ProjectAtlas plugin integration was preserved",
         )
     {
@@ -13304,8 +13619,10 @@ fn assert_plugin_update_refuses_unavailable_or_ambiguous_inventory() -> Result<(
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        let normalized_output_text = output_text.split_whitespace().collect::<Vec<_>>().join(" ");
         let calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
-        if !output_text.contains("installed plugin inventory could not be verified completely")
+        if !normalized_output_text
+            .contains("installed plugin inventory could not be verified completely")
             || calls.contains("plugin remove projectatlas")
             || calls.contains("plugin add projectatlas")
             || calls.contains("plugin marketplace remove projectatlas")
@@ -13613,12 +13930,14 @@ if [ -e "$PROJECTATLAS_FAKE_MOUNT_ACTIVE" ] &&
     exit 1
   fi
   target=$(cat "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE") || exit 1
+  target=$(CDPATH= cd -P -- "$target" 2>/dev/null && pwd -P) || exit 1
+  probe=$(CDPATH= cd -P -- "${3:-}" 2>/dev/null && pwd -P) || exit 1
   if { [ "$PROJECTATLAS_FAKE_RESTORE_FAULT" = mount-probe-unavailable ] ||
       [ "$PROJECTATLAS_FAKE_RESTORE_FAULT" = mount-descendant-unavailable ]; } &&
-    [ "${3:-}" = "$target" ]; then
+    [ "$probe" = "$target" ]; then
     exit 1
   fi
-  case "${3:-}/" in
+  case "$probe/" in
     "$target/"|"$target"/*)
       printf '%s\n' 2
       ;;
@@ -14038,8 +14357,9 @@ fn windows_plugin_snapshot_rejects_reparse_above_codex_home_before_mutation()
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let normalized_output_text = output_text.split_whitespace().collect::<Vec<_>>().join(" ");
     let calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
-    if !output_text.contains("reparse point in its Codex-root ancestry")
+    if !normalized_output_text.contains("reparse point in its Codex-root ancestry")
         || calls.contains("plugin remove projectatlas")
         || calls.contains("plugin add projectatlas")
         || calls.contains("plugin marketplace remove projectatlas")

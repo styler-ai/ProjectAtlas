@@ -64,7 +64,9 @@ PRIVATE_ABSOLUTE_PATH_PATTERNS = (
     (
         "file-user-home-root",
         re.compile(
-            r"(?i)file:/{2,3}(?:home|Users)/[^/\s'\"<>]+(?:/[^\s,;'\"<>]*)?"
+            r"(?i)file:(?:/{2,3}(?:home|Users)/[^/\s'\"<>]+|/{3}root"
+            r"(?=/|[\s,;'\"<>(){}\[\]]|$))"
+            r"(?:/[^\s,;'\"<>]*)?"
         ),
     ),
     (
@@ -77,14 +79,17 @@ PRIVATE_ABSOLUTE_PATH_PATTERNS = (
     (
         "network-root",
         re.compile(
-            r"(?<![A-Za-z0-9_.:+\\/])[\\/]{2,}[A-Za-z0-9][A-Za-z0-9_.-]+"
+            r"(?:(?<![A-Za-z0-9_.:+\\/])[\\/]{2,}|(?<=/)\\{2,})"
+            r"[A-Za-z0-9][A-Za-z0-9_.-]+"
             r"[\\/]+[A-Za-z0-9_$.-]+(?:[\\/][^\s,;'\"<>]*)?"
         ),
     ),
     (
         "user-home-root",
         re.compile(
-            r"(?<![A-Za-z0-9:/])/(?:home|Users)/[^/\s'\"<>]+(?:/[^\s,;'\"<>]*)?"
+            r"(?<![A-Za-z0-9:/])/(?:(?:home|Users)/[^/\s'\"<>]+|root"
+            r"(?=/|[\s,;'\"<>(){}\[\]]|$))"
+            r"(?:/[^\s,;'\"<>]*)?"
         ),
     ),
     (

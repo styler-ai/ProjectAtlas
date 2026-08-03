@@ -120,6 +120,8 @@ namespace ProjectAtlas.Installer
         private const uint CreateAlways = 2;
         private const uint OpenExisting = 3;
         private const uint FileAttributeNormal = 0x00000080;
+        private const uint FileFlagBackupSemantics = 0x02000000;
+        private const uint VolumeNameNt = 0x00000002;
         private const uint JobObjectBasicAccountingInformation = 1;
         private const uint JobObjectExtendedLimitInformation = 9;
         private const uint JobObjectLimitKillOnJobClose = 0x00002000;
@@ -235,6 +237,13 @@ namespace ProjectAtlas.Installer
             IntPtr templateFile);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandle(
+            IntPtr file,
+            StringBuilder path,
+            uint pathLength,
+            uint flags);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool CreateProcessW(
             string applicationName,
@@ -335,6 +344,56 @@ namespace ProjectAtlas.Installer
             this.standardInput = standardInput;
             this.standardOutput = standardOutput;
             this.standardError = standardError;
+        }
+
+        public static string GetCanonicalDirectoryPath(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path))
+                throw new ArgumentException("Directory path is required.", "path");
+
+            SecurityAttributes attributes = new SecurityAttributes();
+            attributes.Length = Marshal.SizeOf(typeof(SecurityAttributes));
+            IntPtr directory = CreateFile(
+                Path.GetFullPath(path),
+                0,
+                FileShareRead | FileShareWrite | FileShareDelete,
+                ref attributes,
+                OpenExisting,
+                FileFlagBackupSemantics,
+                IntPtr.Zero);
+            if (directory == new IntPtr(-1))
+                throw Win32Failure("open directory for canonical identity");
+            try
+            {
+                StringBuilder canonicalPath = new StringBuilder(512);
+                uint length = GetFinalPathNameByHandle(
+                    directory,
+                    canonicalPath,
+                    (uint)canonicalPath.Capacity,
+                    VolumeNameNt);
+                if (length == 0)
+                    throw Win32Failure("resolve canonical directory identity");
+                if (length >= canonicalPath.Capacity)
+                {
+                    if (length >= Int32.MaxValue)
+                        throw new InvalidOperationException("Canonical directory identity is too long.");
+                    canonicalPath = new StringBuilder((int)length + 1);
+                    length = GetFinalPathNameByHandle(
+                        directory,
+                        canonicalPath,
+                        (uint)canonicalPath.Capacity,
+                        VolumeNameNt);
+                    if (length == 0)
+                        throw Win32Failure("resolve canonical directory identity");
+                    if (length >= canonicalPath.Capacity)
+                        throw new InvalidOperationException("Canonical directory identity changed while it was read.");
+                }
+                return canonicalPath.ToString();
+            }
+            finally
+            {
+                CloseHandleChecked(directory, "close canonical directory identity handle");
+            }
         }
 
         public static RuntimeProbeProcess Start(
@@ -2565,7 +2624,36 @@ function Enter-ProjectAtlasCodexPluginUpdateLock {
             throw "Codex config path cannot be resolved"
         }
         $codexRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $ConfigPath))
-        $normalizedRoot = $codexRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar).ToUpperInvariant()
+        $existingRoot = $codexRoot
+        $missingRootSegments = [System.Collections.Generic.List[string]]::new()
+        while (-not [System.IO.Directory]::Exists($existingRoot)) {
+            if ([System.IO.File]::Exists($existingRoot)) {
+                throw "Codex state root has a non-directory ancestor: $existingRoot"
+            }
+            $trimmedRoot = $existingRoot.TrimEnd(
+                [System.IO.Path]::DirectorySeparatorChar,
+                [System.IO.Path]::AltDirectorySeparatorChar
+            )
+            $leaf = [System.IO.Path]::GetFileName($trimmedRoot)
+            $parent = [System.IO.Path]::GetDirectoryName($trimmedRoot)
+            if ([string]::IsNullOrWhiteSpace($leaf) -or [string]::IsNullOrWhiteSpace($parent)) {
+                throw "Codex state root has no existing directory ancestor"
+            }
+            $missingRootSegments.Insert(0, $leaf)
+            $existingRoot = $parent
+        }
+        Initialize-ProjectAtlasRuntimeProbe
+        $canonicalRoot = [ProjectAtlas.Installer.RuntimeProbeProcess]::GetCanonicalDirectoryPath($existingRoot)
+        foreach ($segment in $missingRootSegments) {
+            $canonicalRoot = $canonicalRoot.TrimEnd(
+                [System.IO.Path]::DirectorySeparatorChar,
+                [System.IO.Path]::AltDirectorySeparatorChar
+            ) + [System.IO.Path]::DirectorySeparatorChar + $segment
+        }
+        $normalizedRoot = $canonicalRoot.TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        ).ToUpperInvariant()
         $sha256 = [System.Security.Cryptography.SHA256]::Create()
         try {
             $digest = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($normalizedRoot))

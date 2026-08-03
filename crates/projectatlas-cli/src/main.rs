@@ -81,6 +81,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
 #[cfg(unix)]
+use std::mem::MaybeUninit;
+#[cfg(unix)]
 use std::os::fd::{FromRawFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -2821,12 +2823,12 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         } => {
             acquire_installer_lock(
                 INSTALLER_LOCK_FD,
-                expected_device,
-                expected_inode,
+                *expected_device,
+                *expected_inode,
                 INSTALLER_LOCK_TIMEOUT,
             )
             .map_err(|source| CliError::Io {
-                path: PathBuf::from("/dev/fd/9"),
+                path: PathBuf::from("inherited installer lock descriptor 9"),
                 source,
             })?;
         }
@@ -4898,7 +4900,7 @@ fn cli_command_name(command: &Command) -> &'static str {
 #[cfg(unix)]
 #[expect(
     unsafe_code,
-    reason = "the freshly exec'd single-threaded helper validates inherited FD 9 before making File its sole child-process owner"
+    reason = "POSIX fstat safely rejects an invalid inherited descriptor before the freshly exec'd single-threaded helper makes File its sole child-process owner"
 )]
 fn acquire_installer_lock(
     descriptor: RawFd,
@@ -4906,10 +4908,14 @@ fn acquire_installer_lock(
     expected_inode: u64,
     timeout: Duration,
 ) -> io::Result<()> {
-    let descriptor_path = PathBuf::from(format!("/dev/fd/{descriptor}"));
-    fs::metadata(&descriptor_path)?;
-    // SAFETY: the hidden installer command is single-threaded here, and successful
-    // `/dev/fd` metadata proves the inherited descriptor is open before ownership transfer.
+    let mut descriptor_status = MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `fstat` accepts any integer descriptor, reports `EBADF` for an invalid one,
+    // and receives a valid writable pointer whose contents are not read here.
+    if unsafe { libc::fstat(descriptor, descriptor_status.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful `fstat` proves the inherited descriptor is open. This hidden
+    // command is freshly exec'd and single-threaded, so nothing can close it before transfer.
     let file = unsafe { fs::File::from_raw_fd(descriptor) };
     let metadata = file.metadata()?;
     if !metadata.is_file() {
@@ -5013,6 +5019,8 @@ mod tests {
     use std::io;
     #[cfg(unix)]
     use std::os::fd::{AsRawFd, IntoRawFd};
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
 
     /// Minimal MCP client handler for in-process routing tests.
@@ -5615,6 +5623,19 @@ mod tests {
         drop(parent);
         contender.try_lock()?;
 
+        let blocked = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        let blocked_descriptor = blocked.into_raw_fd();
+        let blocked_result = super::acquire_installer_lock(
+            blocked_descriptor,
+            metadata.dev(),
+            metadata.ino(),
+            std::time::Duration::ZERO,
+        );
+        require_condition(
+            blocked_result.is_err_and(|source| source.kind() == io::ErrorKind::TimedOut),
+            "installer lock did not preserve its bounded contention timeout",
+        )?;
+
         let missing = super::acquire_installer_lock(-1, 0, 0, std::time::Duration::ZERO);
         require_condition(
             missing.is_err(),
@@ -5634,6 +5655,25 @@ mod tests {
             .is_err()
                 && directory.as_raw_fd() == directory_descriptor,
             "installer lock accepted a directory or consumed the parent's descriptor",
+        )?;
+
+        let detached_path = temp.path().join("detached-installer.lock");
+        let detached = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&detached_path)?;
+        fs::remove_file(&detached_path)?;
+        let detached_metadata = detached.metadata()?;
+        require_condition(
+            detached_metadata.nlink() == 0,
+            "installer lock pathless-descriptor fixture remained linked",
+        )?;
+        super::acquire_installer_lock(
+            detached.into_raw_fd(),
+            detached_metadata.dev(),
+            detached_metadata.ino(),
+            std::time::Duration::ZERO,
         )?;
         Ok(())
     }

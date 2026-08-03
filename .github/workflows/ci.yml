@@ -220,6 +220,11 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_update_serializes_restore_before_the_next_installer_reads_state --test e2e
 
+      - name: Windows plugin lock canonicalization failure E2E
+        if: matrix.label == 'windows'
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized --test e2e -- --exact
+
       - name: Plugin update retained recovery refusal E2E
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_update_refuses_retained_recovery_state_before_mutation --test e2e

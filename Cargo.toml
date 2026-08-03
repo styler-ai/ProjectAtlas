@@ -84,6 +84,7 @@ getrandom = "0.4.3"
 ignore = "0.4"
 jsonc-parser = { version = "0.32", features = ["serde"] }
 landlock = "=0.4.5"
+libc = "0.2"
 libloading = "=0.9.0"
 nix = { version = "=0.31.3", default-features = false, features = [
     "fs",

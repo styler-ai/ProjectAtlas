@@ -569,6 +569,7 @@ jobs:
             "windows_plugin_snapshot_cleanup_refuses_path_swap_without_outside_deletion",
             "windows_plugin_snapshot_cleanup_failure_retains_usable_direct_snapshot",
             "windows_plugin_update_serializes_restore_before_the_next_installer_reads_state",
+            "windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized",
             "windows_plugin_update_refuses_retained_recovery_state_before_mutation",
             "windows_plugin_restore_rejects_config_directory_and_retains_recovery_snapshot"
           )) {

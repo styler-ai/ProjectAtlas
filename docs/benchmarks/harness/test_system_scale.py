@@ -1199,40 +1199,103 @@ time.sleep(60)
     def test_structural_private_path_redaction_preserves_urls(self) -> None:
         separator = chr(92)
         samples = (
-            separator.join((f"{chr(88)}:", "private-host", "artifact.txt")),
-            separator * 2 + separator.join(("server", "share", "artifact.txt")),
-            separator * 2
-            + "?"
-            + separator
-            + "UNC"
-            + separator
-            + separator.join(("server", "share", "artifact.txt")),
-            "/".join(("", "home", "example-user", "artifact.txt")),
-            "/".join(("", "mnt", "x", "artifact.txt")),
-            "/".join(("file:", "", "private-host", "share", "artifact.txt")),
-            "/".join(
-                ("file:", "", "", "home", "example-user", "artifact.txt")
+            (
+                separator.join((f"{chr(88)}:", "private-host", "artifact.txt")),
+                "windows-drive-root",
+            ),
+            (
+                separator * 2
+                + separator.join(("server", "share", "artifact.txt")),
+                "network-root",
+            ),
+            (
+                separator * 2
+                + "?"
+                + separator
+                + "UNC"
+                + separator
+                + separator.join(("server", "share", "artifact.txt")),
+                "verbatim-network-root",
+            ),
+            (
+                "/".join(("", "home", "example-user", "artifact.txt")),
+                "user-home-root",
+            ),
+            (
+                "/".join(("", "root", "artifact.txt")),
+                "user-home-root",
+            ),
+            ("/".join(("", "mnt", "x", "artifact.txt")), "wsl-drive-root"),
+            (
+                "/".join(
+                    ("file:", "", "private-host", "share", "artifact.txt")
+                ),
+                "file-network-root",
+            ),
+            (
+                "/".join(
+                    ("file:", "", "", "home", "example-user", "artifact.txt")
+                ),
+                "file-user-home-root",
+            ),
+            (
+                "/".join(("file:", "", "", "root", "artifact.txt")),
+                "file-user-home-root",
             ),
         )
-        for sample in samples:
+        for sample, category in samples:
             with self.subTest(sample=sample):
                 self.assertEqual(
                     system_scale.redact_private_absolute_paths(sample),
                     "{PRIVATE_PATH}",
                 )
-        url = "https://example.com/private/artifact.txt"
-        self.assertEqual(system_scale.redact_private_absolute_paths(url), url)
-        escaped_relative = "." + separator * 2 + separator.join(("src", "lib.rs"))
-        self.assertEqual(
-            system_scale.redact_private_absolute_paths(escaped_relative),
-            escaped_relative,
+                with self.assertRaises(ValueError) as failure:
+                    system_scale.assert_private_absolute_paths_redacted(
+                        {"path": sample}, "result.json"
+                    )
+                self.assertIn(category, str(failure.exception))
+                self.assertNotIn(sample, str(failure.exception))
+        nested_network = (
+            "fixtures/"
+            + separator * 2
+            + separator.join(("server", "share", "artifact.txt"))
         )
+        self.assertEqual(
+            system_scale.redact_private_absolute_paths(nested_network),
+            "fixtures/{PRIVATE_PATH}",
+        )
+        with self.assertRaises(ValueError) as nested_failure:
+            system_scale.assert_private_absolute_paths_redacted(
+                {"path": nested_network}, "result.json"
+            )
+        self.assertIn("network-root", str(nested_failure.exception))
+        self.assertNotIn(nested_network, str(nested_failure.exception))
+        url = "https://example.com/private/artifact.txt"
+        escaped_relative = "." + separator * 2 + separator.join(("src", "lib.rs"))
         escaped_line_ending = separator * 2 + "r" + separator * 2 + "n"
         object_namespace = separator * 2 + "BaseNamedObjects" + separator * 2
-        for portable in (escaped_line_ending, object_namespace):
+        rooted_name = "/".join(("", "rooted", "artifact.txt"))
+        rooted_file_uri = "/".join(
+            ("file:", "", "", "rooted", "artifact.txt")
+        )
+        nested_forward_slashes = "/".join(
+            ("fixtures", "", "server", "share", "artifact.txt")
+        )
+        for portable in (
+            url,
+            rooted_name,
+            rooted_file_uri,
+            nested_forward_slashes,
+            escaped_relative,
+            escaped_line_ending,
+            object_namespace,
+        ):
             self.assertEqual(
                 system_scale.redact_private_absolute_paths(portable),
                 portable,
+            )
+            system_scale.assert_private_absolute_paths_redacted(
+                {"value": portable}, "result.json"
             )
 
     def test_result_write_refuses_unredacted_private_paths(self) -> None:

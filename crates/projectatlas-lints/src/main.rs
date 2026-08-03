@@ -44,8 +44,12 @@ const PRIVATE_PATH_COMPARISON_GROUP_LIMIT: usize = 4_096;
 const PRIVATE_PATH_COMPARISON_IDENTITY_BYTE_LIMIT: usize = 1_048_576;
 /// Domain separator for source-free private-path line identities.
 const PRIVATE_PATH_SOURCE_IDENTITY_DOMAIN: &[u8] = b"projectatlas.private-path-line.v1\0";
+/// Domain separator for non-formattable Git pathname identities.
+const PRIVATE_PATH_LOCATION_IDENTITY_DOMAIN: &[u8] = b"projectatlas.private-path-location.v1\0";
+/// Stable diagnostic label for a forbidden Git pathname identity.
+const PRIVATE_PATH_REDACTED_GIT_PATH: &str = "<redacted-git-path>";
 
-/// Private absolute-path shapes forbidden in every Git-visible text file.
+/// Private absolute-path shapes forbidden in Git-visible path identities and text.
 const PRIVATE_PATH_RULES: &[(&str, &str)] = &[
     (
         "windows-drive-root",
@@ -504,13 +508,27 @@ fn lint_repository_private_paths(root: &Path) -> Result<PrivatePathFindings, Lin
     let rules = private_path_rules()?;
     let mut violations = PrivatePathFindings::default();
     for relative_path in git_visible_paths(root)? {
+        let path_violations = lint_git_path_identity(&relative_path, &rules, None);
+        let path_is_forbidden = !path_violations.is_empty();
+        violations.extend(path_violations);
+        let diagnostic_path = if path_is_forbidden {
+            PRIVATE_PATH_REDACTED_GIT_PATH
+        } else {
+            relative_path.as_str()
+        };
+        if Path::new(&relative_path).is_absolute() {
+            if path_is_forbidden {
+                continue;
+            }
+            return Err(LintError::InvalidGitTreeEntry);
+        }
         let path = root.join(&relative_path);
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
             Err(source) => {
                 return Err(LintError::ReadFile {
-                    path: relative_path,
+                    path: diagnostic_path.to_string(),
                     source,
                 });
             }
@@ -520,27 +538,27 @@ fn lint_repository_private_paths(root: &Path) -> Result<PrivatePathFindings, Lin
         }
         if metadata.file_type().is_symlink() {
             let target = fs::read_link(&path).map_err(|source| LintError::ReadFile {
-                path: relative_path.clone(),
+                path: diagnostic_path.to_string(),
                 source,
             })?;
             let target = target
                 .to_str()
-                .ok_or_else(|| LintError::NonUtf8Text(relative_path.clone()))?;
-            violations.extend(lint_private_paths(&relative_path, target, &rules));
+                .ok_or_else(|| LintError::NonUtf8Text(diagnostic_path.to_string()))?;
+            violations.extend(lint_private_paths(diagnostic_path, target, &rules));
             continue;
         }
         let bytes = fs::read(&path).map_err(|source| LintError::ReadFile {
-            path: relative_path.clone(),
+            path: diagnostic_path.to_string(),
             source,
         })?;
-        if let Some(source) = decode_repository_text(&relative_path, &bytes)? {
-            violations.extend(lint_private_paths(&relative_path, &source, &rules));
+        if let Some(source) = decode_repository_text(diagnostic_path, &bytes)? {
+            violations.extend(lint_private_paths(diagnostic_path, &source, &rules));
         }
     }
     Ok(violations)
 }
 
-/// Scan each blob changed by an outgoing revision once, independent of export policy.
+/// Scan each changed Git path identity and text blob once, independent of export policy.
 fn lint_git_revisions_private_paths(
     root: &Path,
     revisions: &[String],
@@ -582,6 +600,7 @@ fn lint_git_revisions_private_paths(
         });
     }
     let mut blobs = BTreeSet::new();
+    let mut gitlinks = BTreeSet::new();
     let mut records = changed.stdout.split(|byte| *byte == 0);
     loop {
         let Some(metadata) = records.next() else {
@@ -607,16 +626,22 @@ fn lint_git_revisions_private_paths(
         {
             return Err(LintError::InvalidGitTreeEntry);
         }
-        if status == "D" || new_mode == "160000" || new_object.bytes().all(|byte| byte == b'0') {
+        if status == "D" || new_object.bytes().all(|byte| byte == b'0') {
             continue;
         }
         let path = String::from_utf8(path.to_vec()).map_err(LintError::NonUtf8GitPath)?;
-        blobs.insert((new_object.to_string(), path));
+        if new_mode == "160000" {
+            gitlinks.insert((new_object.to_string(), path));
+        } else {
+            blobs.insert((new_object.to_string(), path));
+        }
     }
-    lint_git_blobs(root, &blobs, retain_comparison)
+    let mut violations = lint_git_path_identities(&gitlinks, retain_comparison)?;
+    violations.extend(lint_git_blobs(root, &blobs, retain_comparison)?);
+    Ok(violations)
 }
 
-/// Scan every text blob in one exact Git tree.
+/// Scan every path identity and text blob in one exact Git tree.
 fn lint_git_tree_private_paths(
     root: &Path,
     revision: &str,
@@ -634,6 +659,7 @@ fn lint_git_tree_private_paths(
         });
     }
     let mut blobs = BTreeSet::new();
+    let mut gitlinks = BTreeSet::new();
     for record in output.stdout.split(|byte| *byte == 0) {
         if record.is_empty() {
             continue;
@@ -655,11 +681,15 @@ fn lint_git_tree_private_paths(
         }
         if kind == "blob" {
             blobs.insert((object.to_string(), path));
-        } else if kind != "commit" || mode != "160000" {
+        } else if kind == "commit" && mode == "160000" {
+            gitlinks.insert((object.to_string(), path));
+        } else {
             return Err(LintError::InvalidGitTreeEntry);
         }
     }
-    lint_git_blobs(root, &blobs, true)
+    let mut violations = lint_git_path_identities(&gitlinks, true)?;
+    violations.extend(lint_git_blobs(root, &blobs, true)?);
+    Ok(violations)
 }
 
 /// Keep only private path occurrences that exceed the unchanged published-base multiset.
@@ -689,13 +719,23 @@ fn private_paths_not_in_baseline(
     let mut baseline_counts = BTreeMap::new();
     for (key, group) in baseline_groups {
         *baseline_counts
-            .entry((Rc::clone(&key.path), key.kind, key.source_identity))
+            .entry((
+                Rc::clone(&key.path),
+                key.location_identity,
+                key.kind,
+                key.source_identity,
+            ))
             .or_insert(0usize) += group.count;
     }
     let mut introduced = PrivatePathFindings::default();
     for (key, group) in outgoing_groups {
         let baseline_count = baseline_counts
-            .get(&(Rc::clone(&key.path), key.kind, key.source_identity))
+            .get(&(
+                Rc::clone(&key.path),
+                key.location_identity,
+                key.kind,
+                key.source_identity,
+            ))
             .copied()
             .unwrap_or_default();
         if group.count > baseline_count {
@@ -742,6 +782,17 @@ fn lint_git_blobs(
         PrivatePathFindings::default()
     };
     for (object, relative_path) in blobs {
+        let path_violations = lint_git_path_identity(
+            relative_path,
+            &rules,
+            retain_comparison.then_some(object.as_str()),
+        );
+        let diagnostic_path = if path_violations.is_empty() {
+            relative_path.as_str()
+        } else {
+            PRIVATE_PATH_REDACTED_GIT_PATH
+        };
+        violations.extend(path_violations);
         writeln!(requests, "{object}").map_err(LintError::ReadGitRevision)?;
         requests.flush().map_err(LintError::ReadGitRevision)?;
         let mut header = String::new();
@@ -779,8 +830,9 @@ fn lint_git_blobs(
         if terminator[0] != b'\n' {
             return Err(LintError::InvalidGitObjectResponse);
         }
-        if let Some(source) = decode_repository_text(relative_path, &bytes)? {
-            let blob_violations = lint_private_paths_with_history(
+        if let Some(source) = decode_repository_text(diagnostic_path, &bytes)? {
+            let blob_violations = lint_private_paths_with_history_at_path(
+                diagnostic_path,
                 relative_path,
                 &source,
                 &rules,
@@ -797,6 +849,27 @@ fn lint_git_blobs(
             operation: "blob reading",
             code: status.code(),
         });
+    }
+    Ok(violations)
+}
+
+/// Scan Git path identities whose objects do not contain repository text.
+fn lint_git_path_identities(
+    objects: &BTreeSet<(String, String)>,
+    retain_comparison: bool,
+) -> Result<PrivatePathFindings, LintError> {
+    let rules = private_path_rules()?;
+    let mut violations = if retain_comparison {
+        PrivatePathFindings::with_comparison()
+    } else {
+        PrivatePathFindings::default()
+    };
+    for (object, relative_path) in objects {
+        violations.extend(lint_git_path_identity(
+            relative_path,
+            &rules,
+            retain_comparison.then_some(object.as_str()),
+        ));
     }
     Ok(violations)
 }
@@ -886,12 +959,24 @@ fn lint_private_paths_with_history(
     rules: &[PrivatePathRule],
     git_object: Option<&str>,
 ) -> PrivatePathFindings {
+    lint_private_paths_with_history_at_path(relative_path, relative_path, source, rules, git_object)
+}
+
+/// Find private paths while keeping a redacted label separate from exact location identity.
+fn lint_private_paths_with_history_at_path(
+    diagnostic_path: &str,
+    identity_path: &str,
+    source: &str,
+    rules: &[PrivatePathRule],
+    git_object: Option<&str>,
+) -> PrivatePathFindings {
     let mut violations = if git_object.is_some() {
         PrivatePathFindings::with_comparison()
     } else {
         PrivatePathFindings::default()
     };
-    let comparison_path = git_object.map(|_| Rc::<str>::from(relative_path));
+    let comparison_path = git_object.map(|_| Rc::<str>::from(diagnostic_path));
+    let mut comparison_location_identity = None;
     let comparison_object = git_object.map(Rc::<str>::from);
     for (line_index, line) in source.lines().enumerate() {
         let mut source_identity = None;
@@ -903,6 +988,8 @@ fn lint_private_paths_with_history(
                 let comparison_key = match (&comparison_path, &comparison_object) {
                     (Some(path), Some(git_object)) => Some(PrivatePathOccurrenceKey {
                         path: Rc::clone(path),
+                        location_identity: *comparison_location_identity
+                            .get_or_insert_with(|| private_path_location_identity(identity_path)),
                         kind: rule.kind,
                         source_identity: *source_identity
                             .get_or_insert_with(|| private_path_source_identity(line)),
@@ -912,7 +999,7 @@ fn lint_private_paths_with_history(
                 };
                 violations.push(
                     PrivatePathViolation {
-                        path: relative_path.to_string(),
+                        path: diagnostic_path.to_string(),
                         line: line_index + 1,
                         column: line[..path_match.start()].chars().count() + 1,
                         kind: rule.kind,
@@ -925,11 +1012,82 @@ fn lint_private_paths_with_history(
     violations
 }
 
+/// Reject forbidden absolute-path shapes in a Git pathname without formatting the name.
+fn lint_git_path_identity(
+    relative_path: &str,
+    rules: &[PrivatePathRule],
+    git_object: Option<&str>,
+) -> PrivatePathFindings {
+    let mut violations = if git_object.is_some() {
+        PrivatePathFindings::with_comparison()
+    } else {
+        PrivatePathFindings::default()
+    };
+    let mut location_identity = None;
+    let mut comparison_path = None;
+    let mut comparison_object = None;
+    for rule in rules {
+        let mut match_offsets = BTreeSet::new();
+        for captures in rule.regex.captures_iter(relative_path) {
+            if let Some(path_match) = captures.name("path") {
+                match_offsets.insert(path_match.start());
+            }
+        }
+        let mut component_offset = 0usize;
+        for component in relative_path.split('/') {
+            for captures in rule.regex.captures_iter(component) {
+                if let Some(path_match) = captures.name("path") {
+                    match_offsets.insert(component_offset.saturating_add(path_match.start()));
+                }
+            }
+            component_offset = component_offset
+                .saturating_add(component.len())
+                .saturating_add(1);
+        }
+        for _ in match_offsets {
+            let comparison_key = git_object.map(|git_object| {
+                let location_identity = *location_identity
+                    .get_or_insert_with(|| private_path_location_identity(relative_path));
+                PrivatePathOccurrenceKey {
+                    path: Rc::clone(
+                        comparison_path
+                            .get_or_insert_with(|| Rc::<str>::from(PRIVATE_PATH_REDACTED_GIT_PATH)),
+                    ),
+                    location_identity,
+                    kind: rule.kind,
+                    source_identity: location_identity,
+                    git_object: Rc::clone(
+                        comparison_object.get_or_insert_with(|| Rc::<str>::from(git_object)),
+                    ),
+                }
+            });
+            violations.push(
+                PrivatePathViolation {
+                    path: PRIVATE_PATH_REDACTED_GIT_PATH.to_string(),
+                    line: 1,
+                    column: 1,
+                    kind: rule.kind,
+                },
+                comparison_key,
+            );
+        }
+    }
+    violations
+}
+
 /// Derive a fixed-size identity without retaining private source text.
 fn private_path_source_identity(line: &str) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(PRIVATE_PATH_SOURCE_IDENTITY_DOMAIN);
     hasher.update(line.as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+/// Derive a fixed-size exact pathname identity without retaining private path text.
+fn private_path_location_identity(relative_path: &str) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(PRIVATE_PATH_LOCATION_IDENTITY_DOMAIN);
+    hasher.update(relative_path.as_bytes());
     *hasher.finalize().as_bytes()
 }
 
@@ -1185,13 +1343,15 @@ impl std::ops::Index<usize> for PrivatePathFindings {
 /// Exact non-formattable identity used only by published-base comparison.
 #[derive(Eq, Ord, PartialEq, PartialOrd)]
 struct PrivatePathOccurrenceKey {
-    /// Shared repository-relative path.
+    /// Shared privacy-safe diagnostic path.
     path: Rc<str>,
+    /// Fixed-size exact repository-relative pathname identity.
+    location_identity: [u8; 32],
     /// Stable private-path rule family.
     kind: &'static str,
     /// Fixed-size full-line identity preserving the existing allowance semantics.
     source_identity: [u8; 32],
-    /// Git blob identity that keeps each historical file version independent.
+    /// Git object identity that keeps each historical entry version independent.
     git_object: Rc<str>,
 }
 
@@ -1975,6 +2135,88 @@ mod tests {
         let rules = private_path_rules()?;
         let violations = lint_private_paths("docs/example.md", &source, &rules);
         require(violations.is_empty(), "portable path form was rejected")?;
+        for path in [
+            "fixtures/C_drive_notes.txt".to_string(),
+            "fixtures/UNC_notes.txt".to_string(),
+            ["fixtures", "file:", "rooted", "workspace"].join("/"),
+            ["fixtures", "https:", "example.invalid", "root", "workspace"].join("/"),
+        ] {
+            require(
+                super::lint_git_path_identity(&path, &rules, None).is_empty(),
+                "portable Git pathname component was rejected",
+            )?;
+        }
+        for path in private_path_samples()?.into_iter().take(4) {
+            require(
+                super::lint_git_path_identity(&format!("fixtures/{path}"), &rules, None).len() == 1,
+                "nested private Git pathname did not produce one exact finding",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// A forward drive path can also contain a distinct rooted user-home path.
+    #[test]
+    fn git_path_rule_overlap_is_typed() -> Result<(), Box<dyn std::error::Error>> {
+        let path = ["fixtures", "C:", "Users", "alice", "artifact.txt"].join("/");
+        let rules = private_path_rules()?;
+        let findings = super::lint_git_path_identity(&path, &rules, None);
+        let kinds = findings
+            .iter()
+            .map(|finding| finding.kind)
+            .collect::<BTreeSet<_>>();
+        require(
+            findings.len() == 2
+                && kinds == BTreeSet::from(["user-home-root", "windows-drive-root"]),
+            "overlapping Git pathname rules did not retain both typed findings",
+        )?;
+        Ok(())
+    }
+
+    /// Redacted pathname findings retain exact path identity across baseline comparison.
+    #[test]
+    fn private_path_history_compares_redacted_git_paths_exactly()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let rules = private_path_rules()?;
+        let first_path = private_path_samples()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::other("private pathname sample is missing"))?;
+        let first_path = format!("fixtures/{first_path}");
+        let second_path = first_path.replace("workspace", "other-workspace");
+        let baseline = super::lint_git_path_identity(&first_path, &rules, Some("base-object"));
+        let unchanged = super::lint_git_path_identity(&first_path, &rules, Some("next-object"));
+        require(
+            baseline.len() == 1 && private_paths_not_in_baseline(unchanged, &baseline)?.is_empty(),
+            "an unchanged redacted Git pathname was not allowed by the exact baseline",
+        )?;
+
+        let changed = super::lint_git_path_identity(&second_path, &rules, Some("next-object"));
+        let introduced = private_paths_not_in_baseline(changed, &baseline)?;
+        let path_only = introduced
+            .iter()
+            .next()
+            .ok_or_else(|| io::Error::other("introduced Git pathname finding is missing"))?;
+        let path_only_display = path_only.to_string();
+        let path_only_debug = format!("{path_only:?}");
+        require(
+            introduced.len() == 1
+                && path_only.path == super::PRIVATE_PATH_REDACTED_GIT_PATH
+                && path_only_display.contains(super::PRIVATE_PATH_REDACTED_GIT_PATH)
+                && path_only_debug.contains(super::PRIVATE_PATH_REDACTED_GIT_PATH)
+                && !path_only_display.contains(&second_path)
+                && !path_only_debug.contains(&second_path),
+            "distinct redacted Git pathnames collapsed during baseline comparison",
+        )?;
+        let mut diagnostics = Vec::new();
+        write_violations(&mut diagnostics, &[], &introduced)?;
+        let diagnostics = String::from_utf8(diagnostics)?;
+        require(
+            diagnostics.contains(super::PRIVATE_PATH_REDACTED_GIT_PATH)
+                && !diagnostics.contains(&first_path)
+                && !diagnostics.contains(&second_path),
+            "redacted Git pathname diagnostics disclosed an exact path identity",
+        )?;
         Ok(())
     }
 
@@ -2168,6 +2410,7 @@ mod tests {
             comparison.push(
                 super::PrivatePathOccurrenceKey {
                     path: Rc::clone(&path),
+                    location_identity: [discriminator; 32],
                     kind: "test-private-path",
                     source_identity: [discriminator; 32],
                     git_object: Rc::from("0123456789012345678901234567890123456789"),
@@ -2355,6 +2598,218 @@ mod tests {
                     .iter()
                     .all(|violation| violation.path != "ignored.txt"),
             "Git visibility or repository-relative diagnostics regressed",
+        )?;
+        Ok(())
+    }
+
+    /// POSIX Git pathnames with Windows or UNC roots fail in the tree and outgoing history.
+    #[cfg(unix)]
+    #[test]
+    fn private_path_lint_rejects_and_redacts_git_pathnames()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = tempfile::tempdir()?;
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(repository.path())
+                .output()
+        };
+        for args in [
+            &["init", "--quiet"][..],
+            &["config", "user.name", "ProjectAtlas Test"][..],
+            &["config", "user.email", "projectatlas@example.invalid"][..],
+        ] {
+            require(git(args)?.status.success(), "temporary Git setup failed")?;
+        }
+        let portable_directory = repository.path().join("portable");
+        fs::create_dir(&portable_directory)?;
+        fs::write(portable_directory.join("C_drive_notes.txt"), "safe\n")?;
+        require(
+            git(&["add", "--all"])?.status.success()
+                && git(&["commit", "--quiet", "-m", "portable base"])?
+                    .status
+                    .success(),
+            "portable Git base commit failed",
+        )?;
+        let base = git(&["rev-parse", "HEAD"])?;
+        require(base.status.success(), "portable Git base lookup failed")?;
+        let base = String::from_utf8(base.stdout)?.trim().to_string();
+
+        let backslash = char::from_u32(92)
+            .ok_or_else(|| io::Error::other("backslash code point must be valid"))?;
+        let drive_path =
+            format!("fixtures/C:{backslash}Users{backslash}alice{backslash}secret.txt");
+        let forward_drive_path =
+            ["fixtures", "C:", "Users", "alice", "forward-secret.txt"].join("/");
+        let network_path = format!("fixtures/{backslash}{backslash}private-host{backslash}share");
+        let verbatim_network_path = format!(
+            "fixtures/{backslash}{backslash}?{backslash}UNC{backslash}private-host{backslash}share"
+        );
+        let gitlink_path = format!("fixtures/D:{backslash}Users{backslash}bob{backslash}submodule");
+        let private_source = private_path_samples()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::other("private content sample is missing"))?;
+        fs::create_dir(repository.path().join("fixtures"))?;
+        fs::write(repository.path().join(&drive_path), &private_source)?;
+        let forward_drive_file = repository.path().join(&forward_drive_path);
+        fs::create_dir_all(
+            forward_drive_file
+                .parent()
+                .ok_or_else(|| io::Error::other("forward drive fixture parent is missing"))?,
+        )?;
+        fs::write(&forward_drive_file, "safe\n")?;
+        fs::write(repository.path().join(&verbatim_network_path), "safe\n")?;
+        std::os::unix::fs::symlink(
+            "portable/C_drive_notes.txt",
+            repository.path().join(&network_path),
+        )?;
+        require(
+            git(&["add", "--all"])?.status.success(),
+            "hostile Git paths were not staged",
+        )?;
+        let gitlink_entry = format!("160000,{base},{gitlink_path}");
+        require(
+            git(&["update-index", "--add", "--cacheinfo", &gitlink_entry])?
+                .status
+                .success(),
+            "hostile Git gitlink pathname was not staged",
+        )?;
+
+        let current = lint_repository_private_paths(repository.path())?;
+        let current_debug = format!("{current:?}");
+        require(
+            current.len() == 7,
+            &format!(
+                "current-tree Git pathname scan returned {} findings instead of 7",
+                current.len()
+            ),
+        )?;
+        require(
+            current
+                .iter()
+                .all(|item| item.path == super::PRIVATE_PATH_REDACTED_GIT_PATH),
+            "current-tree Git pathname finding was not redacted",
+        )?;
+        require(
+            !current_debug.contains(&drive_path)
+                && !current_debug.contains(&forward_drive_path)
+                && !current_debug.contains(&network_path)
+                && !current_debug.contains(&verbatim_network_path)
+                && !current_debug.contains(&gitlink_path)
+                && !current_debug.contains(&private_source),
+            "current-tree Git pathname finding disclosed private material",
+        )?;
+        let mut current_diagnostics = Vec::new();
+        write_violations(&mut current_diagnostics, &[], &current)?;
+        let current_diagnostics = String::from_utf8(current_diagnostics)?;
+        require(
+            current_diagnostics.contains(super::PRIVATE_PATH_REDACTED_GIT_PATH)
+                && !current_diagnostics.contains(&drive_path)
+                && !current_diagnostics.contains(&forward_drive_path)
+                && !current_diagnostics.contains(&network_path)
+                && !current_diagnostics.contains(&verbatim_network_path)
+                && !current_diagnostics.contains(&gitlink_path)
+                && !current_diagnostics.contains(&private_source),
+            "current-tree Git pathname diagnostics disclosed private material",
+        )?;
+
+        fs::write(repository.path().join(&drive_path), [0xff])?;
+        let Err(decode_error) = lint_repository_private_paths(repository.path()) else {
+            return Err(
+                io::Error::other("malformed content at a forbidden Git pathname passed").into(),
+            );
+        };
+        let decode_display = decode_error.to_string();
+        let decode_debug = format!("{decode_error:?}");
+        require(
+            decode_display.contains(super::PRIVATE_PATH_REDACTED_GIT_PATH)
+                && decode_debug.contains(super::PRIVATE_PATH_REDACTED_GIT_PATH)
+                && !decode_display.contains(&drive_path)
+                && !decode_debug.contains(&drive_path),
+            "decode failure disclosed a forbidden Git pathname",
+        )?;
+        fs::write(repository.path().join(&drive_path), &private_source)?;
+        require(
+            git(&["commit", "--quiet", "-m", "private pathnames"])?
+                .status
+                .success(),
+            "private Git pathname commit failed",
+        )?;
+
+        fs::remove_file(repository.path().join(&drive_path))?;
+        fs::remove_file(&forward_drive_file)?;
+        fs::remove_file(repository.path().join(&network_path))?;
+        fs::remove_file(repository.path().join(&verbatim_network_path))?;
+        fs::write(portable_directory.join("UNC_notes.txt"), "safe\n")?;
+        require(
+            git(&["add", "--all"])?.status.success()
+                && git(&["update-index", "--force-remove", "--", &gitlink_path])?
+                    .status
+                    .success()
+                && git(&["commit", "--quiet", "-m", "clean tip"])?
+                    .status
+                    .success(),
+            "clean Git pathname tip commit failed",
+        )?;
+        require(
+            lint_repository_private_paths(repository.path())?.is_empty(),
+            "portable current-tree names were rejected after the hostile names were removed",
+        )?;
+        let head = git(&["rev-parse", "HEAD"])?;
+        require(
+            head.status.success(),
+            "clean Git pathname head lookup failed",
+        )?;
+        let head = String::from_utf8(head.stdout)?.trim().to_string();
+        let updates = format!("refs/heads/feature {head} refs/heads/feature {base}\n");
+        let revisions = outgoing_revisions(repository.path(), "", io::Cursor::new(updates))?;
+        let baseline = lint_git_tree_private_paths(repository.path(), &base)?;
+        let introduced = private_paths_not_in_baseline(
+            lint_git_revisions_private_paths(repository.path(), &revisions, true)?,
+            &baseline,
+        )?;
+        let introduced_debug = format!("{introduced:?}");
+        require(
+            introduced.len() == 7,
+            &format!(
+                "outgoing Git pathname scan returned {} findings instead of 7",
+                introduced.len()
+            ),
+        )?;
+        require(
+            introduced
+                .iter()
+                .all(|item| item.path == super::PRIVATE_PATH_REDACTED_GIT_PATH),
+            "outgoing Git pathname finding was not redacted",
+        )?;
+        require(
+            !introduced_debug.contains(&drive_path)
+                && !introduced_debug.contains(&forward_drive_path)
+                && !introduced_debug.contains(&network_path)
+                && !introduced_debug.contains(&verbatim_network_path)
+                && !introduced_debug.contains(&gitlink_path)
+                && !introduced_debug.contains(&private_source),
+            "outgoing Git pathname finding disclosed private material",
+        )?;
+        let mut history_diagnostics = Vec::new();
+        write_violations(&mut history_diagnostics, &[], &introduced)?;
+        let history_diagnostics = String::from_utf8(history_diagnostics)?;
+        require(
+            !history_diagnostics.contains(&drive_path)
+                && !history_diagnostics.contains(&forward_drive_path)
+                && !history_diagnostics.contains(&network_path)
+                && !history_diagnostics.contains(&verbatim_network_path)
+                && !history_diagnostics.contains(&gitlink_path)
+                && !history_diagnostics.contains(&private_source),
+            "outgoing Git pathname diagnostics disclosed private material",
+        )?;
+        require(
+            matches!(
+                run_private_path_range(repository.path(), &base, &head),
+                Err(LintError::Violations { .. })
+            ),
+            "a clean tip hid forbidden Git pathnames in outgoing history",
         )?;
         Ok(())
     }
@@ -2665,16 +3120,27 @@ mod tests {
         let base = String::from_utf8(base.stdout)?.trim().to_string();
         require(base.len() == 64, "Git did not create SHA-256 object ids")?;
 
-        let sample = private_path_samples()?
-            .into_iter()
-            .next()
+        let samples = private_path_samples()?;
+        let sample = samples
+            .first()
             .ok_or_else(|| io::Error::other("private path sample is missing"))?;
+        let nested_path_sample = format!(
+            "fixtures/{}",
+            samples
+                .get(2)
+                .ok_or_else(|| io::Error::other("private pathname sample is missing"))?
+        );
         let private_source = format!("$runtime = {sample:?}\n");
         for path in ["first.ps1", "second.ps1"] {
             fs::write(repository.path().join(path), &private_source)?;
         }
+        #[cfg(unix)]
+        {
+            fs::create_dir(repository.path().join("fixtures"))?;
+            fs::write(repository.path().join(&nested_path_sample), "safe\n")?;
+        }
         require(
-            git(&["add", "first.ps1", "second.ps1"])?.status.success()
+            git(&["add", "--all"])?.status.success()
                 && git(&["commit", "--quiet", "-m", "private intermediate"])?
                     .status
                     .success(),
@@ -2683,8 +3149,10 @@ mod tests {
         for path in ["first.ps1", "second.ps1"] {
             fs::write(repository.path().join(path), "$runtime = $env:TEMP\n")?;
         }
+        #[cfg(unix)]
+        fs::remove_file(repository.path().join(&nested_path_sample))?;
         require(
-            git(&["add", "first.ps1", "second.ps1"])?.status.success()
+            git(&["add", "--all"])?.status.success()
                 && git(&["commit", "--quiet", "-m", "clean tip"])?
                     .status
                     .success(),
@@ -2703,10 +3171,19 @@ mod tests {
             &baseline,
         )?;
         require(
-            introduced.len() == 2
+            introduced.len() == (if cfg!(unix) { 3 } else { 2 })
                 && introduced.iter().any(|item| item.path == "first.ps1")
-                && introduced.iter().any(|item| item.path == "second.ps1"),
+                && introduced.iter().any(|item| item.path == "second.ps1")
+                && (!cfg!(unix)
+                    || introduced
+                        .iter()
+                        .any(|item| item.path == super::PRIVATE_PATH_REDACTED_GIT_PATH)),
             "SHA-256 range scan deduplicated distinct paths sharing one private blob",
+        )?;
+        let introduced_debug = format!("{introduced:?}");
+        require(
+            !introduced_debug.contains(sample) && !introduced_debug.contains(&nested_path_sample),
+            "SHA-256 Git pathname comparison disclosed a raw hostile name",
         )?;
         require(
             matches!(
