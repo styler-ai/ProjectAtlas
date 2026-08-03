@@ -3903,12 +3903,7 @@ $mcpConfigSha256 = Confirm-ProjectAtlasGeneratedMcpConfig $mcpConfigPath "Codex"
 $claudeMcpConfigSha256 = Confirm-ProjectAtlasGeneratedMcpConfig $claudeMcpConfigPath "Claude Code" $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath $ProjectRoot
 $opencodeConfigSha256 = Confirm-ProjectAtlasGeneratedMcpConfig $opencodeConfigPath "OpenCode" $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath $ProjectRoot
 Update-ProjectAtlasCodexPlugin $ProjectAtlasVersion
-if ($script:ProjectAtlasCodexPluginUpdatePreservedPriorState) {
-    Write-Output "Codex MCP registry update skipped because the prior ProjectAtlas plugin integration was preserved after a failed update."
-}
-else {
-    Update-ProjectAtlasCodexMcpRegistry $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath
-}
+Update-ProjectAtlasCodexMcpRegistry $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath
 $codexIntegrationManaged = Test-ProjectAtlasCodexCommandAvailable
 $handoffState = "not_required"
 if (-not $stableMirrorSynchronized) {

@@ -1827,11 +1827,7 @@ write_mcp_config "$opencode_config_path" opencode
 verify_generated_mcp_config "$claude_mcp_config_path" "Claude Code"
 verify_generated_mcp_config "$opencode_config_path" "OpenCode"
 update_codex_plugin
-if [ "$codex_plugin_update_preserved_prior_state" = true ]; then
-  printf '%s\n' "Codex MCP registry update skipped because the prior ProjectAtlas plugin integration was preserved after a failed update."
-else
-  update_codex_mcp_registry
-fi
+update_codex_mcp_registry
 report_projectatlas_workflow_pins
 
 printf 'ProjectAtlas runtime installed and verified: %s\n' "$projectatlas_bin"

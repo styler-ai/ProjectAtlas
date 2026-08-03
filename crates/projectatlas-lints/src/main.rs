@@ -34,9 +34,9 @@ const PRIVATE_PATH_RULE_ID: &str = "private-absolute-path";
 const PRIVATE_PATH_FIXTURE_MARKER: &str = "projectatlas: path-fixture";
 /// Small set of machine-specific path shapes that must use portable placeholders.
 const PRIVATE_PATH_PATTERNS: &[&str] = &[
-    r"(?i)[A-Z]:[\\/]Users[\\/][^\\/\s<>{}]+(?:[\\/]|$)",
-    r"(?i)[A-Z]:[\\/]media[\\/]projects(?:[\\/]|$)",
-    r"(?:^|[^A-Za-z0-9_.])/(?:home|Users)/[^/\s<>{}]+(?:/|$)",
+    r"(?i)[A-Z]:[\\/]{1,2}Users[\\/]{1,2}[^\r\n\\/<>{}]+(?:[\\/]{1,2}|$)",
+    r"(?i)[A-Z]:[\\/]{1,2}media[\\/]{1,2}projects(?:[\\/]{1,2}|$)",
+    r"(?i)(?:^|[^A-Za-z0-9_.])/(?:mnt/[A-Z]/Users|(?:var/)?home|Users)/[^/\r\n<>{}]+(?:/|$)",
     r"(?:^|[^A-Za-z0-9_.])/root(?:/|$)",
 ];
 
@@ -952,6 +952,10 @@ mod tests {
                 repo.join("fixture.txt"),
                 "example = C:/Users/example/ProjectAtlas # projectatlas: path-fixture\n",
             )?;
+            fs::write(
+                repo.join("private.txt"),
+                "escaped = C:\\\\Users\\\\private-owner\\\\ProjectAtlas\nspaces = C:/Users/Private Owner/ProjectAtlas\nwsl = /mnt/c/Users/private-owner/ProjectAtlas\nvar-home = /var/home/private-owner/ProjectAtlas\n", // projectatlas: path-fixture
+            )?;
             #[cfg(unix)]
             std::os::unix::fs::symlink(
                 "/home/private-owner/ProjectAtlas", // projectatlas: path-fixture
@@ -972,14 +976,22 @@ mod tests {
             )?;
 
             let violations = lint_repository_private_paths(&repo)?;
-            require(violations.len() == 1, "private path was not rejected")?;
-            let diagnostic = violations[0].to_string();
+            require(violations.len() == 5, "private paths were not rejected")?;
+            let diagnostic = violations
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
             require(
-                diagnostic.contains("private-link:1:1") && diagnostic.contains("<redacted>"),
+                diagnostic.contains("private-link:1:1")
+                    && diagnostic.contains("private.txt:")
+                    && diagnostic.contains("<redacted>"),
                 "diagnostic lost its repository-relative redacted location",
             )?;
             require(
-                !diagnostic.contains("private-owner") && !diagnostic.contains("ProjectAtlas"),
+                !diagnostic.contains("private-owner")
+                    && !diagnostic.contains("Private Owner")
+                    && !diagnostic.contains("ProjectAtlas"),
                 "diagnostic exposed matched source",
             )
         })();

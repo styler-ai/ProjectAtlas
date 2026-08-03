@@ -12421,11 +12421,17 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
     let fake_codex_calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
     if !installer_output_text.contains("Codex ProjectAtlas plugin update failed")
         || !installer_output_text.contains(
-            "Codex MCP registry update skipped because the prior ProjectAtlas plugin integration was preserved",
+            "Codex MCP registry update skipped: no global projectatlas MCP server is configured",
         )
     {
         return Err(io::Error::other(format!(
-            "installer did not report local preservation after failed replacement:\n{installer_output_text}\nfake Codex calls:\n{fake_codex_calls}"
+            "installer did not preserve the plugin while checking the independent MCP registry:\n{installer_output_text}\nfake Codex calls:\n{fake_codex_calls}"
+        ))
+        .into());
+    }
+    if !fake_codex_calls.contains("mcp get projectatlas") {
+        return Err(io::Error::other(format!(
+            "failed plugin replacement suppressed independent MCP registry convergence:\n{fake_codex_calls}"
         ))
         .into());
     }
@@ -13367,7 +13373,7 @@ fn assert_plugin_update_refuses_retained_recovery_state_before_mutation()
     let normalized_output_text = output_text.split_whitespace().collect::<Vec<_>>().join(" ");
     if !normalized_output_text.contains("retained recovery state requires inspection")
         || !normalized_output_text.contains(
-            "Codex MCP registry update skipped because the prior ProjectAtlas plugin integration was preserved",
+            "Codex MCP registry update skipped: no global projectatlas MCP server is configured",
         )
     {
         return Err(io::Error::other(format!(
@@ -13388,6 +13394,12 @@ fn assert_plugin_update_refuses_retained_recovery_state_before_mutation()
             ))
             .into());
         }
+    }
+    if !calls.contains("mcp get projectatlas") {
+        return Err(io::Error::other(format!(
+            "retained plugin recovery state suppressed independent MCP registry convergence:\n{calls}"
+        ))
+        .into());
     }
     let lock_exists = codex_dir.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME).is_file();
     if !retained_snapshot.join("config.toml").is_file()
