@@ -1063,6 +1063,13 @@ codex_projectatlas_plugin_source_manifest_matches() {
   [ "$(codex_projectatlas_plugin_source_manifest_version "$plugin_source_path")" = "$expected_version" ]
 }
 
+codex_projectatlas_plugin_source_ready() {
+  expected_version=$1
+  plugin_source_path=$2
+  codex_projectatlas_plugin_source_manifest_matches "$expected_version" "$plugin_source_path" &&
+    cmp -s "$plugin_root/skills/projectatlas/SKILL.md" "$plugin_source_path/skills/projectatlas/SKILL.md"
+}
+
 verify_codex_projectatlas_skill_artifact() {
   runtime_version=$(expected_runtime_version)
   if [ -z "$runtime_version" ]; then
@@ -1177,7 +1184,7 @@ update_codex_plugin_locked() {
   current_plugin_source_path=$codex_projectatlas_inventory_source_path
   if [ "$previous_ref" = "$release_tag" ] &&
     [ "$current_plugin_version" = "$runtime_version" ] &&
-    codex_projectatlas_plugin_source_manifest_matches "$runtime_version" "$current_plugin_source_path"; then
+    codex_projectatlas_plugin_source_ready "$runtime_version" "$current_plugin_source_path"; then
     printf 'Codex ProjectAtlas plugin marketplace already points to %s.\n' "$release_tag"
     verify_codex_projectatlas_skill_artifact
     return 0
@@ -1187,6 +1194,8 @@ update_codex_plugin_locked() {
       ! codex_projectatlas_plugin_source_manifest_matches "$runtime_version" "$current_plugin_source_path"; then
       source_manifest_version=$(codex_projectatlas_plugin_source_manifest_version "$current_plugin_source_path")
       printf "Codex ProjectAtlas plugin source manifest version '%s' does not match %s; refreshing official projectatlas plugin cache.\n" "$source_manifest_version" "$runtime_version"
+    elif [ "$current_plugin_version" = "$runtime_version" ]; then
+      printf 'Codex ProjectAtlas plugin skill artifact does not match %s; refreshing official projectatlas plugin cache.\n' "$runtime_version"
     fi
     if ! stage_codex_projectatlas_snapshot "$current_plugin_version" "$current_plugin_source_path" "$runtime_version"; then
       codex_plugin_update_preserved_prior_state=true
