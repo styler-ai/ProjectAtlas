@@ -4676,10 +4676,7 @@ fn load_token_atlas_relations(
             RepositoryGraphDirection::Outbound,
             RepositoryGraphDirection::Inbound,
         ] {
-            let page_limit = ((GraphLimits::MAX_ROWS as usize + 1) / frontier.len())
-                .saturating_sub(1)
-                .clamp(1, ADJACENCY_ROWS_PER_ROUND);
-            let mut remaining_rows = page_limit;
+            let mut remaining_rows = ADJACENCY_ROWS_PER_ROUND;
             for (index, &relation_kind) in adjacency_relation_kinds.iter().enumerate() {
                 if remaining_rows == 0 {
                     truncated = true;
