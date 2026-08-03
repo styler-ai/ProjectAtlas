@@ -36,8 +36,8 @@ const PRIVATE_PATH_FIXTURE_MARKER: &str = "projectatlas: path-fixture";
 const PRIVATE_PATH_PATTERNS: &[&str] = &[
     r"(?i)[A-Z]:[\\/]{1,2}Users[\\/]{1,2}[^\r\n\\/<>{}]+(?:[\\/]{1,2}|$)",
     r"(?i)[A-Z]:[\\/]{1,2}media[\\/]{1,2}projects(?:[\\/]{1,2}|$)",
-    r"(?i)(?:^|[^A-Za-z0-9_.])/(?:mnt/[A-Z]/Users|(?:var/)?home|Users)/[^/\r\n<>{}]+(?:/|$)",
-    r"(?:^|[^A-Za-z0-9_.])/root(?:/|$)",
+    r"(?i)(?:^|[^A-Za-z0-9_.])\\?/(?:mnt\\?/[A-Z]\\?/Users|(?:var\\?/)?home|Users)\\?/[^\\/\r\n<>{}]+(?:\\?/|$)",
+    r"(?:^|[^A-Za-z0-9_.])\\?/root(?:\\?/|$)",
 ];
 
 /// MCP project-selection response strings owned by the MCP adapter contract.
@@ -982,7 +982,7 @@ mod tests {
             )?;
             fs::write(
                 repo.join("private.txt"),
-                "escaped = C:\\\\Users\\\\private-owner\\\\ProjectAtlas\nspaces = C:/Users/Private Owner/ProjectAtlas\nwsl = /mnt/c/Users/private-owner/ProjectAtlas\nvar-home = /var/home/private-owner/ProjectAtlas\n", // projectatlas: path-fixture
+                "escaped = C:\\\\Users\\\\private-owner\\\\ProjectAtlas\nspaces = C:/Users/Private Owner/ProjectAtlas\nwsl = /mnt/c/Users/private-owner/ProjectAtlas\nvar-home = /var/home/private-owner/ProjectAtlas\njson-home = \\/home\\/private-owner\\/ProjectAtlas\njson-wsl = \\/mnt\\/c\\/Users\\/private-owner\\/ProjectAtlas\njson-root = \\/root\\/ProjectAtlas\n", // projectatlas: path-fixture
             )?;
             #[cfg(unix)]
             std::os::unix::fs::symlink(
@@ -1030,7 +1030,7 @@ mod tests {
             )?;
 
             let violations = lint_repository_private_paths(&repo)?;
-            require(violations.len() == 5, "private paths were not rejected")?;
+            require(violations.len() == 8, "private paths were not rejected")?;
             let diagnostic = violations
                 .iter()
                 .map(ToString::to_string)
