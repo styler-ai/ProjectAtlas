@@ -2822,7 +2822,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 .map(fs::File::from)
                 .and_then(|lock_file| {
                     acquire_installer_lock(
-                        lock_file,
+                        &lock_file,
                         *expected_device,
                         *expected_inode,
                         INSTALLER_LOCK_TIMEOUT,
@@ -4919,7 +4919,7 @@ fn cli_command_name(command: &Command) -> &'static str {
 /// Acquire one inherited installer file lock without reopening its authority path.
 #[cfg(unix)]
 fn acquire_installer_lock(
-    file: fs::File,
+    file: &fs::File,
     expected_device: u64,
     expected_inode: u64,
     timeout: Duration,
@@ -5602,7 +5602,7 @@ mod tests {
         let metadata = parent.metadata()?;
         require_condition(
             super::acquire_installer_lock(
-                parent.try_clone()?,
+                &parent.try_clone()?,
                 metadata.dev(),
                 metadata.ino() ^ 1,
                 std::time::Duration::ZERO,
@@ -5611,7 +5611,7 @@ mod tests {
             "installer lock accepted a descriptor with the wrong captured identity",
         )?;
         super::acquire_installer_lock(
-            parent.try_clone()?,
+            &parent.try_clone()?,
             metadata.dev(),
             metadata.ino(),
             std::time::Duration::ZERO,
@@ -5627,7 +5627,7 @@ mod tests {
 
         let blocked = fs::OpenOptions::new().read(true).write(true).open(&path)?;
         let blocked_result = super::acquire_installer_lock(
-            blocked,
+            &blocked,
             metadata.dev(),
             metadata.ino(),
             std::time::Duration::ZERO,
@@ -5641,7 +5641,7 @@ mod tests {
         let directory_metadata = directory.metadata()?;
         require_condition(
             super::acquire_installer_lock(
-                directory,
+                &directory,
                 directory_metadata.dev(),
                 directory_metadata.ino(),
                 std::time::Duration::ZERO,
@@ -5663,7 +5663,7 @@ mod tests {
             "installer lock pathless-descriptor fixture remained linked",
         )?;
         super::acquire_installer_lock(
-            detached,
+            &detached,
             detached_metadata.dev(),
             detached_metadata.ino(),
             std::time::Duration::ZERO,
