@@ -12757,22 +12757,18 @@ exit 0
     if !child_ready.is_file() {
         return Err(io::Error::other("POSIX mutation child did not report readiness").into());
     }
-    let try_native_lock = || -> io::Result<std::process::Output> {
-        if cfg!(target_os = "macos") {
-            StdCommand::new("lockf")
-                .args(["-k", "-s", "-t", "0"])
-                .arg(&lock_path)
-                .arg("true")
-                .output()
-        } else {
-            StdCommand::new("flock")
-                .arg("-n")
-                .arg(&lock_path)
-                .arg("true")
-                .output()
+    let try_native_lock = || -> io::Result<bool> {
+        let contender = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        match contender.try_lock() {
+            Ok(()) => Ok(true),
+            Err(fs::TryLockError::WouldBlock) => Ok(false),
+            Err(fs::TryLockError::Error(source)) => Err(source),
         }
     };
-    if try_native_lock()?.status.success() {
+    if try_native_lock()? {
         return Err(io::Error::other(
             "POSIX plugin lock was released while the mutation child still held its descriptor",
         )
@@ -12781,16 +12777,14 @@ exit 0
     fs::write(&child_release, b"release\n")?;
     let release_deadline = Instant::now() + Duration::from_secs(3);
     let mut release_probe = try_native_lock()?;
-    while !release_probe.status.success() && Instant::now() < release_deadline {
+    while !release_probe && Instant::now() < release_deadline {
         thread::sleep(Duration::from_millis(10));
         release_probe = try_native_lock()?;
     }
-    if !release_probe.status.success() {
-        return Err(io::Error::other(format!(
-            "POSIX plugin lock remained held after releasing the mutation child:\n{}\n{}",
-            String::from_utf8_lossy(&release_probe.stdout),
-            String::from_utf8_lossy(&release_probe.stderr)
-        ))
+    if !release_probe {
+        return Err(io::Error::other(
+            "POSIX plugin lock remained held after releasing the mutation child",
+        )
         .into());
     }
     let released_metadata = fs::symlink_metadata(&lock_path)?;
