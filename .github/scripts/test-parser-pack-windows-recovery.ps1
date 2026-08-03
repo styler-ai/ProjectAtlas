@@ -595,8 +595,8 @@ function Assert-NamedObjectProbeDiagnosticContract {
         "'descendant-native-diagnostic-invalid'",
         '[System.ComponentModel.Win32Exception]::new(',
         "[ValidateSet('none', 'operation-and-cleanup', 'descendant-open-not-found')]",
-        '"diagnostic-operation-fault ordinary/token $diagnosticDrivePath $diagnosticNetworkPath"',
-        '"diagnostic-cleanup-fault ordinary$([char]92)token $diagnosticDrivePath `"$diagnosticNetworkForward`" $diagnosticNetworkBackward $diagnosticMixedPath"',
+        "'diagnostic-operation-fault ordinary/token C:/private/forward.txt //server/share/unquoted.txt'",
+        "'diagnostic-cleanup-fault ordinary\token D:\private/mixed\cleanup.txt ""//server/share/quoted forward.txt"" \\server\share\backward.txt \/server/share\mixed.txt'",
         'exit [int]$record.exit_code'
     )) {
         Require `
@@ -3580,14 +3580,8 @@ try {
 
     $probeStage = 'semaphore-acl'
     if ($DiagnosticFault -ceq 'operation-and-cleanup') {
-        $diagnosticDrivePath = [string]::Concat(
-            [char]67, ':', [char]47, 'private/forward.txt'
-        )
-        $diagnosticNetworkPath = [string]::Concat(
-            [char]47, [char]47, 'server/share/unquoted.txt'
-        )
         throw [System.InvalidOperationException]::new(
-            "diagnostic-operation-fault ordinary/token $diagnosticDrivePath $diagnosticNetworkPath"
+            'diagnostic-operation-fault ordinary/token C:/private/forward.txt //server/share/unquoted.txt'
         )
     }
     $probeStage = 'semaphore-create'
@@ -3708,22 +3702,9 @@ finally {
         }
     }
     if ($DiagnosticFault -ceq 'operation-and-cleanup') {
-        $diagnosticDrivePath = [string]::Concat(
-            [char]68, ':', [char]92, 'private/mixed', [char]92, 'cleanup.txt'
-        )
-        $diagnosticNetworkForward = [string]::Concat(
-            [char]47, [char]47, 'server/share/quoted forward.txt'
-        )
-        $diagnosticNetworkBackward = [string]::Concat(
-            [char]92, [char]92, 'server', [char]92, 'share',
-            [char]92, 'backward.txt'
-        )
-        $diagnosticMixedPath = [string]::Concat(
-            [char]92, [char]47, 'server/share/mixed.txt'
-        )
         $cleanupFailures.Add(
             [System.InvalidOperationException]::new(
-                "diagnostic-cleanup-fault ordinary$([char]92)token $diagnosticDrivePath `"$diagnosticNetworkForward`" $diagnosticNetworkBackward $diagnosticMixedPath"
+                'diagnostic-cleanup-fault ordinary\token D:\private/mixed\cleanup.txt "//server/share/quoted forward.txt" \\server\share\backward.txt \/server/share\mixed.txt'
             )
         )
     }

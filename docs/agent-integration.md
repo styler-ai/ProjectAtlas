@@ -463,7 +463,7 @@ but their line ranges come from the deep symbol index and should be kept fresh b
 
 ## Codex skills
 
-ProjectAtlas ships public agent guidance through `AGENTS.md`, repository docs, and the packaged plugin skill.
+ProjectAtlas ships public agent guidance through repository docs and the packaged plugin skill.
 Personal workspace memory is local state and should stay ignored/untracked through `.gitignore`.
 
 ## Claude Code Plugin And OpenCode MCP Config

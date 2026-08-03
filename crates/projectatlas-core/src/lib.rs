@@ -754,8 +754,7 @@ mod tests {
     #[test]
     fn validated_repo_file_key_rejects_absolute_and_parent_paths() {
         assert!(validated_repo_file_key(Path::new("../secret.rs")).is_err());
-        let windows_absolute = ["C:", "secret.rs"].join("/");
-        assert!(validated_repo_file_key(Path::new(&windows_absolute)).is_err());
+        assert!(validated_repo_file_key(Path::new("C:/secret.rs")).is_err());
         assert!(validated_repo_file_key(Path::new("/secret.rs")).is_err());
         assert!(validated_repo_file_key(Path::new(".")).is_err());
     }
@@ -842,29 +841,18 @@ mod tests {
 
     #[test]
     fn native_path_display_removes_windows_extended_prefixes() {
-        let extended_drive = [
-            "",
-            "",
-            "?",
-            "C:",
-            "repo",
-            ".projectatlas",
-            "projectatlas.db",
-        ]
-        .join(r"\");
-        let drive_display = ["C:", "repo", ".projectatlas", "projectatlas.db"].join("/");
         assert_eq!(
-            normalize_native_path_display_str(&extended_drive),
-            drive_display
+            normalize_native_path_display_str(r"\\?\C:\repo\.projectatlas\projectatlas.db"),
+            "C:/repo/.projectatlas/projectatlas.db"
         );
-        let extended_unc = ["", "", "?", "UNC", "server", "share", "repo"].join(r"\");
-        let unc_display = ["", "", "server", "share", "repo"].join("/");
         assert_eq!(
-            normalize_native_path_display_str(&extended_unc),
-            unc_display
+            normalize_native_path_display_str(r"\\?\UNC\server\share\repo"),
+            "//server/share/repo"
         );
-        let unix_path = ["", "home", "user", "repo"].join("/");
-        assert_eq!(normalize_native_path_display_str(&unix_path), unix_path);
+        assert_eq!(
+            normalize_native_path_display_str("/home/user/repo"), // projectatlas: path-fixture
+            "/home/user/repo"                                     // projectatlas: path-fixture
+        );
         assert_eq!(
             normalize_native_path_display_str("src\\main.rs"),
             "src/main.rs"

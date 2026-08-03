@@ -446,8 +446,7 @@ mod tests {
             Some("src/shared folder/*")
         );
         assert!(normalize_repository_target("", "../outside/*", true).is_err());
-        let windows_escape = ["C:", "outside", "*"].join("/");
-        assert!(normalize_repository_target("src", &windows_escape, true).is_err());
+        assert!(normalize_repository_target("src", "C:/outside/*", true).is_err());
     }
 
     #[test]

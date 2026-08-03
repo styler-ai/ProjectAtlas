@@ -20,14 +20,12 @@ from typing import Any
 
 from mcp_composition import PURPOSES, clear_git_repository_environment, remove_tree
 from system_scale import (
-    assert_private_absolute_paths_redacted,
     committed_git_object_sha256,
     measurement_input_errors,
     persistent_sizes,
     prepare_huge,
     prepare_medium,
     prepare_small,
-    redact_private_absolute_paths,
     run_measured,
 )
 
@@ -78,7 +76,6 @@ PATH_PLACEHOLDERS = {
     "{REPO_ROOT}": "ProjectAtlas checkout root",
     "{USER_HOME}": "current operating-system user home",
     "{POWERSHELL}": "PowerShell executable",
-    "{PRIVATE_PATH}": "other structurally detected private absolute path",
 }
 POWERSHELL = shutil.which("pwsh")
 AGENT_NAVIGATION_MEASUREMENT_INPUTS = (
@@ -107,13 +104,7 @@ def candidate_path(value: str) -> Path:
 
 def redact_local_paths(value: Any) -> Any:
     if isinstance(value, dict):
-        redacted = {}
-        for key, item in value.items():
-            redacted_key = redact_local_paths(key)
-            if redacted_key in redacted:
-                raise ValueError("private path redaction produced duplicate object keys")
-            redacted[redacted_key] = redact_local_paths(item)
-        return redacted
+        return {key: redact_local_paths(item) for key, item in value.items()}
     if isinstance(value, list):
         return [redact_local_paths(item) for item in value]
     if not isinstance(value, str):
@@ -131,7 +122,7 @@ def redact_local_paths(value: Any) -> Any:
         parts = re.split(r"[\\/]+", str(path))
         pattern = r"[\\/]+".join(re.escape(part) for part in parts)
         redacted = re.sub(pattern, placeholder, redacted, flags=re.IGNORECASE)
-    return redact_private_absolute_paths(redacted)
+    return redacted
 
 
 def utf8_size(value: Any) -> int:
@@ -1156,30 +1147,25 @@ def safe_child(path: Path, parent: Path, label: str) -> Path:
 def write_result(result: dict[str, Any], output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(f"{output.name}.tmp")
-    try:
-        temporary.write_text(
-            json.dumps(redact_local_paths(result), indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-            newline="\n",
-        )
-        persisted = json.loads(temporary.read_text(encoding="utf-8"))
-        assert_private_absolute_paths_redacted(persisted, output.name)
-        temporary.replace(output)
-    finally:
-        temporary.unlink(missing_ok=True)
-    print(output.name)
+    temporary.write_text(
+        json.dumps(redact_local_paths(result), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    temporary.replace(output)
+    print(output)
 
 
 def append_checkpoint(record: dict[str, Any], journal: Path) -> None:
     journal.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        redact_local_paths(record),
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    assert_private_absolute_paths_redacted(json.loads(payload), journal.name)
     with journal.open("a", encoding="utf-8", newline="\n") as stream:
-        stream.write(payload)
+        stream.write(
+            json.dumps(
+                redact_local_paths(record),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
@@ -1322,7 +1308,9 @@ def main() -> None:
     output = args.output.resolve()
     journal = output.with_name(f"{output.name}.journal.jsonl")
     if output.exists() or journal.exists():
-        raise SystemExit("refusing to overwrite retained benchmark output or journal")
+        raise SystemExit(
+            f"refusing to overwrite retained benchmark state: {output} or {journal}"
+        )
     try:
         result = run_benchmark(args)
     except Exception as error:

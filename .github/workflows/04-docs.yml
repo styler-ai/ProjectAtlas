@@ -24,8 +24,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
 
       - name: Setup Rust
         run: |
@@ -34,27 +32,7 @@ jobs:
 
       - name: Repository source policy lints
         timeout-minutes: 2
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          HISTORY_BASE: ${{ github.event.before }}
-          HISTORY_HEAD: ${{ github.event.after || github.sha }}
-        run: |
-          set -euo pipefail
-          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-            HISTORY_HEAD="$(git rev-parse --verify "$GITHUB_SHA^{commit}")"
-            HISTORY_BASE="$(git merge-base "origin/$DEFAULT_BRANCH" "$HISTORY_HEAD")"
-            if [[ "$HISTORY_BASE" == "$HISTORY_HEAD" ]]; then
-              HISTORY_BASE="$(git rev-parse --verify "$HISTORY_HEAD^1")"
-            fi
-          elif [[ "$GITHUB_EVENT_NAME" != "push" || -z "$HISTORY_BASE" || -z "$HISTORY_HEAD" ]]; then
-            exit 1
-          fi
-          if [[ "$HISTORY_HEAD" =~ ^0+$ ]]; then
-            exit 0
-          fi
-          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
-            private-path-range "$HISTORY_BASE" "$HISTORY_HEAD"
+        run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 
       - name: Build rustdoc
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked

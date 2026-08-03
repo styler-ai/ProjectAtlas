@@ -3592,8 +3592,7 @@ mod tests {
                     .arg("/J")
                     .arg(link)
                     .arg(target)
-                    .output()?
-                    .status;
+                    .status()?;
                 if status.success() {
                     Ok(())
                 } else {
@@ -3974,25 +3973,22 @@ mod tests {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     #[test]
     fn windows_cleanup_paths_preserve_verbatim_forms_and_bound_current_directory() -> TestResult {
-        let drive = ["C:", "pack", "parser"].join(r"\");
-        let verbatim_drive = ["", "", "?", "C:", "pack", "parser"].join(r"\");
-        let unc = ["", "", "server", "share", "pack"].join(r"\");
-        let verbatim_unc = ["", "", "?", "UNC", "server", "share", "pack"].join(r"\");
         require(
-            windows_verbatim_path(Path::new(&drive)) == Path::new(&verbatim_drive),
+            windows_verbatim_path(Path::new(r"C:\pack\parser")) == Path::new(r"\\?\C:\pack\parser"),
             "drive path did not gain its verbatim prefix",
         )?;
         require(
-            windows_verbatim_path(Path::new(&unc)) == Path::new(&verbatim_unc),
+            windows_verbatim_path(Path::new(r"\\server\share\pack"))
+                == Path::new(r"\\?\UNC\server\share\pack"),
             "UNC path did not gain its verbatim prefix",
         )?;
         require(
-            windows_verbatim_path(Path::new(&verbatim_drive)) == Path::new(&verbatim_drive),
+            windows_verbatim_path(Path::new(r"\\?\C:\pack\parser"))
+                == Path::new(r"\\?\C:\pack\parser"),
             "existing verbatim path changed",
         )?;
         let maximum = PathBuf::from(format!(
-            r"{}:\{}",
-            'C',
+            r"C:\{}",
             "a".repeat(WINDOWS_PROCESS_CURRENT_DIRECTORY_MAX_UTF16_UNITS - 3)
         ));
         require(
@@ -4000,17 +3996,15 @@ mod tests {
             "maximum supported working directory was rejected",
         )?;
         let overlong = PathBuf::from(format!(
-            r"{}:\{}",
-            'C',
+            r"C:\{}",
             "a".repeat(WINDOWS_PROCESS_CURRENT_DIRECTORY_MAX_UTF16_UNITS - 2)
         ));
         require(
             require_windows_framework_path(&overlong).is_err(),
             "overlong working directory was accepted",
         )?;
-        let verbatim_pack = ["", "", "?", "C:", "pack"].join(r"\");
         require(
-            require_windows_framework_path(Path::new(&verbatim_pack)).is_err(),
+            require_windows_framework_path(Path::new(r"\\?\C:\pack")).is_err(),
             "verbatim working directory was accepted",
         )
     }

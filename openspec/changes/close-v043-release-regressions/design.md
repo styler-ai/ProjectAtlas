@@ -10,7 +10,7 @@ The five failures share a release concern—an optional or bounded adapter disca
 - Keep structural/local ProjectAtlas navigation operational when Git is absent while preserving typed child failures.
 - Keep VCS-impact requests responsive while a persistent MCP host keeps its own stdin open.
 - Make failed official Codex plugin replacement locally reversible even when every network add fails.
-- Reject machine-local absolute paths in every Git-visible text encoding and every build-reachable revision before product compilation or publication.
+- Reject genuine machine-local paths in the current tracked UTF-8 source tree before product compilation or publication.
 - Prove each behavior in the accumulated local and hosted v0.4.3 release gate.
 
 **Non-Goals:**
@@ -56,13 +56,13 @@ Successful updates, intentionally managed marketplaces, skip controls, and obsol
 
 Alternative rejected: remove-then-network-add plus network rollback is not reversible offline. Copying unvalidated or external trees weakens the installer trust boundary.
 
-### 4. Keep source privacy in one decoder and require it before every product build
+### 4. Keep source privacy as one small current-tree rule
 
-The repository linter strips UTF-8, UTF-16 little-endian, and UTF-16 big-endian BOMs at its shared text-decoding boundary, rejects malformed non-binary text, and applies the same private-path rules, including root-owned Unix homes with real URI-token boundaries, to tracked and non-ignored untracked source plus historical Git blobs. It counts the complete scan while retaining only a bounded redacted diagnostic sample. Exact published-base comparison uses source-free fixed-size line identities with independent group and identity-byte bounds; exceeding either bound rejects the range with complete raw baseline/outgoing counts and declared limits rather than claiming an unknowable exact introduced count. Diagnostics retain only repository-relative location and rule identity.
+The existing repository linter reads the paths returned by `git ls-files`, skips non-UTF-8 data and explicit path fixtures, and rejects the machine-specific home and checkout forms that caused the leak. Diagnostics contain only the repository-relative file, line, column, and rule identity; the matched path is never echoed.
 
-CI, release, documentation, optional-parser construction, and pre-push run the current-tree policy before product compilation. Each independent hosted artifact path fetches complete history and scans its exact newly reachable range; downstream package, publish, and deploy jobs remain dependency-gated behind that result. The linter binary itself is the unavoidable policy bootstrap and does not compile a ProjectAtlas product crate.
+Pre-push, CI, release, documentation, and optional-parser construction run that same command before product compilation. The root `AGENTS.md` remains useful local guidance, but `/AGENTS.md` is ignored and the tracked copy is removed.
 
-Alternative rejected: extension allowlists miss scripts and configuration, tip-only scans allow clean-tip evasion, and waiting on a concurrent CI run creates a race between independent workflows.
+History scanning, markup parsing, URI normalization, benchmark redaction, and a second matcher in another language are intentionally excluded.
 
 ## Risks / Trade-offs
 
@@ -73,7 +73,7 @@ Alternative rejected: extension allowlists miss scripts and configuration, tip-o
 - [Installer snapshot follows hostile links or escapes ownership] -> Reuse exact official-source and containment validation before snapshot and restore.
 - [Restore overwrites newer successful state] -> Hold one cross-process lock per Codex root across inventory, snapshot, mutation, validation, and restore.
 - [A mounted tree redirects recursive restore or cleanup] -> Require valid platform mount inventory, revalidate immediately before destructive traversal or snapshot copy, and use no-cross-filesystem deletion while retaining the snapshot on refusal.
-- [A BOM or independent workflow bypasses source privacy] -> Normalize supported BOMs in the shared decoder and run current-tree plus range gates before every product build path.
+- [An independent workflow bypasses source privacy] -> Run the same current-tree command before every product build path.
 - [Concurrent release edits drift] -> Run focused checks first, then exact candidate/full hosted gates and automatic review at one head.
 
 ## Migration Plan

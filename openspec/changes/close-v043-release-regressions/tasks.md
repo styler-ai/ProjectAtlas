@@ -21,6 +21,6 @@
 
 ## 4. Repository Source Privacy
 
-- [x] 4.1 Normalize UTF-8 and UTF-16 BOM text at the shared decoder, retain binary exclusion and malformed-text failure, cover named and root-owned home paths with URI boundaries, and bound redacted diagnostics while preserving complete counts and exact published-base comparison.
-- [x] 4.2 Run complete-current-tree and newly reachable history policy before product compilation in pre-push, CI, release, documentation, and optional-parser paths, with full-history checkout and fail-closed range selection.
-- [ ] 4.3 Run format, focused linter/workflow tests, the full accumulated release gate, hosted artifact paths, and independent privacy/edge review.
+- [x] 4.1 Reject genuine machine-specific home and checkout paths in the current tracked UTF-8 source tree, allow explicit fixtures and portable placeholders, and report only repository-relative location plus a redacted rule identity.
+- [x] 4.2 Run the same small current-tree lint before product compilation in pre-push, CI, release, documentation, and optional-parser workflows; remove the root `AGENTS.md` from tracking while retaining it as ignored local guidance.
+- [ ] 4.3 Run format, focused linter/workflow tests, the full accumulated release gate, hosted workflow proof, and independent privacy/edge review.

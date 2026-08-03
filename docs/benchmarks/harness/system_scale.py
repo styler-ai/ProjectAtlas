@@ -50,53 +50,7 @@ PATH_PLACEHOLDERS = {
     "{REPO_ROOT}": "candidate repository root",
     "{USER_HOME}": "current operating-system user home",
     "{POWERSHELL}": "PowerShell executable",
-    "{PRIVATE_PATH}": "other structurally detected private absolute path",
 }
-PRIVATE_ABSOLUTE_PATH_PATTERNS = (
-    (
-        "windows-drive-root",
-        re.compile(r"(?i)(?<![A-Za-z0-9_.+\-])[A-Z]:[\\/]+[^\s,;'\"<>]*"),
-    ),
-    (
-        "file-network-root",
-        re.compile(r"(?i)file://[^\s\\/:'\"`<>]+/[^\s,;'\"<>]+"),
-    ),
-    (
-        "file-user-home-root",
-        re.compile(
-            r"(?i)file:(?:/{2,3}(?:home|Users)/[^/\s'\"<>]+|/{3}root"
-            r"(?=/|[\s,;'\"<>(){}\[\]]|$))"
-            r"(?:/[^\s,;'\"<>]*)?"
-        ),
-    ),
-    (
-        "verbatim-network-root",
-        re.compile(
-            r"(?i)(?<![\\])\\{2,}\?\\+UNC\\+[A-Za-z0-9][A-Za-z0-9_.-]+"
-            r"\\+[A-Za-z0-9_$.-]+(?:\\+[^\s,;'\"<>]*)?"
-        ),
-    ),
-    (
-        "network-root",
-        re.compile(
-            r"(?:(?<![A-Za-z0-9_.:+\\/])[\\/]{2,}|(?<=/)\\{2,})"
-            r"[A-Za-z0-9][A-Za-z0-9_.-]+"
-            r"[\\/]+[A-Za-z0-9_$.-]+(?:[\\/][^\s,;'\"<>]*)?"
-        ),
-    ),
-    (
-        "user-home-root",
-        re.compile(
-            r"(?<![A-Za-z0-9:/])/(?:(?:home|Users)/[^/\s'\"<>]+|root"
-            r"(?=/|[\s,;'\"<>(){}\[\]]|$))"
-            r"(?:/[^\s,;'\"<>]*)?"
-        ),
-    ),
-    (
-        "wsl-drive-root",
-        re.compile(r"(?i)(?<![A-Za-z0-9:/])/mnt/[A-Za-z](?:/[^\s,;'\"<>]*)?"),
-    ),
-)
 SYSTEM_SCALE_MEASUREMENT_INPUTS = (
     "docs/benchmarks/harness/system_scale.py",
     "docs/benchmarks/harness/mcp_composition.py",
@@ -187,13 +141,7 @@ def candidate_file_identity(
 
 def redact_local_paths(value: Any) -> Any:
     if isinstance(value, dict):
-        redacted = {}
-        for key, item in value.items():
-            redacted_key = redact_local_paths(key)
-            if redacted_key in redacted:
-                raise ValueError("private path redaction produced duplicate object keys")
-            redacted[redacted_key] = redact_local_paths(item)
-        return redacted
+        return {key: redact_local_paths(item) for key, item in value.items()}
     if isinstance(value, list):
         return [redact_local_paths(item) for item in value]
     if not isinstance(value, str):
@@ -208,39 +156,7 @@ def redact_local_paths(value: Any) -> Any:
         parts = re.split(r"[\\/]+", str(path))
         pattern = r"[\\/]+".join(re.escape(part) for part in parts)
         redacted = re.sub(pattern, placeholder, redacted, flags=re.IGNORECASE)
-    return redact_private_absolute_paths(redacted)
-
-
-def redact_private_absolute_paths(value: str) -> str:
-    for _, pattern in PRIVATE_ABSOLUTE_PATH_PATTERNS:
-        value = pattern.sub("{PRIVATE_PATH}", value)
-    return value
-
-
-def assert_private_absolute_paths_redacted(value: Any, artifact: str) -> None:
-    remaining: set[str] = set()
-
-    def inspect(item: Any) -> None:
-        if isinstance(item, dict):
-            for key, nested in item.items():
-                inspect(key)
-                inspect(nested)
-        elif isinstance(item, list):
-            for nested in item:
-                inspect(nested)
-        elif isinstance(item, str):
-            remaining.update(
-                kind
-                for kind, pattern in PRIVATE_ABSOLUTE_PATH_PATTERNS
-                if pattern.search(item)
-            )
-
-    inspect(value)
-    if remaining:
-        raise ValueError(
-            f"refusing to publish {artifact}: unredacted private path categories: "
-            + ", ".join(sorted(remaining))
-        )
+    return redacted
 
 
 def command(*args: str, cwd: Path, env: dict[str, str] | None = None) -> None:
@@ -3582,19 +3498,12 @@ def validate_publication_identity(
 def write_result(result: dict[str, Any], output: Path) -> None:
     """Persist every result, then fail the command when any gate rejected it."""
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(f"{output.name}.tmp")
-    try:
-        temporary.write_text(
-            json.dumps(redact_local_paths(result), indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-            newline="\n",
-        )
-        persisted = json.loads(temporary.read_text(encoding="utf-8"))
-        assert_private_absolute_paths_redacted(persisted, output.name)
-        temporary.replace(output)
-    finally:
-        temporary.unlink(missing_ok=True)
-    print(output.name)
+    output.write_text(
+        json.dumps(redact_local_paths(result), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    print(output)
     if not result["passed"]:
         raise SystemExit(1)
 

@@ -3,16 +3,14 @@
 
 use proc_macro2::{TokenStream, TokenTree};
 use regex::Regex;
-use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::fmt::{self, Display};
 use std::fs;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
-use std::rc::Rc;
+use std::process::{Command, ExitCode};
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
@@ -23,10 +21,6 @@ use syn::{
 
 /// Subcommand that runs strict string-contract linting.
 const COMMAND_STRICT_STRINGS: &str = "strict-strings";
-/// Subcommand that scans the changed blobs described by standard pre-push rows.
-const COMMAND_PRIVATE_PATH_UPDATES: &str = "private-path-updates";
-/// Subcommand that scans newly reachable history relative to one published base.
-const COMMAND_PRIVATE_PATH_RANGE: &str = "private-path-range";
 /// Successful process exit.
 const EXIT_OK: u8 = 0;
 /// Lint failure process exit.
@@ -34,51 +28,16 @@ const EXIT_FAILURE: u8 = 1;
 /// Incorrect command usage process exit.
 const EXIT_USAGE: u8 = 2;
 
-/// Stable identifier for the repository-wide private absolute-path rule.
+/// Stable identifier for machine-specific absolute paths in public source.
 const PRIVATE_PATH_RULE_ID: &str = "private-absolute-path";
-/// Maximum redacted private-path diagnostics retained from one complete scan.
-const PRIVATE_PATH_DIAGNOSTIC_LIMIT: usize = 100;
-/// Maximum exact occurrence groups retained for one history comparison.
-const PRIVATE_PATH_COMPARISON_GROUP_LIMIT: usize = 4_096;
-/// Maximum conservatively charged identity bytes retained for history comparison.
-const PRIVATE_PATH_COMPARISON_IDENTITY_BYTE_LIMIT: usize = 1_048_576;
-/// Domain separator for source-free private-path line identities.
-const PRIVATE_PATH_SOURCE_IDENTITY_DOMAIN: &[u8] = b"projectatlas.private-path-line.v1\0";
-/// Domain separator for non-formattable Git pathname identities.
-const PRIVATE_PATH_LOCATION_IDENTITY_DOMAIN: &[u8] = b"projectatlas.private-path-location.v1\0";
-/// Stable diagnostic label for a forbidden Git pathname identity.
-const PRIVATE_PATH_REDACTED_GIT_PATH: &str = "<redacted-git-path>";
-
-/// Private absolute-path shapes forbidden in Git-visible path identities and text.
-const PRIVATE_PATH_RULES: &[(&str, &str)] = &[
-    (
-        "windows-drive-root",
-        r"(?i)(?:^|[^A-Za-z0-9_.+\-])(?P<path>[A-Z]:[\\/])",
-    ),
-    (
-        "verbatim-network-root",
-        r"(?i)(?:^|[^\\])(?P<path>\\{2,}\?\\+UNC\\+[A-Za-z0-9][A-Za-z0-9_.-]+\\+[A-Za-z0-9_$.-]+)",
-    ),
-    (
-        "network-root",
-        r#"(?:^|^["']|[\s(=\[]|[^\\]["'])(?P<path>(?:\\{2,}|/{2})[A-Za-z0-9][A-Za-z0-9_.-]+[\\/]+[A-Za-z0-9_$.-]+)"#,
-    ),
-    (
-        "file-network-root",
-        r#"(?i)(?:^|[^A-Za-z0-9+.-])file:(?P<path>/{2}[^\s\\/:"'`<>]+/)"#,
-    ),
-    (
-        "file-user-home-root",
-        r#"(?i)(?:^|[^A-Za-z0-9+.-])file:(?P<path>/{2,3}(?:(?:home|Users)/[^/\s"'`<>]+|root)(?:/|$))"#,
-    ),
-    (
-        "user-home-root",
-        r#"(?:^|[\s"'`(=:\[])(?P<path>/(?:(?:home|Users)/[^/\s"'`<>]+|root)(?:/|$))"#,
-    ),
-    (
-        "wsl-drive-root",
-        r#"(?:^|[\s"'`(=:\[])(?P<path>/mnt/[A-Za-z](?:/|$))"#,
-    ),
+/// One explicit escape hatch for intentional path-semantics examples.
+const PRIVATE_PATH_FIXTURE_MARKER: &str = "projectatlas: path-fixture";
+/// Small set of machine-specific path shapes that must use portable placeholders.
+const PRIVATE_PATH_PATTERNS: &[&str] = &[
+    r"(?i)[A-Z]:[\\/]Users[\\/][^\\/\s<>{}]+(?:[\\/]|$)",
+    r"(?i)[A-Z]:[\\/]media[\\/]projects(?:[\\/]|$)",
+    r"(?:^|[^A-Za-z0-9_.])/(?:home|Users)/[^/\s<>{}]+(?:/|$)",
+    r"(?:^|[^A-Za-z0-9_.])/root(?:/|$)",
 ];
 
 /// MCP project-selection response strings owned by the MCP adapter contract.
@@ -260,12 +219,9 @@ const REPEATED_PATH_JOIN_RULES: &[PathJoinLiteralRule] = &[PathJoinLiteralRule {
 fn main() -> ExitCode {
     match run(env::args_os().skip(1), &current_dir()) {
         Ok(()) => ExitCode::from(EXIT_OK),
-        Err(LintError::Violations {
-            string_literals,
-            private_paths,
-        }) => {
+        Err(LintError::Violations(violations)) => {
             let mut stderr = io::stderr().lock();
-            if write_violations(&mut stderr, &string_literals, &private_paths).is_err() {
+            if write_violations(&mut stderr, &violations).is_err() {
                 return ExitCode::from(EXIT_FAILURE);
             }
             ExitCode::from(EXIT_FAILURE)
@@ -295,34 +251,15 @@ fn run(args: impl IntoIterator<Item = OsString>, current_dir: &Path) -> Result<(
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         return help();
     }
-    if args.is_empty() {
+    let Some(command) = args.first() else {
         return help();
+    };
+    match command.as_str() {
+        COMMAND_STRICT_STRINGS => run_strict_strings(current_dir),
+        other => Err(LintError::Usage(format!(
+            "unknown projectatlas lint command {other:?}"
+        ))),
     }
-    match args.as_slice() {
-        [command] if command == COMMAND_STRICT_STRINGS => run_strict_strings(current_dir),
-        [command, remote_name] if command == COMMAND_PRIVATE_PATH_UPDATES => {
-            let stdin = io::stdin();
-            run_private_path_updates(current_dir, remote_name, stdin.lock())
-        }
-        [command, base, head] if command == COMMAND_PRIVATE_PATH_RANGE => {
-            run_private_path_range(current_dir, base, head)
-        }
-        [other, ..]
-            if other != COMMAND_STRICT_STRINGS
-                && other != COMMAND_PRIVATE_PATH_UPDATES
-                && other != COMMAND_PRIVATE_PATH_RANGE =>
-        {
-            Err(LintError::Usage(format!(
-                "unknown projectatlas lint command {other:?}"
-            )))
-        }
-        _ => Err(LintError::Usage("unexpected lint arguments".to_string())),
-    }
-}
-
-/// Accept the full SHA-1 and SHA-256 object identifiers supplied by Git hooks.
-fn is_full_git_object_id(revision: &str) -> bool {
-    matches!(revision.len(), 40 | 64) && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Normalize direct binary and Cargo external-subcommand invocation shapes.
@@ -342,14 +279,14 @@ fn help() -> Result<(), LintError> {
     let mut stdout = io::stdout().lock();
     writeln!(
         stdout,
-        "Usage: cargo projectatlas-lints <command>\n\nCommands:\n  {COMMAND_STRICT_STRINGS}  Enforce ProjectAtlas string contracts and repository-wide private-path policy.\n  {COMMAND_PRIVATE_PATH_UPDATES} <remote>  Scan changed blobs from standard pre-push rows on stdin.\n  {COMMAND_PRIVATE_PATH_RANGE} <base> <head>  Scan newly reachable history while allowing unchanged private-path source occurrences already present at the published base."
+        "Usage: cargo projectatlas-lints {COMMAND_STRICT_STRINGS}\n\nCommands:\n  {COMMAND_STRICT_STRINGS}  Enforce ProjectAtlas string contracts and reject machine-specific paths in the current tracked tree."
     )
     .map_err(LintError::Io)
 }
 
 /// Run all strict string-contract rules from a workspace root.
 fn run_strict_strings(root: &Path) -> Result<(), LintError> {
-    let mut string_violations = Vec::new();
+    let mut violations = Vec::new();
     for rule in STRICT_STRING_RULES {
         for relative_path in rule.paths {
             let path = root.join(relative_path);
@@ -357,7 +294,7 @@ fn run_strict_strings(root: &Path) -> Result<(), LintError> {
                 path: (*relative_path).to_string(),
                 source,
             })?;
-            string_violations.extend(lint_source(relative_path, rule, &source)?);
+            violations.extend(lint_source(relative_path, rule, &source)?);
         }
     }
     for rule in REPEATED_PATH_JOIN_RULES {
@@ -367,728 +304,100 @@ fn run_strict_strings(root: &Path) -> Result<(), LintError> {
                 path: (*relative_path).to_string(),
                 source,
             })?;
-            string_violations.extend(lint_repeated_path_join_literals(
+            violations.extend(lint_repeated_path_join_literals(
                 relative_path,
                 rule,
                 &source,
             )?);
         }
     }
-    let private_path_violations = lint_repository_private_paths(root)?;
-    finish_lint(string_violations, private_path_violations)
-}
-
-/// Scan one pre-push update batch without repeating unchanged tree blobs.
-fn run_private_path_updates(
-    root: &Path,
-    remote_name: &str,
-    reader: impl BufRead,
-) -> Result<(), LintError> {
-    let revisions = outgoing_revisions(root, remote_name, reader)?;
-    if revisions.is_empty() {
-        return finish_lint(Vec::new(), PrivatePathFindings::default());
-    }
-    let private_path_violations = lint_git_revisions_private_paths(root, &revisions, false)?;
-    finish_lint(Vec::new(), private_path_violations)
-}
-
-/// Scan newly reachable history without re-reporting unchanged private-path source at the base.
-fn run_private_path_range(root: &Path, base: &str, head: &str) -> Result<(), LintError> {
-    if !is_full_git_object_id(base)
-        || !is_full_git_object_id(head)
-        || base.len() != head.len()
-        || head.bytes().all(|byte| byte == b'0')
-    {
-        return Err(LintError::InvalidPrePushUpdate);
-    }
-    let updates = format!("refs/heads/ci {head} refs/heads/ci {base}\n");
-    let revisions = outgoing_revisions(root, "", io::Cursor::new(updates))?;
-    let baseline = if base.bytes().all(|byte| byte == b'0') {
-        PrivatePathFindings::with_comparison()
-    } else {
-        lint_git_tree_private_paths(root, base)?
-    };
-    let outgoing = lint_git_revisions_private_paths(root, &revisions, true)?;
-    finish_lint(
-        Vec::new(),
-        private_paths_not_in_baseline(outgoing, &baseline)?,
-    )
-}
-
-/// Resolve every newly reachable revision from standard pre-push update rows.
-fn outgoing_revisions(
-    root: &Path,
-    remote_name: &str,
-    reader: impl BufRead,
-) -> Result<Vec<String>, LintError> {
-    let mut revisions = BTreeSet::new();
-    for line in reader.lines() {
-        let line = line.map_err(LintError::ReadGitRevision)?;
-        let fields = line.split_whitespace().collect::<Vec<_>>();
-        let [_, local_object, _, remote_object] = fields.as_slice() else {
-            return Err(LintError::InvalidPrePushUpdate);
-        };
-        if !is_full_git_object_id(local_object) || !is_full_git_object_id(remote_object) {
-            return Err(LintError::InvalidPrePushUpdate);
-        }
-        if local_object.bytes().all(|byte| byte == b'0') {
-            continue;
-        }
-        let mut command = Command::new("git");
-        command.arg("rev-list");
-        if remote_object.bytes().any(|byte| byte != b'0') {
-            command.arg(format!("{remote_object}..{local_object}"));
-        } else {
-            command.arg(local_object);
-            if !remote_name.is_empty() {
-                command.args(["--not", &format!("--remotes={remote_name}")]);
-            }
-        }
-        let output = command
-            .current_dir(root)
-            .stderr(Stdio::null())
-            .output()
-            .map_err(LintError::ReadGitRevision)?;
-        if !output.status.success() {
-            return Err(LintError::GitRevisionCommandFailed {
-                operation: "outgoing revision listing",
-                code: output.status.code(),
-            });
-        }
-        let listed = String::from_utf8(output.stdout).map_err(LintError::NonUtf8GitPath)?;
-        let mut found = false;
-        for revision in listed.lines() {
-            if !is_full_git_object_id(revision) {
-                return Err(LintError::InvalidPrePushUpdate);
-            }
-            found = true;
-            revisions.insert(revision.to_string());
-        }
-        if !found {
-            revisions.insert((*local_object).to_string());
-        }
-    }
-    Ok(revisions.into_iter().collect())
-}
-
-/// Return success output or the collected source-policy failure.
-fn finish_lint(
-    string_violations: Vec<StringLiteralViolation>,
-    private_path_violations: PrivatePathFindings,
-) -> Result<(), LintError> {
-    if string_violations.is_empty() && private_path_violations.is_empty() {
+    violations.extend(lint_repository_private_paths(root)?);
+    if violations.is_empty() {
         let mut stdout = io::stdout().lock();
-        writeln!(
-            stdout,
-            "projectatlas-lints: repository source policies passed"
-        )
-        .map_err(LintError::Io)
+        writeln!(stdout, "projectatlas-lints: source policy passed").map_err(LintError::Io)
     } else {
-        Err(LintError::Violations {
-            string_literals: string_violations,
-            private_paths: private_path_violations,
-        })
+        Err(LintError::Violations(violations))
     }
 }
 
-/// Compile the closed private-path rule set.
-fn private_path_rules() -> Result<Vec<PrivatePathRule>, LintError> {
-    PRIVATE_PATH_RULES
-        .iter()
-        .map(|(kind, pattern)| {
-            Regex::new(pattern)
-                .map(|regex| PrivatePathRule { kind, regex })
-                .map_err(LintError::InvalidPrivatePathRule)
-        })
-        .collect()
-}
-
-/// Scan every Git-visible supported text file without emitting matched private text.
-fn lint_repository_private_paths(root: &Path) -> Result<PrivatePathFindings, LintError> {
-    let rules = private_path_rules()?;
-    let mut violations = PrivatePathFindings::default();
-    for relative_path in git_visible_paths(root)? {
-        let path_violations = lint_git_path_identity(&relative_path, &rules, None);
-        let path_is_forbidden = !path_violations.is_empty();
-        violations.extend(path_violations);
-        let diagnostic_path = if path_is_forbidden {
-            PRIVATE_PATH_REDACTED_GIT_PATH
-        } else {
-            relative_path.as_str()
-        };
-        if Path::new(&relative_path).is_absolute() {
-            if path_is_forbidden {
-                continue;
-            }
-            return Err(LintError::InvalidGitTreeEntry);
-        }
-        let path = root.join(&relative_path);
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
-            Err(source) => {
-                return Err(LintError::ReadFile {
-                    path: diagnostic_path.to_string(),
-                    source,
-                });
-            }
-        };
-        if metadata.is_dir() {
-            continue;
-        }
-        if metadata.file_type().is_symlink() {
-            let target = fs::read_link(&path).map_err(|source| LintError::ReadFile {
-                path: diagnostic_path.to_string(),
-                source,
-            })?;
-            let target = target
-                .to_str()
-                .ok_or_else(|| LintError::NonUtf8Text(diagnostic_path.to_string()))?;
-            violations.extend(lint_private_paths(diagnostic_path, target, &rules));
-            continue;
-        }
-        let bytes = fs::read(&path).map_err(|source| LintError::ReadFile {
-            path: diagnostic_path.to_string(),
-            source,
-        })?;
-        if let Some(source) = decode_repository_text(diagnostic_path, &bytes)? {
-            violations.extend(lint_private_paths(diagnostic_path, &source, &rules));
-        }
-    }
-    Ok(violations)
-}
-
-/// Scan each changed Git path identity and text blob once, independent of export policy.
-fn lint_git_revisions_private_paths(
-    root: &Path,
-    revisions: &[String],
-    retain_comparison: bool,
-) -> Result<PrivatePathFindings, LintError> {
-    let mut diff = Command::new("git")
-        .args([
-            "diff-tree",
-            "--stdin",
-            "--root",
-            "-r",
-            "-m",
-            "--no-commit-id",
-            "--no-renames",
-            "--no-abbrev",
-            "--raw",
-            "-z",
-        ])
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(LintError::ReadGitRevision)?;
-    {
-        let stdin = diff.stdin.take().ok_or(LintError::MissingGitObjectStream)?;
-        let mut requests = BufWriter::new(stdin);
-        for revision in revisions {
-            writeln!(requests, "{revision}").map_err(LintError::ReadGitRevision)?;
-        }
-    }
-    let changed = diff
-        .wait_with_output()
-        .map_err(LintError::ReadGitRevision)?;
-    if !changed.status.success() {
-        return Err(LintError::GitRevisionCommandFailed {
-            operation: "changed blob listing",
-            code: changed.status.code(),
-        });
-    }
-    let mut blobs = BTreeSet::new();
-    let mut gitlinks = BTreeSet::new();
-    let mut records = changed.stdout.split(|byte| *byte == 0);
-    loop {
-        let Some(metadata) = records.next() else {
-            break;
-        };
-        if metadata.is_empty() {
-            break;
-        }
-        let path = records.next().ok_or(LintError::InvalidGitTreeEntry)?;
-        let Ok(metadata) = std::str::from_utf8(metadata) else {
-            return Err(LintError::InvalidGitTreeEntry);
-        };
-        let mut fields = metadata.split_whitespace();
-        let old_mode = fields.next().ok_or(LintError::InvalidGitTreeEntry)?;
-        let new_mode = fields.next().ok_or(LintError::InvalidGitTreeEntry)?;
-        let old_object = fields.next().ok_or(LintError::InvalidGitTreeEntry)?;
-        let new_object = fields.next().ok_or(LintError::InvalidGitTreeEntry)?;
-        let status = fields.next().ok_or(LintError::InvalidGitTreeEntry)?;
-        if !old_mode.starts_with(':')
-            || fields.next().is_some()
-            || old_object.len() != new_object.len()
-            || !is_full_git_object_id(new_object)
-        {
-            return Err(LintError::InvalidGitTreeEntry);
-        }
-        if status == "D" || new_object.bytes().all(|byte| byte == b'0') {
-            continue;
-        }
-        let path = String::from_utf8(path.to_vec()).map_err(LintError::NonUtf8GitPath)?;
-        if new_mode == "160000" {
-            gitlinks.insert((new_object.to_string(), path));
-        } else {
-            blobs.insert((new_object.to_string(), path));
-        }
-    }
-    let mut violations = lint_git_path_identities(&gitlinks, retain_comparison)?;
-    violations.extend(lint_git_blobs(root, &blobs, retain_comparison)?);
-    Ok(violations)
-}
-
-/// Scan every path identity and text blob in one exact Git tree.
-fn lint_git_tree_private_paths(
-    root: &Path,
-    revision: &str,
-) -> Result<PrivatePathFindings, LintError> {
+/// Reject machine-specific paths from the current tracked UTF-8 tree.
+fn lint_repository_private_paths(root: &Path) -> Result<Vec<StringLiteralViolation>, LintError> {
     let output = Command::new("git")
-        .args(["ls-tree", "-r", "-z", "--full-tree", revision])
-        .current_dir(root)
-        .stderr(Stdio::null())
-        .output()
-        .map_err(LintError::ReadGitRevision)?;
-    if !output.status.success() {
-        return Err(LintError::GitRevisionCommandFailed {
-            operation: "baseline tree listing",
-            code: output.status.code(),
-        });
-    }
-    let mut blobs = BTreeSet::new();
-    let mut gitlinks = BTreeSet::new();
-    for record in output.stdout.split(|byte| *byte == 0) {
-        if record.is_empty() {
-            continue;
-        }
-        let separator = record
-            .iter()
-            .position(|byte| *byte == b'\t')
-            .ok_or(LintError::InvalidGitTreeEntry)?;
-        let metadata =
-            String::from_utf8(record[..separator].to_vec()).map_err(LintError::NonUtf8GitPath)?;
-        let path = String::from_utf8(record[separator + 1..].to_vec())
-            .map_err(LintError::NonUtf8GitPath)?;
-        let mut fields = metadata.split_whitespace();
-        let mode = fields.next().ok_or(LintError::InvalidGitTreeEntry)?;
-        let kind = fields.next().ok_or(LintError::InvalidGitTreeEntry)?;
-        let object = fields.next().ok_or(LintError::InvalidGitTreeEntry)?;
-        if fields.next().is_some() || !is_full_git_object_id(object) {
-            return Err(LintError::InvalidGitTreeEntry);
-        }
-        if kind == "blob" {
-            blobs.insert((object.to_string(), path));
-        } else if kind == "commit" && mode == "160000" {
-            gitlinks.insert((object.to_string(), path));
-        } else {
-            return Err(LintError::InvalidGitTreeEntry);
-        }
-    }
-    let mut violations = lint_git_path_identities(&gitlinks, true)?;
-    violations.extend(lint_git_blobs(root, &blobs, true)?);
-    Ok(violations)
-}
-
-/// Keep only private path occurrences that exceed the unchanged published-base multiset.
-fn private_paths_not_in_baseline(
-    outgoing: PrivatePathFindings,
-    baseline: &PrivatePathFindings,
-) -> Result<PrivatePathFindings, LintError> {
-    let baseline_total = baseline.total;
-    let outgoing_total = outgoing.total;
-    let capacity_error = || LintError::PrivatePathComparisonCapacityExceeded {
-        baseline_total,
-        outgoing_total,
-        group_limit: PRIVATE_PATH_COMPARISON_GROUP_LIMIT,
-        identity_byte_limit: PRIVATE_PATH_COMPARISON_IDENTITY_BYTE_LIMIT,
-    };
-    let baseline_groups = baseline
-        .comparison
-        .as_ref()
-        .ok_or(LintError::PrivatePathComparisonUnavailable)?
-        .groups()
-        .ok_or_else(capacity_error)?;
-    let outgoing_groups = outgoing
-        .comparison
-        .ok_or(LintError::PrivatePathComparisonUnavailable)?
-        .into_groups()
-        .ok_or_else(capacity_error)?;
-    let mut baseline_counts = BTreeMap::new();
-    for (key, group) in baseline_groups {
-        *baseline_counts
-            .entry((
-                Rc::clone(&key.path),
-                key.location_identity,
-                key.kind,
-                key.source_identity,
-            ))
-            .or_insert(0usize) += group.count;
-    }
-    let mut introduced = PrivatePathFindings::default();
-    for (key, group) in outgoing_groups {
-        let baseline_count = baseline_counts
-            .get(&(
-                Rc::clone(&key.path),
-                key.location_identity,
-                key.kind,
-                key.source_identity,
-            ))
-            .copied()
-            .unwrap_or_default();
-        if group.count > baseline_count {
-            introduced.push_group(
-                key.path.as_ref(),
-                group.line,
-                group.column,
-                key.kind,
-                group.count - baseline_count,
-            );
-        }
-    }
-    Ok(introduced)
-}
-
-/// Read a deduplicated set of Git blobs through one validated batch process.
-fn lint_git_blobs(
-    root: &Path,
-    blobs: &BTreeSet<(String, String)>,
-    retain_comparison: bool,
-) -> Result<PrivatePathFindings, LintError> {
-    let rules = private_path_rules()?;
-    let mut child = Command::new("git")
-        .args(["cat-file", "--batch"])
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(LintError::ReadGitRevision)?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or(LintError::MissingGitObjectStream)?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or(LintError::MissingGitObjectStream)?;
-    let mut requests = BufWriter::new(stdin);
-    let mut responses = BufReader::new(stdout);
-    let mut violations = if retain_comparison {
-        PrivatePathFindings::with_comparison()
-    } else {
-        PrivatePathFindings::default()
-    };
-    for (object, relative_path) in blobs {
-        let path_violations = lint_git_path_identity(
-            relative_path,
-            &rules,
-            retain_comparison.then_some(object.as_str()),
-        );
-        let diagnostic_path = if path_violations.is_empty() {
-            relative_path.as_str()
-        } else {
-            PRIVATE_PATH_REDACTED_GIT_PATH
-        };
-        violations.extend(path_violations);
-        writeln!(requests, "{object}").map_err(LintError::ReadGitRevision)?;
-        requests.flush().map_err(LintError::ReadGitRevision)?;
-        let mut header = String::new();
-        if responses
-            .read_line(&mut header)
-            .map_err(LintError::ReadGitRevision)?
-            == 0
-        {
-            return Err(LintError::InvalidGitObjectResponse);
-        }
-        let mut response_fields = header.split_whitespace();
-        let returned_object = response_fields
-            .next()
-            .ok_or(LintError::InvalidGitObjectResponse)?;
-        let returned_kind = response_fields
-            .next()
-            .ok_or(LintError::InvalidGitObjectResponse)?;
-        let size = response_fields
-            .next()
-            .ok_or(LintError::InvalidGitObjectResponse)?
-            .parse::<usize>()
-            .map_err(LintError::InvalidGitObjectSize)?;
-        if returned_object != object || returned_kind != "blob" || response_fields.next().is_some()
-        {
-            return Err(LintError::InvalidGitObjectResponse);
-        }
-        let mut bytes = vec![0; size];
-        responses
-            .read_exact(&mut bytes)
-            .map_err(LintError::ReadGitRevision)?;
-        let mut terminator = [0];
-        responses
-            .read_exact(&mut terminator)
-            .map_err(LintError::ReadGitRevision)?;
-        if terminator[0] != b'\n' {
-            return Err(LintError::InvalidGitObjectResponse);
-        }
-        if let Some(source) = decode_repository_text(diagnostic_path, &bytes)? {
-            let blob_violations = lint_private_paths_with_history_at_path(
-                diagnostic_path,
-                relative_path,
-                &source,
-                &rules,
-                retain_comparison.then_some(object.as_str()),
-            );
-            violations.extend(blob_violations);
-        }
-    }
-    drop(requests);
-    drop(responses);
-    let status = child.wait().map_err(LintError::ReadGitRevision)?;
-    if !status.success() {
-        return Err(LintError::GitRevisionCommandFailed {
-            operation: "blob reading",
-            code: status.code(),
-        });
-    }
-    Ok(violations)
-}
-
-/// Scan Git path identities whose objects do not contain repository text.
-fn lint_git_path_identities(
-    objects: &BTreeSet<(String, String)>,
-    retain_comparison: bool,
-) -> Result<PrivatePathFindings, LintError> {
-    let rules = private_path_rules()?;
-    let mut violations = if retain_comparison {
-        PrivatePathFindings::with_comparison()
-    } else {
-        PrivatePathFindings::default()
-    };
-    for (object, relative_path) in objects {
-        violations.extend(lint_git_path_identity(
-            relative_path,
-            &rules,
-            retain_comparison.then_some(object.as_str()),
-        ));
-    }
-    Ok(violations)
-}
-
-/// Return tracked and non-ignored untracked paths relative to the workspace root.
-fn git_visible_paths(root: &Path) -> Result<Vec<String>, LintError> {
-    let output = Command::new("git")
-        .args([
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ])
+        .args(["ls-files", "-z"])
         .current_dir(root)
         .output()
         .map_err(LintError::ListGitFiles)?;
     if !output.status.success() {
         return Err(LintError::GitFileListFailed(output.status.code()));
     }
-    let mut paths = output
+    let rules = private_path_rules()?;
+    let mut violations = Vec::new();
+    for raw_path in output
         .stdout
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8(path.to_vec()).map_err(LintError::NonUtf8GitPath))
-        .collect::<Result<Vec<_>, _>>()?;
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
-}
-
-/// Decode Git-visible text while leaving binary files outside the source-policy surface.
-fn decode_repository_text<'a>(
-    relative_path: &str,
-    bytes: &'a [u8],
-) -> Result<Option<Cow<'a, str>>, LintError> {
-    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
-    if let Some(encoded) = bytes.strip_prefix(&[0xff, 0xfe]) {
-        return decode_utf16(relative_path, encoded, u16::from_le_bytes).map(Some);
-    }
-    if let Some(encoded) = bytes.strip_prefix(&[0xfe, 0xff]) {
-        return decode_utf16(relative_path, encoded, u16::from_be_bytes).map(Some);
-    }
-    if bytes.contains(&0) {
-        return Ok(None);
-    }
-    match std::str::from_utf8(bytes) {
-        Ok(source) => Ok(Some(Cow::Borrowed(source))),
-        Err(_) => Err(LintError::NonUtf8Text(relative_path.to_string())),
-    }
-}
-
-/// Decode one BOM-selected UTF-16 byte stream without guessing a host encoding.
-fn decode_utf16(
-    relative_path: &str,
-    encoded: &[u8],
-    decode_unit: fn([u8; 2]) -> u16,
-) -> Result<Cow<'static, str>, LintError> {
-    if !encoded.len().is_multiple_of(2) {
-        return Err(LintError::NonUtf8Text(relative_path.to_string()));
-    }
-    let units = encoded
-        .chunks_exact(2)
-        .map(|chunk| decode_unit([chunk[0], chunk[1]]))
-        .collect::<Vec<_>>();
-    String::from_utf16(&units)
-        .map(Cow::Owned)
-        .map_err(|source| LintError::InvalidUtf16Text {
+    {
+        let relative_path = std::str::from_utf8(raw_path).map_err(LintError::NonUtf8GitPath)?;
+        let path = root.join(relative_path);
+        let metadata = fs::symlink_metadata(&path).map_err(|source| LintError::ReadFile {
             path: relative_path.to_string(),
             source,
+        })?;
+        let source = if metadata.file_type().is_symlink() {
+            let target = fs::read_link(&path).map_err(|source| LintError::ReadFile {
+                path: relative_path.to_string(),
+                source,
+            })?;
+            let Ok(target) = target.into_os_string().into_string() else {
+                continue;
+            };
+            target
+        } else {
+            let bytes = fs::read(&path).map_err(|source| LintError::ReadFile {
+                path: relative_path.to_string(),
+                source,
+            })?;
+            let Ok(source) = String::from_utf8(bytes) else {
+                continue;
+            };
+            source
+        };
+        violations.extend(lint_private_path_source(relative_path, &source, &rules));
+    }
+    Ok(violations)
+}
+
+/// Compile the fixed repository-private path rules.
+fn private_path_rules() -> Result<Vec<Regex>, LintError> {
+    PRIVATE_PATH_PATTERNS
+        .iter()
+        .map(|pattern| Regex::new(pattern))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(LintError::InvalidPrivatePathRule)
+}
+
+/// Return redacted path findings without retaining matched source text.
+fn lint_private_path_source(
+    relative_path: &str,
+    source: &str,
+    rules: &[Regex],
+) -> Vec<StringLiteralViolation> {
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            !line.contains(PRIVATE_PATH_FIXTURE_MARKER)
+                && rules.iter().any(|rule| rule.is_match(line))
         })
-}
-
-/// Find private absolute-path shapes in one repository-relative text source.
-fn lint_private_paths(
-    relative_path: &str,
-    source: &str,
-    rules: &[PrivatePathRule],
-) -> PrivatePathFindings {
-    lint_private_paths_with_history(relative_path, source, rules, None)
-}
-
-/// Find private paths and optionally retain exact identities for history comparison.
-fn lint_private_paths_with_history(
-    relative_path: &str,
-    source: &str,
-    rules: &[PrivatePathRule],
-    git_object: Option<&str>,
-) -> PrivatePathFindings {
-    lint_private_paths_with_history_at_path(relative_path, relative_path, source, rules, git_object)
-}
-
-/// Find private paths while keeping a redacted label separate from exact location identity.
-fn lint_private_paths_with_history_at_path(
-    diagnostic_path: &str,
-    identity_path: &str,
-    source: &str,
-    rules: &[PrivatePathRule],
-    git_object: Option<&str>,
-) -> PrivatePathFindings {
-    let mut violations = if git_object.is_some() {
-        PrivatePathFindings::with_comparison()
-    } else {
-        PrivatePathFindings::default()
-    };
-    let comparison_path = git_object.map(|_| Rc::<str>::from(diagnostic_path));
-    let mut comparison_location_identity = None;
-    let comparison_object = git_object.map(Rc::<str>::from);
-    for (line_index, line) in source.lines().enumerate() {
-        let mut source_identity = None;
-        for rule in rules {
-            for captures in rule.regex.captures_iter(line) {
-                let Some(path_match) = captures.name("path") else {
-                    continue;
-                };
-                let comparison_key = match (&comparison_path, &comparison_object) {
-                    (Some(path), Some(git_object)) => Some(PrivatePathOccurrenceKey {
-                        path: Rc::clone(path),
-                        location_identity: *comparison_location_identity
-                            .get_or_insert_with(|| private_path_location_identity(identity_path)),
-                        kind: rule.kind,
-                        source_identity: *source_identity
-                            .get_or_insert_with(|| private_path_source_identity(line)),
-                        git_object: Rc::clone(git_object),
-                    }),
-                    _ => None,
-                };
-                violations.push(
-                    PrivatePathViolation {
-                        path: diagnostic_path.to_string(),
-                        line: line_index + 1,
-                        column: line[..path_match.start()].chars().count() + 1,
-                        kind: rule.kind,
-                    },
-                    comparison_key,
-                );
-            }
-        }
-    }
-    violations
-}
-
-/// Reject forbidden absolute-path shapes in a Git pathname without formatting the name.
-fn lint_git_path_identity(
-    relative_path: &str,
-    rules: &[PrivatePathRule],
-    git_object: Option<&str>,
-) -> PrivatePathFindings {
-    let mut violations = if git_object.is_some() {
-        PrivatePathFindings::with_comparison()
-    } else {
-        PrivatePathFindings::default()
-    };
-    let mut location_identity = None;
-    let mut comparison_path = None;
-    let mut comparison_object = None;
-    for rule in rules {
-        let mut match_offsets = BTreeSet::new();
-        for captures in rule.regex.captures_iter(relative_path) {
-            if let Some(path_match) = captures.name("path") {
-                match_offsets.insert(path_match.start());
-            }
-        }
-        let mut component_offset = 0usize;
-        for component in relative_path.split('/') {
-            for captures in rule.regex.captures_iter(component) {
-                if let Some(path_match) = captures.name("path") {
-                    match_offsets.insert(component_offset.saturating_add(path_match.start()));
-                }
-            }
-            component_offset = component_offset
-                .saturating_add(component.len())
-                .saturating_add(1);
-        }
-        for _ in match_offsets {
-            let comparison_key = git_object.map(|git_object| {
-                let location_identity = *location_identity
-                    .get_or_insert_with(|| private_path_location_identity(relative_path));
-                PrivatePathOccurrenceKey {
-                    path: Rc::clone(
-                        comparison_path
-                            .get_or_insert_with(|| Rc::<str>::from(PRIVATE_PATH_REDACTED_GIT_PATH)),
-                    ),
-                    location_identity,
-                    kind: rule.kind,
-                    source_identity: location_identity,
-                    git_object: Rc::clone(
-                        comparison_object.get_or_insert_with(|| Rc::<str>::from(git_object)),
-                    ),
-                }
-            });
-            violations.push(
-                PrivatePathViolation {
-                    path: PRIVATE_PATH_REDACTED_GIT_PATH.to_string(),
-                    line: 1,
-                    column: 1,
-                    kind: rule.kind,
-                },
-                comparison_key,
-            );
-        }
-    }
-    violations
-}
-
-/// Derive a fixed-size identity without retaining private source text.
-fn private_path_source_identity(line: &str) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(PRIVATE_PATH_SOURCE_IDENTITY_DOMAIN);
-    hasher.update(line.as_bytes());
-    *hasher.finalize().as_bytes()
-}
-
-/// Derive a fixed-size exact pathname identity without retaining private path text.
-fn private_path_location_identity(relative_path: &str) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(PRIVATE_PATH_LOCATION_IDENTITY_DOMAIN);
-    hasher.update(relative_path.as_bytes());
-    *hasher.finalize().as_bytes()
+        .map(|(line, _)| StringLiteralViolation {
+            path: relative_path.to_string(),
+            line: line + 1,
+            column: 1,
+            rule_id: PRIVATE_PATH_RULE_ID,
+            literal: "<redacted>".to_string(),
+            description: "Machine-specific paths must use a portable placeholder or derived path.",
+        })
+        .collect()
 }
 
 /// Parse one Rust source file and return strict string-contract violations.
@@ -1148,6 +457,7 @@ fn lint_repeated_path_join_literals(
             line: occurrence.line,
             column: occurrence.column,
             rule_id: rule.id,
+            literal: occurrence.literal,
             description: rule.description,
         })
         .collect();
@@ -1184,303 +494,6 @@ struct PathJoinLiteralRule {
     allowed_repeated_literals: &'static [&'static str],
 }
 
-/// Compiled repository-wide private absolute-path rule.
-#[derive(Debug)]
-struct PrivatePathRule {
-    /// Stable path-shape classification used in redacted diagnostics.
-    kind: &'static str,
-    /// Compiled structural matcher.
-    regex: Regex,
-}
-
-/// One redacted private absolute-path violation.
-struct PrivatePathViolation {
-    /// Repository-relative source path.
-    path: String,
-    /// One-based source line.
-    line: usize,
-    /// One-based source column.
-    column: usize,
-    /// Stable path-shape classification; never contains matched source text.
-    kind: &'static str,
-}
-
-/// Complete violation count with a bounded redacted diagnostic sample.
-#[derive(Default)]
-struct PrivatePathFindings {
-    /// Total matches found across the complete scan.
-    total: usize,
-    /// First deterministic diagnostics retained for actionable output.
-    samples: Vec<PrivatePathViolation>,
-    /// Exact compact occurrence groups retained only for published-base comparison.
-    comparison: Option<PrivatePathComparison>,
-}
-
-impl fmt::Debug for PrivatePathFindings {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PrivatePathFindings")
-            .field("total", &self.total)
-            .field("samples", &self.samples)
-            .field(
-                "comparison_groups",
-                &self
-                    .comparison
-                    .as_ref()
-                    .and_then(PrivatePathComparison::group_count),
-            )
-            .field(
-                "comparison_capacity_exceeded",
-                &self
-                    .comparison
-                    .as_ref()
-                    .is_some_and(PrivatePathComparison::capacity_exceeded),
-            )
-            .finish()
-    }
-}
-
-impl PrivatePathFindings {
-    /// Create findings that also retain exact history-comparison identities.
-    fn with_comparison() -> Self {
-        Self {
-            comparison: Some(PrivatePathComparison::exact()),
-            ..Self::default()
-        }
-    }
-
-    /// Record one match without allowing diagnostic memory or output to grow unbounded.
-    fn push(
-        &mut self,
-        violation: PrivatePathViolation,
-        comparison_key: Option<PrivatePathOccurrenceKey>,
-    ) {
-        self.total = self.total.saturating_add(1);
-        if let (Some(comparison), Some(key)) = (&mut self.comparison, comparison_key) {
-            comparison.push(
-                key,
-                PrivatePathOccurrenceGroup {
-                    count: 1,
-                    line: violation.line,
-                    column: violation.column,
-                },
-            );
-        }
-        if self.samples.len() < PRIVATE_PATH_DIAGNOSTIC_LIMIT {
-            self.samples.push(violation);
-        }
-    }
-
-    /// Record a compared occurrence group while retaining only bounded diagnostics.
-    fn push_group(
-        &mut self,
-        path: &str,
-        line: usize,
-        column: usize,
-        kind: &'static str,
-        count: usize,
-    ) {
-        self.total = self.total.saturating_add(count);
-        let remaining = PRIVATE_PATH_DIAGNOSTIC_LIMIT.saturating_sub(self.samples.len());
-        self.samples.extend(
-            std::iter::repeat_with(|| PrivatePathViolation {
-                path: path.to_string(),
-                line,
-                column,
-                kind,
-            })
-            .take(count.min(remaining)),
-        );
-    }
-
-    /// Merge one completed scan while retaining the global diagnostic bound.
-    fn extend(&mut self, other: Self) {
-        self.total = self.total.saturating_add(other.total);
-        let remaining = PRIVATE_PATH_DIAGNOSTIC_LIMIT.saturating_sub(self.samples.len());
-        self.samples
-            .extend(other.samples.into_iter().take(remaining));
-        match (&mut self.comparison, other.comparison) {
-            (Some(comparison), Some(other)) => {
-                comparison.extend(other);
-            }
-            (None, None) => {}
-            _ => self.comparison = None,
-        }
-    }
-
-    /// Return whether the complete scan found no violations.
-    fn is_empty(&self) -> bool {
-        self.total == 0
-    }
-
-    /// Return whether some violations were omitted from the diagnostic sample.
-    fn is_truncated(&self) -> bool {
-        self.total > self.samples.len()
-    }
-
-    /// Return the complete violation count.
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.total
-    }
-
-    /// Iterate over the bounded diagnostic sample.
-    #[cfg(test)]
-    fn iter(&self) -> std::slice::Iter<'_, PrivatePathViolation> {
-        self.samples.iter()
-    }
-}
-
-#[cfg(test)]
-impl std::ops::Index<usize> for PrivatePathFindings {
-    type Output = PrivatePathViolation;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.samples[index]
-    }
-}
-
-/// Exact non-formattable identity used only by published-base comparison.
-#[derive(Eq, Ord, PartialEq, PartialOrd)]
-struct PrivatePathOccurrenceKey {
-    /// Shared privacy-safe diagnostic path.
-    path: Rc<str>,
-    /// Fixed-size exact repository-relative pathname identity.
-    location_identity: [u8; 32],
-    /// Stable private-path rule family.
-    kind: &'static str,
-    /// Fixed-size full-line identity preserving the existing allowance semantics.
-    source_identity: [u8; 32],
-    /// Git object identity that keeps each historical entry version independent.
-    git_object: Rc<str>,
-}
-
-/// Count and first redacted location for one exact historical occurrence group.
-struct PrivatePathOccurrenceGroup {
-    /// Exact multiplicity within one Git blob and path.
-    count: usize,
-    /// First one-based source line in that group.
-    line: usize,
-    /// First one-based source column in that group.
-    column: usize,
-}
-
-/// Closed exact-or-saturated state for bounded history comparison.
-enum PrivatePathComparison {
-    /// Exact groups retained within both declared bounds.
-    Exact {
-        /// Deterministic occurrence groups.
-        groups: BTreeMap<PrivatePathOccurrenceKey, PrivatePathOccurrenceGroup>,
-        /// Conservative identity-byte charge across inserted groups.
-        retained_identity_bytes: usize,
-    },
-    /// At least one comparison bound was exceeded; the range must fail closed.
-    CapacityExceeded,
-}
-
-impl PrivatePathComparison {
-    /// Create an empty exact comparison state.
-    fn exact() -> Self {
-        Self::Exact {
-            groups: BTreeMap::new(),
-            retained_identity_bytes: 0,
-        }
-    }
-
-    /// Record one group or discard exact state when either bound is exceeded.
-    fn push(&mut self, key: PrivatePathOccurrenceKey, incoming: PrivatePathOccurrenceGroup) {
-        let Self::Exact {
-            groups,
-            retained_identity_bytes,
-        } = self
-        else {
-            return;
-        };
-        if let Some(group) = groups.get_mut(&key) {
-            group.count = group.count.saturating_add(incoming.count);
-            return;
-        }
-        let identity_bytes = std::mem::size_of::<PrivatePathOccurrenceKey>()
-            .saturating_add(std::mem::size_of::<PrivatePathOccurrenceGroup>())
-            .saturating_add(key.path.len())
-            .saturating_add(key.git_object.len());
-        let Some(next_identity_bytes) = retained_identity_bytes.checked_add(identity_bytes) else {
-            *self = Self::CapacityExceeded;
-            return;
-        };
-        if groups.len() >= PRIVATE_PATH_COMPARISON_GROUP_LIMIT
-            || next_identity_bytes > PRIVATE_PATH_COMPARISON_IDENTITY_BYTE_LIMIT
-        {
-            *self = Self::CapacityExceeded;
-            return;
-        }
-        groups.insert(key, incoming);
-        *retained_identity_bytes = next_identity_bytes;
-    }
-
-    /// Merge one completed bounded comparison.
-    fn extend(&mut self, other: Self) {
-        let Self::Exact { groups, .. } = other else {
-            *self = Self::CapacityExceeded;
-            return;
-        };
-        for (key, group) in groups {
-            self.push(key, group);
-        }
-    }
-
-    /// Borrow exact groups or fail the history gate after saturation.
-    fn groups(&self) -> Option<&BTreeMap<PrivatePathOccurrenceKey, PrivatePathOccurrenceGroup>> {
-        match self {
-            Self::Exact { groups, .. } => Some(groups),
-            Self::CapacityExceeded => None,
-        }
-    }
-
-    /// Consume exact groups or fail the history gate after saturation.
-    fn into_groups(self) -> Option<BTreeMap<PrivatePathOccurrenceKey, PrivatePathOccurrenceGroup>> {
-        match self {
-            Self::Exact { groups, .. } => Some(groups),
-            Self::CapacityExceeded => None,
-        }
-    }
-
-    /// Return the exact group count when comparison remains exact.
-    fn group_count(&self) -> Option<usize> {
-        match self {
-            Self::Exact { groups, .. } => Some(groups.len()),
-            Self::CapacityExceeded => None,
-        }
-    }
-
-    /// Return whether comparison saturated and must fail closed.
-    fn capacity_exceeded(&self) -> bool {
-        matches!(self, Self::CapacityExceeded)
-    }
-}
-
-impl fmt::Debug for PrivatePathViolation {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PrivatePathViolation")
-            .field("path", &self.path)
-            .field("line", &self.line)
-            .field("column", &self.column)
-            .field("kind", &self.kind)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Display for PrivatePathViolation {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{:?}:{}:{}: {PRIVATE_PATH_RULE_ID} ({}): machine-specific absolute path is forbidden; derive paths at runtime",
-            self.path, self.line, self.column, self.kind
-        )
-    }
-}
-
 /// One source-aware string-contract violation.
 #[derive(Debug)]
 struct StringLiteralViolation {
@@ -1492,6 +505,8 @@ struct StringLiteralViolation {
     column: usize,
     /// Stable rule identifier.
     rule_id: &'static str,
+    /// Exact literal value that violated the rule.
+    literal: String,
     /// Human-readable rule description.
     description: &'static str,
 }
@@ -1500,8 +515,8 @@ impl Display for StringLiteralViolation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{:?}:{}:{}: {}: inline string literal violates repository contract; {}",
-            self.path, self.line, self.column, self.rule_id, self.description
+            "{}:{}:{}: {}: inline string literal {:?}; {}",
+            self.path, self.line, self.column, self.rule_id, self.literal, self.description
         )
     }
 }
@@ -1602,6 +617,7 @@ impl StringLiteralVisitor<'_> {
             line: location.line,
             column: location.column + 1,
             rule_id: self.rule.id,
+            literal: value,
             description: self.rule.description,
         });
     }
@@ -1761,62 +777,16 @@ enum LintError {
         /// Source parser error.
         source: syn::Error,
     },
-    /// Failed to start Git-backed source discovery.
+    /// Failed to start tracked-file discovery.
     ListGitFiles(io::Error),
-    /// Git-backed source discovery returned an unsuccessful status.
+    /// Tracked-file discovery returned an unsuccessful status.
     GitFileListFailed(Option<i32>),
-    /// Failed to stream or read the requested Git revision.
-    ReadGitRevision(io::Error),
-    /// Git object reading did not expose its requested input or output stream.
-    MissingGitObjectStream,
-    /// One exact-revision Git operation returned an unsuccessful status.
-    GitRevisionCommandFailed {
-        /// Stable operation category without command output or host paths.
-        operation: &'static str,
-        /// Process status code when available.
-        code: Option<i32>,
-    },
-    /// Git returned a malformed recursive tree record.
-    InvalidGitTreeEntry,
-    /// Pre-push input did not contain four valid ref/object fields.
-    InvalidPrePushUpdate,
-    /// Git returned a malformed blob protocol response.
-    InvalidGitObjectResponse,
-    /// Git returned a blob size that could not be parsed.
-    InvalidGitObjectSize(std::num::ParseIntError),
-    /// Git returned a repository path that was not UTF-8.
-    NonUtf8GitPath(std::string::FromUtf8Error),
-    /// Git-visible source text had no supported deterministic encoding.
-    NonUtf8Text(String),
-    /// A BOM-marked UTF-16 source file contained invalid code units.
-    InvalidUtf16Text {
-        /// Repository-relative source path.
-        path: String,
-        /// Original UTF-16 decoding failure.
-        source: std::string::FromUtf16Error,
-    },
+    /// A tracked repository path was not UTF-8.
+    NonUtf8GitPath(std::str::Utf8Error),
     /// A built-in private-path rule did not compile.
     InvalidPrivatePathRule(regex::Error),
-    /// Internal history scan omitted the exact comparison identities it requires.
-    PrivatePathComparisonUnavailable,
-    /// Exact history comparison exceeded its independent memory bounds.
-    PrivatePathComparisonCapacityExceeded {
-        /// Complete private-path count in the published baseline tree.
-        baseline_total: usize,
-        /// Complete private-path count across newly reachable revisions.
-        outgoing_total: usize,
-        /// Maximum retained exact comparison groups.
-        group_limit: usize,
-        /// Maximum conservatively charged identity bytes.
-        identity_byte_limit: usize,
-    },
-    /// Repository source-policy violations.
-    Violations {
-        /// Strict string-contract violations.
-        string_literals: Vec<StringLiteralViolation>,
-        /// Redacted private absolute-path violations.
-        private_paths: PrivatePathFindings,
-    },
+    /// Strict string-contract violations.
+    Violations(Vec<StringLiteralViolation>),
 }
 
 impl Display for LintError {
@@ -1827,91 +797,25 @@ impl Display for LintError {
             Self::ReadFile { path, source } => {
                 write!(formatter, "failed to read {path:?}: {source}")
             }
-            Self::Parse { path, source } => {
-                write!(formatter, "failed to parse {path:?}: {source}")
-            }
-            Self::ListGitFiles(source) => {
-                write!(formatter, "failed to list repository source: {source}")
-            }
+            Self::Parse { path, source } => write!(formatter, "failed to parse {path}: {source}"),
+            Self::ListGitFiles(_) => write!(formatter, "failed to list tracked repository files"),
             Self::GitFileListFailed(code) => {
                 write!(
                     formatter,
-                    "repository source listing failed with status {code:?}"
+                    "tracked repository file listing failed with status {code:?}"
                 )
             }
-            Self::ReadGitRevision(_) => {
-                write!(formatter, "failed to read exact Git revision source")
-            }
-            Self::MissingGitObjectStream => {
-                write!(
-                    formatter,
-                    "exact Git revision source stream was unavailable"
-                )
-            }
-            Self::GitRevisionCommandFailed { operation, code } => {
-                write!(
-                    formatter,
-                    "exact Git revision {operation} failed with status {code:?}"
-                )
-            }
-            Self::InvalidGitTreeEntry => {
-                write!(
-                    formatter,
-                    "exact Git revision returned a malformed tree entry"
-                )
-            }
-            Self::InvalidPrePushUpdate => {
-                write!(formatter, "pre-push update input is malformed")
-            }
-            Self::InvalidGitObjectResponse | Self::InvalidGitObjectSize(_) => {
-                write!(
-                    formatter,
-                    "exact Git revision returned a malformed blob response"
-                )
-            }
-            Self::NonUtf8GitPath(_) => {
-                write!(
-                    formatter,
-                    "repository source listing returned a non-UTF-8 path"
-                )
-            }
-            Self::NonUtf8Text(path) => {
-                write!(
-                    formatter,
-                    "Git-visible text {path:?} is not valid UTF-8 or BOM-marked UTF-16"
-                )
-            }
-            Self::InvalidUtf16Text { path, .. } => {
-                write!(formatter, "Git-visible UTF-16 text {path:?} is malformed")
-            }
+            Self::NonUtf8GitPath(_) => write!(formatter, "tracked repository path is not UTF-8"),
             Self::InvalidPrivatePathRule(_) => {
-                write!(formatter, "built-in private absolute-path rule is invalid")
+                write!(formatter, "built-in private-path rule is invalid")
             }
-            Self::PrivatePathComparisonUnavailable => {
+            Self::Violations(violations) => {
                 write!(
                     formatter,
-                    "private-path history comparison state is unavailable"
+                    "{} repository source-policy violations",
+                    violations.len()
                 )
             }
-            Self::PrivatePathComparisonCapacityExceeded {
-                baseline_total,
-                outgoing_total,
-                group_limit,
-                identity_byte_limit,
-            } => {
-                write!(
-                    formatter,
-                    "private-path history comparison exceeded its bounded capacity: baseline_count={baseline_total}, outgoing_count={outgoing_total}, group_limit={group_limit}, identity_byte_limit={identity_byte_limit}"
-                )
-            }
-            Self::Violations {
-                string_literals,
-                private_paths,
-            } => write!(
-                formatter,
-                "{} repository source-policy violations",
-                string_literals.len().saturating_add(private_paths.total)
-            ),
         }
     }
 }
@@ -1919,53 +823,29 @@ impl Display for LintError {
 impl std::error::Error for LintError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Io(source)
-            | Self::ListGitFiles(source)
-            | Self::ReadGitRevision(source)
-            | Self::ReadFile { source, .. } => Some(source),
+            Self::Io(source) | Self::ListGitFiles(source) | Self::ReadFile { source, .. } => {
+                Some(source)
+            }
             Self::Parse { source, .. } => Some(source),
             Self::NonUtf8GitPath(source) => Some(source),
-            Self::InvalidGitObjectSize(source) => Some(source),
-            Self::InvalidUtf16Text { source, .. } => Some(source),
             Self::InvalidPrivatePathRule(source) => Some(source),
-            Self::Usage(_)
-            | Self::GitFileListFailed(_)
-            | Self::MissingGitObjectStream
-            | Self::GitRevisionCommandFailed { .. }
-            | Self::InvalidGitTreeEntry
-            | Self::InvalidPrePushUpdate
-            | Self::InvalidGitObjectResponse
-            | Self::NonUtf8Text(_)
-            | Self::PrivatePathComparisonUnavailable
-            | Self::PrivatePathComparisonCapacityExceeded { .. }
-            | Self::Violations { .. } => None,
+            Self::Usage(_) | Self::GitFileListFailed(_) | Self::Violations(_) => None,
         }
     }
 }
 
-/// Write all repository source-policy diagnostics without private matched text.
+/// Write all repository source-policy diagnostics.
 fn write_violations(
     writer: &mut impl Write,
-    string_literals: &[StringLiteralViolation],
-    private_paths: &PrivatePathFindings,
+    violations: &[StringLiteralViolation],
 ) -> io::Result<()> {
     writeln!(
         writer,
         "projectatlas-lints: {} repository source-policy violation(s)",
-        string_literals.len().saturating_add(private_paths.total)
+        violations.len()
     )?;
-    for violation in string_literals {
+    for violation in violations {
         writeln!(writer, "{violation}")?;
-    }
-    for violation in &private_paths.samples {
-        writeln!(writer, "{violation}")?;
-    }
-    if private_paths.is_truncated() {
-        writeln!(
-            writer,
-            "{} additional private-path violation(s) omitted",
-            private_paths.total - private_paths.samples.len()
-        )?;
     }
     Ok(())
 }
@@ -1973,19 +853,15 @@ fn write_violations(
 #[cfg(test)]
 mod tests {
     use super::{
-        E2E_FIXTURE_PATH_LITERALS, LintError, MCP_PROJECT_SCHEMA_LITERALS, PathJoinLiteralRule,
-        StringLiteralRule, StringLiteralViolation, decode_repository_text, lint_git_blobs,
-        lint_git_revisions_private_paths, lint_git_tree_private_paths, lint_private_paths,
-        lint_repeated_path_join_literals, lint_repository_private_paths, lint_source,
-        outgoing_revisions, private_path_rules, private_paths_not_in_baseline,
-        run_private_path_range, run_strict_strings, write_violations,
+        E2E_FIXTURE_PATH_LITERALS, MCP_PROJECT_SCHEMA_LITERALS, PathJoinLiteralRule,
+        StringLiteralRule, lint_repeated_path_join_literals, lint_repository_private_paths,
+        lint_source, run_strict_strings,
     };
-    use std::collections::BTreeSet;
     use std::fs;
-    use std::io::{self, Write};
+    use std::io;
     use std::path::Path;
-    use std::process::Command;
-    use std::rc::Rc;
+    use std::process::{self, Command};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     /// Rule used by parser-focused unit tests.
     const TEST_RULE: StringLiteralRule = StringLiteralRule {
@@ -2043,1227 +919,73 @@ mod tests {
             .ok_or_else(|| {
                 io::Error::other("lint crate must be nested below the workspace root")
             })?;
-        run_strict_strings(workspace_root).map_err(|error| io::Error::other(error.to_string()))?;
+        run_strict_strings(workspace_root)?;
         Ok(())
     }
 
-    /// Build representative private path shapes without embedding an absolute path literal.
-    fn private_path_samples() -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let backslash = char::from_u32(92)
-            .ok_or_else(|| io::Error::other("backslash code point must be valid"))?;
-        let drive =
-            char::from_u32(88).ok_or_else(|| io::Error::other("drive code point must be valid"))?;
-        Ok(vec![
-            format!(
-                "{drive}:{backslash}{}{backslash}{}",
-                "private-host", "workspace"
-            ),
-            format!("{drive}:/{}/{}", "private-host", "workspace"),
-            format!(
-                "{backslash}{backslash}{}{backslash}{}",
-                "private-host", "share"
-            ),
-            format!(
-                "{backslash}{backslash}?{backslash}UNC{backslash}{}{backslash}{}",
-                "private-host", "share"
-            ),
-            format!(
-                "{backslash}{backslash}{backslash}{backslash}?{backslash}{backslash}UNC{backslash}{backslash}{}{backslash}{backslash}{}",
-                "private-host", "share"
-            ),
-            ["", "", "private-host", "share"].join("/"),
-            ["", "home", "example-user", "workspace"].join("/"),
-            ["", "Users", "example-user", "workspace"].join("/"),
-            ["", "root", "workspace"].join("/"),
-            ["", "root"].join("/"),
-            ["", "mnt", "x", "workspace"].join("/"),
-            ["file:", "", "private-host", "share"].join("/"),
-            ["file:", "", "", "home", "example-user", "workspace"].join("/"),
-            ["file:", "", "", "root", "workspace"].join("/"),
-            ["file:", "", "", "root"].join("/"),
-        ])
-    }
-
-    /// Every private path family is detected while diagnostics omit matched source text.
+    /// The current-tree rule scans tracked symlinks, accepts portable fixtures, and redacts findings.
     #[test]
-    fn private_path_lint_detects_all_shapes_with_redacted_diagnostics()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let samples = private_path_samples()?;
-        let source = samples.join("\n");
-        let rules = private_path_rules()?;
-        let violations = lint_private_paths("scripts/privacy-check.ps1", &source, &rules);
-        require(
-            violations.len() == samples.len(),
-            "expected every private path shape to be rejected",
-        )?;
-        let string_violation = StringLiteralViolation {
-            path: "scripts/privacy-check.ps1".to_string(),
-            line: 1,
-            column: 1,
-            rule_id: "test-rule",
-            description: "test string contract",
-        };
-        let mut diagnostics = Vec::new();
-        write_violations(&mut diagnostics, &[string_violation], &violations)?;
-        let diagnostics = String::from_utf8(diagnostics)?;
-        require(
-            samples.iter().all(|sample| !diagnostics.contains(sample)),
-            "private path diagnostic disclosed matched source text",
-        )?;
-        Ok(())
-    }
+    fn private_path_lint_is_redacted_and_fixture_aware() -> Result<(), Box<dyn std::error::Error>> {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| {
+                io::Error::other("lint crate must be nested below the workspace root")
+            })?;
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let repo = workspace_root
+            .join(".tmp")
+            .join(format!("private-path-lint-{}-{nonce}", process::id()));
+        fs::create_dir_all(&repo)?;
 
-    /// Relative paths, placeholders, and network URLs remain portable source text.
-    #[test]
-    fn private_path_lint_allows_portable_path_forms() -> Result<(), Box<dyn std::error::Error>> {
-        let backslash = char::from_u32(92)
-            .ok_or_else(|| io::Error::other("backslash code point must be valid"))?;
-        let source = format!(
-            "scripts/install-runtime.ps1\n<project-root>/scripts/install-runtime.sh\n\
-             $HOME/.local/bin\n%USERPROFILE%{backslash}AppData{backslash}Local\n\
-             https://example.com/downloads/runtime\n\
-             {}\n{}\n{}\n{}\n{}\n{}\n\
-             \"{backslash}{backslash}Sessions{backslash}{backslash}\"\n\
-             \"{backslash}{backslash}r{backslash}{backslash}n\"",
-            ["profile:", "", "", "root", "workspace"].join("/"),
-            ["notfile:", "", "", "root", "workspace"].join("/"),
-            ["", "rooted", "workspace"].join("/"),
-            ["file:", "", "", "rooted", "workspace"].join("/"),
-            ["project", "root", "workspace"].join("/"),
-            ["https:", "", "example.invalid", "root", "workspace"].join("/"),
-        );
-        let rules = private_path_rules()?;
-        let violations = lint_private_paths("docs/example.md", &source, &rules);
-        require(violations.is_empty(), "portable path form was rejected")?;
-        for path in [
-            "fixtures/C_drive_notes.txt".to_string(),
-            "fixtures/UNC_notes.txt".to_string(),
-            ["fixtures", "file:", "rooted", "workspace"].join("/"),
-            ["fixtures", "https:", "example.invalid", "root", "workspace"].join("/"),
-        ] {
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
             require(
-                super::lint_git_path_identity(&path, &rules, None).is_empty(),
-                "portable Git pathname component was rejected",
-            )?;
-        }
-        for path in private_path_samples()?.into_iter().take(4) {
-            require(
-                super::lint_git_path_identity(&format!("fixtures/{path}"), &rules, None).len() == 1,
-                "nested private Git pathname did not produce one exact finding",
-            )?;
-        }
-        Ok(())
-    }
-
-    /// A forward drive path can also contain a distinct rooted user-home path.
-    #[test]
-    fn git_path_rule_overlap_is_typed() -> Result<(), Box<dyn std::error::Error>> {
-        let path = ["fixtures", "C:", "Users", "alice", "artifact.txt"].join("/");
-        let rules = private_path_rules()?;
-        let findings = super::lint_git_path_identity(&path, &rules, None);
-        let kinds = findings
-            .iter()
-            .map(|finding| finding.kind)
-            .collect::<BTreeSet<_>>();
-        require(
-            findings.len() == 2
-                && kinds == BTreeSet::from(["user-home-root", "windows-drive-root"]),
-            "overlapping Git pathname rules did not retain both typed findings",
-        )?;
-        Ok(())
-    }
-
-    /// Redacted pathname findings retain exact path identity across baseline comparison.
-    #[test]
-    fn private_path_history_compares_redacted_git_paths_exactly()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let rules = private_path_rules()?;
-        let first_path = private_path_samples()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| io::Error::other("private pathname sample is missing"))?;
-        let first_path = format!("fixtures/{first_path}");
-        let second_path = first_path.replace("workspace", "other-workspace");
-        let baseline = super::lint_git_path_identity(&first_path, &rules, Some("base-object"));
-        let unchanged = super::lint_git_path_identity(&first_path, &rules, Some("next-object"));
-        require(
-            baseline.len() == 1 && private_paths_not_in_baseline(unchanged, &baseline)?.is_empty(),
-            "an unchanged redacted Git pathname was not allowed by the exact baseline",
-        )?;
-
-        let changed = super::lint_git_path_identity(&second_path, &rules, Some("next-object"));
-        let introduced = private_paths_not_in_baseline(changed, &baseline)?;
-        let path_only = introduced
-            .iter()
-            .next()
-            .ok_or_else(|| io::Error::other("introduced Git pathname finding is missing"))?;
-        let path_only_display = path_only.to_string();
-        let path_only_debug = format!("{path_only:?}");
-        require(
-            introduced.len() == 1
-                && path_only.path == super::PRIVATE_PATH_REDACTED_GIT_PATH
-                && path_only_display.contains(super::PRIVATE_PATH_REDACTED_GIT_PATH)
-                && path_only_debug.contains(super::PRIVATE_PATH_REDACTED_GIT_PATH)
-                && !path_only_display.contains(&second_path)
-                && !path_only_debug.contains(&second_path),
-            "distinct redacted Git pathnames collapsed during baseline comparison",
-        )?;
-        let mut diagnostics = Vec::new();
-        write_violations(&mut diagnostics, &[], &introduced)?;
-        let diagnostics = String::from_utf8(diagnostics)?;
-        require(
-            diagnostics.contains(super::PRIVATE_PATH_REDACTED_GIT_PATH)
-                && !diagnostics.contains(&first_path)
-                && !diagnostics.contains(&second_path),
-            "redacted Git pathname diagnostics disclosed an exact path identity",
-        )?;
-        Ok(())
-    }
-
-    /// Large hostile files fail with an exact count and bounded redacted diagnostics.
-    #[test]
-    fn private_path_diagnostics_are_bounded() -> Result<(), Box<dyn std::error::Error>> {
-        let sample = private_path_samples()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| io::Error::other("private path sample is missing"))?;
-        let total = super::PRIVATE_PATH_DIAGNOSTIC_LIMIT + 7;
-        let source = (0..total)
-            .map(|_| sample.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let findings =
-            lint_private_paths("scripts/privacy-check.ps1", &source, &private_path_rules()?);
-        require(
-            findings.total == total,
-            "complete violation count was truncated",
-        )?;
-        require(
-            findings.samples.len() == super::PRIVATE_PATH_DIAGNOSTIC_LIMIT,
-            "diagnostic sample exceeded its bound",
-        )?;
-        require(
-            findings.comparison.is_none(),
-            "ordinary source scan retained history-comparison identities",
-        )?;
-        let mut diagnostics = Vec::new();
-        write_violations(&mut diagnostics, &[], &findings)?;
-        let diagnostics = String::from_utf8(diagnostics)?;
-        require(
-            diagnostics.contains("7 additional private-path violation(s) omitted")
-                && !diagnostics.contains(&sample),
-            "bounded diagnostic summary was incomplete or disclosed matched source",
-        )?;
-        Ok(())
-    }
-
-    /// Published-base allowance remains exact above the diagnostic sample bound.
-    #[test]
-    fn private_path_history_allowance_exceeds_diagnostic_limit()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let samples = private_path_samples()?;
-        let retained = samples
-            .first()
-            .ok_or_else(|| io::Error::other("retained private path sample is missing"))?;
-        let introduced = samples
-            .get(1)
-            .ok_or_else(|| io::Error::other("introduced private path sample is missing"))?;
-        let rules = private_path_rules()?;
-        for total in [
-            super::PRIVATE_PATH_DIAGNOSTIC_LIMIT,
-            super::PRIVATE_PATH_DIAGNOSTIC_LIMIT + 1,
-        ] {
-            let baseline_source = (0..total)
-                .map(|index| format!("legacy_{index} = {retained:?}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let baseline = super::lint_private_paths_with_history(
-                "legacy.ps1",
-                &baseline_source,
-                &rules,
-                Some("base-object"),
-            );
-            let debug = format!("{baseline:?}");
-            require(
-                !debug.contains(retained),
-                "history finding Debug output disclosed a private source identity",
-            )?;
-            let error_debug = format!(
-                "{:?}",
-                LintError::Violations {
-                    string_literals: Vec::new(),
-                    private_paths: super::lint_private_paths_with_history(
-                        "legacy.ps1",
-                        &baseline_source,
-                        &rules,
-                        Some("debug-object"),
-                    ),
-                }
-            );
-            require(
-                !error_debug.contains(retained),
-                "lint error Debug output disclosed a private source identity",
-            )?;
-            let outgoing = super::lint_private_paths_with_history(
-                "legacy.ps1",
-                &baseline_source,
-                &rules,
-                Some("head-object"),
-            );
-            require(
-                private_paths_not_in_baseline(outgoing, &baseline)?.is_empty(),
-                "unchanged published-base occurrences were rejected at the diagnostic boundary",
-            )?;
-            let changed_context = baseline_source.replacen("legacy_0", "changed_0", 1);
-            let changed_context = super::lint_private_paths_with_history(
-                "legacy.ps1",
-                &changed_context,
-                &rules,
-                Some("changed-context-object"),
-            );
-            require(
-                private_paths_not_in_baseline(changed_context, &baseline)?.total == 1,
-                "history identity ignored changed non-private source-line context",
-            )?;
-
-            let changed_source = format!("{baseline_source}\nintroduced = {introduced:?}");
-            let outgoing = super::lint_private_paths_with_history(
-                "legacy.ps1",
-                &changed_source,
-                &rules,
-                Some("changed-object"),
-            );
-            let findings = private_paths_not_in_baseline(outgoing, &baseline)?;
-            require(
-                findings.total == 1 && findings.samples.len() == 1,
-                "introduced history occurrence was hidden above the diagnostic boundary",
-            )?;
-        }
-        Ok(())
-    }
-
-    /// Distinct history identities saturate independently of diagnostic sampling.
-    #[test]
-    fn private_path_history_comparison_is_bounded_and_redacted()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let sample = private_path_samples()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| io::Error::other("private path sample is missing"))?;
-        let total = super::PRIVATE_PATH_COMPARISON_GROUP_LIMIT + 1;
-        let source = (0..total)
-            .map(|index| format!("private_{index} = {sample:?}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let findings = super::lint_private_paths_with_history(
-            "history.ps1",
-            &source,
-            &private_path_rules()?,
-            Some("history-object"),
-        );
-        require(
-            findings.total == total
-                && findings.samples.len() == super::PRIVATE_PATH_DIAGNOSTIC_LIMIT
-                && findings
-                    .comparison
-                    .as_ref()
-                    .is_some_and(super::PrivatePathComparison::capacity_exceeded),
-            "history comparison did not fail closed at its independent group bound",
-        )?;
-        let debug = format!("{findings:?}");
-        require(
-            !debug.contains(&sample)
-                && debug.contains("comparison_capacity_exceeded: true")
-                && !debug.contains("history-object"),
-            "bounded history state disclosed private source or Git identity",
-        )?;
-        let baseline = super::PrivatePathFindings::with_comparison();
-        let Err(error) = private_paths_not_in_baseline(findings, &baseline) else {
-            return Err(io::Error::other("saturated history comparison was accepted").into());
-        };
-        require(
-            matches!(
-                &error,
-                LintError::PrivatePathComparisonCapacityExceeded {
-                    baseline_total: 0,
-                    outgoing_total,
-                    group_limit,
-                    identity_byte_limit,
-                } if *outgoing_total == total
-                    && *group_limit == super::PRIVATE_PATH_COMPARISON_GROUP_LIMIT
-                    && *identity_byte_limit == super::PRIVATE_PATH_COMPARISON_IDENTITY_BYTE_LIMIT
-            ) && !error.to_string().contains(&sample)
-                && !format!("{error:?}").contains(&sample),
-            "capacity failure omitted safe bounds/counts or disclosed source",
-        )?;
-        Ok(())
-    }
-
-    /// Conservative identity-byte charging fails closed before retained keys grow unbounded.
-    #[test]
-    fn private_path_history_comparison_byte_budget_fails_closed()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut comparison = super::PrivatePathComparison::exact();
-        let path =
-            Rc::<str>::from("p".repeat(super::PRIVATE_PATH_COMPARISON_IDENTITY_BYTE_LIMIT / 2));
-        for discriminator in 0..3 {
-            comparison.push(
-                super::PrivatePathOccurrenceKey {
-                    path: Rc::clone(&path),
-                    location_identity: [discriminator; 32],
-                    kind: "test-private-path",
-                    source_identity: [discriminator; 32],
-                    git_object: Rc::from("0123456789012345678901234567890123456789"),
-                },
-                super::PrivatePathOccurrenceGroup {
-                    count: 1,
-                    line: 1,
-                    column: 1,
-                },
-            );
-        }
-        require(
-            comparison.capacity_exceeded(),
-            "history comparison retained identities beyond its byte budget",
-        )?;
-        Ok(())
-    }
-
-    /// Several individually exact Git blobs fail closed when their merged history exceeds bounds.
-    #[test]
-    fn private_path_history_capacity_fails_closed_across_outgoing_git_blobs()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let repository = tempfile::tempdir()?;
-        let git = |args: &[&str]| {
-            Command::new("git")
-                .args(args)
-                .current_dir(repository.path())
-                .output()
-        };
-        for args in [
-            &["init", "--quiet"][..],
-            &["config", "user.name", "ProjectAtlas Test"][..],
-            &["config", "user.email", "projectatlas@example.invalid"][..],
-        ] {
-            require(git(args)?.status.success(), "temporary Git setup failed")?;
-        }
-        let source_path = repository.path().join("history.ps1");
-        fs::write(&source_path, "safe\n")?;
-        require(
-            git(&["add", "history.ps1"])?.status.success()
-                && git(&["commit", "--quiet", "-m", "clean base"])?
-                    .status
+                Command::new("git")
+                    .args(["init", "--quiet"])
+                    .current_dir(&repo)
+                    .status()?
                     .success(),
-            "temporary Git base commit failed",
-        )?;
-        let base = git(&["rev-parse", "HEAD"])?;
-        require(base.status.success(), "temporary Git base lookup failed")?;
-        let base = String::from_utf8(base.stdout)?.trim().to_string();
-        let sample = private_path_samples()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| io::Error::other("private path sample is missing"))?;
-        let per_blob = super::PRIVATE_PATH_COMPARISON_GROUP_LIMIT / 2 + 1;
-        let mut private_objects = Vec::new();
-        for (prefix, message) in [
-            ("first_private", "first private history"),
-            ("second_private", "second private history"),
-        ] {
-            let source = (0..per_blob)
-                .map(|index| format!("{prefix}_{index} = {sample:?}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            fs::write(&source_path, source)?;
-            require(
-                git(&["add", "history.ps1"])?.status.success()
-                    && git(&["commit", "--quiet", "-m", message])?.status.success(),
-                "temporary private Git commit failed",
+                "temporary Git repository initialization failed",
             )?;
-            let object = git(&["rev-parse", "HEAD:history.ps1"])?;
-            require(object.status.success(), "private Git blob lookup failed")?;
-            private_objects.push(String::from_utf8(object.stdout)?.trim().to_string());
-        }
-        for object in &private_objects {
-            let blobs = BTreeSet::from([(object.clone(), "history.ps1".to_string())]);
-            let findings = lint_git_blobs(repository.path(), &blobs, true)?;
-            require(
-                findings.total == per_blob
-                    && findings
-                        .comparison
-                        .as_ref()
-                        .and_then(super::PrivatePathComparison::group_count)
-                        == Some(per_blob),
-                "an individual Git blob exceeded the comparison bound",
-            )?;
-        }
-        fs::write(&source_path, "safe tip\n")?;
-        require(
-            git(&["add", "history.ps1"])?.status.success()
-                && git(&["commit", "--quiet", "-m", "clean tip"])?
-                    .status
-                    .success(),
-            "temporary clean-tip commit failed",
-        )?;
-        let head = git(&["rev-parse", "HEAD"])?;
-        require(head.status.success(), "temporary Git head lookup failed")?;
-        let head = String::from_utf8(head.stdout)?.trim().to_string();
-        let Err(error) = run_private_path_range(repository.path(), &base, &head) else {
-            return Err(io::Error::other("merged outgoing Git history exceeded no bound").into());
-        };
-        let total = per_blob * private_objects.len();
-        let display = error.to_string();
-        let debug = format!("{error:?}");
-        require(
-            matches!(
-                &error,
-                LintError::PrivatePathComparisonCapacityExceeded {
-                    baseline_total: 0,
-                    outgoing_total,
-                    group_limit,
-                    identity_byte_limit,
-                } if *outgoing_total == total
-                    && *group_limit == super::PRIVATE_PATH_COMPARISON_GROUP_LIMIT
-                    && *identity_byte_limit == super::PRIVATE_PATH_COMPARISON_IDENTITY_BYTE_LIMIT
-            ) && !display.contains(&sample)
-                && !debug.contains(&sample)
-                && private_objects
-                    .iter()
-                    .all(|object| !display.contains(object) && !debug.contains(object)),
-            "merged Git capacity failure omitted safe counts/bounds or disclosed source identity",
-        )?;
-        Ok(())
-    }
-
-    /// Tracked and non-ignored untracked files are scanned while ignored state is excluded.
-    #[test]
-    fn private_path_lint_scans_visible_paths() -> Result<(), Box<dyn std::error::Error>> {
-        let repository = tempfile::tempdir()?;
-        let status = Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(repository.path())
-            .status()?;
-        require(
-            status.success(),
-            "temporary Git repository initialization failed",
-        )?;
-        let samples = private_path_samples()?;
-        let sample = samples
-            .get(4)
-            .ok_or_else(|| io::Error::other("untracked private path sample is missing"))?;
-        fs::write(
-            repository.path().join("privacy-check.ps1"),
-            format!("$runtime = {sample:?}\n"),
-        )?;
-        let tracked_sample = samples
-            .get(1)
-            .ok_or_else(|| io::Error::other("tracked private path sample is missing"))?;
-        fs::write(
-            repository.path().join("tracked.rs"),
-            format!("const RUNTIME: &str = {tracked_sample:?};\n"),
-        )?;
-        fs::write(
-            repository.path().join("extensionless"),
-            format!("{sample}\n"),
-        )?;
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(sample, repository.path().join("private-link"))?;
-        fs::write(repository.path().join(".gitignore"), "ignored.txt\n")?;
-        fs::write(repository.path().join("ignored.txt"), format!("{sample}\n"))?;
-        let status = Command::new("git")
-            .args(["add", ".gitignore", "tracked.rs"])
-            .current_dir(repository.path())
-            .output()?
-            .status;
-        require(status.success(), "temporary Git files could not be staged")?;
-        let violations = lint_repository_private_paths(repository.path())?;
-        require(
-            violations.len() == if cfg!(unix) { 4 } else { 3 },
-            "tracked or non-ignored untracked private path was not rejected",
-        )?;
-        require(
-            violations
-                .iter()
-                .any(|violation| violation.path == "privacy-check.ps1")
-                && violations
-                    .iter()
-                    .any(|violation| violation.path == "tracked.rs")
-                && violations
-                    .iter()
-                    .any(|violation| violation.path == "extensionless")
-                && (!cfg!(unix)
-                    || violations
-                        .iter()
-                        .any(|violation| violation.path == "private-link"))
-                && violations
-                    .iter()
-                    .all(|violation| violation.path != "ignored.txt"),
-            "Git visibility or repository-relative diagnostics regressed",
-        )?;
-        Ok(())
-    }
-
-    /// POSIX Git pathnames with Windows or UNC roots fail in the tree and outgoing history.
-    #[cfg(unix)]
-    #[test]
-    fn private_path_lint_rejects_and_redacts_git_pathnames()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let repository = tempfile::tempdir()?;
-        let git = |args: &[&str]| {
-            Command::new("git")
-                .args(args)
-                .current_dir(repository.path())
-                .output()
-        };
-        for args in [
-            &["init", "--quiet"][..],
-            &["config", "user.name", "ProjectAtlas Test"][..],
-            &["config", "user.email", "projectatlas@example.invalid"][..],
-        ] {
-            require(git(args)?.status.success(), "temporary Git setup failed")?;
-        }
-        let portable_directory = repository.path().join("portable");
-        fs::create_dir(&portable_directory)?;
-        fs::write(portable_directory.join("C_drive_notes.txt"), "safe\n")?;
-        require(
-            git(&["add", "--all"])?.status.success()
-                && git(&["commit", "--quiet", "-m", "portable base"])?
-                    .status
-                    .success(),
-            "portable Git base commit failed",
-        )?;
-        let base = git(&["rev-parse", "HEAD"])?;
-        require(base.status.success(), "portable Git base lookup failed")?;
-        let base = String::from_utf8(base.stdout)?.trim().to_string();
-
-        let backslash = char::from_u32(92)
-            .ok_or_else(|| io::Error::other("backslash code point must be valid"))?;
-        let drive_path =
-            format!("fixtures/C:{backslash}Users{backslash}alice{backslash}secret.txt");
-        let forward_drive_path =
-            ["fixtures", "C:", "Users", "alice", "forward-secret.txt"].join("/");
-        let network_path = format!("fixtures/{backslash}{backslash}private-host{backslash}share");
-        let verbatim_network_path = format!(
-            "fixtures/{backslash}{backslash}?{backslash}UNC{backslash}private-host{backslash}share"
-        );
-        let gitlink_path = format!("fixtures/D:{backslash}Users{backslash}bob{backslash}submodule");
-        let private_source = private_path_samples()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| io::Error::other("private content sample is missing"))?;
-        fs::create_dir(repository.path().join("fixtures"))?;
-        fs::write(repository.path().join(&drive_path), &private_source)?;
-        let forward_drive_file = repository.path().join(&forward_drive_path);
-        fs::create_dir_all(
-            forward_drive_file
-                .parent()
-                .ok_or_else(|| io::Error::other("forward drive fixture parent is missing"))?,
-        )?;
-        fs::write(&forward_drive_file, "safe\n")?;
-        fs::write(repository.path().join(&verbatim_network_path), "safe\n")?;
-        std::os::unix::fs::symlink(
-            "portable/C_drive_notes.txt",
-            repository.path().join(&network_path),
-        )?;
-        require(
-            git(&["add", "--all"])?.status.success(),
-            "hostile Git paths were not staged",
-        )?;
-        let gitlink_entry = format!("160000,{base},{gitlink_path}");
-        require(
-            git(&["update-index", "--add", "--cacheinfo", &gitlink_entry])?
-                .status
-                .success(),
-            "hostile Git gitlink pathname was not staged",
-        )?;
-
-        let current = lint_repository_private_paths(repository.path())?;
-        let current_debug = format!("{current:?}");
-        require(
-            current.len() == 7,
-            &format!(
-                "current-tree Git pathname scan returned {} findings instead of 7",
-                current.len()
-            ),
-        )?;
-        require(
-            current
-                .iter()
-                .all(|item| item.path == super::PRIVATE_PATH_REDACTED_GIT_PATH),
-            "current-tree Git pathname finding was not redacted",
-        )?;
-        require(
-            !current_debug.contains(&drive_path)
-                && !current_debug.contains(&forward_drive_path)
-                && !current_debug.contains(&network_path)
-                && !current_debug.contains(&verbatim_network_path)
-                && !current_debug.contains(&gitlink_path)
-                && !current_debug.contains(&private_source),
-            "current-tree Git pathname finding disclosed private material",
-        )?;
-        let mut current_diagnostics = Vec::new();
-        write_violations(&mut current_diagnostics, &[], &current)?;
-        let current_diagnostics = String::from_utf8(current_diagnostics)?;
-        require(
-            current_diagnostics.contains(super::PRIVATE_PATH_REDACTED_GIT_PATH)
-                && !current_diagnostics.contains(&drive_path)
-                && !current_diagnostics.contains(&forward_drive_path)
-                && !current_diagnostics.contains(&network_path)
-                && !current_diagnostics.contains(&verbatim_network_path)
-                && !current_diagnostics.contains(&gitlink_path)
-                && !current_diagnostics.contains(&private_source),
-            "current-tree Git pathname diagnostics disclosed private material",
-        )?;
-
-        fs::write(repository.path().join(&drive_path), [0xff])?;
-        let Err(decode_error) = lint_repository_private_paths(repository.path()) else {
-            return Err(
-                io::Error::other("malformed content at a forbidden Git pathname passed").into(),
-            );
-        };
-        let decode_display = decode_error.to_string();
-        let decode_debug = format!("{decode_error:?}");
-        require(
-            decode_display.contains(super::PRIVATE_PATH_REDACTED_GIT_PATH)
-                && decode_debug.contains(super::PRIVATE_PATH_REDACTED_GIT_PATH)
-                && !decode_display.contains(&drive_path)
-                && !decode_debug.contains(&drive_path),
-            "decode failure disclosed a forbidden Git pathname",
-        )?;
-        fs::write(repository.path().join(&drive_path), &private_source)?;
-        require(
-            git(&["commit", "--quiet", "-m", "private pathnames"])?
-                .status
-                .success(),
-            "private Git pathname commit failed",
-        )?;
-
-        fs::remove_file(repository.path().join(&drive_path))?;
-        fs::remove_file(&forward_drive_file)?;
-        fs::remove_file(repository.path().join(&network_path))?;
-        fs::remove_file(repository.path().join(&verbatim_network_path))?;
-        fs::write(portable_directory.join("UNC_notes.txt"), "safe\n")?;
-        require(
-            git(&["add", "--all"])?.status.success()
-                && git(&["update-index", "--force-remove", "--", &gitlink_path])?
-                    .status
-                    .success()
-                && git(&["commit", "--quiet", "-m", "clean tip"])?
-                    .status
-                    .success(),
-            "clean Git pathname tip commit failed",
-        )?;
-        require(
-            lint_repository_private_paths(repository.path())?.is_empty(),
-            "portable current-tree names were rejected after the hostile names were removed",
-        )?;
-        let head = git(&["rev-parse", "HEAD"])?;
-        require(
-            head.status.success(),
-            "clean Git pathname head lookup failed",
-        )?;
-        let head = String::from_utf8(head.stdout)?.trim().to_string();
-        let updates = format!("refs/heads/feature {head} refs/heads/feature {base}\n");
-        let revisions = outgoing_revisions(repository.path(), "", io::Cursor::new(updates))?;
-        let baseline = lint_git_tree_private_paths(repository.path(), &base)?;
-        let introduced = private_paths_not_in_baseline(
-            lint_git_revisions_private_paths(repository.path(), &revisions, true)?,
-            &baseline,
-        )?;
-        let introduced_debug = format!("{introduced:?}");
-        require(
-            introduced.len() == 7,
-            &format!(
-                "outgoing Git pathname scan returned {} findings instead of 7",
-                introduced.len()
-            ),
-        )?;
-        require(
-            introduced
-                .iter()
-                .all(|item| item.path == super::PRIVATE_PATH_REDACTED_GIT_PATH),
-            "outgoing Git pathname finding was not redacted",
-        )?;
-        require(
-            !introduced_debug.contains(&drive_path)
-                && !introduced_debug.contains(&forward_drive_path)
-                && !introduced_debug.contains(&network_path)
-                && !introduced_debug.contains(&verbatim_network_path)
-                && !introduced_debug.contains(&gitlink_path)
-                && !introduced_debug.contains(&private_source),
-            "outgoing Git pathname finding disclosed private material",
-        )?;
-        let mut history_diagnostics = Vec::new();
-        write_violations(&mut history_diagnostics, &[], &introduced)?;
-        let history_diagnostics = String::from_utf8(history_diagnostics)?;
-        require(
-            !history_diagnostics.contains(&drive_path)
-                && !history_diagnostics.contains(&forward_drive_path)
-                && !history_diagnostics.contains(&network_path)
-                && !history_diagnostics.contains(&verbatim_network_path)
-                && !history_diagnostics.contains(&gitlink_path)
-                && !history_diagnostics.contains(&private_source),
-            "outgoing Git pathname diagnostics disclosed private material",
-        )?;
-        require(
-            matches!(
-                run_private_path_range(repository.path(), &base, &head),
-                Err(LintError::Violations { .. })
-            ),
-            "a clean tip hid forbidden Git pathnames in outgoing history",
-        )?;
-        Ok(())
-    }
-
-    /// BOM-marked source is text, while binary Git files stay excluded.
-    #[test]
-    fn private_path_lint_scans_text_encodings() -> Result<(), Box<dyn std::error::Error>> {
-        let repository = tempfile::tempdir()?;
-        let status = Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(repository.path())
-            .output()?
-            .status;
-        require(
-            status.success(),
-            "temporary Git repository initialization failed",
-        )?;
-        let sample = private_path_samples()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| io::Error::other("private path sample is missing"))?;
-        let mut encoded = vec![0xff, 0xfe];
-        let mut encoded_be = vec![0xfe, 0xff];
-        for unit in sample.encode_utf16() {
-            encoded.extend_from_slice(&unit.to_le_bytes());
-            encoded_be.extend_from_slice(&unit.to_be_bytes());
-        }
-        let mut binary = vec![0];
-        binary.extend_from_slice(sample.as_bytes());
-        binary.push(0);
-        fs::write(repository.path().join("privacy-check.ps1"), encoded)?;
-        fs::write(repository.path().join("privacy-check-be.ps1"), encoded_be)?;
-        fs::write(repository.path().join("asset.bin"), binary)?;
-        let status = Command::new("git")
-            .args([
-                "add",
-                "privacy-check.ps1",
-                "privacy-check-be.ps1",
-                "asset.bin",
-            ])
-            .current_dir(repository.path())
-            .output()?
-            .status;
-        require(status.success(), "temporary Git files could not be staged")?;
-        let violations = lint_repository_private_paths(repository.path())?;
-        require(
-            violations.len() == 2
-                && violations
-                    .iter()
-                    .any(|violation| violation.path == "privacy-check.ps1")
-                && violations
-                    .iter()
-                    .any(|violation| violation.path == "privacy-check-be.ps1"),
-            "UTF-16 source or binary classification regressed",
-        )?;
-        require(
-            decode_repository_text("malformed.ps1", &[0xff, 0xfe, 0]).is_err(),
-            "malformed UTF-16 source was accepted",
-        )?;
-        require(
-            decode_repository_text("malformed.txt", &[0xff]).is_err(),
-            "malformed non-binary UTF-8 source was accepted",
-        )?;
-        let rules = private_path_rules()?;
-        for sample in private_path_samples()? {
-            let mut encoded = vec![0xef, 0xbb, 0xbf];
-            encoded.extend_from_slice(sample.as_bytes());
-            let decoded = decode_repository_text("bom.txt", &encoded)?
-                .ok_or_else(|| io::Error::other("UTF-8 BOM source was treated as binary"))?;
-            require(
-                lint_private_paths("bom.txt", &decoded, &rules).len() == 1,
-                "UTF-8 BOM hid a private path family at the start of source",
-            )?;
-        }
-        Ok(())
-    }
-
-    /// Every outgoing revision is scanned even when its tip and dirty overlay are safe.
-    #[test]
-    fn private_path_lint_scans_outgoing_revisions() -> Result<(), Box<dyn std::error::Error>> {
-        let repository = tempfile::tempdir()?;
-        for args in [
-            &["init", "--quiet"][..],
-            &["config", "user.name", "ProjectAtlas Test"][..],
-            &["config", "user.email", "projectatlas@example.invalid"][..],
-            &["config", "core.abbrev", "4"][..],
-        ] {
-            let status = Command::new("git")
-                .args(args)
-                .current_dir(repository.path())
-                .output()?
-                .status;
-            require(status.success(), "temporary Git setup failed")?;
-        }
-        let samples = private_path_samples()?;
-        let sample = samples
-            .first()
-            .ok_or_else(|| io::Error::other("private path sample is missing"))?;
-        let baseline_sample = samples
-            .get(1)
-            .ok_or_else(|| io::Error::other("baseline private path sample is missing"))?;
-        let source_path = repository.path().join("privacy-check.ps1");
-        let legacy_path = repository.path().join("legacy.ps1");
-        let same_root_path = repository.path().join("same-root.ps1");
-        let same_root_sample = sample.replace("private-host", "private host");
-        let replacement_sample = same_root_sample.replace("workspace", "replacement");
-        fs::write(&source_path, "$runtime = Join-Path $env:TEMP 'base'\n")?;
-        fs::write(&legacy_path, format!("$legacy = {baseline_sample:?}\n"))?;
-        fs::write(
-            &same_root_path,
-            format!("$runtime = {same_root_sample:?}\n"),
-        )?;
-        let status = Command::new("git")
-            .args(["add", "privacy-check.ps1", "legacy.ps1", "same-root.ps1"])
-            .current_dir(repository.path())
-            .output()?
-            .status;
-        require(status.success(), "temporary Git base could not be staged")?;
-        let status = Command::new("git")
-            .args(["commit", "--quiet", "-m", "clean base"])
-            .current_dir(repository.path())
-            .output()?
-            .status;
-        require(status.success(), "temporary Git base commit failed")?;
-        let base = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repository.path())
-            .output()?;
-        require(base.status.success(), "temporary Git base lookup failed")?;
-        let base = String::from_utf8(base.stdout)?.trim().to_string();
-        fs::write(
-            &legacy_path,
-            format!("$legacy = {baseline_sample:?}\n# retained baseline text\n"),
-        )?;
-        let status = Command::new("git")
-            .args(["add", "legacy.ps1"])
-            .current_dir(repository.path())
-            .output()?
-            .status;
-        require(status.success(), "safe baseline edit could not be staged")?;
-        let status = Command::new("git")
-            .args(["commit", "--quiet", "-m", "retain published private text"])
-            .current_dir(repository.path())
-            .output()?
-            .status;
-        require(status.success(), "safe baseline edit commit failed")?;
-        let safe_head = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repository.path())
-            .output()?;
-        require(safe_head.status.success(), "safe Git head lookup failed")?;
-        let safe_head = String::from_utf8(safe_head.stdout)?.trim().to_string();
-        require(
-            run_private_path_range(repository.path(), &base, &safe_head).is_ok(),
-            "unchanged private text already present at the published base was rejected",
-        )?;
-        for (content, message, attributes) in [
-            (
-                format!("$runtime = {sample:?}\n"),
-                "private intermediate",
-                Some("privacy-check.ps1 export-ignore\n"),
-            ),
-            (
-                "$runtime = Join-Path $env:TEMP 'clean-tip'\n".to_string(),
-                "clean tip",
-                None,
-            ),
-        ] {
-            fs::write(&source_path, content)?;
+            fs::write(repo.join("portable.txt"), "checkout = <project-root>\n")?;
             fs::write(
-                &same_root_path,
-                if message == "private intermediate" {
-                    format!("$runtime = {replacement_sample:?}\n")
-                } else {
-                    "$runtime = Join-Path $env:TEMP 'clean-tip'\n".to_string()
-                },
+                repo.join("fixture.txt"),
+                "example = C:/Users/example/ProjectAtlas # projectatlas: path-fixture\n",
             )?;
-            if let Some(attributes) = attributes {
-                fs::write(repository.path().join(".gitattributes"), attributes)?;
-            }
-            for args in [
-                &["add", "--all"][..],
-                &["commit", "--quiet", "-m", message][..],
-            ] {
-                let status = Command::new("git")
-                    .args(args)
-                    .current_dir(repository.path())
-                    .output()?
-                    .status;
-                require(status.success(), "temporary Git commit failed")?;
-            }
-        }
-        fs::write(
-            &source_path,
-            "$runtime = Join-Path $env:TEMP 'dirty-safe'\n",
-        )?;
-        let working_tree_violations = lint_repository_private_paths(repository.path())?;
-        require(
-            working_tree_violations.len() == 1 && working_tree_violations[0].path == "legacy.ps1",
-            "safe dirty overlay must retain only the published-base private text",
-        )?;
-        let head = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repository.path())
-            .output()?;
-        require(head.status.success(), "outgoing Git head lookup failed")?;
-        let head = String::from_utf8(head.stdout)?.trim().to_string();
-        let null_object = "0".repeat(base.len());
-        let updates = format!(
-            "refs/heads/feature {head} refs/heads/feature {base}\n\
-             refs/heads/new {head} refs/heads/new {null_object}\n\
-             refs/heads/delete {null_object} refs/heads/delete {base}\n"
-        );
-        let revisions = outgoing_revisions(
-            repository.path(),
-            "unconfigured-remote",
-            io::Cursor::new(updates),
-        )?;
-        require(
-            revisions.len() == 4,
-            "existing, new, duplicate, or deletion update selection regressed",
-        )?;
-        let violations = lint_git_revisions_private_paths(repository.path(), &revisions, true)?;
-        let update_findings =
-            lint_git_revisions_private_paths(repository.path(), &revisions, false)?;
-        require(
-            update_findings.comparison.is_none() && update_findings.total == violations.total,
-            "ordinary update scan retained comparison identities or lost complete counts",
-        )?;
-        require(
-            violations.len() == 5,
-            &format!(
-                "raw outgoing scan must include introduced and inherited private text; found {}",
-                violations.len()
-            ),
-        )?;
-        let baseline = lint_git_tree_private_paths(repository.path(), &base)?;
-        let introduced = private_paths_not_in_baseline(violations, &baseline)?;
-        require(
-            introduced.len() == 2
-                && introduced
-                    .iter()
-                    .any(|violation| violation.path == "privacy-check.ps1")
-                && introduced
-                    .iter()
-                    .any(|violation| violation.path == "same-root.ps1"),
-            "range scan did not isolate private text introduced after the published base",
-        )?;
-        require(
-            run_private_path_range(repository.path(), &base, &head).is_err(),
-            "private intermediate revision was accepted by the hosted range gate",
-        )?;
-        require(
-            matches!(
-                run_private_path_range(repository.path(), &null_object, &head),
-                Err(LintError::Violations { .. })
-            ),
-            "a zero-base branch creation did not scan its complete reachable history",
-        )?;
-        require(
-            outgoing_revisions(
-                repository.path(),
-                "unconfigured-remote",
-                io::Cursor::new("malformed\n"),
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(
+                "/home/private-owner/ProjectAtlas", // projectatlas: path-fixture
+                repo.join("private-link"),
+            )?;
+            #[cfg(not(unix))]
+            fs::write(
+                repo.join("private-link"),
+                "checkout = C:/Users/private-owner/ProjectAtlas\n", // projectatlas: path-fixture
+            )?;
+            require(
+                Command::new("git")
+                    .args(["add", "."])
+                    .current_dir(&repo)
+                    .status()?
+                    .success(),
+                "temporary Git repository staging failed",
+            )?;
+
+            let violations = lint_repository_private_paths(&repo)?;
+            require(violations.len() == 1, "private path was not rejected")?;
+            let diagnostic = violations[0].to_string();
+            require(
+                diagnostic.contains("private-link:1:1") && diagnostic.contains("<redacted>"),
+                "diagnostic lost its repository-relative redacted location",
+            )?;
+            require(
+                !diagnostic.contains("private-owner") && !diagnostic.contains("ProjectAtlas"),
+                "diagnostic exposed matched source",
             )
-            .is_err(),
-            "malformed pre-push input was accepted",
-        )?;
-        Ok(())
-    }
-
-    /// SHA-256 history keeps distinct paths even when they share one private blob.
-    #[test]
-    fn private_path_lint_scans_sha256_history() -> Result<(), Box<dyn std::error::Error>> {
-        let repository = tempfile::tempdir()?;
-        let git = |args: &[&str]| {
-            Command::new("git")
-                .args(args)
-                .current_dir(repository.path())
-                .output()
-        };
-        if !git(&["init", "--quiet", "--object-format=sha256"])?
-            .status
-            .success()
-        {
-            writeln!(
-                io::stderr().lock(),
-                "skipped: installed Git does not support SHA-256 repositories"
-            )?;
-            return Ok(());
-        }
-        for args in [
-            &["config", "user.name", "ProjectAtlas Test"][..],
-            &["config", "user.email", "projectatlas@example.invalid"][..],
-        ] {
-            require(git(args)?.status.success(), "SHA-256 Git setup failed")?;
-        }
-        fs::write(repository.path().join("baseline.txt"), "safe\n")?;
-        require(
-            git(&["add", "baseline.txt"])?.status.success()
-                && git(&["commit", "--quiet", "-m", "clean base"])?
-                    .status
-                    .success(),
-            "SHA-256 Git base commit failed",
-        )?;
-        let base = git(&["rev-parse", "HEAD"])?;
-        require(base.status.success(), "SHA-256 Git base lookup failed")?;
-        let base = String::from_utf8(base.stdout)?.trim().to_string();
-        require(base.len() == 64, "Git did not create SHA-256 object ids")?;
-
-        let samples = private_path_samples()?;
-        let sample = samples
-            .first()
-            .ok_or_else(|| io::Error::other("private path sample is missing"))?;
-        let nested_path_sample = format!(
-            "fixtures/{}",
-            samples
-                .get(2)
-                .ok_or_else(|| io::Error::other("private pathname sample is missing"))?
-        );
-        let private_source = format!("$runtime = {sample:?}\n");
-        for path in ["first.ps1", "second.ps1"] {
-            fs::write(repository.path().join(path), &private_source)?;
-        }
-        #[cfg(unix)]
-        {
-            fs::create_dir(repository.path().join("fixtures"))?;
-            fs::write(repository.path().join(&nested_path_sample), "safe\n")?;
-        }
-        require(
-            git(&["add", "--all"])?.status.success()
-                && git(&["commit", "--quiet", "-m", "private intermediate"])?
-                    .status
-                    .success(),
-            "SHA-256 private intermediate commit failed",
-        )?;
-        for path in ["first.ps1", "second.ps1"] {
-            fs::write(repository.path().join(path), "$runtime = $env:TEMP\n")?;
-        }
-        #[cfg(unix)]
-        fs::remove_file(repository.path().join(&nested_path_sample))?;
-        require(
-            git(&["add", "--all"])?.status.success()
-                && git(&["commit", "--quiet", "-m", "clean tip"])?
-                    .status
-                    .success(),
-            "SHA-256 clean tip commit failed",
-        )?;
-        let head = git(&["rev-parse", "HEAD"])?;
-        require(head.status.success(), "SHA-256 Git head lookup failed")?;
-        let head = String::from_utf8(head.stdout)?.trim().to_string();
-        require(head.len() == 64, "SHA-256 Git head has the wrong width")?;
-
-        let updates = format!("refs/heads/feature {head} refs/heads/feature {base}\n");
-        let revisions = outgoing_revisions(repository.path(), "", io::Cursor::new(updates))?;
-        let baseline = lint_git_tree_private_paths(repository.path(), &base)?;
-        let introduced = private_paths_not_in_baseline(
-            lint_git_revisions_private_paths(repository.path(), &revisions, true)?,
-            &baseline,
-        )?;
-        require(
-            introduced.len() == (if cfg!(unix) { 3 } else { 2 })
-                && introduced.iter().any(|item| item.path == "first.ps1")
-                && introduced.iter().any(|item| item.path == "second.ps1")
-                && (!cfg!(unix)
-                    || introduced
-                        .iter()
-                        .any(|item| item.path == super::PRIVATE_PATH_REDACTED_GIT_PATH)),
-            "SHA-256 range scan deduplicated distinct paths sharing one private blob",
-        )?;
-        let introduced_debug = format!("{introduced:?}");
-        require(
-            !introduced_debug.contains(sample) && !introduced_debug.contains(&nested_path_sample),
-            "SHA-256 Git pathname comparison disclosed a raw hostile name",
-        )?;
-        require(
-            matches!(
-                run_private_path_range(repository.path(), &base, &head),
-                Err(LintError::Violations { .. })
-            ),
-            "SHA-256 intermediate private revision passed the range gate",
-        )?;
-        let null_object = "0".repeat(64);
-        require(
-            matches!(
-                run_private_path_range(repository.path(), &null_object, &head),
-                Err(LintError::Violations { .. })
-            ),
-            "SHA-256 zero-base history passed the range gate",
-        )?;
-        Ok(())
-    }
-
-    /// Hostile Git-relative filenames stay escaped in source-policy diagnostics.
-    #[test]
-    fn private_path_diagnostics_escape_control_characters() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let path = "scripts/line\n::error::forged.ps1";
-        let private_path = super::PrivatePathViolation {
-            path: path.to_string(),
-            line: 1,
-            column: 1,
-            kind: "windows-drive-root",
-        };
-        let mut diagnostics = Vec::new();
-        write_violations(
-            &mut diagnostics,
-            &[],
-            &super::PrivatePathFindings {
-                total: 1,
-                samples: vec![private_path],
-                comparison: None,
-            },
-        )?;
-        let diagnostics = String::from_utf8(diagnostics)?;
-        require(
-            !diagnostics.contains("\n::error::") && diagnostics.contains("\\n::error::"),
-            "control-bearing repository path was not escaped",
-        )?;
-        Ok(())
-    }
-
-    /// Unix Git filenames containing controls cannot inject hosted log records.
-    #[cfg(unix)]
-    #[test]
-    fn private_path_lint_escapes_hostile_git_filename() -> Result<(), Box<dyn std::error::Error>> {
-        let repository = tempfile::tempdir()?;
-        let status = Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(repository.path())
-            .output()?
-            .status;
-        require(
-            status.success(),
-            "temporary Git repository initialization failed",
-        )?;
-        let path = "line\n::error::forged.ps1";
-        let sample = private_path_samples()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| io::Error::other("private path sample is missing"))?;
-        fs::write(repository.path().join(path), sample)?;
-        let violations = lint_repository_private_paths(repository.path())?;
-        require(
-            violations.len() == 1,
-            "hostile Git filename was not scanned",
-        )?;
-        let mut diagnostics = Vec::new();
-        write_violations(&mut diagnostics, &[], &violations)?;
-        let diagnostics = String::from_utf8(diagnostics)?;
-        require(
-            !diagnostics.contains("\n::error::") && diagnostics.contains("\\n::error::"),
-            "hostile Git filename injected a diagnostic record",
-        )?;
+        })();
+        let cleanup = fs::remove_dir_all(&repo);
+        result?;
+        cleanup?;
         Ok(())
     }
 
@@ -3279,8 +1001,14 @@ mod tests {
         require(
             violations
                 .iter()
-                .all(|violation| violation.rule_id == TEST_RULE.id),
-            "macro violation used the wrong rule",
+                .any(|violation| violation.literal == "status"),
+            "missing status macro violation",
+        )?;
+        require(
+            violations
+                .iter()
+                .any(|violation| violation.literal == "active"),
+            "missing active macro violation",
         )?;
         Ok(())
     }
@@ -3314,8 +1042,8 @@ mod tests {
             .first()
             .ok_or_else(|| io::Error::other("missing e2e fixture path violation"))?;
         require(
-            violation.rule_id == E2E_FIXTURE_TEST_RULE.id,
-            "e2e fixture path violation used the wrong rule",
+            violation.literal == "fake-codex.log",
+            "e2e fixture path violation had the wrong value",
         )?;
         Ok(())
     }
@@ -3357,8 +1085,8 @@ fn fixture(root: &std::path::Path) {
         require(
             violations
                 .iter()
-                .all(|violation| violation.rule_id == PATH_JOIN_TEST_RULE.id),
-            "repeated path join violation used the wrong rule",
+                .all(|violation| violation.literal == "future-fixture"),
+            "unexpected repeated path join literal was flagged",
         )?;
         Ok(())
     }
@@ -3459,8 +1187,8 @@ impl Status {
             .first()
             .ok_or_else(|| io::Error::other("missing direct literal violation"))?;
         require(
-            violation.rule_id == TEST_RULE.id,
-            "direct literal violation used the wrong rule",
+            violation.literal == "active",
+            "direct literal violation had the wrong value",
         )?;
         Ok(())
     }

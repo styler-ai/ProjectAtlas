@@ -3,19 +3,12 @@
 
 set -e
 
-mkdir -p .tmp
-push_updates="$(mktemp .tmp/pre-push-updates.XXXXXX)"
-trap 'rm -f "$push_updates"' EXIT HUP INT TERM
-cat > "$push_updates"
-
 # Git exports repository-local state to hooks; test fixtures must rediscover their own roots.
 for git_variable in $(git rev-parse --local-env-vars); do
   unset "$git_variable"
 done
 
 cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
-cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
-  private-path-updates "$1" < "$push_updates"
 python3 docs/benchmarks/harness/mcp_composition.py --self-test
 python3 .github/scripts/verify-manual-benchmark-policy.py
 python3 .github/scripts/verify-published-benchmark-locks.py

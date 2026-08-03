@@ -47,7 +47,6 @@ jobs:
       - name: Checkout exact candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0
           persist-credentials: false
 
       - name: Install pinned Rust toolchain
@@ -61,29 +60,9 @@ jobs:
       - name: Repository source policy lints
         timeout-minutes: 2
         shell: pwsh
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          HISTORY_BASE: ${{ github.event.pull_request.base.sha }}
-          HISTORY_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           $ErrorActionPreference = "Stop"
           cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $base = $env:HISTORY_BASE
-          $head = $env:HISTORY_HEAD
-          if ([string]::IsNullOrWhiteSpace($head)) {
-            throw "Source-policy history head is unavailable."
-          }
-          if ([string]::IsNullOrWhiteSpace($base)) {
-            $base = (git merge-base "origin/$env:DEFAULT_BRANCH" $head).Trim()
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            if ($base -eq $head) {
-              $base = (git rev-parse --verify "$head^1").Trim()
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            }
-          }
-          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- `
-            private-path-range $base $head
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Bind exact clean candidate identity

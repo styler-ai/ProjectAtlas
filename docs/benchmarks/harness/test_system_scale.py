@@ -124,23 +124,16 @@ class SystemScaleHarnessTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows extended-path behavior")
     def test_remove_tree_preserves_extended_paths_and_converts_unc_paths(self) -> None:
         metadata = mock.Mock(st_mode=stat.S_IFDIR, st_file_attributes=0)
-        separator = chr(92)
-        device_root = separator * 2 + "?" + separator
-        drive_parent = device_root + f"{chr(67)}:" + separator + "benchmark"
-        network_parent = separator * 2 + separator.join(("server", "share", "benchmark"))
         cases = (
             (
-                Path(drive_parent + separator + "child"),
-                Path(drive_parent),
-                drive_parent + separator + "child",
+                Path(r"\\?\C:\benchmark\child"),
+                Path(r"\\?\C:\benchmark"),
+                r"\\?\C:\benchmark\child",
             ),
             (
-                Path(network_parent + separator + "child"),
-                Path(network_parent),
-                device_root
-                + "UNC"
-                + separator
-                + separator.join(("server", "share", "benchmark", "child")),
+                Path(r"\\server\share\benchmark\child"),
+                Path(r"\\server\share\benchmark"),
+                r"\\?\UNC\server\share\benchmark\child",
             ),
         )
         for path, parent, expected in cases:
@@ -1159,179 +1152,23 @@ time.sleep(60)
     def test_failed_result_is_persisted_before_nonzero_exit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "result.json"
-            separator = chr(92)
-            foreign_path = (
-                separator * 2
-                + "?"
-                + separator
-                + "UNC"
-                + separator
-                + separator.join(("private-host", "share", "artifact.txt"))
-            )
-            with (
-                mock.patch("builtins.print") as report,
-                self.assertRaisesRegex(SystemExit, "1"),
-            ):
+            with self.assertRaisesRegex(SystemExit, "1"):
                 system_scale.write_result(
                     {
                         "passed": False,
                         "publication_eligible": False,
                         "path": str(system_scale.ROOT / "private"),
-                        "foreign_path": foreign_path,
-                        "nested": [{foreign_path: foreign_path}],
                     },
                     output,
                 )
-            report.assert_called_once_with(output.name)
             result = json.loads(output.read_text(encoding="utf-8"))
             self.assertFalse(result["passed"])
             self.assertEqual(
                 result["path"], str(Path("{REPO_ROOT}") / "private")
             )
-            self.assertEqual(result["foreign_path"], "{PRIVATE_PATH}")
-            self.assertEqual(
-                result["nested"], [{"{PRIVATE_PATH}": "{PRIVATE_PATH}"}]
-            )
             self.assertNotIn(
                 str(system_scale.ROOT), output.read_text(encoding="utf-8")
             )
-
-    def test_structural_private_path_redaction_preserves_urls(self) -> None:
-        separator = chr(92)
-        samples = (
-            (
-                separator.join((f"{chr(88)}:", "private-host", "artifact.txt")),
-                "windows-drive-root",
-            ),
-            (
-                separator * 2
-                + separator.join(("server", "share", "artifact.txt")),
-                "network-root",
-            ),
-            (
-                separator * 2
-                + "?"
-                + separator
-                + "UNC"
-                + separator
-                + separator.join(("server", "share", "artifact.txt")),
-                "verbatim-network-root",
-            ),
-            (
-                "/".join(("", "home", "example-user", "artifact.txt")),
-                "user-home-root",
-            ),
-            (
-                "/".join(("", "root", "artifact.txt")),
-                "user-home-root",
-            ),
-            ("/".join(("", "mnt", "x", "artifact.txt")), "wsl-drive-root"),
-            (
-                "/".join(
-                    ("file:", "", "private-host", "share", "artifact.txt")
-                ),
-                "file-network-root",
-            ),
-            (
-                "/".join(
-                    ("file:", "", "", "home", "example-user", "artifact.txt")
-                ),
-                "file-user-home-root",
-            ),
-            (
-                "/".join(("file:", "", "", "root", "artifact.txt")),
-                "file-user-home-root",
-            ),
-        )
-        for sample, category in samples:
-            with self.subTest(sample=sample):
-                self.assertEqual(
-                    system_scale.redact_private_absolute_paths(sample),
-                    "{PRIVATE_PATH}",
-                )
-                with self.assertRaises(ValueError) as failure:
-                    system_scale.assert_private_absolute_paths_redacted(
-                        {"path": sample}, "result.json"
-                    )
-                self.assertIn(category, str(failure.exception))
-                self.assertNotIn(sample, str(failure.exception))
-        nested_network = (
-            "fixtures/"
-            + separator * 2
-            + separator.join(("server", "share", "artifact.txt"))
-        )
-        self.assertEqual(
-            system_scale.redact_private_absolute_paths(nested_network),
-            "fixtures/{PRIVATE_PATH}",
-        )
-        with self.assertRaises(ValueError) as nested_failure:
-            system_scale.assert_private_absolute_paths_redacted(
-                {"path": nested_network}, "result.json"
-            )
-        self.assertIn("network-root", str(nested_failure.exception))
-        self.assertNotIn(nested_network, str(nested_failure.exception))
-        url = "https://example.com/private/artifact.txt"
-        escaped_relative = "." + separator * 2 + separator.join(("src", "lib.rs"))
-        escaped_line_ending = separator * 2 + "r" + separator * 2 + "n"
-        object_namespace = separator * 2 + "BaseNamedObjects" + separator * 2
-        rooted_name = "/".join(("", "rooted", "artifact.txt"))
-        rooted_file_uri = "/".join(
-            ("file:", "", "", "rooted", "artifact.txt")
-        )
-        nested_forward_slashes = "/".join(
-            ("fixtures", "", "server", "share", "artifact.txt")
-        )
-        for portable in (
-            url,
-            rooted_name,
-            rooted_file_uri,
-            nested_forward_slashes,
-            escaped_relative,
-            escaped_line_ending,
-            object_namespace,
-        ):
-            self.assertEqual(
-                system_scale.redact_private_absolute_paths(portable),
-                portable,
-            )
-            system_scale.assert_private_absolute_paths_redacted(
-                {"value": portable}, "result.json"
-            )
-
-    def test_result_write_refuses_unredacted_private_paths(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "result.json"
-            separator = chr(92)
-            private_path = (
-                separator * 2
-                + "?"
-                + separator
-                + "UNC"
-                + separator
-                + separator.join(("private-host", "share", "artifact.txt"))
-            )
-            with (
-                mock.patch.object(
-                    system_scale,
-                    "redact_private_absolute_paths",
-                    side_effect=lambda value: value,
-                ),
-                self.assertRaises(ValueError) as failure,
-            ):
-                system_scale.write_result(
-                    {"passed": True, "path": private_path}, output
-                )
-            self.assertIn("verbatim-network-root", str(failure.exception))
-            self.assertNotIn(private_path, str(failure.exception))
-            self.assertFalse(output.exists())
-            self.assertFalse(output.with_name(f"{output.name}.tmp").exists())
-            other_private_path = private_path.replace("artifact", "other")
-            with self.assertRaises(ValueError) as collision:
-                system_scale.redact_local_paths(
-                    {private_path: 1, other_private_path: 2}
-                )
-            self.assertNotIn(private_path, str(collision.exception))
-            self.assertNotIn(other_private_path, str(collision.exception))
 
     def test_main_persists_stalled_mcp_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

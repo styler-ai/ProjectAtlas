@@ -2722,9 +2722,8 @@ mod tests {
             RepositoryFilePath::new(Path::new(".")).is_err(),
             "project root was accepted as a file",
         )?;
-        let windows_absolute = ["C:", "repo"].join("/");
         require(
-            RepositoryNodePath::new(Path::new(&windows_absolute)).is_err(),
+            RepositoryNodePath::new(Path::new("C:/repo")).is_err(),
             "absolute Windows path was accepted",
         )?;
         require(

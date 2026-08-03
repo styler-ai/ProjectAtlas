@@ -5049,8 +5049,7 @@ mod tests {
                     .arg("/J")
                     .arg(link)
                     .arg(target)
-                    .output()?
-                    .status;
+                    .status()?;
                 if status.success() {
                     Ok(())
                 } else {

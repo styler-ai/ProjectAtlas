@@ -181,7 +181,7 @@ projectatlas ignore remove --kind path-prefix docs/api
 defaults. It is a no-op when the file already exists and does not require GitHub or a remote Git repository.
 Project-local or personal workspace state should stay in `.gitignore`. ProjectAtlas honors those ignore rules and
 does not need tool-specific folders copied into its own config. If a workflow note needs to be public, promote it
-to `AGENTS.md`, `docs/`, or plugin skill documentation instead of committing private workspace memory.
+to `docs/` or plugin skill documentation instead of committing private workspace memory.
 
 During migration from legacy TOON maps, `projectatlas scan` imports purpose records only for paths still present in
 the freshly indexed file set. Stale or newly excluded map rows are counted as skipped stale imports instead of

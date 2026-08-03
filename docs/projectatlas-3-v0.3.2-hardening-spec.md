@@ -110,8 +110,8 @@ declarations when both exist.
 
 ### Problem
 
-The CLI and DB currently each normalize Windows extended drive and UNC path
-prefixes. This is small duplication, but it sits on a
+The CLI and DB currently each normalize Windows extended path prefixes such as
+`\\?\C:\...` and `\\?\UNC\...`. This is small duplication, but it sits on a
 cross-platform boundary and should not drift.
 
 ### Required Design
@@ -126,8 +126,8 @@ pub fn normalize_native_path_display_str(path: &str) -> String
 The helper must:
 
 - replace host separators with `/`
-- remove Windows extended-path device prefixes in either separator style
-- convert extended UNC paths to conventional UNC display paths
+- remove `\\?\` / `//?/` prefixes
+- convert `\\?\UNC\server\share` to `//server/share`
 - preserve ordinary POSIX paths
 - preserve ordinary relative paths
 
@@ -212,8 +212,7 @@ symbol extractor for that language and cover it with tests.
 - Keep local workspace memory notes out of Git; promote only stable public decisions into docs.
 - Do not require a committed `.projectatlas/projectatlas.toon`; the SQLite DB
   and MCP/CLI query surfaces are the normal ProjectAtlas 3 source of truth.
-- Keep `AGENTS.md` and plugin skill guidance aligned only if the command
-  workflow changes. No workflow change is expected.
+- Keep public command guidance in the packaged plugin skill aligned with the workflow.
 
 ### Verification Gates
 

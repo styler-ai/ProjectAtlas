@@ -649,10 +649,9 @@ mod tests {
         )?;
         assert_database_unchanged(&relative_db, &relative_bytes, "relative-root move database")?;
 
-        let uncertain_root = normalize_metadata_path(&temp.path().join("uncertain-project-root"));
         let uncertain_error = require_error(
             classify_root_absence(
-                &uncertain_root,
+                "C:/uncertain-project-root",
                 Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     "injected permission denial",

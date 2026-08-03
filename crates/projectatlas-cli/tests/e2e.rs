@@ -5979,7 +5979,6 @@ fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<
         }
     }
     for path in [
-        "AGENTS.md",
         "templates/AGENTS.md",
         "plugins/projectatlas/skills/projectatlas/SKILL.md",
         "docs/agent-integration.md",
@@ -6285,54 +6284,19 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
                 "{workflow_name} verify job has no workspace check position"
             ))
         })?;
-        let history_policy_position = verify.find("private-path-range").ok_or_else(|| {
-            io::Error::other(format!(
-                "{workflow_name} verify job has no history policy position"
-            ))
-        })?;
-        if source_policy_position > workspace_build_position
-            || history_policy_position > workspace_build_position
-        {
+        if source_policy_position > workspace_build_position {
             return Err(io::Error::other(format!(
-                "{workflow_name} must reject current and historical private source before compiling the workspace"
+                "{workflow_name} must reject private source before compiling the workspace"
             ))
             .into());
         }
-        if !workflow.contains("fetch-depth: 0") || !verify.contains("private-path-range") {
-            return Err(io::Error::other(format!(
-                "{workflow_name} must inspect the complete current tree and newly reachable history"
-            ))
-            .into());
-        }
-        if workflow_name == "ci"
-            && (!verify.contains("private-path-range \"$HISTORY_BASE\" \"$HISTORY_HEAD\"")
-                || !verify.contains("github.event.pull_request.base.sha")
-                || !verify.contains("github.event.pull_request.head.sha")
-                || !verify.contains("github.event.before")
-                || !verify.contains("github.event.after")
-                || !verify.contains("git rev-parse --verify HEAD^1")
-                || !verify.contains("git rev-parse --verify HEAD^2")
-                || !verify.contains("git merge-base")
-                || !verify.contains("if [[ \"$HISTORY_BASE\" == \"$HISTORY_HEAD\" ]]")
-                || !verify.contains("\"$HISTORY_HEAD^1\"")
-                || !verify.contains("if [[ \"$HISTORY_HEAD\" =~ ^0+$ ]]")
-                || verify.contains("if [[ -n \"$HISTORY_BASE\""))
-        {
-            return Err(io::Error::other(
-                "CI must scan every newly reachable pull-request revision, not only the checked-out tip",
-            )
-            .into());
-        }
-        if workflow_name == "release"
-            && (!verify.contains("git merge-base")
-                || !verify.contains("if [[ \"$HISTORY_BASE\" == \"$HISTORY_HEAD\" ]]")
-                || !verify.contains("\"$HISTORY_HEAD^1\"")
-                || !verify.contains("$GITHUB_SHA^{commit}"))
-        {
-            return Err(io::Error::other(
-                "release must scan branch or promoted second-parent history before package jobs can start",
-            )
-            .into());
+        for forbidden in ["private-path-range", "select-private-history-range.py"] {
+            if workflow.contains(forbidden) {
+                return Err(io::Error::other(format!(
+                    "{workflow_name} must not restore obsolete source-history policy {forbidden:?}"
+                ))
+                .into());
+            }
         }
         for run in workflow_job_runs(workflow, "verify")? {
             if command_runs_projectatlas_maintenance(&run) {
@@ -6359,15 +6323,6 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
             ))
             .into());
         }
-        if !workflow.contains("fetch-depth: 0")
-            || !build_job.contains("private-path-range")
-            || !build_job.contains("git merge-base")
-        {
-            return Err(io::Error::other(format!(
-                "{workflow_name} build must scan newly reachable history independently"
-            ))
-            .into());
-        }
         let source_policy_position = build_job.find("strict-strings").ok_or_else(|| {
             io::Error::other(format!(
                 "{workflow_name} build has no repository source policy position"
@@ -6378,36 +6333,19 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
                 "{workflow_name} build has no expected build command {first_build:?}"
             ))
         })?;
-        let history_policy_position = build_job.find("private-path-range").ok_or_else(|| {
-            io::Error::other(format!(
-                "{workflow_name} build has no history policy position"
-            ))
-        })?;
-        if source_policy_position > first_build_position
-            || history_policy_position > first_build_position
-        {
+        if source_policy_position > first_build_position {
             return Err(io::Error::other(format!(
-                "{workflow_name} must reject current and historical private source before product build commands"
+                "{workflow_name} must reject private source before product build commands"
             ))
             .into());
         }
-        let dispatch_fallback = if workflow_name == "optional parser pack" {
-            build_job.contains("if ($base -eq $head)")
-                && build_job.contains("\"$head^1\"")
-                && build_job.contains("github.event.pull_request.base.sha")
-                && build_job.contains("github.event.pull_request.head.sha")
-        } else {
-            build_job.contains("if [[ \"$HISTORY_BASE\" == \"$HISTORY_HEAD\" ]]")
-                && build_job.contains("\"$HISTORY_HEAD^1\"")
-                && build_job.contains("github.event.before")
-                && build_job.contains("github.event.after")
-                && build_job.contains("if [[ \"$HISTORY_HEAD\" =~ ^0+$ ]]")
-        };
-        if !dispatch_fallback {
-            return Err(io::Error::other(format!(
-                "{workflow_name} build must preserve exact push, pull-request, and default-head range selection"
-            ))
-            .into());
+        for forbidden in ["private-path-range", "select-private-history-range.py"] {
+            if build_job.contains(forbidden) {
+                return Err(io::Error::other(format!(
+                    "{workflow_name} must not restore obsolete source-history policy {forbidden:?}"
+                ))
+                .into());
+            }
         }
     }
     if !pre_push.contains("projectatlas-lints") || !pre_push.contains("strict-strings") {
@@ -6416,31 +6354,25 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
         )
         .into());
     }
-    if !pre_push.contains("private-path-updates \"$1\" < \"$push_updates\"")
-        || !pre_push.contains("cat > \"$push_updates\"")
-    {
+    let pre_push_build = pre_push.find("cargo check --workspace");
+    if pre_push.find("strict-strings") > pre_push_build {
         return Err(io::Error::other(
-            "pre-push must scan every exact outgoing Git revision, not only the tip or working-tree bytes",
+            "pre-push must reject private source before compiling the workspace",
         )
         .into());
     }
-    let pre_push_build = pre_push.find("cargo check --workspace");
-    if pre_push.find("strict-strings") > pre_push_build
-        || pre_push.find("private-path-updates") > pre_push_build
-    {
-        return Err(io::Error::other(
-            "pre-push must reject current and outgoing private source before compiling the workspace",
-        )
-        .into());
+    for forbidden in ["private-path-updates", "private-path-range"] {
+        if pre_push.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "pre-push must not restore obsolete source-history policy {forbidden:?}"
+            ))
+            .into());
+        }
     }
     if !auto_release_workflow.contains("promotion_sha=\"$(git rev-parse HEAD^2)\"")
         || !auto_release_workflow.contains("--ref main")
-        || !release_workflow.contains("\"$HISTORY_HEAD^1\"")
     {
-        return Err(io::Error::other(
-            "auto-release and release must preserve the promoted second-parent privacy range",
-        )
-        .into());
+        return Err(io::Error::other("auto-release must preserve promotion identity").into());
     }
     for maintenance in ["init", "scan", "purpose", "parity", "lint"] {
         for command in [
@@ -6475,7 +6407,6 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
     }
 
     let guidance_paths = [
-        "AGENTS.md",
         "templates/AGENTS.md",
         "plugins/projectatlas/skills/projectatlas/SKILL.md",
         "docs/workflow.md",
@@ -7163,7 +7094,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .join(ISSUE_TEMPLATE_DIR_NAME)
             .join("improvement_request.yml"),
     )?;
-    let agent_rules = fs::read_to_string(workspace_root.join("AGENTS.md"))?;
     let workflow_docs =
         fs::read_to_string(workspace_root.join("docs").join(WORKFLOW_DOC_FILE_NAME))?;
     let toolchain = fs::read_to_string(workspace_root.join("rust-toolchain.toml"))?;
@@ -7235,9 +7165,9 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "OpenSpec tasks:",
         "commit/SHA permalink evidence",
     ] {
-        if !agent_rules.contains(required) || !workflow_docs.contains(required) {
+        if !workflow_docs.contains(required) {
             return Err(io::Error::other(format!(
-                "agent and workflow guidance are missing lean issue contract {required:?}"
+                "workflow guidance is missing lean issue contract {required:?}"
             ))
             .into());
         }
@@ -7643,7 +7573,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "required committed OpenSpec permalinks",
     ] {
         for (name, content) in [
-            ("AGENTS", agent_rules.as_str()),
             ("workflow docs", workflow_docs.as_str()),
             ("#309 tasks", tasks.as_str()),
         ] {
@@ -8030,11 +7959,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             "transport": {
                 "type": "stdio",
                 "command": stable_runtime,
-                "args": [
-                    "--require-version", "0.3.15",
-                    "--db", temp.path().join("old").join(ATLAS_DIR_NAME).join("projectatlas.db"),
-                    "mcp"
-                ]
+                "args": ["--require-version", "0.3.15", "--db", "C:\\old\\.projectatlas\\projectatlas.db", "mcp"]
             }
         }))?,
     )?;
@@ -9071,11 +8996,7 @@ public static class Program
             "transport": {
                 "type": "stdio",
                 "command": stable_runtime,
-                "args": [
-                    "--require-version", "0.3.26",
-                    "--db", isolated_home.join("old").join(ATLAS_DIR_NAME).join("projectatlas.db"),
-                    "mcp"
-                ]
+                "args": ["--require-version", "0.3.26", "--db", "C:\\old\\.projectatlas\\projectatlas.db", "mcp"]
             }
         }))?,
     )?;
@@ -9681,11 +9602,7 @@ public static class Program
             "transport": {
                 "type": "stdio",
                 "command": stable_runtime,
-                "args": [
-                    "--require-version", "0.3.26",
-                    "--db", temp.path().join("old").join("projectatlas.db"),
-                    "mcp"
-                ]
+                "args": ["--require-version", "0.3.26", "--db", "C:\\old\\projectatlas.db", "mcp"]
             }
         }))?,
     )?;
@@ -9905,11 +9822,7 @@ public static class Program
             "transport": {
                 "type": "stdio",
                 "command": &stable_runtime,
-                "args": [
-                    "--require-version", "0.3.26",
-                    "--db", temp.path().join("old").join("projectatlas.db"),
-                    "mcp"
-                ]
+                "args": ["--require-version", "0.3.26", "--db", "C:\\old\\projectatlas.db", "mcp"]
             }
         }))?,
     )?;
@@ -10437,9 +10350,7 @@ if ((Get-ProjectAtlasCodexPluginSourceManifestVersion $validPlugin) -eq "0.4.2" 
 }
 $script:pluginPayload = [pscustomobject]@{ installed = @($validPlugin); available = @() }
 function Convert-ProjectAtlasVersionTag { return "0.4.2" }
-function Resolve-ProjectAtlasCodexCommand {
-    return Join-Path ([IO.Path]::GetTempPath()) "codex\codex.exe"
-}
+function Resolve-ProjectAtlasCodexCommand { return "C:\Codex\codex.exe" }
 function Get-ProjectAtlasCodexPlugin { return $validPlugin }
 function Test-ProjectAtlasOfficialMarketplaceSource { return $true }
 $script:sourceManifestError = $false
@@ -10475,7 +10386,7 @@ if (Test-ProjectAtlasCodexPluginReady "0.4.2") {
     throw "An unreadable plugin source manifest was accepted as ready."
 }
 $script:sourceManifestError = $false
-$script:pluginSourcePath = Join-Path ([IO.Path]::GetTempPath()) ("bad" + [char]0 + "path")
+$script:pluginSourcePath = "C:\bad$([char]0)path"
 if (Test-ProjectAtlasCodexPluginReady "0.4.2") {
     throw "A malformed plugin source path was accepted as ready."
 }
@@ -10913,15 +10824,8 @@ try {
         throw "Installer obsolete MCP finder function was not found."
     }
     Invoke-Expression $findMatch.Value
-    $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ("projectatlas-obsolete-mcp-" + $PID)
-    $syntheticStablePath = Join-Path $fixtureRoot "stable\projectatlas.exe"
-    $syntheticCodexPath = Join-Path $fixtureRoot "signed\codex.exe"
-    $fixtureDatabase = Join-Path $fixtureRoot "repo\.projectatlas\projectatlas.db"
-    $fixtureConfig = Join-Path $fixtureRoot "repo\.projectatlas\config.toml"
-    $fixtureProjectConfig = Join-Path $fixtureRoot "repo\projectatlas.toml"
-    $fixtureMcpConfig = Join-Path $fixtureRoot "repo\.projectatlas\projectatlas.mcp.json"
-    $fixtureClaudeMcpConfig = Join-Path $fixtureRoot "repo\.projectatlas\projectatlas.claude.mcp.json"
-    $fixtureOpenCodeMcpConfig = Join-Path $fixtureRoot "repo\.projectatlas\projectatlas.opencode.json"
+    $syntheticStablePath = "C:\stable\projectatlas.exe"
+    $syntheticCodexPath = "C:\signed\codex.exe"
     function Initialize-ProjectAtlasRuntimeProbe {}
     function Get-CimInstance {
         return @(
@@ -10929,7 +10833,7 @@ try {
                 ProcessId = 42
                 Name = "projectatlas.exe"
                 ExecutablePath = $syntheticStablePath
-                CommandLine = ('"{0}" --require-version 0.3.26 --db "{1}" --config "{2}" mcp' -f $syntheticStablePath, $fixtureDatabase, $fixtureConfig)
+                CommandLine = '"C:\stable\projectatlas.exe" --require-version 0.3.26 --db C:\repo\projectatlas.db --config C:\repo\config.toml mcp'
                 CreationDate = 100
                 ParentProcessId = 43
             },
@@ -10937,7 +10841,7 @@ try {
                 ProcessId = 43
                 Name = "codex.exe"
                 ExecutablePath = $syntheticCodexPath
-                CommandLine = ('"{0}" app-server' -f $syntheticCodexPath)
+                CommandLine = '"C:\signed\codex.exe" app-server'
                 CreationDate = 200
                 ParentProcessId = 1
             }
@@ -10961,9 +10865,9 @@ try {
     function Get-ProjectAtlasCodexImageIdentity { return ("c" * 64) }
     $reusedParentSelection = Find-ProjectAtlasObsoleteStableMcpProcess `
         $syntheticStablePath `
-        $fixtureDatabase `
-        $fixtureConfig `
-        $fixtureProjectConfig `
+        "C:\repo\projectatlas.db" `
+        "C:\repo\config.toml" `
+        "C:\repo\projectatlas.toml" `
         "0.4.3"
     if ($reusedParentSelection.State -ne "unsafe_owner" -or $owned.HasExited -or $parent.HasExited) {
         throw "Parent created after its MCP child was not refused safely: $($reusedParentSelection.State)"
@@ -10995,12 +10899,12 @@ try {
         $hostPath `
         $hostPath `
         "0.4.3" `
-        $fixtureDatabase `
-        $fixtureConfig `
-        $fixtureProjectConfig `
-        $fixtureMcpConfig `
-        $fixtureClaudeMcpConfig `
-        $fixtureOpenCodeMcpConfig `
+        "C:\repo\.projectatlas\projectatlas.db" `
+        "C:\repo\.projectatlas\config.toml" `
+        "C:\repo\projectatlas.toml" `
+        "C:\repo\.projectatlas\projectatlas.mcp.json" `
+        "C:\repo\.projectatlas\projectatlas.claude.mcp.json" `
+        "C:\repo\.projectatlas\projectatlas.opencode.json" `
         ("b" * 64) `
         ("b" * 64) `
         ("b" * 64)
@@ -11011,12 +10915,12 @@ try {
         $hostPath `
         $hostPath `
         "0.4.3" `
-        $fixtureDatabase `
-        $fixtureConfig `
-        $fixtureProjectConfig `
-        $fixtureMcpConfig `
-        $fixtureClaudeMcpConfig `
-        $fixtureOpenCodeMcpConfig `
+        "C:\repo\.projectatlas\projectatlas.db" `
+        "C:\repo\.projectatlas\config.toml" `
+        "C:\repo\projectatlas.toml" `
+        "C:\repo\.projectatlas\projectatlas.mcp.json" `
+        "C:\repo\.projectatlas\projectatlas.claude.mcp.json" `
+        "C:\repo\.projectatlas\projectatlas.opencode.json" `
         ("e" * 64) `
         ("e" * 64) `
         ("e" * 64)
@@ -11044,12 +10948,12 @@ try {
         $hostPath `
         $hostPath `
         "0.4.3" `
-        $fixtureDatabase `
-        $fixtureConfig `
-        $fixtureProjectConfig `
-        $fixtureMcpConfig `
-        $fixtureClaudeMcpConfig `
-        $fixtureOpenCodeMcpConfig `
+        "C:\repo\.projectatlas\projectatlas.db" `
+        "C:\repo\.projectatlas\config.toml" `
+        "C:\repo\projectatlas.toml" `
+        "C:\repo\.projectatlas\projectatlas.mcp.json" `
+        "C:\repo\.projectatlas\projectatlas.claude.mcp.json" `
+        "C:\repo\.projectatlas\projectatlas.opencode.json" `
         ("b" * 64) `
         ("b" * 64) `
         ("b" * 64)
@@ -11062,12 +10966,12 @@ try {
         $hostPath `
         $hostPath `
         "0.4.3" `
-        $fixtureDatabase `
-        $fixtureConfig `
-        $fixtureProjectConfig `
-        $fixtureMcpConfig `
-        $fixtureClaudeMcpConfig `
-        $fixtureOpenCodeMcpConfig `
+        "C:\repo\.projectatlas\projectatlas.db" `
+        "C:\repo\.projectatlas\config.toml" `
+        "C:\repo\projectatlas.toml" `
+        "C:\repo\.projectatlas\projectatlas.mcp.json" `
+        "C:\repo\.projectatlas\projectatlas.claude.mcp.json" `
+        "C:\repo\.projectatlas\projectatlas.opencode.json" `
         ("b" * 64) `
         ("b" * 64) `
         ("b" * 64)
@@ -11418,14 +11322,11 @@ foreach ($functionName in @(
     }
     Invoke-Expression $match.Value
 }
-$fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) "projectatlas-registry"
-$runtime = Join-Path $fixtureRoot "runtime\projectatlas.exe"
-$database = Join-Path $fixtureRoot "repo\.projectatlas\projectatlas.db"
-$config = Join-Path $fixtureRoot "repo\.projectatlas\config.toml"
+$runtime = "C:\ProjectAtlas\runtime\projectatlas.exe"
 $arguments = @(
     "--require-version", "0.4.1",
-    "--db", $database,
-    "--config", $config,
+    "--db", "C:\repo\.projectatlas\projectatlas.db",
+    "--config", "C:\repo\.projectatlas\config.toml",
     "mcp"
 )
 $exact = [pscustomobject]@{
@@ -11508,9 +11409,9 @@ if (Test-ProjectAtlasCodexMcpRegistryEntry $substringValue $runtime $arguments) 
 }
 $reordered = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
 $reordered.transport.args = @(
-    "--db", $database,
+    "--db", "C:\repo\.projectatlas\projectatlas.db",
     "--require-version", "0.4.1",
-    "--config", $config,
+    "--config", "C:\repo\.projectatlas\config.toml",
     "mcp"
 )
 if (Test-ProjectAtlasCodexMcpRegistryEntry $reordered $runtime $arguments) {
@@ -11748,12 +11649,8 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
             "enabled": true,
             "transport": {
                 "type": "stdio",
-                "command": &stale_runtime,
-                "args": [
-                    "--require-version", "0.0.1",
-                    "--db", temp.path().join("stale-repo").join(ATLAS_DIR_NAME).join("projectatlas.db"),
-                    "mcp"
-                ]
+                "command": if cfg!(windows) { "C:\\stale\\ProjectAtlas\\bin\\projectatlas.exe" } else { "/stale/ProjectAtlas/bin/projectatlas" },
+                "args": ["--require-version", "0.0.1", "--db", if cfg!(windows) { "C:\\stale-repo\\.projectatlas\\projectatlas.db" } else { "/stale-repo/.projectatlas/projectatlas.db" }, "mcp"]
             }
         }))?,
     )?;
@@ -13865,6 +13762,17 @@ if [ "${PROJECTATLAS_FAKE_RESTORE_FAULT:-}" = late-snapshot-source-symlink ]; th
       ;;
   esac
 fi
+if [ "${PROJECTATLAS_FAKE_RESTORE_FAULT:-}" = cleanup-mounted-snapshot ] &&
+  [ "${1:-}" = -p ] && [ "${2:-}" = -- ]; then
+  case "${4:-}" in
+    "$PROJECTATLAS_FAKE_CODEX_CONFIG".projectatlas-restore.*)
+      snapshot=$(find "$CODEX_HOME" -maxdepth 1 -type d -name '.projectatlas-plugin-state.*' -print -quit)
+      [ -n "$snapshot" ] || exit 25
+      printf '%s\n' "$snapshot/marketplace-root/$PROJECTATLAS_FAKE_SNAPSHOT_MOUNT_RELATIVE" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 26
+      : > "$PROJECTATLAS_FAKE_MOUNT_ACTIVE"
+      ;;
+  esac
+fi
 "#,
     )?;
     write_executable_script(
@@ -13879,22 +13787,6 @@ if [ "$status" -eq 0 ] &&
   : > "$PROJECTATLAS_FAKE_MOUNT_ACTIVE"
 fi
 exit "$status"
-"#,
-    )?;
-    write_executable_script(
-        &fake_path.join("mv"),
-        r#"#!/usr/bin/env sh
-PATH=$PROJECTATLAS_FAKE_REAL_PATH
-export PATH
-mv "$@" || exit $?
-if [ "${PROJECTATLAS_FAKE_RESTORE_FAULT:-}" = cleanup-mounted-snapshot ] &&
-  [ "${1:-}" = -f ] && [ "${2:-}" = -- ] &&
-  [ "${4:-}" = "$PROJECTATLAS_FAKE_CODEX_CONFIG" ]; then
-  snapshot=$(find "$CODEX_HOME" -maxdepth 1 -type d -name '.projectatlas-plugin-state.*' -print -quit)
-  [ -n "$snapshot" ] || exit 25
-  printf '%s\n' "$snapshot/marketplace-root/$PROJECTATLAS_FAKE_SNAPSHOT_MOUNT_RELATIVE" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 26
-  : > "$PROJECTATLAS_FAKE_MOUNT_ACTIVE"
-fi
 "#,
     )?;
     #[cfg(target_os = "linux")]
@@ -30425,11 +30317,7 @@ fn workflow_job_runs(workflow: &str, job: &str) -> Result<Vec<String>, Box<dyn E
 fn command_runs_projectatlas_maintenance(command: &str) -> bool {
     const MAINTENANCE_COMMANDS: [&str; 5] = ["init", "scan", "purpose", "parity", "lint"];
 
-    let continued_crlf = format!("{}{}", '\\', "\r\n");
-    let continued_lf = format!("{}{}", '\\', '\n');
-    let command = command
-        .replace(&continued_crlf, " ")
-        .replace(&continued_lf, " ");
+    let command = command.replace("\\\r\n", " ").replace("\\\n", " ");
     command
         .lines()
         .flat_map(|line| line.split([';', '|', '&']))
