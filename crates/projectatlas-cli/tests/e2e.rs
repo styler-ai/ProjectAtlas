@@ -12504,6 +12504,7 @@ fn posix_plugin_lock_rejects_indirection_and_survives_crash() -> Result<(), Box<
     let temp = tempfile::tempdir()?;
     let lock_root = temp.path().join("codex-root");
     fs::create_dir(&lock_root)?;
+    let lock_root = fs::canonicalize(lock_root)?;
     let lock_path = lock_root.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME);
     let harness = temp.path().join("verify-plugin-lock-crash.sh");
     let runtime = mcp_contract_executable();
