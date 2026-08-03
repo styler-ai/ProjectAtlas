@@ -13764,8 +13764,8 @@ if [ "${PROJECTATLAS_FAKE_RESTORE_FAULT:-}" = late-snapshot-source-symlink ]; th
 fi
 if [ "${PROJECTATLAS_FAKE_RESTORE_FAULT:-}" = cleanup-mounted-snapshot ] &&
   [ "${1:-}" = -p ] && [ "${2:-}" = -- ]; then
-  case "${4:-}" in
-    "$PROJECTATLAS_FAKE_CODEX_CONFIG".projectatlas-restore.*)
+  case "${4##*/}" in
+    config.toml.projectatlas-restore.*)
       snapshot=$(find "$CODEX_HOME" -maxdepth 1 -type d -name '.projectatlas-plugin-state.*' -print -quit)
       [ -n "$snapshot" ] || exit 25
       printf '%s\n' "$snapshot/marketplace-root/$PROJECTATLAS_FAKE_SNAPSHOT_MOUNT_RELATIVE" > "$PROJECTATLAS_FAKE_MOUNT_TARGET_FILE" || exit 26
