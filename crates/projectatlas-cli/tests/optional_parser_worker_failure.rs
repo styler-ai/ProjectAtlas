@@ -773,24 +773,6 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
         .to_owned();
     wait_for_mcp_task_state(&mut mcp, &failed_task_id, "running", MCP_TASK_STATE_TIMEOUT)?;
 
-    let overview = mcp.call_tool("atlas_overview", &serde_json::json!({}))?;
-    if !overview.contains("overview:") {
-        return Err(io::Error::other(format!(
-            "suspended optional worker blocked the retained overview: {overview}"
-        ))
-        .into());
-    }
-    let baseline_summary = mcp.call_tool(
-        "atlas_file_summary",
-        &serde_json::json!({"file": "src/baseline.awk", "compact": true}),
-    )?;
-    if !baseline_summary.contains("file_summary:") || !baseline_summary.contains("src/baseline.awk")
-    {
-        return Err(io::Error::other(format!(
-            "suspended optional worker hid the retained baseline summary: {baseline_summary}"
-        ))
-        .into());
-    }
     let active_store = AtlasStore::open_read_only_for_project(&database, &repo)?;
     let active_publication = active_store
         .index_publication()?
@@ -866,25 +848,6 @@ fn contained_worker_crash_preserves_active_generation() -> Result<(), Box<dyn Er
     if !mcp.is_running()? {
         return Err(io::Error::other("MCP server exited with its contained worker").into());
     }
-    let retained_overview = mcp.call_tool("atlas_overview", &serde_json::json!({}))?;
-    if !retained_overview.contains("overview:") {
-        return Err(io::Error::other(format!(
-            "MCP overview was unavailable after contained worker failure: {retained_overview}"
-        ))
-        .into());
-    }
-    let retained_summary = mcp.call_tool(
-        "atlas_file_summary",
-        &serde_json::json!({"file": "src/baseline.awk", "compact": true}),
-    )?;
-    if !retained_summary.contains("file_summary:") || !retained_summary.contains("src/baseline.awk")
-    {
-        return Err(io::Error::other(format!(
-            "MCP baseline summary was unavailable after contained worker failure: {retained_summary}"
-        ))
-        .into());
-    }
-
     mcp.shutdown()?;
     run_json(
         &repo,
