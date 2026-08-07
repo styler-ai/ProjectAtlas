@@ -37,16 +37,23 @@ without ProjectAtlas = avoided candidate files, directory walks, and full-file r
 with ProjectAtlas    = compact TOON payloads returned by atlas commands
 legacy gross saved   = without ProjectAtlas - with ProjectAtlas
 savings rate         = legacy gross saved / without ProjectAtlas
-tokens avoided       = measured saved + deduped modeled avoided
+average tokens avoided = measured saved + average modeled avoided
+maximum tokens avoided = measured saved + deduped modeled avoided
+tokens avoided         = average tokens avoided (compatibility alias)
 ```
 
 Current reports preserve the historical `estimated_saved`/`legacy_gross_estimated_saved` value for compatibility, but the headline claim should use `tokens_avoided` when repeated modeled baselines exist. The split is:
 
 - `measured_tokens_saved`: observed full-file/source-compression before/after deltas.
 - `gross_modeled_tokens_avoided`: modeled navigation avoidance before dedupe.
-- `deduped_modeled_tokens_avoided`: modeled navigation avoidance after retaining one repeated session-scoped baseline per identity and subtracting every ProjectAtlas payload emitted for it; modeled rows with `dedupe_scope = "event"` are kept as individual events.
+- `deduped_modeled_tokens_avoided`: all-files modeled navigation avoidance after retaining one repeated session-scoped baseline per identity and subtracting every ProjectAtlas payload emitted for it; modeled rows with `dedupe_scope = "event"` are kept as individual events.
+- `average_modeled_tokens_avoided`: the same modeled total with 50% applied once to the deduped aggregate `directory_walk` baseline before subtracting the complete Atlas payload; non-folder categories are unchanged.
 - `repeated_baselines_deduped`: duplicate session-scoped modeled events collapsed by that repeated-baseline dedupe.
-- `tokens_avoided`: conservative headline value, equal to measured saved plus deduped modeled avoided.
+- `average_tokens_avoided`: primary fixed-policy estimate, equal to measured saved plus average modeled avoided.
+- `maximum_tokens_avoided`: all-files upper bound, equal to measured saved plus deduped modeled avoided.
+- `tokens_avoided`: compatibility alias equal to `average_tokens_avoided` in v0.4.4 and later.
+
+The fixed 50% folder policy is a transparent reporting choice, not a measured Codex average or provider-billing value. The audit totals above remain the historical legacy gross comparison.
 
 ## Responsiveness Sample
 

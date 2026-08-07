@@ -205,5 +205,77 @@
       "token": ["--view=agent", "--theme=dark"],
       "watch": ["[PATH]=.", "--poll-seconds=2", "--max-cycles=0"]
     }
+  },
+  "v0.4.4": {
+    "commands": [
+      "init",
+      "map",
+      "scan",
+      "overview",
+      "folders",
+      "files",
+      "next",
+      "outline",
+      "summary",
+      "search",
+      "slice",
+      "symbols",
+      "settings",
+      "snapshot",
+      "parser-pack",
+      "root",
+      "config",
+      "ignore",
+      "watch-status",
+      "watch",
+      "health-check",
+      "health",
+      "lint",
+      "token",
+      "parity",
+      "strip-legacy-purpose",
+      "reset-index",
+      "mcp",
+      "mcp-config",
+      "runtime-info",
+      "purpose"
+    ],
+    "subcommands": {
+      "health": ["resolve"],
+      "ignore": ["list", "init-gitignore", "add", "remove"],
+      "parity": ["report"],
+      "parser-pack": ["verify", "install", "enable", "update", "disable", "remove", "status"],
+      "purpose": ["set", "review", "queue"],
+      "root": ["set", "show", "verify"],
+      "symbols": ["build", "list", "relations", "slice"]
+    },
+    "actions": {
+      "snapshot": ["export", "import"]
+    },
+    "defaults": {
+      "": ["--db=.projectatlas/projectatlas.db", "--format=toon", "--session=default"],
+      "files": ["--limit=10"],
+      "folders": ["--limit=10"],
+      "health-check": ["--start-index=0", "--limit=50"],
+      "lint": ["--purpose-level=low"],
+      "mcp-config": ["--server-name=projectatlas", "--harness=mcp-json"],
+      "next": ["--limit=3"],
+      "outline": ["--lines=12"],
+      "parity": ["--profile=repository-intelligence"],
+      "parity report": ["--profile=repository-intelligence"],
+      "purpose queue": ["--start-index=0", "--limit=50"],
+      "root set": ["--transition=bind"],
+      "scan": ["[PATH]=."],
+      "search": ["--retrieval-mode=lexical", "--context-lines=0", "--start-index=0", "--limit=20"],
+      "slice": ["--output-bytes=262144"],
+      "strip-legacy-purpose": ["[PATH]=."],
+      "summary": ["--limit=25"],
+      "symbols build": ["[PATH]=.", "--max-bytes=2000000"],
+      "symbols list": ["--limit=50"],
+      "symbols relations": ["--view=legacy", "--direction=outbound", "--minimum-confidence=low", "--resolution=any", "--depth=1", "--occurrence-limit=25", "--output-bytes=262144", "--limit=50"],
+      "symbols slice": ["--output-bytes=262144"],
+      "token": ["--view=agent", "--theme=dark"],
+      "watch": ["[PATH]=.", "--poll-seconds=2", "--max-cycles=0"]
+    }
   }
 }

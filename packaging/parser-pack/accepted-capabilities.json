@@ -18,16 +18,16 @@
   },
   "runtime": {
     "consumer": "projectatlas-parser-worker",
-    "projectatlas_version": "0.4.3",
+    "projectatlas_version": "0.4.4",
     "tree_sitter_version": "0.26.9",
     "minimum_abi": 13,
     "maximum_abi": 15
   },
   "registry": {
     "registry_version": 3,
-    "registry_digest": "e9342f2b06b083a72ecc58af0afe4ba12f0ec33321225199bb0c9be4f4375c7a",
-    "accepted_set_version": 6,
-    "accepted_set_digest": "e9342f2b06b083a72ecc58af0afe4ba12f0ec33321225199bb0c9be4f4375c7a"
+    "registry_digest": "50fcac887dffecc27f1b7d365ff5da991f2a86dc15e0474ef5bcc339c58bfd60",
+    "accepted_set_version": 7,
+    "accepted_set_digest": "50fcac887dffecc27f1b7d365ff5da991f2a86dc15e0474ef5bcc339c58bfd60"
   },
   "required_platforms": [
     "x86_64-unknown-linux-gnu",
@@ -7597,5 +7597,5 @@
       "capability_digest": "d11ac33f63f87c732d6bcac6b300eace2a4eba4775097f03c0f835f5fa2db4e9"
     }
   ],
-  "capability_set_digest": "c94135f9a57a66d7f57550ff5a17d7130c2cff99946cfb70c5c8593e5cefe362"
+  "capability_set_digest": "0d87c289fa2ada5b743adbae09c1f119db6b16632b8267777706ea9e51905063"
 }
