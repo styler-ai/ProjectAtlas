@@ -2654,7 +2654,7 @@ The live navigation section uses the same reconciled source rows as the source
 ledger below it. File reads retain their exact observed summary/slice and
 search-modeled split. Broad folder walks skipped and candidate files not opened
 each show an activity bar against all persisted source steps and a separate
-token-impact bar against reconciled `tokens_avoided`; therefore a rare but
+token-impact bar against reconciled `average_tokens_avoided`; therefore a rare but
 high-impact source can appear small in activity and dominant in avoided tokens
 without any bar being normalized to an uninformative 100%.
 
@@ -2675,8 +2675,14 @@ Token accounting model:
   estimated_tokens_with_projectatlas` from the stored raw estimates instead of
   trusting historical per-row saved values. Keep this as the legacy gross
   compatibility number.
-- Compute headline `tokens_avoided` as `measured_tokens_saved +
-  deduped_modeled_tokens_avoided`. `measured_tokens_saved` is observed
+- Compute primary `average_tokens_avoided` as `measured_tokens_saved +
+  average_modeled_tokens_avoided`; keep `tokens_avoided` as its compatibility
+  alias. `average_modeled_tokens_avoided` applies 50% once to the deduped
+  aggregate `directory_walk` baseline, rounds down, subtracts the complete
+  Atlas payload, and leaves every non-folder category unchanged. Compute
+  `maximum_tokens_avoided` as `measured_tokens_saved +
+  deduped_modeled_tokens_avoided`, retaining the all-files folder scope.
+  `measured_tokens_saved` is observed
   before/after source-compression evidence. `gross_modeled_tokens_avoided` is
   counterfactual navigation avoidance before dedupe. `deduped_modeled_tokens_avoided`
   counts repeated modeled baselines once per internal runtime/invocation
@@ -2686,6 +2692,10 @@ Token accounting model:
   state. Modeled rows with `dedupe_scope = "event"` remain individual events.
   `repeated_baselines_deduped` counts duplicate instance-scoped modeled events
   collapsed, not unique baseline groups.
+- Preserve `directory_walk` in one reserved overflow dimension after ordinary
+  dimension capacity is reached. Existing generic overflow rows cannot recover
+  their old denominator; keep their modeled contribution at maximum and label
+  `average_policy.evidence` as an unclassified overflow fallback.
 - Compute `savings_rate = saved / estimated_tokens_without_projectatlas` only
   when the baseline is greater than zero. A zero baseline yields an unknown rate
   instead of a fake percentage.
