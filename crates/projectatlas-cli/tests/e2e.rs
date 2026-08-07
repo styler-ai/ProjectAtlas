@@ -19536,6 +19536,10 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
                 repo.join(SRC_DIR_NAME).join(SCANNED_RS_FILE_NAME),
                 "pub fn scanned_contract() {}\n",
             )?,
+            "atlas_scan" => fs::write(
+                repo.join(SRC_DIR_NAME).join(SCANNED_RS_FILE_NAME),
+                "pub fn rescanned_contract() {}\n",
+            )?,
             "atlas_file_summary" => fs::write(
                 repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
                 "pub fn indexed() {\n    helper();\n}\n\nfn helper() {}\n\npub fn dirty_contract() {}\n",
