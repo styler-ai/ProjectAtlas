@@ -19,4 +19,6 @@
 
 - [x] 4.1 Run focused tests, `cargo fmt --check`, workspace check/Clippy/tests/doc-tests/rustdoc, ProjectAtlas lint, OpenSpec strict validation, IssueOps checklist validation, diff checks, and affected packaging/compatibility/release gates with explicit timeouts.
 - [x] 4.2 Render and visually inspect the real token TUI at desktop, common, and narrow terminal widths in dark, light, and terminal themes; fix overlap, truncation, hierarchy, contrast, or misleading formula presentation.
-- [ ] 4.3 Reconcile every live review thread and automated finding against the behavior-relevant source, configuration, dependency, artifact, and workflow inputs; merge only after hosted gates and packaged proof succeed, then publish and independently verify the v0.4.4 release, artifacts, installer, runtime, plugin, and MCP identity before closing and archiving the change.
+- [x] 4.3 Reconcile every live review thread and automated finding against the behavior-relevant source, configuration, dependency, artifact, and workflow inputs; merge only after hosted gates and packaged prepublication proof succeed, then synchronize the completed checklist and close issue #439 before dispatching the release workflow with `prepublish_only: false`.
+
+Archive condition: Keep this OpenSpec change unarchived until the release workflow has published v0.4.4 and a separate post-publication verification confirms the GitHub release, platform artifacts and checksums, installer behavior, runtime version, plugin version, and MCP identity.
