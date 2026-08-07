@@ -2100,11 +2100,13 @@ fn modeled_source_groups(overview: &TokenOverview) -> Vec<ModeledSourceGroup> {
 
 /// Pick the reference-style source row for one modeled bucket.
 fn modeled_group_index(bucket: &TokenBucketOverview) -> usize {
+    if bucket.denominator_kind == TOKEN_BASELINE_DIRECTORY_WALK {
+        return 0;
+    }
     match (
         bucket.baseline_kind.as_str(),
         bucket.denominator_kind.as_str(),
     ) {
-        (TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_DIRECTORY_WALK) => 0,
         (TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_SELECTED_CANDIDATES) => 1,
         (TOKEN_BASELINE_SELECTED_CANDIDATES, _) | (_, TOKEN_BASELINE_SELECTED_CANDIDATES) => 2,
         _ => 3,
@@ -3257,6 +3259,40 @@ mod tests {
 
         let dashboard = strip_ansi(&render_token_dashboard(&overview, Some("s")));
         assert!(dashboard.contains("Unattributed savings"));
+    }
+
+    #[test]
+    fn overview_dashboard_discounts_every_directory_walk_denominator() {
+        let overview = TokenOverview::from_events(&[usage_from_estimates_with_accounting(
+            "s",
+            "folders",
+            None,
+            Some("src".to_string()),
+            120,
+            20,
+            TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
+            TOKEN_BASELINE_SELECTED_CANDIDATES,
+            TOKEN_CONFIDENCE_POLICY_ESTIMATE,
+            TOKEN_ACCOUNTING_MODELED_AVOIDANCE,
+            TOKEN_BASELINE_DIRECTORY_WALK,
+            TOKEN_DEDUPE_SCOPE_SESSION,
+        )]);
+
+        let rows = savings_source_rows_for_width(&overview, false);
+
+        assert_eq!(overview.average_tokens_avoided, 40);
+        assert_eq!(overview.maximum_tokens_avoided, 100);
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.label == "Skipped broad folder walk")
+                .map(|row| row.tokens),
+            Some(40)
+        );
+        assert_eq!(
+            rows.iter().map(|row| row.tokens).sum::<isize>(),
+            overview.average_tokens_avoided
+        );
+        assert!(!rows.iter().any(|row| row.label == "Unattributed savings"));
     }
 
     #[test]
