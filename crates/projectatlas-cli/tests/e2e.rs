@@ -16463,16 +16463,11 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .stdout(predicate::str::contains(
             "A V E R A G E   T O K E N S   A V O I D E D",
         ))
-        .stdout(predicate::str::contains("50% folder-navigation policy"))
+        .stdout(predicate::str::contains("Total Tokens Avoided"))
         .stdout(predicate::str::contains("Without ProjectAtlas"))
         .stdout(predicate::str::contains("With ProjectAtlas"))
         .stdout(predicate::str::contains("Average avoided"))
-        .stdout(predicate::str::contains(
-            "M A X I M U M   T O K E N S   A V O I D E D",
-        ))
-        .stdout(predicate::str::contains(
-            "all folder files; other savings unchanged",
-        ))
+        .stdout(predicate::str::contains("Maximum avoided"))
         .stdout(predicate::str::contains(
             "N A V I G A T I O N   W O R K   A V O I D E D",
         ))
@@ -19929,8 +19924,9 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains("ProjectAtlas")
         || !stdout.contains("Token Impact")
         || !stdout.contains("A V E R A G E   T O K E N S   A V O I D E D")
-        || !stdout.contains("M A X I M U M   T O K E N S   A V O I D E D")
-        || !stdout.contains("50% folder-navigation policy; other savings unchanged")
+        || !stdout.contains("Total Tokens Avoided")
+        || !stdout.contains("Average avoided")
+        || !stdout.contains("Maximum avoided")
         || !stdout.contains("N A V I G A T I O N   W O R K   A V O I D E D")
         || !stdout.to_ascii_lowercase().contains("file reads avoided")
         || stdout.contains("Broad folder walks skipped")

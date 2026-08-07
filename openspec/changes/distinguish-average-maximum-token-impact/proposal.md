@@ -7,14 +7,14 @@ ProjectAtlas currently presents the all-files folder-navigation estimate as the 
 - Report both average and maximum tokens avoided from the same telemetry events.
 - Calculate average modeled folder-navigation savings from 50% of the deduped aggregate all-files folder baseline before subtracting the unchanged aggregate Atlas payload; keep measured compression and every other savings category unchanged.
 - Retain the current all-files folder-navigation calculation as maximum tokens avoided.
-- Keep the token TUI layout substantially unchanged: show average tokens avoided as the primary hero and add one compact maximum comparison bar below it with concise source explanations.
+- Keep the token TUI layout substantially unchanged: show average tokens avoided as the primary hero, then render the complete without-minus-with equation once for the average and once for the maximum, with no policy subtext in the hero panel.
 - Preserve compatibility for existing telemetry rows, SQLite databases, CLI/MCP callers, TOON/JSON consumers, trend reports, and non-folder accounting; label predecessor overflow rows whose denominator can no longer be classified.
 
 ### Non-Goals
 
 - Claiming that the 50% policy is benchmark-derived, provider-billed, or a measurement of one specific agent run.
 - Changing search baselines, measured full-file compression, candidate-file modeling, deduplication, tokenizer behavior, or read-avoidance counts.
-- Redesigning the dashboard, adding configuration for the fixed v0.4.4 policy, or adding a database schema/migration; one bounded directory-walk overflow discriminator is permitted so new retained aggregates remain truthful.
+- Redesigning the dashboard, adding explanatory policy prose to the hero panel, adding configuration for the fixed v0.4.4 policy, or adding a database schema/migration; one bounded directory-walk overflow discriminator is permitted so new retained aggregates remain truthful.
 
 This focused bug fix is ready for implementation as the only product issue in v0.4.4.
 

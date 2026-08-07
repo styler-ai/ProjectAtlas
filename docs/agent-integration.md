@@ -452,8 +452,9 @@ file reads avoided; aggregate bucket-only reports must stay `not_recorded`
 instead of inventing whole-file-read counts.
 
 The TUI keeps the observed summary/slice and search-modeled file-read sources as
-separate proportional bars rather than adding standalone bar panels. Average tokens avoided remains the dominant hero;
-one compact lower maximum bar identifies the all-files folder-scope upper bound.
+separate proportional bars rather than adding standalone bar panels. Average
+tokens avoided remains the dominant hero; complete average and maximum
+without-minus-with equations are stacked directly below it.
 Broad folder walks and candidate files remain in the exact source ledger, but
 only the folder-walk row receives the 50% average-policy adjustment. The ledger
 and composition use the same persisted rows, counts, and token allocation.

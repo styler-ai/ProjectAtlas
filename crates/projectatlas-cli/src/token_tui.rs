@@ -762,13 +762,46 @@ fn render_token_hero(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview
     );
     render_hero_value(frame, rows[1], overview.average_tokens_avoided);
     frame.render_widget(
-        Paragraph::new("50% folder-navigation policy; other savings unchanged")
+        Paragraph::new("Total Tokens Avoided")
             .style(body_style().bg(THEME_PANEL))
             .alignment(Alignment::Center),
         rows[2],
     );
     render_divider(frame, rows[3]);
 
+    let with_projectatlas = usize_to_isize_saturating(overview.estimated_with_projectatlas);
+    let average = overview.average_tokens_avoided;
+    render_token_equation(
+        frame,
+        rows[4],
+        reconciled_without_projectatlas(overview),
+        with_projectatlas,
+        average,
+        "Average avoided",
+        signed_color(average),
+    );
+    let maximum = overview.maximum_tokens_avoided;
+    render_token_equation(
+        frame,
+        rows[5],
+        with_projectatlas.saturating_add(maximum),
+        with_projectatlas,
+        maximum,
+        "Maximum avoided",
+        if maximum < 0 { THEME_RED } else { THEME_YELLOW },
+    );
+}
+
+/// Draw one without-minus-with avoided-token equation and its three bars.
+fn render_token_equation(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    without_projectatlas: isize,
+    with_projectatlas: isize,
+    avoided: isize,
+    avoided_label: &'static str,
+    avoided_color: Color,
+) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -778,11 +811,7 @@ fn render_token_hero(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview
             Constraint::Length(3),
             Constraint::Percentage(30),
         ])
-        .split(rows[4]);
-
-    let with_projectatlas = usize_to_isize_saturating(overview.estimated_with_projectatlas);
-    let without_projectatlas = reconciled_without_projectatlas(overview);
-    let saved_by_projectatlas = overview.average_tokens_avoided;
+        .split(area);
     let denominator = without_projectatlas.unsigned_abs();
 
     render_metric_column(
@@ -806,49 +835,10 @@ fn render_token_hero(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview
     render_metric_column(
         frame,
         columns[4],
-        signed_count(saved_by_projectatlas),
-        "Average avoided",
-        signed_color(saved_by_projectatlas),
-        ratio(saved_by_projectatlas.unsigned_abs(), denominator),
-    );
-    render_maximum_tokens_bar(frame, rows[5], overview);
-}
-
-/// Draw the all-files upper bound as a compact comparison below the average equation.
-fn render_maximum_tokens_bar(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
-    let maximum = overview.maximum_tokens_avoided;
-    let maximum_without =
-        usize_to_isize_saturating(overview.estimated_with_projectatlas).saturating_add(maximum);
-    let bar_width = if area.width < 92 { 10 } else { 18 };
-    let explanation = if area.width < 92 {
-        "all folder files; other savings unchanged"
-    } else {
-        "all files in avoided folder scopes; other savings unchanged"
-    };
-    let maximum_ratio = ratio(maximum.unsigned_abs(), maximum_without.unsigned_abs());
-    let maximum_color = if maximum < 0 { THEME_RED } else { THEME_YELLOW };
-    let mut maximum_spans = vec![Span::styled(
-        format!(
-            "Maximum: {} • {}  ",
-            signed_count(maximum),
-            percentage_one_decimal(maximum_ratio)
-        ),
-        Style::default().fg(maximum_color).bg(THEME_PANEL),
-    )];
-    maximum_spans.extend(block_bar(bar_width, maximum_ratio, maximum_color).spans);
-    let maximum_line = Line::from(maximum_spans);
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                reference_title("MAXIMUM TOKENS AVOIDED"),
-                section_title_style().bg(THEME_PANEL),
-            )),
-            maximum_line,
-            Line::from(Span::styled(explanation, muted_style().bg(THEME_PANEL))),
-        ])
-        .style(body_style().bg(THEME_PANEL))
-        .alignment(Alignment::Center),
-        area,
+        signed_count(avoided),
+        avoided_label,
+        avoided_color,
+        ratio(avoided.unsigned_abs(), denominator),
     );
 }
 
@@ -2712,11 +2702,11 @@ mod tests {
             "Session:",
             "Lookups:",
             "Estimate:",
-            "50% folder-navigation policy; other savings unchanged",
+            "Total Tokens Avoided",
             "Without ProjectAtlas",
             "With ProjectAtlas",
             "Average avoided",
-            "all files in avoided folder scopes; other savings unchanged",
+            "Maximum avoided",
             "file reads avoided",
             "Observed (summaries/slices)",
             "Search-modeled narrowing",
@@ -2748,7 +2738,6 @@ mod tests {
         assert!(!dashboard.contains("source steps account for"));
         for title in [
             "AVERAGE TOKENS AVOIDED",
-            "MAXIMUM TOKENS AVOIDED",
             "NAVIGATION WORK AVOIDED",
             "SAVINGS COMPOSITION",
             "SIGNAL",
@@ -2781,7 +2770,8 @@ mod tests {
             &[
                 "ProjectAtlas",
                 &reference_title("AVERAGE TOKENS AVOIDED"),
-                &reference_title("MAXIMUM TOKENS AVOIDED"),
+                "Average avoided",
+                "Maximum avoided",
                 &reference_title("NAVIGATION WORK AVOIDED"),
                 &reference_title("SAVINGS COMPOSITION"),
                 &reference_title("WHERE THE SAVINGS CAME FROM"),
@@ -2925,6 +2915,7 @@ mod tests {
             Modifier::empty(),
         );
         assert_cell_style(&buffer, "Average avoided", THEME_GREEN, Modifier::empty());
+        assert_cell_style(&buffer, "Maximum avoided", THEME_YELLOW, Modifier::empty());
         assert_cell_style(
             &buffer,
             "Observed (summaries/slices)",
@@ -2955,7 +2946,6 @@ mod tests {
             THEME_YELLOW,
             Modifier::empty(),
         );
-        assert_cell_style(&buffer, "Tokens Avoided", super::THEME_TEXT, Modifier::BOLD);
         assert_cell_style(
             &buffer,
             "Search-modeled narrowing",
@@ -3082,7 +3072,7 @@ mod tests {
             "wide hero value should avoid dense segmented glyphs that render inconsistently across terminals"
         );
         let caption_line = line_symbols(&buffer, title_y + 3);
-        assert!(caption_line.contains("50% folder-navigation policy"));
+        assert!(caption_line.contains("Total Tokens Avoided"));
         assert!(
             !caption_line.contains(&signed_count(overview.tokens_avoided)),
             "caption should label the hero without duplicating the numeric value"
@@ -3091,7 +3081,7 @@ mod tests {
         let dashboard = render_dashboard_to_string(140, DASHBOARD_HEIGHT, |frame| {
             render_overview_frame(frame, &overview, Some("s"));
         });
-        assert!(dashboard.contains("50% folder-navigation policy"));
+        assert!(dashboard.contains("Total Tokens Avoided"));
         assert!(
             !dashboard.contains(&format!(
                 "{} tokens avoided",
@@ -3099,6 +3089,121 @@ mod tests {
             )),
             "caption should not duplicate the saved-token number already shown as the hero and saved operand"
         );
+    }
+
+    #[test]
+    fn overview_dashboard_duplicates_the_complete_average_and_maximum_equations() {
+        let overview = sample_overview();
+        for width in [80, 140, 190] {
+            let buffer = render_overview_buffer_at_width(&overview, Some("s"), width);
+            let Some((_, title_y)) = find_text(&buffer, &reference_title("AVERAGE TOKENS AVOIDED"))
+            else {
+                unreachable!("average hero should render at width {width}");
+            };
+            let Some((_, average_y)) = find_text(&buffer, "Average avoided") else {
+                unreachable!("average comparison row should render at width {width}");
+            };
+            let Some((_, maximum_y)) = find_text(&buffer, "Maximum avoided") else {
+                unreachable!("maximum comparison row should render at width {width}");
+            };
+            assert_eq!(maximum_y, average_y + 3);
+
+            let with_projectatlas =
+                super::usize_to_isize_saturating(overview.estimated_with_projectatlas);
+            let equations = [
+                (
+                    average_y,
+                    reconciled_without_projectatlas(&overview),
+                    overview.average_tokens_avoided,
+                    "Average avoided",
+                ),
+                (
+                    maximum_y,
+                    with_projectatlas.saturating_add(overview.maximum_tokens_avoided),
+                    overview.maximum_tokens_avoided,
+                    "Maximum avoided",
+                ),
+            ];
+            let text_in = |area: super::Rect| {
+                let mut text = String::new();
+                for y in area.y..area.y.saturating_add(area.height) {
+                    for x in area.x..area.x.saturating_add(area.width) {
+                        if let Some(cell) = buffer.cell((x, y)) {
+                            text.push_str(cell.symbol());
+                        }
+                    }
+                    text.push('\n');
+                }
+                text
+            };
+
+            for (label_y, without_projectatlas, avoided, avoided_label) in equations {
+                assert_eq!(
+                    without_projectatlas.saturating_sub(with_projectatlas),
+                    avoided
+                );
+                let equation =
+                    super::Rect::new(2, label_y.saturating_sub(1), width.saturating_sub(4), 3);
+                let columns = super::Layout::default()
+                    .direction(super::Direction::Horizontal)
+                    .constraints([
+                        super::Constraint::Percentage(30),
+                        super::Constraint::Length(3),
+                        super::Constraint::Percentage(30),
+                        super::Constraint::Length(3),
+                        super::Constraint::Percentage(30),
+                    ])
+                    .split(equation);
+                let value_y = label_y.saturating_sub(1);
+                let bar_y = label_y + 1;
+
+                assert!(
+                    text_in(super::Rect::new(columns[0].x, value_y, columns[0].width, 1,))
+                        .contains(&signed_count(without_projectatlas))
+                );
+                assert!(text_in(columns[0]).contains("Without ProjectAtlas"));
+                assert!(text_in(columns[1]).contains('-'));
+                assert!(
+                    text_in(super::Rect::new(columns[2].x, value_y, columns[2].width, 1,))
+                        .contains(&signed_count(with_projectatlas))
+                );
+                assert!(text_in(columns[2]).contains("With ProjectAtlas"));
+                assert!(text_in(columns[3]).contains('='));
+                assert!(
+                    text_in(super::Rect::new(columns[4].x, value_y, columns[4].width, 1,))
+                        .contains(&signed_count(avoided))
+                );
+                assert!(text_in(columns[4]).contains(avoided_label));
+                for column in [columns[0], columns[2], columns[4]] {
+                    assert!(
+                        text_in(super::Rect::new(column.x, bar_y, column.width, 1))
+                            .chars()
+                            .any(|character| matches!(character, '█' | '░')),
+                        "every metric column needs its own bar at width {width}"
+                    );
+                }
+            }
+
+            let hero = (title_y..=maximum_y + 1)
+                .map(|y| line_symbols(&buffer, y))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(hero.contains("Total Tokens Avoided"));
+            assert!(!hero.contains('%'));
+            for forbidden in [
+                &reference_title("MAXIMUM TOKENS AVOIDED"),
+                "Maximum:",
+                "50% folder-navigation policy",
+                "all files in avoided folder scopes",
+                "all folder files",
+                "other savings unchanged",
+            ] {
+                assert!(
+                    !hero.contains(forbidden),
+                    "hero should omit obsolete copy {forbidden:?} at width {width}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3111,8 +3216,9 @@ mod tests {
         assert!(dashboard.contains("ProjectAtlas"));
         assert!(dashboard.contains("Token Impact"));
         assert!(dashboard.contains(&reference_title("AVERAGE TOKENS AVOIDED")));
-        assert!(dashboard.contains(&reference_title("MAXIMUM TOKENS AVOIDED")));
-        assert!(dashboard.contains("all folder files; other savings unchanged"));
+        assert!(dashboard.contains("Total Tokens Avoided"));
+        assert!(dashboard.contains("Average avoided"));
+        assert!(dashboard.contains("Maximum avoided"));
         assert!(dashboard.contains(&reference_title("NAVIGATION WORK AVOIDED")));
         assert!(dashboard.contains(&reference_title("SAVINGS MIX")));
         assert!(!dashboard.contains(&reference_title("SAVINGS COMPOSITION")));
@@ -3687,16 +3793,12 @@ mod tests {
             let buffer = render_overview_buffer_at_width(&overview, Some("s"), width);
             let dashboard = buffer_to_string(&buffer);
             assert!(dashboard.contains(&reference_title("AVERAGE TOKENS AVOIDED")));
-            assert!(dashboard.contains(&reference_title("MAXIMUM TOKENS AVOIDED")));
-            assert!(dashboard.contains("Maximum: 41"));
-            assert!(dashboard.contains("50% folder-navigation policy"));
+            assert!(dashboard.contains("Total Tokens Avoided"));
+            assert!(dashboard.contains("Average avoided"));
+            assert!(dashboard.contains("Maximum avoided"));
             assert_cell_style(&buffer, "-10", super::THEME_RED, Modifier::BOLD);
-            assert_cell_style(&buffer, "Maximum: 41", THEME_YELLOW, Modifier::empty());
+            assert_cell_style(&buffer, "41", THEME_YELLOW, Modifier::empty());
         }
-        let narrow = buffer_to_string(&render_overview_buffer_at_width(&overview, Some("s"), 80));
-        assert!(narrow.contains("all folder files; other savings unchanged"));
-        let wide = buffer_to_string(&render_overview_buffer_at_width(&overview, Some("s"), 140));
-        assert!(wide.contains("all files in avoided folder scopes; other savings unchanged"));
 
         let buffer = render_overview_buffer_at_width(&overview, Some("s"), 140);
         for (theme, average_color, maximum_color) in [
@@ -3718,16 +3820,11 @@ mod tests {
                 theme,
             ));
             assert!(dashboard.contains(&reference_title("AVERAGE TOKENS AVOIDED")));
-            assert!(dashboard.contains(&reference_title("MAXIMUM TOKENS AVOIDED")));
-            assert!(dashboard.contains("Maximum: 41"));
+            assert!(dashboard.contains("Total Tokens Avoided"));
+            assert!(dashboard.contains("Average avoided"));
+            assert!(dashboard.contains("Maximum avoided"));
             assert_themed_cell_style(&buffer, "-10", theme, average_color, Modifier::BOLD);
-            assert_themed_cell_style(
-                &buffer,
-                "Maximum: 41",
-                theme,
-                maximum_color,
-                Modifier::empty(),
-            );
+            assert_themed_cell_style(&buffer, "41", theme, maximum_color, Modifier::empty());
         }
     }
 

@@ -56,16 +56,16 @@ ProjectAtlas SHALL derive the two values from existing raw or aggregate telemetr
 - **WHEN** equivalent telemetry is reported directly from raw events and after a real SQLite write/read round trip
 - **THEN** average and maximum totals are identical across both paths
 
-### Requirement: TUI emphasizes average and explains maximum
-The token overview TUI SHALL use average tokens avoided as its primary hero and equation result, SHALL retain the existing visual composition, and SHALL add one compact lower bar for maximum tokens avoided with copy identifying the 50% folder-scope average and all-files maximum policies.
+### Requirement: TUI emphasizes average and visibly compares maximum
+The token overview TUI SHALL use average tokens avoided as its primary hero, SHALL retain the existing visual composition, and SHALL stack two complete `Without ProjectAtlas - With ProjectAtlas = avoided` equations: average first and maximum second. The equations SHALL use the concise result labels `Average avoided` and `Maximum avoided` without explanatory policy subtext in the hero panel.
 
 #### Scenario: Desktop dashboard
 - **WHEN** the token overview renders at the supported desktop width
-- **THEN** the average hero is dominant, the maximum bar is visible below it, and existing navigation, composition, source, notes, status, and optional Atlas sections remain recognizable
+- **THEN** the average hero is dominant, the complete average and maximum equations are visible one below the other, and existing navigation, composition, source, notes, status, and optional Atlas sections remain recognizable
 
 #### Scenario: Narrow dashboard
 - **WHEN** the token overview renders at the supported narrow width
-- **THEN** both values and their policy distinction remain readable without overlap or truncation of core information
+- **THEN** both complete equations and their average/maximum result labels remain readable without overlap or truncation of core information
 
 #### Scenario: Theme variants
 - **WHEN** the dashboard renders in dark, light, and terminal themes

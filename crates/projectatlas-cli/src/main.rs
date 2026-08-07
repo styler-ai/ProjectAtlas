@@ -5972,11 +5972,11 @@ mod tests {
         assert!(dashboard.contains("Token Impact"));
         assert!(dashboard.contains("session-a"));
         assert!(dashboard.contains("A V E R A G E   T O K E N S   A V O I D E D"));
-        assert!(dashboard.contains("50% folder-navigation policy"));
+        assert!(dashboard.contains("Total Tokens Avoided"));
         assert!(dashboard.contains("Without ProjectAtlas"));
         assert!(dashboard.contains("With ProjectAtlas"));
         assert!(dashboard.contains("Average avoided"));
-        assert!(dashboard.contains("M A X I M U M   T O K E N S   A V O I D E D"));
+        assert!(dashboard.contains("Maximum avoided"));
         assert!(dashboard.contains("N A V I G A T I O N   W O R K   A V O I D E D"));
         assert!(
             dashboard

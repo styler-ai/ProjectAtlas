@@ -11,7 +11,7 @@
 
 ## 3. Minimal TUI and Documentation
 
-- [x] 3.1 Keep the current Ratatui dashboard composition, make average tokens avoided the primary hero/equation, and add one compact lower maximum bar with concise 50%-folder-scope versus all-files explanations.
+- [x] 3.1 Keep the current Ratatui dashboard composition, make average tokens avoided the primary hero, and stack complete average and maximum without-minus-with equations using only the concise `Average avoided` and `Maximum avoided` result labels.
 - [x] 3.2 Add deterministic `TestBackend` text, ordering, signed-value, narrow-width, and semantic-style coverage for dark, light, and terminal themes without weakening existing dashboard tests.
 - [x] 3.3 Update version-matched user, plugin, and release documentation only where required to define the two formulas and v0.4.4 compatibility boundary.
 

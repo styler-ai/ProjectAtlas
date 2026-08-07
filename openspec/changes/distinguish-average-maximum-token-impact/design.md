@@ -12,7 +12,7 @@ The change crosses core aggregation, SQLite report composition, structured seria
 - Add a transparent primary average estimate that applies a fixed 50% policy only to modeled `directory_walk` baselines.
 - Keep measured compression, non-folder modeled categories, deduplication, buckets, trends, read counts, and stored events unchanged.
 - Preserve old structured fields while adding explicit average and maximum fields.
-- Keep the existing dashboard composition and add only one compact comparison bar.
+- Keep the existing dashboard composition and duplicate only the complete three-column equation for the maximum comparison.
 
 **Non-Goals:**
 
@@ -50,15 +50,15 @@ The existing generic overflow dimension erases `denominator_kind` at dimension c
 
 ### Preserve the dashboard and make the distinction visible
 
-The current hero will be relabeled for average tokens avoided and use the average value throughout its equation. One compact maximum bar immediately below the primary comparison will show the current all-files result and explain that average uses 50% of folder scope while maximum uses all files. Existing sections, themes, atlas side panel, narrow fallback, and non-folder source rows remain intact.
+The current hero will be relabeled for average tokens avoided and use the average value throughout its equation. Immediately below it, the same complete `Without ProjectAtlas - With ProjectAtlas = avoided` visual will be rendered for the current all-files maximum. The hero caption remains the concise `Total Tokens Avoided`; the two results are identified only as `Average avoided` and `Maximum avoided`, while structured metadata and version-matched documentation own the detailed policy explanation. Existing sections, themes, atlas side panel, narrow fallback, and non-folder source rows remain intact.
 
 ## Risks / Trade-offs
 
-- [A fixed 50% policy can be mistaken for measured behavior] → Label it as a policy estimate in structured metadata and visible TUI copy; do not connect it to benchmark evidence.
+- [A fixed 50% policy can be mistaken for measured behavior] → Label it as a policy estimate in structured metadata and version-matched documentation; keep the hero visually concise and do not connect it to benchmark evidence.
 - [Average savings can be negative when the unchanged Atlas payload exceeds half the baseline] → Preserve signed arithmetic and the existing negative-state styling instead of clamping.
 - [Raw-event and SQLite-derived reports can drift] → Use the same denominator predicate and component formula at both report boundaries, with a real SQLite round-trip test.
 - [Existing generic overflow rows have already lost their denominator] → Preserve their numeric maximum fallback, label the policy evidence as unclassified, and retain the discriminator in one bounded overflow row for future writes.
-- [A new bar can crowd narrow terminals] → Reuse the existing panel and responsive layout, assert text and styles with `TestBackend`, and inspect real screenshots at desktop, common, and narrow widths in dark, light, and terminal themes.
+- [A second complete equation can crowd narrow terminals] → Reuse one shared equation renderer and the existing responsive panel, assert text and styles with `TestBackend`, and inspect real screenshots at desktop, common, and narrow widths in dark, light, and terminal themes.
 
 ## Migration Plan
 
