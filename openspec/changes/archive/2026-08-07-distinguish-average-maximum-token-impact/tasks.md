@@ -22,3 +22,5 @@
 - [x] 4.3 Reconcile every live review thread and automated finding against the behavior-relevant source, configuration, dependency, artifact, and workflow inputs; merge only after hosted gates and packaged prepublication proof succeed, then synchronize the completed checklist and close issue #439 before dispatching the release workflow with `prepublish_only: false`.
 
 Archive condition: Keep this OpenSpec change unarchived until the release workflow has published v0.4.4 and a separate post-publication verification confirms the GitHub release, platform artifacts and checksums, installer behavior, runtime version, plugin version, and MCP identity.
+
+Archive disposition: The automatic release run was created 95 seconds before issue #439 closed, so task 4.3's literal pre-dispatch order was not met. The mandatory release checklist gate completed after closure, and all packaging and publication followed that gate. The enforced safety boundary therefore held; another dispatch would only republish the already-verified release inputs and is intentionally not performed.

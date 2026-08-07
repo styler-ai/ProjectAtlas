@@ -41,7 +41,6 @@
     "converge-claude-code-installer": 278,
     "converge-opencode-installer": 279,
     "delegate-bulk-purpose-curation": 301,
-    "distinguish-average-maximum-token-impact": 439,
     "drain-mcp-test-responses-before-eof": 416,
     "enforce-rust-test-quality-gates": 309,
     "expose-concrete-codex-tool-schemas": 386,
