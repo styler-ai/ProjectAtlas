@@ -1200,6 +1200,8 @@ fn symbol_hydration_respects_shared_bytes_file_count_and_deadline() -> Result<()
             entity.key().canonical_identity().to_string(),
             DetailedRelationNode {
                 entity,
+                classification: None,
+                content_selection: None,
                 purpose: RelationPurpose::Unavailable { path: None },
                 coverage: Vec::new(),
             },
@@ -1265,6 +1267,7 @@ fn analysis_query(mode: RelationAnalysisMode) -> Result<RelationAnalysisQuery, B
             )
             .with_aggregate_limits(Some(100), None, None, None, None, None)?,
             cursor: None,
+            content_selection: projectatlas_core::language::ContentSelection::UnspecifiedLegacy,
         },
         mode,
         trace_target: None,
@@ -1546,6 +1549,7 @@ fn analysis_symbol(
         documentation: None,
         line_start,
         line_end,
+        source_selector: None,
         parent: None,
         parser: ParserKind::TreeSitter,
         detail: Some("function_item".to_string()),

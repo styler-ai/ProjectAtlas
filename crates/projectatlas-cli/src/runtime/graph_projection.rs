@@ -3,18 +3,21 @@
 use super::{
     CliError, INDEX_FRESHNESS_SAMPLE_LIMIT, IndexReadStatus, IndexRefreshReason,
     IndexRefreshRequired, IndexRefreshScope, IndexWorkControl, IndexWorkFailure, IndexWorkResource,
-    IndexWorkStage, Node, NodeKind, SymbolBuildStage, SymbolProjectionChange,
-    normalize_native_path_display,
+    IndexWorkStage, MAX_SYMBOL_FILE_BYTES, Node, NodeKind, SourceReadFailure, SymbolBuildStage,
+    SymbolProjectionChange, normalize_native_path_display, read_source_bytes_controlled,
+    source_changed_during_derivation,
 };
 use projectatlas_core::IndexGeneration;
 use projectatlas_core::graph::{
     CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
-    CoverageState, EntityResolutionKey, EntitySelector, ExtendedRelationKind, ExternalSelector,
-    GraphContractError, GraphEntity, GraphIdentityText, GraphLimits, GraphRelationKind,
-    LogicalRelation, PackageSelector, ProjectInstanceId, RelationDependencyKey, RelationOccurrence,
-    RelationResolution, RepositoryFilePath, RepositoryNodePath, SourceSpan, SymbolSelector,
+    CoverageState, DocumentTargetUnresolvedReason, EntityResolutionKey, EntitySelector,
+    ExtendedRelationKind, ExternalSelector, GraphContractError, GraphEntity, GraphIdentityText,
+    GraphLimitKind, GraphLimits, GraphRelationKind, LogicalRelation, LogicalRelationKey,
+    PackageSelector, ProjectInstanceId, RelationDependencyKey, RelationOccurrence,
+    RelationResolution, RepositoryFilePath, RepositoryNodePath, ResolutionKeyDomain, SourceSpan,
+    SymbolSelector,
 };
-use projectatlas_core::language::{SemanticProviderOwner, language_capability};
+use projectatlas_core::language::{SemanticProviderOwner, SymbolParserOwner, language_capability};
 use projectatlas_core::symbols::{
     ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
 };
@@ -22,14 +25,19 @@ use projectatlas_db::{
     AtlasStore, IndexPublicationGuard, RepositoryAffectedSourceFootprint,
     RepositoryResolutionCandidate,
 };
+use projectatlas_fs::RootScanPolicy;
+#[cfg(test)]
+use projectatlas_fs::ScanOptions;
 use projectatlas_symbols::{
-    ConfiguredModuleResolution, MAX_RESOLUTION_KEYS_PER_FACT, ResolutionKeyProjection,
-    ResolutionProjectionContext, ResolutionProjectionError, derive_resolution_keys_with_context,
-    parse_import_references,
+    ConfiguredModuleResolution, MAX_RESOLUTION_KEYS_PER_FACT, MarkdownFactCompleteness,
+    MarkdownFactLimit, MarkdownFacts, ResolutionKeyProjection, ResolutionProjectionContext,
+    ResolutionProjectionError, derive_resolution_keys_with_context,
+    extract_markdown_facts_controlled, parse_import_references,
 };
 use std::borrow::{Borrow, Cow};
+use std::cell::RefCell;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, btree_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, btree_map::Entry};
 use std::fs::{self, File, OpenOptions};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -79,6 +87,15 @@ const CONFIGURATION_SYSTEM: &str = "configuration";
 const ENVIRONMENT_SYSTEM: &str = "environment-variable";
 /// External namespace for content-free deployment platform identities.
 const DEPLOYMENT_SYSTEM: &str = "deployment-platform";
+/// Canonical provider owner for exact repository document targets.
+const DOCUMENT_PATH_PROVIDER: &str = "projectatlas-document";
+/// Canonical resolver language for repository-relative file and heading identities.
+const DOCUMENT_PATH_LANGUAGE: &str = "repository-path";
+/// Canonical resolver language for case-fold collision invalidation only.
+const DOCUMENT_CASEFOLD_LANGUAGE: &str = "repository-path-casefold";
+/// Honest content-free coverage diagnostic for bounded Markdown facts.
+const DOCUMENT_PARTIAL_COVERAGE_REASON: &str =
+    "markdown fact extraction reached a declared limit or unsupported structure";
 
 /// One graph mutation staged outside the database writer transaction.
 pub(super) enum RepositoryGraphMutation {
@@ -106,6 +123,12 @@ pub(super) struct StagedRepositoryGraph {
     entity_exports: Vec<EntityResolutionKey>,
     /// Canonical dependency keys retained by staged relations.
     relation_dependencies: Vec<RelationDependencyKey>,
+    /// Closed reasons retained only for unresolved canonical document relations.
+    document_unresolved_reasons: Vec<(LogicalRelationKey, DocumentTargetUnresolvedReason)>,
+    /// Effective scan policy used to recheck non-indexed document targets before commit.
+    scan_policy: RootScanPolicy,
+    /// Non-indexed target states observed while resolving document candidates.
+    document_target_states: Vec<(String, DocumentTargetUnresolvedReason)>,
     /// Optional disposable database replacing the in-memory row vectors.
     database: Option<StagedGraphDatabase>,
     /// Conservative bytes retained until the parent publication completes.
@@ -172,6 +195,20 @@ impl StagedRepositoryGraph {
         self.retained_bytes
     }
 
+    /// Refuse publication if a consulted non-indexed target changed after resolution.
+    pub(super) fn revalidate_document_targets(&self, root: &Path) -> Result<(), CliError> {
+        if self.document_target_states.is_empty() {
+            return Ok(());
+        }
+        let current = DocumentResolutionIndex::new(root, &[], &self.scan_policy)?;
+        for (path, expected) in &self.document_target_states {
+            if current.absent_reason(path)? != *expected {
+                return Err(source_changed_during_derivation(root, path));
+            }
+        }
+        Ok(())
+    }
+
     /// Apply the complete staged graph through the parent publication transaction.
     pub(super) fn apply(
         &self,
@@ -195,6 +232,9 @@ impl StagedRepositoryGraph {
                 database.store()?,
                 Some(control),
             )?;
+            if !self.document_unresolved_reasons.is_empty() {
+                publication.set_document_unresolved_reasons(&self.document_unresolved_reasons)?;
+            }
             control.check(IndexWorkStage::Publication)?;
             return Ok(());
         }
@@ -223,6 +263,9 @@ impl StagedRepositoryGraph {
                 )?;
             }
         }
+        if !self.document_unresolved_reasons.is_empty() {
+            publication.set_document_unresolved_reasons(&self.document_unresolved_reasons)?;
+        }
         control.check(IndexWorkStage::Publication)?;
         Ok(())
     }
@@ -234,6 +277,7 @@ pub(super) fn stage_full_repository_graph(
     root: &Path,
     base_generation: IndexGeneration,
     nodes: &[Node],
+    scan_policy: &RootScanPolicy,
     symbols: &SymbolBuildStage,
     control: &IndexWorkControl,
 ) -> Result<StagedRepositoryGraph, CliError> {
@@ -246,6 +290,7 @@ pub(super) fn stage_full_repository_graph(
         .map(|node| node.path.clone())
         .collect::<BTreeSet<_>>();
     let graphs = complete_symbol_graphs(store, &paths, symbols, control)?;
+    let document_facts = complete_markdown_facts(root, nodes, &graphs, symbols, control)?;
     control.check(IndexWorkStage::SymbolParsing)?;
     let configured_modules =
         super::module_resolution::load_configured_module_resolution(root, nodes, control)?;
@@ -265,26 +310,33 @@ pub(super) fn stage_full_repository_graph(
     let graph_work_bytes = symbols
         .retained_bytes
         .saturating_add(entity_projection.retained_bytes)
-        .saturating_add(candidates.retained_bytes);
+        .saturating_add(candidates.retained_bytes)
+        .saturating_add(document_fact_map_retained_bytes(&document_facts));
     if graph_work_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
-        finish_projection_in_database(
+        finish_projection_in_database_with_documents(
             root,
             nodes,
             project,
             generation,
             &graphs,
+            &document_facts,
             entity_projection,
             &candidates,
+            scan_policy,
             control,
         )
     } else {
-        finish_projection(
+        finish_projection_with_documents(
             project,
             generation,
             RepositoryGraphMutation::Full,
             &graphs,
+            root,
+            nodes,
+            &document_facts,
             entity_projection,
             &candidates,
+            scan_policy,
             control,
         )
     }
@@ -297,6 +349,7 @@ pub(super) fn stage_incremental_repository_graph(
     base_generation: IndexGeneration,
     expected_nodes: &[Node],
     direct_paths: &[String],
+    scan_policy: &RootScanPolicy,
     symbols: &SymbolBuildStage,
     control: &IndexWorkControl,
 ) -> Result<StagedRepositoryGraph, CliError> {
@@ -350,6 +403,10 @@ pub(super) fn stage_incremental_repository_graph(
         ));
     }
     let mut changed_keys = old_exports.rows.into_iter().collect::<BTreeSet<_>>();
+    for path in &direct_paths {
+        changed_keys.insert(document_file_resolution_key(project, path)?);
+        changed_keys.insert(document_casefold_resolution_key(project, path)?);
+    }
     for graph in &direct_graphs {
         control.check(IndexWorkStage::SymbolParsing)?;
         let projection = resolution_projection_with_config(
@@ -361,6 +418,15 @@ pub(super) fn stage_incremental_repository_graph(
         changed_keys.extend(projection.source_keys().iter().cloned());
         for symbol in projection.symbol_keys() {
             changed_keys.extend(symbol.keys().iter().cloned());
+        }
+        for symbol in &graph.symbols {
+            if symbol.kind == SymbolKind::Heading {
+                changed_keys.insert(document_heading_resolution_key(
+                    project,
+                    &graph.path,
+                    &symbol.signature,
+                )?);
+            }
         }
     }
     enforce_incremental_count(
@@ -399,6 +465,8 @@ pub(super) fn stage_incremental_repository_graph(
         .cloned()
         .collect::<BTreeSet<_>>();
     let affected_graphs = complete_symbol_graphs(store, &affected_graph_paths, symbols, control)?;
+    let document_facts =
+        complete_markdown_facts(root, expected_nodes, &affected_graphs, symbols, control)?;
     let affected_nodes = expected_nodes
         .iter()
         .filter(|node| affected_paths.contains(&node.path))
@@ -415,12 +483,13 @@ pub(super) fn stage_incremental_repository_graph(
         control,
     )?;
 
-    let dependency_keys = entity_projection
+    let mut dependency_keys = entity_projection
         .keys_by_graph
         .values()
         .flat_map(ResolutionKeyProjection::relation_keys)
         .flat_map(|relation| relation.keys().iter().cloned())
         .collect::<BTreeSet<_>>();
+    dependency_keys.extend(document_dependency_keys(project, &document_facts)?);
     enforce_incremental_count(
         root,
         "affected dependency keys",
@@ -452,13 +521,23 @@ pub(super) fn stage_incremental_repository_graph(
         control,
     )?;
     enforce_resolution_staging_budget(&entity_projection, &candidates)?;
-    let staged = finish_projection(
+    enforce_resolution_registry_budget(
+        entity_projection
+            .retained_bytes
+            .saturating_add(candidates.retained_bytes)
+            .saturating_add(document_fact_map_retained_bytes(&document_facts)),
+    )?;
+    let staged = finish_projection_with_documents(
         project,
         generation,
         RepositoryGraphMutation::AffectedPaths(affected_paths.iter().cloned().collect()),
         &affected_graphs,
+        root,
+        expected_nodes,
+        &document_facts,
         entity_projection,
         &candidates,
+        scan_policy,
         control,
     )?;
     enforce_incremental_projection_limits(root, &affected_paths, persisted_footprint, &staged)?;
@@ -690,6 +769,7 @@ fn build_entity_projection_with_config(
     control: &IndexWorkControl,
 ) -> Result<EntityProjection, CliError> {
     let mut entity_by_digest = BTreeMap::new();
+    let mut entity_exports = Vec::new();
     if include_project {
         insert_entity(
             &mut entity_by_digest,
@@ -709,15 +789,24 @@ fn build_entity_projection_with_config(
                     .map_err(invalid_graph_contract)?,
             },
         };
-        insert_entity(
-            &mut entity_by_digest,
-            GraphEntity::new(project, selector, generation).map_err(invalid_graph_contract)?,
-        )?;
+        let entity =
+            GraphEntity::new(project, selector, generation).map_err(invalid_graph_contract)?;
+        if node.kind == NodeKind::File {
+            for key in [
+                document_file_resolution_key(project, &node.path)?,
+                document_casefold_resolution_key(project, &node.path)?,
+            ] {
+                entity_exports.push(
+                    EntityResolutionKey::new(entity.key().clone(), key)
+                        .map_err(invalid_graph_contract)?,
+                );
+            }
+        }
+        insert_entity(&mut entity_by_digest, entity)?;
     }
 
     let mut owners_by_graph = BTreeMap::new();
     let mut keys_by_graph = BTreeMap::new();
-    let mut entity_exports = Vec::new();
     let mut retained_bytes = 0_u64;
     for graph in graphs {
         let graph = graph.borrow();
@@ -789,6 +878,19 @@ fn build_entity_projection_with_config(
                 .as_ref()
                 .map(|entity| entity.key().digest().to_string());
             if let Some(entity) = entity {
+                if symbol.kind == SymbolKind::Heading {
+                    entity_exports.push(
+                        EntityResolutionKey::new(
+                            entity.key().clone(),
+                            document_heading_resolution_key(
+                                project,
+                                &graph.path,
+                                &symbol.signature,
+                            )?,
+                        )
+                        .map_err(invalid_graph_contract)?,
+                    );
+                }
                 insert_entity(&mut entity_by_digest, entity)?;
             }
             symbol_digests.push(entity_digest);
@@ -1021,16 +1123,19 @@ fn cleanup_abandoned_graph_staging_while_locked(
 }
 
 /// Spill a large full graph to typed disposable `SQLite` rows before main publication.
-fn finish_projection_in_database(
+fn finish_projection_in_database_with_documents(
     root: &Path,
     nodes: &[Node],
     project: ProjectInstanceId,
     generation: IndexGeneration,
     graphs: &[impl Borrow<SymbolGraph>],
+    document_facts: &BTreeMap<String, Cow<'_, MarkdownFacts>>,
     mut entities: EntityProjection,
     candidates: &ProjectResolutionRegistry,
+    scan_policy: &RootScanPolicy,
     control: &IndexWorkControl,
 ) -> Result<StagedRepositoryGraph, CliError> {
+    let document_index = DocumentResolutionIndex::new(root, nodes, scan_policy)?;
     let staging_parent = root.join(".projectatlas");
     fs::create_dir_all(&staging_parent).map_err(|source| CliError::Io {
         path: staging_parent.clone(),
@@ -1089,6 +1194,8 @@ fn finish_projection_in_database(
                 project,
                 generation,
                 graph,
+                document_facts.get(&graph.path).map(Cow::as_ref),
+                &document_index,
                 &mut entities,
                 candidates,
                 control,
@@ -1105,6 +1212,10 @@ fn finish_projection_in_database(
                 &[],
                 &staged_rows.relation_dependencies,
             )?;
+            if !staged_rows.document_unresolved_reasons.is_empty() {
+                staging
+                    .set_document_unresolved_reasons(&staged_rows.document_unresolved_reasons)?;
+            }
             staged_rows.clear();
         }
         if !staged_rows.is_empty() {
@@ -1116,13 +1227,22 @@ fn finish_projection_in_database(
                 &[],
                 &staged_rows.relation_dependencies,
             )?;
+            if !staged_rows.document_unresolved_reasons.is_empty() {
+                staging
+                    .set_document_unresolved_reasons(&staged_rows.document_unresolved_reasons)?;
+            }
         }
         staging.complete()?;
     }
     database.store()?.checkpoint_repository_graph_staging()?;
     database.store()?.begin_index_read_snapshot()?;
     let _staged_generation = database.store()?.repository_graph_generation()?;
-    let retained_bytes = normalize_native_path_display(&database_path).len() as u64;
+    let document_target_states = document_index.observed_absent_states();
+    let retained_bytes = normalize_native_path_display(&database_path).len() as u64
+        + document_target_states
+            .iter()
+            .map(|(path, _reason)| path.len() as u64 + STAGED_GRAPH_ROW_BYTES)
+            .sum::<u64>();
     Ok(StagedRepositoryGraph {
         project,
         mutation: RepositoryGraphMutation::Full,
@@ -1132,31 +1252,69 @@ fn finish_projection_in_database(
         coverage: Vec::new(),
         entity_exports: Vec::new(),
         relation_dependencies: Vec::new(),
+        document_unresolved_reasons: Vec::new(),
+        scan_policy: scan_policy.clone(),
+        document_target_states,
         database: Some(database),
         retained_bytes,
     })
 }
 
+/// Test-only compatibility wrapper for graph fixtures without Markdown facts.
+#[cfg(test)]
+fn finish_projection_in_database(
+    root: &Path,
+    nodes: &[Node],
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    graphs: &[impl Borrow<SymbolGraph>],
+    entities: EntityProjection,
+    candidates: &ProjectResolutionRegistry,
+    scan_policy: &RootScanPolicy,
+    control: &IndexWorkControl,
+) -> Result<StagedRepositoryGraph, CliError> {
+    finish_projection_in_database_with_documents(
+        root,
+        nodes,
+        project,
+        generation,
+        graphs,
+        &BTreeMap::new(),
+        entities,
+        candidates,
+        scan_policy,
+        control,
+    )
+}
+
 /// Resolve staged relationships and finish one complete normalized graph batch.
-fn finish_projection(
+fn finish_projection_with_documents(
     project: ProjectInstanceId,
     generation: IndexGeneration,
     mutation: RepositoryGraphMutation,
     graphs: &[impl Borrow<SymbolGraph>],
+    root: &Path,
+    nodes: &[Node],
+    document_facts: &BTreeMap<String, Cow<'_, MarkdownFacts>>,
     mut entities: EntityProjection,
     candidates: &ProjectResolutionRegistry,
+    scan_policy: &RootScanPolicy,
     control: &IndexWorkControl,
 ) -> Result<StagedRepositoryGraph, CliError> {
+    let document_index = DocumentResolutionIndex::new(root, nodes, scan_policy)?;
     let mut relations_by_digest = BTreeMap::new();
     let mut occurrences = Vec::new();
     let mut relation_dependencies = Vec::new();
     let mut coverage = Vec::new();
+    let mut document_unresolved_reasons = BTreeMap::new();
     for graph in graphs {
         let graph = graph.borrow();
         let rows = project_graph_rows(
             project,
             generation,
             graph,
+            document_facts.get(&graph.path).map(Cow::as_ref),
+            &document_index,
             &mut entities,
             candidates,
             control,
@@ -1172,6 +1330,9 @@ fn finish_projection(
         }
         occurrences.extend(rows.occurrences);
         relation_dependencies.extend(rows.relation_dependencies);
+        for (key, reason) in rows.document_unresolved_reasons {
+            insert_document_unresolved_reason(&mut document_unresolved_reasons, key, reason)?;
+        }
         coverage.extend(rows.coverage);
         entities.retained_bytes = rows
             .external_entities
@@ -1201,9 +1362,22 @@ fn finish_projection(
         .saturating_add(occurrences.len())
         .saturating_add(coverage.len())
         .saturating_add(relation_dependencies.len());
-    entities.retained_bytes = entities.retained_bytes.saturating_add(
-        STAGED_GRAPH_ROW_BYTES.saturating_mul(u64::try_from(added_rows).unwrap_or(u64::MAX)),
-    );
+    let added_rows = added_rows.saturating_add(document_unresolved_reasons.len());
+    let document_target_states = document_index.observed_absent_states();
+    entities.retained_bytes = entities
+        .retained_bytes
+        .saturating_add(
+            STAGED_GRAPH_ROW_BYTES.saturating_mul(u64::try_from(added_rows).unwrap_or(u64::MAX)),
+        )
+        .saturating_add(
+            document_target_states
+                .iter()
+                .fold(0_u64, |bytes, (path, _reason)| {
+                    bytes
+                        .saturating_add(STAGED_GRAPH_ROW_BYTES)
+                        .saturating_add(path.len() as u64)
+                }),
+        );
     Ok(StagedRepositoryGraph {
         project,
         mutation,
@@ -1213,9 +1387,40 @@ fn finish_projection(
         coverage,
         entity_exports: entities.entity_exports,
         relation_dependencies,
+        document_unresolved_reasons: document_unresolved_reasons.into_values().collect(),
+        scan_policy: scan_policy.clone(),
+        document_target_states,
         database: None,
         retained_bytes: entities.retained_bytes,
     })
+}
+
+/// Test-only compatibility wrapper for graph fixtures without Markdown facts.
+#[cfg(test)]
+fn finish_projection(
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    mutation: RepositoryGraphMutation,
+    graphs: &[impl Borrow<SymbolGraph>],
+    entities: EntityProjection,
+    candidates: &ProjectResolutionRegistry,
+    control: &IndexWorkControl,
+) -> Result<StagedRepositoryGraph, CliError> {
+    let scan_policy = RootScanPolicy::discover(Path::new("."), &ScanOptions::default(), control)
+        .map_err(|source| CliError::InvalidInput(source.to_string()))?;
+    finish_projection_with_documents(
+        project,
+        generation,
+        mutation,
+        graphs,
+        Path::new("."),
+        &[],
+        &BTreeMap::new(),
+        entities,
+        candidates,
+        &scan_policy,
+        control,
+    )
 }
 
 /// One graph's normalized rows, bounded by the parser graph already in memory.
@@ -1231,6 +1436,8 @@ struct ProjectedGraphRows {
     external_entities: Vec<GraphEntity>,
     /// Canonical dependency keys retained by the graph relations.
     relation_dependencies: Vec<RelationDependencyKey>,
+    /// Closed reasons for unresolved canonical document relations.
+    document_unresolved_reasons: Vec<(LogicalRelationKey, DocumentTargetUnresolvedReason)>,
 }
 
 impl ProjectedGraphRows {
@@ -1242,6 +1449,8 @@ impl ProjectedGraphRows {
         self.external_entities.extend(rows.external_entities);
         self.relation_dependencies
             .extend(rows.relation_dependencies);
+        self.document_unresolved_reasons
+            .extend(rows.document_unresolved_reasons);
     }
 
     /// Return aggregate normalized rows retained by this staging batch.
@@ -1252,6 +1461,7 @@ impl ProjectedGraphRows {
             .saturating_add(self.coverage.len())
             .saturating_add(self.external_entities.len())
             .saturating_add(self.relation_dependencies.len())
+            .saturating_add(self.document_unresolved_reasons.len())
     }
 
     /// Return whether the staging batch is empty.
@@ -1266,6 +1476,504 @@ impl ProjectedGraphRows {
         self.coverage.clear();
         self.external_entities.clear();
         self.relation_dependencies.clear();
+        self.document_unresolved_reasons.clear();
+    }
+}
+
+/// Exact staged file inventory plus platform-aware case and root checks.
+struct DocumentResolutionIndex<'a> {
+    /// Selected source root used only for bounded filesystem checks.
+    root: PathBuf,
+    /// Canonical selected root used to reject symlink escape.
+    canonical_root: PathBuf,
+    /// Exact case-preserving staged identities.
+    kinds_by_path: HashMap<&'a str, NodeKind>,
+    /// Unicode-lowercase identity counts used to refuse guesses and collisions.
+    casefold_path_counts: HashMap<String, u32>,
+    /// Effective repository admission policy shared with full and incremental scans.
+    scan_policy: &'a RootScanPolicy,
+    /// Consulted non-indexed states, memoized for repeated high-fan-out references.
+    absent_states: RefCell<BTreeMap<String, DocumentTargetUnresolvedReason>>,
+}
+
+impl<'a> DocumentResolutionIndex<'a> {
+    /// Build one bounded exact-identity view from the staged source inventory.
+    fn new(
+        root: &Path,
+        nodes: &'a [Node],
+        scan_policy: &'a RootScanPolicy,
+    ) -> Result<Self, CliError> {
+        let canonical_root = fs::canonicalize(root).map_err(|source| CliError::Io {
+            path: root.to_path_buf(),
+            source,
+        })?;
+        let kinds_by_path = nodes
+            .iter()
+            .map(|node| (node.path.as_str(), node.kind))
+            .collect::<HashMap<_, _>>();
+        let mut casefold_path_counts = HashMap::new();
+        for node in nodes {
+            let count = casefold_path_counts
+                .entry(node.path.to_lowercase())
+                .or_insert(0_u32);
+            *count = count.saturating_add(1);
+        }
+        let retained_bytes = nodes.iter().fold(0_u64, |bytes, node| {
+            bytes
+                .saturating_add(STAGED_GRAPH_ROW_BYTES.saturating_mul(2))
+                .saturating_add(node.path.len() as u64)
+        });
+        enforce_resolution_registry_budget(retained_bytes)?;
+        Ok(Self {
+            root: root.to_path_buf(),
+            canonical_root,
+            kinds_by_path,
+            casefold_path_counts,
+            scan_policy,
+            absent_states: RefCell::new(BTreeMap::new()),
+        })
+    }
+
+    /// Return a closed unresolved reason, or `None` for one exact admitted file.
+    fn unresolved_reason(
+        &self,
+        path: &str,
+    ) -> Result<Option<DocumentTargetUnresolvedReason>, CliError> {
+        let casefold_count = self
+            .casefold_path_counts
+            .get(&path.to_lowercase())
+            .copied()
+            .unwrap_or(0);
+        if casefold_count > 1 {
+            return Ok(Some(DocumentTargetUnresolvedReason::CaseConflict));
+        }
+        Ok(match self.kinds_by_path.get(path).copied() {
+            Some(NodeKind::File) => None,
+            Some(NodeKind::Folder) => Some(DocumentTargetUnresolvedReason::Unsupported),
+            None if casefold_count == 1 => Some(DocumentTargetUnresolvedReason::CaseConflict),
+            None => Some(self.absent_reason(path)?),
+        })
+    }
+
+    /// Distinguish absent source from excluded or escaping filesystem state.
+    fn absent_reason(&self, path: &str) -> Result<DocumentTargetUnresolvedReason, CliError> {
+        if let Some(reason) = self.absent_states.borrow().get(path).copied() {
+            return Ok(reason);
+        }
+        let native = self.root.join(Path::new(path));
+        let reason = if self
+            .scan_policy
+            .excludes_path(&native)
+            .map_err(|source| CliError::InvalidInput(source.to_string()))?
+        {
+            DocumentTargetUnresolvedReason::Ignored
+        } else {
+            match fs::symlink_metadata(&native) {
+                Ok(metadata) if metadata.file_type().is_dir() => {
+                    DocumentTargetUnresolvedReason::Unsupported
+                }
+                Ok(_metadata) => match fs::canonicalize(&native) {
+                    Ok(canonical) if !canonical.starts_with(&self.canonical_root) => {
+                        DocumentTargetUnresolvedReason::OutsideRoot
+                    }
+                    Ok(_canonical) => DocumentTargetUnresolvedReason::Unsupported,
+                    Err(_source) => DocumentTargetUnresolvedReason::Unsupported,
+                },
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                    self.missing_or_escaping_ancestor(&native)
+                }
+                Err(_source) => DocumentTargetUnresolvedReason::Unsupported,
+            }
+        };
+        self.absent_states
+            .borrow_mut()
+            .insert(path.to_string(), reason);
+        Ok(reason)
+    }
+
+    /// Return the bounded states actually consulted during document resolution.
+    fn observed_absent_states(&self) -> Vec<(String, DocumentTargetUnresolvedReason)> {
+        self.absent_states
+            .borrow()
+            .iter()
+            .map(|(path, reason)| (path.clone(), *reason))
+            .collect()
+    }
+
+    /// Check the nearest existing ancestor so a missing child cannot hide symlink escape.
+    fn missing_or_escaping_ancestor(&self, native: &Path) -> DocumentTargetUnresolvedReason {
+        let mut ancestor = native.parent();
+        while let Some(path) = ancestor {
+            if !path.starts_with(&self.root) {
+                break;
+            }
+            match fs::canonicalize(path) {
+                Ok(canonical) if !canonical.starts_with(&self.canonical_root) => {
+                    return DocumentTargetUnresolvedReason::OutsideRoot;
+                }
+                Ok(_canonical) => return DocumentTargetUnresolvedReason::Missing,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                    ancestor = path.parent();
+                }
+                Err(_source) => return DocumentTargetUnresolvedReason::Unsupported,
+            }
+        }
+        DocumentTargetUnresolvedReason::Missing
+    }
+}
+
+/// One resolved or typed-unresolved document candidate plus invalidation keys.
+struct DocumentResolutionOutcome {
+    /// Existing normalized graph resolution envelope.
+    resolution: RelationResolution,
+    /// Closed reason required only for unresolved document relations.
+    unresolved_reason: Option<DocumentTargetUnresolvedReason>,
+    /// Exact file and optional heading keys that invalidate this relation.
+    dependencies: Vec<CanonicalResolutionKey>,
+}
+
+/// Project one Markdown fact batch into canonical document relations and coverage.
+#[allow(clippy::too_many_arguments)]
+fn project_document_rows(
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    graph: &SymbolGraph,
+    facts: &MarkdownFacts,
+    owners: &GraphOwners,
+    document_index: &DocumentResolutionIndex<'_>,
+    candidates: &ProjectResolutionRegistry,
+    staged_entities: &BTreeMap<String, GraphEntity>,
+    control: &IndexWorkControl,
+) -> Result<ProjectedGraphRows, CliError> {
+    let file_source = staged_entities.get(&owners.file_digest).ok_or_else(|| {
+        CliError::InvalidInput("document graph file owner was not staged".to_string())
+    })?;
+    let mut heading_sources = BTreeMap::new();
+    for (symbol_index, symbol) in graph.symbols.iter().enumerate() {
+        if symbol.kind != SymbolKind::Heading {
+            continue;
+        }
+        let digest = owners
+            .symbol_digests
+            .get(symbol_index)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| {
+                CliError::InvalidInput("document heading owner was not staged".to_string())
+            })?;
+        let entity = staged_entities.get(digest).ok_or_else(|| {
+            CliError::InvalidInput("document heading entity was not staged".to_string())
+        })?;
+        if heading_sources
+            .insert(symbol.signature.as_str(), entity)
+            .is_some()
+        {
+            return Err(CliError::InvalidInput(
+                "document heading selector is not unique".to_string(),
+            ));
+        }
+    }
+    let completeness = match facts.coverage.completeness {
+        MarkdownFactCompleteness::Complete => Completeness::Complete,
+        MarkdownFactCompleteness::Partial => Completeness::Partial,
+    };
+    let mut relations_by_digest = BTreeMap::new();
+    let mut occurrences = Vec::new();
+    let mut relation_dependencies = Vec::new();
+    let mut unresolved_reasons = BTreeMap::new();
+    for (candidate_index, candidate) in facts.link_candidates.iter().enumerate() {
+        check_graph_work(control, candidate_index)?;
+        if normalize_document_target(&graph.path, &candidate.selector)
+            .is_ok_and(|target| target.path == graph.path && target.fragment.is_none())
+        {
+            continue;
+        }
+        let source = candidate
+            .enclosing_heading
+            .as_ref()
+            .map_or(Ok(file_source), |heading| {
+                heading_sources
+                    .get(heading.as_str())
+                    .copied()
+                    .ok_or_else(|| {
+                        CliError::InvalidInput(
+                            "document link enclosing heading was not staged".to_string(),
+                        )
+                    })
+            })?;
+        let outcome = resolve_document_candidate(
+            project,
+            &graph.path,
+            &candidate.selector,
+            document_index,
+            candidates,
+            staged_entities,
+            control,
+        )?;
+        if matches!(
+            &outcome.resolution,
+            RelationResolution::Resolved { target, .. } if target == source.key()
+        ) {
+            continue;
+        }
+        let relation = LogicalRelation::new(
+            source,
+            GraphRelationKind::Extended(ExtendedRelationKind::Documents),
+            outcome.resolution,
+            ConfidenceClass::High,
+            completeness,
+            generation,
+        )
+        .map_err(invalid_graph_contract)?;
+        insert_relation(
+            &mut relations_by_digest,
+            relation.clone(),
+            &graph.path,
+            "document",
+            candidate_index,
+        )?;
+        if let Some(reason) = outcome.unresolved_reason {
+            insert_document_unresolved_reason(
+                &mut unresolved_reasons,
+                relation.key().clone(),
+                reason,
+            )?;
+        }
+        let start_line = u32::try_from(candidate.source.line_start).map_err(|error| {
+            CliError::InvalidInput(format!("document source line exceeds graph range: {error}"))
+        })?;
+        let end_line = u32::try_from(candidate.source.line_end).map_err(|error| {
+            CliError::InvalidInput(format!("document end line exceeds graph range: {error}"))
+        })?;
+        let start_column = u32::try_from(candidate.source.column_start).map_err(|error| {
+            CliError::InvalidInput(format!(
+                "document source column exceeds graph range: {error}"
+            ))
+        })?;
+        let end_column = u32::try_from(candidate.source.column_end).map_err(|error| {
+            CliError::InvalidInput(format!("document end column exceeds graph range: {error}"))
+        })?;
+        occurrences.push(
+            RelationOccurrence::new(
+                &relation,
+                RepositoryFilePath::new(Path::new(&graph.path)).map_err(invalid_graph_contract)?,
+                SourceSpan::new(start_line, start_column, end_line, end_column)
+                    .map_err(invalid_graph_contract)?,
+                generation,
+            )
+            .map_err(invalid_graph_contract)?,
+        );
+        for key in outcome.dependencies {
+            relation_dependencies.push(
+                RelationDependencyKey::new(relation.key().clone(), key)
+                    .map_err(invalid_graph_contract)?,
+            );
+        }
+    }
+    Ok(ProjectedGraphRows {
+        relations: relations_by_digest.into_values().collect(),
+        occurrences,
+        coverage: vec![document_coverage(&graph.path, facts, generation)?],
+        external_entities: Vec::new(),
+        relation_dependencies,
+        document_unresolved_reasons: unresolved_reasons.into_values().collect(),
+    })
+}
+
+/// Resolve one normalized document target through exact staged/persisted identities.
+#[allow(clippy::too_many_arguments)]
+fn resolve_document_candidate(
+    project: ProjectInstanceId,
+    document_path: &str,
+    selector: &str,
+    document_index: &DocumentResolutionIndex<'_>,
+    candidates: &ProjectResolutionRegistry,
+    staged_entities: &BTreeMap<String, GraphEntity>,
+    control: &IndexWorkControl,
+) -> Result<DocumentResolutionOutcome, CliError> {
+    let target = match normalize_document_target(document_path, selector) {
+        Ok(target) => target,
+        Err(reason) => {
+            return unresolved_document_outcome(selector, reason, Vec::new());
+        }
+    };
+    let file_key = document_file_resolution_key(project, &target.path)?;
+    let mut dependencies = vec![
+        file_key.clone(),
+        document_casefold_resolution_key(project, &target.path)?,
+    ];
+    let heading_key = target
+        .fragment
+        .as_deref()
+        .map(|fragment| document_heading_resolution_key(project, &target.path, fragment))
+        .transpose()?;
+    if let Some(key) = heading_key.as_ref() {
+        dependencies.push(key.clone());
+    }
+    if let Some(reason) = document_index.unresolved_reason(&target.path)? {
+        return unresolved_document_outcome(selector, reason, dependencies);
+    }
+    if let Some(key) = heading_key.as_ref() {
+        let matches = registry_resolution_matches(
+            std::slice::from_ref(key),
+            candidates,
+            staged_entities,
+            control,
+        )?;
+        match matches.count {
+            0 => {
+                return unresolved_document_outcome(
+                    selector,
+                    DocumentTargetUnresolvedReason::Missing,
+                    dependencies,
+                );
+            }
+            1 => {
+                let target = matches.first.ok_or_else(|| {
+                    CliError::InvalidInput("resolved document heading disappeared".to_string())
+                })?;
+                return Ok(DocumentResolutionOutcome {
+                    resolution: RelationResolution::resolved(target)
+                        .map_err(invalid_graph_contract)?,
+                    unresolved_reason: None,
+                    dependencies,
+                });
+            }
+            _ => {
+                return unresolved_document_outcome(
+                    selector,
+                    DocumentTargetUnresolvedReason::CaseConflict,
+                    dependencies,
+                );
+            }
+        }
+    }
+    let matches = registry_resolution_matches(
+        std::slice::from_ref(&file_key),
+        candidates,
+        staged_entities,
+        control,
+    )?;
+    match matches.count {
+        1 => Ok(DocumentResolutionOutcome {
+            resolution: RelationResolution::resolved(matches.first.ok_or_else(|| {
+                CliError::InvalidInput("resolved document file disappeared".to_string())
+            })?)
+            .map_err(invalid_graph_contract)?,
+            unresolved_reason: None,
+            dependencies,
+        }),
+        0 => Err(CliError::InvalidInput(format!(
+            "admitted document target lacked its exact graph identity: {}",
+            target.path
+        ))),
+        _ => unresolved_document_outcome(
+            selector,
+            DocumentTargetUnresolvedReason::CaseConflict,
+            dependencies,
+        ),
+    }
+}
+
+/// Construct one privacy-safe unresolved document outcome.
+fn unresolved_document_outcome(
+    selector: &str,
+    reason: DocumentTargetUnresolvedReason,
+    dependencies: Vec<CanonicalResolutionKey>,
+) -> Result<DocumentResolutionOutcome, CliError> {
+    Ok(DocumentResolutionOutcome {
+        resolution: RelationResolution::Unresolved {
+            reference: GraphIdentityText::new(selector).map_err(invalid_graph_contract)?,
+        },
+        unresolved_reason: Some(reason),
+        dependencies,
+    })
+}
+
+/// Project bounded Markdown fact coverage into the existing relation coverage table.
+fn document_coverage(
+    path: &str,
+    facts: &MarkdownFacts,
+    generation: IndexGeneration,
+) -> Result<CoverageRecord, CliError> {
+    let scope = CoverageScope::Path {
+        path: RepositoryNodePath::new(Path::new(path)).map_err(invalid_graph_contract)?,
+    };
+    let covered = u64::try_from(facts.link_candidates.len()).unwrap_or(u64::MAX);
+    let reached_limit = facts.coverage.limits.first().map(|limit| match limit {
+        MarkdownFactLimit::HeadingCount | MarkdownFactLimit::CandidateCount => GraphLimitKind::Rows,
+        MarkdownFactLimit::InputBytes
+        | MarkdownFactLimit::LabelBytes
+        | MarkdownFactLimit::SelectorBytes
+        | MarkdownFactLimit::EvidenceBytes => GraphLimitKind::IntermediateBytes,
+    });
+    let relation = Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents));
+    match facts.coverage.completeness {
+        MarkdownFactCompleteness::Complete => CoverageRecord::new(
+            scope,
+            relation,
+            CoverageState::Complete,
+            covered,
+            0,
+            generation,
+            None,
+            None,
+        )
+        .map_err(invalid_graph_contract),
+        MarkdownFactCompleteness::Partial if covered > 0 => CoverageRecord::new(
+            scope,
+            relation,
+            CoverageState::Partial,
+            covered,
+            1,
+            generation,
+            Some(
+                GraphIdentityText::new(DOCUMENT_PARTIAL_COVERAGE_REASON)
+                    .map_err(invalid_graph_contract)?,
+            ),
+            reached_limit,
+        )
+        .map_err(invalid_graph_contract),
+        MarkdownFactCompleteness::Partial => CoverageRecord::new(
+            scope,
+            relation,
+            if facts
+                .coverage
+                .limits
+                .contains(&MarkdownFactLimit::InputBytes)
+            {
+                CoverageState::Oversized
+            } else {
+                CoverageState::Failed
+            },
+            0,
+            1,
+            generation,
+            Some(
+                GraphIdentityText::new(DOCUMENT_PARTIAL_COVERAGE_REASON)
+                    .map_err(invalid_graph_contract)?,
+            ),
+            reached_limit,
+        )
+        .map_err(invalid_graph_contract),
+    }
+}
+
+/// Deduplicate unresolved reasons while rejecting one logical-key contradiction.
+fn insert_document_unresolved_reason(
+    reasons: &mut BTreeMap<String, (LogicalRelationKey, DocumentTargetUnresolvedReason)>,
+    key: LogicalRelationKey,
+    reason: DocumentTargetUnresolvedReason,
+) -> Result<(), CliError> {
+    let digest = key.digest().to_string();
+    match reasons.entry(digest) {
+        Entry::Vacant(entry) => {
+            entry.insert((key, reason));
+            Ok(())
+        }
+        Entry::Occupied(entry) if entry.get() == &(key, reason) => Ok(()),
+        Entry::Occupied(_entry) => Err(CliError::InvalidInput(
+            "document relation retained conflicting unresolved reasons".to_string(),
+        )),
     }
 }
 
@@ -1274,6 +1982,8 @@ fn project_graph_rows(
     project: ProjectInstanceId,
     generation: IndexGeneration,
     graph: &SymbolGraph,
+    document_facts: Option<&MarkdownFacts>,
+    document_index: &DocumentResolutionIndex<'_>,
     entities: &mut EntityProjection,
     candidates: &ProjectResolutionRegistry,
     control: &IndexWorkControl,
@@ -1296,7 +2006,9 @@ fn project_graph_rows(
     let mut relations_by_digest = BTreeMap::new();
     let mut occurrences = Vec::new();
     let mut relation_dependencies = Vec::new();
+    let mut coverage = Vec::new();
     let mut external_entities = BTreeMap::new();
+    let mut document_unresolved_reasons = BTreeMap::new();
     for (relation_index, source_relation) in graph.relations.iter().enumerate() {
         control.check(IndexWorkStage::SymbolParsing)?;
         let source = relation_source(
@@ -1432,6 +2144,34 @@ fn project_graph_rows(
             }
         }
     }
+    if let Some(facts) = document_facts {
+        let rows = project_document_rows(
+            project,
+            generation,
+            graph,
+            facts,
+            &owners,
+            document_index,
+            candidates,
+            &entities.entity_by_digest,
+            control,
+        )?;
+        for (relation_index, relation) in rows.relations.into_iter().enumerate() {
+            insert_relation(
+                &mut relations_by_digest,
+                relation,
+                &graph.path,
+                "document",
+                relation_index,
+            )?;
+        }
+        occurrences.extend(rows.occurrences);
+        coverage.extend(rows.coverage);
+        relation_dependencies.extend(rows.relation_dependencies);
+        for (key, reason) in rows.document_unresolved_reasons {
+            insert_document_unresolved_reason(&mut document_unresolved_reasons, key, reason)?;
+        }
+    }
     let mut relations = relations_by_digest.into_values().collect::<Vec<_>>();
     relations.sort_by(|left, right| left.key().digest().cmp(right.key().digest()));
     occurrences.sort_by(|left, right| {
@@ -1448,12 +2188,15 @@ fn project_graph_rows(
     entities.retained_bytes = entities
         .retained_bytes
         .saturating_sub(resolution_retained_bytes(&resolution_keys));
+    let mut graph_coverage = vec![coverage_for_graph(graph, generation)?];
+    graph_coverage.extend(coverage);
     Ok(ProjectedGraphRows {
         relations,
         occurrences,
-        coverage: vec![coverage_for_graph(graph, generation)?],
+        coverage: graph_coverage,
         external_entities: external_entities.into_values().collect(),
         relation_dependencies,
+        document_unresolved_reasons: document_unresolved_reasons.into_values().collect(),
     })
 }
 
@@ -2676,6 +3419,295 @@ fn complete_symbol_graphs<'a>(
     Ok(graphs.into_values().collect())
 }
 
+/// Overlay staged Markdown facts and parse only persisted graphs not parsed in this operation.
+fn complete_markdown_facts<'a>(
+    root: &Path,
+    nodes: &[Node],
+    graphs: &[Cow<'a, SymbolGraph>],
+    symbols: &'a SymbolBuildStage,
+    control: &IndexWorkControl,
+) -> Result<BTreeMap<String, Cow<'a, MarkdownFacts>>, CliError> {
+    let graph_paths = graphs
+        .iter()
+        .map(|graph| graph.path.as_str())
+        .collect::<BTreeSet<_>>();
+    let nodes_by_path = nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::File)
+        .map(|node| (node.path.as_str(), node))
+        .collect::<BTreeMap<_, _>>();
+    let mut facts = BTreeMap::new();
+    for change in &symbols.changes {
+        let SymbolProjectionChange::Parsed(parsed) = change else {
+            continue;
+        };
+        if graph_paths.contains(parsed.path.as_str())
+            && let Some(markdown) = parsed.markdown_facts.as_ref()
+        {
+            facts.insert(parsed.path.clone(), Cow::Borrowed(markdown.as_ref()));
+        }
+    }
+    for graph in graphs {
+        control.check(IndexWorkStage::SymbolParsing)?;
+        if facts.contains_key(&graph.path)
+            || !graph
+                .language
+                .as_deref()
+                .and_then(language_capability)
+                .is_some_and(|capability| capability.symbol_parser == SymbolParserOwner::Markdown)
+        {
+            continue;
+        }
+        let node = nodes_by_path.get(graph.path.as_str()).ok_or_else(|| {
+            CliError::InvalidInput(format!(
+                "Markdown graph path was absent from the staged file inventory: {}",
+                graph.path
+            ))
+        })?;
+        let native_path = root.join(Path::new(&graph.path));
+        let bytes = match read_source_bytes_controlled(
+            &native_path,
+            MAX_SYMBOL_FILE_BYTES,
+            IndexWorkStage::SymbolParsing,
+            control,
+        ) {
+            Ok(bytes) => bytes,
+            Err(SourceReadFailure::IndexWork(failure)) => return Err(failure.into()),
+            Err(SourceReadFailure::LimitExceeded { .. }) => {
+                return Err(source_changed_during_derivation(root, &graph.path));
+            }
+            Err(SourceReadFailure::Io(source)) => {
+                return Err(CliError::Io {
+                    path: native_path,
+                    source,
+                });
+            }
+        };
+        if node
+            .content_hash
+            .as_deref()
+            .is_none_or(|expected| blake3::hash(&bytes).to_hex().as_str() != expected)
+        {
+            return Err(source_changed_during_derivation(root, &graph.path));
+        }
+        let content = String::from_utf8(bytes)
+            .map_err(|_source| source_changed_during_derivation(root, &graph.path))?;
+        facts.insert(
+            graph.path.clone(),
+            Cow::Owned(extract_markdown_facts_controlled(&content, control)?),
+        );
+    }
+    enforce_resolution_registry_budget(document_fact_map_retained_bytes(&facts))?;
+    Ok(facts)
+}
+
+/// Count map ownership plus evidence owned only for persisted graphs parsed on demand.
+fn document_fact_map_retained_bytes(facts: &BTreeMap<String, Cow<'_, MarkdownFacts>>) -> u64 {
+    facts.iter().fold(0_u64, |bytes, (path, facts)| {
+        let bytes = bytes
+            .saturating_add(STAGED_GRAPH_ROW_BYTES)
+            .saturating_add(path.len() as u64);
+        if !matches!(facts, Cow::Owned(_)) {
+            return bytes;
+        }
+        let heading_bytes = facts.headings.iter().fold(0_u64, |bytes, heading| {
+            bytes
+                .saturating_add(STAGED_GRAPH_ROW_BYTES)
+                .saturating_add(heading.text.len() as u64)
+                .saturating_add(heading.slug.len() as u64)
+        });
+        facts.link_candidates.iter().fold(
+            bytes.saturating_add(heading_bytes),
+            |bytes, candidate| {
+                bytes
+                    .saturating_add(STAGED_GRAPH_ROW_BYTES)
+                    .saturating_add(candidate.selector.len() as u64)
+                    .saturating_add(candidate.label.as_ref().map_or(0, String::len) as u64)
+                    .saturating_add(
+                        candidate.enclosing_heading.as_ref().map_or(0, String::len) as u64
+                    )
+            },
+        )
+    })
+}
+
+/// One normalized repository-local document target and optional heading fragment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DocumentTargetIdentity {
+    /// Exact slash-separated path under the selected root.
+    path: String,
+    /// Static fragment retained only when it can address a heading export.
+    fragment: Option<String>,
+}
+
+/// Normalize one parser-admitted selector relative to its owning document.
+fn normalize_document_target(
+    document_path: &str,
+    selector: &str,
+) -> Result<DocumentTargetIdentity, DocumentTargetUnresolvedReason> {
+    let (path_and_query, fragment) = selector
+        .split_once('#')
+        .map_or((selector, None), |(path, fragment)| (path, Some(fragment)));
+    let path = path_and_query
+        .split_once('?')
+        .map_or(path_and_query, |(path, _query)| path);
+    let path = strip_document_line_selector(path);
+    if path.is_empty() {
+        return Err(DocumentTargetUnresolvedReason::NoStaticTarget);
+    }
+    let mut components = document_path
+        .rsplit_once('/')
+        .map_or_else(Vec::new, |(parent, _file)| {
+            parent.split('/').map(str::to_owned).collect::<Vec<_>>()
+        });
+    for component in path.split('/') {
+        match component {
+            "" => return Err(DocumentTargetUnresolvedReason::Unsupported),
+            "." => {}
+            ".." => {
+                if components.pop().is_none() {
+                    return Err(DocumentTargetUnresolvedReason::OutsideRoot);
+                }
+            }
+            value if value.contains(':') => {
+                return Err(DocumentTargetUnresolvedReason::Unsupported);
+            }
+            value => components.push(value.to_owned()),
+        }
+    }
+    if components.is_empty() {
+        return Err(DocumentTargetUnresolvedReason::NoStaticTarget);
+    }
+    let fragment = match fragment.map(str::trim) {
+        None => None,
+        Some(value)
+            if !value.is_empty()
+                && !value.contains(['/', '\\', '?', '#', '{', '}', '<', '>', '|', '*', '$'])
+                && !value.chars().any(char::is_whitespace) =>
+        {
+            Some(value.to_lowercase())
+        }
+        Some(_value) => return Err(DocumentTargetUnresolvedReason::NoStaticTarget),
+    };
+    Ok(DocumentTargetIdentity {
+        path: components.join("/"),
+        fragment,
+    })
+}
+
+/// Remove one supported `:12`, `:L12-L20`, or equivalent line selector.
+fn strip_document_line_selector(path: &str) -> &str {
+    let Some((identity, selector)) = path.rsplit_once(':') else {
+        return path;
+    };
+    let selector = selector.strip_prefix('L').unwrap_or(selector);
+    let valid = selector.split_once('-').map_or_else(
+        || !selector.is_empty() && selector.chars().all(|character| character.is_ascii_digit()),
+        |(start, end)| {
+            !start.is_empty()
+                && !end.is_empty()
+                && start.chars().all(|character| character.is_ascii_digit())
+                && end
+                    .strip_prefix('L')
+                    .unwrap_or(end)
+                    .chars()
+                    .all(|character| character.is_ascii_digit())
+        },
+    );
+    if valid { identity } else { path }
+}
+
+/// Construct one exact file identity through the existing module-key domain.
+fn document_file_resolution_key(
+    project: ProjectInstanceId,
+    path: &str,
+) -> Result<CanonicalResolutionKey, CliError> {
+    document_resolution_key(project, ResolutionKeyDomain::Module, path)
+}
+
+/// Construct one case-fold collision key through the existing module-key domain.
+fn document_casefold_resolution_key(
+    project: ProjectInstanceId,
+    path: &str,
+) -> Result<CanonicalResolutionKey, CliError> {
+    document_resolution_key_with_language(
+        project,
+        ResolutionKeyDomain::Module,
+        DOCUMENT_CASEFOLD_LANGUAGE,
+        &path.to_lowercase(),
+    )
+}
+
+/// Construct one exact Markdown heading identity through the declaration-key domain.
+fn document_heading_resolution_key(
+    project: ProjectInstanceId,
+    path: &str,
+    fragment: &str,
+) -> Result<CanonicalResolutionKey, CliError> {
+    document_resolution_key(
+        project,
+        ResolutionKeyDomain::Declaration,
+        &format!("{path}#{fragment}"),
+    )
+}
+
+/// Construct one project-qualified canonical document identity without a new key family.
+fn document_resolution_key(
+    project: ProjectInstanceId,
+    domain: ResolutionKeyDomain,
+    identity: &str,
+) -> Result<CanonicalResolutionKey, CliError> {
+    document_resolution_key_with_language(project, domain, DOCUMENT_PATH_LANGUAGE, identity)
+}
+
+/// Construct one project-qualified document key under a selected resolver language.
+fn document_resolution_key_with_language(
+    project: ProjectInstanceId,
+    domain: ResolutionKeyDomain,
+    resolver_language: &str,
+    identity: &str,
+) -> Result<CanonicalResolutionKey, CliError> {
+    let provider =
+        GraphIdentityText::new(DOCUMENT_PATH_PROVIDER).map_err(invalid_graph_contract)?;
+    let language = GraphIdentityText::new(resolver_language).map_err(invalid_graph_contract)?;
+    let identity = GraphIdentityText::new(identity).map_err(invalid_graph_contract)?;
+    Ok(CanonicalResolutionKey::new(
+        project,
+        domain,
+        &provider,
+        &language,
+        None,
+        None,
+        Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+        &identity,
+    ))
+}
+
+/// Return all exact path and heading keys that can affect staged document relations.
+fn document_dependency_keys(
+    project: ProjectInstanceId,
+    facts: &BTreeMap<String, Cow<'_, MarkdownFacts>>,
+) -> Result<BTreeSet<CanonicalResolutionKey>, CliError> {
+    let mut keys = BTreeSet::new();
+    for (document_path, facts) in facts {
+        for candidate in &facts.link_candidates {
+            let Ok(target) = normalize_document_target(document_path, &candidate.selector) else {
+                continue;
+            };
+            keys.insert(document_file_resolution_key(project, &target.path)?);
+            keys.insert(document_casefold_resolution_key(project, &target.path)?);
+            if let Some(fragment) = target.fragment {
+                keys.insert(document_heading_resolution_key(
+                    project,
+                    &target.path,
+                    &fragment,
+                )?);
+            }
+        }
+    }
+    Ok(keys)
+}
+
 /// Derive canonical resolution keys with repository compiler configuration.
 fn resolution_projection_with_config(
     project: ProjectInstanceId,
@@ -2836,6 +3868,7 @@ fn enforce_incremental_projection_limits(
         staged.coverage.len(),
         staged.entity_exports.len(),
         staged.relation_dependencies.len(),
+        staged.document_unresolved_reasons.len(),
     ]
     .into_iter()
     .fold(0_u64, |total, count| {
@@ -2928,13 +3961,15 @@ fn resolution_retained_bytes(projection: &ResolutionKeyProjection) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CliError, GRAPH_STAGE_DATABASE_FILE_NAME, GRAPH_STAGE_DIRECTORY_PREFIX, GraphOwners,
-        GraphSymbolIndex, MAX_INCREMENTAL_GRAPH_BYTES, MAX_INCREMENTAL_GRAPH_ROWS, PackageIndex,
-        ProjectResolutionRegistry, RepositoryGraphMutation, StagedRepositoryGraph,
-        build_entity_projection, build_entity_projection_with_config,
-        cleanup_abandoned_graph_staging, enforce_incremental_projection_budget,
-        enforce_incremental_projection_limits, explicit_external_selector, finish_projection,
-        finish_projection_in_database, insert_relation, is_cargo_manifest_path,
+        CliError, DocumentResolutionIndex, DocumentTargetIdentity, GRAPH_STAGE_DATABASE_FILE_NAME,
+        GRAPH_STAGE_DIRECTORY_PREFIX, GraphOwners, GraphSymbolIndex, MAX_INCREMENTAL_GRAPH_BYTES,
+        MAX_INCREMENTAL_GRAPH_ROWS, PackageIndex, ProjectResolutionRegistry,
+        RepositoryGraphMutation, StagedRepositoryGraph, build_entity_projection,
+        build_entity_projection_with_config, cleanup_abandoned_graph_staging,
+        document_casefold_resolution_key, document_fact_map_retained_bytes,
+        enforce_incremental_projection_budget, enforce_incremental_projection_limits,
+        explicit_external_selector, finish_projection, finish_projection_in_database,
+        insert_relation, is_cargo_manifest_path, normalize_document_target, project_document_rows,
         registry_resolution_matches, relation_resolution, remove_owned_graph_stage_payload,
         repository_path_belongs_to, resolution_registry_from_exports, rust_toolchain_identity,
         stage_incremental_repository_graph, try_graph_stage_lease,
@@ -2944,10 +3979,10 @@ mod tests {
     };
     use projectatlas_core::graph::{
         CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageScope, CoverageState,
-        EntityResolutionKey, EntitySelector, ExtendedRelationKind, GraphEntity, GraphIdentityText,
-        GraphRelationKind, LogicalRelation, PackageSelector, ProjectInstanceId,
-        RelationDependencyKey, RelationResolution, RepositoryFilePath, RepositoryNodePath,
-        ResolutionKeyDomain, ReusableTargetSelector, SymbolSelector,
+        DocumentTargetUnresolvedReason, EntityResolutionKey, EntitySelector, ExtendedRelationKind,
+        GraphEntity, GraphIdentityText, GraphRelationKind, LogicalRelation, PackageSelector,
+        ProjectInstanceId, RelationDependencyKey, RelationResolution, RepositoryFilePath,
+        RepositoryNodePath, ResolutionKeyDomain, ReusableTargetSelector, SymbolSelector,
     };
     use projectatlas_core::relation_capabilities::{
         RELATION_FAMILY_CAPABILITIES, RelationFamilyState,
@@ -2963,11 +3998,13 @@ mod tests {
     use projectatlas_db::{
         AtlasStore, RepositoryAffectedSourceFootprint, RepositoryGraphRelationQuery,
     };
+    use projectatlas_fs::{RootScanPolicy, ScanOptions};
     use projectatlas_symbols::extract_symbol_graph;
     use projectatlas_symbols::{
         ConfiguredModuleResolution, EcmaScriptConfigKind, EcmaScriptModuleConfig,
         EcmaScriptPathMapping,
     };
+    use std::borrow::Cow;
     use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error;
     use std::fmt::Debug;
@@ -3092,8 +4129,10 @@ mod tests {
 
     #[test]
     fn incremental_projection_budget_combines_old_and_new_work() -> Result<(), Box<dyn Error>> {
-        let root = Path::new("repository");
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
         let affected_paths = BTreeSet::from(["src/lib.rs".to_string()]);
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
         let persisted = RepositoryAffectedSourceFootprint {
             rows: MAX_INCREMENTAL_GRAPH_ROWS,
             retained_bytes: 0,
@@ -3108,6 +4147,9 @@ mod tests {
             coverage: Vec::new(),
             entity_exports: Vec::new(),
             relation_dependencies: Vec::new(),
+            document_unresolved_reasons: Vec::new(),
+            scan_policy: RootScanPolicy::discover(root, &ScanOptions::default(), &control)?,
+            document_target_states: Vec::new(),
             database: None,
             retained_bytes: 0,
         };
@@ -3490,6 +4532,7 @@ mod tests {
             project, generation, &nodes, &graphs, &packages, true, &control,
         )?;
         let candidates = resolution_registry_from_exports(&projection, &control)?;
+        let scan_policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
         let staged = finish_projection_in_database(
             &root,
             &nodes,
@@ -3498,6 +4541,7 @@ mod tests {
             &graphs,
             projection,
             &candidates,
+            &scan_policy,
             &control,
         )?;
         let staging_path = staged
@@ -4605,6 +5649,7 @@ mod tests {
             EntityResolutionKey::new(entities[3].key().clone(), shared_key.clone())?,
             EntityResolutionKey::new(entities[4].key().clone(), local_package_key.clone())?,
         ];
+        let scan_policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
         let staged = StagedRepositoryGraph {
             project,
             mutation: RepositoryGraphMutation::Full,
@@ -4614,6 +5659,9 @@ mod tests {
             coverage: Vec::new(),
             entity_exports: exports.into(),
             relation_dependencies: dependencies,
+            document_unresolved_reasons: Vec::new(),
+            scan_policy,
+            document_target_states: Vec::new(),
             database: None,
             retained_bytes: 0,
         };
@@ -4860,10 +5908,404 @@ mod tests {
             documentation: None,
             line_start: 1,
             line_end: 1,
+            source_selector: None,
             parent: parent.map(ToString::to_string),
             parser: ParserKind::TreeSitter,
             detail: Some("function_item".to_string()),
         }
+    }
+
+    #[test]
+    fn document_target_normalization_is_relative_bounded_and_platform_neutral()
+    -> Result<(), Box<dyn Error>> {
+        require_eq(
+            &normalize_document_target("docs/guide.md", "../src/lib.rs:L12-L20?view=raw#entry")
+                .map_err(|reason| io::Error::other(reason.to_string()))?,
+            &DocumentTargetIdentity {
+                path: "src/lib.rs".to_string(),
+                fragment: Some("entry".to_string()),
+            },
+            "relative document target",
+        )?;
+        require_eq(
+            &normalize_document_target("guide.md", "README")
+                .map_err(|reason| io::Error::other(reason.to_string()))?,
+            &DocumentTargetIdentity {
+                path: "README".to_string(),
+                fragment: None,
+            },
+            "root extensionless target",
+        )?;
+        require_eq(
+            &normalize_document_target("docs/guide.md", "../../../private.txt"),
+            &Err(DocumentTargetUnresolvedReason::OutsideRoot),
+            "outside-root selector",
+        )?;
+        require_eq(
+            &normalize_document_target("docs/guide.md", "target.md#runtime value"),
+            &Err(DocumentTargetUnresolvedReason::NoStaticTarget),
+            "non-static fragment refusal",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn document_rows_resolve_exact_files_and_headings_with_typed_absence()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("docs"))?;
+        fs::write(root.join(".gitignore"), "docs/ignored.md\n")?;
+        fs::write(root.join("docs/ignored.md"), "ignored")?;
+        let source = "[lib](../src/lib.rs)\n[heading](target.md#api)\n[missing heading](target.md#absent)\n[missing](missing.md)\n[ignored](ignored.md)\n[case](../SRC/lib.rs)\n[folder](../src)\n[outside](../../../private.txt)\n[self](guide.md)\n[self heading](guide.md#api)\n";
+        let source_facts = projectatlas_symbols::extract_markdown_facts(source);
+        let target_facts = projectatlas_symbols::extract_markdown_facts("# API\n");
+        let source_graph = source_facts.symbol_graph("docs/guide.md", Some("markdown"));
+        let target_graph = target_facts.symbol_graph("docs/target.md", Some("markdown"));
+        let source_code_graph = SymbolGraph {
+            path: "src/lib.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: Vec::new(),
+            relations: Vec::new(),
+        };
+        let graphs = vec![source_graph, target_graph, source_code_graph];
+        let mut nodes = vec![
+            test_file_node("docs/guide.md", "markdown"),
+            test_file_node("docs/target.md", "markdown"),
+            test_file_node("src/lib.rs", "rust"),
+        ];
+        let mut folder = test_file_node("src", "unknown");
+        folder.kind = NodeKind::Folder;
+        folder.language = None;
+        folder.extension = None;
+        nodes.push(folder);
+        let project = ProjectInstanceId::from_bytes([31; 16])?;
+        let generation = IndexGeneration::new(4);
+        let packages = PackageIndex::from_graphs(&graphs)?;
+        let control = super::super::standalone_index_work_control();
+        let mut projection = build_entity_projection(
+            project, generation, &nodes, &graphs, &packages, true, &control,
+        )?;
+        let candidates = resolution_registry_from_exports(&projection, &control)?;
+        let owners = projection
+            .owners_by_graph
+            .remove("docs/guide.md")
+            .ok_or_else(|| io::Error::other("document owners were not projected"))?;
+        let scan_policy = RootScanPolicy::discover(root, &ScanOptions::default(), &control)?;
+        let index = DocumentResolutionIndex::new(root, &nodes, &scan_policy)?;
+        let rows = project_document_rows(
+            project,
+            generation,
+            &graphs[0],
+            &source_facts,
+            &owners,
+            &index,
+            &candidates,
+            &projection.entity_by_digest,
+            &control,
+        )?;
+        require_eq(&rows.relations.len(), &9, "document relation count")?;
+        require_eq(&rows.occurrences.len(), &9, "document occurrence count")?;
+        require_eq(
+            &rows
+                .relations
+                .iter()
+                .filter(|relation| {
+                    matches!(relation.resolution(), RelationResolution::Resolved { .. })
+                })
+                .count(),
+            &2,
+            "resolved document targets",
+        )?;
+        let reasons = rows
+            .document_unresolved_reasons
+            .iter()
+            .map(|(_key, reason)| *reason)
+            .collect::<BTreeSet<_>>();
+        require_eq(
+            &reasons,
+            &BTreeSet::from([
+                DocumentTargetUnresolvedReason::Missing,
+                DocumentTargetUnresolvedReason::Ignored,
+                DocumentTargetUnresolvedReason::OutsideRoot,
+                DocumentTargetUnresolvedReason::CaseConflict,
+                DocumentTargetUnresolvedReason::Unsupported,
+            ]),
+            "typed unresolved reasons",
+        )?;
+        require(
+            rows.relations.iter().any(|relation| {
+                matches!(
+                    relation.resolution(),
+                    RelationResolution::Resolved {
+                        selector: projectatlas_core::graph::ReusableTargetSelector::Symbol {
+                            symbol
+                        },
+                        ..
+                    } if symbol.kind == SymbolKind::Heading && symbol.signature.as_str() == "api"
+                )
+            }),
+            "heading fragment did not resolve to its heading entity",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn document_rows_preserve_enclosing_heading_identity_and_deduplicate_per_heading()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        fs::create_dir_all(temp.path().join("src"))?;
+        fs::write(temp.path().join("src/lib.rs"), "pub fn entry() {}\n")?;
+        let source = "# First\n[target](../src/lib.rs)\n[second](guide.md#second)\n[self](guide.md#first)\n\n# Second\n[target](../src/lib.rs)\n[target](../src/lib.rs)\n[first](guide.md#first)\n[self](guide.md#second)\n";
+        let facts = projectatlas_symbols::extract_markdown_facts(source);
+        let enclosing_heading_bytes = facts
+            .link_candidates
+            .iter()
+            .map(|candidate| candidate.enclosing_heading.as_ref().map_or(0, String::len) as u64)
+            .sum::<u64>();
+        let mut facts_without_heading_owners = facts.clone();
+        for candidate in &mut facts_without_heading_owners.link_candidates {
+            candidate.enclosing_heading = None;
+        }
+        let retained_with_heading_owners = document_fact_map_retained_bytes(&BTreeMap::from([(
+            "docs/guide.md".to_string(),
+            Cow::Owned(facts.clone()),
+        )]));
+        let retained_without_heading_owners =
+            document_fact_map_retained_bytes(&BTreeMap::from([(
+                "docs/guide.md".to_string(),
+                Cow::Owned(facts_without_heading_owners),
+            )]));
+        require_eq(
+            &retained_with_heading_owners.saturating_sub(retained_without_heading_owners),
+            &enclosing_heading_bytes,
+            "document registry enclosing-heading bytes",
+        )?;
+        let source_graph = facts.symbol_graph("docs/guide.md", Some("markdown"));
+        let target_graph = SymbolGraph {
+            path: "src/lib.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: Vec::new(),
+            relations: Vec::new(),
+        };
+        let graphs = vec![source_graph, target_graph];
+        let nodes = vec![
+            test_file_node("docs/guide.md", "markdown"),
+            test_file_node("src/lib.rs", "rust"),
+        ];
+        let project = ProjectInstanceId::from_bytes([33; 16])?;
+        let generation = IndexGeneration::new(5);
+        let packages = PackageIndex::from_graphs(&graphs)?;
+        let control = super::super::standalone_index_work_control();
+        let mut projection = build_entity_projection(
+            project, generation, &nodes, &graphs, &packages, true, &control,
+        )?;
+        let candidates = resolution_registry_from_exports(&projection, &control)?;
+        let owners = projection
+            .owners_by_graph
+            .remove("docs/guide.md")
+            .ok_or_else(|| io::Error::other("document owners were not projected"))?;
+        let scan_policy = RootScanPolicy::discover(temp.path(), &ScanOptions::default(), &control)?;
+        let index = DocumentResolutionIndex::new(temp.path(), &nodes, &scan_policy)?;
+        let rows = project_document_rows(
+            project,
+            generation,
+            &graphs[0],
+            &facts,
+            &owners,
+            &index,
+            &candidates,
+            &projection.entity_by_digest,
+            &control,
+        )?;
+        require_eq(&rows.relations.len(), &4, "heading-owned relation count")?;
+        require_eq(&rows.occurrences.len(), &5, "distinct link occurrences")?;
+        let sources = rows
+            .relations
+            .iter()
+            .map(|relation| {
+                projection
+                    .entity_by_digest
+                    .get(relation.source().digest())
+                    .and_then(|entity| match entity.selector() {
+                        EntitySelector::Symbol { symbol } => Some(symbol.signature.as_str()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| io::Error::other("document source was not a heading"))
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        require_eq(
+            &sources,
+            &BTreeSet::from(["first", "second"]),
+            "heading source identities",
+        )?;
+        let heading_edges = rows
+            .relations
+            .iter()
+            .filter_map(|relation| {
+                let source = projection
+                    .entity_by_digest
+                    .get(relation.source().digest())
+                    .and_then(|entity| match entity.selector() {
+                        EntitySelector::Symbol { symbol } => {
+                            Some(symbol.signature.as_str().to_string())
+                        }
+                        _ => None,
+                    })?;
+                let RelationResolution::Resolved {
+                    selector: projectatlas_core::graph::ReusableTargetSelector::Symbol { symbol },
+                    ..
+                } = relation.resolution()
+                else {
+                    return None;
+                };
+                (symbol.kind == SymbolKind::Heading)
+                    .then(|| (source, symbol.signature.as_str().to_string()))
+            })
+            .collect::<BTreeSet<_>>();
+        require_eq(
+            &heading_edges,
+            &BTreeSet::from([
+                ("first".to_string(), "second".to_string()),
+                ("second".to_string(), "first".to_string()),
+            ]),
+            "cross-heading links without self edges",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn document_cycles_emit_only_canonical_bounded_edges() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        fs::create_dir_all(temp.path().join("docs"))?;
+        fs::write(temp.path().join("docs/a.md"), "# A\n\n[b](b.md#b)\n")?;
+        fs::write(temp.path().join("docs/b.md"), "# B\n\n[a](a.md#a)\n")?;
+        let facts = [
+            projectatlas_symbols::extract_markdown_facts("# A\n\n[b](b.md#b)\n"),
+            projectatlas_symbols::extract_markdown_facts("# B\n\n[a](a.md#a)\n"),
+        ];
+        let graphs = vec![
+            facts[0].symbol_graph("docs/a.md", Some("markdown")),
+            facts[1].symbol_graph("docs/b.md", Some("markdown")),
+        ];
+        let nodes = vec![
+            test_file_node("docs/a.md", "markdown"),
+            test_file_node("docs/b.md", "markdown"),
+        ];
+        let project = ProjectInstanceId::from_bytes([35; 16])?;
+        let generation = IndexGeneration::new(1);
+        let packages = PackageIndex::from_graphs(&graphs)?;
+        let control = super::super::standalone_index_work_control();
+        let mut projection = build_entity_projection(
+            project, generation, &nodes, &graphs, &packages, true, &control,
+        )?;
+        let candidates = resolution_registry_from_exports(&projection, &control)?;
+        let scan_policy = RootScanPolicy::discover(temp.path(), &ScanOptions::default(), &control)?;
+        let index = DocumentResolutionIndex::new(temp.path(), &nodes, &scan_policy)?;
+        let mut relations = Vec::new();
+        for (graph, facts) in graphs.iter().zip(&facts) {
+            let owners = projection
+                .owners_by_graph
+                .remove(&graph.path)
+                .ok_or_else(|| io::Error::other("document owners were not projected"))?;
+            relations.extend(
+                project_document_rows(
+                    project,
+                    generation,
+                    graph,
+                    facts,
+                    &owners,
+                    &index,
+                    &candidates,
+                    &projection.entity_by_digest,
+                    &control,
+                )?
+                .relations,
+            );
+        }
+        require_eq(&relations.len(), &2, "document cycle relation count")?;
+        require(
+            relations.iter().all(|relation| {
+                relation.kind() == GraphRelationKind::Extended(ExtendedRelationKind::Documents)
+                    && matches!(
+                        relation.resolution(),
+                        RelationResolution::Resolved {
+                            selector: ReusableTargetSelector::Symbol { symbol },
+                            ..
+                        } if symbol.kind == SymbolKind::Heading
+                    )
+            }),
+            "document cycle emitted a non-canonical or unresolved edge",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn document_casefold_collisions_refuse_exact_winners_and_share_invalidation_keys()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let nodes = vec![
+            test_file_node("src/lib.rs", "rust"),
+            test_file_node("SRC/lib.rs", "rust"),
+        ];
+        let control = super::super::standalone_index_work_control();
+        let scan_policy = RootScanPolicy::discover(temp.path(), &ScanOptions::default(), &control)?;
+        let index = DocumentResolutionIndex::new(temp.path(), &nodes, &scan_policy)?;
+        require_eq(
+            &index.unresolved_reason("src/lib.rs")?,
+            &Some(DocumentTargetUnresolvedReason::CaseConflict),
+            "exact case-collision target",
+        )?;
+        let project = ProjectInstanceId::from_bytes([32; 16])?;
+        require_eq(
+            &document_casefold_resolution_key(project, "src/lib.rs")?,
+            &document_casefold_resolution_key(project, "SRC/lib.rs")?,
+            "casefold invalidation key",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn document_target_state_change_refuses_stale_publication() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control = super::super::standalone_index_work_control();
+        let scan_policy = RootScanPolicy::discover(temp.path(), &ScanOptions::default(), &control)?;
+        let index = DocumentResolutionIndex::new(temp.path(), &[], &scan_policy)?;
+        let actual = index
+            .unresolved_reason("docs/target.md")?
+            .ok_or_else(|| std::io::Error::other("absent target unexpectedly resolved"))?;
+        let stale = if actual == DocumentTargetUnresolvedReason::Missing {
+            DocumentTargetUnresolvedReason::Ignored
+        } else {
+            DocumentTargetUnresolvedReason::Missing
+        };
+        let document_target_states = vec![("docs/target.md".to_string(), stale)];
+        drop(index);
+        let staged = StagedRepositoryGraph {
+            project: ProjectInstanceId::from_bytes([34; 16])?,
+            mutation: RepositoryGraphMutation::Full,
+            entities: Vec::new(),
+            relations: Vec::new(),
+            occurrences: Vec::new(),
+            coverage: Vec::new(),
+            entity_exports: Vec::new(),
+            relation_dependencies: Vec::new(),
+            document_unresolved_reasons: Vec::new(),
+            scan_policy,
+            document_target_states,
+            database: None,
+            retained_bytes: 0,
+        };
+        require(
+            matches!(
+                staged.revalidate_document_targets(temp.path()),
+                Err(CliError::RefreshRequired(_))
+            ),
+            "changed non-indexed target state reached publication",
+        )?;
+        Ok(())
     }
 
     fn test_file_node(path: &str, language: &str) -> Node {
@@ -4903,6 +6345,7 @@ mod tests {
                 documentation: None,
                 line_start: 1,
                 line_end: 1,
+                source_selector: None,
                 parent: None,
                 parser: ParserKind::Fallback,
                 detail: None,
@@ -5056,6 +6499,7 @@ mod tests {
         let dependencies_before =
             store.repository_affected_source_paths(project, &dependency_keys, 100)?;
         let empty_symbols = empty_symbol_build_stage();
+        let scan_policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
 
         let error = stage_incremental_repository_graph(
             &store,
@@ -5063,6 +6507,7 @@ mod tests {
             publication_before.generation,
             &[],
             &["src/lib.rs".to_string()],
+            &scan_policy,
             &empty_symbols,
             &control,
         )
@@ -5166,6 +6611,7 @@ mod tests {
                     documentation: None,
                     line_start: index + 1,
                     line_end: index + 1,
+                    source_selector: None,
                     parent: None,
                     parser: ParserKind::TreeSitter,
                     detail: Some("function_item".to_string()),
@@ -5198,6 +6644,7 @@ mod tests {
                 documentation: None,
                 line_start: 1,
                 line_end: 1,
+                source_selector: None,
                 parent: None,
                 parser: ParserKind::Manifest,
                 detail: Some("cargo-package".to_string()),

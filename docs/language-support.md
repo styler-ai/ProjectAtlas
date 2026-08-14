@@ -2,293 +2,293 @@
 
 This document is generated from the versioned Rust language capability registry. Do not edit the capability table or totals by hand. Canonical rows count once; aliases and extensions never increase a capability total.
 
-Registry version: `3`. Accepted capability-set version: `7`. Detection policy version: `1`. Registry digest: `50fcac887dffecc27f1b7d365ff5da991f2a86dc15e0474ef5bcc339c58bfd60`. Accepted-set digest: `50fcac887dffecc27f1b7d365ff5da991f2a86dc15e0474ef5bcc339c58bfd60`. Semantic-provider digest: `b26c4aa768ebe3bb185d5929350d2f41c6b1b2f93630080248dec7eb6ec00e82`.
+Registry version: `4`. Accepted capability-set version: `8`. Detection policy version: `1`. Registry digest: `2b26ae43b74475ea0dcb78d5b182329d500d76c33b2d87470d303400886ead1b`. Accepted-set digest: `2b26ae43b74475ea0dcb78d5b182329d500d76c33b2d87470d303400886ead1b`. Semantic-provider digest: `b26c4aa768ebe3bb185d5929350d2f41c6b1b2f93630080248dec7eb6ec00e82`.
 
 Optional catalog input: `tree-sitter-language-pack@1.13.2` revision `6258abac30304283763a0d2dc8a48cb87fbcf438` under `MIT` metadata license. This catalog identity is not a grammar-license or runtime-support claim.
 
-The registry contains **271** canonical rows: **63** default-core rows and **208** optional-pack candidates. Detection is supported for 271 rows. Parsing is supported for 30, fallback for 241, and unavailable for 0. Symbols are supported for 20, fallback for 241, and unavailable for 10. Semantic resolution and benchmark coverage are reported independently.
+The registry contains **271** canonical rows: **63** default-core rows and **208** optional-pack candidates. Detection is supported for 271 rows. Parsing is supported for 30, fallback for 241, and unavailable for 0. Symbols are supported for 21, fallback for 241, and unavailable for 9. Semantic resolution and benchmark coverage are reported independently.
 
 Rows marked `broad-parser` are detected and, when explicitly admitted to the scan policy, remain usable through the conservative default-core fallback while the optional pack is absent. Catalog recognition alone does not add these extensions to the default scan surface. The pinned catalog is provenance for detection metadata only. A row becomes grammar-backed parsed support only after its exact grammar binary, subtree license, ABI/export, fixtures, and every accepted optional-pack target pass the separate acceptance gates. The v0.4 optional-pack targets are Linux x86-64 and Windows x86-64; macOS keeps the full built-in surface and reports `unsupported_containment` for optional-pack activation. Built-in owners always retain precedence.
 
 Broad candidate rows are admitted only when the pinned catalog supplies a stable canonical grammar identity and at least one ordinary extension that does not conflict with an already accepted detector owner. Extensionless, ambiguous, duplicate, pseudo, or conflicting catalog entries remain unadvertised until a separate deterministic rule and evidence exist.
 
-| Language | Aliases | Detection rules | Parser owner | Parsed | Symbols | Semantic | Embedded source | Benchmarked | Optional pack | Provenance | License |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `rust` | `rs` | `.rs` | tree-sitter-rust@0.24.2 | supported | supported | supported (rust) | — | unavailable | — | `tree-sitter-rust@0.24.2` | `MIT` |
-| `rust-build-script` | — | exact `build.rs` | tree-sitter-rust@0.24.2 | supported | supported | supported (rust) | — | unavailable | — | `tree-sitter-rust@0.24.2` | `MIT` |
-| `python` | `py` | `.py`, `.pyw`, shebang `python`, shebang `pythonw` | tree-sitter-python@0.25.0 | supported | supported | supported (python) | — | unavailable | — | `tree-sitter-python@0.25.0` | `MIT` |
-| `javascript` | `js` | `.js`, `.jsx`, `.mjs`, `.cjs`, shebang `node`, shebang `deno` | tree-sitter-javascript@0.25.0 | supported | supported | supported (ecma-script) | — | unavailable | — | `tree-sitter-javascript@0.25.0` | `MIT` |
-| `typescript` | `ts` | compound `.d.ts`, `.ts`, `.d.ts` | tree-sitter-typescript@0.23.2 | supported | supported | supported (ecma-script) | — | unavailable | — | `tree-sitter-typescript@0.23.2` | `MIT` |
-| `tsx` | — | `.tsx` | tree-sitter-typescript@0.23.2 | supported | supported | supported (ecma-script) | — | unavailable | — | `tree-sitter-typescript@0.23.2` | `MIT` |
-| `java` | — | `.java` | tree-sitter-java@0.23.5 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-java@0.23.5` | `MIT` |
-| `kotlin` | `kt` | `.kt`, `.kts` | tree-sitter-kotlin-ng@1.1.0 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-kotlin-ng@1.1.0` | `MIT` |
-| `csharp` | `c#`, `cs` | `.cs` | tree-sitter-c-sharp@0.23.5 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-c-sharp@0.23.5` | `MIT` |
-| `go` | — | `.go` | tree-sitter-go@0.25.0 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-go@0.25.0` | `MIT` |
-| `objective-c` | `objc` | `.m`, `.mm` | tree-sitter-objc@3.0.2 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-objc@3.0.2` | `MIT` |
-| `zig` | — | `.zig`, `.zon` | tree-sitter-zig@1.1.2 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-zig@1.1.2` | `MIT` |
-| `c` | — | `.c` | tree-sitter-c@0.24.2 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-c@0.24.2` | `MIT` |
-| `cpp` | `c++` | `.cpp`, `.cxx`, `.cc` | tree-sitter-cpp@0.23.4 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-cpp@0.23.4` | `MIT` |
-| `h` | — | `.h` | tree-sitter-c@0.24.2 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-c@0.24.2` | `MIT` |
-| `hpp` | — | `.hpp`, `.hxx`, `.hh` | tree-sitter-cpp@0.23.4 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-cpp@0.23.4` | `MIT` |
-| `cargo-manifest` | — | exact `Cargo.toml` | projectatlas:cargo-manifest | supported | supported | supported (cargo) | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `cargo-lock` | — | exact `Cargo.lock` | projectatlas:cargo-manifest | supported | supported | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `vue` | — | `.vue` | projectatlas:vue | supported | supported | unavailable | component → ecma-script | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `markdown` | `md` | `.md`, `.mdx` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `json` | — | `.json`, `.jsonc` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `yaml` | `yml` | `.yml`, `.yaml` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `css` | — | `.css`, `.scss`, `.sass`, `.less`, `.stylus`, `.styl` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `html` | — | `.html`, `.htm` | unavailable | supported | unavailable | unavailable | html-like → ecma-script | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `toon` | — | `.toon` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `dockerfile` | — | exact `Dockerfile` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `makefile` | — | exact `Makefile` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `text` | `txt` | `.txt` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `toml` | — | `.toml` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `xml` | — | `.xml` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `svelte` | — | `.svelte` | projectatlas:fallback | fallback | fallback | unavailable | template → ecma-script | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `astro` | — | `.astro` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `jsp` | — | `.jsp`, `.jspx`, `.jspf` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `jsp-tag` | — | `.tag`, `.tagx` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `gsp` | — | `.gsp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `groovy` | — | `.gradle`, `.groovy` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `protobuf` | `proto` | `.proto` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `handlebars` | `hbs` | `.hbs`, `.handlebars` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `ejs` | — | `.ejs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `pug` | — | `.pug` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `freemarker` | `ftl` | `.ftl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `mustache` | — | `.mustache` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `liquid` | — | `.liquid` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `erb` | — | `.erb` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `sql` | — | `.sql`, `.ddl`, `.dml`, `.mysql`, `.postgresql`, `.psql`, `.sqlite`, `.mssql`, `.oracle`, `.ora`, `.db2`, `.proc`, `.procedure`, `.func`, `.function`, `.view`, `.trigger`, `.index`, `.migration`, `.seed`, `.fixture`, `.schema`, `.cql`, `.cypher`, `.sparql`, `.liquibase`, `.flyway` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `graphql` | `gql` | `.gql` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `config` | — | `.ini`, `.cfg`, `.conf`, `.properties`, `.env`, `.gitignore`, `.dockerignore`, `.editorconfig` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `ruby` | `rb` | `.rb`, shebang `ruby` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `php` | — | `.php` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `swift` | — | `.swift` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `scala` | — | `.scala` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `shell` | `sh` | `.sh`, `.bash`, `.zsh`, shebang `sh`, shebang `bash`, shebang `dash`, shebang `ash`, shebang `zsh`, shebang `ksh`, shebang `mksh`, shebang `fish` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `powershell` | `pwsh` | `.ps1`, `.psm1`, `.psd1`, shebang `powershell`, shebang `pwsh` | projectatlas:powershell | supported | supported | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `batch` | — | `.bat`, `.cmd` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `r` | `rscript` | `.r`, `.R`, shebang `rscript` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `perl` | — | `.pl`, `.pm`, shebang `perl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `lua` | — | `.lua`, shebang `lua` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `dart` | — | `.dart` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `haskell` | `hs` | `.hs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `ocaml` | — | `.ml`, `.mli` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `fsharp` | `f#` | `.fs`, `.fsx` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `clojure` | `clj` | `.clj`, `.cljs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `vim` | `vimscript` | `.vim` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
-| `abl` | — | `.p` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `actionscript` | — | `.as` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `ada` | — | `.ada` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `agda` | — | `.agda` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `al` | — | `.al` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `arduino` | — | `.ino` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `asciidoc` | — | `.adoc` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `asm` | — | `.s` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `awk` | — | `.awk` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `beancount` | — | `.beancount` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `bibtex` | — | `.bib` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `bicep` | — | `.bicep` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `bitbake` | — | `.bb` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `blade` | — | `.blade` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `brightscript` | — | `.brs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `bsl` | — | `.bsl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `c3` | — | `.c3` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `caddy` | — | `.caddyfile` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `cairo` | — | `.cairo` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `capnp` | — | `.capnp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `cedar` | — | `.cedar` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `cedarschema` | — | `.cedarschema` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `cel` | — | `.cel` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `cfml` | — | `.cfc` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `chatito` | — | `.chatito` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `chuck` | — | `.ck` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `circom` | — | `.circom` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `clarity` | — | `.clar` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `cmake` | — | `.cmake` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `cobol` | — | `.cobol` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `commonlisp` | — | `.lisp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `cooklang` | — | `.cook` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `corn` | — | `.corn` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `cpon` | — | `.cpon` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `crystal` | — | `.cr` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `cst` | — | `.cst` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `csv` | — | `.csv` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `cuda` | — | `.cu` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `cue` | — | `.cue` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `cylc` | — | `.cylc` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `d` | — | `.d` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `desktop` | — | `.desktop` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `devicetree` | — | `.dts` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `dhall` | — | `.dhall` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `diff` | — | `.diff` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `djot` | — | `.dj` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `dot` | — | `.dot` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `dtd` | — | `.dtd` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `ebnf` | — | `.ebnf` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `eds` | — | `.eds` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `eex` | — | `.eex` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `elisp` | — | `.el` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `elixir` | — | `.ex` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `elm` | — | `.elm` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `elsa` | — | `.lc` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `elvish` | — | `.elv` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `enforce` | — | `.enforce` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `erlang` | — | `.erl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `facility` | — | `.fsd` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `faust` | — | `.dsp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `fennel` | — | `.fnl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `fidl` | — | `.fidl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `firrtl` | — | `.fir` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `fish` | — | `.fish` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `forth` | — | `.fth` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `fortran` | — | `.f90` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `fsharp_signature` | — | `.fsi` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `func` | — | `.fc` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `gap` | — | `.g` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `gdscript` | — | `.gd` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `gdshader` | — | `.gdshader` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `gherkin` | — | `.feature` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `gitattributes` | — | `.gitattributes` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `gleam` | — | `.gleam` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `glsl` | — | `.glsl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `gn` | — | `.gn` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `gnuplot` | — | `.gp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `godot_resource` | — | `.tres` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `gomod` | — | `.mod` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `gotmpl` | — | `.gotmpl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `gren` | — | `.gren` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `hack` | — | `.hack` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `hare` | — | `.hare` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `haxe` | — | `.hx` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `hcl` | — | `.hcl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `heex` | — | `.heex` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `hjson` | — | `.hjson` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `hlsl` | — | `.hlsl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `hocon` | — | `.hocon` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `hoon` | — | `.hoon` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `http` | — | `.http` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `hurl` | — | `.hurl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `idris` | — | `.idr` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `ispc` | — | `.ispc` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `jai` | — | `.jai` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `janet` | — | `.janet` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `jinja2` | — | `.j2` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `jq` | — | `.jq` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `json5` | — | `.json5` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `jsonnet` | — | `.jsonnet` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `julia` | — | `.jl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `just` | — | `.just` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `kcl` | — | `.k` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `kdl` | — | `.kdl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `latex` | — | `.tex` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `lean` | — | `.lean` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `ledger` | — | `.ldg` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `linkerscript` | — | `.lds` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `llvm` | — | `.ll` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `luau` | — | `.luau` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `magik` | — | `.magik` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `make` | — | `.mk` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `matlab` | — | `.matlab` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `mermaid` | — | `.mmd` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `meson` | — | `.meson` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `mlir` | — | `.mlir` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `mojo` | — | `.mojo` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `move` | — | `.move` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `nasm` | — | `.nasm` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `netlinx` | — | `.axs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `nginx` | — | `.nginx` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `nickel` | — | `.ncl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `nim` | — | `.nim` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `ninja` | — | `.ninja` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `nix` | — | `.nix` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `norg` | — | `.norg` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `nqc` | — | `.nqc` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `nushell` | — | `.nu` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `ocamllex` | — | `.mll` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `odin` | — | `.odin` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `openscad` | — | `.scad` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `org` | — | `.org` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `pascal` | — | `.pas` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `pem` | — | `.pem` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `pgn` | — | `.pgn` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `pkl` | — | `.pkl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `po` | — | `.po` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `poe_filter` | — | `.filter` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `pony` | — | `.pony` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `postscript` | — | `.ps` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `prisma` | — | `.prisma` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `prolog` | — | `.pro` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `promql` | — | `.promql` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `prql` | — | `.prql` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `psv` | — | `.psv` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `puppet` | — | `.pp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `purescript` | — | `.purs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `ql` | — | `.ql` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `qmljs` | — | `.qml` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `racket` | — | `.rkt` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `rasi` | — | `.rasi` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `razor` | — | `.razor` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `rbs` | — | `.rbs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `re2c` | — | `.re` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `rego` | — | `.rego` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `rescript` | — | `.res` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `robot` | — | `.robot` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `roc` | — | `.roc` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `ron` | — | `.ron` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `rst` | — | `.rst` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `rtf` | — | `.rtf` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `scheme` | — | `.scm` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `slang` | — | `.slang` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `smali` | — | `.smali` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `smalltalk` | — | `.st` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `smithy` | — | `.smithy` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `sml` | — | `.sml` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `snakemake` | — | `.smk` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `solidity` | — | `.sol` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `souffle` | — | `.dl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `sourcepawn` | — | `.sp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `sql_bigquery` | — | `.bq` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `squirrel` | — | `.squirrel` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `stan` | — | `.stan` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `starlark` | — | `.star` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `superhtml` | — | `.shtml` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `sway` | — | `.sw` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `systemverilog` | — | `.sv` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `tablegen` | — | `.td` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `tact` | — | `.tact` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `tcl` | — | `.tcl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `teal` | — | `.tl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `templ` | — | `.templ` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `tera` | — | `.tera` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `terraform` | — | `.tf` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `textproto` | — | `.textproto` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `thrift` | — | `.thrift` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `tlaplus` | — | `.tla` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `todotxt` | — | `.todotxt` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `tsv` | — | `.tsv` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `turtle` | — | `.ttl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `twig` | — | `.twig` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `typespec` | — | `.tsp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `typoscript` | — | `.typoscript` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `typst` | — | `.typst` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `uxntal` | — | `.tal` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `v` | — | `.v` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `vb` | — | `.vb` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `verilog` | — | `.verilog` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `vhdl` | — | `.vhdl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `vhs` | — | `.tape` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `vrl` | — | `.vrl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `wast` | — | `.wast` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `wat` | — | `.wat` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `wgsl` | — | `.wgsl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `wit` | — | `.wit` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `yuck` | — | `.yuck` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
-| `ziggy` | — | `.ziggy` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| Language | Classification | Aliases | Detection rules | Parser owner | Parsed | Symbols | Semantic | Embedded source | Benchmarked | Optional pack | Provenance | License |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `rust` | `source` | `rs` | `.rs` | tree-sitter-rust@0.24.2 | supported | supported | supported (rust) | — | unavailable | — | `tree-sitter-rust@0.24.2` | `MIT` |
+| `rust-build-script` | `source` | — | exact `build.rs` | tree-sitter-rust@0.24.2 | supported | supported | supported (rust) | — | unavailable | — | `tree-sitter-rust@0.24.2` | `MIT` |
+| `python` | `source` | `py` | `.py`, `.pyw`, shebang `python`, shebang `pythonw` | tree-sitter-python@0.25.0 | supported | supported | supported (python) | — | unavailable | — | `tree-sitter-python@0.25.0` | `MIT` |
+| `javascript` | `source` | `js` | `.js`, `.jsx`, `.mjs`, `.cjs`, shebang `node`, shebang `deno` | tree-sitter-javascript@0.25.0 | supported | supported | supported (ecma-script) | — | unavailable | — | `tree-sitter-javascript@0.25.0` | `MIT` |
+| `typescript` | `source` | `ts` | compound `.d.ts`, `.ts`, `.d.ts` | tree-sitter-typescript@0.23.2 | supported | supported | supported (ecma-script) | — | unavailable | — | `tree-sitter-typescript@0.23.2` | `MIT` |
+| `tsx` | `source` | — | `.tsx` | tree-sitter-typescript@0.23.2 | supported | supported | supported (ecma-script) | — | unavailable | — | `tree-sitter-typescript@0.23.2` | `MIT` |
+| `java` | `source` | — | `.java` | tree-sitter-java@0.23.5 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-java@0.23.5` | `MIT` |
+| `kotlin` | `source` | `kt` | `.kt`, `.kts` | tree-sitter-kotlin-ng@1.1.0 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-kotlin-ng@1.1.0` | `MIT` |
+| `csharp` | `source` | `c#`, `cs` | `.cs` | tree-sitter-c-sharp@0.23.5 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-c-sharp@0.23.5` | `MIT` |
+| `go` | `source` | — | `.go` | tree-sitter-go@0.25.0 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-go@0.25.0` | `MIT` |
+| `objective-c` | `source` | `objc` | `.m`, `.mm` | tree-sitter-objc@3.0.2 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-objc@3.0.2` | `MIT` |
+| `zig` | `source` | — | `.zig`, `.zon` | tree-sitter-zig@1.1.2 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-zig@1.1.2` | `MIT` |
+| `c` | `source` | — | `.c` | tree-sitter-c@0.24.2 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-c@0.24.2` | `MIT` |
+| `cpp` | `source` | `c++` | `.cpp`, `.cxx`, `.cc` | tree-sitter-cpp@0.23.4 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-cpp@0.23.4` | `MIT` |
+| `h` | `source` | — | `.h` | tree-sitter-c@0.24.2 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-c@0.24.2` | `MIT` |
+| `hpp` | `source` | — | `.hpp`, `.hxx`, `.hh` | tree-sitter-cpp@0.23.4 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-cpp@0.23.4` | `MIT` |
+| `cargo-manifest` | `configuration_data` | — | exact `Cargo.toml` | projectatlas:cargo-manifest | supported | supported | supported (cargo) | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `cargo-lock` | `configuration_data` | — | exact `Cargo.lock` | projectatlas:cargo-manifest | supported | supported | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `vue` | `source` | — | `.vue` | projectatlas:vue | supported | supported | unavailable | component → ecma-script | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `markdown` | `documentation` | `md` | `.md`, `.mdx` | projectatlas:markdown | supported | supported | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `json` | `configuration_data` | — | `.json`, `.jsonc` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `yaml` | `configuration_data` | `yml` | `.yml`, `.yaml` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `css` | `source` | — | `.css`, `.scss`, `.sass`, `.less`, `.stylus`, `.styl` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `html` | `source` | — | `.html`, `.htm` | unavailable | supported | unavailable | unavailable | html-like → ecma-script | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `toon` | `configuration_data` | — | `.toon` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `dockerfile` | `source` | — | exact `Dockerfile` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `makefile` | `source` | — | exact `Makefile` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `text` | `other_text` | `txt` | `.txt` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `toml` | `configuration_data` | — | `.toml` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `xml` | `configuration_data` | — | `.xml` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `svelte` | `source` | — | `.svelte` | projectatlas:fallback | fallback | fallback | unavailable | template → ecma-script | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `astro` | `source` | — | `.astro` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `jsp` | `source` | — | `.jsp`, `.jspx`, `.jspf` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `jsp-tag` | `source` | — | `.tag`, `.tagx` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `gsp` | `source` | — | `.gsp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `groovy` | `source` | — | `.gradle`, `.groovy` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `protobuf` | `source` | `proto` | `.proto` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `handlebars` | `source` | `hbs` | `.hbs`, `.handlebars` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `ejs` | `source` | — | `.ejs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `pug` | `source` | — | `.pug` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `freemarker` | `source` | `ftl` | `.ftl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `mustache` | `source` | — | `.mustache` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `liquid` | `source` | — | `.liquid` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `erb` | `source` | — | `.erb` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `sql` | `source` | — | `.sql`, `.ddl`, `.dml`, `.mysql`, `.postgresql`, `.psql`, `.sqlite`, `.mssql`, `.oracle`, `.ora`, `.db2`, `.proc`, `.procedure`, `.func`, `.function`, `.view`, `.trigger`, `.index`, `.migration`, `.seed`, `.fixture`, `.schema`, `.cql`, `.cypher`, `.sparql`, `.liquibase`, `.flyway` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `graphql` | `source` | `gql` | `.gql` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `config` | `configuration_data` | — | `.ini`, `.cfg`, `.conf`, `.properties`, `.env`, `.gitignore`, `.dockerignore`, `.editorconfig` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `ruby` | `source` | `rb` | `.rb`, shebang `ruby` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `php` | `source` | — | `.php` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `swift` | `source` | — | `.swift` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `scala` | `source` | — | `.scala` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `shell` | `source` | `sh` | `.sh`, `.bash`, `.zsh`, shebang `sh`, shebang `bash`, shebang `dash`, shebang `ash`, shebang `zsh`, shebang `ksh`, shebang `mksh`, shebang `fish` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `powershell` | `source` | `pwsh` | `.ps1`, `.psm1`, `.psd1`, shebang `powershell`, shebang `pwsh` | projectatlas:powershell | supported | supported | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `batch` | `source` | — | `.bat`, `.cmd` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `r` | `source` | `rscript` | `.r`, `.R`, shebang `rscript` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `perl` | `source` | — | `.pl`, `.pm`, shebang `perl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `lua` | `source` | — | `.lua`, shebang `lua` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `dart` | `source` | — | `.dart` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `haskell` | `source` | `hs` | `.hs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `ocaml` | `source` | — | `.ml`, `.mli` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `fsharp` | `source` | `f#` | `.fs`, `.fsx` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `clojure` | `source` | `clj` | `.clj`, `.cljs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `vim` | `source` | `vimscript` | `.vim` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.4` | `MIT` |
+| `abl` | `source` | — | `.p` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `actionscript` | `source` | — | `.as` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `ada` | `source` | — | `.ada` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `agda` | `source` | — | `.agda` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `al` | `source` | — | `.al` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `arduino` | `source` | — | `.ino` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `asciidoc` | `documentation` | — | `.adoc` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `asm` | `source` | — | `.s` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `awk` | `source` | — | `.awk` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `beancount` | `configuration_data` | — | `.beancount` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `bibtex` | `configuration_data` | — | `.bib` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `bicep` | `source` | — | `.bicep` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `bitbake` | `source` | — | `.bb` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `blade` | `source` | — | `.blade` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `brightscript` | `source` | — | `.brs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `bsl` | `source` | — | `.bsl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `c3` | `source` | — | `.c3` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `caddy` | `configuration_data` | — | `.caddyfile` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `cairo` | `source` | — | `.cairo` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `capnp` | `source` | — | `.capnp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `cedar` | `source` | — | `.cedar` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `cedarschema` | `source` | — | `.cedarschema` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `cel` | `source` | — | `.cel` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `cfml` | `source` | — | `.cfc` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `chatito` | `source` | — | `.chatito` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `chuck` | `source` | — | `.ck` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `circom` | `source` | — | `.circom` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `clarity` | `source` | — | `.clar` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `cmake` | `source` | — | `.cmake` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `cobol` | `source` | — | `.cobol` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `commonlisp` | `source` | — | `.lisp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `cooklang` | `source` | — | `.cook` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `corn` | `source` | — | `.corn` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `cpon` | `configuration_data` | — | `.cpon` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `crystal` | `source` | — | `.cr` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `cst` | `source` | — | `.cst` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `csv` | `configuration_data` | — | `.csv` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `cuda` | `source` | — | `.cu` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `cue` | `source` | — | `.cue` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `cylc` | `source` | — | `.cylc` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `d` | `source` | — | `.d` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `desktop` | `configuration_data` | — | `.desktop` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `devicetree` | `source` | — | `.dts` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `dhall` | `source` | — | `.dhall` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `diff` | `other_text` | — | `.diff` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `djot` | `documentation` | — | `.dj` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `dot` | `source` | — | `.dot` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `dtd` | `source` | — | `.dtd` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `ebnf` | `source` | — | `.ebnf` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `eds` | `source` | — | `.eds` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `eex` | `source` | — | `.eex` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `elisp` | `source` | — | `.el` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `elixir` | `source` | — | `.ex` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `elm` | `source` | — | `.elm` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `elsa` | `source` | — | `.lc` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `elvish` | `source` | — | `.elv` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `enforce` | `source` | — | `.enforce` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `erlang` | `source` | — | `.erl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `facility` | `source` | — | `.fsd` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `faust` | `source` | — | `.dsp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `fennel` | `source` | — | `.fnl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `fidl` | `source` | — | `.fidl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `firrtl` | `source` | — | `.fir` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `fish` | `source` | — | `.fish` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `forth` | `source` | — | `.fth` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `fortran` | `source` | — | `.f90` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `fsharp_signature` | `source` | — | `.fsi` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `func` | `source` | — | `.fc` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `gap` | `source` | — | `.g` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `gdscript` | `source` | — | `.gd` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `gdshader` | `source` | — | `.gdshader` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `gherkin` | `source` | — | `.feature` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `gitattributes` | `configuration_data` | — | `.gitattributes` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `gleam` | `source` | — | `.gleam` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `glsl` | `source` | — | `.glsl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `gn` | `source` | — | `.gn` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `gnuplot` | `source` | — | `.gp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `godot_resource` | `configuration_data` | — | `.tres` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `gomod` | `configuration_data` | — | `.mod` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `gotmpl` | `source` | — | `.gotmpl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `gren` | `source` | — | `.gren` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `hack` | `source` | — | `.hack` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `hare` | `source` | — | `.hare` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `haxe` | `source` | — | `.hx` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `hcl` | `configuration_data` | — | `.hcl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `heex` | `source` | — | `.heex` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `hjson` | `configuration_data` | — | `.hjson` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `hlsl` | `source` | — | `.hlsl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `hocon` | `configuration_data` | — | `.hocon` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `hoon` | `source` | — | `.hoon` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `http` | `source` | — | `.http` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `hurl` | `source` | — | `.hurl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `idris` | `source` | — | `.idr` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `ispc` | `source` | — | `.ispc` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `jai` | `source` | — | `.jai` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `janet` | `source` | — | `.janet` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `jinja2` | `source` | — | `.j2` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `jq` | `source` | — | `.jq` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `json5` | `configuration_data` | — | `.json5` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `jsonnet` | `source` | — | `.jsonnet` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `julia` | `source` | — | `.jl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `just` | `source` | — | `.just` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `kcl` | `source` | — | `.k` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `kdl` | `configuration_data` | — | `.kdl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `latex` | `documentation` | — | `.tex` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `lean` | `source` | — | `.lean` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `ledger` | `configuration_data` | — | `.ldg` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `linkerscript` | `source` | — | `.lds` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `llvm` | `source` | — | `.ll` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `luau` | `source` | — | `.luau` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `magik` | `source` | — | `.magik` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `make` | `source` | — | `.mk` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `matlab` | `source` | — | `.matlab` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `mermaid` | `source` | — | `.mmd` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `meson` | `source` | — | `.meson` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `mlir` | `source` | — | `.mlir` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `mojo` | `source` | — | `.mojo` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `move` | `source` | — | `.move` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `nasm` | `source` | — | `.nasm` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `netlinx` | `source` | — | `.axs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `nginx` | `source` | — | `.nginx` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `nickel` | `source` | — | `.ncl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `nim` | `source` | — | `.nim` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `ninja` | `source` | — | `.ninja` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `nix` | `source` | — | `.nix` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `norg` | `documentation` | — | `.norg` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `nqc` | `source` | — | `.nqc` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `nushell` | `source` | — | `.nu` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `ocamllex` | `source` | — | `.mll` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `odin` | `source` | — | `.odin` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `openscad` | `source` | — | `.scad` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `org` | `documentation` | — | `.org` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `pascal` | `source` | — | `.pas` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `pem` | `configuration_data` | — | `.pem` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `pgn` | `configuration_data` | — | `.pgn` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `pkl` | `source` | — | `.pkl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `po` | `configuration_data` | — | `.po` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `poe_filter` | `source` | — | `.filter` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `pony` | `source` | — | `.pony` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `postscript` | `source` | — | `.ps` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `prisma` | `source` | — | `.prisma` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `prolog` | `source` | — | `.pro` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `promql` | `source` | — | `.promql` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `prql` | `source` | — | `.prql` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `psv` | `configuration_data` | — | `.psv` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `puppet` | `source` | — | `.pp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `purescript` | `source` | — | `.purs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `ql` | `source` | — | `.ql` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `qmljs` | `source` | — | `.qml` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `racket` | `source` | — | `.rkt` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `rasi` | `source` | — | `.rasi` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `razor` | `source` | — | `.razor` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `rbs` | `source` | — | `.rbs` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `re2c` | `source` | — | `.re` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `rego` | `source` | — | `.rego` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `rescript` | `source` | — | `.res` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `robot` | `source` | — | `.robot` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `roc` | `source` | — | `.roc` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `ron` | `configuration_data` | — | `.ron` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `rst` | `documentation` | — | `.rst` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `rtf` | `documentation` | — | `.rtf` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `scheme` | `source` | — | `.scm` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `slang` | `source` | — | `.slang` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `smali` | `source` | — | `.smali` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `smalltalk` | `source` | — | `.st` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `smithy` | `source` | — | `.smithy` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `sml` | `source` | — | `.sml` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `snakemake` | `source` | — | `.smk` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `solidity` | `source` | — | `.sol` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `souffle` | `source` | — | `.dl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `sourcepawn` | `source` | — | `.sp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `sql_bigquery` | `source` | — | `.bq` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `squirrel` | `source` | — | `.squirrel` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `stan` | `source` | — | `.stan` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `starlark` | `source` | — | `.star` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `superhtml` | `source` | — | `.shtml` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `sway` | `source` | — | `.sw` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `systemverilog` | `source` | — | `.sv` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `tablegen` | `source` | — | `.td` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `tact` | `source` | — | `.tact` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `tcl` | `source` | — | `.tcl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `teal` | `source` | — | `.tl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `templ` | `source` | — | `.templ` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `tera` | `source` | — | `.tera` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `terraform` | `configuration_data` | — | `.tf` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `textproto` | `configuration_data` | — | `.textproto` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `thrift` | `source` | — | `.thrift` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `tlaplus` | `source` | — | `.tla` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `todotxt` | `other_text` | — | `.todotxt` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `tsv` | `configuration_data` | — | `.tsv` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `turtle` | `configuration_data` | — | `.ttl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `twig` | `source` | — | `.twig` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `typespec` | `source` | — | `.tsp` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `typoscript` | `source` | — | `.typoscript` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `typst` | `documentation` | — | `.typst` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `uxntal` | `source` | — | `.tal` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `v` | `source` | — | `.v` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `vb` | `source` | — | `.vb` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `verilog` | `source` | — | `.verilog` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `vhdl` | `source` | — | `.vhdl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `vhs` | `source` | — | `.tape` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `vrl` | `source` | — | `.vrl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `wast` | `source` | — | `.wast` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `wat` | `source` | — | `.wat` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `wgsl` | `source` | — | `.wgsl` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `wit` | `source` | — | `.wit` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `yuck` | `source` | — | `.yuck` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+| `ziggy` | `source` | — | `.ziggy` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
 
 ## Language & Ecosystem Support
 
-Complete-support schema version: `1`. Ecosystem catalog version: `1`. Catalog digest: `934259103c396eb3e3ea357b1dc407caea16ec99bdded2da4f435d79837288cd`.
+Complete-support schema version: `1`. Ecosystem catalog version: `1`. Catalog digest: `41e2af6215c1366bcc7da6a44119aa1ca9c9982fa189b6df20861af0e2c728d4`.
 
 `Complete` means conformance to the fixed ProjectAtlas navigation contract, not compiler, build-system, runtime, or whole-language completeness. Final v0.4 MCP navigation revalidation retained every runtime candidate at its achieved detected/parsed/symbol/semantic/benchmarked tier: none has the complete schema-bound capability and agent-navigation evidence required for promotion.
 

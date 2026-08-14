@@ -11,11 +11,12 @@ use projectatlas_core::graph::{
     ExtendedRelationKind, ExternalSelector, GraphLimitKind, GraphRelationKind, LogicalRelation,
     ProjectInstanceId, RelationResolution,
 };
+use projectatlas_core::language::ContentClassification;
 use projectatlas_core::symbols::RelationKind;
 use projectatlas_core::{
     IndexGeneration, IndexWorkControl, IndexWorkStage, normalize_native_path_display,
 };
-use projectatlas_db::{AtlasStore, DbError, RepositoryGraphRelationQuery};
+use projectatlas_db::{AtlasStore, DbError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -207,6 +208,8 @@ pub struct FederatedRelationEvidence {
     pub generation: IndexGeneration,
     /// Exact local source entity that emitted the relation.
     pub source: projectatlas_core::graph::GraphEntity,
+    /// Registry-owned role of the source file, when the source is file-bearing.
+    pub classification: Option<ContentClassification>,
     /// Complete typed logical relation.
     pub relation: LogicalRelation,
 }
@@ -791,11 +794,14 @@ fn load_rendezvous(
             let limit = u32::try_from(fair_share).map_err(|_overflow| {
                 ServiceError::InvalidInput("federated relation page limit overflowed".to_string())
             })?;
-            let page = participant.store.repository_graph_relation_rows(
-                RepositoryGraphRelationQuery::Family { relation: family },
-                limit,
-                control,
-            )?;
+            let page = participant
+                .store
+                .repository_graph_classified_relation_family_rows(
+                    family,
+                    query.content_selection,
+                    limit,
+                    control,
+                )?;
             queries_left = queries_left.saturating_sub(1);
             let decoded_rows = u64::try_from(page.rows.len()).map_err(|_overflow| {
                 ServiceError::InvalidInput("federated database row count overflowed".to_string())
@@ -813,7 +819,11 @@ fn load_rendezvous(
                 push_limit(&mut reached_limits, GraphLimitKind::Edges);
             }
             for row in page.rows {
-                let encoded_bytes = serialized_equivalent_bytes(&(&row.source, &row.relation))?;
+                let encoded_bytes = serialized_equivalent_bytes(&(
+                    &row.detail.source,
+                    &row.detail.relation,
+                    row.source_classification,
+                ))?;
                 if encoded_bytes > remaining_intermediate_bytes {
                     push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
                     break 'queries;
@@ -822,10 +832,11 @@ fn load_rendezvous(
                     remaining_intermediate_bytes.saturating_sub(encoded_bytes);
                 database_bytes =
                     checked_sum(database_bytes, encoded_bytes, "federated decoded bytes")?;
-                if !super::relations::relation_matches(&row.relation, query) {
+                if !super::relations::relation_matches(&row.detail.relation, query) {
                     continue;
                 }
-                let RelationResolution::External { external, .. } = row.relation.resolution()
+                let RelationResolution::External { external, .. } =
+                    row.detail.relation.resolution()
                 else {
                     continue;
                 };
@@ -837,8 +848,8 @@ fn load_rendezvous(
                 if !identities.contains(&key) {
                     continue;
                 }
-                let project = row.relation.key().project();
-                let generation = row.relation.generation();
+                let project = row.detail.relation.key().project();
+                let generation = row.detail.relation.generation();
                 let group = groups.entry(key).or_insert_with(|| FederatedRendezvous {
                     relation: family,
                     external: external.clone(),
@@ -847,8 +858,9 @@ fn load_rendezvous(
                 group.evidence.push(FederatedRelationEvidence {
                     project,
                     generation,
-                    source: row.source,
-                    relation: row.relation,
+                    source: row.detail.source,
+                    classification: row.source_classification,
+                    relation: row.detail.relation,
                 });
             }
         }
@@ -1163,6 +1175,7 @@ mod tests {
         Completeness, EntitySelector, GraphEntity, GraphIdentityText, GraphLimits,
         RepositoryFilePath,
     };
+    use projectatlas_core::language::ContentSelection;
     use projectatlas_core::symbols::RelationKind;
     use projectatlas_core::{IndexCancellation, Node, NodeKind};
     use projectatlas_db::sqlite_progress_test_observer::{
@@ -1218,12 +1231,32 @@ mod tests {
                     .iter()
                     .flat_map(|row| &row.evidence)
                     .all(|evidence| {
-                        matches!(
-                            evidence.source.selector(),
-                            EntitySelector::File { path } if path.as_str() == "src/same.rs"
-                        )
+                        evidence.classification == Some(ContentClassification::Source)
+                            && matches!(
+                                evidence.source.selector(),
+                                EntitySelector::File { path } if path.as_str() == "src/same.rs"
+                            )
                     }),
             "same relative paths collapsed across project identities",
+        )?;
+        let classified_query = relation_query_with_selection(
+            None,
+            RelationResolutionFilter::External,
+            RelationDirection::Outbound,
+            ContentSelection::Source,
+        )?;
+        let classified = load_federated_detailed_relations(
+            open_participants(&participants)?,
+            &classified_query,
+            None,
+        )?;
+        let (classified, _) = classified.fit_output(None, |report| {
+            serde_json::to_string(report).map_err(ServiceError::from)
+        })?;
+        require(
+            classified.rendezvous == report.rendezvous
+                && classified.primary.content_selection == Some(ContentSelection::Source),
+            "classified federation changed eligible rendezvous evidence or lost selection",
         )?;
         require(
             encoded.len() <= query.budget.output_bytes() as usize
@@ -1581,6 +1614,16 @@ mod tests {
             fixture_file_node("src/same.rs"),
             fixture_file_node("src/unrelated.rs"),
         ])?;
+        publication.upsert_file_content_classification_batch(&[
+            projectatlas_db::FileContentClassification {
+                path: "src/same.rs".to_string(),
+                classification: ContentClassification::Source,
+            },
+            projectatlas_db::FileContentClassification {
+                path: "src/unrelated.rs".to_string(),
+                classification: ContentClassification::Documentation,
+            },
+        ])?;
         publication.finish_scan_replacement()?;
         publication.replace_repository_graph(project, &entities, &relations, &[], &[])?;
         publication.complete()?;
@@ -1610,6 +1653,21 @@ mod tests {
         resolution: RelationResolutionFilter,
         direction: RelationDirection,
     ) -> Result<DetailedRelationQuery, Box<dyn Error>> {
+        relation_query_with_selection(
+            cursor,
+            resolution,
+            direction,
+            ContentSelection::UnspecifiedLegacy,
+        )
+    }
+
+    /// Build one bounded anchored relation request with explicit content selection.
+    fn relation_query_with_selection(
+        cursor: Option<String>,
+        resolution: RelationResolutionFilter,
+        direction: RelationDirection,
+        content_selection: ContentSelection,
+    ) -> Result<DetailedRelationQuery, Box<dyn Error>> {
         Ok(DetailedRelationQuery {
             anchor: RelationAnchor::File {
                 file: RepositoryFilePath::new(Path::new("src/same.rs"))?,
@@ -1627,6 +1685,7 @@ mod tests {
             )?)
             .with_aggregate_limits(Some(100), None, None, None, None, None)?,
             cursor,
+            content_selection,
         })
     }
 

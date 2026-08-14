@@ -757,7 +757,7 @@ mod tests {
         )?;
         require_eq(
             &predecessor.schema.migration_steps_remaining,
-            &Some(8),
+            &Some(9),
             "predecessor migration steps",
         )?;
         require_eq(
@@ -768,6 +768,12 @@ mod tests {
 
         let resolution_path = temp.path().join("resolution-predecessor.db");
         let resolution_store = AtlasStore::open_for_project(&resolution_path, &root)?;
+        resolution_store.connection.execute_batch(
+            "DROP TABLE file_content_classifications;
+             DROP INDEX idx_nodes_path_kind;",
+        )?;
+        crate::schema::recreate_disposable_graph_projection(&resolution_store.connection, false)?;
+        crate::schema::recreate_pre_selector_symbol_storage_for_test(&resolution_store.connection)?;
         resolution_store.connection.execute_batch(
             "ALTER TABLE source_parse_metadata RENAME TO source_parse_metadata_current;
              CREATE TABLE source_parse_metadata (
@@ -786,6 +792,7 @@ mod tests {
              DROP TABLE source_parse_metadata_current;
              CREATE INDEX idx_source_parse_metadata_parser
                  ON source_parse_metadata(parser);
+             DROP INDEX idx_symbol_import_alias_lookup;
              DROP TABLE file_text_fts;",
         )?;
         set_metadata(&resolution_store.connection, SCHEMA_VERSION_KEY, "12")?;
@@ -799,7 +806,7 @@ mod tests {
         )?;
         require_eq(
             &resolution.schema.migration_steps_remaining,
-            &Some(4),
+            &Some(5),
             "schema-12 migration steps",
         )?;
         require_eq(
