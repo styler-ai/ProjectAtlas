@@ -407,7 +407,7 @@ explicit `projectatlas token --view tui` view.
 The default token report is a fast offline heuristic, not provider billing telemetry. It estimates emitted
 ProjectAtlas payload text with `ceil(chars / 4)` and file-size baselines with `ceil(bytes / 4)`. Reports expose
 bucket, baseline kind, confidence, accounting layer, provider, model, tokenizer backend, and accuracy labels so agents can separate
-observed full-file compression from modeled navigation savings. Use `tokens_avoided` for the conservative headline because repeated modeled baselines are deduped there; `estimated_saved` remains the legacy gross compatibility value. Local tokenizer calibration is explicit with `projectatlas token --tokenizer o200k_base` or `projectatlas token --tokenizer cl100k_base`; normal orientation and `atlas_token_report` must stay local and fast.
+observed full-file compression from modeled navigation savings. Use `tokens_avoided` or `average_tokens_avoided` for the primary value: measured compression plus unchanged non-folder savings plus `floor(deduped aggregate directory-walk baseline / 2)`, minus the complete Atlas payload. `maximum_tokens_avoided` uses the same inputs but retains the full all-files directory-walk baseline. `average_policy` identifies this as a fixed 50% policy estimate, not a benchmark, provider counter, or measured Codex average. `estimated_saved` remains the legacy gross compatibility value. Local tokenizer calibration is explicit with `projectatlas token --tokenizer o200k_base` or `projectatlas token --tokenizer cl100k_base`; normal orientation and `atlas_token_report` must stay local and fast.
 
 To attach the controlled v0.4 navigation benchmark to the existing overview,
 pass its repository-relative path:
@@ -452,10 +452,12 @@ file reads avoided; aggregate bucket-only reports must stay `not_recorded`
 instead of inventing whole-file-read counts.
 
 The TUI keeps the observed summary/slice and search-modeled file-read sources as
-separate proportional bars. Broad folder walks skipped and candidate files not
-opened remain in the exact source ledger and contribute to the navigation
-composition total rather than adding standalone bar panels. The ledger and
-composition use the same persisted rows, counts, and token allocation.
+separate proportional bars rather than adding standalone bar panels. Average
+tokens avoided remains the dominant hero; complete average and maximum
+without-minus-with equations are stacked directly below it.
+Broad folder walks and candidate files remain in the exact source ledger, but
+only the folder-walk row receives the 50% average-policy adjustment. The ledger
+and composition use the same persisted rows, counts, and token allocation.
 
 For freshness, treat `projectatlas watch` as the steady-state updater for local editing sessions. Line slices
 validate against SQLite and then read the current file from disk. Symbol slices also read current disk content,
@@ -463,7 +465,7 @@ but their line ranges come from the deep symbol index and should be kept fresh b
 
 ## Codex skills
 
-ProjectAtlas ships public agent guidance through `AGENTS.md`, repository docs, and the packaged plugin skill.
+ProjectAtlas ships public agent guidance through repository docs and the packaged plugin skill.
 Personal workspace memory is local state and should stay ignored/untracked through `.gitignore`.
 
 ## Claude Code Plugin And OpenCode MCP Config

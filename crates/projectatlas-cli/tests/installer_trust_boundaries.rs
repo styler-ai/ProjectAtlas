@@ -110,13 +110,11 @@ fn powershell_bootstrap_rejects_project_state_reparse_points_before_writing()
         !output.status.success(),
         "PowerShell bootstrap accepted a project-state reparse point",
     )?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let normalized_stderr = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
     require(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("must not be a symlink, junction, or reparse point"),
-        format!(
-            "PowerShell bootstrap did not explain the rejected reparse point: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ),
+        normalized_stderr.contains("must not be a symlink, junction, or reparse point"),
+        format!("PowerShell bootstrap did not explain the rejected reparse point: {stderr}"),
     )?;
     require(
         fs::read_to_string(sentinel)? == "unchanged\n"
@@ -159,12 +157,12 @@ fn powershell_bootstrap_rejects_redirected_config_outputs() -> Result<(), Box<dy
             !output.status.success(),
             format!("PowerShell bootstrap accepted redirected output {config_name}"),
         )?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let normalized_stderr = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
         require(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("must not be a symlink, junction, or reparse point"),
+            normalized_stderr.contains("must not be a symlink, junction, or reparse point"),
             format!(
-                "PowerShell bootstrap did not explain redirected output {config_name}: {}",
-                String::from_utf8_lossy(&output.stderr)
+                "PowerShell bootstrap did not explain redirected output {config_name}: {stderr}"
             ),
         )?;
         require(

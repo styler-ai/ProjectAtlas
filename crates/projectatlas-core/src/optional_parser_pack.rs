@@ -36,7 +36,7 @@ pub const OPTIONAL_GRAMMAR_CATALOG_RELEASE_TAG: &str = "v1.13.2";
 pub const OPTIONAL_GRAMMAR_CATALOG_SOURCE_BUNDLE_SHA256: &str =
     "d684799dc664553c9c746d5fe676a5b599f9efcec4cad5450bec7ec5a29574a9";
 /// Exact `ProjectAtlas` release line selected to consume the first pack.
-pub const OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION: &str = "0.4.2";
+pub const OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION: &str = "0.4.4";
 /// Exact Tree-sitter runtime selected by the consuming parser worker.
 pub const OPTIONAL_PARSER_PACK_TREE_SITTER_VERSION: &str = "0.26.9";
 /// Oldest grammar ABI accepted by the selected Tree-sitter runtime.

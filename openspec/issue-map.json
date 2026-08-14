@@ -10,6 +10,32 @@
     "bound-impact-analysis-deadlines": 380,
     "centralize-cargo-dependency-management": 316,
     "close-mcp-cli-parity": 281,
+    "close-v043-release-regressions": {
+      "contract": "checklist-v1",
+      "primary_issue": 428,
+      "owners": [
+        {
+          "issue": 428,
+          "first_task": "1.1",
+          "last_task": "1.4"
+        },
+        {
+          "issue": 432,
+          "first_task": "2.1",
+          "last_task": "2.4"
+        },
+        {
+          "issue": 433,
+          "first_task": "3.1",
+          "last_task": "3.4"
+        },
+        {
+          "issue": 435,
+          "first_task": "4.1",
+          "last_task": "4.3"
+        }
+      ]
+    },
     "complete-v040-release-readiness": 311,
     "consolidate-projectatlas-landing-page": 381,
     "converge-claude-code-installer": 278,

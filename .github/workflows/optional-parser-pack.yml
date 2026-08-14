@@ -57,6 +57,14 @@ jobs:
           rustup default $env:RUSTUP_TOOLCHAIN
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Repository source policy lints
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Bind exact clean candidate identity
         id: identity
         shell: pwsh

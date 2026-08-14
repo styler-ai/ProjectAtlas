@@ -130,7 +130,7 @@ Prefer installer-generated absolute host configs:
 
 After plugin/runtime updates, verify `codex plugin list --marketplace projectatlas --json` and `codex mcp get projectatlas` (or `codex mcp list`). Rerun the installer if the official plugin cache, skill, MCP registry, runtime version, DB/config binding, or downstream release pin is stale. Use `PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1` or `PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1` only in intentionally managed environments. A parent host may need restart; absolute generated configs remain authoritative.
 
-For a stale official plugin snapshot, run `codex plugin marketplace upgrade projectatlas --json`, `codex plugin remove projectatlas --marketplace projectatlas`, `codex plugin add projectatlas --marketplace projectatlas`, then `codex plugin list --marketplace projectatlas --available --json`. If that source is pinned to an older release tag, replace only the dedicated `styler-ai/ProjectAtlas` source after confirming it has no unrelated consumers: `codex plugin marketplace remove projectatlas`, then `codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.4.2`.
+For a stale official plugin snapshot, run `codex plugin marketplace upgrade projectatlas --json`, `codex plugin remove projectatlas --marketplace projectatlas`, `codex plugin add projectatlas --marketplace projectatlas`, then `codex plugin list --marketplace projectatlas --available --json`. If that source is pinned to an older release tag, replace only the dedicated `styler-ai/ProjectAtlas` source after confirming it has no unrelated consumers: `codex plugin marketplace remove projectatlas`, then `codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.4.4`.
 
 MCP stdio uses newline-delimited JSON-RPC, not `Content-Length` framing.
 
@@ -170,7 +170,7 @@ Read-only review or CI smoke must set `PROJECTATLAS_NO_TELEMETRY=1`.
 
 ## Token Reporting
 
-Use `atlas_token_report` or `projectatlas token` when asked. Treat `tokens_avoided` as the conservative headline. Default accounting is offline `ceil(chars_or_bytes / 4)` heuristic, not model billing. Distinguish observed summary/slice replacement from modeled navigation narrowing; inspect accounting layer, baseline, confidence, provider/model/backend, and accuracy labels. Search-modeled file reads avoided are weaker than observed summary/slice replacements. Tokenizer calibration is explicit; normal reporting never calls network APIs.
+Use `atlas_token_report` or `projectatlas token` when asked. Treat `tokens_avoided` as the compatibility alias for the primary `average_tokens_avoided`: measured compression plus unchanged non-folder savings plus 50% of the deduped aggregate folder-navigation baseline, minus the complete Atlas payload. `maximum_tokens_avoided` retains the all-files folder-scope calculation. Inspect `average_policy`; 50% is a fixed policy estimate, not a benchmark-derived Codex average or provider-billing value. Default accounting is offline `ceil(chars_or_bytes / 4)` heuristic. Distinguish observed summary/slice replacement from modeled navigation narrowing; inspect accounting layer, baseline, confidence, provider/model/backend, and accuracy labels. Search-modeled file reads avoided are weaker than observed summary/slice replacements. Tokenizer calibration is explicit; normal reporting never calls network APIs.
 
 ## Repository Gates
 

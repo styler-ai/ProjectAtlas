@@ -167,7 +167,15 @@ pub fn render_token_overview(overview: &TokenOverview) -> String {
             "measured_tokens_saved": overview.measured_tokens_saved,
             "gross_modeled_tokens_avoided": overview.gross_modeled_tokens_avoided,
             "deduped_modeled_tokens_avoided": overview.deduped_modeled_tokens_avoided,
+            "average_modeled_tokens_avoided": overview.average_modeled_tokens_avoided,
+            "average_tokens_avoided": overview.average_tokens_avoided,
+            "maximum_tokens_avoided": overview.maximum_tokens_avoided,
             "tokens_avoided": overview.tokens_avoided,
+            "average_policy": {
+                "directory_walk_baseline_percent": overview.average_policy.directory_walk_baseline_percent,
+                "atlas_payload_percent": overview.average_policy.atlas_payload_percent,
+                "evidence": overview.average_policy.evidence.as_str(),
+            },
             "repeated_baselines_deduped": overview.repeated_baselines_deduped,
             "likely_file_reads_avoided": overview.likely_file_reads_avoided,
             "read_avoidance": {
@@ -189,6 +197,9 @@ pub fn render_token_overview(overview: &TokenOverview) -> String {
                 "measured_saved_tokens": overview.measured_tokens_saved,
                 "gross_modeled_avoided_tokens": overview.gross_modeled_tokens_avoided,
                 "deduped_modeled_avoided_tokens": overview.deduped_modeled_tokens_avoided,
+                "average_modeled_avoided_tokens": overview.average_modeled_tokens_avoided,
+                "average_tokens_avoided": overview.average_tokens_avoided,
+                "maximum_tokens_avoided": overview.maximum_tokens_avoided,
                 "tokens_avoided": overview.tokens_avoided,
                 "likely_file_reads_avoided": overview.likely_file_reads_avoided,
                 "savings_rate": savings_rate,
@@ -351,8 +362,8 @@ mod tests {
     use super::{encode_agent_payload, render_symbols, render_token_overview, render_token_trends};
     use crate::symbols::{CodeSymbol, ParserKind, SymbolKind};
     use crate::telemetry::{
-        TokenOverview, TokenTrendReport, TokenTrendWindow, UsageDetailAvailability,
-        usage_from_estimates, usage_from_text,
+        TOKEN_BASELINE_DIRECTORY_WALK, TokenOverview, TokenTrendReport, TokenTrendWindow,
+        UsageDetailAvailability, usage_from_estimates, usage_from_text,
     };
     use serde_json::{Value, json};
 
@@ -399,13 +410,37 @@ mod tests {
     #[test]
     fn renders_token_overview_with_read_avoidance_section() -> Result<(), Box<dyn std::error::Error>>
     {
+        let mut folder = usage_from_estimates("s", "folders", None, None, 101, 20);
+        folder.denominator_kind = TOKEN_BASELINE_DIRECTORY_WALK.to_string();
         let overview = TokenOverview::from_events(&[
             usage_from_text("s", "summary", None, None, "abcdefghijkl", "abcd"),
             usage_from_estimates("s", "search", None, None, 100, 20),
+            folder,
         ]);
         let toon = render_token_overview(&overview);
         let decoded: Value = toon_format::decode_default(&toon)?;
         let token_savings = &decoded["token_savings"];
+
+        require_json_eq(
+            &token_savings["average_tokens_avoided"],
+            &json!(overview.average_tokens_avoided),
+            "average tokens avoided",
+        )?;
+        require_json_eq(
+            &token_savings["maximum_tokens_avoided"],
+            &json!(overview.maximum_tokens_avoided),
+            "maximum tokens avoided",
+        )?;
+        require_json_eq(
+            &token_savings["tokens_avoided"],
+            &token_savings["average_tokens_avoided"],
+            "primary average compatibility alias",
+        )?;
+        require_json_eq(
+            &token_savings["average_policy"]["directory_walk_baseline_percent"],
+            &json!(50),
+            "average directory-walk policy",
+        )?;
 
         require_json_eq(
             &token_savings["likely_file_reads_avoided"],

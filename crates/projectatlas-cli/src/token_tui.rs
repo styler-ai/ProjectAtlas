@@ -273,6 +273,22 @@ impl TokenAtlasPreview {
                 available: true,
             };
         };
+        let omitted_disconnected = candidates.iter().any(|edge| {
+            !largest_component.contains(&edge.source) || !largest_component.contains(&edge.target)
+        });
+        candidates.retain(|edge| {
+            largest_component.contains(&edge.source) && largest_component.contains(&edge.target)
+        });
+        let mut branch_reach = BTreeMap::<String, BTreeMap<String, usize>>::new();
+        for edge in &candidates {
+            for (blocked, start) in [(&edge.source, &edge.target), (&edge.target, &edge.source)] {
+                let reach = atlas_branch_reach(&adjacency, blocked, start);
+                branch_reach
+                    .entry(blocked.clone())
+                    .or_default()
+                    .insert(start.clone(), reach);
+            }
+        }
         let mut nodes = BTreeSet::from([hub]);
         let mut edges = Vec::new();
         let mut selected_degrees = BTreeMap::<String, usize>::new();
@@ -291,13 +307,36 @@ impl TokenAtlasPreview {
             };
             let next_index = candidates
                 .iter()
-                .position(|edge| {
+                .enumerate()
+                .filter_map(|(index, edge)| {
                     let source_selected = nodes.contains(&edge.source);
                     let target_selected = nodes.contains(&edge.target);
-                    source_selected != target_selected
-                        && nodes.len() < ATLAS_PREVIEW_MAX_NODES
-                        && can_admit(edge)
+                    if source_selected == target_selected
+                        || nodes.len() >= ATLAS_PREVIEW_MAX_NODES
+                        || !can_admit(edge)
+                    {
+                        return None;
+                    }
+                    let (selected, unselected) = if source_selected {
+                        (&edge.source, &edge.target)
+                    } else {
+                        (&edge.target, &edge.source)
+                    };
+                    let reach = branch_reach
+                        .get(selected)
+                        .and_then(|by_neighbor| by_neighbor.get(unselected))
+                        .copied()
+                        .unwrap_or_default();
+                    let expansion_degree = degrees.get(unselected).copied().unwrap_or_default();
+                    Some((index, reach, expansion_degree))
                 })
+                .max_by(|left, right| {
+                    left.1
+                        .cmp(&right.1)
+                        .then_with(|| left.2.cmp(&right.2))
+                        .then_with(|| right.0.cmp(&left.0))
+                })
+                .map(|(index, _, _)| index)
                 .or_else(|| {
                     candidates.iter().position(|edge| {
                         nodes.contains(&edge.source)
@@ -317,7 +356,7 @@ impl TokenAtlasPreview {
         }
         Self {
             edges,
-            truncated: source_truncated || !candidates.is_empty(),
+            truncated: source_truncated || omitted_disconnected || !candidates.is_empty(),
             available: true,
         }
     }
@@ -330,6 +369,26 @@ impl TokenAtlasPreview {
             .collect::<BTreeSet<_>>()
             .len()
     }
+}
+
+/// Count one candidate branch without crossing back through its selected endpoint.
+fn atlas_branch_reach(
+    adjacency: &BTreeMap<String, BTreeSet<String>>,
+    blocked: &str,
+    start: &str,
+) -> usize {
+    let mut visited = BTreeSet::from([start.to_string()]);
+    let mut frontier = VecDeque::from([start.to_string()]);
+    while let Some(node) = frontier.pop_front() {
+        if let Some(neighbors) = adjacency.get(&node) {
+            for neighbor in neighbors {
+                if neighbor != blocked && visited.insert(neighbor.clone()) {
+                    frontier.push_back(neighbor.clone());
+                }
+            }
+        }
+    }
+    visited.len()
 }
 
 /// Light terminal palette preserving the same semantic color roles.
@@ -384,6 +443,21 @@ pub(crate) fn render_token_dashboard_with_atlas(
     let width = dashboard_width().clamp(80, DASHBOARD_MAX_WIDTH) as u16;
     with_token_theme(theme, || {
         render_dashboard_to_ansi_string(width, DASHBOARD_HEIGHT, |frame| {
+            render_overview_frame_with_atlas(frame, overview, session, Some(atlas));
+        })
+    })
+}
+
+/// Render one deterministic test dashboard with an explicit atlas width.
+#[cfg(test)]
+pub(crate) fn render_token_dashboard_with_atlas_at_width(
+    overview: &TokenOverview,
+    session: Option<&str>,
+    atlas: &TokenAtlasPreview,
+    width: u16,
+) -> String {
+    with_token_theme(TokenDashboardTheme::Dark, || {
+        render_dashboard_to_string(width, DASHBOARD_HEIGHT, |frame| {
             render_overview_frame_with_atlas(frame, overview, session, Some(atlas));
         })
     })
@@ -675,25 +749,59 @@ fn render_token_hero(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview
             Constraint::Length(2),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(3),
             Constraint::Min(3),
         ])
         .split(inner);
 
     frame.render_widget(
-        Paragraph::new(reference_title("TOTAL TOKENS AVOIDED"))
+        Paragraph::new(reference_title("AVERAGE TOKENS AVOIDED"))
             .style(section_title_style().bg(THEME_PANEL))
             .alignment(Alignment::Center),
         rows[0],
     );
-    render_hero_value(frame, rows[1], overview.tokens_avoided);
+    render_hero_value(frame, rows[1], overview.average_tokens_avoided);
     frame.render_widget(
-        Paragraph::new("tokens avoided")
+        Paragraph::new("Total Tokens Avoided")
             .style(body_style().bg(THEME_PANEL))
             .alignment(Alignment::Center),
         rows[2],
     );
     render_divider(frame, rows[3]);
 
+    let with_projectatlas = usize_to_isize_saturating(overview.estimated_with_projectatlas);
+    let average = overview.average_tokens_avoided;
+    render_token_equation(
+        frame,
+        rows[4],
+        reconciled_without_projectatlas(overview),
+        with_projectatlas,
+        average,
+        "Average avoided",
+        signed_color(average),
+    );
+    let maximum = overview.maximum_tokens_avoided;
+    render_token_equation(
+        frame,
+        rows[5],
+        with_projectatlas.saturating_add(maximum),
+        with_projectatlas,
+        maximum,
+        "Maximum avoided",
+        if maximum < 0 { THEME_RED } else { THEME_YELLOW },
+    );
+}
+
+/// Draw one without-minus-with avoided-token equation and its three bars.
+fn render_token_equation(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    without_projectatlas: isize,
+    with_projectatlas: isize,
+    avoided: isize,
+    avoided_label: &'static str,
+    avoided_color: Color,
+) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -703,11 +811,7 @@ fn render_token_hero(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview
             Constraint::Length(3),
             Constraint::Percentage(30),
         ])
-        .split(rows[4]);
-
-    let with_projectatlas = usize_to_isize_saturating(overview.estimated_with_projectatlas);
-    let without_projectatlas = reconciled_without_projectatlas(overview);
-    let saved_by_projectatlas = overview.tokens_avoided;
+        .split(area);
     let denominator = without_projectatlas.unsigned_abs();
 
     render_metric_column(
@@ -731,10 +835,10 @@ fn render_token_hero(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview
     render_metric_column(
         frame,
         columns[4],
-        signed_count(saved_by_projectatlas),
-        "Saved by ProjectAtlas",
-        signed_color(saved_by_projectatlas),
-        ratio(saved_by_projectatlas.unsigned_abs(), denominator),
+        signed_count(avoided),
+        avoided_label,
+        avoided_color,
+        ratio(avoided.unsigned_abs(), denominator),
     );
 }
 
@@ -1747,9 +1851,9 @@ impl TokenMix {
 fn file_handling_token_mix(overview: &TokenOverview) -> TokenMix {
     TokenMix {
         observed: overview.measured_tokens_saved,
-        modeled: overview.deduped_modeled_tokens_avoided,
+        modeled: overview.average_modeled_tokens_avoided,
         observed_abs: overview.measured_tokens_saved.unsigned_abs(),
-        modeled_abs: overview.deduped_modeled_tokens_avoided.unsigned_abs(),
+        modeled_abs: overview.average_modeled_tokens_avoided.unsigned_abs(),
     }
 }
 
@@ -1797,8 +1901,19 @@ fn savings_source_rows_for_width(overview: &TokenOverview, compact: bool) -> Vec
         .iter()
         .map(|group| group.gross_tokens.unsigned_abs().max(group.steps))
         .collect::<Vec<_>>();
-    let modeled_tokens =
+    let mut modeled_tokens =
         allocate_signed_total(overview.deduped_modeled_tokens_avoided, &modeled_weights);
+    let folder_discount = overview
+        .deduped_modeled_tokens_avoided
+        .saturating_sub(overview.average_modeled_tokens_avoided);
+    if folder_discount > 0
+        && let Some((index, _)) = modeled_groups
+            .iter()
+            .enumerate()
+            .find(|(_, group)| group.directory_walk)
+    {
+        modeled_tokens[index] = modeled_tokens[index].saturating_sub(folder_discount);
+    }
     for (group, tokens) in modeled_groups.into_iter().zip(modeled_tokens) {
         if group.steps == 0 && tokens == 0 {
             continue;
@@ -1824,7 +1939,9 @@ fn savings_source_rows_for_width(overview: &TokenOverview, compact: bool) -> Vec
     let displayed_steps = rows.iter().map(|row| row.steps).sum::<usize>();
     let displayed_tokens = rows.iter().map(|row| row.tokens).sum::<isize>();
     let step_remainder = overview.calls.saturating_sub(displayed_steps);
-    let token_remainder = overview.tokens_avoided.saturating_sub(displayed_tokens);
+    let token_remainder = overview
+        .average_tokens_avoided
+        .saturating_sub(displayed_tokens);
     if step_remainder > 0 || token_remainder != 0 {
         rows.push(SavingsSourceRow {
             label: if compact {
@@ -1873,6 +1990,8 @@ struct ModeledSourceGroup {
     steps: usize,
     /// Gross saved-token contribution before headline dedupe allocation.
     gross_tokens: isize,
+    /// Whether the fixed average policy applies to this folder-scope row.
+    directory_walk: bool,
 }
 
 impl ModeledSourceGroup {
@@ -1883,6 +2002,7 @@ impl ModeledSourceGroup {
         meaning: &'static str,
         compact_meaning: &'static str,
         icon: &'static str,
+        directory_walk: bool,
     ) -> Self {
         Self {
             label,
@@ -1892,6 +2012,7 @@ impl ModeledSourceGroup {
             icon,
             steps: 0,
             gross_tokens: 0,
+            directory_walk,
         }
     }
 
@@ -1926,6 +2047,7 @@ fn modeled_source_groups(overview: &TokenOverview) -> Vec<ModeledSourceGroup> {
             "Ranking skipped broad folders",
             "Folders skipped",
             "□",
+            true,
         ),
         ModeledSourceGroup::new(
             "Opened fewer candidates (A)",
@@ -1933,6 +2055,7 @@ fn modeled_source_groups(overview: &TokenOverview) -> Vec<ModeledSourceGroup> {
             "Folder ranking narrowed files",
             "Folder shortlist",
             "▤",
+            false,
         ),
         ModeledSourceGroup::new(
             "Opened fewer candidates (B)",
@@ -1940,6 +2063,7 @@ fn modeled_source_groups(overview: &TokenOverview) -> Vec<ModeledSourceGroup> {
             "Search/ranking narrowed files",
             "Search shortlist",
             "▥",
+            false,
         ),
         ModeledSourceGroup::new(
             "Other modeled narrowing",
@@ -1947,6 +2071,7 @@ fn modeled_source_groups(overview: &TokenOverview) -> Vec<ModeledSourceGroup> {
             "Additional modeled avoidance",
             "Other modeled",
             "◇",
+            false,
         ),
     ];
     for bucket in overview
@@ -1965,11 +2090,13 @@ fn modeled_source_groups(overview: &TokenOverview) -> Vec<ModeledSourceGroup> {
 
 /// Pick the reference-style source row for one modeled bucket.
 fn modeled_group_index(bucket: &TokenBucketOverview) -> usize {
+    if bucket.denominator_kind == TOKEN_BASELINE_DIRECTORY_WALK {
+        return 0;
+    }
     match (
         bucket.baseline_kind.as_str(),
         bucket.denominator_kind.as_str(),
     ) {
-        (TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_DIRECTORY_WALK) => 0,
         (TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_SELECTED_CANDIDATES) => 1,
         (TOKEN_BASELINE_SELECTED_CANDIDATES, _) | (_, TOKEN_BASELINE_SELECTED_CANDIDATES) => 2,
         _ => 3,
@@ -2026,7 +2153,7 @@ fn split_signed_by_ratio(value: isize, part: usize, total: usize) -> isize {
 /// Return the screenshot hero's reconciled conservative baseline operand.
 fn reconciled_without_projectatlas(overview: &TokenOverview) -> isize {
     usize_to_isize_saturating(overview.estimated_with_projectatlas)
-        .saturating_add(overview.tokens_avoided)
+        .saturating_add(overview.average_tokens_avoided)
 }
 
 /// Convert a `usize` to `isize` without panicking on unusually large values.
@@ -2575,10 +2702,11 @@ mod tests {
             "Session:",
             "Lookups:",
             "Estimate:",
-            "tokens avoided",
+            "Total Tokens Avoided",
             "Without ProjectAtlas",
             "With ProjectAtlas",
-            "Saved by ProjectAtlas",
+            "Average avoided",
+            "Maximum avoided",
             "file reads avoided",
             "Observed (summaries/slices)",
             "Search-modeled narrowing",
@@ -2609,7 +2737,7 @@ mod tests {
         assert!(!dashboard.contains("Candidate files not opened"));
         assert!(!dashboard.contains("source steps account for"));
         for title in [
-            "TOTAL TOKENS AVOIDED",
+            "AVERAGE TOKENS AVOIDED",
             "NAVIGATION WORK AVOIDED",
             "SAVINGS COMPOSITION",
             "SIGNAL",
@@ -2641,7 +2769,9 @@ mod tests {
             &dashboard,
             &[
                 "ProjectAtlas",
-                &reference_title("TOTAL TOKENS AVOIDED"),
+                &reference_title("AVERAGE TOKENS AVOIDED"),
+                "Average avoided",
+                "Maximum avoided",
                 &reference_title("NAVIGATION WORK AVOIDED"),
                 &reference_title("SAVINGS COMPOSITION"),
                 &reference_title("WHERE THE SAVINGS CAME FROM"),
@@ -2649,6 +2779,33 @@ mod tests {
             ],
         );
         assert_header_margin(&dashboard, "Source", "Summaries and slices");
+    }
+
+    #[test]
+    fn overview_dashboard_renders_complete_version_footer_at_supported_widths() {
+        let overview = sample_overview();
+        let expected_footer = format!("ProjectAtlas v{}", env!("CARGO_PKG_VERSION"));
+
+        for width in [80, 140, 200] {
+            let buffer = render_overview_buffer_at_width(&overview, Some("s"), width);
+            let rows = (0..buffer.area.height)
+                .map(|y| line_symbols(&buffer, y))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row.contains(&expected_footer))
+                    .count(),
+                1,
+                "{width}-column overview must contain exactly one complete version footer"
+            );
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row.matches("ProjectAtlas v").count())
+                    .sum::<usize>(),
+                1,
+                "{width}-column overview must not duplicate or clip the version footer"
+            );
+        }
     }
 
     #[test]
@@ -2729,7 +2886,7 @@ mod tests {
         assert_cell_style(&buffer, "Token Impact", THEME_BLUE, Modifier::BOLD);
         assert_cell_style(
             &buffer,
-            &reference_title("TOTAL TOKENS AVOIDED"),
+            &reference_title("AVERAGE TOKENS AVOIDED"),
             super::THEME_TEXT,
             Modifier::BOLD,
         );
@@ -2757,12 +2914,8 @@ mod tests {
             THEME_INK_WHITE,
             Modifier::empty(),
         );
-        assert_cell_style(
-            &buffer,
-            "Saved by ProjectAtlas",
-            THEME_GREEN,
-            Modifier::empty(),
-        );
+        assert_cell_style(&buffer, "Average avoided", THEME_GREEN, Modifier::empty());
+        assert_cell_style(&buffer, "Maximum avoided", THEME_YELLOW, Modifier::empty());
         assert_cell_style(
             &buffer,
             "Observed (summaries/slices)",
@@ -2793,7 +2946,6 @@ mod tests {
             THEME_YELLOW,
             Modifier::empty(),
         );
-        assert_cell_style(&buffer, "Tokens Avoided", super::THEME_TEXT, Modifier::BOLD);
         assert_cell_style(
             &buffer,
             "Search-modeled narrowing",
@@ -2880,7 +3032,7 @@ mod tests {
         let overview = TokenOverview::from_estimated_totals(3, 241_563_877, 4_749_368);
         let narrow_buffer = render_overview_buffer_at_width(&overview, Some("s"), 100);
         let Some((_, narrow_title_y)) =
-            find_text(&narrow_buffer, &reference_title("TOTAL TOKENS AVOIDED"))
+            find_text(&narrow_buffer, &reference_title("AVERAGE TOKENS AVOIDED"))
         else {
             unreachable!("hero title should render");
         };
@@ -2896,7 +3048,7 @@ mod tests {
         );
 
         let buffer = render_overview_buffer_at_width(&overview, Some("s"), 140);
-        let Some((_, title_y)) = find_text(&buffer, &reference_title("TOTAL TOKENS AVOIDED"))
+        let Some((_, title_y)) = find_text(&buffer, &reference_title("AVERAGE TOKENS AVOIDED"))
         else {
             unreachable!("hero title should render");
         };
@@ -2920,7 +3072,7 @@ mod tests {
             "wide hero value should avoid dense segmented glyphs that render inconsistently across terminals"
         );
         let caption_line = line_symbols(&buffer, title_y + 3);
-        assert!(caption_line.contains("tokens avoided"));
+        assert!(caption_line.contains("Total Tokens Avoided"));
         assert!(
             !caption_line.contains(&signed_count(overview.tokens_avoided)),
             "caption should label the hero without duplicating the numeric value"
@@ -2929,7 +3081,7 @@ mod tests {
         let dashboard = render_dashboard_to_string(140, DASHBOARD_HEIGHT, |frame| {
             render_overview_frame(frame, &overview, Some("s"));
         });
-        assert!(dashboard.contains("tokens avoided"));
+        assert!(dashboard.contains("Total Tokens Avoided"));
         assert!(
             !dashboard.contains(&format!(
                 "{} tokens avoided",
@@ -2937,6 +3089,121 @@ mod tests {
             )),
             "caption should not duplicate the saved-token number already shown as the hero and saved operand"
         );
+    }
+
+    #[test]
+    fn overview_dashboard_duplicates_the_complete_average_and_maximum_equations() {
+        let overview = sample_overview();
+        for width in [80, 140, 190] {
+            let buffer = render_overview_buffer_at_width(&overview, Some("s"), width);
+            let Some((_, title_y)) = find_text(&buffer, &reference_title("AVERAGE TOKENS AVOIDED"))
+            else {
+                unreachable!("average hero should render at width {width}");
+            };
+            let Some((_, average_y)) = find_text(&buffer, "Average avoided") else {
+                unreachable!("average comparison row should render at width {width}");
+            };
+            let Some((_, maximum_y)) = find_text(&buffer, "Maximum avoided") else {
+                unreachable!("maximum comparison row should render at width {width}");
+            };
+            assert_eq!(maximum_y, average_y + 3);
+
+            let with_projectatlas =
+                super::usize_to_isize_saturating(overview.estimated_with_projectatlas);
+            let equations = [
+                (
+                    average_y,
+                    reconciled_without_projectatlas(&overview),
+                    overview.average_tokens_avoided,
+                    "Average avoided",
+                ),
+                (
+                    maximum_y,
+                    with_projectatlas.saturating_add(overview.maximum_tokens_avoided),
+                    overview.maximum_tokens_avoided,
+                    "Maximum avoided",
+                ),
+            ];
+            let text_in = |area: super::Rect| {
+                let mut text = String::new();
+                for y in area.y..area.y.saturating_add(area.height) {
+                    for x in area.x..area.x.saturating_add(area.width) {
+                        if let Some(cell) = buffer.cell((x, y)) {
+                            text.push_str(cell.symbol());
+                        }
+                    }
+                    text.push('\n');
+                }
+                text
+            };
+
+            for (label_y, without_projectatlas, avoided, avoided_label) in equations {
+                assert_eq!(
+                    without_projectatlas.saturating_sub(with_projectatlas),
+                    avoided
+                );
+                let equation =
+                    super::Rect::new(2, label_y.saturating_sub(1), width.saturating_sub(4), 3);
+                let columns = super::Layout::default()
+                    .direction(super::Direction::Horizontal)
+                    .constraints([
+                        super::Constraint::Percentage(30),
+                        super::Constraint::Length(3),
+                        super::Constraint::Percentage(30),
+                        super::Constraint::Length(3),
+                        super::Constraint::Percentage(30),
+                    ])
+                    .split(equation);
+                let value_y = label_y.saturating_sub(1);
+                let bar_y = label_y + 1;
+
+                assert!(
+                    text_in(super::Rect::new(columns[0].x, value_y, columns[0].width, 1,))
+                        .contains(&signed_count(without_projectatlas))
+                );
+                assert!(text_in(columns[0]).contains("Without ProjectAtlas"));
+                assert!(text_in(columns[1]).contains('-'));
+                assert!(
+                    text_in(super::Rect::new(columns[2].x, value_y, columns[2].width, 1,))
+                        .contains(&signed_count(with_projectatlas))
+                );
+                assert!(text_in(columns[2]).contains("With ProjectAtlas"));
+                assert!(text_in(columns[3]).contains('='));
+                assert!(
+                    text_in(super::Rect::new(columns[4].x, value_y, columns[4].width, 1,))
+                        .contains(&signed_count(avoided))
+                );
+                assert!(text_in(columns[4]).contains(avoided_label));
+                for column in [columns[0], columns[2], columns[4]] {
+                    assert!(
+                        text_in(super::Rect::new(column.x, bar_y, column.width, 1))
+                            .chars()
+                            .any(|character| matches!(character, '█' | '░')),
+                        "every metric column needs its own bar at width {width}"
+                    );
+                }
+            }
+
+            let hero = (title_y..=maximum_y + 1)
+                .map(|y| line_symbols(&buffer, y))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(hero.contains("Total Tokens Avoided"));
+            assert!(!hero.contains('%'));
+            for forbidden in [
+                &reference_title("MAXIMUM TOKENS AVOIDED"),
+                "Maximum:",
+                "50% folder-navigation policy",
+                "all files in avoided folder scopes",
+                "all folder files",
+                "other savings unchanged",
+            ] {
+                assert!(
+                    !hero.contains(forbidden),
+                    "hero should omit obsolete copy {forbidden:?} at width {width}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2948,7 +3215,10 @@ mod tests {
 
         assert!(dashboard.contains("ProjectAtlas"));
         assert!(dashboard.contains("Token Impact"));
-        assert!(dashboard.contains(&reference_title("TOTAL TOKENS AVOIDED")));
+        assert!(dashboard.contains(&reference_title("AVERAGE TOKENS AVOIDED")));
+        assert!(dashboard.contains("Total Tokens Avoided"));
+        assert!(dashboard.contains("Average avoided"));
+        assert!(dashboard.contains("Maximum avoided"));
         assert!(dashboard.contains(&reference_title("NAVIGATION WORK AVOIDED")));
         assert!(dashboard.contains(&reference_title("SAVINGS MIX")));
         assert!(!dashboard.contains(&reference_title("SAVINGS COMPOSITION")));
@@ -3001,17 +3271,22 @@ mod tests {
     #[test]
     fn overview_dashboard_fields_use_consistent_accounting_layers() {
         let overview = sample_overview();
-        let conservative_avoided = overview.tokens_avoided;
+        let average_avoided = overview.tokens_avoided;
         let with_projectatlas = overview.estimated_with_projectatlas as isize;
         let without_projectatlas = reconciled_without_projectatlas(&overview);
 
+        assert_eq!(overview.average_tokens_avoided, 204);
+        assert_eq!(overview.maximum_tokens_avoided, 264);
+        assert_eq!(overview.tokens_avoided, overview.average_tokens_avoided);
+
+        assert_eq!(without_projectatlas - with_projectatlas, average_avoided);
         assert_eq!(
-            without_projectatlas - with_projectatlas,
-            conservative_avoided
+            overview.measured_tokens_saved + overview.average_modeled_tokens_avoided,
+            average_avoided
         );
         assert_eq!(
             overview.measured_tokens_saved + overview.deduped_modeled_tokens_avoided,
-            conservative_avoided
+            overview.maximum_tokens_avoided
         );
         assert_eq!(
             overview.observed_file_read_replacements + overview.modeled_file_reads_avoided,
@@ -3029,17 +3304,37 @@ mod tests {
                 .map(|row| row.steps),
             Some(1)
         );
+        assert_eq!(
+            source_rows
+                .iter()
+                .find(|row| row.label == "Skipped broad folder walk")
+                .map(|row| row.tokens),
+            Some(40)
+        );
+        assert_eq!(
+            source_rows
+                .iter()
+                .find(|row| row.label == "Opened fewer candidates (A)")
+                .map(|row| row.tokens),
+            Some(64)
+        );
+        assert_eq!(
+            source_rows
+                .iter()
+                .find(|row| row.label == "Opened fewer candidates (B)")
+                .map(|row| row.tokens),
+            Some(80)
+        );
         assert_eq!(source_steps, overview.calls);
-        assert_eq!(source_tokens, conservative_avoided);
+        assert_eq!(source_tokens, average_avoided);
         assert!(!dashboard.contains("Broad folder walks skipped"));
         assert!(!dashboard.contains("Candidate files not opened"));
         assert!(dashboard.contains(&signed_count(without_projectatlas)));
         assert!(dashboard.contains(&signed_count(with_projectatlas)));
-        assert!(dashboard.contains(&signed_count(conservative_avoided)));
+        assert!(dashboard.contains(&signed_count(average_avoided)));
+        assert!(dashboard.contains(&signed_count(overview.maximum_tokens_avoided)));
         assert_eq!(
-            dashboard
-                .matches(&signed_count(conservative_avoided))
-                .count(),
+            dashboard.matches(&signed_count(average_avoided)).count(),
             2,
             "wide dashboard should show the saved total as readable hero text and as the equation result"
         );
@@ -3055,6 +3350,9 @@ mod tests {
         overview.calls = 7;
         overview.measured_tokens_saved = 11;
         overview.deduped_modeled_tokens_avoided = 29;
+        overview.average_modeled_tokens_avoided = 29;
+        overview.average_tokens_avoided = 40;
+        overview.maximum_tokens_avoided = 40;
         overview.tokens_avoided = 40;
 
         let rows = savings_source_rows_for_width(&overview, false);
@@ -3067,6 +3365,40 @@ mod tests {
 
         let dashboard = strip_ansi(&render_token_dashboard(&overview, Some("s")));
         assert!(dashboard.contains("Unattributed savings"));
+    }
+
+    #[test]
+    fn overview_dashboard_discounts_every_directory_walk_denominator() {
+        let overview = TokenOverview::from_events(&[usage_from_estimates_with_accounting(
+            "s",
+            "folders",
+            None,
+            Some("src".to_string()),
+            120,
+            20,
+            TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
+            TOKEN_BASELINE_SELECTED_CANDIDATES,
+            TOKEN_CONFIDENCE_POLICY_ESTIMATE,
+            TOKEN_ACCOUNTING_MODELED_AVOIDANCE,
+            TOKEN_BASELINE_DIRECTORY_WALK,
+            TOKEN_DEDUPE_SCOPE_SESSION,
+        )]);
+
+        let rows = savings_source_rows_for_width(&overview, false);
+
+        assert_eq!(overview.average_tokens_avoided, 40);
+        assert_eq!(overview.maximum_tokens_avoided, 100);
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.label == "Skipped broad folder walk")
+                .map(|row| row.tokens),
+            Some(40)
+        );
+        assert_eq!(
+            rows.iter().map(|row| row.tokens).sum::<isize>(),
+            overview.average_tokens_avoided
+        );
+        assert!(!rows.iter().any(|row| row.label == "Unattributed savings"));
     }
 
     #[test]
@@ -3206,6 +3538,68 @@ mod tests {
     }
 
     #[test]
+    fn atlas_preview_discovers_expanding_branches_before_applying_visual_degree_limits() {
+        let kind = GraphRelationKind::Legacy(RelationKind::Calls);
+        let mut relations = Vec::new();
+        for branch in 0..16 {
+            let root = format!("branch-{branch:02}-root");
+            relations.push(("hub".to_string(), root.clone(), kind));
+            let leaves = (0..3)
+                .map(|leaf| format!("branch-{branch:02}-leaf-{leaf}"))
+                .collect::<Vec<_>>();
+            for leaf in &leaves {
+                relations.push((root.clone(), leaf.clone(), kind));
+            }
+            for (left, right) in [(0, 1), (1, 2), (2, 0)] {
+                relations.push((leaves[left].clone(), leaves[right].clone(), kind));
+            }
+        }
+
+        let atlas = TokenAtlasPreview::from_resolved_edges(relations, false);
+        assert_eq!(atlas.node_count(), ATLAS_PREVIEW_MAX_NODES);
+        assert_eq!(atlas.edges.len(), ATLAS_PREVIEW_MAX_EDGES);
+        assert!(atlas.truncated);
+        let mut selected_degrees = BTreeMap::<&str, usize>::new();
+        for edge in &atlas.edges {
+            *selected_degrees.entry(&edge.source).or_default() += 1;
+            *selected_degrees.entry(&edge.target).or_default() += 1;
+        }
+        assert!(
+            selected_degrees
+                .values()
+                .all(|degree| *degree <= ATLAS_PREVIEW_MAX_NODE_DEGREE)
+        );
+
+        let narrow =
+            render_overview_buffer_with_atlas_at_width(&sample_overview(), None, &atlas, 189);
+        assert!(!buffer_to_string(&narrow).contains(&reference_title("ATLAS MAP")));
+        for width in [190, 200, 220] {
+            let buffer =
+                render_overview_buffer_with_atlas_at_width(&sample_overview(), None, &atlas, width);
+            let dashboard = buffer_to_string(&buffer);
+            assert!(dashboard.contains("48 nodes • 64 links"));
+            let atlas_start = TOKEN_IMPACT_COLUMN_WIDTH + 2;
+            let midpoint_x = atlas_start + (width - atlas_start) / 2;
+            let midpoint_y = DASHBOARD_HEIGHT / 2;
+            let quadrants = (0..buffer.area.height)
+                .flat_map(|y| (atlas_start..buffer.area.width).map(move |x| (x, y)))
+                .filter_map(|(x, y)| {
+                    buffer.cell((x, y)).and_then(|cell| {
+                        cell.symbol()
+                            .chars()
+                            .any(|character| ('\u{2801}'..='\u{28ff}').contains(&character))
+                            .then_some((x >= midpoint_x, y >= midpoint_y))
+                    })
+                })
+                .collect::<BTreeSet<_>>();
+            assert!(
+                quadrants.len() >= 3,
+                "atlas should retain visible density across the panel at width {width}: {quadrants:?}"
+            );
+        }
+    }
+
+    #[test]
     fn atlas_preview_excludes_containment_before_applying_bounds() {
         let mut relations = (0..80)
             .map(|index| {
@@ -3327,13 +3721,13 @@ mod tests {
         assert!(dashboard.contains(&format!(
             "Signed mix: observed {} / modeled {}; net {}",
             signed_count(overview.measured_tokens_saved),
-            signed_count(overview.deduped_modeled_tokens_avoided),
+            signed_count(overview.average_modeled_tokens_avoided),
             signed_count(overview.tokens_avoided)
         )));
         assert!(!dashboard.contains("% / modeled"));
         let wide_buffer = render_overview_buffer_at_width(&overview, Some("s"), 140);
         let Some((_, wide_title_y)) =
-            find_text(&wide_buffer, &reference_title("TOTAL TOKENS AVOIDED"))
+            find_text(&wide_buffer, &reference_title("AVERAGE TOKENS AVOIDED"))
         else {
             unreachable!("hero title should render");
         };
@@ -3353,7 +3747,7 @@ mod tests {
 
         let narrow_buffer = render_overview_buffer_at_width(&overview, Some("s"), 100);
         let Some((_, narrow_title_y)) =
-            find_text(&narrow_buffer, &reference_title("TOTAL TOKENS AVOIDED"))
+            find_text(&narrow_buffer, &reference_title("AVERAGE TOKENS AVOIDED"))
         else {
             unreachable!("hero title should render");
         };
@@ -3384,6 +3778,54 @@ mod tests {
         assert_float_eq(single_points[0].1, 20.0);
         assert_float_eq(single_points[1].0, 1.0);
         assert_float_eq(single_points[1].1, 20.0);
+    }
+
+    #[test]
+    fn overview_dashboard_distinguishes_negative_average_from_positive_maximum() {
+        let mut folder =
+            usage_from_estimates("s", "folders", Some("src".to_string()), None, 101, 60);
+        folder.denominator_kind = TOKEN_BASELINE_DIRECTORY_WALK.to_string();
+        let overview = TokenOverview::from_events(&[folder]);
+        assert_eq!(overview.average_tokens_avoided, -10);
+        assert_eq!(overview.maximum_tokens_avoided, 41);
+
+        for width in [80, 140] {
+            let buffer = render_overview_buffer_at_width(&overview, Some("s"), width);
+            let dashboard = buffer_to_string(&buffer);
+            assert!(dashboard.contains(&reference_title("AVERAGE TOKENS AVOIDED")));
+            assert!(dashboard.contains("Total Tokens Avoided"));
+            assert!(dashboard.contains("Average avoided"));
+            assert!(dashboard.contains("Maximum avoided"));
+            assert_cell_style(&buffer, "-10", super::THEME_RED, Modifier::BOLD);
+            assert_cell_style(&buffer, "41", THEME_YELLOW, Modifier::empty());
+        }
+
+        let buffer = render_overview_buffer_at_width(&overview, Some("s"), 140);
+        for (theme, average_color, maximum_color) in [
+            (TokenDashboardTheme::Dark, super::THEME_RED, THEME_YELLOW),
+            (
+                TokenDashboardTheme::Light,
+                super::LIGHT_THEME.red,
+                super::LIGHT_THEME.yellow,
+            ),
+            (
+                TokenDashboardTheme::Terminal,
+                super::THEME_RED,
+                THEME_YELLOW,
+            ),
+        ] {
+            let dashboard = strip_ansi(&render_token_dashboard_with_theme(
+                &overview,
+                Some("s"),
+                theme,
+            ));
+            assert!(dashboard.contains(&reference_title("AVERAGE TOKENS AVOIDED")));
+            assert!(dashboard.contains("Total Tokens Avoided"));
+            assert!(dashboard.contains("Average avoided"));
+            assert!(dashboard.contains("Maximum avoided"));
+            assert_themed_cell_style(&buffer, "-10", theme, average_color, Modifier::BOLD);
+            assert_themed_cell_style(&buffer, "41", theme, maximum_color, Modifier::empty());
+        }
     }
 
     #[test]
@@ -3677,6 +4119,29 @@ mod tests {
             cell.modifier.contains(modifier),
             "missing modifier {modifier:?} for {text:?}"
         );
+    }
+
+    fn assert_themed_cell_style(
+        buffer: &Buffer,
+        text: &str,
+        theme: TokenDashboardTheme,
+        color: Color,
+        modifier: Modifier,
+    ) {
+        super::with_token_theme(theme, || {
+            let Some((x, y)) = find_text(buffer, text) else {
+                unreachable!("rendered buffer should contain {text:?}");
+            };
+            let Some(cell) = buffer.cell((x, y)) else {
+                unreachable!("located text should resolve to a buffer cell");
+            };
+            let style = super::CellAnsiStyle::from_cell(cell);
+            assert_eq!(style.fg, color, "unexpected themed color for {text:?}");
+            assert!(
+                style.modifier.contains(modifier),
+                "missing themed modifier {modifier:?} for {text:?}"
+            );
+        });
     }
 
     fn strip_ansi(input: &str) -> String {

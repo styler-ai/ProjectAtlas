@@ -850,8 +850,8 @@ mod tests {
             "//server/share/repo"
         );
         assert_eq!(
-            normalize_native_path_display_str("/home/user/repo"),
-            "/home/user/repo"
+            normalize_native_path_display_str("/home/user/repo"), // projectatlas: path-fixture
+            "/home/user/repo"                                     // projectatlas: path-fixture
         );
         assert_eq!(
             normalize_native_path_display_str("src\\main.rs"),

@@ -16,7 +16,7 @@ pub const LANGUAGE_CAPABILITY_REGISTRY_VERSION: u32 = 3;
 pub const SEMANTIC_PROVIDER_CONTRACT_VERSION: u32 = 1;
 
 /// Version of the accepted language capability floor.
-pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION: u32 = 5;
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION: u32 = 7;
 
 /// Version of exact detector precedence and content-matching semantics.
 pub const LANGUAGE_DETECTION_POLICY_VERSION: u32 = 1;
@@ -55,6 +55,20 @@ pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V4_DIGEST: &str =
 /// binding ProjectAtlas-owned parser provenance to the 0.4.2 runtime.
 pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V5_DIGEST: &str =
     "07a3d2c45a4736bc764e44016a6ba9b7f9ea1b769b0100604702160528679bc7";
+
+/// Historical acceptance seal for capability-set version 6.
+///
+/// Version 6 preserves version 5 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.4.3 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V6_DIGEST: &str =
+    "e9342f2b06b083a72ecc58af0afe4ba12f0ec33321225199bb0c9be4f4375c7a";
+
+/// Historical acceptance seal for capability-set version 7.
+///
+/// Version 7 preserves version 6 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.4.4 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V7_DIGEST: &str =
+    "50fcac887dffecc27f1b7d365ff5da991f2a86dc15e0474ef5bcc339c58bfd60";
 
 /// Maximum content prefix inspected by the bounded content/dialect detector.
 pub const LANGUAGE_CONTENT_DETECTION_MAX_BYTES: usize = 512;
@@ -2084,6 +2098,8 @@ pub fn validate_language_registry() -> Result<(), LanguageRegistryError> {
         3 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V3_DIGEST,
         4 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V4_DIGEST,
         5 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V5_DIGEST,
+        6 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V6_DIGEST,
+        7 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V7_DIGEST,
         version => {
             return Err(LanguageRegistryError::new(format!(
                 "accepted language capability-set version {version} lacks a historical digest seal"

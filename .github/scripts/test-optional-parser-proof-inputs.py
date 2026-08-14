@@ -18,14 +18,12 @@ class OptionalParserProofInputsTests(unittest.TestCase):
                     ".github/scripts/issue-checklists.py",
                     "openspec/changes/release/tasks.md",
                     "docs/workflow.md",
-                    "AGENTS.md",
                 ]
             ),
             {
                 "reusable": True,
                 "metadata_only": [
                     ".github/scripts/issue-checklists.py",
-                    "AGENTS.md",
                     "docs/workflow.md",
                     "openspec/changes/release/tasks.md",
                 ],
