@@ -1,6 +1,6 @@
 ## 1. Contract
 
-- [ ] 1.1 Map `release-candidates-and-pr-cleanup` to GitHub issue #448 in `openspec/issue-map.json` and keep the issue checklist synchronized with this file.
+- [x] 1.1 Map `release-candidates-and-pr-cleanup` to GitHub issue #448 in `openspec/issue-map.json` and keep the issue checklist synchronized with this file.
 - [x] 1.2 Specify version-agnostic stable/RC syntax, stable milestone derivation, prerelease/Latest behavior, recovery refusal, cumulative release-note history, parser asset identity, installer pin compatibility, automatic dispatch, dependency cleanup, and IssueOps architecture/readiness boundaries.
 
 ## 2. Implementation
@@ -17,7 +17,7 @@
 
 - [x] 3.1 Add and run focused positive, negative, failure, and stable-compatibility checks for generic stable, RC, malformed, and development versions, milestone derivation/readiness, cumulative release-note history, and workflow routing.
 - [ ] 3.2 Strengthen and run the existing installer E2E coverage for exact stable and RC downstream pins, stale pins, and unrelated repositories.
-- [ ] 3.3 Update release guidance and the stable-versus-RC architecture diagram, render and visually inspect the Mermaid output, and synchronize issue #448.
+- [x] 3.3 Update release guidance and the stable-versus-RC architecture diagram, render and visually inspect the Mermaid output, and synchronize issue #448.
 - [x] 3.4 Verify the generic post-publication contract covers exact tag head, stable/prerelease metadata, new-release and repair Latest behavior, and immutable optional-asset repair without making any gated implementation issue depend on the release it blocks.
 - [ ] 3.5 Run OpenSpec, IssueOps, release, Rust, and repository gates and reconcile every live review thread before closure.
 - [ ] 3.6 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
