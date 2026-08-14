@@ -99,6 +99,7 @@ const ISSUE_TEMPLATE_DIR_NAME: &str = "ISSUE_TEMPLATE";
 const VERSIONS_DIR_NAME: &str = "versions";
 const PRE_PUSH_HOOK_FILE_NAME: &str = "pre-push";
 const TS_CONFIG_FILE_NAME: &str = "tsconfig.json";
+const PACKAGE_JSON_FILE_NAME: &str = "package.json";
 const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_CONFIG",
@@ -7178,7 +7179,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let workflows = github.join("workflows");
     let issueops = fs::read_to_string(github.join("scripts").join("issue-checklists.py"))?;
     let mermaid_parser = github.join("mermaid-parser");
-    let mermaid_package = fs::read_to_string(mermaid_parser.join("package.json"))?;
+    let mermaid_package = fs::read_to_string(mermaid_parser.join(PACKAGE_JSON_FILE_NAME))?;
     let mermaid_lock = fs::read_to_string(mermaid_parser.join("package-lock.json"))?;
     let ci = fs::read_to_string(workflows.join("ci.yml"))?;
     let release = fs::read_to_string(workflows.join("release.yml"))?;
@@ -21932,7 +21933,7 @@ fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
         "# ProjectAtlas Demo\n\n## Install\n## Usage\n",
     )?;
     fs::write(
-        repo.join("package.json"),
+        repo.join(PACKAGE_JSON_FILE_NAME),
         r#"{"name":"demo","scripts":{"test":"vitest"},"dependencies":{"react":"1.0.0"}}"#,
     )?;
     fs::write(
@@ -22022,7 +22023,7 @@ fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
     require_json_string(&readme_summary, &["summary_status"], "ok")?;
     require_json_string(&readme_summary, &["file_purpose_status"], "suggested")?;
 
-    let package_summary = json_summary_command(&repo, &db, "package.json")?;
+    let package_summary = json_summary_command(&repo, &db, PACKAGE_JSON_FILE_NAME)?;
     require_json_string(
         &package_summary,
         &["content_summary"],
