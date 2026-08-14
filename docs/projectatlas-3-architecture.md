@@ -1475,21 +1475,33 @@ and usage telemetry. Interfaces call the same core APIs.
 
 Recommended layers:
 
-```text
-projectatlas-core
-  owns domain models and service traits
+```mermaid
+flowchart TB
+    Core[projectatlas-core<br/>domain models and service traits]
+    subgraph Engines[Responsibility-owned engines]
+        DB[projectatlas-db<br/>storage and publication]
+        FS[projectatlas-fs<br/>ignore-aware scanning]
+        Service[projectatlas-service<br/>shared query services]
+        Symbols[projectatlas-symbols<br/>language and relation parsing]
+    end
+    Runtime[projectatlas-cli runtime<br/>shared orchestration]
+    CLI[CLI adapter<br/>humans and CI]
+    MCP[MCP adapter<br/>agents and harnesses]
+    Future[Future adapters<br/>only when separately justified]
 
-projectatlas-db/projectatlas-fs/projectatlas-service/projectatlas-symbols
-  implement storage, scanning, shared query services, and parsing
-
-projectatlas-cli
-  human and CI command adapter plus shared runtime orchestration module
-
-projectatlas-cli::mcp
-  current agent/harness adapter over the same runtime module
-
-future adapters
-  language server, daemon, or editor extensions only when separately justified
+    CLI --> Runtime
+    MCP --> Runtime
+    Future -.-> Runtime
+    Runtime --> DB
+    Runtime --> FS
+    Runtime --> Service
+    Runtime --> Symbols
+    DB --> Core
+    FS --> Core
+    Service --> DB
+    Service --> Symbols
+    Service --> Core
+    Symbols --> Core
 ```
 
 CLI is the best first implementation target because it is deterministic, easy
@@ -2102,6 +2114,41 @@ workflows. Those paths retain focused harness unit tests and artifact-integrity
 checks, but an input-incompatible campaign publication becomes historical or
 unavailable instead of triggering a run. Only an explicit user request starts a
 full campaign.
+
+Release promotion has one version-derived path for stable and candidate tags.
+Both use the same stable milestone and cumulative notes baseline, but GitHub
+publication keeps candidates explicitly outside Latest. The release adapter may
+consume a clean-main Atlas seed archive and manifest created by the separately
+owned seed producer; it validates their exact tag-bound names and checksums both,
+without creating or opening the immutable seed.
+
+```mermaid
+flowchart TB
+    subgraph Admission[Version-derived release admission]
+        Main[Exact origin/main candidate head] --> Serial[One in-flight workflow per requested tag]
+        Serial --> Classify{Classify workspace version}
+        Classify -->|development| Stop[No release dispatch]
+        Classify -->|malformed| Fail[Fail closed]
+        Classify -->|stable or rcN| Handoff[Verify clean parser handoff compatibility]
+        Handoff --> Milestone[Gate shared stable milestone]
+        Milestone --> Kind{Derived release kind}
+        Kind -->|rcN| RCGuard[Refuse when stable tag exists]
+        Kind -->|stable| PriorRC[Require highest published rcN<br/>as an ancestor of final head]
+    end
+    RCGuard --> Stage[Validate assets and checksum every file]
+    PriorRC --> Stage
+    Stage --> Existing{Existing release?}
+    Existing -->|yes| Repair[Validate exact metadata and tag head;<br/>repair replaceable assets;<br/>preserve immutable seed and captured Latest]
+    Existing -->|no| Create{Create requested release kind}
+    Seed[Optional clean-main seed producer] -. exact-tag archive and manifest .-> Stage
+    Prior[Greatest preceding stable tag] --> Notes[Cumulative notes for new releases]
+    Notes -. new releases only .-> Create
+    Repair --> VerifyRepair[Verify repaired metadata, tag head,<br/>and unchanged Latest]
+    Create -->|rcN| RC[Create non-draft prerelease<br/>Latest disabled]
+    Create -->|stable| Stable[Create non-draft stable release]
+    RC --> VerifyRC[Verify prerelease metadata and tag head;<br/>previous stable remains Latest]
+    Stable --> VerifyStable[Verify stable metadata and tag head;<br/>promoted stable becomes Latest]
+```
 
 The optional-pack workflow may reuse only sanitized Cargo dependency build state.
 An exact key binds the target, Rust and native toolchains, Cargo lockfile and

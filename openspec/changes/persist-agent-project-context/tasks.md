@@ -46,3 +46,4 @@
 - [ ] 7.2 After the complete #314 surface is implemented, run line coverage and mutation once, close real gaps or document justified exclusions, and do not create per-task coverage/mutation campaigns.
 - [ ] 7.3 Run bounded final reviews for architecture/crate ownership, Rust skill and pattern fit, OpenSpec task truth, shared-test adequacy, privacy/root/migration safety, streamlined MCP usefulness, and whether the result materially improves agent recovery without an eighth crate.
 - [ ] 7.4 Synchronize completed OpenSpec/GitHub task states, verify the issue checklist gate and packaged documentation, and close #314 only after the implementation is merged and the complete issue checks pass.
+- [ ] 7.5 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.

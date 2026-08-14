@@ -1391,7 +1391,7 @@ report_projectatlas_workflow_pins() {
       case "$line" in
         *github.com/styler-ai/ProjectAtlas/releases/download/v*)
           printf '%s\n' "$line" |
-            grep -Eo 'v[0-9]+\.[0-9]+\.[0-9]+' |
+            grep -Eo 'v[0-9]+\.[0-9]+\.[0-9]+(-rc[1-9][0-9]*)?' |
             sort -u |
             while IFS= read -r found_tag; do
               if [ "$found_tag" != "$release_tag" ]; then

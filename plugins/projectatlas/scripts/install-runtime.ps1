@@ -3656,7 +3656,7 @@ function Write-ProjectAtlasWorkflowPinReport {
             if ($line -notmatch 'github\.com/styler-ai/ProjectAtlas/releases/download/') {
                 continue
             }
-            $pinMatches = [System.Text.RegularExpressions.Regex]::Matches($line, 'v[0-9]+\.[0-9]+\.[0-9]+')
+            $pinMatches = [System.Text.RegularExpressions.Regex]::Matches($line, 'v[0-9]+\.[0-9]+\.[0-9]+(?:-rc[1-9][0-9]*)?')
             foreach ($match in $pinMatches) {
                 $foundTag = $match.Value
                 if ($foundTag -and $foundTag -ne $releaseTag) {

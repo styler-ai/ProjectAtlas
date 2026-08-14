@@ -18,7 +18,7 @@ on:
           - x86_64-unknown-linux-gnu
           - x86_64-pc-windows-msvc
   pull_request:
-    branches: [dev]
+    branches: [main]
     types: [labeled]
 
 permissions:

@@ -63,13 +63,14 @@
         {
           "issue": 314,
           "first_task": "1.1",
-          "last_task": "7.4"
+          "last_task": "7.5"
         }
       ]
     },
     "prefer-worktree-guidance-before-database-preflight": 412,
     "publish-rustdoc-readme-links": 300,
     "reject-incompatible-schema-before-write": 410,
+    "release-candidates-and-pr-cleanup": 448,
     "report-installer-host-restart": 383,
     "resolve-configured-module-aliases": 385,
     "reuse-release-proof-by-inputs": 366,

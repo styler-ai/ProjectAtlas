@@ -8,6 +8,8 @@ import sys
 from datetime import datetime
 from html.parser import HTMLParser
 
+from release_version import parse_release_version
+
 
 def run(args, check=True):
     process = subprocess.run(args, capture_output=True, text=True)
@@ -38,20 +40,19 @@ def note_title(text):
 SECTIONS = ("New Features", "Bug Fixes", "Chores")
 
 
-def semver_key(tag):
-    match = re.fullmatch(r"v([0-9]+)\.([0-9]+)\.([0-9]+)", tag or "")
-    return tuple(int(part) for part in match.groups()) if match else None
-
-
 def previous_tag_from(tags, version):
-    current = semver_key(version)
-    if current is None:
+    try:
+        current = parse_release_version(version, source="release")
+    except ValueError:
         return ""
     candidates = []
     for tag in tags:
-        key = semver_key(tag)
-        if key and key < current:
-            candidates.append((key, tag))
+        try:
+            candidate = parse_release_version(tag, source="release")
+        except ValueError:
+            continue
+        if not candidate.is_prerelease and candidate.numbers < current.numbers:
+            candidates.append((candidate.numbers, tag))
     return max(candidates)[1] if candidates else ""
 
 
@@ -354,8 +355,12 @@ def self_test():
     assert section_for("fix: reject stale paths", [], "feat(index): publish graph") == "Bug Fixes"
     assert merged_after("2026-07-05T18:59:26Z", 1783277965)
     assert not merged_after("2026-07-05T18:59:26Z", 1783277966)
-    assert previous_tag_from(["v0.3.15", "v0.3.16"], "v0.3.17") == "v0.3.16"
-    assert previous_tag_from(["v0.3.15", "v0.3.16", "v0.3.17"], "v0.3.17") == "v0.3.16"
+    tags = ["v4.8.8", "v4.8.9", "v4.9.0-rc1", "v4.9.0-rc2"]
+    assert previous_tag_from(tags, "v4.9.0-rc1") == "v4.8.9"
+    assert previous_tag_from(tags, "v4.9.0-rc3") == "v4.8.9"
+    assert previous_tag_from(tags, "v4.9.0") == "v4.8.9"
+    assert previous_tag_from(["v4.8.8", "v4.8.9"], "v4.9.0") == "v4.8.9"
+    assert previous_tag_from(["v4.9.0"], "v4.9.0") == ""
     print("release notes self-test passed")
 
 

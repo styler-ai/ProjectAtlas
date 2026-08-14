@@ -5,9 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -21,6 +24,11 @@ HEADING_RE = re.compile(r"(?m)^(#{1,6})\s+(.+?)\s*$")
 TASK_SECTION_HEADING_RE = re.compile(r"^(\d+(?:\.\d+)*)\.\s+")
 HTML_COMMENT_RE = re.compile(r"(?s)<!--.*?(?:-->|$)")
 FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
+ARCHITECTURE_NA_RE = re.compile(r"(?is)^N/A:\s*(\S(?:.*\S)?)$")
+ARCHITECTURE_ACCEPTANCE_TASK = (
+    "Review the final implementation against the architecture diagrams, update the "
+    "diagrams or implementation until they agree, or reconfirm the reasoned N/A."
+)
 MARKDOWN_LINK_RE = re.compile(
     r"\[(?:[^\[\]\n]|\[[^\[\]\n]*\])+\]"
     r"\(\s*<?([^)>\s]+)>?"
@@ -91,6 +99,18 @@ REQUIRED_OPEN_ISSUE_HEADINGS = (
     "non-goals",
     "pre-mortem",
 )
+RELEASE_MILESTONE_RE = re.compile(
+    r"^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)-00$"
+)
+REQUIRED_PROPOSAL_HEADINGS = {"why", "what changes", "capabilities", "impact"}
+REQUIRED_DESIGN_HEADINGS = {
+    "goals / non-goals",
+    "decisions",
+    "risks / trade-offs",
+    "migration plan",
+    "dependencies / cross-issue impact",
+    "open questions",
+}
 
 
 @dataclass(frozen=True)
@@ -212,23 +232,160 @@ def github_heading_slug(heading: str) -> str:
     ).replace(" ", "-")
 
 
+def markdown_headings(text: str) -> list[tuple[str, int, int, int]]:
+    """Return visible headings as fragment, level, start, and end offsets."""
+
+    masked = HTML_COMMENT_RE.sub(
+        lambda match: "".join(
+            character if character in "\r\n" else " " for character in match.group(0)
+        ),
+        text or "",
+    )
+    headings: list[tuple[str, int, int, int]] = []
+    next_suffix: dict[str, int] = {}
+    used: set[str] = set()
+    fence_character = ""
+    fence_length = 0
+    offset = 0
+    for line in masked.splitlines(keepends=True):
+        fence = FENCE_RE.match(line)
+        if fence_character:
+            marker = fence.group(1) if fence else ""
+            if (
+                marker
+                and marker[0] == fence_character
+                and len(marker) >= fence_length
+                and not line[fence.end() :].strip()
+            ):
+                fence_character = ""
+                fence_length = 0
+        elif fence:
+            marker = fence.group(1)
+            fence_character = marker[0]
+            fence_length = len(marker)
+        else:
+            heading = HEADING_RE.match(line)
+            if heading:
+                base = github_heading_slug(heading.group(2))
+                if base:
+                    suffix = next_suffix.get(base, 0)
+                    fragment = base if suffix == 0 else f"{base}-{suffix}"
+                    while fragment in used:
+                        suffix += 1
+                        fragment = f"{base}-{suffix}"
+                    used.add(fragment)
+                    next_suffix[base] = suffix + 1
+                    headings.append(
+                        (
+                            fragment,
+                            len(heading.group(1)),
+                            offset + heading.start(),
+                            offset + heading.end(),
+                        )
+                    )
+        offset += len(line)
+    return headings
+
+
 def markdown_heading_fragments(text: str) -> set[str]:
     """Return rendered heading fragments, including GitHub duplicate suffixes."""
 
-    fragments: set[str] = set()
-    next_suffix: dict[str, int] = {}
-    for heading in HEADING_RE.finditer(visible_markdown(text)):
-        base = github_heading_slug(heading.group(2))
-        if not base:
+    return {fragment for fragment, _, _, _ in markdown_headings(text)}
+
+
+def markdown_heading_section(text: str, fragment: str) -> str | None:
+    """Return the raw Markdown body owned by one rendered heading fragment."""
+
+    headings = markdown_headings(text)
+    for index, (candidate, level, _, end) in enumerate(headings):
+        if candidate != fragment:
             continue
-        suffix = next_suffix.get(base, 0)
-        fragment = base if suffix == 0 else f"{base}-{suffix}"
-        while fragment in fragments:
-            suffix += 1
-            fragment = f"{base}-{suffix}"
-        fragments.add(fragment)
-        next_suffix[base] = suffix + 1
-    return fragments
+        section_end = len(text)
+        for _, later_level, later_start, _ in headings[index + 1 :]:
+            if later_level <= level:
+                section_end = later_start
+                break
+        return text[end:section_end]
+    return None
+
+
+def mermaid_diagram_blocks(section: str) -> list[str]:
+    """Return structurally eligible fenced Mermaid diagram bodies."""
+
+    diagrams: list[str] = []
+    fence_character = ""
+    fence_length = 0
+    mermaid = False
+    body: list[str] = []
+    for line in section.splitlines():
+        fence = FENCE_RE.match(line)
+        if fence_character:
+            marker = fence.group(1) if fence else ""
+            if (
+                marker
+                and marker[0] == fence_character
+                and len(marker) >= fence_length
+                and not line[fence.end() :].strip()
+            ):
+                if mermaid:
+                    meaningful = [
+                        value
+                        for value in (candidate.strip() for candidate in body)
+                        if value and not value.startswith("%%")
+                    ]
+                    if meaningful[:1] == ["---"]:
+                        try:
+                            frontmatter_end = meaningful.index("---", 1)
+                        except ValueError:
+                            meaningful = []
+                        else:
+                            meaningful = meaningful[frontmatter_end + 1 :]
+                    if len(meaningful) > 1:
+                        diagrams.append("\n".join(body))
+                fence_character = ""
+                fence_length = 0
+                mermaid = False
+                body = []
+            elif mermaid:
+                body.append(line)
+        elif fence:
+            marker = fence.group(1)
+            fence_character = marker[0]
+            fence_length = len(marker)
+            mermaid = line[fence.end() :].strip().casefold() == "mermaid"
+    return diagrams
+
+
+@lru_cache(maxsize=64)
+def mermaid_syntax_is_valid(diagram: str) -> bool:
+    """Validate one diagram with the repository-locked Mermaid parser."""
+
+    node = shutil.which("node")
+    validator = Path(__file__).resolve().parents[1] / "mermaid-parser" / "validate.mjs"
+    mermaid_package = validator.parent / "node_modules" / "mermaid" / "package.json"
+    if node is None or not mermaid_package.is_file():
+        raise RuntimeError(
+            "IssueOps Mermaid validation requires `npm ci --ignore-scripts --prefix "
+            ".github/mermaid-parser`"
+        )
+    try:
+        result = subprocess.run(
+            [node, str(validator)],
+            input=f"{diagram}\n",
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return result.returncode == 0
+
+
+def contains_mermaid_diagram(section: str) -> bool:
+    """Return whether a fenced Mermaid block is structurally and syntactically real."""
+
+    return any(mermaid_syntax_is_valid(diagram) for diagram in mermaid_diagram_blocks(section))
 
 
 def parse_tasks(text: str) -> list[tuple[bool, str]]:
@@ -392,7 +549,7 @@ def issue_payload(repo: str, number: int) -> dict[str, object]:
             "-R",
             repo,
             "--json",
-            "body,title,state,url",
+            "body,title,state,url,number,labels,milestone",
         ]
     )
     if not isinstance(payload, dict):
@@ -431,9 +588,167 @@ def heading_section(
     return text[heading.end() : end].strip()
 
 
+def named_markdown_section(text: str, name: str) -> str | None:
+    """Return one uniquely named visible Markdown section."""
+
+    visible = visible_markdown(text)
+    headings = list(HEADING_RE.finditer(visible))
+    matches = [
+        index
+        for index, heading in enumerate(headings)
+        if clean(heading.group(2)).casefold() == name.casefold()
+    ]
+    if len(matches) != 1:
+        return None
+    return heading_section(visible, headings, matches[0])
+
+
+def required_markdown_section_failures(
+    text: str, names: set[str], document: str
+) -> list[str]:
+    """Require one non-empty visible section for every named heading."""
+
+    visible = visible_markdown(text)
+    headings = list(HEADING_RE.finditer(visible))
+    failures: list[str] = []
+    for name in sorted(names):
+        matches = [
+            index
+            for index, heading in enumerate(headings)
+            if clean(heading.group(2)).casefold() == name
+        ]
+        if len(matches) != 1:
+            failures.append(
+                f"{document} section {name!r} must appear exactly once; found {len(matches)}"
+            )
+            continue
+        body = heading_section(visible, headings, matches[0])
+        if not clean(HEADING_RE.sub("", body)):
+            failures.append(f"{document} section {name!r} must not be empty")
+    return failures
+
+
+def openspec_readiness_failures(root: Path, change: str) -> list[str]:
+    """Validate the bounded artifacts required before milestone planning."""
+
+    change_root = root / "openspec" / "changes" / change
+    failures: list[str] = []
+    documents: dict[str, str] = {}
+    for name in ("proposal.md", "design.md"):
+        path = change_root / name
+        try:
+            documents[name] = path.read_text(encoding="utf-8")
+        except OSError:
+            failures.append(f"{change} is not implementation-ready: missing readable {name}")
+    proposal = documents.get("proposal.md")
+    if proposal is not None:
+        failures.extend(
+            f"{change} {failure}"
+            for failure in required_markdown_section_failures(
+                proposal, REQUIRED_PROPOSAL_HEADINGS, "proposal"
+            )
+        )
+    design = documents.get("design.md")
+    if design is not None:
+        failures.extend(
+            f"{change} {failure}"
+            for failure in required_markdown_section_failures(
+                design, REQUIRED_DESIGN_HEADINGS, "design"
+            )
+        )
+        dependencies = named_markdown_section(design, "dependencies / cross-issue impact")
+        if dependencies is not None and not (
+            re.search(r"#\d+", dependencies)
+            or ARCHITECTURE_NA_RE.fullmatch(dependencies.strip())
+        ):
+            failures.append(
+                f"{change} design must name cross-issue dependencies or use a reasoned N/A"
+            )
+        open_questions = named_markdown_section(design, "open questions")
+        if open_questions is not None and clean(open_questions).casefold() not in {
+            "none",
+            "none.",
+        }:
+            failures.append(f"{change} still has unresolved open questions")
+    specs_root = change_root / "specs"
+    specs = sorted(specs_root.glob("*/spec.md")) if specs_root.is_dir() else []
+    if not specs:
+        failures.append(f"{change} is not implementation-ready: no delta spec")
+    for spec in specs:
+        try:
+            text = visible_markdown(spec.read_text(encoding="utf-8"))
+        except OSError:
+            failures.append(f"{change} has an unreadable delta spec: {spec}")
+            continue
+        if re.search(r"(?m)^### Requirement:\s+\S", text) is None:
+            failures.append(f"{change} delta spec has no requirement: {spec}")
+        if re.search(r"(?m)^#### Scenario:\s+\S", text) is None:
+            failures.append(f"{change} delta spec has no scenario: {spec}")
+    try:
+        _, tasks = local_tasks(root, change)
+    except SystemExit as error:
+        failures.append(str(error))
+    else:
+        contract_tasks = [task for task in tasks if task_id(task).startswith("1.")]
+        if not contract_tasks or any(not checked for checked, _ in contract_tasks):
+            failures.append(
+                f"{change} contract/specification tasks must be present and checked before milestone planning"
+            )
+    return failures
+
+
+def planned_issue_failures(
+    issue: dict[str, object],
+    issue_map: dict[str, tuple[Owner, ...]],
+    root: Path,
+) -> list[str]:
+    """Validate one open issue when it is assigned to a release milestone."""
+
+    if str(issue.get("state", "")).upper() != "OPEN":
+        return []
+    milestone = issue.get("milestone")
+    if not isinstance(milestone, dict):
+        return []
+    title = milestone.get("title")
+    if not isinstance(title, str) or RELEASE_MILESTONE_RE.fullmatch(title) is None:
+        return []
+    number = positive_issue(issue.get("number"), "issue number")
+    issue_to_change = {
+        owner.issue: change for change, owners in issue_map.items() for owner in owners
+    }
+    failures: list[str] = []
+    change = issue_to_change.get(number)
+    if change is None:
+        failures.append(
+            f"#{number} cannot be planned in {title}: no local OpenSpec mapping"
+        )
+        return failures
+    labels = issue.get("labels")
+    status_labels = {
+        label.get("name")
+        for label in (labels if isinstance(labels, list) else [])
+        if isinstance(label, dict)
+        and isinstance(label.get("name"), str)
+        and str(label.get("name")).startswith("status:")
+    }
+    if status_labels != {"status:ready"}:
+        failures.append(
+            f"#{number} cannot be planned in {title}: expected only status:ready, found "
+            f"{', '.join(sorted(status_labels)) or 'no status label'}"
+        )
+    failures.extend(openspec_readiness_failures(root, change))
+    return failures
+
+
 def architecture_diagram_link_failures(section: str, repo: str, root: Path) -> list[str]:
     """Validate durable local architecture-document links for one issue section."""
 
+    if ARCHITECTURE_NA_RE.fullmatch(section.strip()):
+        return []
+    if re.match(r"(?is)^\s*N/?A\b", section):
+        return [
+            "'architecture diagrams' N/A decision must use 'N/A: <reason>' with a non-empty reason"
+        ]
     matches = list(MARKDOWN_LINK_RE.finditer(section))
     urls = [match.group(1) for match in matches]
     if not urls:
@@ -506,18 +821,22 @@ def architecture_diagram_link_failures(section: str, repo: str, root: Path) -> l
             )
         else:
             try:
-                fragments = markdown_heading_fragments(
-                    candidate.read_text(encoding="utf-8")
-                )
+                document = candidate.read_text(encoding="utf-8")
             except OSError as error:
                 failures.append(
                     f"architecture diagram link {url!r} documentation could not be read: {error}"
                 )
                 continue
             fragment = unquote(parsed.fragment)
-            if fragment not in fragments:
+            diagram_section = markdown_heading_section(document, fragment)
+            if diagram_section is None:
                 failures.append(
                     f"architecture diagram link {url!r} has no matching GitHub-style heading fragment"
+                )
+            elif not contains_mermaid_diagram(diagram_section):
+                failures.append(
+                    f"architecture diagram link {url!r} must target a section containing a non-empty "
+                    "fenced Mermaid block accepted by the locked syntax parser"
                 )
     return failures
 
@@ -543,6 +862,14 @@ def issue_contract_failures(
     headings = list(HEADING_RE.finditer(visible_body))
     normalized = [clean(heading.group(2)).lower() for heading in headings]
     failures: list[str] = []
+    final_task = (
+        TASK_ID_RE.sub("", expected_tasks[-1][1], count=1) if expected_tasks else ""
+    )
+    if clean(final_task).casefold() != ARCHITECTURE_ACCEPTANCE_TASK.casefold():
+        failures.append(
+            "final OpenSpec task must be the architecture acceptance task: "
+            f"{ARCHITECTURE_ACCEPTANCE_TASK}"
+        )
     positions: list[int] = []
     for required in REQUIRED_OPEN_ISSUE_HEADINGS:
         matches = [index for index, value in enumerate(normalized) if value == required]
@@ -687,14 +1014,23 @@ def first_task_difference(
 
 
 def check_openspec_tasks(
-    repo: str, root: Path, issue_map: dict[str, tuple[Owner, ...]]
+    repo: str,
+    root: Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+    planned_issue: int | None = None,
 ) -> list[str]:
     failures: list[str] = []
     for change, owners in sorted(issue_map.items()):
+        if planned_issue is not None and all(
+            owner.issue != planned_issue for owner in owners
+        ):
+            continue
         path, tasks = local_tasks(root, change)
         for owner, expected in owner_slices(path, tasks, owners):
-            issue = issue_payload(repo, owner.issue)
-            remote = issue_checklist_tasks(issue)
+            if planned_issue is not None and owner.issue != planned_issue:
+                continue
+            payload = issue_payload(repo, owner.issue)
+            remote = issue_checklist_tasks(payload)
             print(
                 f"#{owner.issue} {change}: local {len(expected)} / "
                 f"remote {len(remote)} / checked "
@@ -705,9 +1041,9 @@ def check_openspec_tasks(
                     f"#{owner.issue} does not exactly mirror {path}: "
                     f"{first_task_difference(expected, remote)}"
                 )
-            for failure in issue_contract_failures(issue, expected, repo, root):
+            for failure in issue_contract_failures(payload, expected, repo, root):
                 failures.append(f"#{owner.issue} issue contract {failure}")
-            if issue.get("state") == "CLOSED" and any(
+            if payload.get("state") == "CLOSED" and any(
                 not checked for checked, _ in remote
             ):
                 failures.append(f"#{owner.issue} is closed but still has unchecked tasks")
@@ -858,7 +1194,7 @@ def self_test() -> None:
 
 ## 2. Implementation
 
-- [ ] 2.1 Same-level task subsection
+- [ ] 2.1 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 2. Acceptance Criteria
 
@@ -870,7 +1206,10 @@ def self_test() -> None:
 """
     expected = [
         (True, "1.1 Anchored task"),
-        (False, "2.1 Same-level task subsection"),
+        (
+            False,
+            "2.1 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.",
+        ),
     ]
     assert parse_section_tasks(issue_body, heading_matches_openspec_tasks) == expected
     issue_contract = """
@@ -895,7 +1234,7 @@ Mitigations:
 ## 1. Review
 - [x] 1.1 Anchored task
 ## 2. Implementation
-- [ ] 2.1 Same-level task subsection
+- [ ] 2.1 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 """
     self_test_root = Path(__file__).resolve().parents[2]
 
@@ -905,6 +1244,91 @@ Mitigations:
         return issue_contract_failures(issue, tasks, "owner/repo", self_test_root)
 
     assert contract_failures({"state": "OPEN", "body": issue_contract}, expected) == []
+    na_contract = issue_contract.replace(
+        "- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)",
+        "N/A: This change has no architecture impact.",
+    )
+    assert contract_failures({"state": "OPEN", "body": na_contract}, expected) == []
+    unexplained_na = na_contract.replace(
+        "N/A: This change has no architecture impact.", "N/A"
+    )
+    assert any(
+        "N/A decision" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": unexplained_na}, expected
+        )
+    )
+    invalid_na = na_contract.replace(
+        "N/A: This change has no architecture impact.",
+        "NA: This change has no architecture impact.",
+    )
+    assert any(
+        "N/A decision" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": invalid_na}, expected
+        )
+    )
+    invalid_na_delimiter = na_contract.replace(
+        "N/A: This change has no architecture impact.",
+        "N/A - This change has no architecture impact.",
+    )
+    assert any(
+        "N/A decision" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": invalid_na_delimiter}, expected
+        )
+    )
+    assert contains_mermaid_diagram("```mermaid\nflowchart LR\nA --> B\n```")
+    assert contains_mermaid_diagram(
+        "```mermaid\n---\ntitle: Typed graph\n---\nerDiagram\nA ||--o{ B : owns\n```"
+    )
+    assert contains_mermaid_diagram(
+        "```mermaid\nkanban\n  column1[Backlog]\n    task1[Add feature]\n```"
+    )
+    assert not contains_mermaid_diagram(
+        "```mermaid\nflowchart LR\nthis is not valid mermaid ???\n```"
+    )
+    assert not contains_mermaid_diagram("```mermaid\nThis is only prose.\n```")
+    assert not contains_mermaid_diagram("```mermaid\nflowchart LR\n```")
+    assert not contains_mermaid_diagram("```mermaid\n---\ntitle: Missing close\nflowchart LR\n```")
+    assert not contains_mermaid_diagram("```python\nflowchart LR\n```")
+    assert not contains_mermaid_diagram("```mermaid\n```")
+    with tempfile.TemporaryDirectory() as temporary:
+        architecture_root = Path(temporary)
+        docs = architecture_root / "docs"
+        docs.mkdir()
+        architecture = docs / "architecture.md"
+        link = (
+            "[Target](https://github.com/owner/repo/blob/dev/docs/"
+            "architecture.md#target-view)"
+        )
+        architecture.write_text(
+            "## Target View\n\n```mermaid\n%% comment\nflowchart LR\nA --> B\n```\n"
+            "\n## Later View\n\n```mermaid\nflowchart LR\nB --> C\n```\n",
+            encoding="utf-8",
+        )
+        assert architecture_diagram_link_failures(link, "owner/repo", architecture_root) == []
+        architecture.write_text(
+            "## Target View\n\nArchitecture prose only.\n"
+            "\n## Later View\n\n```mermaid\nflowchart LR\nB --> C\n```\n",
+            encoding="utf-8",
+        )
+        assert any(
+            "fenced Mermaid block" in failure
+            for failure in architecture_diagram_link_failures(
+                link, "owner/repo", architecture_root
+            )
+        )
+        architecture.write_text(
+            "## Target View\n\n```mermaid\nflowchart LR\nA --> B\n",
+            encoding="utf-8",
+        )
+        assert any(
+            "fenced Mermaid block" in failure
+            for failure in architecture_diagram_link_failures(
+                link, "owner/repo", architecture_root
+            )
+        )
     exact_head_contract = issue_contract.replace(
         "Explain the need.", "Require exact-head proof."
     )
@@ -1024,12 +1448,18 @@ Mitigations:
         "- [ ] Keep the contract synchronized.",
         "- [x] Keep the contract synchronized.",
     ).replace(
-        "- [ ] 2.1 Same-level task subsection",
-        "- [x] 2.1 Same-level task subsection",
+        "- [ ] 2.1 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.",
+        "- [x] 2.1 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.",
     )
     assert contract_failures(
         {"state": "OPEN", "body": completed_contract},
-        [(True, "1.1 Anchored task"), (True, "2.1 Same-level task subsection")],
+        [
+            (True, "1.1 Anchored task"),
+            (
+                True,
+                "2.1 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.",
+            ),
+        ],
     ) == []
     missing_scope = issue_contract.replace("## Release Scope", "## Delivery")
     assert any(
@@ -1044,6 +1474,13 @@ Mitigations:
         for failure in contract_failures({"state": "OPEN", "body": unknown_task}, expected)
     )
     assert contract_failures({"state": "CLOSED", "body": ""}, expected) == []
+    wrong_final = [expected[0], (False, "2.1 Finish ordinary tests.")]
+    assert any(
+        "final OpenSpec task must be the architecture acceptance task" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": issue_contract}, wrong_final
+        )
+    )
     missing_architecture_link = issue_contract.replace(
         "- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)",
         "Architecture will be documented later.",
@@ -1231,6 +1668,121 @@ Mitigations:
         assert "owned by both one and one" in str(error)
     else:
         raise AssertionError("repeated issue ownership within one change was accepted")
+    ready_issue = {
+        "number": 448,
+        "state": "OPEN",
+        "milestone": {"title": "v6.7.8-00"},
+        "labels": [{"name": "status:ready"}],
+    }
+    backlog_issue = {**ready_issue, "labels": [{"name": "status:backlog"}]}
+    assert any(
+        "expected only status:ready" in failure
+        for failure in planned_issue_failures(
+            backlog_issue, {"missing-readiness-change": (Owner(448),)}, self_test_root
+        )
+    )
+    assert any(
+        "no local OpenSpec mapping" in failure
+        for failure in planned_issue_failures(ready_issue, {}, self_test_root)
+    )
+    assert any(
+        "missing readable proposal.md" in failure
+        for failure in openspec_readiness_failures(
+            self_test_root, "missing-readiness-change"
+        )
+    )
+    with tempfile.TemporaryDirectory() as temporary:
+        readiness_root = Path(temporary)
+        change = readiness_root / "openspec" / "changes" / "ready-change"
+        (change / "specs" / "capability").mkdir(parents=True)
+        (change / "proposal.md").write_text(
+            "## Why\nNeed it.\n## What Changes\nChange it.\n"
+            "## Capabilities\nOne.\n## Impact\nBounded.\n",
+            encoding="utf-8",
+        )
+        design = (
+            "## Goals / Non-Goals\nGoal.\n## Decisions\nDecide.\n"
+            "## Risks / Trade-offs\nRisk.\n## Migration Plan\nMigrate.\n"
+            "## Dependencies / Cross-Issue Impact\nIssue #123 owns the input.\n"
+            "## Open Questions\nNone.\n"
+        )
+        (change / "design.md").write_text(design, encoding="utf-8")
+        (change / "specs" / "capability" / "spec.md").write_text(
+            "## ADDED Requirements\n### Requirement: Ready contract\nIt SHALL work.\n"
+            "#### Scenario: Positive\n- **WHEN** ready\n- **THEN** proceed\n",
+            encoding="utf-8",
+        )
+        (change / "tasks.md").write_text(
+            "## 1. Contract\n- [x] 1.1 Specify the contract.\n"
+            "## 2. Acceptance\n- [ ] 2.1 Review the final implementation against the "
+            "architecture diagrams, update the diagrams or implementation until they "
+            "agree, or reconfirm the reasoned N/A.\n",
+            encoding="utf-8",
+        )
+        assert openspec_readiness_failures(readiness_root, "ready-change") == []
+        assert planned_issue_failures(
+            ready_issue, {"ready-change": (Owner(448),)}, readiness_root
+        ) == []
+        empty_proposal = (
+            "## Why\n\n## What Changes\nChange it.\n"
+            "## Capabilities\nOne.\n## Impact\nBounded.\n"
+        )
+        (change / "proposal.md").write_text(empty_proposal, encoding="utf-8")
+        assert any(
+            "proposal section 'why' must not be empty" in failure
+            for failure in openspec_readiness_failures(
+                readiness_root, "ready-change"
+            )
+        )
+        (change / "proposal.md").write_text(
+            "## Why\nNeed it.\n## Why\nNeed it twice.\n"
+            "## What Changes\nChange it.\n## Capabilities\nOne.\n"
+            "## Impact\nBounded.\n",
+            encoding="utf-8",
+        )
+        assert any(
+            "proposal section 'why' must appear exactly once" in failure
+            for failure in openspec_readiness_failures(
+                readiness_root, "ready-change"
+            )
+        )
+        (change / "proposal.md").write_text(
+            "## Why\nNeed it.\n## What Changes\nChange it.\n"
+            "## Capabilities\nOne.\n## Impact\nBounded.\n",
+            encoding="utf-8",
+        )
+        (change / "design.md").write_text(
+            design.replace("None.", "Which owner is responsible?"), encoding="utf-8"
+        )
+        assert any(
+            "unresolved open questions" in failure
+            for failure in openspec_readiness_failures(
+                readiness_root, "ready-change"
+            )
+        )
+        (change / "design.md").write_text(
+            design.replace(
+                "Issue #123 owns the input.", "Dependencies will be decided later."
+            ),
+            encoding="utf-8",
+        )
+        assert any(
+            "must name cross-issue dependencies" in failure
+            for failure in openspec_readiness_failures(
+                readiness_root, "ready-change"
+            )
+        )
+        (change / "design.md").write_text(design, encoding="utf-8")
+        (change / "tasks.md").write_text(
+            "## 1. Contract\n- [ ] 1.1 Specify the contract.\n",
+            encoding="utf-8",
+        )
+        assert any(
+            "contract/specification tasks" in failure
+            for failure in openspec_readiness_failures(
+                readiness_root, "ready-change"
+            )
+        )
     print("issue checklist self-test passed")
 
 
@@ -1240,6 +1792,7 @@ def main() -> None:
     parser.add_argument("--root", default=".")
     parser.add_argument("--issue-map", default="openspec/issue-map.json")
     parser.add_argument("--milestone", action="append", default=[])
+    parser.add_argument("--planned-issue", type=int)
     parser.add_argument("--skip-openspec", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -1254,7 +1807,17 @@ def main() -> None:
     failures: list[str] = []
     issue_map = load_issue_map(args.issue_map)
     if not args.skip_openspec:
-        failures.extend(check_openspec_tasks(args.repo, root, issue_map))
+        failures.extend(
+            check_openspec_tasks(
+                args.repo, root, issue_map, planned_issue=args.planned_issue
+            )
+        )
+    if args.planned_issue is not None:
+        failures.extend(
+            planned_issue_failures(
+                issue_payload(args.repo, args.planned_issue), issue_map, root
+            )
+        )
     mapped_issues = mapped_issue_numbers(issue_map)
     for milestone in args.milestone:
         failures.extend(check_milestone_complete(args.repo, milestone, mapped_issues))

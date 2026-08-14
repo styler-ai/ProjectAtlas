@@ -6382,8 +6382,10 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
             .into());
         }
     }
-    if !auto_release_workflow.contains("promotion_sha=\"$(git rev-parse HEAD^2)\"")
+    if !auto_release_workflow.contains("promotion_sha=\"$(git rev-parse 'HEAD^{commit}')\"")
+        || !auto_release_workflow.contains("[[ \"$promotion_sha\" != \"$GITHUB_SHA\" ]]")
         || !auto_release_workflow.contains("--ref main")
+        || auto_release_workflow.contains("HEAD^2")
     {
         return Err(io::Error::other("auto-release must preserve promotion identity").into());
     }
@@ -6620,6 +6622,18 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     let release_workflow = fs::read_to_string(workflow_dir.join("release.yml"))?;
     let auto_release_workflow =
         fs::read_to_string(workflow_dir.join(AUTO_RELEASE_WORKFLOW_FILE_NAME))?;
+    let release_version_policy = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("scripts")
+            .join("release_version.py"),
+    )?;
+    let seed_asset_policy = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("scripts")
+            .join("verify-main-atlas-seed-release-assets.py"),
+    )?;
     let optional_parser_handoff_resolver = fs::read_to_string(
         workspace_root
             .join(".github")
@@ -6767,7 +6781,7 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     for (ecosystem, update) in [("cargo", cargo_update), ("github-actions", actions_update)] {
         for (field, actual, expected) in [
             ("directory", update["directory"].as_str(), "/"),
-            ("target-branch", update["target-branch"].as_str(), "dev"),
+            ("target-branch", update["target-branch"].as_str(), "main"),
             (
                 "schedule.interval",
                 update["schedule"]["interval"].as_str(),
@@ -6971,7 +6985,7 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     }
     for required in [
         "gh release create \"$RELEASE_VERSION\"",
-        "gh release upload \"$RELEASE_VERSION\" release-assets/* --clobber",
+        "gh release upload \"$RELEASE_VERSION\" \"${upload_assets[@]}\" --clobber",
         "--target \"$GITHUB_SHA\"",
         "PROJECTATLAS_RELEASE_EXISTS",
         "SHA256SUMS",
@@ -6979,10 +6993,67 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         "already points to",
         "exists without a GitHub release; continuing recovery publish",
         "continuing asset repair publish",
+        "--prerelease --latest=false",
+        "EXPECTED_RELEASE_PRERELEASE",
+        "PROJECTATLAS_LATEST_BEFORE",
+        "Verify hosted release state",
+        "verify-main-atlas-seed-release-assets.py",
+        "Enforce RC-first promotion",
+        "--require-prior-rc-from",
+        "git merge-base --is-ancestor",
+        "Cannot publish an RC after stable tag",
+        "projectatlas-release-${{ inputs.version }}",
+        "cancel-in-progress: false",
+        "Require exact main head for publication",
+        "Revalidate exact main head before release mutation",
+        "git fetch --force origin main:refs/remotes/origin/main",
+        "refs/remotes/origin/main^{commit}",
+        "Release publication requires the exact origin/main head",
+        "projectatlas-main-atlas-seed",
+        "projectatlas-hosted-main-atlas-seed-assets.txt",
+        "projectatlas-main-atlas-seed-*",
+        "--staged-source release-assets",
+        "Existing release contains duplicate or non-regular main Atlas seed assets",
+        "immutable_hosted_seed",
+        "if [[ \"$EXPECTED_RELEASE_PRERELEASE\" == \"true\" || \"${PROJECTATLAS_RELEASE_EXISTS:-false}\" == \"true\" ]]; then",
+        "if [[ \"$EXPECTED_RELEASE_PRERELEASE\" == \"true\" || \"$release_exists\" == \"true\" ]]; then",
+        "Cannot publish an RC or repair a release without observing the current Latest stable release",
     ] {
         if !release_workflow.contains(required) {
             return Err(io::Error::other(format!(
                 "release workflow is missing recoverable publish/checksum guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "ReleaseVersion",
+        "VERSION_PATTERN",
+        "DEVELOPMENT_PATTERN",
+        "-dev.",
+        "stable_tag",
+        "milestone",
+        "is_prerelease",
+        "rc_number",
+        "latest_published_rc",
+    ] {
+        if !release_version_policy.contains(required) {
+            return Err(io::Error::other(format!(
+                "release version policy is missing closed classifier field {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "projectatlas-main-atlas-seed-",
+        "\".tar.zst\"",
+        "\".manifest.json\"",
+        "exact release tag",
+        "validate_hosted_seed_assets",
+    ] {
+        if !seed_asset_policy.contains(required) {
+            return Err(io::Error::other(format!(
+                "main Atlas seed release hook is missing exact-pair guard {required:?}"
             ))
             .into());
         }
@@ -7009,6 +7080,18 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         }
     }
     for required in [
+        "Revalidate exact main head before release mutation",
+        "Release mutation requires the exact current origin/main head",
+        "git fetch --force origin main:refs/remotes/origin/main",
+    ] {
+        if !publish.contains(required) {
+            return Err(io::Error::other(format!(
+                "release publish job omitted exact-main mutation guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
         "parser_pack_run_id:",
         "parser-pack-assets:",
         "optional-parser-pack-release-assets",
@@ -7028,6 +7111,7 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     }
     for required in [
         "github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all'",
+        "pull_request:\n    branches: [main]",
         "optional-parser-pack-release-assets",
         "cargo-layer-$target.json",
         "projectatlas-broad-parser-$target.tar.zst",
@@ -7040,7 +7124,8 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         }
     }
     for required in [
-        "git rev-parse HEAD^2",
+        "git rev-parse 'HEAD^{commit}'",
+        "Auto-release checkout differs from the exact main push",
         "resolve-optional-parser-handoff.py",
         "--field parser_pack_run_id=",
     ] {
@@ -7090,8 +7175,12 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let github = workspace_root.join(".github");
     let workflows = github.join("workflows");
     let issueops = fs::read_to_string(github.join("scripts").join("issue-checklists.py"))?;
+    let mermaid_parser = github.join("mermaid-parser");
+    let mermaid_package = fs::read_to_string(mermaid_parser.join("package.json"))?;
+    let mermaid_lock = fs::read_to_string(mermaid_parser.join("package-lock.json"))?;
     let ci = fs::read_to_string(workflows.join("ci.yml"))?;
     let release = fs::read_to_string(workflows.join("release.yml"))?;
+    let issueops_workflow = fs::read_to_string(workflows.join("issueops.yml"))?;
     let hook = fs::read_to_string(
         workspace_root
             .join(GITHOOKS_DIR_NAME)
@@ -7123,6 +7212,35 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .join("tasks.md"),
     )?;
 
+    if !mermaid_package.contains(r#""jsdom": "27.4.0""#)
+        || !mermaid_package.contains(r#""mermaid": "11.16.1""#)
+        || !mermaid_lock.contains(r#""node_modules/jsdom""#)
+        || !mermaid_lock.contains(r#""node_modules/mermaid""#)
+        || !mermaid_lock.contains(r#""version": "11.16.1""#)
+    {
+        return Err(io::Error::other(
+            "IssueOps Mermaid syntax validation must use one exact lockfile-owned parser",
+        )
+        .into());
+    }
+    for (name, workflow) in [
+        ("CI", ci.as_str()),
+        ("release", release.as_str()),
+        ("IssueOps", issueops_workflow.as_str()),
+    ] {
+        for command in [
+            "npm ci --ignore-scripts --prefix .github/mermaid-parser",
+            "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+        ] {
+            if !workflow.contains(command) {
+                return Err(io::Error::other(format!(
+                    "{name} workflow omitted locked Mermaid parser gate {command:?}"
+                ))
+                .into());
+            }
+        }
+    }
+
     for required in [
         "validate_unique_issue_ownership",
         "owner_slices",
@@ -7131,6 +7249,15 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "milestone_issue_failures",
         "REQUIRED_OPEN_ISSUE_HEADINGS",
         "architecture_diagram_link_failures",
+        "contains_mermaid_diagram",
+        "mermaid_syntax_is_valid",
+        "mermaid-parser",
+        "len(meaningful) > 1",
+        "ARCHITECTURE_ACCEPTANCE_TASK",
+        "planned_issue_failures",
+        "openspec_readiness_failures",
+        "required_markdown_section_failures",
+        "planned_issue=args.planned_issue",
         "MITIGATION_RE",
         "issue_contract_failures",
     ] {
@@ -7140,6 +7267,12 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             ))
             .into());
         }
+    }
+    if issueops.contains("MERMAID_DECLARATION_RE") {
+        return Err(io::Error::other(
+            "IssueOps must let the locked Mermaid parser own diagram-family admission",
+        )
+        .into());
     }
     if !issue_map.contains(r#""schema_version": 2"#)
         || !issue_map.contains(r#""enforce-rust-test-quality-gates": 309"#)
@@ -7194,6 +7327,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "cargo test --doc --workspace --all-features --locked",
         "RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --no-deps --all-features --locked",
         "cargo deny --locked --all-features check -D warnings",
+        "npm ci --ignore-scripts --prefix .github/mermaid-parser",
+        "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
         "issue-checklists.py --self-test",
         "test-optional-parser-proof-inputs.py",
     ] {
@@ -7233,7 +7368,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         )
         .into());
     }
-    if !release.contains("--milestone \"${RELEASE_VERSION}-00\"")
+    if !release.contains("--milestone \"${{ steps.release_version.outputs.milestone }}\"")
         || !release.contains("cargo fmt --all --check")
         || !release.contains(
             "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled",
@@ -7244,6 +7379,20 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             "release must retain milestone completion, ordinary gates, and a non-publishing package-proof mode",
         )
         .into());
+    }
+    for required in [
+        "types: [opened, edited, reopened, labeled, unlabeled, milestoned]",
+        "--planned-issue \"$ISSUE_NUMBER\"",
+        "timeout-minutes: 5",
+        "contents: read",
+        "issues: read",
+    ] {
+        if !issueops_workflow.contains(required) {
+            return Err(io::Error::other(format!(
+                "issue-event IssueOps workflow is missing readiness guard {required:?}"
+            ))
+            .into());
+        }
     }
     let prepublish_input = release
         .split("      prepublish_only:")
@@ -7270,6 +7419,31 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         )
         .into());
     }
+    let rc_first_gate = release
+        .split("      - name: Enforce RC-first promotion")
+        .nth(1)
+        .and_then(|tail| tail.split("\n      - name:").next())
+        .ok_or_else(|| io::Error::other("release omitted the RC-first promotion step"))?;
+    if !rc_first_gate.contains(prepublish_guard) {
+        return Err(io::Error::other(
+            "hosted RC-first admission must not block non-publishing package proof",
+        )
+        .into());
+    }
+    let exact_main_gate = release
+        .split("      - name: Require exact main head for publication")
+        .nth(1)
+        .and_then(|tail| tail.split("\n      - name:").next())
+        .ok_or_else(|| io::Error::other("release omitted the exact-main publication step"))?;
+    if !exact_main_gate.contains(prepublish_guard)
+        || !exact_main_gate.contains("git fetch --force origin main:refs/remotes/origin/main")
+        || !exact_main_gate.contains("refs/remotes/origin/main^{commit}")
+    {
+        return Err(io::Error::other(
+            "exact-main publication admission must preserve branch prepublication proof",
+        )
+        .into());
+    }
     let publish_job = release
         .split("\n  publish:\n")
         .nth(1)
@@ -7278,10 +7452,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .split("    steps:")
         .next()
         .ok_or_else(|| io::Error::other("release publish job omitted its header"))?;
-    if !publish_header.contains(prepublish_guard) || release.matches(prepublish_guard).count() != 2
+    if !publish_header.contains(prepublish_guard) || release.matches(prepublish_guard).count() != 4
     {
         return Err(io::Error::other(
-            "prepublish-only guard must own exactly the checklist step and publish job",
+            "prepublish-only guard must own exactly the RC-first, exact-main, checklist, and publish boundaries",
         )
         .into());
     }
@@ -7309,7 +7483,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "packaged-contract-runner-${{ matrix.suffix }}",
         "packaged-contract-runner-x86_64-pc-windows-msvc",
         "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE",
-        "[prepublish-installer-smoke-unix, prepublish-installer-smoke-windows, parser-pack-assets]",
+        "      - verify\n      - prepublish-installer-smoke-unix\n      - prepublish-installer-smoke-windows\n      - parser-pack-assets",
         "pattern: projectatlas-*",
     ] {
         if !release.contains(required) {
@@ -11563,7 +11737,7 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
     fs::write(
         workflow_dir.join("ci.yml"),
         format!(
-            "jobs:\n  smoke:\n    steps:\n      - run: curl -fsSL https://github.com/styler-ai/ProjectAtlas/releases/download/v0.0.1/projectatlas-v0.0.1-x86_64-unknown-linux-gnu.tar.gz -o projectatlas.tar.gz\n      - run: curl -fsSL https://github.com/styler-ai/ProjectAtlas/releases/download/{expected_release_tag}/projectatlas-{expected_release_tag}-x86_64-unknown-linux-gnu.tar.gz -o projectatlas-current.tar.gz\n      - run: curl -fsSL https://github.com/example/ProjectAtlas/releases/download/v9.9.9/projectatlas-v9.9.9-x86_64-unknown-linux-gnu.tar.gz -o projectatlas-fork.tar.gz\n"
+            "jobs:\n  smoke:\n    steps:\n      - run: curl -fsSL https://github.com/styler-ai/ProjectAtlas/releases/download/v0.0.1/projectatlas-v0.0.1-x86_64-unknown-linux-gnu.tar.gz -o projectatlas.tar.gz\n      - run: curl -fsSL https://github.com/styler-ai/ProjectAtlas/releases/download/v0.0.2-rc12/projectatlas-v0.0.2-rc12-x86_64-unknown-linux-gnu.tar.gz -o projectatlas-rc.tar.gz\n      - run: curl -fsSL https://github.com/styler-ai/ProjectAtlas/releases/download/{expected_release_tag}/projectatlas-{expected_release_tag}-x86_64-unknown-linux-gnu.tar.gz -o projectatlas-current.tar.gz\n      - run: curl -fsSL https://github.com/example/ProjectAtlas/releases/download/v9.9.9/projectatlas-v9.9.9-x86_64-unknown-linux-gnu.tar.gz -o projectatlas-fork.tar.gz\n"
         ),
     )?;
     fs::write(
@@ -11812,12 +11986,47 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
     }
     if !installer_output_text.contains("Stale ProjectAtlas workflow release pin")
         || !installer_output_text.contains("v0.0.1")
+        || !installer_output_text.contains("v0.0.2-rc12")
         || !installer_output_text.contains(&expected_release_tag)
     {
         return Err(io::Error::other(format!(
             "plugin update installer did not report stale downstream workflow release pins:\n{installer_output_text}"
         ))
         .into());
+    }
+    let stale_pin_lines = installer_output_text
+        .lines()
+        .filter(|line| line.contains("Stale ProjectAtlas workflow release pin"))
+        .collect::<Vec<_>>();
+    if stale_pin_lines
+        .iter()
+        .any(|line| line.contains(&format!("uses {expected_release_tag};")))
+    {
+        return Err(io::Error::other(format!(
+            "plugin update installer reported its exact current workflow release pin as stale:\n{installer_output_text}"
+        ))
+        .into());
+    }
+    if stale_pin_lines
+        .iter()
+        .any(|line| line.contains("uses v0.0.2;"))
+    {
+        return Err(io::Error::other(format!(
+            "plugin update installer truncated a stale RC workflow release pin:\n{installer_output_text}"
+        ))
+        .into());
+    }
+    if let Some((stable_version, _)) = env!("CARGO_PKG_VERSION").split_once("-rc") {
+        let truncated_tag = format!("v{stable_version}");
+        if stale_pin_lines
+            .iter()
+            .any(|line| line.contains(&format!("uses {truncated_tag};")))
+        {
+            return Err(io::Error::other(format!(
+                "plugin update installer truncated its exact RC workflow release pin:\n{installer_output_text}"
+            ))
+            .into());
+        }
     }
     if installer_output_text.contains("v9.9.9") {
         return Err(io::Error::other(format!(

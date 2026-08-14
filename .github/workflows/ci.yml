@@ -71,6 +71,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          npm ci --ignore-scripts --prefix .github/mermaid-parser
+          npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
           python3 .github/scripts/issue-checklists.py --self-test
           python3 .github/scripts/test-optional-parser-proof-inputs.py
           python3 .github/scripts/issue-checklists.py \
