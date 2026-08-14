@@ -1475,21 +1475,31 @@ and usage telemetry. Interfaces call the same core APIs.
 
 Recommended layers:
 
-```text
-projectatlas-core
-  owns domain models and service traits
+```mermaid
+flowchart TB
+    Core[projectatlas-core<br/>domain models and service traits]
+    subgraph Engines[Responsibility-owned engines]
+        DB[projectatlas-db<br/>storage and publication]
+        FS[projectatlas-fs<br/>ignore-aware scanning]
+        Service[projectatlas-service<br/>shared query services]
+        Symbols[projectatlas-symbols<br/>language and relation parsing]
+    end
+    Runtime[projectatlas-cli runtime<br/>shared orchestration]
+    CLI[CLI adapter<br/>humans and CI]
+    MCP[MCP adapter<br/>agents and harnesses]
+    Future[Future adapters<br/>only when separately justified]
 
-projectatlas-db/projectatlas-fs/projectatlas-service/projectatlas-symbols
-  implement storage, scanning, shared query services, and parsing
-
-projectatlas-cli
-  human and CI command adapter plus shared runtime orchestration module
-
-projectatlas-cli::mcp
-  current agent/harness adapter over the same runtime module
-
-future adapters
-  language server, daemon, or editor extensions only when separately justified
+    CLI --> Runtime
+    MCP --> Runtime
+    Future -.-> Runtime
+    Runtime --> DB
+    Runtime --> FS
+    Runtime --> Service
+    Runtime --> Symbols
+    DB --> Core
+    FS --> Core
+    Service --> Core
+    Symbols --> Core
 ```
 
 CLI is the best first implementation target because it is deterministic, easy
