@@ -9,26 +9,26 @@
 
 ## 2. Core And SQLite Foundation
 
-- [ ] 2.1 Add typed content classification and selection contracts to the core language registry, plus `Heading`, `Documents`, and the closed unresolved document-target reasons without scattering protocol strings.
-- [ ] 2.2 Add the append-only active-atlas schema 16-to-17 migration with one constrained classification table, file ownership, classification/path index, and no duplicate inverse document table.
-- [ ] 2.3 Land prepared and batched classification write/read APIs, endpoint projection, inbound `documents` lookup, generation cleanup, and query-plan assertions before dependent services.
-- [ ] 2.4 Prove schema-17 write/read/reopen, v0.4.4 migration, rollback on constraint/busy/interruption failures, corrupt/newer-schema refusal, and preservation of authored purposes in real SQLite tests.
+- [x] 2.1 Add typed content classification and selection contracts to the core language registry, plus `Heading`, `Documents`, and the closed unresolved document-target reasons without scattering protocol strings.
+- [x] 2.2 Add the append-only active-atlas schema 16-to-17 migration with one constrained classification table, file ownership, classification/path index, and no duplicate inverse document table.
+- [x] 2.3 Land prepared and batched classification write/read APIs, endpoint projection, inbound `documents` lookup, generation cleanup, and query-plan assertions before dependent services.
+- [x] 2.4 Prove schema-17 write/read/reopen, v0.4.4 migration, rollback on constraint/busy/interruption failures, corrupt/newer-schema refusal, and preservation of authored purposes in real SQLite tests.
 
 ## 3. Markdown Facts And Document Resolution
 
-- [ ] 3.1 Move reusable Markdown/MDX heading extraction into `projectatlas-symbols` with the existing `pulldown-cmark`, exact byte/line selectors, parser provenance, and explicit byte/count/evidence limits; make structural summaries reuse those facts.
-- [ ] 3.2 Extract only parser destinations and complete repository-path code spans, rejecting images, external/absolute/drive/UNC/dynamic/fragment-only/directory/prose candidates and unsupported RST/JSX/HTML structure without guessing.
-- [ ] 3.3 Resolve candidates relative to the owning document through exact indexed identities, case/collision and symlink/root checks, ignored/missing distinction, bounded repository-relative evidence, fragment/heading selectors, and stable deduplication.
-- [ ] 3.4 Publish headings, canonical document relations, completeness, and unresolved evidence in the same generation transaction as classifications and graph facts.
-- [ ] 3.5 Make add/change/delete/rename/ignore/case refresh recompute changed documents plus the affected inbound closure, and prove incremental/full-build equivalence and prior-generation retention on failure or cancellation.
+- [x] 3.1 Move reusable Markdown/MDX heading extraction into `projectatlas-symbols` with the existing `pulldown-cmark`, exact byte/line selectors, parser provenance, and explicit byte/count/evidence limits; make structural summaries reuse those facts.
+- [x] 3.2 Extract only parser destinations and complete repository-path code spans, rejecting images, external/absolute/drive/UNC/dynamic/fragment-only/directory/prose candidates and unsupported RST/JSX/HTML structure without guessing.
+- [x] 3.3 Resolve candidates relative to the owning document through exact indexed identities, case/collision and symlink/root checks, ignored/missing distinction, bounded repository-relative evidence, fragment/heading selectors, and stable deduplication.
+- [x] 3.4 Publish headings, canonical document relations, completeness, and unresolved evidence in the same generation transaction as classifications and graph facts.
+- [x] 3.5 Make add/change/delete/rename/ignore/case refresh recompute changed documents plus the affected inbound closure, and prove incremental/full-build equivalence and prior-generation retention on failure or cancellation.
 
 ## 4. Shared Service And Adapter Behavior
 
-- [ ] 4.1 Apply one service-owned explicit-selection predicate before ranking, pagination, anchor selection, and frontier expansion while preserving omitted-selection candidate/order/cursor compatibility and explicit cross-class document endpoints.
-- [ ] 4.2 Batch and expose classification on every file-bearing files, search, summary, purpose, symbol, relation, analysis, capability, and next-call result without letting purpose mutations override it.
-- [ ] 4.3 Add semantically equivalent CLI JSON/TOON and MCP schemas, validation, exact continuation fields, capability reporting, and side-effect-free errors for unsupported selection.
-- [ ] 4.4 Preserve legacy relation-family defaults so `documents` appears only when requested or classified traversal opts in, and keep existing source, configuration/data, other-text, counters, ranks, and pagination behavior intact.
-- [ ] 4.5 Update the version-matched shipped ProjectAtlas skill and user guidance for source/documentation/both selection, trust/completeness handling, `documents`/`documented_by`, exact source follow-through, and per-call worktree routing.
+- [x] 4.1 Apply one service-owned explicit-selection predicate before ranking, pagination, anchor selection, and frontier expansion while preserving omitted-selection candidate/order/cursor compatibility and explicit cross-class document endpoints.
+- [x] 4.2 Batch and expose classification on every file-bearing files, search, summary, purpose, symbol, relation, analysis, capability, and next-call result without letting purpose mutations override it.
+- [x] 4.3 Add semantically equivalent CLI JSON/TOON and MCP schemas, validation, exact continuation fields, capability reporting, and side-effect-free errors for unsupported selection.
+- [x] 4.4 Preserve legacy relation-family defaults so `documents` appears only when requested or classified traversal opts in, and keep existing source, configuration/data, other-text, counters, ranks, and pagination behavior intact.
+- [x] 4.5 Update the version-matched shipped ProjectAtlas skill and user guidance for source/documentation/both selection, trust/completeness handling, `documents`/`documented_by`, exact source follow-through, and per-call worktree routing.
 
 ## 5. Immutable Seed And Worktree Integration
 
@@ -40,9 +40,9 @@
 
 ## 6. Focused Verification
 
-- [ ] 6.1 Cover classification, selection, heading identity, parser limits, candidate admission, resolution, deduplication, cycles, privacy, and negative/unsupported paths with owning core and parser unit tests.
-- [ ] 6.2 Cover schema constraints, index/query plans, batching, atomic generation publication, rollback/recovery, WAL/concurrency, migration, and incremental closure with SQLite integration and fault tests.
-- [ ] 6.3 Cover legacy compatibility, pre-limit filtering, cross-class endpoints, pagination/cursor identity, completeness, cancellation, and exact next calls with service integration tests.
+- [x] 6.1 Cover classification, selection, heading identity, parser limits, candidate admission, resolution, deduplication, cycles, privacy, and negative/unsupported paths with owning core and parser unit tests.
+- [x] 6.2 Cover schema constraints, index/query plans, batching, atomic generation publication, rollback/recovery, WAL/concurrency, migration, and incremental closure with SQLite integration and fault tests.
+- [x] 6.3 Cover legacy compatibility, pre-limit filtering, cross-class endpoints, pagination/cursor identity, completeness, cancellation, and exact next calls with service integration tests.
 - [ ] 6.4 Cover CLI/MCP parity, malformed selections, no-side-effect failures, bounded output, current-source follow-through, and Windows/Linux/macOS path, case, Unicode, and symlink behavior with real adapter and platform E2E.
 - [ ] 6.5 Run one joint #430/#440 E2E from a v0.4.4 fixture through seed sealing, two-worktree hydration/divergence, classified bidirectional traversal, and clean/migrated/hydrated logical equivalence.
 - [ ] 6.6 Measure a representative full build and high-fan-out one-document refresh for CPU, wall time, allocations/RSS, SQLite statements/lock time, WAL/I/O, persistent and seed bytes, affected rows, and bounded output; address regressions rather than inventing unmeasured claims.
@@ -50,8 +50,8 @@
 ## 7. Release Readiness
 
 - [ ] 7.1 Update durable architecture, database, graph, workflow, upgrade, privacy, and failure guidance so #430 and #440 describe one coherent lifecycle without duplicating authorities.
-- [ ] 7.2 Render and visually inspect every changed Mermaid block, checking semantic ownership, arrow direction, termination, readability, and agreement with the live implementation.
-- [ ] 7.3 Run the affected focused tests, then `cargo fmt --check`, `cargo check --workspace --all-targets --all-features`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`, `cargo test --doc --all-features`, and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` with explicit timeouts.
+- [x] 7.2 Render and visually inspect every changed Mermaid block, checking semantic ownership, arrow direction, termination, readability, and agreement with the live implementation.
+- [x] 7.3 Run the affected focused tests, then `cargo fmt --check`, `cargo check --workspace --all-targets --all-features`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`, `cargo test --doc --all-features`, and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` with explicit timeouts.
 - [ ] 7.4 Run ProjectAtlas lint, strict OpenSpec validation, IssueOps parity/readiness, installer/plugin/MCP drift checks, packaged cross-platform E2E, and exact-head GitHub checks; resolve or disposition every live review and automated finding.
 - [ ] 7.5 Synchronize issue #440's checklist and metadata only after all implementation, compatibility, verification, cross-issue, and release-blocker work is complete.
 - [ ] 7.6 Confirm the v0.4.5-rc1 release notes, immutable seed manifest/checksums/assets, shipped skill, installers, and prerelease/latest-state verification include the complete #430/#440 behavior.

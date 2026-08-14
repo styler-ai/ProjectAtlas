@@ -19,6 +19,7 @@ ProjectAtlas is an agent orientation layer. It combines reviewed folder/file res
 2. Bind the intended project. In shared or concurrent MCP hosts, pass `project_path` on every call; use `atlas_set_project_path` only as a single-client process default.
 3. Refresh only when needed. Prefer `atlas_watch_once` for ordinary changed-file updates. Use `atlas_scan` only when the index is absent or typed ProjectAtlas guidance requires a full refresh; never scan merely because a session started.
 4. Call `atlas_session_brief` once at task-oriented startup with `query`, `project_path` when needed, and `compact: true`. For a focused code question, start with `file_limit: 3`, `folder_limit: 3`, `blocker_limit: 1`, and `purpose_limit: 1`; widen only when no actionable candidate is returned. Follow its typed next call directly; do not restart the brief or repeat folder/file discovery for a later caller, source, or public-boundary check.
+   When the task has a content role, carry `content_selection: "source"`, `"documentation"`, or `"both"` on the returned files, search, summary, slice, symbol, and detailed-relation calls that expose it. Use `source` for ordinary implementation work, `documentation` for specification or guidance discovery, and `both` only when the task crosses the two. Omit the field only when the legacy candidate universe, including configuration/data and other text, is intentionally required.
 5. Call a returned `atlas_file_summary` recommendation with `compact: true`. Use legacy/default summary output or an explicit `limit` only when full totals, empty sections, and complete coverage state are needed.
 6. Use the compact summary's crisp connections for an ordinary direct caller or dependency already shown there. Do not add a relation call merely to reconfirm a trusted `called_by` or call row, and do not inspect a plausible sibling once another ranked summary contains the exact requested behavior. Use `atlas_outline` or `atlas_symbols` only when summary context is insufficient. Use `atlas_symbol_relations` with `view: "detailed"` and `compact: true` when resolution/completeness matters, a connection sample is truncated, ambiguity or external/unresolved state matters, or a required path is not explicit in the summaries. Request occurrences only when the call-site span itself is needed. When the compact result returns a top-level `next_call`, submit its tool and arguments unchanged; do not reconstruct the cursor or rediscover the file first.
 7. Use `atlas_slice` for the smallest exact line or symbol range that answers the task. Do not guess a symbol line or other disambiguator; copy the returned selector fields.
@@ -26,6 +27,15 @@ ProjectAtlas is an agent orientation layer. It combines reviewed folder/file res
 9. Fall back to `atlas_overview` only when the session-brief MCP tool is unavailable, the brief has no actionable candidate, or broader repository structure is itself the task. Then use `atlas_folders` before `atlas_files`.
 
 `connections_truncated` describes the compact sample. It means more relationships exist, not that the selected next call is wrong. Use the returned detailed-relations call only when those additional relationships matter.
+
+## Classified Documentation Navigation
+
+- Treat `classification` as a derived file role, not parser trust, purpose authority, or runtime truth. `documentation` is guidance; confirm implementation claims in current `source` summaries, symbols, or exact slices.
+- Start with classified files or search. Use `source` for code-only work, `documentation` for docs-only discovery, and `both` when finding an explicit bridge. The closed selections exclude configuration/data, other text, and opaque rows; omission preserves the broader legacy behavior.
+- Follow an explicit document bridge with `atlas_symbol_relations` using `view: "detailed"`, `relation: "documents"`, and the exact file or heading anchor. Outbound traversal moves from documentation to its validated repository target. Inbound traversal from source returns the same stored relation under the read-only `documented_by` view; no inverse fact is stored.
+- Inspect parser provenance, coverage, completeness, resolution, and typed unresolved reason together with classification. Missing, ignored, outside-root, case-conflicting, unsupported, and non-static targets are evidence to narrow or repair the navigation request, never permission to guess.
+- Submit the returned `next_call` unchanged. It preserves the exact file or heading selector, content selection, generation, and bounds; finish at current source evidence before making an implementation claim.
+- In linked-worktree or shared-host sessions, pass the exact checkout `project_path` on every call. Each checkout owns its ignored writable database and classified graph; a stable seed, when available, is verified read-only input and never a shared writable atlas.
 
 ## Indexing Strategy
 
@@ -48,13 +58,13 @@ Never reset or replace an incompatible database as an orientation shortcut. Foll
 | Missing index or typed full-refresh requirement | `atlas_scan` | Do not use for routine session startup |
 | Missing, stale, or explicitly requested deep symbol/graph projection | `atlas_symbols_build` | Then use `atlas_symbols` or `atlas_symbol_relations`; do not rebuild repeatedly |
 | Broad work-area selection | `atlas_overview`, `atlas_folders`, `atlas_files` | Summary for the selected file |
-| One-file intelligence or direct impact already shown by crisp connections | `atlas_file_summary` with `compact: true` | Follow the selected connection to another compact summary or exact slice; use relations only when its stronger trust/path facts are material |
+| One-file intelligence or direct impact already shown by crisp connections | `atlas_file_summary` with `compact: true` and task-appropriate `content_selection` | Follow the selected connection to another compact summary or exact slice; use relations only when its stronger trust/path facts are material |
 | Declaration lookup | `atlas_symbols` | Slice the returned exact selector |
-| Inbound/outbound relations or bounded graph projection | `atlas_symbol_relations` with `view: "detailed"` and `compact: true` | Submit a top-level continuation `next_call` unchanged; otherwise copy a row `next_call` selector into summary, relations, or slice; do not restart discovery |
+| Inbound/outbound relations or bounded graph projection | `atlas_symbol_relations` with `view: "detailed"`, `compact: true`, and task-appropriate `content_selection` | Request `relation: "documents"` explicitly for documentation bridges; submit a continuation or row `next_call` unchanged |
 | Public reachability | Trusted owning-file export or bounded search for the module/re-export declaration | Slice the exact declaration when source proof is required; a reviewed purpose and nested `pub` declaration are selection evidence, not exposure proof |
 | Architecture, impact, dead-code, cycle, or static path review | `atlas_symbol_relations` with its closed analysis view/mode | Treat candidate/inconclusive output as review evidence, then inspect returned source selectors |
-| Indexed text discovery | `atlas_search` with a bounded `file_pattern` when possible | Slice the returned range; narrow before paging when truncated |
-| Exact source | `atlas_slice` | Stop when sufficient |
+| Indexed text discovery | `atlas_search` with a bounded `file_pattern` and task-appropriate `content_selection` when possible | Slice the returned range; narrow before paging when truncated |
+| Exact source | `atlas_slice` with `content_selection: "source"` when supported by the returned call | Stop when sufficient |
 | Missing, suggested, stale, or wrong purposes | `atlas_purpose_queue`, then `atlas_purpose_review` or `atlas_purpose_set` | Delegate one bounded `low` batch through isolated subagent execution at the lowest reliable reasoning and cost tier the host supports; otherwise process it in the main agent; never edit SQLite |
 | Cleanup, coverage, or purpose diagnostics | `atlas_health` / `atlas_purpose_queue` | Resolve a confirmed conflict or curate through purpose APIs |
 | Manual ProjectAtlas ignore policy | `atlas_ignore_list`, then `atlas_ignore_add` / `atlas_ignore_remove` | Keep `.gitignore` authoritative and add only stricter atlas-specific rules |
@@ -96,6 +106,7 @@ For a single known wrong or genuinely repurposed accepted purpose, inspect enoug
 ## Root, Ignore, and Isolation Rules
 
 - Run from the project root; the normal database is `<root>/.projectatlas/projectatlas.db`.
+- Every ordinary checkout and linked worktree owns that private ignored writable database. Never substitute a sibling checkout's database or make the common/bare manager a classified-navigation root.
 - One MCP server may serve several indexed roots. Per-call `project_path` is the concurrency-safe choice.
 - Never route a path outside the selected root unless that addressed root is already indexed and explicitly selected.
 - If the selected DB is incompatible or belongs to another project, do not reset, migrate, attach, merge, substitute, or fall back silently. Use typed recovery guidance or an explicit isolated DB.
@@ -155,12 +166,12 @@ Read-only review or CI smoke must set `PROJECTATLAS_NO_TELEMETRY=1`.
 | --- | --- |
 | Initialize | `projectatlas init` |
 | Refresh | `projectatlas scan` or `projectatlas watch --once` |
-| Broad orientation | `projectatlas overview`; `projectatlas folders <query>`; `projectatlas files <query> --folder <path>` |
+| Broad orientation | `projectatlas overview`; `projectatlas folders <query>`; `projectatlas files <query> --folder <path> --content-selection source|documentation|both` |
 | Exact file discovery | `projectatlas files --file-pattern <glob>` |
-| Summary/outline | `projectatlas summary <file> --limit <n>`; `projectatlas outline <file>` |
-| Symbols/relations | `projectatlas symbols list --file <file>`; `projectatlas symbols relations --file <file>` |
-| Search | `projectatlas search <pattern> --file-pattern <glob> --context-lines <n>` |
-| Exact source | `projectatlas slice <file> --start-line <n> --end-line <m>`; `projectatlas symbols slice <file> <symbol> --symbol-parent <parent>` |
+| Summary/outline | `projectatlas summary <file> --content-selection source|documentation|both --limit <n>`; `projectatlas outline <file>` |
+| Symbols/relations | `projectatlas symbols list --file <file> --content-selection source|documentation|both`; `projectatlas symbols relations --view detailed --file <file> --relation documents --direction outbound|inbound --content-selection source|documentation|both` |
+| Search | `projectatlas search <pattern> --file-pattern <glob> --content-selection source|documentation|both --context-lines <n>` |
+| Exact source | `projectatlas slice <file> --content-selection source --start-line <n> --end-line <m>`; `projectatlas symbols slice <file> <symbol> --content-selection source|documentation|both --symbol-parent <parent>` |
 | Health/purpose/lint | `projectatlas health-check --source-only --limit <n>`; `projectatlas purpose queue --limit <n>`; `projectatlas purpose review --from-file <json> --apply`; `projectatlas lint --report-untracked --purpose-level low` |
 | Runtime/root/config | `projectatlas --format json runtime-info`; `projectatlas root verify`; `projectatlas config --print` |
 | Token report | `projectatlas token` |

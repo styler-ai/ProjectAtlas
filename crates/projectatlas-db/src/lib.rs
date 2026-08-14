@@ -1,5 +1,6 @@
 //! Purpose: Persist `ProjectAtlas` 3 indexes in `SQLite`.
 
+mod content_classification;
 mod derived_snapshot;
 mod diagnostics;
 mod project_identity;
@@ -8,6 +9,10 @@ mod schema;
 mod sqlite_profile;
 mod telemetry;
 
+pub use content_classification::{
+    FileContentClassification, FileContentClassificationPage,
+    MAX_FILE_CONTENT_CLASSIFICATION_PAGE_ROWS, MAX_FILE_CONTENT_CLASSIFICATION_PATHS,
+};
 pub use derived_snapshot::{
     DerivedGraphSnapshot, DerivedGraphSnapshotImport, DerivedGraphSnapshotMetadata,
     DerivedSnapshotContent, MAX_DERIVED_SNAPSHOT_JSON_BYTES,
@@ -23,11 +28,12 @@ pub use project_identity::{ProjectRootTransition, ProjectRootTransitionResult};
 pub use repository_graph::{
     MAX_REPOSITORY_GRAPH_FRONTIER, RepositoryAffectedSourceFootprint, RepositoryCoverageQuery,
     RepositoryCoverageRow, RepositoryGraphAdjacencyContinuation, RepositoryGraphAdjacencyPage,
-    RepositoryGraphAdjacencyReadPage, RepositoryGraphAdjacencyRow, RepositoryGraphDirection,
-    RepositoryGraphPage, RepositoryGraphReadBatch, RepositoryGraphReadBudget,
-    RepositoryGraphReadPage, RepositoryGraphReadPages, RepositoryGraphReadWork,
-    RepositoryGraphRelationQuery, RepositoryGraphRelationRow, RepositoryGraphStagingGuard,
-    RepositoryNavigationConnections, RepositoryNavigationNode, RepositoryResolutionCandidate,
+    RepositoryGraphAdjacencyReadPage, RepositoryGraphAdjacencyRow,
+    RepositoryGraphClassifiedRelationRow, RepositoryGraphDirection, RepositoryGraphPage,
+    RepositoryGraphReadBatch, RepositoryGraphReadBudget, RepositoryGraphReadPage,
+    RepositoryGraphReadPages, RepositoryGraphReadWork, RepositoryGraphRelationQuery,
+    RepositoryGraphRelationRow, RepositoryGraphStagingGuard, RepositoryNavigationConnections,
+    RepositoryNavigationNode, RepositoryResolutionCandidate,
 };
 pub use sqlite_profile::validate_database_location;
 pub use telemetry::{
@@ -47,9 +53,10 @@ use projectatlas_core::health::{
     RECOMMENDATION_SUGGESTED_PURPOSE_REVIEW_QUEUE, STRUCTURAL_HEALTH_CATEGORIES, Severity,
     TEMP_FOLDER_BUCKETS, finding_id,
 };
+use projectatlas_core::language::{ContentClassification, ContentSelection};
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolGraph, SymbolKind,
-    SymbolRelation,
+    SymbolRelation, SymbolSourceSelector,
 };
 use projectatlas_core::telemetry::{
     TelemetryContractError, TokenOverview, TokenTrendReport, TokenTrendWindow, UsageEvent,
@@ -98,16 +105,22 @@ pub const MAX_PURPOSE_CURATION_BATCH_ROWS: usize = 200;
 pub const MAX_FILE_TEXT_FTS_CANDIDATES: usize = 4_096;
 /// Path-indexed metadata cursor for one exact path-or-descendant fallback scope.
 const FILE_TEXT_FALLBACK_SCOPED_METADATA_SQL: &str = "
-    SELECT path, content_hash, byte_count, line_count
-    FROM file_texts
-    WHERE path = ?1 OR (path >= ?2 AND path < ?3)
-    ORDER BY path
+    SELECT text.path, text.content_hash, text.byte_count, text.line_count,
+           classification.classification
+    FROM file_texts AS text
+    LEFT JOIN file_content_classifications AS classification
+      ON classification.path = text.path
+    WHERE text.path = ?1 OR (text.path >= ?2 AND text.path < ?3)
+    ORDER BY text.path
 ";
 /// Metadata cursor used when a fallback glob has no safe fixed prefix.
 const FILE_TEXT_FALLBACK_ALL_METADATA_SQL: &str = "
-    SELECT path, content_hash, byte_count, line_count
-    FROM file_texts
-    ORDER BY path
+    SELECT text.path, text.content_hash, text.byte_count, text.line_count,
+           classification.classification
+    FROM file_texts AS text
+    LEFT JOIN file_content_classifications AS classification
+      ON classification.path = text.path
+    ORDER BY text.path
 ";
 /// Exact authoritative content hydration after service-owned admission.
 const FILE_TEXT_FALLBACK_CONTENT_SQL: &str = "SELECT content FROM file_texts WHERE path = ?1";
@@ -475,6 +488,40 @@ pub enum DbError {
         /// Repository-relative path.
         path: String,
     },
+    /// One classification write/read batch exceeded its fixed path ceiling.
+    #[error("file classification batch requested {requested} paths; maximum is {maximum}")]
+    FileContentClassificationBatchTooLarge {
+        /// Unique paths requested.
+        requested: usize,
+        /// Storage-owned hard maximum.
+        maximum: usize,
+    },
+    /// One classification batch repeated an exact path.
+    #[error("file classification batch repeats path {path:?}")]
+    FileContentClassificationDuplicatePath {
+        /// Repeated repository-relative path.
+        path: String,
+    },
+    /// A current admitted file has no classification in the active transaction.
+    #[error("current file {path:?} has no content classification")]
+    FileContentClassificationMissing {
+        /// Current repository-relative file path.
+        path: String,
+    },
+    /// A classification row outlived current file ownership.
+    #[error("content classification for {path:?} does not belong to a current file")]
+    FileContentClassificationNotCurrent {
+        /// Stale or non-file repository-relative path.
+        path: String,
+    },
+    /// One classification/path page requested an invalid row limit.
+    #[error("file classification page requested {requested} rows; maximum is {maximum}")]
+    FileContentClassificationLimit {
+        /// Requested page rows.
+        requested: u32,
+        /// Storage-owned hard maximum.
+        maximum: u32,
+    },
     /// A purpose-curation task label is blank, unsafe, or too large.
     #[error("invalid purpose-curation task label: {reason}")]
     PurposeCurationTaskInvalid {
@@ -618,6 +665,15 @@ pub const MAX_SYMBOL_BATCH_ROWS: u32 = 4_096;
 pub const MAX_SYMBOL_BATCH_DECODED_BYTES: u64 = 4 * 1_024 * 1_024;
 /// Paths bound per statement, below supported `SQLite` variable ceilings.
 const SYMBOL_BATCH_BIND_PATHS: usize = 48;
+
+/// One persisted symbol with the classification of its owning file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClassifiedSymbol {
+    /// Persisted symbol detail.
+    pub symbol: CodeSymbol,
+    /// Registry-owned content role for the symbol's file.
+    pub classification: ContentClassification,
+}
 
 /// Typed database envelope for one exact-path symbol batch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -945,6 +1001,9 @@ impl IndexPublicationGuard<'_> {
     /// Returns an error if stale projections cannot be removed.
     pub fn finish_scan_replacement(&mut self) -> DbResult<()> {
         delete_absent_scan_projections(&self.store.connection)?;
+        content_classification::validate_complete_file_content_classifications(
+            &self.store.connection,
+        )?;
         self.scan_replacement_pending = false;
         Ok(())
     }
@@ -960,6 +1019,10 @@ impl IndexPublicationGuard<'_> {
         if self.scan_replacement_pending {
             return Err(DbError::ScanReplacementIncomplete);
         }
+        content_classification::validate_complete_file_content_classifications(
+            &self.store.connection,
+        )?;
+        repository_graph::validate_complete_document_unresolved_reasons(&self.store.connection)?;
         let next_generation = self
             .previous_generation
             .checked_next()
@@ -1070,6 +1133,8 @@ pub struct FileTextMetadata {
     pub byte_count: usize,
     /// Persisted line count.
     pub line_count: usize,
+    /// Closed content role available before source decoding.
+    pub classification: ContentClassification,
 }
 
 /// Service decision made before one fallback row decodes source content.
@@ -1597,6 +1662,10 @@ impl AtlasStore {
             let mut mark_nodes = savepoint.prepare_cached(
                 "UPDATE nodes SET exists_now = 0 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
             )?;
+            let mut delete_classifications = savepoint.prepare_cached(
+                "DELETE FROM file_content_classifications
+                  WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+            )?;
             let mut delete_relations = savepoint.prepare_cached(
                 "DELETE FROM symbol_relations WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
             )?;
@@ -1619,6 +1688,7 @@ impl AtlasStore {
                     continue;
                 }
                 let descendant_pattern = sqlite_descendant_pattern(path);
+                delete_classifications.execute(params![path, descendant_pattern])?;
                 mark_nodes.execute(params![path, descendant_pattern])?;
                 delete_relations.execute(params![path, descendant_pattern])?;
                 delete_symbols.execute(params![path, descendant_pattern])?;
@@ -2434,14 +2504,22 @@ impl AtlasStore {
                     documentation,
                     line_start,
                     line_end,
+                    source_byte_start,
+                    source_byte_end,
+                    source_column_start,
+                    source_column_end,
                     parent,
                     parser,
                     detail
                 )
-                VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                VALUES(
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                    ?13, ?14, ?15, ?16
+                )
                 ",
             )?;
             for symbol in &graph.symbols {
+                let selector = symbol_source_selector_values(symbol)?;
                 insert_symbol.execute(params![
                     symbol.path,
                     symbol.language.as_deref(),
@@ -2452,6 +2530,10 @@ impl AtlasStore {
                     symbol.documentation.as_deref(),
                     usize_to_i64(symbol.line_start),
                     usize_to_i64(symbol.line_end),
+                    selector[0],
+                    selector[1],
+                    selector[2],
+                    selector[3],
                     symbol.parent.as_deref(),
                     symbol.parser.to_string(),
                     symbol.detail.as_deref(),
@@ -2625,7 +2707,8 @@ impl AtlasStore {
         match (file, query) {
             (Some(file), Some(query)) => self.query_symbols(
                 "
-                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
+                       source_byte_start, source_byte_end, source_column_start, source_column_end
                 FROM symbols
                 WHERE path = ?1 AND (name LIKE ?2 OR signature LIKE ?2 OR documentation LIKE ?2)
                 ORDER BY path, line_start, name
@@ -2635,7 +2718,8 @@ impl AtlasStore {
             ),
             (Some(file), None) => self.query_symbols(
                 "
-                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
+                       source_byte_start, source_byte_end, source_column_start, source_column_end
                 FROM symbols
                 WHERE path = ?1
                 ORDER BY path, line_start, name
@@ -2645,7 +2729,8 @@ impl AtlasStore {
             ),
             (None, Some(query)) => self.query_symbols(
                 "
-                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
+                       source_byte_start, source_byte_end, source_column_start, source_column_end
                 FROM symbols
                 WHERE name LIKE ?1 OR signature LIKE ?1 OR documentation LIKE ?1 OR path LIKE ?1
                 ORDER BY path, line_start, name
@@ -2655,7 +2740,8 @@ impl AtlasStore {
             ),
             (None, None) => self.query_symbols(
                 "
-                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
+                       source_byte_start, source_byte_end, source_column_start, source_column_end
                 FROM symbols
                 ORDER BY path, line_start, name
                 LIMIT ?1
@@ -2663,6 +2749,31 @@ impl AtlasStore {
                 params![max_rows],
             ),
         }
+    }
+
+    /// Load symbols with their owning file classification and optional content selection.
+    ///
+    /// Omitted selection retains the legacy symbol candidate universe and order. Explicit
+    /// selection is applied by `SQLite` before the row limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a classification is missing or corrupt, or reading fails.
+    pub fn load_classified_symbols(
+        &self,
+        file: Option<&str>,
+        query: Option<&str>,
+        selection: ContentSelection,
+        limit: usize,
+    ) -> DbResult<Vec<ClassifiedSymbol>> {
+        let (sql, bindings) = classified_symbols_sql(file, query, selection, limit);
+        let mut statement = self.connection.prepare(&sql)?;
+        let mut rows = statement.query(params_from_iter(bindings.iter()))?;
+        let mut symbols = Vec::new();
+        while let Some(row) = rows.next()? {
+            symbols.push(classified_symbol_from_row(row)?);
+        }
+        Ok(symbols)
     }
 
     /// Load one bounded deterministic symbol set for exact repository paths.
@@ -2737,6 +2848,10 @@ impl AtlasStore {
                     detail,
                     exported,
                     documentation,
+                    source_byte_start,
+                    source_byte_end,
+                    source_column_start,
+                    source_column_end,
                     length(CAST(path AS BLOB))
                         + COALESCE(length(CAST(language AS BLOB)), 0)
                         + length(CAST(name AS BLOB))
@@ -2832,7 +2947,8 @@ impl AtlasStore {
         let placeholders = numbered_placeholders(2, kinds.len());
         let sql = format!(
             "
-            SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+            SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
+                   source_byte_start, source_byte_end, source_column_start, source_column_end
             FROM symbols INDEXED BY idx_symbols_path
             WHERE path = ?1 AND kind IN ({placeholders})
             ORDER BY path, line_start, name
@@ -2907,7 +3023,8 @@ impl AtlasStore {
         let placeholders = numbered_placeholders(1, names.len());
         let sql = format!(
             "
-            SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+            SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
+                   source_byte_start, source_byte_end, source_column_start, source_column_end
             FROM symbols
             WHERE name IN ({placeholders})
             ORDER BY path, line_start, name
@@ -2981,7 +3098,8 @@ impl AtlasStore {
     ) -> DbResult<Vec<CodeSymbol>> {
         self.query_symbols(
             "
-            SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+            SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
+                   source_byte_start, source_byte_end, source_column_start, source_column_end
             FROM symbols
             WHERE path = ?1 AND name = ?2
             ORDER BY line_start, line_end, kind, parent
@@ -3744,7 +3862,9 @@ impl AtlasStore {
 
             let symbol_sql = format!(
                 "SELECT path, language, name, kind, signature, line_start, line_end,
-                        parent, parser, detail, exported, documentation
+                        parent, parser, detail, exported, documentation,
+                        source_byte_start, source_byte_end,
+                        source_column_start, source_column_end
                    FROM symbols
                   WHERE path IN ({placeholders})
                   ORDER BY path, line_start, line_end, name, kind"
@@ -6122,6 +6242,7 @@ fn mark_all_scan_nodes_absent(connection: &Connection) -> DbResult<()> {
 
 /// Delete derived rows whose owning scan node remained absent.
 fn delete_absent_scan_projections(connection: &Connection) -> DbResult<()> {
+    content_classification::delete_absent_file_content_classifications(connection)?;
     let fts_revision = begin_file_text_fts_update(connection)?;
     connection.execute(
         "DELETE FROM symbol_relations WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
@@ -6151,6 +6272,7 @@ fn delete_absent_scan_projections(connection: &Connection) -> DbResult<()> {
 
 /// Upsert scanned nodes through transaction-owned prepared statements.
 fn upsert_nodes(connection: &Connection, nodes: &[Node]) -> DbResult<()> {
+    content_classification::delete_non_file_content_classifications(connection, nodes)?;
     let mut select_existing = connection.prepare_cached(
         "
         SELECT content_hash
@@ -6174,6 +6296,12 @@ fn upsert_nodes(connection: &Connection, nodes: &[Node]) -> DbResult<()> {
             last_seen_at = CURRENT_TIMESTAMP,
             last_indexed_at = CURRENT_TIMESTAMP
         ",
+    )?;
+    let mut ensure_file_classification = connection.prepare_cached(
+        "INSERT INTO file_content_classifications(path, classification)
+         SELECT ?1, 'opaque'
+          WHERE ?2 = 'file'
+         ON CONFLICT(path) DO NOTHING",
     )?;
     let mut select_node_id = connection.prepare_cached("SELECT id FROM nodes WHERE path = ?1")?;
     let mut ensure_purpose = connection.prepare_cached(
@@ -6212,6 +6340,7 @@ fn upsert_nodes(connection: &Connection, nodes: &[Node]) -> DbResult<()> {
             node.mtime_ns,
             node.content_hash
         ])?;
+        ensure_file_classification.execute(params![node.path, node.kind.to_string()])?;
         let node_id = select_node_id.query_row([&node.path], |row| row.get::<_, i64>(0))?;
         ensure_purpose.execute([node_id])?;
         upsert_summary.execute(params![
@@ -6474,11 +6603,21 @@ fn collect_file_text_fts_candidates(
 
 /// Decode persisted file metadata before the potentially large source column.
 fn file_text_metadata_from_row(row: &rusqlite::Row<'_>) -> DbResult<FileTextMetadata> {
+    let path = row.get::<_, String>(0)?;
+    let classification = row
+        .get::<_, Option<String>>(4)?
+        .ok_or_else(|| DbError::FileContentClassificationMissing { path: path.clone() })?;
     Ok(FileTextMetadata {
-        path: row.get(0)?,
+        path,
         content_hash: row.get(1)?,
         byte_count: count_to_usize("file_texts.byte_count", row.get::<_, i64>(2)?)?,
         line_count: count_to_usize("file_texts.line_count", row.get::<_, i64>(3)?)?,
+        classification: ContentClassification::from_db(&classification).ok_or(
+            DbError::InvalidEnum {
+                field: "file_content_classifications.classification",
+                value: classification,
+            },
+        )?,
     })
 }
 
@@ -7054,16 +7193,200 @@ fn i64_to_usize(value: i64) -> usize {
     usize::try_from(value.max(0)).unwrap_or(usize::MAX)
 }
 
+/// Build the classified symbol query from static clauses and bound caller values.
+fn classified_symbols_sql(
+    file: Option<&str>,
+    query: Option<&str>,
+    selection: ContentSelection,
+    limit: usize,
+) -> (String, Vec<Value>) {
+    let mut predicates = Vec::new();
+    let mut bindings = Vec::new();
+    if let Some(file) = file {
+        bindings.push(Value::Text(file.to_string()));
+        predicates.push(format!("symbol.path = ?{}", bindings.len()));
+    }
+    if let Some(query) = query {
+        bindings.push(Value::Text(like_query(query)));
+        let placeholder = bindings.len();
+        let path_predicate = if file.is_some() {
+            String::new()
+        } else {
+            format!(" OR symbol.path LIKE ?{placeholder}")
+        };
+        predicates.push(format!(
+            "(symbol.name LIKE ?{placeholder} OR symbol.signature LIKE ?{placeholder} \
+             OR symbol.documentation LIKE ?{placeholder}{path_predicate})"
+        ));
+    }
+    match selection {
+        ContentSelection::UnspecifiedLegacy => {}
+        ContentSelection::Source => {
+            bindings.push(Value::Text(
+                ContentClassification::Source.as_str().to_string(),
+            ));
+            predicates.push(format!(
+                "(classification.classification = ?{} OR classification.path IS NULL)",
+                bindings.len()
+            ));
+        }
+        ContentSelection::Documentation => {
+            bindings.push(Value::Text(
+                ContentClassification::Documentation.as_str().to_string(),
+            ));
+            predicates.push(format!(
+                "(classification.classification = ?{} OR classification.path IS NULL)",
+                bindings.len()
+            ));
+        }
+        ContentSelection::Both => {
+            bindings.push(Value::Text(
+                ContentClassification::Source.as_str().to_string(),
+            ));
+            let source = bindings.len();
+            bindings.push(Value::Text(
+                ContentClassification::Documentation.as_str().to_string(),
+            ));
+            let documentation = bindings.len();
+            predicates.push(format!(
+                "(classification.classification IN (?{source}, ?{documentation}) \
+                 OR classification.path IS NULL)"
+            ));
+        }
+    }
+    bindings.push(Value::Integer(usize_to_i64(limit.max(1))));
+    let limit = bindings.len();
+    let where_clause = if predicates.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", predicates.join(" AND "))
+    };
+    let sql = format!(
+        "SELECT symbol.path, symbol.language, symbol.name, symbol.kind,
+                symbol.signature, symbol.line_start, symbol.line_end, symbol.parent,
+                symbol.parser, symbol.detail, symbol.exported, symbol.documentation,
+                symbol.source_byte_start, symbol.source_byte_end,
+                symbol.source_column_start, symbol.source_column_end,
+                classification.classification
+           FROM symbols AS symbol INDEXED BY idx_symbols_path
+           LEFT JOIN file_content_classifications AS classification
+             ON classification.path = symbol.path
+           {where_clause}
+          ORDER BY symbol.path, symbol.line_start, symbol.name
+          LIMIT ?{limit}"
+    );
+    (sql, bindings)
+}
+
+/// Validate and narrow one parser-supplied source selector for `SQLite` storage.
+fn symbol_source_selector_values(symbol: &CodeSymbol) -> DbResult<[Option<i64>; 4]> {
+    let Some(selector) = symbol.source_selector else {
+        return Ok([None; 4]);
+    };
+    if symbol.line_start == 0
+        || symbol.line_end < symbol.line_start
+        || selector.byte_end < selector.byte_start
+        || (symbol.line_start == symbol.line_end && selector.column_end < selector.column_start)
+    {
+        return Err(DbError::SymbolGraphRowShape {
+            path: symbol.path.clone(),
+            reason: "symbol source selector range is invalid",
+        });
+    }
+    let narrow = |value| match i64::try_from(value) {
+        Ok(value) => Ok(Some(value)),
+        Err(_) => Err(DbError::SymbolGraphRowShape {
+            path: symbol.path.clone(),
+            reason: "symbol source selector exceeds the SQLite integer range",
+        }),
+    };
+    Ok([
+        narrow(selector.byte_start)?,
+        narrow(selector.byte_end)?,
+        narrow(selector.column_start)?,
+        narrow(selector.column_end)?,
+    ])
+}
+
+/// Decode one all-or-none persisted source selector without coercing corrupt ranges.
+fn symbol_source_selector_from_row(
+    row: &rusqlite::Row<'_>,
+    line_start: usize,
+    line_end: usize,
+) -> rusqlite::Result<Option<SymbolSourceSelector>> {
+    let raw = [
+        row.get::<_, Option<i64>>(12)?,
+        row.get::<_, Option<i64>>(13)?,
+        row.get::<_, Option<i64>>(14)?,
+        row.get::<_, Option<i64>>(15)?,
+    ];
+    let [
+        Some(byte_start),
+        Some(byte_end),
+        Some(column_start),
+        Some(column_end),
+    ] = raw
+    else {
+        if raw.iter().all(Option::is_none) {
+            return Ok(None);
+        }
+        return Err(invalid_symbol_source_selector(
+            "symbol source selector columns are only partially populated",
+        ));
+    };
+    if byte_start < 0
+        || byte_end < byte_start
+        || column_start < 0
+        || column_end < 0
+        || line_start == 0
+        || line_end < line_start
+        || (line_start == line_end && column_end < column_start)
+    {
+        return Err(invalid_symbol_source_selector(
+            "symbol source selector range is invalid",
+        ));
+    }
+    Ok(Some(SymbolSourceSelector {
+        byte_start: symbol_source_selector_usize(byte_start)?,
+        byte_end: symbol_source_selector_usize(byte_end)?,
+        column_start: symbol_source_selector_usize(column_start)?,
+        column_end: symbol_source_selector_usize(column_end)?,
+    }))
+}
+
+/// Convert one validated nonnegative selector integer without losing overflow detail.
+fn symbol_source_selector_usize(value: i64) -> rusqlite::Result<usize> {
+    usize::try_from(value).map_err(|source| {
+        rusqlite::Error::FromSqlConversionFailure(
+            12,
+            rusqlite::types::Type::Integer,
+            Box::new(source),
+        )
+    })
+}
+
+/// Construct one fail-closed `SQLite` conversion error for a malformed selector row.
+fn invalid_symbol_source_selector(message: &'static str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        12,
+        rusqlite::types::Type::Integer,
+        Box::new(std::io::Error::other(message)),
+    )
+}
+
 /// Decode one persisted symbol row through the shared column contract.
 fn code_symbol_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSymbol> {
+    let line_start = i64_to_usize(row.get::<_, i64>(5)?);
+    let line_end = i64_to_usize(row.get::<_, i64>(6)?);
     Ok(CodeSymbol {
         path: row.get(0)?,
         language: row.get(1)?,
         name: row.get(2)?,
         kind: SymbolKind::from_db(row.get_ref(3)?.as_str()?),
         signature: row.get(4)?,
-        line_start: i64_to_usize(row.get::<_, i64>(5)?),
-        line_end: i64_to_usize(row.get::<_, i64>(6)?),
+        line_start,
+        line_end,
+        source_selector: symbol_source_selector_from_row(row, line_start, line_end)?,
         parent: row.get(7)?,
         parser: ParserKind::from_db(row.get_ref(8)?.as_str()?),
         detail: row.get(9)?,
@@ -7072,9 +7395,23 @@ fn code_symbol_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSymbol>
     })
 }
 
+/// Decode one joined symbol/classification row through both owning contracts.
+fn classified_symbol_from_row(row: &rusqlite::Row<'_>) -> DbResult<ClassifiedSymbol> {
+    let symbol = code_symbol_from_row(row)?;
+    let classification = row.get::<_, Option<String>>(16)?.ok_or_else(|| {
+        DbError::FileContentClassificationMissing {
+            path: symbol.path.clone(),
+        }
+    })?;
+    Ok(ClassifiedSymbol {
+        symbol,
+        classification: content_classification::parse_classification(classification)?,
+    })
+}
+
 /// Read the exact owned-string byte floor before hydrating one symbol row.
 fn code_symbol_preflight_bytes(row: &rusqlite::Row<'_>) -> DbResult<u64> {
-    let string_bytes = row.get::<_, i64>(12)?;
+    let string_bytes = row.get::<_, i64>(16)?;
     let string_bytes = u64::try_from(string_bytes).map_err(|source| DbError::InvalidCount {
         field: "symbol persisted field bytes",
         value: string_bytes,
@@ -9440,6 +9777,7 @@ mod tests {
                 documentation: None,
                 line_start: 1,
                 line_end: 1,
+                source_selector: None,
                 parent: None,
                 parser: ParserKind::TreeSitter,
                 detail: Some("gradle-kotlin-dsl-task".to_string()),
@@ -11132,7 +11470,16 @@ mod tests {
                 content: "migration needle\n".to_string(),
             }],
         )?;
-        store.connection.execute_batch("DROP TABLE file_text_fts")?;
+        store.connection.execute_batch(
+            "DROP TABLE file_content_classifications;
+             DROP INDEX idx_nodes_path_kind;",
+        )?;
+        crate::schema::recreate_disposable_graph_projection(&store.connection, false)?;
+        crate::schema::recreate_pre_selector_symbol_storage_for_test(&store.connection)?;
+        store.connection.execute_batch(
+            "DROP INDEX idx_symbol_import_alias_lookup;
+             DROP TABLE file_text_fts;",
+        )?;
         store.connection.execute(
             "DELETE FROM metadata WHERE key IN (?1, ?2)",
             params![
@@ -11335,10 +11682,12 @@ mod tests {
                 content: "needle good\n".to_string(),
             }],
         )?;
-        store.connection.execute(
-            "INSERT INTO file_texts(path, content_hash, byte_count, line_count, content)
-             VALUES('src/bad.rs', 'hash-bad', 1, 1, x'80')",
-            [],
+        store.connection.execute_batch(
+            "INSERT INTO nodes(path, kind, exists_now) VALUES('src/bad.rs', 'file', 1);
+             INSERT INTO file_content_classifications(path, classification)
+                VALUES('src/bad.rs', 'source');
+             INSERT INTO file_texts(path, content_hash, byte_count, line_count, content)
+                VALUES('src/bad.rs', 'hash-bad', 1, 1, x'80');",
         )?;
 
         let mut admitted = Vec::new();
@@ -11347,7 +11696,7 @@ mod tests {
             Some("src"),
             None,
             |metadata| {
-                admitted.push(metadata.path.clone());
+                admitted.push((metadata.path.clone(), metadata.classification));
                 Ok(if metadata.path == "src/bad.rs" {
                     FileTextAdmission::Skip
                 } else {
@@ -11361,7 +11710,10 @@ mod tests {
         )?;
         require_eq(
             &admitted,
-            &vec!["src/bad.rs".to_string(), "src/good.rs".to_string()],
+            &vec![
+                ("src/bad.rs".to_string(), ContentClassification::Source),
+                ("src/good.rs".to_string(), ContentClassification::Opaque),
+            ],
             "fallback metadata admission rows",
         )?;
         require_eq(
@@ -11380,10 +11732,13 @@ mod tests {
         require(
             scoped_plan_details
                 .iter()
-                .any(|detail| detail.contains("SEARCH file_texts USING INDEX"))
-                && scoped_plan_details
-                    .iter()
-                    .all(|detail| !detail.contains("SCAN file_texts")),
+                .any(|detail| detail.contains("sqlite_autoindex_file_texts_1"))
+                && scoped_plan_details.iter().any(|detail| {
+                    detail.contains("sqlite_autoindex_file_content_classifications_1")
+                })
+                && scoped_plan_details.iter().all(|detail| {
+                    !detail.contains("SCAN text") && !detail.contains("SCAN classification")
+                }),
             "path-scoped fallback did not use bounded binary index ranges",
         )?;
         let mut scoped_opcodes = store
@@ -11391,14 +11746,31 @@ mod tests {
             .prepare(&format!("EXPLAIN {FILE_TEXT_FALLBACK_SCOPED_METADATA_SQL}"))?;
         let scoped_opcode_rows = scoped_opcodes
             .query_map(params!["src", "src/", "src0"], |row| {
-                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+                Ok((
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let file_text_table_cursors = scoped_opcode_rows
+            .iter()
+            .filter(|(opcode, _, _, shape)| opcode == "DeferredSeek" && shape.is_some())
+            .map(|(_, _, table_cursor, _)| *table_cursor)
+            .collect::<Vec<_>>();
         require(
-            scoped_opcode_rows
-                .iter()
-                .all(|(opcode, column)| opcode != "Column" || *column != 4),
-            "fallback metadata cursor read source content before admission",
+            !file_text_table_cursors.is_empty()
+                && scoped_opcode_rows
+                    .iter()
+                    .all(|(opcode, cursor, column, _)| {
+                        opcode != "Column"
+                            || !file_text_table_cursors.contains(cursor)
+                            || *column != 4
+                    }),
+            &format!(
+                "fallback metadata cursor read source content before admission: {scoped_opcode_rows:?}"
+            ),
         )?;
         require(
             store
@@ -11492,6 +11864,23 @@ mod tests {
                 }))
             ),
             "FTS deadline was not typed",
+        )?;
+        store.connection.execute(
+            "DELETE FROM file_content_classifications WHERE path = 'src/good.rs'",
+            [],
+        )?;
+        let missing_classification = store.visit_file_texts_for_fallback(
+            Some("src/good.rs"),
+            None,
+            |_| Ok(FileTextAdmission::Read),
+            |_| Ok(true),
+        );
+        require(
+            matches!(
+                missing_classification,
+                Err(DbError::FileContentClassificationMissing { .. })
+            ),
+            "fallback omitted a text row whose predecode classification was missing",
         )?;
         Ok(())
     }
@@ -12205,6 +12594,7 @@ mod tests {
                 documentation: Some("Run the application.".to_string()),
                 line_start: 1,
                 line_end: 3,
+                source_selector: None,
                 parent: None,
                 parser: ParserKind::TreeSitter,
                 detail: Some("function_item".to_string()),
@@ -12238,6 +12628,388 @@ mod tests {
             &Some("Run the application.".to_string()),
             "documentation metadata",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn symbol_source_selectors_round_trip_all_read_paths_and_reopen() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let path = "docs/guide.md";
+        let expected = SymbolSourceSelector {
+            byte_start: 17,
+            byte_end: 31,
+            column_start: 4,
+            column_end: 2,
+        };
+        let graph = SymbolGraph {
+            path: path.to_string(),
+            language: Some("markdown".to_string()),
+            parser: ParserKind::Structural,
+            symbols: vec![
+                CodeSymbol {
+                    path: path.to_string(),
+                    language: Some("markdown".to_string()),
+                    name: "Overview".to_string(),
+                    kind: SymbolKind::Heading,
+                    signature: "overview#1".to_string(),
+                    exported: false,
+                    documentation: None,
+                    line_start: 2,
+                    line_end: 3,
+                    source_selector: Some(expected),
+                    parent: None,
+                    parser: ParserKind::Structural,
+                    detail: Some("level=2".to_string()),
+                },
+                CodeSymbol {
+                    path: path.to_string(),
+                    language: Some("markdown".to_string()),
+                    name: "Compatibility".to_string(),
+                    kind: SymbolKind::Heading,
+                    signature: "compatibility#1".to_string(),
+                    exported: false,
+                    documentation: None,
+                    line_start: 6,
+                    line_end: 6,
+                    source_selector: None,
+                    parent: None,
+                    parser: ParserKind::Structural,
+                    detail: Some("level=2".to_string()),
+                },
+            ],
+            relations: Vec::new(),
+        };
+
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        store.replace_scan(&[test_file_node(path, "guide-hash")])?;
+        store.replace_symbol_graph(&graph)?;
+        let mut publication = store.begin_index_publication("symbol-source-selectors")?;
+        publication.upsert_file_content_classification_batch(&[FileContentClassification {
+            path: path.to_string(),
+            classification: ContentClassification::Documentation,
+        }])?;
+        publication.complete()?;
+        verify_symbol_source_selector_read_paths(&store, path, expected)?;
+        drop(store);
+
+        let reopened = AtlasStore::open_for_project(&database, &root)?;
+        verify_symbol_source_selector_read_paths(&reopened, path, expected)?;
+        drop(reopened);
+
+        let read_only = AtlasStore::open_read_only_for_project(&database, &root)?;
+        verify_symbol_source_selector_read_paths(&read_only, path, expected)?;
+        read_only.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn symbol_source_selector_constraints_and_corrupt_reads_fail_closed()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let path = "docs/guide.md";
+        store.replace_symbol_graph(&SymbolGraph {
+            path: path.to_string(),
+            language: Some("markdown".to_string()),
+            parser: ParserKind::Structural,
+            symbols: vec![CodeSymbol {
+                path: path.to_string(),
+                language: Some("markdown".to_string()),
+                name: "Overview".to_string(),
+                kind: SymbolKind::Heading,
+                signature: "overview#1".to_string(),
+                exported: false,
+                documentation: None,
+                line_start: 2,
+                line_end: 2,
+                source_selector: None,
+                parent: None,
+                parser: ParserKind::Structural,
+                detail: None,
+            }],
+            relations: Vec::new(),
+        })?;
+
+        for invalid_update in [
+            "UPDATE symbols SET source_byte_start = 0 WHERE path = 'docs/guide.md'",
+            "UPDATE symbols SET source_byte_start = -1, source_byte_end = 4,
+                                source_column_start = 0, source_column_end = 4
+              WHERE path = 'docs/guide.md'",
+            "UPDATE symbols SET source_byte_start = 5, source_byte_end = 4,
+                                source_column_start = 0, source_column_end = 4
+              WHERE path = 'docs/guide.md'",
+            "UPDATE symbols SET source_byte_start = 0, source_byte_end = 4,
+                                source_column_start = 5, source_column_end = 4
+              WHERE path = 'docs/guide.md'",
+        ] {
+            require(
+                store.connection.execute(invalid_update, []).is_err(),
+                "invalid source selector bypassed its table constraint",
+            )?;
+        }
+        store.connection.execute(
+            "UPDATE symbols
+                SET source_byte_start = 0, source_byte_end = 4,
+                    source_column_start = 0, source_column_end = 4
+              WHERE path = ?1",
+            [path],
+        )?;
+        require_symbol_source_selectors(
+            &store.load_symbols(Some(path), None, 10)?,
+            Some(SymbolSourceSelector {
+                byte_start: 0,
+                byte_end: 4,
+                column_start: 0,
+                column_end: 4,
+            }),
+            "valid constrained selector",
+        )?;
+
+        store.connection.execute_batch(
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE symbols
+                SET source_byte_start = 0, source_byte_end = NULL,
+                    source_column_start = 0, source_column_end = 4
+              WHERE path = 'docs/guide.md';
+             PRAGMA ignore_check_constraints = OFF;",
+        )?;
+        let corrupt = store.load_symbols(Some(path), None, 10);
+        require(
+            matches!(corrupt, Err(DbError::Sqlite(_))),
+            "partially populated source selector did not fail closed",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn symbol_source_selector_write_failure_rolls_back_graph() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let path = "docs/guide.md";
+        let previous = SymbolGraph {
+            path: path.to_string(),
+            language: Some("markdown".to_string()),
+            parser: ParserKind::Structural,
+            symbols: vec![batch_test_symbol(path, "previous", 1, 0)],
+            relations: Vec::new(),
+        };
+        store.replace_symbol_graph(&previous)?;
+
+        let mut valid = batch_test_symbol(path, "valid", 2, 0);
+        valid.source_selector = Some(SymbolSourceSelector {
+            byte_start: 4,
+            byte_end: 9,
+            column_start: 0,
+            column_end: 5,
+        });
+        let mut invalid = batch_test_symbol(path, "invalid", 3, 0);
+        invalid.source_selector = Some(SymbolSourceSelector {
+            byte_start: 12,
+            byte_end: 11,
+            column_start: 0,
+            column_end: 5,
+        });
+        let replacement = SymbolGraph {
+            path: path.to_string(),
+            language: Some("markdown".to_string()),
+            parser: ParserKind::Structural,
+            symbols: vec![valid, invalid],
+            relations: Vec::new(),
+        };
+        let Err(error) = store.replace_symbol_graph(&replacement) else {
+            return Err(io::Error::other("invalid selector replacement committed").into());
+        };
+        require(
+            matches!(error, DbError::SymbolGraphRowShape { .. }),
+            "invalid selector replacement returned the wrong error",
+        )?;
+        require_eq(
+            &store.load_symbol_graphs_for_paths(&[path.to_string()])?,
+            &vec![previous],
+            "selector failure transaction rollback",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn classified_symbol_list_filters_before_limit_and_preserves_legacy_order()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let classified_paths = [
+            (
+                "config/first.toml",
+                ContentClassification::ConfigurationData,
+            ),
+            ("docs/guide.md", ContentClassification::Documentation),
+            ("other/notes.txt", ContentClassification::OtherText),
+            ("src/lib.rs", ContentClassification::Source),
+            ("src/second.rs", ContentClassification::Source),
+        ];
+        let nodes = classified_paths
+            .iter()
+            .enumerate()
+            .map(|(index, (path, _))| test_file_node(path, &format!("hash-{index}")))
+            .collect::<Vec<_>>();
+        store.replace_scan(&nodes)?;
+        for (index, (path, _)) in classified_paths.iter().enumerate() {
+            store.replace_symbol_graph(&SymbolGraph {
+                path: (*path).to_string(),
+                language: Some("rust".to_string()),
+                parser: ParserKind::TreeSitter,
+                symbols: vec![batch_test_symbol(path, &format!("needle_{index}"), 1, 0)],
+                relations: Vec::new(),
+            })?;
+        }
+        let classifications = classified_paths
+            .iter()
+            .map(|(path, classification)| FileContentClassification {
+                path: (*path).to_string(),
+                classification: *classification,
+            })
+            .collect::<Vec<_>>();
+        let mut publication = store.begin_index_publication("classified-symbol-list")?;
+        publication.upsert_file_content_classification_batch(&classifications)?;
+        publication.complete()?;
+
+        for (file, query, limit) in [
+            (None, None, 3),
+            (None, Some("needle"), 3),
+            (Some("src/second.rs"), None, 10),
+            (Some("src/second.rs"), Some("needle_4"), 10),
+            (Some("src/second.rs"), Some("second"), 10),
+            (None, None, 0),
+        ] {
+            let legacy = store.load_symbols(file, query, limit)?;
+            let classified = store.load_classified_symbols(
+                file,
+                query,
+                ContentSelection::UnspecifiedLegacy,
+                limit,
+            )?;
+            require_eq(
+                &classified
+                    .into_iter()
+                    .map(|row| row.symbol)
+                    .collect::<Vec<_>>(),
+                &legacy,
+                "omitted classified symbol candidates and order",
+            )?;
+        }
+        let omitted = store.load_classified_symbols(
+            None,
+            Some("needle"),
+            ContentSelection::UnspecifiedLegacy,
+            3,
+        )?;
+        require_eq(
+            &omitted
+                .iter()
+                .map(|row| row.classification)
+                .collect::<Vec<_>>(),
+            &vec![
+                ContentClassification::ConfigurationData,
+                ContentClassification::Documentation,
+                ContentClassification::OtherText,
+            ],
+            "additive legacy classifications",
+        )?;
+
+        let source =
+            store.load_classified_symbols(None, Some("needle"), ContentSelection::Source, 1)?;
+        require_eq(
+            &source.first().map(|row| row.symbol.path.as_str()),
+            &Some("src/lib.rs"),
+            "source selection before limit",
+        )?;
+        let documentation = store.load_classified_symbols(
+            None,
+            Some("needle"),
+            ContentSelection::Documentation,
+            1,
+        )?;
+        require_eq(
+            &documentation.first().map(|row| row.symbol.path.as_str()),
+            &Some("docs/guide.md"),
+            "documentation selection before limit",
+        )?;
+        let both =
+            store.load_classified_symbols(None, Some("needle"), ContentSelection::Both, 2)?;
+        require_eq(
+            &both
+                .iter()
+                .map(|row| row.symbol.path.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["docs/guide.md", "src/lib.rs"],
+            "combined selection order",
+        )?;
+        let file_query = store.load_classified_symbols(
+            Some("src/second.rs"),
+            Some("needle_4"),
+            ContentSelection::Source,
+            10,
+        )?;
+        require_eq(&file_query.len(), &1, "file/query classified symbol filter")?;
+        Ok(())
+    }
+
+    #[test]
+    fn classified_symbol_list_rejects_missing_owner_and_uses_existing_indexes()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[test_file_node("src/lib.rs", "hash")])?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/lib.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![batch_test_symbol("src/lib.rs", "needle", 1, 0)],
+            relations: Vec::new(),
+        })?;
+
+        for selection in [
+            ContentSelection::UnspecifiedLegacy,
+            ContentSelection::Source,
+            ContentSelection::Both,
+        ] {
+            let (sql, bindings) = classified_symbols_sql(None, Some("needle"), selection, 1);
+            let mut statement = store
+                .connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+            let plan = statement
+                .query_map(params_from_iter(bindings.iter()), |row| {
+                    row.get::<_, String>(3)
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n");
+            require(
+                plan.contains("idx_symbols_path")
+                    && plan.contains("sqlite_autoindex_file_content_classifications_1")
+                    && !plan.contains("SCAN classification"),
+                &format!("classified symbol query missed existing indexes: {plan}"),
+            )?;
+        }
+
+        store.connection.execute(
+            "DELETE FROM file_content_classifications WHERE path = 'src/lib.rs'",
+            [],
+        )?;
+        for selection in [
+            ContentSelection::UnspecifiedLegacy,
+            ContentSelection::Source,
+            ContentSelection::Both,
+        ] {
+            let Err(error) = store.load_classified_symbols(Some("src/lib.rs"), None, selection, 10)
+            else {
+                return Err(
+                    io::Error::other("symbol without a file classification was accepted").into(),
+                );
+            };
+            require(
+                matches!(error, DbError::FileContentClassificationMissing { .. }),
+                "missing symbol classification returned the wrong error",
+            )?;
+        }
         Ok(())
     }
 
@@ -12308,7 +13080,9 @@ mod tests {
         for sql in [
             "EXPLAIN QUERY PLAN
              SELECT path, language, name, kind, signature, line_start, line_end,
-                    parent, parser, detail, exported, documentation
+                    parent, parser, detail, exported, documentation,
+                    source_byte_start, source_byte_end,
+                    source_column_start, source_column_end
              FROM symbols INDEXED BY idx_symbols_path
              WHERE path = 'src/lib.rs' AND kind IN ('function')
              ORDER BY path, line_start, name
@@ -12350,6 +13124,7 @@ mod tests {
                 documentation: None,
                 line_start: 1,
                 line_end: 1,
+                source_selector: None,
                 parent: None,
                 parser: ParserKind::Fallback,
                 detail: None,
@@ -12481,6 +13256,7 @@ mod tests {
                 documentation: None,
                 line_start: 1,
                 line_end: 2,
+                source_selector: None,
                 parent: None,
                 parser: ParserKind::TreeSitter,
                 detail: Some("function_item".to_string()),
@@ -12779,6 +13555,10 @@ mod tests {
                  detail,
                  exported,
                  documentation,
+                 source_byte_start,
+                 source_byte_end,
+                 source_column_start,
+                 source_column_end,
                  length(CAST(path AS BLOB))
                      + COALESCE(length(CAST(language AS BLOB)), 0)
                      + length(CAST(name AS BLOB))
@@ -13240,10 +14020,103 @@ mod tests {
             documentation: Some("d".repeat(documentation_bytes)),
             line_start,
             line_end: line_start.saturating_add(1),
+            source_selector: None,
             parent: None,
             parser: ParserKind::TreeSitter,
             detail: Some("function_item".to_string()),
         }
+    }
+
+    /// Assert the exact selector on the heading row and the legacy row remains absent.
+    fn require_symbol_source_selectors(
+        symbols: &[CodeSymbol],
+        expected: Option<SymbolSourceSelector>,
+        context: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let heading = symbols
+            .iter()
+            .find(|symbol| symbol.name == "Overview")
+            .ok_or_else(|| io::Error::other(format!("{context} omitted the heading symbol")))?;
+        require_eq(&heading.source_selector, &expected, context)?;
+        if let Some(compatibility) = symbols.iter().find(|symbol| symbol.name == "Compatibility") {
+            require_eq(
+                &compatibility.source_selector,
+                &None,
+                &format!("{context} changed the selector-free symbol"),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Exercise every DB-owned symbol row decoder against one persisted selector.
+    fn verify_symbol_source_selector_read_paths(
+        store: &AtlasStore,
+        path: &str,
+        expected: SymbolSourceSelector,
+    ) -> Result<(), Box<dyn Error>> {
+        require_symbol_source_selectors(
+            &store.load_symbols(Some(path), None, 10)?,
+            Some(expected),
+            "symbol list",
+        )?;
+        require_symbol_source_selectors(
+            &store.load_symbols_by_kinds(path, &[SymbolKind::Heading], 10)?,
+            Some(expected),
+            "kind-filtered symbols",
+        )?;
+        require_symbol_source_selectors(
+            &store.load_symbols_by_names(&["Overview".to_string()])?,
+            Some(expected),
+            "name-filtered symbols",
+        )?;
+        let named = store
+            .load_symbol_by_name(path, "Overview")?
+            .ok_or_else(|| io::Error::other("exact-name symbol lookup omitted the heading"))?;
+        require_eq(
+            &named.source_selector,
+            &Some(expected),
+            "single exact-name symbol",
+        )?;
+        require_symbol_source_selectors(
+            &store.load_symbols_by_exact_file_and_name(path, "Overview")?,
+            Some(expected),
+            "exact-file-and-name symbols",
+        )?;
+        require_symbol_source_selectors(
+            &store
+                .load_symbols_for_paths_bounded(
+                    &[path.to_string()],
+                    SymbolBatchReadBudget::new(1, 10, MAX_SYMBOL_BATCH_DECODED_BYTES)?,
+                    None,
+                )?
+                .rows,
+            Some(expected),
+            "bounded exact-path symbols",
+        )?;
+        let classified =
+            store.load_classified_symbols(Some(path), None, ContentSelection::Documentation, 10)?;
+        require(
+            classified
+                .iter()
+                .all(|row| row.classification == ContentClassification::Documentation),
+            "classified symbol read changed the owning file classification",
+        )?;
+        require_symbol_source_selectors(
+            &classified
+                .into_iter()
+                .map(|row| row.symbol)
+                .collect::<Vec<_>>(),
+            Some(expected),
+            "classified symbols",
+        )?;
+        let graphs = store.load_symbol_graphs_for_paths(&[path.to_string()])?;
+        require_eq(&graphs.len(), &1, "reconstructed graph count")?;
+        require_symbol_source_selectors(
+            &graphs[0].symbols,
+            Some(expected),
+            "reconstructed symbol graph",
+        )?;
+        Ok(())
     }
 
     /// Copy one selected queue candidate into the public conditional-write contract.
@@ -13290,6 +14163,7 @@ mod tests {
                 documentation: None,
                 line_start: 1,
                 line_end: 1,
+                source_selector: None,
                 parent: None,
                 parser: ParserKind::TreeSitter,
                 detail: Some("function_item".to_string()),

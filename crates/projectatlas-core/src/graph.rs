@@ -650,6 +650,8 @@ impl GraphEntity {
 pub enum ExtendedRelationKind {
     /// A source references a declaration or resource.
     References,
+    /// Documentation explicitly describes a validated repository target.
+    Documents,
     /// A test exercises a source target.
     Tests,
     /// A route or protocol entry reaches a handler.
@@ -676,12 +678,13 @@ pub enum GraphRelationKind {
 
 impl GraphRelationKind {
     /// Complete stable persisted relation-kind set.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Legacy(RelationKind::Contains),
         Self::Legacy(RelationKind::Imports),
         Self::Legacy(RelationKind::Calls),
         Self::Legacy(RelationKind::DependsOn),
         Self::Extended(ExtendedRelationKind::References),
+        Self::Extended(ExtendedRelationKind::Documents),
         Self::Extended(ExtendedRelationKind::Tests),
         Self::Extended(ExtendedRelationKind::RoutesTo),
         Self::Extended(ExtendedRelationKind::Configures),
@@ -714,6 +717,7 @@ impl GraphRelationKind {
             Self::Legacy(RelationKind::Calls) => "legacy:calls",
             Self::Legacy(RelationKind::DependsOn) => "legacy:depends-on",
             Self::Extended(ExtendedRelationKind::References) => "extended:references",
+            Self::Extended(ExtendedRelationKind::Documents) => "extended:documents",
             Self::Extended(ExtendedRelationKind::Tests) => "extended:tests",
             Self::Extended(ExtendedRelationKind::RoutesTo) => "extended:routes-to",
             Self::Extended(ExtendedRelationKind::Configures) => "extended:configures",
@@ -721,6 +725,69 @@ impl GraphRelationKind {
             Self::Extended(ExtendedRelationKind::Reads) => "extended:reads",
             Self::Extended(ExtendedRelationKind::Writes) => "extended:writes",
         }
+    }
+}
+
+/// Closed reason that an explicit document target did not resolve.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentTargetUnresolvedReason {
+    /// No indexed target exists for the normalized selector.
+    Missing,
+    /// Effective ignore or admission policy excludes the target.
+    Ignored,
+    /// Normalization or canonicalization would leave the selected root.
+    OutsideRoot,
+    /// Exact-case identity is absent or conflicts under case folding.
+    CaseConflict,
+    /// The candidate names an unsupported target kind or syntax.
+    Unsupported,
+    /// No complete static repository selector could be extracted.
+    NoStaticTarget,
+}
+
+impl DocumentTargetUnresolvedReason {
+    /// Complete stable persisted reason set.
+    pub const ALL: [Self; 6] = [
+        Self::Missing,
+        Self::Ignored,
+        Self::OutsideRoot,
+        Self::CaseConflict,
+        Self::Unsupported,
+        Self::NoStaticTarget,
+    ];
+
+    /// Return the stable database and payload spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Ignored => "ignored",
+            Self::OutsideRoot => "outside_root",
+            Self::CaseConflict => "case_conflict",
+            Self::Unsupported => "unsupported",
+            Self::NoStaticTarget => "no_static_target",
+        }
+    }
+
+    /// Parse one stable persisted reason.
+    #[must_use]
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "missing" => Some(Self::Missing),
+            "ignored" => Some(Self::Ignored),
+            "outside_root" => Some(Self::OutsideRoot),
+            "case_conflict" => Some(Self::CaseConflict),
+            "unsupported" => Some(Self::Unsupported),
+            "no_static_target" => Some(Self::NoStaticTarget),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for DocumentTargetUnresolvedReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -2234,12 +2301,12 @@ const fn decode_hex(value: u8) -> Option<u8> {
 mod tests {
     use super::{
         CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
-        CoverageState, EntityResolutionKey, EntitySelector, ExtendedRelationKind, ExternalSelector,
-        GraphContractError, GraphEntity, GraphEntityKey, GraphIdentityText, GraphLimitKind,
-        GraphLimits, GraphRelationKind, LogicalRelation, PackageSelector, PortableResolutionKey,
-        ProjectInstanceId, RelationDependencyKey, RelationOccurrence, RelationResolution,
-        RepositoryFilePath, RepositoryNodePath, ResolutionKeyDomain, ReusableTargetSelector,
-        SourceSpan, StableKey, SymbolSelector,
+        CoverageState, DocumentTargetUnresolvedReason, EntityResolutionKey, EntitySelector,
+        ExtendedRelationKind, ExternalSelector, GraphContractError, GraphEntity, GraphEntityKey,
+        GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind, LogicalRelation,
+        PackageSelector, PortableResolutionKey, ProjectInstanceId, RelationDependencyKey,
+        RelationOccurrence, RelationResolution, RepositoryFilePath, RepositoryNodePath,
+        ResolutionKeyDomain, ReusableTargetSelector, SourceSpan, StableKey, SymbolSelector,
     };
     use crate::IndexGeneration;
     use crate::symbols::{RelationKind, SymbolKind};
@@ -3179,6 +3246,40 @@ mod tests {
             GraphRelationKind::Extended(ExtendedRelationKind::Tests).legacy_kind(),
             None
         );
+    }
+
+    #[test]
+    fn documents_relation_and_unresolved_reasons_are_closed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let documents = GraphRelationKind::Extended(ExtendedRelationKind::Documents);
+        require(
+            GraphRelationKind::ALL.contains(&documents)
+                && documents.as_str() == "extended:documents"
+                && documents.legacy_kind().is_none(),
+            "documents relation was not added as an extended persisted family",
+        )?;
+        require(
+            serde_json::to_string(&documents)?
+                == "{\"scope\":\"extended\",\"value\":\"documents\"}",
+            "documents relation wire spelling drifted",
+        )?;
+
+        for reason in DocumentTargetUnresolvedReason::ALL {
+            require(
+                DocumentTargetUnresolvedReason::from_db(reason.as_str()) == Some(reason),
+                "document unresolved reason did not round-trip",
+            )?;
+            require(
+                serde_json::from_str::<DocumentTargetUnresolvedReason>(&serde_json::to_string(
+                    &reason,
+                )?)? == reason,
+                "document unresolved reason wire spelling did not round-trip",
+            )?;
+        }
+        require(
+            DocumentTargetUnresolvedReason::from_db("external").is_none(),
+            "unsupported document unresolved reason was accepted",
+        )
     }
 
     #[test]

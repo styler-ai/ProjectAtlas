@@ -2,6 +2,7 @@
 
 mod configured_modules;
 mod languages;
+mod markdown;
 mod resolution_keys;
 mod semantic;
 
@@ -10,6 +11,14 @@ pub use configured_modules::{
     EcmaScriptModuleConfig, EcmaScriptPathMapping, MAX_CONFIGURED_MODULE_CONFIGS,
     MAX_CONFIGURED_MODULE_IDENTITY_BYTES, MAX_CONFIGURED_MODULE_MAPPINGS,
     MAX_CONFIGURED_MODULE_TARGETS,
+};
+pub use markdown::{
+    DocumentLinkCandidate, DocumentLinkSource, MAX_DOCUMENT_LINK_CANDIDATES,
+    MAX_DOCUMENT_SELECTOR_BYTES, MAX_MARKDOWN_BYTES, MAX_MARKDOWN_EVIDENCE_BYTES,
+    MAX_MARKDOWN_HEADINGS, MAX_MARKDOWN_LABEL_BYTES, MarkdownFactCompleteness,
+    MarkdownFactCoverage, MarkdownFactLimit, MarkdownFacts, MarkdownHeadingFact,
+    MarkdownParserProvenance, MarkdownSourceSelector, MarkdownUnsupportedStructure,
+    extract_markdown_facts, extract_markdown_facts_controlled,
 };
 pub use resolution_keys::{
     ImportReference, ImportSyntax, MAX_RESOLUTION_KEYS_PER_FACT, RelationResolutionKeys,
@@ -99,6 +108,10 @@ fn extract_symbol_graph_checked<E>(
         }
         SymbolParserOwner::PowerShell => {
             return extract_powershell_graph_checked(path, language, parse_content.as_ref(), check);
+        }
+        SymbolParserOwner::Markdown => {
+            let facts = markdown::extract_markdown_facts_checked(parse_content.as_ref(), check)?;
+            return Ok(facts.symbol_graph(path, language));
         }
         SymbolParserOwner::Unavailable => {
             check()?;
@@ -2106,6 +2119,7 @@ fn push_symbol_with_metadata(
         documentation: documentation.map(ToString::to_string),
         line_start,
         line_end: line_end.max(line_start),
+        source_selector: None,
         parent,
         parser: graph.parser,
         detail: detail.map(ToString::to_string),
@@ -2341,6 +2355,12 @@ mod tests {
         });
         assert_parser_cancels_at!("PowerShell structural adapter", 8, |check| {
             extract_powershell_graph_checked(fixtures[4].0, fixtures[4].1, fixtures[4].2, check)
+        });
+        assert_parser_cancels_at!("Markdown structural adapter", 2, |check| {
+            super::markdown::extract_markdown_facts_checked(
+                "# Guide\n\n[src](../src/lib.rs)\n",
+                check,
+            )
         });
 
         let mut native_augmentation =

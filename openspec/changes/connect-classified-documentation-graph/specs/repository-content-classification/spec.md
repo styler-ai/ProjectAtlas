@@ -11,9 +11,13 @@ ProjectAtlas SHALL publish exactly one `source`, `documentation`, `configuration
 - **WHEN** an eligible extensionless or unknown-format file is valid UTF-8 and has no registry row
 - **THEN** ProjectAtlas classifies it as `other_text`, keeps it boundedly searchable/summarizable, and never presents it as source
 
-#### Scenario: Binary content is opaque
-- **WHEN** an admitted file is invalid UTF-8 or binary under the existing bounded admission checks
+#### Scenario: Unknown binary content is opaque
+- **WHEN** an admitted file has no registry row and is invalid UTF-8 or binary under the existing bounded admission checks
 - **THEN** ProjectAtlas classifies it as `opaque`, retains eligible metadata, and does not persist searchable text or fabricate document facts
+
+#### Scenario: Known families retain registry authority when text is unavailable
+- **WHEN** an admitted file has a known registry family but bounded text indexing skips it as too large, binary, or invalid UTF-8
+- **THEN** ProjectAtlas retains the registry-owned classification while omitting text-derived facts it could not safely extract
 
 #### Scenario: Ignored and ineligible files stay absent
 - **WHEN** `.gitignore`, ProjectAtlas ignore policy, root/privacy rules, vendor/cache policy, or size admission excludes a path

@@ -6,7 +6,7 @@ use crate::symbols::{CodeSymbol, SymbolRelation};
 use crate::telemetry::{TokenOverview, TokenTrendReport};
 use crate::{IndexedNode, Overview, RankedNode};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 /// Render a repository overview as standard TOON.
 #[must_use]
@@ -267,10 +267,16 @@ pub fn render_token_trends(report: &TokenTrendReport) -> String {
 /// Render symbols as standard TOON.
 #[must_use]
 pub fn render_symbols(symbols: &[CodeSymbol]) -> String {
-    let rows = symbols
+    encode_agent_payload(&json!({ "symbols": render_symbol_rows(symbols) }))
+}
+
+/// Project symbols into the stable agent-facing row shape.
+#[must_use]
+pub fn render_symbol_rows(symbols: &[CodeSymbol]) -> Vec<Value> {
+    symbols
         .iter()
         .map(|symbol| {
-            json!({
+            let mut row = json!({
                 "path": symbol.path,
                 "kind": symbol.kind.to_string(),
                 "name": symbol.name,
@@ -281,10 +287,13 @@ pub fn render_symbols(symbols: &[CodeSymbol]) -> String {
                 "signature": symbol.signature,
                 "exported": symbol.exported,
                 "documentation": symbol.documentation.as_deref().unwrap_or(""),
-            })
+            });
+            if let (Some(object), Some(selector)) = (row.as_object_mut(), symbol.source_selector) {
+                object.insert("source_selector".to_string(), json!(selector));
+            }
+            row
         })
-        .collect::<Vec<_>>();
-    encode_agent_payload(&json!({ "symbols": rows }))
+        .collect()
 }
 
 /// Render symbol relations as standard TOON.
@@ -398,6 +407,7 @@ mod tests {
             documentation: None,
             line_start: 1,
             line_end: 3,
+            source_selector: None,
             parent: None,
             parser: ParserKind::TreeSitter,
             detail: Some("function_item".to_string()),

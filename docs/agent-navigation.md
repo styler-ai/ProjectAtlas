@@ -131,6 +131,41 @@ trust fields state how much to rely on it, and the slice provides exact source.
 An external or unresolved target reports purpose as not applicable or
 unavailable instead of inheriting or fabricating local responsibility.
 
+### Classified Documentation Traversal
+
+Classification narrows the same agent-first sieve without replacing its trust
+contract. `source`, `documentation`, and `both` are the only explicit
+selections. `both` means source plus documentation; configuration/data, other
+text, and opaque metadata remain available through the omitted legacy path.
+Filtering occurs before ranking, pagination, anchor selection, and traversal
+expansion.
+
+Documentation is guidance rather than runtime truth. Start a documentation task
+with classified files or search, inspect parser provenance and completeness,
+then request a validated bridge explicitly:
+
+```text
+documentation file or exact heading
+→ detailed outbound relation=documents, content_selection=documentation
+→ source-classified target and exact next_call
+→ current source summary, symbol, or slice
+```
+
+From a source anchor, the same stored relation is queried inbound and displayed
+as `documented_by`; ProjectAtlas stores no inverse edge. A requested document
+bridge may cross the selected classification to return its endpoint, but that
+endpoint does not expand as an unrelated frontier. Missing, ignored,
+outside-root, case-conflicting, unsupported, and non-static targets remain typed
+unresolved evidence rather than guessed links.
+
+Every returned file endpoint retains classification alongside purpose, parser,
+coverage, resolution, completeness, freshness, and truncation. Exact next calls
+carry the selected project, file or heading selector, selection, generation, and
+bounds. In a shared host or linked-worktree session, pass the addressed
+checkout's `project_path` on every call: each checkout owns an ignored writable
+database, and a verified stable seed is read-only input rather than shared live
+state.
+
 ### Anchored Analysis Views
 
 Architecture, impact, and trace remain closed views of the existing relation

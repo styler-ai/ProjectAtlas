@@ -33,6 +33,7 @@ use projectatlas_core::graph::{
     CoverageScope, CoverageState, ExtendedRelationKind, GraphLimitKind, GraphLimits,
     GraphRelationKind,
 };
+use projectatlas_core::language::{ContentClassification, ContentSelection};
 use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolKind, SymbolRelation,
@@ -46,14 +47,17 @@ use projectatlas_core::{
 };
 use projectatlas_db::{
     AtlasStore, CapturedProjectBinding, DbError, FileTextAdmission, FileTextFtsQuery,
-    IndexedFileText, MAX_FILE_TEXT_FTS_CANDIDATES, RepositoryCoverageQuery, RepositoryCoverageRow,
-    RepositoryNavigationConnections, RepositoryNavigationNode,
+    IndexedFileText, MAX_FILE_CONTENT_CLASSIFICATION_PATHS, MAX_FILE_TEXT_FTS_CANDIDATES,
+    RepositoryCoverageQuery, RepositoryCoverageRow, RepositoryNavigationConnections,
+    RepositoryNavigationNode,
 };
 use projectatlas_symbols::module_aliases_for_path;
 use regex::RegexBuilder;
 use serde::Serialize;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
@@ -236,6 +240,44 @@ fn revalidate_selected_project_binding(store: &AtlasStore) -> ServiceResult<()> 
         ) => Err(ServiceError::SelectedProjectChanged),
         Err(error) => Err(ServiceError::Db(error)),
     }
+}
+
+/// Load persisted classifications for exact paths through bounded set queries.
+fn file_content_classifications_by_path(
+    store: &AtlasStore,
+    paths: impl IntoIterator<Item = String>,
+) -> ServiceResult<HashMap<String, ContentClassification>> {
+    let mut paths = paths.into_iter().collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    let mut classifications = HashMap::with_capacity(paths.len());
+    for chunk in paths.chunks(MAX_FILE_CONTENT_CLASSIFICATION_PATHS) {
+        classifications.extend(
+            store
+                .file_content_classifications_for_paths(chunk)?
+                .into_iter()
+                .map(|row| (row.path, row.classification)),
+        );
+    }
+    Ok(classifications)
+}
+
+/// Load one exact file classification and enforce an explicit selection.
+fn selected_file_classification(
+    store: &AtlasStore,
+    path: &str,
+    selection: ContentSelection,
+) -> ServiceResult<ContentClassification> {
+    let mut classifications = file_content_classifications_by_path(store, [path.to_string()])?;
+    let classification = classifications.remove(path).ok_or_else(|| {
+        ServiceError::InvalidInput(format!("file {path:?} has no content classification"))
+    })?;
+    if !selection.includes(classification) {
+        return Err(ServiceError::InvalidInput(format!(
+            "file {path:?} is classified as {classification} and is outside the selected content"
+        )));
+    }
+    Ok(classification)
 }
 
 /// Load one token report through the selected-project service boundary.
@@ -453,6 +495,7 @@ pub fn parse_coverage_relation(value: &str) -> ServiceResult<GraphRelationKind> 
         "deploys" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Deploys)),
         "reads" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Reads)),
         "writes" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Writes)),
+        "documents" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
         _ => Err(ServiceError::InvalidInput(format!(
             "invalid coverage relation '{value}'"
         ))),
@@ -698,6 +741,8 @@ pub struct FileSummaryReport {
     pub file_path: String,
     /// Detected language or file family.
     pub language: String,
+    /// Registry-owned role of this admitted file.
+    pub classification: ContentClassification,
     /// Source line count when the file can be read.
     pub line_count: usize,
     /// Whether source-derived fields came from live source or indexed metadata.
@@ -805,6 +850,8 @@ pub struct FileCallSummary {
 pub struct SearchMatch {
     /// Repository-relative path.
     pub path: String,
+    /// Registry-owned role of the matched file.
+    pub classification: ContentClassification,
     /// One-based line number.
     pub line: usize,
     /// Context before the matching line.
@@ -859,6 +906,8 @@ pub struct SearchQuery<'query> {
     pub start_index: usize,
     /// Maximum exact matches returned.
     pub limit: usize,
+    /// Optional classified-content restriction; the default preserves legacy candidates.
+    pub content_selection: ContentSelection,
     /// Explicit retrieval family; omitted adapters use lexical.
     pub retrieval_mode: SearchRetrievalMode,
 }
@@ -872,6 +921,9 @@ pub struct SearchReport {
     pub mode: String,
     /// Retrieval family selected by the caller.
     pub retrieval_mode: String,
+    /// Explicit classified-content restriction, or `None` for legacy behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_selection: Option<ContentSelection>,
     /// Source used for broad repository search.
     pub source: String,
     /// Candidate strategy used while preserving exact lexical semantics.
@@ -910,9 +962,27 @@ pub struct NextStepReport {
     /// Top matching folders with concise ranking evidence.
     pub folders: Vec<RankedNode>,
     /// Top matching files with concise ranking evidence.
-    pub files: Vec<RankedNode>,
+    pub files: Vec<ClassifiedRankedNode>,
     /// Deterministic follow-up commands for the selected index targets.
     pub suggestions: Vec<String>,
+}
+
+/// One ranked file row with its persisted content role.
+#[derive(Debug, Serialize)]
+pub struct ClassifiedRankedNode {
+    /// Existing compatibility-preserving ranked node payload.
+    #[serde(flatten)]
+    pub ranked: RankedNode,
+    /// Registry-owned role of the ranked file.
+    pub classification: ContentClassification,
+}
+
+impl Deref for ClassifiedRankedNode {
+    type Target = RankedNode;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ranked
+    }
 }
 
 /// Exact code slice returned after orientation.
@@ -920,6 +990,9 @@ pub struct NextStepReport {
 pub struct CodeSlice {
     /// Repository-relative path.
     pub path: String,
+    /// Persisted role of the indexed file, when an index-backed entry point was used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classification: Option<ContentClassification>,
     /// One-based start line.
     pub start_line: usize,
     /// One-based end line.
@@ -1050,25 +1123,43 @@ pub fn build_file_summary(
     file: &Path,
     limit: usize,
 ) -> ServiceResult<FileSummaryReport> {
+    build_file_summary_with_selection(store, file, limit, ContentSelection::UnspecifiedLegacy)
+}
+
+/// Build structured file intelligence after enforcing classified-content selection.
+///
+/// # Errors
+///
+/// Returns an error when the file is outside the explicit selection or the
+/// ordinary summary read fails.
+pub fn build_file_summary_with_selection(
+    store: &AtlasStore,
+    file: &Path,
+    limit: usize,
+    content_selection: ContentSelection,
+) -> ServiceResult<FileSummaryReport> {
     let file_key = validated_indexed_file_key(store, file)?;
+    let classification = selected_file_classification(store, &file_key, content_selection)?;
     let source_read =
         indexed_native_path(store, &file_key).and_then(|path| read_file_content(&path));
     match source_read {
         Ok(content) => build_file_summary_with_source_state(
             store,
-            file,
+            file_key,
             limit,
             Some(&content),
             SOURCE_STATUS_LIVE.to_string(),
             String::new(),
+            classification,
         ),
         Err(error) => build_file_summary_with_source_state(
             store,
-            file,
+            file_key,
             limit,
             None,
             SOURCE_STATUS_INDEXED.to_string(),
             error.to_string(),
+            classification,
         ),
     }
 }
@@ -1085,26 +1176,51 @@ pub fn build_file_summary_from_source(
     limit: usize,
     source: &str,
 ) -> ServiceResult<FileSummaryReport> {
-    build_file_summary_with_source_state(
+    build_file_summary_from_source_with_selection(
         store,
         file,
+        limit,
+        source,
+        ContentSelection::UnspecifiedLegacy,
+    )
+}
+
+/// Build structured file intelligence from verified source after selection.
+///
+/// # Errors
+///
+/// Returns an error when the file is outside the explicit selection or the
+/// ordinary summary read fails.
+pub fn build_file_summary_from_source_with_selection(
+    store: &AtlasStore,
+    file: &Path,
+    limit: usize,
+    source: &str,
+    content_selection: ContentSelection,
+) -> ServiceResult<FileSummaryReport> {
+    let file_key = validated_indexed_file_key(store, file)?;
+    let classification = selected_file_classification(store, &file_key, content_selection)?;
+    build_file_summary_with_source_state(
+        store,
+        file_key,
         limit,
         Some(source),
         SOURCE_STATUS_LIVE.to_string(),
         String::new(),
+        classification,
     )
 }
 
 /// Build one summary from optional already-selected live source.
 fn build_file_summary_with_source_state(
     store: &AtlasStore,
-    file: &Path,
+    file_key: String,
     limit: usize,
     file_content: Option<&str>,
     source_status: String,
     source_error: String,
+    classification: ContentClassification,
 ) -> ServiceResult<FileSummaryReport> {
-    let file_key = validated_indexed_file_key(store, file)?;
     let effective_limit = limit.max(1);
     let indexed = store
         .load_node_by_path(&file_key)?
@@ -1220,6 +1336,7 @@ fn build_file_summary_with_source_state(
             .language
             .clone()
             .unwrap_or_else(|| "unknown".to_string()),
+        classification,
         line_count,
         file_purpose: indexed.purpose.purpose.clone().unwrap_or_default(),
         file_purpose_status: indexed.purpose.status.to_string(),
@@ -1398,6 +1515,7 @@ pub fn search_indexed_files(
             context_lines,
             start_index,
             limit,
+            content_selection: ContentSelection::UnspecifiedLegacy,
             retrieval_mode: SearchRetrievalMode::Lexical,
         },
         None,
@@ -1489,6 +1607,10 @@ fn search_indexed_files_with_bounds(
         query: query.pattern.to_string(),
         mode: matcher.mode().to_string(),
         retrieval_mode: query.retrieval_mode.as_str().to_string(),
+        content_selection: query
+            .content_selection
+            .explicit_value()
+            .map(|_| query.content_selection),
         source: "sqlite-file-text".to_string(),
         strategy: "persisted-text-fallback".to_string(),
         start_index: query.start_index,
@@ -1543,10 +1665,29 @@ fn search_indexed_files_with_bounds(
         if !page.overflow {
             page.candidates
                 .sort_by(|left, right| left.path.cmp(&right.path));
+            let classifications = file_content_classifications_by_path(
+                store,
+                page.candidates
+                    .iter()
+                    .map(|candidate| candidate.path.clone()),
+            )?;
             report.strategy = "fts5-bm25-candidates-exact-verified".to_string();
             used_fts = true;
             for candidate in page.candidates {
                 if !path_matches(&candidate.path, path_matcher.as_ref()) {
+                    continue;
+                }
+                let classification =
+                    classifications
+                        .get(&candidate.path)
+                        .copied()
+                        .ok_or_else(|| {
+                            ServiceError::InvalidInput(format!(
+                                "FTS candidate {:?} has no content classification",
+                                candidate.path
+                            ))
+                        })?;
+                if !query.content_selection.includes(classification) {
                     continue;
                 }
                 if let Err(failure) = bounded_control.check(IndexWorkStage::RepositoryTraversal) {
@@ -1584,6 +1725,7 @@ fn search_indexed_files_with_bounds(
                 if let Err(failure) = inspect_search_text(
                     &mut report,
                     &text,
+                    classification,
                     &matcher,
                     query.context_lines,
                     needed,
@@ -1608,11 +1750,15 @@ fn search_indexed_files_with_bounds(
         let mut searched_files = 0usize;
         let mut searched_bytes = 0usize;
         let mut admission_truncation = None;
+        let admitted_classification = Cell::new(None);
         let fallback_result = store.visit_file_texts_for_fallback(
             path_prefix.as_deref(),
             Some(&bounded_control),
             |metadata| {
                 if !path_matches(&metadata.path, path_matcher.as_ref()) {
+                    return Ok(FileTextAdmission::Skip);
+                }
+                if !query.content_selection.includes(metadata.classification) {
                     return Ok(FileTextAdmission::Skip);
                 }
                 if selected_files >= bounds.selected_files {
@@ -1629,14 +1775,21 @@ fn search_indexed_files_with_bounds(
                 }
                 selected_files += 1;
                 selected_bytes = next_bytes;
+                admitted_classification.set(Some(metadata.classification));
                 Ok(FileTextAdmission::Read)
             },
             |text| {
+                let classification = admitted_classification.take().ok_or_else(|| {
+                    DbError::FileContentClassificationMissing {
+                        path: text.path.clone(),
+                    }
+                })?;
                 searched_files += 1;
                 searched_bytes += text.byte_count;
                 inspect_search_text(
                     &mut report,
                     &text,
+                    classification,
                     &matcher,
                     query.context_lines,
                     needed,
@@ -1756,6 +1909,57 @@ fn load_ranked_file_node_candidates(
     Ok(selected)
 }
 
+/// Load the bounded eligible file candidate set before final ranking.
+fn load_ranked_file_node_candidates_with_selection(
+    store: &AtlasStore,
+    query: &str,
+    folder: Option<&str>,
+    file_pattern: Option<&str>,
+    target: usize,
+    include_content: bool,
+    content_selection: ContentSelection,
+) -> ServiceResult<Vec<IndexedNode>> {
+    if content_selection == ContentSelection::UnspecifiedLegacy {
+        return load_ranked_file_node_candidates(
+            store,
+            query,
+            folder,
+            file_pattern,
+            target,
+            include_content,
+        );
+    }
+    let matcher = FilePathMatcher::new(file_pattern)?;
+    let candidate_target = ranked_candidate_target(query, target);
+    let mut selected = load_ranked_file_nodes_matching_selection(
+        store,
+        query,
+        folder,
+        &matcher,
+        candidate_target,
+        content_selection,
+    )?;
+    if include_content && !query.trim().is_empty() && selected.len() < candidate_target {
+        append_content_ranked_file_nodes_selected(
+            store,
+            query,
+            folder,
+            &matcher,
+            candidate_target,
+            content_selection,
+            &mut selected,
+        )?;
+    }
+    append_paired_file_nodes_selected(
+        store,
+        &matcher,
+        candidate_target,
+        content_selection,
+        &mut selected,
+    )?;
+    Ok(selected)
+}
+
 /// Load ranked folders with concise reasons.
 ///
 /// # Errors
@@ -1801,6 +2005,56 @@ pub fn load_ranked_file_nodes_with_reasons(
     Ok(ranked)
 }
 
+/// Load ranked files with persisted classification and pre-ranking selection.
+///
+/// # Errors
+///
+/// Returns an error when indexed metadata, classification, or filters are invalid.
+pub fn load_classified_ranked_file_nodes_with_reasons(
+    store: &AtlasStore,
+    query: &str,
+    folder: Option<&str>,
+    file_pattern: Option<&str>,
+    limit: usize,
+    include_content: bool,
+    content_selection: ContentSelection,
+) -> ServiceResult<Vec<ClassifiedRankedNode>> {
+    let target = limit.max(1);
+    let selected = load_ranked_file_node_candidates_with_selection(
+        store,
+        query,
+        folder,
+        file_pattern,
+        target,
+        include_content,
+        content_selection,
+    )?;
+    let mut ranked = ranked_nodes_with_reasons(store, query, selected)?;
+    ranked.truncate(target);
+    let classifications = file_content_classifications_by_path(
+        store,
+        ranked.iter().map(|node| node.node.node.path.clone()),
+    )?;
+    ranked
+        .into_iter()
+        .map(|ranked| {
+            let classification = classifications
+                .get(&ranked.node.node.path)
+                .copied()
+                .ok_or_else(|| {
+                    ServiceError::InvalidInput(format!(
+                        "ranked file {:?} has no content classification",
+                        ranked.node.node.path
+                    ))
+                })?;
+            Ok(ClassifiedRankedNode {
+                ranked,
+                classification,
+            })
+        })
+        .collect()
+}
+
 /// Build an indexed-metadata recommendation report for the next inspection step.
 ///
 /// # Errors
@@ -1811,12 +2065,34 @@ pub fn build_next_report(
     query: &str,
     limit: Option<usize>,
 ) -> ServiceResult<NextStepReport> {
+    build_next_report_with_selection(store, query, limit, ContentSelection::UnspecifiedLegacy)
+}
+
+/// Build an indexed recommendation report with classified file selection.
+///
+/// # Errors
+///
+/// Returns an error when indexed folder, file, or classification metadata cannot be loaded.
+pub fn build_next_report_with_selection(
+    store: &AtlasStore,
+    query: &str,
+    limit: Option<usize>,
+    content_selection: ContentSelection,
+) -> ServiceResult<NextStepReport> {
     let target = limit
         .unwrap_or(NEXT_REPORT_DEFAULT_LIMIT)
         .clamp(1, NEXT_REPORT_MAX_LIMIT);
     let folders = load_ranked_folder_nodes_with_reasons(store, query, target)?;
-    let files = load_ranked_file_nodes_with_reasons(store, query, None, None, target, true)?;
-    let suggestions = next_report_suggestions(query, &folders, &files);
+    let files = load_classified_ranked_file_nodes_with_reasons(
+        store,
+        query,
+        None,
+        None,
+        target,
+        true,
+        content_selection,
+    )?;
+    let suggestions = next_report_suggestions(query, &folders, &files, content_selection);
     Ok(NextStepReport {
         query: query.to_string(),
         folders,
@@ -2216,6 +2492,49 @@ fn append_paired_file_nodes(
     Ok(())
 }
 
+/// Append classification-eligible source/test counterparts in one exact-path batch.
+fn append_paired_file_nodes_selected(
+    store: &AtlasStore,
+    matcher: &FilePathMatcher,
+    target: usize,
+    content_selection: ContentSelection,
+    selected: &mut Vec<IndexedNode>,
+) -> ServiceResult<()> {
+    if selected.len() >= target {
+        return Ok(());
+    }
+    let seen = selected
+        .iter()
+        .map(|node| node.node.path.clone())
+        .collect::<HashSet<_>>();
+    let mut candidates = selected
+        .iter()
+        .flat_map(|node| paired_path_candidates(&node.node.path))
+        .filter(|path| !seen.contains(path) && matcher.is_match(path))
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+    let classifications = file_content_classifications_by_path(store, candidates.clone())?;
+    let hydrated = store
+        .load_nodes_by_paths(&candidates)?
+        .into_iter()
+        .map(|node| (node.node.path.clone(), node))
+        .collect::<HashMap<_, _>>();
+    for path in candidates {
+        if selected.len() >= target {
+            break;
+        }
+        if classifications
+            .get(&path)
+            .is_some_and(|classification| content_selection.includes(*classification))
+            && let Some(node) = hydrated.get(&path)
+        {
+            selected.push(node.clone());
+        }
+    }
+    Ok(())
+}
+
 /// Build a concise reason when a source/test counterpart is indexed.
 fn paired_path_reason(store: &AtlasStore, path: &str) -> ServiceResult<Option<String>> {
     for candidate in paired_path_candidates(path) {
@@ -2286,25 +2605,29 @@ fn join_repo_path(prefix: &str, leaf: &str) -> String {
 fn next_report_suggestions(
     query: &str,
     folders: &[RankedNode],
-    files: &[RankedNode],
+    files: &[ClassifiedRankedNode],
+    content_selection: ContentSelection,
 ) -> Vec<String> {
     let mut suggestions = Vec::new();
+    let selection = content_selection
+        .explicit_value()
+        .map_or_else(String::new, |value| format!(" --content-selection {value}"));
     if let Some(file) = files.first() {
         let path = quoted_command_arg(&file.node.node.path);
-        suggestions.push(format!("projectatlas summary {path} --limit 25"));
-        suggestions.push(format!("projectatlas outline {path}"));
+        suggestions.push(format!("projectatlas summary {path} --limit 25{selection}"));
+        suggestions.push(format!("projectatlas outline {path}{selection}"));
     }
     if let Some(folder) = folders.first() {
         let query_arg = quoted_command_arg(query);
         let folder_arg = quoted_command_arg(&folder.node.node.path);
         suggestions.push(format!(
-            "projectatlas files {query_arg} --folder {folder_arg} --limit 5"
+            "projectatlas files {query_arg} --folder {folder_arg} --limit 5{selection}"
         ));
     }
     if !query.trim().is_empty() {
         let query_arg = quoted_command_arg(query);
         suggestions.push(format!(
-            "projectatlas search {query_arg} --file-pattern **/* --context-lines 2"
+            "projectatlas search {query_arg} --file-pattern **/* --context-lines 2{selection}"
         ));
     }
     suggestions.truncate(4);
@@ -2357,6 +2680,47 @@ fn load_ranked_file_nodes_matching_glob(
     Ok(selected)
 }
 
+/// Load ranked DB pages until enough classification-eligible files are found.
+fn load_ranked_file_nodes_matching_selection(
+    store: &AtlasStore,
+    query: &str,
+    folder: Option<&str>,
+    matcher: &FilePathMatcher,
+    target: usize,
+    content_selection: ContentSelection,
+) -> ServiceResult<Vec<IndexedNode>> {
+    let batch_size = target.saturating_mul(20).clamp(50, 500);
+    let mut offset = 0usize;
+    let mut selected = Vec::new();
+    loop {
+        let batch = store.load_ranked_nodes(query, NodeKind::File, folder, batch_size, offset)?;
+        if batch.is_empty() {
+            break;
+        }
+        offset = offset.saturating_add(batch.len());
+        let candidates = batch
+            .into_iter()
+            .filter(|node| matcher.is_match(&node.node.path))
+            .collect::<Vec<_>>();
+        let classifications = file_content_classifications_by_path(
+            store,
+            candidates.iter().map(|node| node.node.path.clone()),
+        )?;
+        for node in candidates {
+            if classifications
+                .get(&node.node.path)
+                .is_some_and(|classification| content_selection.includes(*classification))
+            {
+                selected.push(node);
+                if selected.len() >= target {
+                    return Ok(selected);
+                }
+            }
+        }
+    }
+    Ok(selected)
+}
+
 /// Append indexed-text hits after ordinary ranked file results.
 fn append_content_ranked_file_nodes(
     store: &AtlasStore,
@@ -2390,6 +2754,57 @@ fn append_content_ranked_file_nodes(
         }
         Ok(selected.len() < target)
     })?;
+    Ok(())
+}
+
+/// Append selected indexed-text hits after ordinary ranked file results.
+fn append_content_ranked_file_nodes_selected(
+    store: &AtlasStore,
+    query: &str,
+    folder: Option<&str>,
+    matcher: &FilePathMatcher,
+    target: usize,
+    content_selection: ContentSelection,
+    selected: &mut Vec<IndexedNode>,
+) -> ServiceResult<()> {
+    let terms = normalize_ranking_terms(query);
+    if terms.is_empty() {
+        return Ok(());
+    }
+    let mut seen = selected
+        .iter()
+        .map(|node| node.node.path.clone())
+        .collect::<HashSet<_>>();
+    store.visit_file_texts_for_fallback(
+        None,
+        None,
+        |metadata| {
+            Ok(
+                if path_is_inside_folder(&metadata.path, folder)
+                    && matcher.is_match(&metadata.path)
+                    && content_selection.includes(metadata.classification)
+                {
+                    FileTextAdmission::Read
+                } else {
+                    FileTextAdmission::Skip
+                },
+            )
+        },
+        |text| {
+            if selected.len() >= target {
+                return Ok(false);
+            }
+            let indexed_text = normalized_search_text(&text.content, false);
+            if !seen.contains(&text.path)
+                && terms.iter().any(|term| indexed_text.contains(term))
+                && let Some(node) = store.load_node_by_path(&text.path)?
+            {
+                seen.insert(text.path);
+                selected.push(node);
+            }
+            Ok(selected.len() < target)
+        },
+    )?;
     Ok(())
 }
 
@@ -2465,10 +2880,41 @@ pub fn read_indexed_code_slice(
     start_line: usize,
     end_line: Option<usize>,
 ) -> ServiceResult<CodeSlice> {
+    read_indexed_code_slice_with_selection(
+        store,
+        file,
+        start_line,
+        end_line,
+        ContentSelection::UnspecifiedLegacy,
+    )
+}
+
+/// Read an exact indexed line slice after enforcing classified-content selection.
+///
+/// # Errors
+///
+/// Returns an error when the file is outside the explicit selection, is not an
+/// indexed project file, has invalid line numbers, or source cannot be read.
+pub fn read_indexed_code_slice_with_selection(
+    store: &AtlasStore,
+    file: &Path,
+    start_line: usize,
+    end_line: Option<usize>,
+    content_selection: ContentSelection,
+) -> ServiceResult<CodeSlice> {
     let file_key = validated_indexed_file_key(store, file)?;
+    let classification = selected_file_classification(store, &file_key, content_selection)?;
     let native_file = indexed_native_path(store, &file_key)?;
     let content = read_file_content(&native_file)?;
-    read_indexed_code_slice_from_source(store, file, start_line, end_line, &content)
+    let mut draft = read_code_slice(
+        &content,
+        &file_key,
+        start_line,
+        end_line,
+        CodeSliceBudget::default(),
+    )?;
+    draft.slice.classification = Some(classification);
+    Ok(draft.slice)
 }
 
 /// Read an exact line slice from caller-verified source bytes.
@@ -2483,13 +2929,40 @@ pub fn read_indexed_code_slice_from_source(
     end_line: Option<usize>,
     source: &str,
 ) -> ServiceResult<CodeSlice> {
-    read_indexed_code_slice_from_source_bounded(
+    read_indexed_code_slice_from_source_bounded_with_selection(
         store,
         file,
         start_line,
         end_line,
         source,
         CodeSliceBudget::default(),
+        ContentSelection::UnspecifiedLegacy,
+    )
+    .map(|draft| draft.slice)
+}
+
+/// Read an exact line slice from verified source after classified selection.
+///
+/// # Errors
+///
+/// Returns an error when the file is outside the explicit selection, is not
+/// indexed, or the requested line range is invalid.
+pub fn read_indexed_code_slice_from_source_with_selection(
+    store: &AtlasStore,
+    file: &Path,
+    start_line: usize,
+    end_line: Option<usize>,
+    source: &str,
+    content_selection: ContentSelection,
+) -> ServiceResult<CodeSlice> {
+    read_indexed_code_slice_from_source_bounded_with_selection(
+        store,
+        file,
+        start_line,
+        end_line,
+        source,
+        CodeSliceBudget::default(),
+        content_selection,
     )
     .map(|draft| draft.slice)
 }
@@ -2508,8 +2981,37 @@ pub fn read_indexed_code_slice_from_source_bounded(
     source: &str,
     output_budget: CodeSliceBudget,
 ) -> ServiceResult<CodeSliceDraft> {
+    read_indexed_code_slice_from_source_bounded_with_selection(
+        store,
+        file,
+        start_line,
+        end_line,
+        source,
+        output_budget,
+        ContentSelection::UnspecifiedLegacy,
+    )
+}
+
+/// Read a bounded line slice from verified source after classified selection.
+///
+/// # Errors
+///
+/// Returns an error when the file is outside the explicit selection, is not
+/// indexed, has invalid line numbers, or cannot fit the output budget.
+pub fn read_indexed_code_slice_from_source_bounded_with_selection(
+    store: &AtlasStore,
+    file: &Path,
+    start_line: usize,
+    end_line: Option<usize>,
+    source: &str,
+    output_budget: CodeSliceBudget,
+    content_selection: ContentSelection,
+) -> ServiceResult<CodeSliceDraft> {
     let file_key = validated_indexed_file_key(store, file)?;
-    read_code_slice(source, &file_key, start_line, end_line, output_budget)
+    let classification = selected_file_classification(store, &file_key, content_selection)?;
+    let mut draft = read_code_slice(source, &file_key, start_line, end_line, output_budget)?;
+    draft.slice.classification = Some(classification);
+    Ok(draft)
 }
 
 /// Read a symbol body by exact symbol name and optional disambiguators.
@@ -2523,10 +3025,34 @@ pub fn read_symbol_slice(
     file: &Path,
     selector: &SymbolSliceSelector<'_>,
 ) -> ServiceResult<CodeSlice> {
+    read_symbol_slice_with_selection(store, file, selector, ContentSelection::UnspecifiedLegacy)
+}
+
+/// Read an exact indexed symbol body after classified-content selection.
+///
+/// # Errors
+///
+/// Returns an error when the file is outside the explicit selection, the
+/// symbol is absent or ambiguous, its selector rejects it, or source fails.
+pub fn read_symbol_slice_with_selection(
+    store: &AtlasStore,
+    file: &Path,
+    selector: &SymbolSliceSelector<'_>,
+    content_selection: ContentSelection,
+) -> ServiceResult<CodeSlice> {
     let file_key = validated_indexed_file_key(store, file)?;
+    let classification = selected_file_classification(store, &file_key, content_selection)?;
     let native_file = indexed_native_path(store, &file_key)?;
     let content = read_file_content(&native_file)?;
-    read_symbol_slice_from_source(store, file, selector, &content)
+    read_symbol_slice_from_source_for_file(
+        store,
+        &file_key,
+        selector,
+        &content,
+        CodeSliceBudget::default(),
+        classification,
+    )
+    .map(|draft| draft.slice)
 }
 
 /// Read a symbol body from caller-verified source bytes.
@@ -2541,8 +3067,39 @@ pub fn read_symbol_slice_from_source(
     selector: &SymbolSliceSelector<'_>,
     source: &str,
 ) -> ServiceResult<CodeSlice> {
-    read_symbol_slice_from_source_bounded(store, file, selector, source, CodeSliceBudget::default())
-        .map(|draft| draft.slice)
+    read_symbol_slice_from_source_bounded_with_selection(
+        store,
+        file,
+        selector,
+        source,
+        CodeSliceBudget::default(),
+        ContentSelection::UnspecifiedLegacy,
+    )
+    .map(|draft| draft.slice)
+}
+
+/// Read an exact symbol body from verified source after classified selection.
+///
+/// # Errors
+///
+/// Returns an error when the file is outside the explicit selection, or the
+/// symbol is absent, ambiguous, rejected by the selector, or out of range.
+pub fn read_symbol_slice_from_source_with_selection(
+    store: &AtlasStore,
+    file: &Path,
+    selector: &SymbolSliceSelector<'_>,
+    source: &str,
+    content_selection: ContentSelection,
+) -> ServiceResult<CodeSlice> {
+    read_symbol_slice_from_source_bounded_with_selection(
+        store,
+        file,
+        selector,
+        source,
+        CodeSliceBudget::default(),
+        content_selection,
+    )
+    .map(|draft| draft.slice)
 }
 
 /// Read a byte-bounded symbol body from caller-verified source bytes.
@@ -2559,9 +3116,53 @@ pub fn read_symbol_slice_from_source_bounded(
     source: &str,
     output_budget: CodeSliceBudget,
 ) -> ServiceResult<CodeSliceDraft> {
+    read_symbol_slice_from_source_bounded_with_selection(
+        store,
+        file,
+        selector,
+        source,
+        output_budget,
+        ContentSelection::UnspecifiedLegacy,
+    )
+}
+
+/// Read a bounded symbol body from verified source after classified selection.
+///
+/// # Errors
+///
+/// Returns an error when the file is outside the explicit selection, the
+/// symbol cannot be selected exactly, or its body cannot fit the output budget.
+pub fn read_symbol_slice_from_source_bounded_with_selection(
+    store: &AtlasStore,
+    file: &Path,
+    selector: &SymbolSliceSelector<'_>,
+    source: &str,
+    output_budget: CodeSliceBudget,
+    content_selection: ContentSelection,
+) -> ServiceResult<CodeSliceDraft> {
     let file_key = validated_indexed_file_key(store, file)?;
+    let classification = selected_file_classification(store, &file_key, content_selection)?;
+    read_symbol_slice_from_source_for_file(
+        store,
+        &file_key,
+        selector,
+        source,
+        output_budget,
+        classification,
+    )
+}
+
+/// Select and slice one symbol after its owning file classification is admitted.
+fn read_symbol_slice_from_source_for_file(
+    store: &AtlasStore,
+    file_key: &str,
+    selector: &SymbolSliceSelector<'_>,
+    source: &str,
+    output_budget: CodeSliceBudget,
+    classification: ContentClassification,
+) -> ServiceResult<CodeSliceDraft> {
     let requested_kind = selector.kind.map(parse_symbol_kind).transpose()?;
-    let mut symbols = store.load_symbols_by_exact_file_and_name(&file_key, selector.name)?;
+    let mut symbols = store.load_symbols_by_exact_file_and_name(file_key, selector.name)?;
     if let Some(parent) = selector.parent {
         symbols.retain(|symbol| symbol.parent.as_deref() == Some(parent));
     }
@@ -2590,13 +3191,15 @@ pub fn read_symbol_slice_from_source_bounded(
             )));
         }
     };
-    read_code_slice(
+    let mut draft = read_code_slice(
         source,
-        &file_key,
+        file_key,
         symbol.line_start,
         Some(symbol.line_end),
         output_budget,
-    )
+    )?;
+    draft.slice.classification = Some(classification);
+    Ok(draft)
 }
 
 /// Normalize and validate a user-supplied path as a repository-relative file key.
@@ -2713,6 +3316,7 @@ fn mark_search_truncated(report: &mut SearchReport, reason: &'static str) {
 fn inspect_search_text(
     report: &mut SearchReport,
     text: &IndexedFileText,
+    classification: ContentClassification,
     matcher: &LineMatcher,
     context_lines: usize,
     needed: usize,
@@ -2723,6 +3327,7 @@ fn inspect_search_text(
     append_line_matches(
         report,
         &text.path,
+        classification,
         &lines,
         matcher,
         context_lines,
@@ -2812,6 +3417,7 @@ impl LineMatcher {
 fn append_line_matches(
     report: &mut SearchReport,
     path: &str,
+    classification: ContentClassification,
     lines: &[&str],
     matcher: &LineMatcher,
     context_lines: usize,
@@ -2836,6 +3442,7 @@ fn append_line_matches(
         }
         let row = SearchMatch {
             path: path.to_string(),
+            classification,
             line: index + 1,
             context_before: context_before(lines, index, context_lines),
             text: (*line).to_string(),
@@ -2988,6 +3595,7 @@ fn read_code_slice(
     Ok(CodeSliceDraft {
         slice: CodeSlice {
             path: file_key.to_string(),
+            classification: None,
             start_line,
             end_line: end_index,
             line_count,
@@ -4810,6 +5418,232 @@ mod tests {
     }
 
     #[test]
+    fn classified_summary_search_and_ranking_filter_before_result_limits()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src"))?;
+        fs::create_dir_all(root.join("docs"))?;
+        fs::write(root.join("src/a.rs"), "needle source\n")?;
+        fs::write(root.join("docs/guide.md"), "needle documentation\n")?;
+        fs::write(root.join("settings.toml"), "needle = 'configuration'\n")?;
+        let nodes = [
+            test_node_with_language("src/a.rs", "hash-source", ".rs", "rust"),
+            test_node_with_language("docs/guide.md", "hash-documentation", ".md", "markdown"),
+            test_node_with_language("settings.toml", "hash-configuration", ".toml", "toml"),
+        ];
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&nodes)?;
+        index_test_file_texts(&mut store, root, &nodes)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("classified service fixture project identity is missing")?;
+        let mut publication = store.begin_index_publication("classified-service-test")?;
+        publication.upsert_file_content_classification_batch(&[
+            projectatlas_db::FileContentClassification {
+                path: "src/a.rs".to_string(),
+                classification: ContentClassification::Source,
+            },
+            projectatlas_db::FileContentClassification {
+                path: "docs/guide.md".to_string(),
+                classification: ContentClassification::Documentation,
+            },
+            projectatlas_db::FileContentClassification {
+                path: "settings.toml".to_string(),
+                classification: ContentClassification::ConfigurationData,
+            },
+        ])?;
+        publication.replace_repository_graph(project, &[], &[], &[], &[])?;
+        publication.complete()?;
+        store.set_purpose(
+            "docs/guide.md",
+            "Misleading source-code wording must not override classification",
+            PurposeSource::Agent,
+        )?;
+
+        let summary = build_file_summary_with_selection(
+            &store,
+            Path::new("docs/guide.md"),
+            10,
+            ContentSelection::Documentation,
+        )?;
+        require_eq(
+            &summary.classification,
+            &ContentClassification::Documentation,
+            "summary classification",
+        )?;
+        require(
+            summary.file_purpose.contains("source-code wording")
+                && summary.classification == ContentClassification::Documentation,
+            "purpose mutation overrode the registry-owned file classification",
+        )?;
+        let legacy_summary = build_file_summary(&store, Path::new("docs/guide.md"), 10)?;
+        let explicit_legacy_summary = build_file_summary_with_selection(
+            &store,
+            Path::new("docs/guide.md"),
+            10,
+            ContentSelection::UnspecifiedLegacy,
+        )?;
+        require_eq(
+            &serde_json::to_value(&legacy_summary)?,
+            &serde_json::to_value(&explicit_legacy_summary)?,
+            "legacy summary wrapper compatibility",
+        )?;
+        let slice = read_indexed_code_slice_from_source_with_selection(
+            &store,
+            Path::new("docs/guide.md"),
+            1,
+            Some(1),
+            "# Guide\n",
+            ContentSelection::Documentation,
+        )?;
+        require_eq(
+            &slice.classification,
+            &Some(ContentClassification::Documentation),
+            "indexed slice classification",
+        )?;
+        if !matches!(
+            build_file_summary_with_selection(
+                &store,
+                Path::new("docs/guide.md"),
+                10,
+                ContentSelection::Source,
+            ),
+            Err(ServiceError::InvalidInput(message)) if message.contains("outside the selected content")
+        ) {
+            return Err(io::Error::other(
+                "summary accepted a file outside the explicit content selection",
+            )
+            .into());
+        }
+
+        let legacy = search_indexed_files(&store, "needle", false, false, false, None, 0, 0, 10)?;
+        let explicit_legacy = search_indexed_files_with_control(
+            &store,
+            &SearchQuery {
+                pattern: "needle",
+                regex: false,
+                fuzzy: false,
+                case_sensitive: false,
+                file_pattern: None,
+                context_lines: 0,
+                start_index: 0,
+                limit: 10,
+                content_selection: ContentSelection::UnspecifiedLegacy,
+                retrieval_mode: SearchRetrievalMode::Lexical,
+            },
+            None,
+        )?;
+        require_eq(
+            &serde_json::to_value(&legacy)?,
+            &serde_json::to_value(&explicit_legacy)?,
+            "legacy search wrapper compatibility",
+        )?;
+        require_eq(&legacy.returned, &3, "legacy mixed search rows")?;
+        require(
+            legacy.results.iter().map(|row| row.classification).eq([
+                ContentClassification::Documentation,
+                ContentClassification::ConfigurationData,
+                ContentClassification::Source,
+            ]),
+            "legacy search omitted or reordered mixed classifications",
+        )?;
+
+        for regex in [false, true] {
+            let documentation = search_indexed_files_with_control(
+                &store,
+                &SearchQuery {
+                    pattern: "needle",
+                    regex,
+                    fuzzy: false,
+                    case_sensitive: false,
+                    file_pattern: None,
+                    context_lines: 0,
+                    start_index: 0,
+                    limit: 1,
+                    content_selection: ContentSelection::Documentation,
+                    retrieval_mode: SearchRetrievalMode::Lexical,
+                },
+                None,
+            )?;
+            require(
+                documentation.returned == 1
+                    && documentation.results[0].path == "docs/guide.md"
+                    && documentation.results[0].classification
+                        == ContentClassification::Documentation,
+                "documentation selection was applied after the search result limit",
+            )?;
+        }
+
+        let both = search_indexed_files_with_control(
+            &store,
+            &SearchQuery {
+                pattern: "needle",
+                regex: true,
+                fuzzy: false,
+                case_sensitive: false,
+                file_pattern: None,
+                context_lines: 0,
+                start_index: 0,
+                limit: 10,
+                content_selection: ContentSelection::Both,
+                retrieval_mode: SearchRetrievalMode::Lexical,
+            },
+            None,
+        )?;
+        require(
+            both.returned == 2
+                && both.results.iter().all(|row| {
+                    matches!(
+                        row.classification,
+                        ContentClassification::Source | ContentClassification::Documentation
+                    )
+                }),
+            "both selection did not exclude configuration data",
+        )?;
+
+        let ranked = load_classified_ranked_file_nodes_with_reasons(
+            &store,
+            "",
+            None,
+            None,
+            1,
+            false,
+            ContentSelection::Documentation,
+        )?;
+        require(
+            ranked.len() == 1
+                && ranked[0].node.node.path == "docs/guide.md"
+                && ranked[0].classification == ContentClassification::Documentation,
+            "documentation selection was applied after the ranked-file limit",
+        )?;
+        let documentation_next =
+            build_next_report_with_selection(&store, "", Some(1), ContentSelection::Documentation)?;
+        require(
+            !documentation_next.suggestions.is_empty()
+                && documentation_next
+                    .suggestions
+                    .iter()
+                    .all(|suggestion| suggestion.contains("--content-selection documentation")),
+            "classified next suggestions lost the explicit content selection",
+        )?;
+        let legacy_next = build_next_report(&store, "", Some(3))?;
+        let explicit_legacy_next = build_next_report_with_selection(
+            &store,
+            "",
+            Some(3),
+            ContentSelection::UnspecifiedLegacy,
+        )?;
+        require_eq(
+            &serde_json::to_value(&legacy_next)?,
+            &serde_json::to_value(&explicit_legacy_next)?,
+            "legacy next wrapper compatibility",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn search_fts_candidates_preserve_fallback_results_and_unsafe_shapes_fall_back()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -4843,6 +5677,7 @@ mod tests {
                 context_lines: 0,
                 start_index: 0,
                 limit: 20,
+                content_selection: ContentSelection::UnspecifiedLegacy,
                 retrieval_mode: SearchRetrievalMode::Lexical,
             },
             None,
@@ -4865,6 +5700,7 @@ mod tests {
                 context_lines: 0,
                 start_index: 0,
                 limit: 20,
+                content_selection: ContentSelection::UnspecifiedLegacy,
                 retrieval_mode: SearchRetrievalMode::Lexical,
             },
             None,
@@ -4917,6 +5753,7 @@ mod tests {
                     context_lines: 0,
                     start_index: 0,
                     limit: 20,
+                    content_selection: ContentSelection::UnspecifiedLegacy,
                     retrieval_mode: SearchRetrievalMode::Lexical,
                 },
                 None,
@@ -4954,6 +5791,7 @@ mod tests {
                     context_lines: 0,
                     start_index: 0,
                     limit: 20,
+                    content_selection: ContentSelection::UnspecifiedLegacy,
                     retrieval_mode: SearchRetrievalMode::Lexical,
                 },
                 None,
@@ -4969,6 +5807,7 @@ mod tests {
                     context_lines: 0,
                     start_index: 0,
                     limit: 20,
+                    content_selection: ContentSelection::UnspecifiedLegacy,
                     retrieval_mode: SearchRetrievalMode::Lexical,
                 },
                 None,
@@ -5024,6 +5863,7 @@ mod tests {
             context_lines: 0,
             start_index: MATCHING_FILES - 1,
             limit: 1,
+            content_selection: ContentSelection::UnspecifiedLegacy,
             retrieval_mode: SearchRetrievalMode::Lexical,
         };
         let overflow = search_indexed_files_with_control(&store, &request, None)?;
@@ -5104,6 +5944,7 @@ mod tests {
             context_lines: 0,
             start_index: 0,
             limit: 20,
+            content_selection: ContentSelection::UnspecifiedLegacy,
             retrieval_mode: SearchRetrievalMode::Lexical,
         };
 
@@ -5198,6 +6039,7 @@ mod tests {
         let line_match = append_line_matches(
             &mut line_report,
             "src/a.rs",
+            ContentClassification::Source,
             &["needle"],
             &LineMatcher::Literal {
                 needle: "needle".to_string(),
@@ -5825,12 +6667,17 @@ mod tests {
 
     /// Build a representative file node.
     fn test_node(path: &str, hash: &str) -> Node {
+        test_node_with_language(path, hash, ".rs", "rust")
+    }
+
+    /// Build a representative file node with an explicit registry language.
+    fn test_node_with_language(path: &str, hash: &str, extension: &str, language: &str) -> Node {
         Node {
             path: path.to_string(),
             kind: NodeKind::File,
             parent_path: normalized_parent(path),
-            extension: Some(".rs".to_string()),
-            language: Some("rust".to_string()),
+            extension: Some(extension.to_string()),
+            language: Some(language.to_string()),
             size_bytes: Some(12),
             mtime_ns: Some(10),
             content_hash: Some(hash.to_string()),
@@ -5887,6 +6734,7 @@ mod tests {
             documentation: None,
             line_start: 1,
             line_end: 1,
+            source_selector: None,
             parent: None,
             parser: ParserKind::TreeSitter,
             detail: None,
@@ -5908,6 +6756,15 @@ mod tests {
             &vec![caller.to_string()],
             "import alias called-by",
         )
+    }
+
+    /// Return one ordinary test error instead of panicking inside fallible tests.
+    fn require(condition: bool, message: &str) -> Result<(), Box<dyn Error>> {
+        if condition {
+            Ok(())
+        } else {
+            Err(io::Error::other(message).into())
+        }
     }
 
     /// Require two test values to be equal without panicking.
