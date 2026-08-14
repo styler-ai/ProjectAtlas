@@ -1780,6 +1780,46 @@ Detection and parsing do not imply semantic certainty. Parser and fact-provider
 provenance remain separate, resolution retains uncertainty, and the existing MCP
 summary, relation, and slice routes expose the smallest trustworthy next step.
 
+### Classified Documentation And Worktree Navigation
+
+```mermaid
+flowchart TB
+    subgraph Stable[Clean stable main]
+        Saved[Current saved source and documentation] --> Classify[Registry-owned content classification]
+        Classify --> Parse[Bounded Markdown headings and explicit local references]
+        Parse --> Publish[(Atomic complete active-atlas generation)]
+        Publish --> Seal[Portable derived-state allowlist and verification]
+        Seal --> Seed[(Immutable content-addressed exact-tag seed)]
+    end
+
+    subgraph WorktreeA[Worktree A]
+        CopyA[Verified local copy or safe reflink] --> RefreshA[Two-sided branch refresh]
+        SavedA[Current and dirty saved bytes] --> RefreshA
+        RefreshA --> DbA[(Private ignored writable database A)]
+        CallA[MCP call with project_path A] --> DbA
+        DbA --> NavigateA[Classified navigation and documents or documented_by]
+        NavigateA --> SliceA[Exact current source or heading slice]
+    end
+
+    subgraph WorktreeB[Worktree B]
+        CopyB[Verified local copy or safe reflink] --> RefreshB[Two-sided branch refresh]
+        SavedB[Current and dirty saved bytes] --> RefreshB
+        RefreshB --> DbB[(Private ignored writable database B)]
+        CallB[MCP call with project_path B] --> DbB
+        DbB --> NavigateB[Classified navigation and documents or documented_by]
+        NavigateB --> SliceB[Exact current source or heading slice]
+    end
+
+    Seed --> CopyA
+    Seed --> CopyB
+```
+
+The seed is a verified read-only input, never a shared writable database. Each
+checkout refreshes stable-main facts against its own current and dirty saved bytes
+before publication, then captures its exact root, private database, and generation
+for the request. Classification, heading, relation, purpose, unresolved evidence,
+and next-call state therefore cannot leak between sibling worktrees.
+
 A modernization tag highlights source families where exact dependency and
 source-evidence navigation is especially valuable for high-risk transformation
 work. It does not claim automatic translation, infer a target language, or
