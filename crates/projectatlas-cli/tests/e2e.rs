@@ -41,7 +41,7 @@ use projectatlas_core::telemetry::{
     READ_AVOIDANCE_CONFIDENCE_MODELED, READ_AVOIDANCE_SCOPE,
     TOKEN_AVERAGE_POLICY_OVERFLOW_EVIDENCE, TOKEN_BASELINE_DIRECTORY_WALK, usage_from_estimates,
 };
-use projectatlas_core::{PurposeSource, normalize_native_path_display};
+use projectatlas_core::{NodeKind, PurposeSource, normalize_native_path_display};
 use projectatlas_db::{
     AtlasStore, HealthResolution, IndexedFileText, PlannerStatisticsPolicy, PlannerStatisticsState,
     RepositoryGraphRelationQuery, TelemetryCheckpointState,
@@ -76,6 +76,7 @@ const TEST_REPO_DIR: &str = "repo";
 const SRC_DIR_NAME: &str = "src";
 const TESTS_DIR_NAME: &str = "tests";
 const ALPHA_RS_FILE_NAME: &str = "alpha.rs";
+const GUIDE_MD_PATH: &str = "docs/guide.md";
 const CREATED_RS_FILE_NAME: &str = "created.rs";
 const DUPLICATE_RS_FILE_NAME: &str = "duplicate.rs";
 const HIDDEN_RS_FILE_NAME: &str = "hidden.rs";
@@ -252,8 +253,7 @@ const SKILL_FILE_NAME: &str = "SKILL.md";
 const MCP_CONTRACT_EXECUTABLE_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE";
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 const MCP_CONTRACT_METADATA_CANARY: &str = "mcp_contract_metadata_canary";
-const MCP_V041_TOOLS_SHA256: &str =
-    "26674d7134973a8f5abdb870a29db6d11e19d4287ec20add04f08653e50dec73";
+const MCP_TOOLS_SHA256: &str = "62281b4258cab70ecc72d1bb73353f5f8799e5dbf2486c9b7b7e1aec1932eed8";
 const AGENT_EFFICIENCY_BENCHMARK_PATH: &str =
     "../../docs/benchmarks/v0.4-agent-navigation-results.json";
 const AGENT_EFFICIENCY_PARTIAL_FILE: &str = "partial.json";
@@ -3023,11 +3023,11 @@ fn assert_settings_reports_supported_predecessor_without_migration(
         || token_error_json
             .pointer("/error/schema_migration_required/supported_schema_version")
             .and_then(Value::as_i64)
-            != Some(16)
+            != Some(17)
         || token_error_json
             .pointer("/error/schema_migration_required/migration_steps_remaining")
             .and_then(Value::as_u64)
-            != Some(8)
+            != Some(9)
         || !token_error.contains("projectatlas init")
         || !token_error.contains("atlas_init")
         || !token_error.contains("same global `--db`/`--config` selection")
@@ -3047,8 +3047,8 @@ fn assert_settings_reports_supported_predecessor_without_migration(
         let token_report = mcp.call_tool("atlas_token_report", &json!({}))?;
         if !token_report.contains("kind: schema_migration_required")
             || !token_report.contains("found_schema_version: 8")
-            || !token_report.contains("supported_schema_version: 16")
-            || !token_report.contains("migration_steps_remaining: 8")
+            || !token_report.contains("supported_schema_version: 17")
+            || !token_report.contains("migration_steps_remaining: 9")
             || !token_report.contains("projectatlas init")
             || !token_report.contains("atlas_init")
             || !token_report.contains("same global `--db`/`--config` selection")
@@ -3066,7 +3066,7 @@ fn assert_settings_reports_supported_predecessor_without_migration(
             "compatibility: supported_predecessor",
             "migration_required: true",
             "migration_supported: true",
-            "migration_steps_remaining: 8",
+            "migration_steps_remaining: 9",
         ] {
             if !mcp_settings.contains(required) {
                 return Err(io::Error::other(format!(
@@ -3103,7 +3103,7 @@ fn assert_settings_reports_supported_predecessor_without_migration(
         || schema
             .get("migration_steps_remaining")
             .and_then(Value::as_u64)
-            != Some(8)
+            != Some(9)
         || !settings.get("index").is_some_and(Value::is_null)
         || !settings.get("telemetry").is_some_and(Value::is_null)
     {
@@ -3236,7 +3236,7 @@ fn supported_predecessor_recovery_preserves_explicit_database_selection()
             [],
             |row| row.get(0),
         )?;
-        if stored_version != "16" {
+        if stored_version != "17" {
             return Err(io::Error::other(format!(
                 "{adapter} recovery did not migrate the explicitly selected database"
             ))
@@ -3316,7 +3316,7 @@ fn assert_cli_migrates_released_schema_layout(
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    if stored_version != "16" || stored_root != project_root {
+    if stored_version != "17" || stored_root != project_root {
         return Err(io::Error::other(format!(
             "{command} did not preserve and migrate {label}: version={stored_version}, root={stored_root}"
         ))
@@ -3707,7 +3707,7 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
         [],
         |row| row.get(0),
     )?;
-    if migrated != "16" {
+    if migrated != "17" {
         return Err(io::Error::other(format!(
             "linked first-write scan did not migrate its released schema: {migrated}"
         ))
@@ -4270,7 +4270,7 @@ fn implicit_bare_root_refuses_before_opening_a_future_schema_database() -> Resul
             "schema_version_mismatch",
             "supported_schema_version",
         ],
-        16,
+        17,
     )?;
     require_json_string(
         &explicit_error,
@@ -19487,9 +19487,9 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
         .into());
     }
     let tools_digest = sha256_hex(&serde_json::to_vec(tools)?);
-    if tools_digest != MCP_V041_TOOLS_SHA256 {
+    if tools_digest != MCP_TOOLS_SHA256 {
         return Err(io::Error::other(format!(
-            "frozen v0.4.1 MCP inventory/schema digest drifted: expected {MCP_V041_TOOLS_SHA256}, found {tools_digest}"
+            "MCP inventory/schema digest drifted: expected {MCP_TOOLS_SHA256}, found {tools_digest}"
         ))
         .into());
     }
@@ -21701,7 +21701,7 @@ fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
         &["content_summary"],
         "markdown document titled ProjectAtlas Demo with sections Install, Usage.",
     )?;
-    require_json_string(&readme_summary, &["parser_kind"], "structural")?;
+    require_json_string(&readme_summary, &["parser_kind"], "structural-symbol-graph")?;
     require_json_string(&readme_summary, &["summary_status"], "ok")?;
     require_json_string(&readme_summary, &["file_purpose_status"], "suggested")?;
 
@@ -21771,6 +21771,347 @@ fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
     require_json_string(&rust_summary, &["summary_status"], "ok")?;
 
     Ok(())
+}
+
+#[test]
+fn classified_document_navigation_agrees_across_cli_and_mcp() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("classified-document-navigation");
+    fs::create_dir_all(repo.join("docs"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(GUIDE_MD_PATH),
+        "# Guide\n\nSee [the current source](../src/lib.rs).\n",
+    )?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn api() {}\n",
+    )?;
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    run_scan(&repo, &database)?;
+
+    let symbols_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&database)
+        .args([
+            "symbols",
+            "list",
+            "--file",
+            "docs/guide.md",
+            "--content-selection",
+            "documentation",
+            "--limit",
+            "10",
+        ])
+        .output()?;
+    if !symbols_output.status.success() {
+        return Err(io::Error::other(format!(
+            "classified CLI symbols failed: {}",
+            String::from_utf8_lossy(&symbols_output.stderr)
+        ))
+        .into());
+    }
+    let symbols: Value = serde_json::from_slice(&symbols_output.stdout)?;
+    require_json_string(&symbols, &["0", "classification"], "documentation")?;
+    require_json_string(&symbols, &["0", "kind"], "heading")?;
+    require_json_string(&symbols, &["0", "name"], "Guide")?;
+    require_json_usize(&symbols, &["0", "source_selector", "byte_start"], 0)?;
+    require_json_usize(&symbols, &["0", "source_selector", "byte_end"], 7)?;
+    let symbols_toon_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--format")
+        .arg("toon")
+        .arg("--db")
+        .arg(&database)
+        .args([
+            "symbols",
+            "list",
+            "--file",
+            "docs/guide.md",
+            "--content-selection",
+            "documentation",
+            "--limit",
+            "10",
+        ])
+        .output()?;
+    if !symbols_toon_output.status.success() {
+        return Err(io::Error::other(format!(
+            "classified CLI TOON symbols failed: {}",
+            String::from_utf8_lossy(&symbols_toon_output.stderr)
+        ))
+        .into());
+    }
+    let symbols_toon: Value =
+        toon_format::decode_default(&String::from_utf8(symbols_toon_output.stdout)?)?;
+    require_json_string(
+        &symbols_toon,
+        &["symbols", "0", "classification"],
+        "documentation",
+    )?;
+    require_json_usize(
+        &symbols_toon,
+        &["symbols", "0", "source_selector", "byte_end"],
+        7,
+    )?;
+
+    let relation_arguments = [
+        "symbols",
+        "relations",
+        "--view",
+        "detailed",
+        "--file",
+        "docs/guide.md",
+        "--symbol",
+        "Guide",
+        "--symbol-kind",
+        "heading",
+        "--direction",
+        "outbound",
+        "--relation",
+        "documents",
+        "--content-selection",
+        "documentation",
+        "--limit",
+        "10",
+    ];
+    let relations_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&database)
+        .args(relation_arguments)
+        .output()?;
+    if !relations_output.status.success() {
+        return Err(io::Error::other(format!(
+            "classified CLI relation failed: {}",
+            String::from_utf8_lossy(&relations_output.stderr)
+        ))
+        .into());
+    }
+    let cli_relation: Value = serde_json::from_slice(&relations_output.stdout)?;
+    require_json_string(
+        &cli_relation,
+        &["symbol_relations", "content_selection"],
+        "documentation",
+    )?;
+    require_json_string(
+        &cli_relation,
+        &["symbol_relations", "rows", "0", "relation", "kind", "scope"],
+        "extended",
+    )?;
+    require_json_string(
+        &cli_relation,
+        &["symbol_relations", "rows", "0", "relation", "kind", "value"],
+        "documents",
+    )?;
+    require_json_string(
+        &cli_relation,
+        &["symbol_relations", "rows", "0", "source", "classification"],
+        "documentation",
+    )?;
+    require_json_string(
+        &cli_relation,
+        &["symbol_relations", "rows", "0", "target", "classification"],
+        "source",
+    )?;
+    require_json_string(
+        &cli_relation,
+        &["symbol_relations", "rows", "0", "next_call", "capability"],
+        "summary",
+    )?;
+    require_json_string(
+        &cli_relation,
+        &[
+            "symbol_relations",
+            "rows",
+            "0",
+            "next_call",
+            "content_selection",
+        ],
+        "source",
+    )?;
+    let relations_toon_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--format")
+        .arg("toon")
+        .arg("--db")
+        .arg(&database)
+        .args(relation_arguments)
+        .output()?;
+    if !relations_toon_output.status.success() {
+        return Err(io::Error::other(format!(
+            "classified CLI TOON relation failed: {}",
+            String::from_utf8_lossy(&relations_toon_output.stderr)
+        ))
+        .into());
+    }
+    let relations_toon: Value =
+        toon_format::decode_default(&String::from_utf8(relations_toon_output.stdout)?)?;
+    require_json_string(
+        &relations_toon,
+        &["symbol_relations", "rows", "0", "relation", "kind", "value"],
+        "documents",
+    )?;
+    require_json_string(
+        &relations_toon,
+        &[
+            "symbol_relations",
+            "rows",
+            "0",
+            "next_call",
+            "content_selection",
+        ],
+        "source",
+    )?;
+
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn api() {}\n\npub fn current_saved_source() {}\n",
+    )?;
+    let before_invalid_cli = mcp_database_snapshot(&database)?;
+    let invalid_cli = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--db")
+        .arg(&database)
+        .args(["files", "--content-selection", "prose"])
+        .output()?;
+    if invalid_cli.status.success() || mcp_database_snapshot(&database)? != before_invalid_cli {
+        return Err(io::Error::other(
+            "invalid CLI content selection refreshed or changed SQLite state",
+        )
+        .into());
+    }
+
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+    let operation_result = (|| -> Result<(), Box<dyn Error>> {
+        let mcp_symbols: Value = toon_format::decode_default(&session.call_tool(
+            "atlas_symbols",
+            &serde_json::json!({
+                "project_path": repo.as_path(),
+                "file": "docs/guide.md",
+                "content_selection": "documentation",
+                "limit": 10
+            }),
+        )?)?;
+        if mcp_symbols.get("symbols").is_none() {
+            return Err(io::Error::other(format!(
+                "classified MCP symbols omitted its rows: {mcp_symbols}"
+            ))
+            .into());
+        }
+        require_json_string(
+            &mcp_symbols,
+            &["symbols", "0", "classification"],
+            "documentation",
+        )?;
+        require_json_usize(
+            &mcp_symbols,
+            &["symbols", "0", "source_selector", "byte_end"],
+            7,
+        )?;
+
+        let mcp_outbound: Value = toon_format::decode_default(&session.call_tool(
+            "atlas_symbol_relations",
+            &serde_json::json!({
+                "project_path": repo.as_path(),
+                "view": "detailed",
+                "file": "docs/guide.md",
+                "symbol": "Guide",
+                "symbol_kind": "heading",
+                "direction": "outbound",
+                "relation": "documents",
+                "content_selection": "documentation",
+                "limit": 10
+            }),
+        )?)?;
+        require_json_string(
+            &mcp_outbound,
+            &["symbol_relations", "rows", "0", "relation", "kind", "value"],
+            "documents",
+        )?;
+        require_json_string(
+            &mcp_outbound,
+            &["symbol_relations", "rows", "0", "target", "classification"],
+            "source",
+        )?;
+
+        let mcp_inbound: Value = toon_format::decode_default(&session.call_tool(
+            "atlas_symbol_relations",
+            &serde_json::json!({
+                "project_path": repo.as_path(),
+                "view": "detailed",
+                "file": "src/lib.rs",
+                "direction": "inbound",
+                "relation": "documents",
+                "content_selection": "source",
+                "limit": 10
+            }),
+        )?)?;
+        require_json_string(
+            &mcp_inbound,
+            &["symbol_relations", "rows", "0", "inbound_view"],
+            "documented_by",
+        )?;
+        require_json_string(
+            &mcp_inbound,
+            &["symbol_relations", "anchor", "classification"],
+            "source",
+        )?;
+        require_json_string(
+            &mcp_inbound,
+            &["symbol_relations", "rows", "0", "source", "classification"],
+            "documentation",
+        )?;
+
+        let source_summary: Value = toon_format::decode_default(&session.call_tool(
+            "atlas_file_summary",
+            &serde_json::json!({
+                "project_path": repo.as_path(),
+                "file": "src/lib.rs",
+                "content_selection": "source",
+                "limit": 10
+            }),
+        )?)?;
+        require_json_contains(
+            &source_summary,
+            &["file_summary", "content_summary"],
+            "current_saved_source",
+        )?;
+        require_json_string(
+            &source_summary,
+            &["file_summary", "classification"],
+            "source",
+        )?;
+
+        let before_invalid_mcp = mcp_database_snapshot(&database)?;
+        let invalid_mcp = session.call_tool(
+            "atlas_files",
+            &serde_json::json!({
+                "project_path": repo.as_path(),
+                "content_selection": "prose"
+            }),
+        )?;
+        if !invalid_mcp.contains("source, documentation, or both")
+            || mcp_database_snapshot(&database)? != before_invalid_mcp
+        {
+            return Err(io::Error::other(format!(
+                "invalid MCP content selection changed state or lost allowed values: {invalid_mcp}"
+            ))
+            .into());
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())
 }
 
 #[test]
@@ -23075,6 +23416,7 @@ fn incremental_refreshes_converge_with_clean_scan_results() -> Result<(), Box<dy
     let repo = temp.path().join(TEST_REPO_DIR);
     let db = temp.path().join("incremental-convergence.db");
     fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
+    fs::create_dir_all(repo.join("docs"))?;
     fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
     fs::create_dir_all(repo.join(TESTS_DIR_NAME))?;
     fs::create_dir_all(repo.join(IGNORED_DIR_NAME))?;
@@ -23094,6 +23436,10 @@ fn incremental_refreshes_converge_with_clean_scan_results() -> Result<(), Box<dy
         repo.join(IGNORED_DIR_NAME).join(HIDDEN_RS_FILE_NAME),
         "pub fn hidden() {}\n",
     )?;
+    let guide = repo.join(GUIDE_MD_PATH);
+    let document_target = repo.join("docs/target.md");
+    fs::write(&guide, "# Guide\n\n[target](target.md#target)\n")?;
+    fs::write(&document_target, "# Target\n")?;
     fs::write(repo.join(".gitignore"), ".projectatlas/\nignored/\n")?;
     let config = repo.join(ATLAS_DIR_NAME).join("config.toml");
     fs::write(&config, CONFIG)?;
@@ -23102,7 +23448,10 @@ fn incremental_refreshes_converge_with_clean_scan_results() -> Result<(), Box<dy
     assert_clean_scan_convergence(&repo, &db, temp.path(), "initial")?;
 
     let created = repo.join(SRC_DIR_NAME).join(CREATED_RS_FILE_NAME);
+    let created_document = repo.join("docs/created.md");
     fs::write(&created, "pub fn created() -> u32 { 2 }\n")?;
+    fs::write(&created_document, "# Created\n")?;
+    fs::write(&guide, "# Guide\n\n[created](created.md#created)\n")?;
     let _created_summary = json_summary_command(&repo, &db, "src/created.rs")?;
     assert_clean_scan_convergence(&repo, &db, temp.path(), "create")?;
 
@@ -23110,11 +23459,16 @@ fn incremental_refreshes_converge_with_clean_scan_results() -> Result<(), Box<dy
         &created,
         "pub fn created() -> u32 { helper() }\nfn helper() -> u32 { 3 }\n",
     )?;
+    fs::write(&created_document, "# Revised\n")?;
+    fs::write(&guide, "# Guide\n\n[revised](created.md#revised)\n")?;
     run_watch_once(&repo, &db)?;
     assert_clean_scan_convergence(&repo, &db, temp.path(), "modify")?;
 
     let moved = repo.join(TESTS_DIR_NAME).join(CREATED_RS_FILE_NAME);
+    let moved_document = repo.join("docs/moved.md");
     fs::rename(&created, &moved)?;
+    fs::rename(&created_document, &moved_document)?;
+    fs::write(&guide, "# Guide\n\n[moved](moved.md#revised)\n")?;
     let moved_files = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .arg("--db")
@@ -23133,11 +23487,15 @@ fn incremental_refreshes_converge_with_clean_scan_results() -> Result<(), Box<dy
     assert_clean_scan_convergence(&repo, &db, temp.path(), "move")?;
 
     let renamed = repo.join(TESTS_DIR_NAME).join("renamed.rs");
+    let renamed_document = repo.join("docs/Renamed.md");
     fs::rename(&moved, &renamed)?;
+    fs::rename(&moved_document, &renamed_document)?;
+    fs::write(&guide, "# Guide\n\n[renamed](Renamed.md#revised)\n")?;
     run_watch_once(&repo, &db)?;
     assert_clean_scan_convergence(&repo, &db, temp.path(), "rename")?;
 
     fs::remove_file(repo.join(SRC_DIR_NAME).join(ALPHA_RS_FILE_NAME))?;
+    fs::remove_file(&renamed_document)?;
     fs::write(
         repo.join(SRC_DIR_NAME).join("lib.rs"),
         "pub fn entry() {}\n",
@@ -23147,14 +23505,23 @@ fn incremental_refreshes_converge_with_clean_scan_results() -> Result<(), Box<dy
 
     fs::write(
         repo.join(".gitignore"),
-        ".projectatlas/\nignored/\ntests/\n",
+        ".projectatlas/\nignored/\ntests/\ndocs/Renamed.md\n",
     )?;
+    fs::write(&renamed_document, "# Revised\n")?;
     run_watch_once(&repo, &db)?;
     assert_clean_scan_convergence(&repo, &db, temp.path(), "ignore")?;
 
     fs::write(repo.join(".gitignore"), ".projectatlas/\nignored/\n")?;
     run_watch_once(&repo, &db)?;
     assert_clean_scan_convergence(&repo, &db, temp.path(), "unignore")?;
+
+    let case_intermediate = repo.join("docs/case-rename.tmp");
+    let case_renamed_document = repo.join("docs/renamed.md");
+    fs::rename(&renamed_document, &case_intermediate)?;
+    fs::rename(&case_intermediate, &case_renamed_document)?;
+    fs::write(&guide, "# Guide\n\n[renamed](renamed.md#revised)\n")?;
+    run_watch_once(&repo, &db)?;
+    assert_clean_scan_convergence(&repo, &db, temp.path(), "case-rename")?;
 
     let python = repo.join(TESTS_DIR_NAME).join("renamed.py");
     fs::rename(&renamed, &python)?;
@@ -23185,10 +23552,12 @@ fn incremental_refreshes_converge_with_clean_scan_results() -> Result<(), Box<dy
     let before_failed_refresh = AtlasStore::open_read_only(&db)?
         .index_publication()?
         .ok_or_else(|| io::Error::other("publication missing before failed refresh"))?;
+    let before_failed_results = derived_result_snapshot(&db)?;
     fs::write(
         repo.join(SRC_DIR_NAME).join("lib.rs"),
         "pub fn entry() {}\npub fn after_retry() {}\n",
     )?;
+    fs::write(&guide, "# Guide\n\n[after retry](missing-after-retry.md)\n")?;
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .arg("--db")
@@ -23204,6 +23573,12 @@ fn incremental_refreshes_converge_with_clean_scan_results() -> Result<(), Box<dy
         return Err(
             io::Error::other("failed watcher work changed the complete publication").into(),
         );
+    }
+    if derived_result_snapshot(&db)? != before_failed_results {
+        return Err(io::Error::other(
+            "failed watcher work changed classified document or graph results",
+        )
+        .into());
     }
     run_watch_once(&repo, &db)?;
     assert_clean_scan_convergence(&repo, &db, temp.path(), "retry")?;
@@ -23245,6 +23620,7 @@ fn incremental_refreshes_converge_with_clean_scan_results() -> Result<(), Box<dy
 #[derive(Debug, Eq, PartialEq)]
 struct DerivedResultSnapshot {
     nodes: Vec<String>,
+    file_classifications: Vec<String>,
     unreviewed_purposes: BTreeMap<String, String>,
     texts: Vec<IndexedFileText>,
     parsers: Vec<String>,
@@ -23340,6 +23716,16 @@ fn derived_result_snapshot(db: &Path) -> Result<DerivedResultSnapshot, Box<dyn E
         .project_instance_id()?
         .ok_or_else(|| io::Error::other("convergence project identity missing"))?;
     let indexed_nodes = store.load_nodes()?;
+    let file_paths = indexed_nodes
+        .iter()
+        .filter(|indexed| indexed.node.kind == NodeKind::File)
+        .map(|indexed| indexed.node.path.clone())
+        .collect::<Vec<_>>();
+    let file_classifications = store
+        .file_content_classifications_for_paths(&file_paths)?
+        .into_iter()
+        .map(|row| format!("{}:{}", row.path, row.classification.as_str()))
+        .collect::<Vec<_>>();
     let mut nodes = Vec::with_capacity(indexed_nodes.len());
     let mut unreviewed_purposes = BTreeMap::new();
     let mut parsers = Vec::new();
@@ -23413,25 +23799,31 @@ fn derived_result_snapshot(db: &Path) -> Result<DerivedResultSnapshot, Box<dyn E
     let mut graph_relations = BTreeSet::new();
     let mut graph_occurrences = BTreeSet::new();
     for family in GraphRelationKind::ALL {
-        let relations = store.repository_graph_relations(
+        let relations = store.repository_graph_relation_rows(
             RepositoryGraphRelationQuery::Family { relation: family },
             GRAPH_ROW_LIMIT,
+            None,
         )?;
         if relations.truncated {
             return Err(io::Error::other("relation snapshot was truncated").into());
         }
-        for relation in relations.rows {
+        for row in relations.rows {
+            let relation = &row.relation;
             if relation.generation() != publication.generation {
                 return Err(io::Error::other("relation snapshot used a mixed generation").into());
             }
-            let source = store
-                .repository_graph_entity(relation.source())?
-                .ok_or_else(|| io::Error::other("relation source entity missing"))?;
-            graph_entities.insert(serde_json::to_string(source.selector())?);
-            let semantics = relation_semantics(source.selector(), &relation)?;
+            graph_entities.insert(serde_json::to_string(row.source.selector())?);
+            if let Some(target) = &row.target {
+                graph_entities.insert(serde_json::to_string(target.selector())?);
+            }
+            let semantics = relation_semantics(
+                row.source.selector(),
+                relation,
+                row.document_unresolved_reason,
+            )?;
             graph_relations.insert(semantics.clone());
             let occurrences =
-                store.repository_graph_occurrences(&relation, GRAPH_OCCURRENCE_LIMIT)?;
+                store.repository_graph_occurrences(relation, GRAPH_OCCURRENCE_LIMIT)?;
             if occurrences.truncated {
                 return Err(io::Error::other("occurrence snapshot was truncated").into());
             }
@@ -23468,6 +23860,7 @@ fn derived_result_snapshot(db: &Path) -> Result<DerivedResultSnapshot, Box<dyn E
     let internal = internal_derived_snapshot(db, &project_hex)?;
     Ok(DerivedResultSnapshot {
         nodes,
+        file_classifications,
         unreviewed_purposes,
         texts: store.load_file_texts_for_search(None, true)?,
         parsers,
@@ -23733,6 +24126,7 @@ fn normalize_project_witness(
 fn relation_semantics(
     source: &projectatlas_core::graph::EntitySelector,
     relation: &projectatlas_core::graph::LogicalRelation,
+    document_unresolved_reason: Option<projectatlas_core::graph::DocumentTargetUnresolvedReason>,
 ) -> Result<String, Box<dyn Error>> {
     let resolution = match relation.resolution() {
         RelationResolution::Resolved { selector, .. } => {
@@ -23760,6 +24154,7 @@ fn relation_semantics(
         "resolution": resolution,
         "confidence": relation.confidence(),
         "completeness": relation.completeness(),
+        "document_unresolved_reason": document_unresolved_reason,
     }))?)
 }
 
@@ -24287,6 +24682,7 @@ fn exercise_normal_read_freshness(
             documentation: None,
             line_start: 1,
             line_end: 1,
+            source_selector: None,
             parent: None,
             parser: ParserKind::TreeSitter,
             detail: Some("function_item".to_string()),
@@ -28637,6 +29033,7 @@ fn mcp_source_publication_table(table: &str) -> bool {
             | "source_parse_metadata"
             | "symbol_relations"
             | "file_texts"
+            | "file_content_classifications"
             | "graph_entities"
             | "graph_relations"
             | "graph_relation_occurrences"

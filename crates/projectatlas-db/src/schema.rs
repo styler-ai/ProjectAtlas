@@ -17,7 +17,7 @@ use projectatlas_core::normalize_native_path_display;
 use std::path::PathBuf;
 
 /// Current `SQLite` schema version supported by this crate.
-pub(crate) const SCHEMA_VERSION: i64 = 16;
+pub(crate) const SCHEMA_VERSION: i64 = 17;
 /// Released 0.3.26 schema accepted by the migration inventory.
 pub(crate) const PREVIOUS_SCHEMA_VERSION: i64 = 8;
 /// First internal schema with explicit publication invalidation.
@@ -34,6 +34,8 @@ const PARSER_PROVENANCE_SCHEMA_VERSION: i64 = 13;
 pub(crate) const COVERAGE_DISCOVERY_SCHEMA_VERSION: i64 = 14;
 /// First schema with the rebuildable lexical candidate accelerator.
 const LEXICAL_SCHEMA_VERSION: i64 = 15;
+/// Released schema with compact normalized graph keys.
+const COMPACT_GRAPH_SCHEMA_VERSION: i64 = 16;
 /// Metadata key for the durable schema version.
 pub(crate) const SCHEMA_VERSION_KEY: &str = "schema_version";
 /// Metadata key for the owning project root.
@@ -126,8 +128,13 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         from: LEXICAL_SCHEMA_VERSION,
-        to: SCHEMA_VERSION,
+        to: COMPACT_GRAPH_SCHEMA_VERSION,
         apply: migrate_15_to_16,
+    },
+    Migration {
+        from: COMPACT_GRAPH_SCHEMA_VERSION,
+        to: SCHEMA_VERSION,
+        apply: migrate_16_to_17,
     },
 ];
 
@@ -259,6 +266,8 @@ static RESOLUTION_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLo
 static PARSER_PROVENANCE_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 /// Process-local immutable schema-14 contract before lexical acceleration.
 static COVERAGE_DISCOVERY_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
+/// Immutable schema-16 contract admitted before classified-document storage.
+static COMPACT_GRAPH_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 
 /// Immutable physical schema emitted by the released 0.3.26 runtime.
 #[cfg(test)]
@@ -406,6 +415,69 @@ const BASE_SCHEMA_SQL: &str = "
     CREATE INDEX idx_file_texts_hash ON file_texts(content_hash);
 ";
 
+/// Rebuild symbol storage with one optional exact parser-supplied source selector.
+const SYMBOL_SOURCE_SELECTOR_SCHEMA_SQL: &str = "
+    CREATE TABLE symbols_with_source_selectors (
+        id INTEGER PRIMARY KEY,
+        path TEXT NOT NULL,
+        language TEXT,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        signature TEXT NOT NULL,
+        exported INTEGER NOT NULL DEFAULT 0,
+        documentation TEXT,
+        line_start INTEGER NOT NULL,
+        line_end INTEGER NOT NULL,
+        source_byte_start INTEGER,
+        source_byte_end INTEGER,
+        source_column_start INTEGER,
+        source_column_end INTEGER,
+        parent TEXT,
+        parser TEXT NOT NULL,
+        detail TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CHECK (
+            (
+                source_byte_start IS NULL
+                AND source_byte_end IS NULL
+                AND source_column_start IS NULL
+                AND source_column_end IS NULL
+            ) OR (
+                typeof(source_byte_start) = 'integer'
+                AND typeof(source_byte_end) = 'integer'
+                AND typeof(source_column_start) = 'integer'
+                AND typeof(source_column_end) = 'integer'
+                AND source_byte_start >= 0
+                AND source_byte_end >= source_byte_start
+                AND source_column_start >= 0
+                AND source_column_end >= 0
+                AND line_start >= 1
+                AND line_end >= line_start
+                AND (
+                    line_end > line_start
+                    OR source_column_end >= source_column_start
+                )
+            )
+        )
+    );
+
+    INSERT INTO symbols_with_source_selectors(
+        id, path, language, name, kind, signature, exported, documentation,
+        line_start, line_end, parent, parser, detail, created_at, updated_at
+    )
+    SELECT
+        id, path, language, name, kind, signature, exported, documentation,
+        line_start, line_end, parent, parser, detail, created_at, updated_at
+    FROM symbols;
+
+    DROP TABLE symbols;
+    ALTER TABLE symbols_with_source_selectors RENAME TO symbols;
+    CREATE INDEX idx_symbols_path ON symbols(path);
+    CREATE INDEX idx_symbols_name ON symbols(name);
+    CREATE INDEX idx_symbols_kind ON symbols(kind);
+";
+
 /// Trigger-free FTS5 acceleration over authoritative persisted file text.
 const FILE_TEXT_FTS_SCHEMA_SQL: &str = "
     CREATE VIRTUAL TABLE file_text_fts USING fts5(
@@ -538,7 +610,7 @@ const GRAPH_SCHEMA_SQL: &str = "
         CHECK(symbol_name IS NULL OR (typeof(symbol_name) = 'text' AND length(symbol_name) > 0)),
         CHECK(symbol_kind IS NULL OR symbol_kind IN (
             'function', 'method', 'class', 'struct', 'enum', 'trait', 'interface',
-            'module', 'type', 'value', 'import', 'package', 'workspace', 'dependency', 'unknown'
+            'module', 'type', 'value', 'import', 'package', 'workspace', 'dependency'__DOCUMENT_HEADING_SYMBOL_KIND__, 'unknown'
         )),
         CHECK(symbol_parent IS NULL OR (typeof(symbol_parent) = 'text' AND length(symbol_parent) > 0)),
         CHECK(symbol_signature IS NULL OR (typeof(symbol_signature) = 'text' AND length(symbol_signature) > 0)),
@@ -592,6 +664,7 @@ const GRAPH_SCHEMA_SQL: &str = "
             CHECK(reference_text IS NULL OR (typeof(reference_text) = 'text' AND length(reference_text) > 0)),
         candidate_count INTEGER
             CHECK(candidate_count IS NULL OR (typeof(candidate_count) = 'integer' AND candidate_count > 0)),
+        __DOCUMENT_UNRESOLVED_REASON_COLUMN__
         confidence TEXT NOT NULL CHECK(confidence IN ('exact', 'high', 'medium', 'low')),
         completeness TEXT NOT NULL CHECK(completeness IN ('complete', 'partial')),
         FOREIGN KEY(project_instance_id)
@@ -604,7 +677,7 @@ const GRAPH_SCHEMA_SQL: &str = "
             (relation_scope = 'legacy'
                 AND relation_kind IN ('contains', 'imports', 'calls', 'depends-on'))
             OR (relation_scope = 'extended'
-                AND relation_kind IN ('references', 'tests', 'routes-to', 'configures', 'deploys', 'reads', 'writes'))
+                AND relation_kind IN ('references', 'tests', 'routes-to', 'configures', 'deploys', 'reads', 'writes'__DOCUMENT_RELATION_KIND__))
         ),
         CHECK(
             (resolution_status IN ('resolved', 'external')
@@ -617,6 +690,7 @@ const GRAPH_SCHEMA_SQL: &str = "
                 AND target_entity_key IS NULL
                 AND reference_text IS NOT NULL AND candidate_count IS NULL)
         )
+        __DOCUMENT_UNRESOLVED_REASON_CONSTRAINT__
     );
 
     CREATE TABLE graph_relation_occurrences (
@@ -667,7 +741,7 @@ const GRAPH_SCHEMA_SQL: &str = "
             OR (relation_scope = 'legacy'
                 AND relation_kind IN ('contains', 'imports', 'calls', 'depends-on'))
             OR (relation_scope = 'extended'
-                AND relation_kind IN ('references', 'tests', 'routes-to', 'configures', 'deploys', 'reads', 'writes'))
+                AND relation_kind IN ('references', 'tests', 'routes-to', 'configures', 'deploys', 'reads', 'writes'__DOCUMENT_RELATION_KIND__))
         ),
         CHECK(total = covered + omitted),
         CHECK(
@@ -715,6 +789,64 @@ const GRAPH_SCHEMA_SQL: &str = "
     CREATE INDEX idx_graph_coverage_relation_state
         ON graph_coverage(relation_scope, relation_kind, state, id);
 ";
+
+/// Persist one closed content role for every currently admitted file node.
+const FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL: &str = "
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_path_kind ON nodes(path, kind);
+    CREATE TABLE file_content_classifications (
+        path TEXT PRIMARY KEY NOT NULL
+            CHECK(typeof(path) = 'text' AND length(path) > 0),
+        node_kind TEXT NOT NULL DEFAULT 'file' CHECK(node_kind = 'file'),
+        classification TEXT NOT NULL CHECK(classification IN (
+            'source', 'documentation', 'configuration_data', 'other_text', 'opaque'
+        )),
+        FOREIGN KEY(path, node_kind) REFERENCES nodes(path, kind) ON DELETE CASCADE
+    );
+    CREATE INDEX idx_file_content_classifications_classification_path
+        ON file_content_classifications(classification, path);
+";
+
+/// Produce the historical or current graph constraints from one DDL authority.
+fn graph_schema_sql(include_classified_documents: bool) -> String {
+    let heading = if include_classified_documents {
+        ", 'heading'"
+    } else {
+        ""
+    };
+    let documents = if include_classified_documents {
+        ", 'documents'"
+    } else {
+        ""
+    };
+    let reason_column = if include_classified_documents {
+        "document_unresolved_reason TEXT CHECK(document_unresolved_reason IS NULL OR document_unresolved_reason IN ('missing', 'ignored', 'outside_root', 'case_conflict', 'unsupported', 'no_static_target')),"
+    } else {
+        ""
+    };
+    let reason_constraint = if include_classified_documents {
+        ", CHECK(document_unresolved_reason IS NULL OR (relation_scope = 'extended' AND relation_kind = 'documents' AND resolution_status = 'unresolved'))"
+    } else {
+        ""
+    };
+    GRAPH_SCHEMA_SQL
+        .replace("__DOCUMENT_HEADING_SYMBOL_KIND__", heading)
+        .replace("__DOCUMENT_RELATION_KIND__", documents)
+        .replace("__DOCUMENT_UNRESOLVED_REASON_COLUMN__", reason_column)
+        .replace(
+            "__DOCUMENT_UNRESOLVED_REASON_CONSTRAINT__",
+            reason_constraint,
+        )
+}
+
+/// Create one historical or current normalized graph schema.
+fn create_graph_schema(
+    connection: &Connection,
+    include_classified_documents: bool,
+) -> DbResult<()> {
+    let sql = graph_schema_sql(include_classified_documents);
+    connection.execute_batch(&sql)?;
+    Ok(())
+}
 
 /// Parser lookup indexes owned by bounded project-wide coverage discovery.
 const COVERAGE_DISCOVERY_SOURCE_SCHEMA_SQL: &str = "
@@ -1438,14 +1570,16 @@ fn schema_state(connection: &Connection) -> DbResult<SchemaState> {
 /// Create a new schema and stamp identity/version only after all DDL succeeds.
 fn create_fresh(connection: &Connection, expected_root: Option<&str>) -> DbResult<()> {
     connection.execute_batch(BASE_SCHEMA_SQL)?;
+    add_symbol_source_selector_storage(connection)?;
     connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
-    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    create_graph_schema(connection, true)?;
     create_coverage_discovery_schema(connection)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
     connection.execute_batch(FILE_TEXT_FTS_SCHEMA_SQL)?;
     connection.execute_batch(SYMBOL_RELATION_LOOKUP_SCHEMA_SQL)?;
+    connection.execute_batch(FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL)?;
     set_metadata(connection, FILE_TEXT_FTS_SOURCE_REVISION_KEY, "0")?;
     set_metadata(connection, FILE_TEXT_FTS_PROJECTION_REVISION_KEY, "0")?;
     crate::telemetry::initialize_empty_storage(connection)?;
@@ -1483,7 +1617,7 @@ fn migrate_8_to_9(connection: &Connection) -> DbResult<()> {
 
 /// Add normalized graph storage and invalidate predecessor publication trust.
 fn migrate_9_to_10(connection: &Connection) -> DbResult<()> {
-    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    create_graph_schema(connection, false)?;
     if read_metadata(connection, PROJECT_ROOT_KEY)?.is_some() {
         crate::project_identity::ensure_project_identity(connection)?;
     }
@@ -1542,6 +1676,28 @@ fn migrate_14_to_15(connection: &Connection) -> DbResult<()> {
 
 /// Recreate disposable graph projections with compact stable-key ordering.
 fn migrate_15_to_16(connection: &Connection) -> DbResult<()> {
+    recreate_disposable_graph_projection(connection, false)
+}
+
+/// Add classified document constraints and file-role persistence.
+fn migrate_16_to_17(connection: &Connection) -> DbResult<()> {
+    recreate_disposable_graph_projection(connection, true)?;
+    add_symbol_source_selector_storage(connection)?;
+    connection.execute_batch(FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL)?;
+    invalidate_derived_publication(connection)
+}
+
+/// Add selector columns by rebuilding the derived symbol table in the caller transaction.
+fn add_symbol_source_selector_storage(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(SYMBOL_SOURCE_SELECTOR_SCHEMA_SQL)?;
+    Ok(())
+}
+
+/// Rebuild disposable normalized graph state while retaining project identity.
+pub(crate) fn recreate_disposable_graph_projection(
+    connection: &Connection,
+    include_classified_documents: bool,
+) -> DbResult<()> {
     let project_identity = connection
         .query_row(
             "SELECT project_instance_id FROM project_identity WHERE singleton = 1",
@@ -1561,7 +1717,7 @@ fn migrate_15_to_16(connection: &Connection) -> DbResult<()> {
         DROP TABLE project_identity;
         ",
     )?;
-    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    create_graph_schema(connection, include_classified_documents)?;
     if let Some(project_identity) = project_identity {
         connection.execute(
             "INSERT INTO project_identity(singleton, project_instance_id, active_generation)
@@ -1632,6 +1788,7 @@ fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResul
                 COVERAGE_DISCOVERY_SCHEMA_VERSION => {
                     coverage_discovery_predecessor_schema_contract()?
                 }
+                COMPACT_GRAPH_SCHEMA_VERSION => compact_graph_predecessor_schema_contract()?,
                 found => {
                     return Err(DbError::SchemaVersion {
                         found,
@@ -1821,7 +1978,7 @@ fn normalize_sql_fragment(fragment: &str) -> String {
 
 /// Validate schema 15 outside objects introduced or rebuilt by its migration.
 fn validate_disposable_graph_predecessor_shape(connection: &Connection) -> DbResult<()> {
-    let expected = schema_contract()?;
+    let expected = compact_graph_predecessor_schema_contract()?;
     let found = read_schema_contract(connection)?;
     let expected_graph_tables = expected
         .tables
@@ -1935,14 +2092,16 @@ fn schema_contract() -> DbResult<&'static SchemaContract> {
     }
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(BASE_SCHEMA_SQL)?;
+    add_symbol_source_selector_storage(&connection)?;
     connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
-    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    create_graph_schema(&connection, true)?;
     create_coverage_discovery_schema(&connection)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
     connection.execute_batch(FILE_TEXT_FTS_SCHEMA_SQL)?;
     connection.execute_batch(SYMBOL_RELATION_LOOKUP_SCHEMA_SQL)?;
+    connection.execute_batch(FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
     Ok(SCHEMA_CONTRACT.get_or_init(|| contract))
 }
@@ -1955,7 +2114,7 @@ fn graph_predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     connection.execute_batch(LEGACY_USAGE_SCHEMA_SQL)?;
-    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    create_graph_schema(&connection, false)?;
     let contract = read_schema_contract(&connection)?;
     Ok(GRAPH_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
 }
@@ -1967,7 +2126,7 @@ fn telemetry_predecessor_schema_contract() -> DbResult<&'static SchemaContract> 
     }
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(BASE_SCHEMA_SQL)?;
-    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    create_graph_schema(&connection, false)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
@@ -1981,7 +2140,7 @@ fn resolution_predecessor_schema_contract() -> DbResult<&'static SchemaContract>
     }
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(BASE_SCHEMA_SQL)?;
-    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    create_graph_schema(&connection, false)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
@@ -1997,7 +2156,7 @@ fn parser_provenance_predecessor_schema_contract() -> DbResult<&'static SchemaCo
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
-    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    create_graph_schema(&connection, false)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
@@ -2013,13 +2172,32 @@ fn coverage_discovery_predecessor_schema_contract() -> DbResult<&'static SchemaC
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
-    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    create_graph_schema(&connection, false)?;
     create_coverage_discovery_schema(&connection)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
     Ok(COVERAGE_DISCOVERY_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
+}
+
+/// Build the immutable schema-16 contract before classified-document storage.
+fn compact_graph_predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
+    if let Some(contract) = COMPACT_GRAPH_PREDECESSOR_SCHEMA_CONTRACT.get() {
+        return Ok(contract);
+    }
+    let connection = Connection::open_in_memory()?;
+    connection.execute_batch(BASE_SCHEMA_SQL)?;
+    connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
+    create_graph_schema(&connection, false)?;
+    create_coverage_discovery_schema(&connection)?;
+    connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
+    connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
+    connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
+    connection.execute_batch(FILE_TEXT_FTS_SCHEMA_SQL)?;
+    connection.execute_batch(SYMBOL_RELATION_LOOKUP_SCHEMA_SQL)?;
+    let contract = read_schema_contract(&connection)?;
+    Ok(COMPACT_GRAPH_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
 }
 
 /// Build the immutable schema-8/9 contract from the unchanged base DDL.
@@ -2347,6 +2525,71 @@ pub(crate) fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut sidecar = path.as_os_str().to_os_string();
     sidecar.push(suffix);
     PathBuf::from(sidecar)
+}
+
+/// Restore the exact selector-free symbol shape owned by predecessor fixtures.
+#[cfg(test)]
+pub(crate) fn recreate_pre_selector_symbol_storage_for_test(
+    connection: &Connection,
+) -> DbResult<()> {
+    connection.execute_batch(
+        "CREATE TABLE symbols_without_source_selectors (
+             id INTEGER PRIMARY KEY,
+             path TEXT NOT NULL,
+             language TEXT,
+             name TEXT NOT NULL,
+             kind TEXT NOT NULL,
+             signature TEXT NOT NULL,
+             exported INTEGER NOT NULL DEFAULT 0,
+             documentation TEXT,
+             line_start INTEGER NOT NULL,
+             line_end INTEGER NOT NULL,
+             parent TEXT,
+             parser TEXT NOT NULL,
+             detail TEXT,
+             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+         );
+         INSERT INTO symbols_without_source_selectors(
+             id, path, language, name, kind, signature, exported, documentation,
+             line_start, line_end, parent, parser, detail, created_at, updated_at
+         )
+         SELECT
+             id, path, language, name, kind, signature, exported, documentation,
+             line_start, line_end, parent, parser, detail, created_at, updated_at
+         FROM symbols;
+         DROP TABLE symbols;
+         CREATE TABLE symbols (
+             id INTEGER PRIMARY KEY,
+             path TEXT NOT NULL,
+             language TEXT,
+             name TEXT NOT NULL,
+             kind TEXT NOT NULL,
+             signature TEXT NOT NULL,
+             exported INTEGER NOT NULL DEFAULT 0,
+             documentation TEXT,
+             line_start INTEGER NOT NULL,
+             line_end INTEGER NOT NULL,
+             parent TEXT,
+             parser TEXT NOT NULL,
+             detail TEXT,
+             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+         );
+         INSERT INTO symbols(
+             id, path, language, name, kind, signature, exported, documentation,
+             line_start, line_end, parent, parser, detail, created_at, updated_at
+         )
+         SELECT
+             id, path, language, name, kind, signature, exported, documentation,
+             line_start, line_end, parent, parser, detail, created_at, updated_at
+         FROM symbols_without_source_selectors;
+         DROP TABLE symbols_without_source_selectors;
+         CREATE INDEX idx_symbols_path ON symbols(path);
+         CREATE INDEX idx_symbols_name ON symbols(name);
+         CREATE INDEX idx_symbols_kind ON symbols(kind);",
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3564,6 +3807,15 @@ mod tests {
             |row| row.get::<_, Vec<u8>>(0),
         )?;
         store.connection.execute_batch(
+            "DROP TABLE file_content_classifications;
+             DROP INDEX idx_nodes_path_kind;",
+        )?;
+        recreate_disposable_graph_projection(&store.connection, false)?;
+        recreate_pre_selector_symbol_storage_for_test(&store.connection)?;
+        store
+            .connection
+            .execute_batch("DROP INDEX idx_symbol_import_alias_lookup")?;
+        store.connection.execute_batch(
             "
             INSERT INTO nodes(id, path, kind) VALUES(1, 'src/lib.rs', 'file');
             INSERT INTO purposes(node_id, purpose, source, status, updated_by)
@@ -3587,9 +3839,6 @@ mod tests {
             "lexical-publication",
         )?;
         set_metadata(&store.connection, INDEX_PUBLICATION_GENERATION_KEY, "7")?;
-        store
-            .connection
-            .execute_batch("DROP INDEX idx_symbol_import_alias_lookup")?;
         drop(store);
 
         let expected_root = normalize_native_path_display(&root);
@@ -3675,6 +3924,287 @@ mod tests {
     }
 
     #[test]
+    fn schema_sixteen_upgrade_rolls_back_then_preserves_authored_state_and_reopens()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        let project_identity = store.connection.query_row(
+            "SELECT project_instance_id FROM project_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
+        store.connection.execute_batch(
+            "DROP TABLE file_content_classifications;
+             DROP INDEX idx_nodes_path_kind;",
+        )?;
+        recreate_disposable_graph_projection(&store.connection, false)?;
+        recreate_pre_selector_symbol_storage_for_test(&store.connection)?;
+        store.connection.execute_batch(
+            "INSERT INTO nodes(id, path, kind, exists_now)
+                VALUES(1, 'src/lib.rs', 'file', 1);
+             INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+                VALUES(1, 'Own the library.', 'agent', 'approved', 'agent');
+             INSERT INTO graph_entities(
+                entity_key, project_instance_id, canonical_identity,
+                entity_kind, repository_path
+             ) SELECT zeroblob(32), project_instance_id, 'schema-16-file',
+                      'file', 'src/lib.rs'
+                 FROM project_identity WHERE singleton = 1;
+             INSERT INTO symbols(
+                 path, language, name, kind, signature, exported, documentation,
+                 line_start, line_end, parent, parser, detail
+             ) VALUES(
+                 'src/lib.rs', 'rust', 'run', 'function', 'fn run()', 1,
+                 'Run the library.', 4, 4, NULL, 'tree-sitter', NULL
+             );
+             UPDATE project_identity SET active_generation = 3 WHERE singleton = 1;",
+        )?;
+        set_metadata(&store.connection, INDEX_PUBLICATION_STATE_KEY, "complete")?;
+        set_metadata(
+            &store.connection,
+            INDEX_PUBLICATION_FINGERPRINT_KEY,
+            "schema-16-publication",
+        )?;
+        set_metadata(&store.connection, INDEX_PUBLICATION_GENERATION_KEY, "3")?;
+        set_metadata(
+            &store.connection,
+            SCHEMA_VERSION_KEY,
+            &COMPACT_GRAPH_SCHEMA_VERSION.to_string(),
+        )?;
+        drop(store);
+
+        let expected_root = normalize_native_path_display(&root);
+        let (before, _) = preflight(&database, Some(&expected_root))?;
+        if before.state != SchemaState::UpgradeRequired
+            || before.schema_version != Some(COMPACT_GRAPH_SCHEMA_VERSION)
+        {
+            return Err(io::Error::other("schema-16 fixture was not admitted").into());
+        }
+
+        let connection = Connection::open(&database)?;
+        configure_writable(&connection)?;
+        let assert_schema_sixteen_state = |stage: &str| -> Result<(), Box<dyn Error>> {
+            let state = connection.query_row(
+                "SELECT
+                    (SELECT value FROM metadata WHERE key = 'schema_version'),
+                    (SELECT COUNT(*) FROM sqlite_schema
+                      WHERE type = 'table' AND name = 'file_content_classifications'),
+                    (SELECT COUNT(*) FROM graph_entities),
+                    (SELECT COUNT(*) FROM purposes WHERE node_id = 1),
+                    (SELECT COUNT(*) FROM pragma_table_info('symbols')
+                      WHERE name LIKE 'source_%'),
+                    (SELECT COUNT(*) FROM symbols WHERE path = 'src/lib.rs' AND name = 'run')",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )?;
+            if state != (COMPACT_GRAPH_SCHEMA_VERSION.to_string(), 0, 1, 1, 0, 1) {
+                return Err(io::Error::other(format!(
+                    "schema-17 {stage} exposed partial state: {state:?}"
+                ))
+                .into());
+            }
+            Ok(())
+        };
+
+        let blocker = Connection::open(&database)?;
+        configure_writable(&blocker)?;
+        blocker.execute_batch("BEGIN IMMEDIATE")?;
+        connection.busy_timeout(std::time::Duration::ZERO)?;
+        let busy_failure = initialize(&connection, Some(&expected_root));
+        blocker.execute_batch("ROLLBACK")?;
+        let Err(DbError::Sqlite(busy_error)) = busy_failure else {
+            return Err(io::Error::other("schema-17 busy migration did not fail in SQLite").into());
+        };
+        if !matches!(
+            busy_error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+        ) {
+            return Err(io::Error::other(format!(
+                "schema-17 busy migration returned the wrong SQLite error: {busy_error}"
+            ))
+            .into());
+        }
+        assert_schema_sixteen_state("busy failure")?;
+
+        let prefix_steps = Arc::new(AtomicUsize::new(0));
+        let observed_prefix_steps = Arc::clone(&prefix_steps);
+        connection.progress_handler(
+            1,
+            Some(move || {
+                observed_prefix_steps.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        );
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+        let prefix_result = (|| -> DbResult<()> {
+            let inspected = inspect_connection(&connection, Some(&expected_root), false)?;
+            if inspected.state != SchemaState::UpgradeRequired {
+                return Err(DbError::SchemaPostcondition {
+                    expected: SCHEMA_VERSION,
+                });
+            }
+            validate_integrity(&connection)?;
+            let _version = stored_schema_version(&connection)?;
+            Ok(())
+        })();
+        connection.execute_batch("ROLLBACK")?;
+        connection.progress_handler(0, None::<fn() -> bool>);
+        prefix_result?;
+
+        let interrupt_after = prefix_steps
+            .load(Ordering::Relaxed)
+            .saturating_sub(1)
+            .max(1);
+        let interrupted_steps = Arc::new(AtomicUsize::new(0));
+        let observed_interrupted_steps = Arc::clone(&interrupted_steps);
+        connection.progress_handler(
+            1,
+            Some(move || {
+                observed_interrupted_steps.fetch_add(1, Ordering::Relaxed) == interrupt_after
+            }),
+        );
+        let interrupted_failure = initialize(&connection, Some(&expected_root));
+        connection.progress_handler(0, None::<fn() -> bool>);
+        let interrupted_error = match interrupted_failure {
+            Err(DbError::Sqlite(error)) => error,
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "schema-17 interrupted migration returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(()) => {
+                return Err(io::Error::other(
+                    "schema-17 interrupted migration unexpectedly committed",
+                )
+                .into());
+            }
+        };
+        if interrupted_error.sqlite_error_code() != Some(rusqlite::ErrorCode::OperationInterrupted)
+            || interrupted_steps.load(Ordering::Relaxed) <= interrupt_after
+        {
+            return Err(io::Error::other(format!(
+                "schema-17 interrupted migration returned the wrong SQLite evidence: error={interrupted_error} steps={} threshold={interrupt_after}",
+                interrupted_steps.load(Ordering::Relaxed)
+            ))
+            .into());
+        }
+        assert_schema_sixteen_state("interruption")?;
+
+        connection.execute_batch(&format!(
+            "CREATE TEMP TRIGGER abort_schema_seventeen
+             BEFORE UPDATE OF value ON metadata
+             WHEN OLD.key = 'schema_version' AND NEW.value = '{SCHEMA_VERSION}'
+             BEGIN SELECT RAISE(ABORT, 'injected schema-17 failure'); END;"
+        ))?;
+        let failure = match initialize(&connection, Some(&expected_root)) {
+            Ok(()) => {
+                return Err(
+                    io::Error::other("injected schema-17 migration failure committed").into(),
+                );
+            }
+            Err(error) => error,
+        };
+        if !matches!(failure, DbError::Sqlite(_)) {
+            return Err(io::Error::other("schema-17 rollback returned the wrong error").into());
+        }
+        assert_schema_sixteen_state("constraint rollback")?;
+        connection.execute_batch("DROP TRIGGER abort_schema_seventeen")?;
+        initialize(&connection, Some(&expected_root))?;
+
+        let migrated = connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT COUNT(*) FROM file_content_classifications),
+                (SELECT COUNT(*) FROM graph_entities),
+                (SELECT COUNT(*) FROM metadata WHERE key IN (
+                    'index_publication_state',
+                    'index_publication_fingerprint',
+                    'index_publication_generation'
+                )),
+                (SELECT active_generation FROM project_identity WHERE singleton = 1),
+                (SELECT COUNT(*) FROM purposes
+                  WHERE node_id = 1 AND purpose = 'Own the library.'
+                    AND source = 'agent' AND status = 'approved'),
+                (SELECT COUNT(*) FROM pragma_table_info('symbols')
+                  WHERE name LIKE 'source_%'),
+                (SELECT COUNT(*) FROM symbols
+                  WHERE path = 'src/lib.rs' AND name = 'run'
+                    AND source_byte_start IS NULL
+                    AND source_byte_end IS NULL
+                    AND source_column_start IS NULL
+                    AND source_column_end IS NULL)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            },
+        )?;
+        if migrated != (SCHEMA_VERSION.to_string(), 0, 0, 0, 0, 1, 4, 1) {
+            return Err(io::Error::other(format!(
+                "schema-17 migration changed its preservation boundary: {migrated:?}"
+            ))
+            .into());
+        }
+        let migrated_identity = connection.query_row(
+            "SELECT project_instance_id FROM project_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
+        if migrated_identity != project_identity {
+            return Err(io::Error::other("schema-17 migration changed project identity").into());
+        }
+        let foreign_key_errors = connection
+            .prepare("PRAGMA foreign_key_check")?
+            .query_map([], |_| Ok(()))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !foreign_key_errors.is_empty() {
+            return Err(io::Error::other("schema-17 migration broke foreign keys").into());
+        }
+        drop(connection);
+
+        let reopened = AtlasStore::open_for_project(&database, &root)?;
+        let reopened_symbols = reopened.load_symbols(Some("src/lib.rs"), None, 10)?;
+        if reopened_symbols.len() != 1 || reopened_symbols[0].source_selector.is_some() {
+            return Err(io::Error::other(
+                "schema-17 writable reopen did not preserve the selector-free symbol",
+            )
+            .into());
+        }
+        drop(reopened);
+        let read_only = AtlasStore::open_read_only_for_project(&database, &root)?;
+        let read_only_symbols = read_only.load_symbols(Some("src/lib.rs"), None, 10)?;
+        if read_only_symbols.len() != 1 || read_only_symbols[0].source_selector.is_some() {
+            return Err(io::Error::other(
+                "schema-17 read-only reopen did not preserve the selector-free symbol",
+            )
+            .into());
+        }
+        drop(read_only);
+        Ok(())
+    }
+
+    #[test]
     fn resolution_schema_migrates_parser_provenance_without_weakening_existing_facts()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -3682,7 +4212,7 @@ mod tests {
         let connection = Connection::open(&database)?;
         configure_writable(&connection)?;
         connection.execute_batch(BASE_SCHEMA_SQL)?;
-        connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+        create_graph_schema(&connection, false)?;
         connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
         connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
         connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
@@ -3788,7 +4318,7 @@ mod tests {
         let connection = Connection::open(&db_path)?;
         configure_writable(&connection)?;
         connection.execute_batch(BASE_SCHEMA_SQL)?;
-        connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+        create_graph_schema(&connection, false)?;
         connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
         connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
         crate::telemetry::initialize_empty_storage(&connection)?;

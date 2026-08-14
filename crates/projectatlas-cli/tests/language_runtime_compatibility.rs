@@ -39,7 +39,7 @@ struct RuntimeSemanticsFixture {
     cargo_routing_corrections: Vec<CargoCorrection>,
 }
 
-#[derive(Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 struct LanguagePipeline {
     language: String,
     support: String,
@@ -153,6 +153,7 @@ fn core_pipeline(capability: &LanguageCapability) -> LanguagePipeline {
             SymbolParserOwner::CargoManifest => "manifest",
             SymbolParserOwner::Vue => "vue-structural",
             SymbolParserOwner::PowerShell => "powershell-structural",
+            SymbolParserOwner::Markdown => "markdown-structural",
             SymbolParserOwner::Fallback => "fallback",
             SymbolParserOwner::Unavailable => "none",
         }
@@ -237,7 +238,24 @@ fn assert_runtime_semantics(fixture: &RuntimeSemanticsFixture) {
         .filter(|capability| capability.optional_pack.is_none())
         .map(core_pipeline)
         .collect::<Vec<_>>();
-    assert_eq!(pipelines, fixture.language_pipelines);
+    let mut historical_pipelines = pipelines.clone();
+    if let Some(markdown) = historical_pipelines
+        .iter_mut()
+        .find(|pipeline| pipeline.language == "markdown")
+    {
+        markdown.symbol_adapter = "none".to_string();
+    }
+    assert_eq!(historical_pipelines, fixture.language_pipelines);
+    assert!(pipelines.iter().any(|pipeline| {
+        pipeline.language == "markdown" && pipeline.symbol_adapter == "markdown-structural"
+    }));
+    let markdown = extract_symbol_graph("docs/guide.md", Some("markdown"), "# Guide\n");
+    assert!(
+        markdown
+            .symbols
+            .iter()
+            .any(|symbol| { symbol.kind.to_string() == "heading" && symbol.name == "Guide" })
+    );
 
     for row in &fixture.semantic_witnesses {
         let capability = projectatlas_core::language::language_capability(&row.language);

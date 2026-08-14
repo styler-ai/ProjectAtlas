@@ -42,7 +42,6 @@ cli-core = [
     "dep:getrandom",
     "dep:jsonc-parser",
     "dep:notify",
-    "dep:pulldown-cmark",
     "dep:projectatlas-db",
     "dep:projectatlas-fs",
     "dep:projectatlas-service",
@@ -99,7 +98,6 @@ cssparser = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
 jsonc-parser = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
-pulldown-cmark = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 ratatui = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }

@@ -1136,23 +1136,19 @@ mod tests {
             None,
             &test_control(),
             |store, _stamp| Ok(store.load_node_by_path("source.rs")?.is_some()),
-        );
+        )?;
 
         require(
-            matches!(ignored, Err(CliError::RefreshRequired(_))),
-            "Git exclude change did not require refresh",
+            !ignored.value,
+            "Git exclude change left the excluded source indexed",
         )?;
-        let binding = SourceBinding::new(&database, temp.path(), None)?;
-        let entry = registry
-            .entries
-            .lock()
-            .map_err(|_poisoned| std::io::Error::other("registry lock poisoned"))?
-            .get(&binding)
-            .cloned()
-            .ok_or_else(|| std::io::Error::other("observer entry missing"))?;
         require(
-            entry.current_epoch()?.is_none(),
-            "Git exclude change left a verified epoch installed",
+            ignored.work.exact_verifications >= 1,
+            "Git exclude change reused the stale source epoch",
+        )?;
+        require(
+            ignored.stamp.epoch > first.stamp.epoch,
+            "Git exclude change did not advance the verified source epoch",
         )?;
         Ok(())
     }

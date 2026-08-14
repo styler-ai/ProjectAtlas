@@ -2,19 +2,20 @@
 
 use super::{ServiceError, ServiceResult, selected_project_binding};
 use projectatlas_core::graph::{
-    ConfidenceClass, CoverageRecord, CoverageScope, EntitySelector, GraphEntity, GraphEntityKey,
-    GraphLimitKind, GraphLimits, GraphRelationKind, LogicalRelation, RelationOccurrence,
-    RelationResolution, RepositoryFilePath, RepositoryNodePath, SymbolSelector,
+    ConfidenceClass, CoverageRecord, CoverageScope, EntitySelector, ExtendedRelationKind,
+    GraphEntity, GraphEntityKey, GraphLimitKind, GraphLimits, GraphRelationKind, LogicalRelation,
+    RelationOccurrence, RelationResolution, RepositoryFilePath, RepositoryNodePath, SymbolSelector,
 };
+use projectatlas_core::language::{ContentClassification, ContentSelection};
 use projectatlas_core::symbols::SymbolKind;
 use projectatlas_core::{
     IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
     Purpose, PurposeSource, PurposeStatus,
 };
 use projectatlas_db::{
-    AtlasStore, DbError, MAX_REPOSITORY_GRAPH_FRONTIER, RepositoryGraphAdjacencyContinuation,
-    RepositoryGraphDirection, RepositoryGraphReadBudget, RepositoryGraphReadWork,
-    RepositoryGraphRelationRow,
+    AtlasStore, DbError, MAX_FILE_CONTENT_CLASSIFICATION_PATHS, MAX_REPOSITORY_GRAPH_FRONTIER,
+    RepositoryGraphAdjacencyContinuation, RepositoryGraphDirection, RepositoryGraphReadBudget,
+    RepositoryGraphReadWork, RepositoryGraphRelationRow,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -32,6 +33,9 @@ const DETAILED_RELATION_CURSOR_VERSION: u16 = 1;
 
 /// Domain separator for selected-root cursor identity.
 const DETAILED_RELATION_ROOT_DOMAIN: &str = "projectatlas:detailed-relation-root:v1";
+
+/// Adapter-facing inverse label for an inbound canonical document relation.
+const DOCUMENTED_BY_INBOUND_VIEW: &str = "documented_by";
 
 /// Direction of one detailed relation request from its selected anchor.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -161,6 +165,8 @@ pub struct DetailedRelationQuery {
     pub budget: DetailedRelationBudget,
     /// Opaque generation- and purpose-bound continuation from a prior page.
     pub cursor: Option<String>,
+    /// Classified-content restriction for anchors and ordinary traversal frontiers.
+    pub content_selection: ContentSelection,
 }
 
 /// Aggregate budgets for one detailed relation page and its resumable state.
@@ -373,16 +379,25 @@ pub enum RelationNextCall {
     Files {
         /// Exact folder selector.
         folder: projectatlas_core::graph::RepositoryNodePath,
+        /// Explicit classified-content restriction retained across navigation.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content_selection: Option<ContentSelection>,
     },
     /// Inspect a file or package owner through the existing summary route.
     Summary {
         /// Exact file selector.
         file: RepositoryFilePath,
+        /// Explicit classified-content restriction retained across navigation.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content_selection: Option<ContentSelection>,
     },
     /// Inspect one declaration through the existing exact slice route.
     SymbolSlice {
         /// Stable declaration selector.
         symbol: SymbolSelector,
+        /// Explicit classified-content restriction retained across navigation.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content_selection: Option<ContentSelection>,
     },
 }
 
@@ -391,6 +406,11 @@ pub enum RelationNextCall {
 pub struct DetailedRelationNode {
     /// Typed generation-bound graph entity.
     pub entity: GraphEntity,
+    /// Persisted role of the local file endpoint, when the entity has one.
+    pub classification: Option<ContentClassification>,
+    /// Explicit selection captured for exact follow-up calls, or legacy omission.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_selection: Option<ContentSelection>,
     /// Accepted owner purpose, unavailable local purpose, or non-local state.
     pub purpose: RelationPurpose,
     /// Authoritative graph coverage for this node's local owning path.
@@ -406,6 +426,9 @@ pub struct DetailedRelationRow {
     pub direction: RelationDirection,
     /// Fully reconstructed normalized relation.
     pub relation: LogicalRelation,
+    /// Read-only inverse label for an inbound document relation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inbound_view: Option<&'static str>,
     /// Exact relation source with purpose projection.
     pub source: DetailedRelationNode,
     /// Retained resolved or external target with purpose projection.
@@ -457,6 +480,8 @@ pub struct DetailedRelationWork {
     pub hydrated_entities: u32,
     /// Aggregate batch-local unique purpose-owner paths hydrated by database reads.
     pub hydrated_purpose_paths: u32,
+    /// Unique local file paths hydrated through classification batch reads.
+    pub hydrated_classification_paths: u32,
     /// Exact serialized bytes retained by one composed anchor and row set.
     pub retained_composition_bytes: u64,
     /// Aggregate decoded database, encoded cursor, and peak composition bytes.
@@ -518,6 +543,9 @@ pub struct DetailedRelationReport {
     pub authored_purpose_revision: u64,
     /// Direction followed from the anchor.
     pub direction: RelationDirection,
+    /// Explicit classified-content restriction, or `None` for legacy behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_selection: Option<ContentSelection>,
     /// Number of retained relation steps.
     pub returned: u32,
     /// Number of cyclic or lower-ranked duplicate-node paths pruned.
@@ -571,6 +599,9 @@ struct DetailedRelationCursorQuery {
     resolution: RelationResolutionFilter,
     /// Whether exact source occurrences are included.
     include_occurrences: bool,
+    /// Classified-content restriction that changes anchor and frontier admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_selection: Option<ContentSelection>,
 }
 
 impl From<&DetailedRelationQuery> for DetailedRelationCursorQuery {
@@ -582,6 +613,10 @@ impl From<&DetailedRelationQuery> for DetailedRelationCursorQuery {
             minimum_confidence: query.minimum_confidence,
             resolution: query.resolution,
             include_occurrences: query.include_occurrences,
+            content_selection: query
+                .content_selection
+                .explicit_value()
+                .map(|_| query.content_selection),
         }
     }
 }
@@ -831,6 +866,69 @@ struct SerializedByteCounter {
     bytes: u64,
 }
 
+/// Return the exact admitted file path that owns an entity classification.
+fn classification_path(entity: &GraphEntity) -> Option<String> {
+    match entity.selector() {
+        EntitySelector::File { path } => Some(path.as_str().to_string()),
+        EntitySelector::Package { package } => Some(package.manifest.as_str().to_string()),
+        EntitySelector::Symbol { symbol } => Some(symbol.file.as_str().to_string()),
+        EntitySelector::Project
+        | EntitySelector::Folder { .. }
+        | EntitySelector::External { .. } => None,
+    }
+}
+
+/// Load exact entity classifications through bounded set-oriented DB calls.
+fn load_entity_classifications<'entity>(
+    store: &AtlasStore,
+    entities: impl IntoIterator<Item = &'entity GraphEntity>,
+) -> ServiceResult<BTreeMap<String, ContentClassification>> {
+    let paths = entities
+        .into_iter()
+        .filter_map(classification_path)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut classifications = BTreeMap::new();
+    for chunk in paths.chunks(MAX_FILE_CONTENT_CLASSIFICATION_PATHS) {
+        classifications.extend(
+            store
+                .file_content_classifications_for_paths(chunk)?
+                .into_iter()
+                .map(|row| (row.path, row.classification)),
+        );
+    }
+    Ok(classifications)
+}
+
+/// Return whether one local file-bearing entity belongs to the selection.
+fn entity_matches_selection(
+    entity: &GraphEntity,
+    classifications: &BTreeMap<String, ContentClassification>,
+    selection: ContentSelection,
+) -> bool {
+    selection == ContentSelection::UnspecifiedLegacy
+        || classification_path(entity)
+            .and_then(|path| classifications.get(&path).copied())
+            .is_some_and(|classification| selection.includes(classification))
+}
+
+/// Return whether an explicitly requested document edge may expose one cross-class endpoint.
+fn explicit_document_endpoint(query: &DetailedRelationQuery, relation: &LogicalRelation) -> bool {
+    query.relation == Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents))
+        && relation.kind() == GraphRelationKind::Extended(ExtendedRelationKind::Documents)
+}
+
+/// Project the inbound wire label without storing an inverse graph relation.
+fn inbound_relation_view(
+    direction: RelationDirection,
+    relation: &LogicalRelation,
+) -> Option<&'static str> {
+    (direction == RelationDirection::Inbound
+        && relation.kind() == GraphRelationKind::Extended(ExtendedRelationKind::Documents))
+    .then_some(DOCUMENTED_BY_INBOUND_VIEW)
+}
+
 impl Write for SerializedByteCounter {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         let bytes = u64::try_from(buffer.len())
@@ -873,6 +971,11 @@ pub fn load_detailed_relation_page(
             "repository graph has no complete generation for relation navigation".to_string(),
         )
     })?;
+    let anchor_path = match &query.anchor {
+        RelationAnchor::File { file } | RelationAnchor::Symbol { file, .. } => file.as_str(),
+    };
+    let anchor_classification =
+        super::selected_file_classification(store, anchor_path, query.content_selection)?;
     let mut database_work = RelationDatabaseWork::default();
     let anchor = resolve_anchor(
         store,
@@ -883,6 +986,11 @@ pub fn load_detailed_relation_page(
         &mut database_work,
         control,
     )?;
+    let anchor_classifications = BTreeMap::from([(anchor_path.to_string(), anchor_classification)]);
+    let mut hydrated_classification_paths = anchor_classifications
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     check_relation_control(control)?;
     let anchor_digest = anchor.key().digest_bytes().map_err(invalid_graph_input)?;
     let authored_purpose_revision = store.authored_purpose_revision()?;
@@ -1030,15 +1138,17 @@ pub fn load_detailed_relation_page(
                 endpoint_limit,
                 endpoint_limit,
             )?;
-            let bounded_page = store.repository_graph_adjacency_page_filtered_bounded(
-                &frontier,
-                query.direction.into(),
-                query.relation,
-                state.adjacency.as_ref(),
-                page_limit,
-                database_budget,
-                control,
-            )?;
+            let bounded_page = store
+                .repository_graph_adjacency_page_filtered_bounded_with_documents(
+                    &frontier,
+                    query.direction.into(),
+                    query.relation,
+                    include_document_relations(query),
+                    state.adjacency.as_ref(),
+                    page_limit,
+                    database_budget,
+                    control,
+                )?;
             database_work.record(bounded_page.work)?;
             let page = bounded_page.page;
             inspected_edges = inspected_edges
@@ -1071,6 +1181,13 @@ pub fn load_detailed_relation_page(
         }
         depth_rows.retain(|row| relation_matches(&row.detail.relation, query));
         depth_rows.sort_by(|left, right| relation_rank_order(&left.detail, &right.detail));
+        let endpoint_classifications = load_entity_classifications(
+            store,
+            depth_rows
+                .iter()
+                .filter_map(|row| traversable_entity(&row.detail, query.direction)),
+        )?;
+        hydrated_classification_paths.extend(endpoint_classifications.keys().cloned());
         let prior_state = state.clone();
         let prior_entity_count = entities.len();
         for row in depth_rows {
@@ -1083,6 +1200,15 @@ pub fn load_detailed_relation_page(
             };
             let mut path_terminal = parent_index;
             if let Some(next) = traversable_entity(&row.detail, query.direction) {
+                let endpoint_selected = entity_matches_selection(
+                    next,
+                    &endpoint_classifications,
+                    query.content_selection,
+                );
+                let cross_class_document = explicit_document_endpoint(query, &row.detail.relation);
+                if !endpoint_selected && !cross_class_document {
+                    continue;
+                }
                 let digest = next.key().digest_bytes().map_err(invalid_graph_input)?;
                 if visited.contains_key(&digest) {
                     state.pruned_paths = state.pruned_paths.saturating_add(1);
@@ -1105,7 +1231,9 @@ pub fn load_detailed_relation_page(
                     digest,
                     parent: Some(parent_index),
                 });
-                state.next_frontier.push(path_terminal);
+                if endpoint_selected {
+                    state.next_frontier.push(path_terminal);
+                }
                 visited.insert(digest, path_terminal);
                 entities.push(next.clone());
             }
@@ -1198,6 +1326,15 @@ pub fn load_detailed_relation_page(
         })
         .collect::<ServiceResult<Vec<_>>>()?;
 
+    let mut classification_entities = vec![&anchor];
+    for row in &retained {
+        classification_entities.push(&row.detail.source);
+        classification_entities.extend(row.detail.target.iter());
+        classification_entities.extend(&row.path);
+    }
+    let classifications = load_entity_classifications(store, classification_entities)?;
+    hydrated_classification_paths.extend(classifications.keys().cloned());
+
     let purposes = load_purposes(
         store,
         binding.project_instance_id,
@@ -1220,7 +1357,13 @@ pub fn load_detailed_relation_page(
         retained_cursor_bytes,
         control,
     )?;
-    let anchor_node = detailed_node(anchor, &purposes, &coverage);
+    let anchor_node = detailed_node(
+        anchor,
+        query.content_selection,
+        &classifications,
+        &purposes,
+        &coverage,
+    );
     let (occurrence_pages, retained_occurrences) = load_occurrence_pages(
         store,
         &retained,
@@ -1234,8 +1377,10 @@ pub fn load_detailed_relation_page(
     let working_composition_bytes = relation_working_composition_bytes(
         &entities,
         &retained,
+        query.direction,
         &purposes,
         &coverage,
+        &classifications,
         &occurrence_pages,
     )?;
     let precomposition_bytes = relation_intermediate_bytes(
@@ -1253,7 +1398,14 @@ pub fn load_detailed_relation_page(
     let mut rows = Vec::with_capacity(retained.len());
     for (row, occurrences) in retained.into_iter().zip(occurrence_pages) {
         check_relation_control(control)?;
-        rows.push(detailed_row(row, query, &purposes, &coverage, occurrences));
+        rows.push(detailed_row(
+            row,
+            query,
+            &classifications,
+            &purposes,
+            &coverage,
+            occurrences,
+        ));
     }
     let retained_composition_bytes = relation_composition_bytes(&anchor_node, &rows)?;
 
@@ -1303,6 +1455,10 @@ pub fn load_detailed_relation_page(
         generation,
         authored_purpose_revision,
         direction: query.direction,
+        content_selection: query
+            .content_selection
+            .explicit_value()
+            .map(|_| query.content_selection),
         returned,
         pruned_paths: state.pruned_paths,
         truncated: continuation.is_some() || terminal_limit || !reached_limits.is_empty(),
@@ -1320,6 +1476,8 @@ pub fn load_detailed_relation_page(
             database_decoded_bytes: database_work.decoded_bytes,
             hydrated_entities: database_work.hydrated_entities,
             hydrated_purpose_paths: database_work.hydrated_paths,
+            hydrated_classification_paths: u32::try_from(hydrated_classification_paths.len())
+                .unwrap_or(u32::MAX),
             retained_composition_bytes,
             intermediate_bytes,
             rendered_output_bytes: 0,
@@ -1706,6 +1864,9 @@ fn resolve_anchor(
 /// Test one normalized relation against the service-owned trust filters.
 pub(super) fn relation_matches(relation: &LogicalRelation, query: &DetailedRelationQuery) -> bool {
     query.relation.is_none_or(|kind| relation.kind() == kind)
+        && !(query.relation.is_none()
+            && query.content_selection == ContentSelection::UnspecifiedLegacy
+            && relation.kind() == GraphRelationKind::Extended(ExtendedRelationKind::Documents))
         && confidence_rank(relation.confidence()) >= confidence_rank(query.minimum_confidence)
         && match query.resolution {
             RelationResolutionFilter::Any => true,
@@ -1722,6 +1883,11 @@ pub(super) fn relation_matches(relation: &LogicalRelation, query: &DetailedRelat
                 matches!(relation.resolution(), RelationResolution::External { .. })
             }
         }
+}
+
+/// Return whether an all-family traversal explicitly opts into document edges.
+pub(super) fn include_document_relations(query: &DetailedRelationQuery) -> bool {
+    query.content_selection != ContentSelection::UnspecifiedLegacy
 }
 
 /// Retain exact external identities reached by one bounded traversal page.
@@ -1927,15 +2093,21 @@ fn purpose_projection(
 /// Compose one hydrated response node from graph, purpose, and coverage state.
 fn detailed_node(
     entity: GraphEntity,
+    content_selection: ContentSelection,
+    classifications: &BTreeMap<String, ContentClassification>,
     purposes: &BTreeMap<String, Purpose>,
     coverage: &BTreeMap<String, Vec<CoverageRecord>>,
 ) -> DetailedRelationNode {
+    let classification =
+        classification_path(&entity).and_then(|path| classifications.get(&path).copied());
     let purpose = purpose_projection(&entity, purposes);
     let coverage = purpose_owner(&entity)
         .and_then(|path| coverage.get(&path).cloned())
         .unwrap_or_default();
     DetailedRelationNode {
         entity,
+        classification,
+        content_selection: next_call_content_selection(content_selection, classification),
         purpose,
         coverage,
     }
@@ -1945,12 +2117,18 @@ fn detailed_node(
 fn detailed_row(
     row: TraversalRow,
     query: &DetailedRelationQuery,
+    classifications: &BTreeMap<String, ContentClassification>,
     purposes: &BTreeMap<String, Purpose>,
     coverage: &BTreeMap<String, Vec<CoverageRecord>>,
     occurrence_page: (Vec<RelationOccurrence>, bool),
 ) -> DetailedRelationRow {
     let (occurrences, occurrences_truncated) = occurrence_page;
-    let next_call = traversable_entity(&row.detail, query.direction).and_then(next_call_for_entity);
+    let inbound_view = inbound_relation_view(query.direction, &row.detail.relation);
+    let next_call = traversable_entity(&row.detail, query.direction).and_then(|entity| {
+        let classification =
+            classification_path(entity).and_then(|path| classifications.get(&path).copied());
+        next_call_for_entity(entity, query.content_selection, classification)
+    });
     let target_purpose = row
         .detail
         .target
@@ -1961,17 +2139,37 @@ fn detailed_row(
     let path = row
         .path
         .into_iter()
-        .map(|entity| detailed_node(entity, purposes, coverage))
+        .map(|entity| {
+            detailed_node(
+                entity,
+                query.content_selection,
+                classifications,
+                purposes,
+                coverage,
+            )
+        })
         .collect();
     DetailedRelationRow {
         depth: row.depth,
         direction: query.direction,
         relation: row.detail.relation,
-        source: detailed_node(row.detail.source, purposes, coverage),
-        target: row
-            .detail
-            .target
-            .map(|target| detailed_node(target, purposes, coverage)),
+        inbound_view,
+        source: detailed_node(
+            row.detail.source,
+            query.content_selection,
+            classifications,
+            purposes,
+            coverage,
+        ),
+        target: row.detail.target.map(|target| {
+            detailed_node(
+                target,
+                query.content_selection,
+                classifications,
+                purposes,
+                coverage,
+            )
+        }),
         target_purpose,
         path,
         occurrences,
@@ -2135,19 +2333,53 @@ fn load_occurrence_pages(
 }
 
 /// Map one resolved local entity to an existing exact navigation call.
-fn next_call_for_entity(entity: &GraphEntity) -> Option<RelationNextCall> {
+pub(super) fn next_call_for_entity(
+    entity: &GraphEntity,
+    content_selection: ContentSelection,
+    classification: Option<ContentClassification>,
+) -> Option<RelationNextCall> {
+    let content_selection = next_call_content_selection(content_selection, classification);
     match entity.selector() {
         EntitySelector::Project | EntitySelector::External { .. } => None,
         EntitySelector::Folder { path } => Some(RelationNextCall::Files {
             folder: path.clone(),
+            content_selection,
         }),
-        EntitySelector::File { path } => Some(RelationNextCall::Summary { file: path.clone() }),
+        EntitySelector::File { path } => Some(RelationNextCall::Summary {
+            file: path.clone(),
+            content_selection,
+        }),
         EntitySelector::Package { package } => Some(RelationNextCall::Summary {
             file: package.manifest.clone(),
+            content_selection,
         }),
         EntitySelector::Symbol { symbol } => Some(RelationNextCall::SymbolSlice {
             symbol: symbol.clone(),
+            content_selection,
         }),
+    }
+}
+
+/// Retain the requested selection when possible and narrow cross-class document targets safely.
+fn next_call_content_selection(
+    requested: ContentSelection,
+    classification: Option<ContentClassification>,
+) -> Option<ContentSelection> {
+    if requested == ContentSelection::UnspecifiedLegacy {
+        return None;
+    }
+    let Some(classification) = classification else {
+        return Some(requested);
+    };
+    if requested.includes(classification) {
+        return Some(requested);
+    }
+    match classification {
+        ContentClassification::Source => Some(ContentSelection::Source),
+        ContentClassification::Documentation => Some(ContentSelection::Documentation),
+        ContentClassification::ConfigurationData
+        | ContentClassification::OtherText
+        | ContentClassification::Opaque => None,
     }
 }
 
@@ -2273,14 +2505,17 @@ where
 fn relation_working_composition_bytes(
     entities: &[GraphEntity],
     rows: &[TraversalRow],
+    direction: RelationDirection,
     purposes: &BTreeMap<String, Purpose>,
     coverage: &BTreeMap<String, Vec<CoverageRecord>>,
+    classifications: &BTreeMap<String, ContentClassification>,
     occurrence_pages: &[(Vec<RelationOccurrence>, bool)],
 ) -> ServiceResult<u64> {
     let parts = [
         serialized_equivalent_bytes(entities)?,
         serialized_equivalent_bytes(purposes)?,
         serialized_equivalent_bytes(coverage)?,
+        serialized_equivalent_bytes(classifications)?,
         serialized_equivalent_bytes(occurrence_pages)?,
     ];
     let mut bytes = 0_u64;
@@ -2291,6 +2526,7 @@ fn relation_working_composition_bytes(
         let row_bytes = serialized_equivalent_bytes(&(
             row.depth,
             &row.detail.relation,
+            inbound_relation_view(direction, &row.detail.relation),
             &row.detail.source,
             &row.detail.target,
             &row.path,
@@ -2565,6 +2801,7 @@ mod tests {
                     64 * 1024,
                 )?),
                 cursor: None,
+                content_selection: ContentSelection::UnspecifiedLegacy,
             },
             None,
         )?;
@@ -2669,7 +2906,7 @@ mod tests {
         require(
             matches!(
                 report.rows[0].next_call,
-                Some(RelationNextCall::Summary { ref file }) if file.as_str() == "src/b.rs"
+                Some(RelationNextCall::Summary { ref file, .. }) if file.as_str() == "src/b.rs"
             ),
             "resolved target next call changed",
         )?;
@@ -2691,6 +2928,7 @@ mod tests {
                     64 * 1024,
                 )?),
                 cursor: Some(first_cursor.clone()),
+                content_selection: ContentSelection::UnspecifiedLegacy,
             },
             None,
         )?;
@@ -2720,6 +2958,7 @@ mod tests {
                     64 * 1024,
                 )?),
                 cursor: None,
+                content_selection: ContentSelection::UnspecifiedLegacy,
             },
             None,
         )?;
@@ -2745,6 +2984,7 @@ mod tests {
                 64 * 1024,
             )?),
             cursor: Some(first_cursor.clone()),
+            content_selection: ContentSelection::UnspecifiedLegacy,
         };
         require(
             matches!(
@@ -2832,6 +3072,7 @@ mod tests {
                     64 * 1024,
                 )?),
                 cursor: None,
+                content_selection: ContentSelection::UnspecifiedLegacy,
             },
             None,
         )?;
@@ -2868,6 +3109,7 @@ mod tests {
                     exact_output_limit,
                 )?),
                 cursor: None,
+                content_selection: ContentSelection::UnspecifiedLegacy,
             },
             None,
         )?;
@@ -2904,6 +3146,7 @@ mod tests {
                     64 * 1024,
                 )?),
                 cursor: None,
+                content_selection: ContentSelection::UnspecifiedLegacy,
             },
             None,
         )?;
@@ -2939,6 +3182,7 @@ mod tests {
                 )?)
                 .with_aggregate_limits(Some(10), None, None, None, None, None)?,
                 cursor: None,
+                content_selection: ContentSelection::UnspecifiedLegacy,
             },
             None,
         )?;
@@ -2969,6 +3213,7 @@ mod tests {
                 )?)
                 .with_aggregate_limits(Some(1), None, None, None, None, None)?,
                 cursor: None,
+                content_selection: ContentSelection::UnspecifiedLegacy,
             },
             None,
         )?;
@@ -3006,6 +3251,7 @@ mod tests {
                     None,
                 )?,
                 cursor: None,
+                content_selection: ContentSelection::UnspecifiedLegacy,
             },
             None,
         )?;
@@ -3043,6 +3289,7 @@ mod tests {
                     None,
                 )?,
                 cursor: None,
+                content_selection: ContentSelection::UnspecifiedLegacy,
             },
             None,
         )?;
@@ -3075,6 +3322,7 @@ mod tests {
                 )?)
                 .with_aggregate_limits(None, None, None, Some(1), None, None)?,
                 cursor: None,
+                content_selection: ContentSelection::UnspecifiedLegacy,
             },
             None,
         )?;
@@ -3108,6 +3356,7 @@ mod tests {
                 64 * 1024,
             )?),
             cursor: Some(first_cursor.clone()),
+            content_selection: ContentSelection::UnspecifiedLegacy,
         };
         require(
             load_detailed_relations(&store, &unchanged_query, None).is_ok(),
@@ -3134,6 +3383,7 @@ mod tests {
                 64 * 1024,
             )?),
             cursor: Some(first_cursor),
+            content_selection: ContentSelection::UnspecifiedLegacy,
         };
         require(
             matches!(
@@ -3374,6 +3624,7 @@ mod tests {
             include_occurrences: false,
             budget: complete_budget,
             cursor: None,
+            content_selection: ContentSelection::UnspecifiedLegacy,
         };
         let (complete_rows, complete_total, complete_pruned_paths) =
             collect_relation_pages(&store, complete_query.clone(), 10)?;
@@ -3398,6 +3649,7 @@ mod tests {
                 include_occurrences: false,
                 budget: page_budget,
                 cursor: None,
+                content_selection: ContentSelection::UnspecifiedLegacy,
             },
             10,
         )?;
@@ -3432,11 +3684,13 @@ mod tests {
                     None,
                 )?,
                 cursor: None,
+                content_selection: ContentSelection::UnspecifiedLegacy,
             },
             None,
         )?;
         require(
             inbound.returned == 2
+                && inbound.rows.iter().all(|row| row.inbound_view.is_none())
                 && inbound.rows[0].relation.confidence() == ConfidenceClass::Exact
                 && inbound.rows[1].relation.confidence() == ConfidenceClass::Medium,
             "inbound extended relations were not ranked across the bounded batch",
@@ -3457,6 +3711,7 @@ mod tests {
             include_occurrences: false,
             budget: complete_budget,
             cursor: None,
+            content_selection: ContentSelection::UnspecifiedLegacy,
         };
         require(
             load_detailed_relations(&store, &ambiguous_symbol, None)
@@ -3483,7 +3738,7 @@ mod tests {
                 && exact_symbol.rows[0]
                     .next_call
                     .as_ref()
-                    .is_some_and(|next| matches!(next, RelationNextCall::Summary { file } if file.as_str() == "src/b.rs")),
+                    .is_some_and(|next| matches!(next, RelationNextCall::Summary { file, .. } if file.as_str() == "src/b.rs")),
             "exact symbol selector did not retain its reusable target call",
         )?;
         drop(store);
@@ -3514,6 +3769,317 @@ mod tests {
                 "parallel relation snapshot changed deterministic rows",
             )?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn classified_relations_preserve_legacy_defaults_and_stop_cross_class_frontiers()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("classified-relations");
+        fs::create_dir_all(root.join("docs"))?;
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(root.join("docs/guide.md"), "# Guide\n")?;
+        fs::write(root.join("docs/other.md"), "# Other\n")?;
+        fs::write(root.join("src/lib.rs"), "pub fn library() {}\n")?;
+        let database = root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("classified relation fixture project identity is missing")?;
+        let generation = IndexGeneration::new(1);
+        let guide = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("docs/guide.md"))?,
+            },
+            generation,
+        )?;
+        let other_document = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("docs/other.md"))?,
+            },
+            generation,
+        )?;
+        let source = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("src/lib.rs"))?,
+            },
+            generation,
+        )?;
+        let documents = GraphRelationKind::Extended(ExtendedRelationKind::Documents);
+        let references = GraphRelationKind::Extended(ExtendedRelationKind::References);
+        let guide_documents_source = LogicalRelation::new(
+            &guide,
+            documents,
+            RelationResolution::resolved(&source)?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )?;
+        let source_documents_other = LogicalRelation::new(
+            &source,
+            documents,
+            RelationResolution::resolved(&other_document)?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )?;
+        let guide_references_other = LogicalRelation::new(
+            &guide,
+            references,
+            RelationResolution::resolved(&other_document)?,
+            ConfidenceClass::Low,
+            Completeness::Complete,
+            generation,
+        )?;
+        let mut publication = store.begin_index_publication("classified-relations")?;
+        publication.begin_scan_replacement()?;
+        publication.upsert_scan_node_batch(&[
+            test_folder_node("docs"),
+            test_folder_node("src"),
+            classified_test_node("docs/guide.md", "hash-guide", ".md", "markdown"),
+            classified_test_node("docs/other.md", "hash-other", ".md", "markdown"),
+            classified_test_node("src/lib.rs", "hash-source", ".rs", "rust"),
+        ])?;
+        publication.upsert_file_content_classification_batch(&[
+            projectatlas_db::FileContentClassification {
+                path: "docs/guide.md".to_string(),
+                classification: ContentClassification::Documentation,
+            },
+            projectatlas_db::FileContentClassification {
+                path: "docs/other.md".to_string(),
+                classification: ContentClassification::Documentation,
+            },
+            projectatlas_db::FileContentClassification {
+                path: "src/lib.rs".to_string(),
+                classification: ContentClassification::Source,
+            },
+        ])?;
+        publication.finish_scan_replacement()?;
+        publication.replace_repository_graph(
+            project,
+            &[guide, other_document, source],
+            &[
+                guide_documents_source,
+                source_documents_other,
+                guide_references_other,
+            ],
+            &[],
+            &[],
+        )?;
+        publication.complete()?;
+        drop(store);
+
+        let store = AtlasStore::open_read_only_for_project(&database, &root)?;
+        let anchor = RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("docs/guide.md"))?,
+        };
+        let legacy = load_detailed_relations(
+            &store,
+            &DetailedRelationQuery {
+                anchor: anchor.clone(),
+                direction: RelationDirection::Outbound,
+                relation: None,
+                minimum_confidence: ConfidenceClass::Low,
+                resolution: RelationResolutionFilter::Resolved,
+                include_occurrences: false,
+                budget: DetailedRelationBudget::from_graph_limits(GraphLimits::new(
+                    1,
+                    5,
+                    3,
+                    256 * 1024,
+                )?)
+                .with_aggregate_limits(
+                    Some(1),
+                    Some(10),
+                    Some(10),
+                    None,
+                    None,
+                    None,
+                )?,
+                cursor: None,
+                content_selection: ContentSelection::UnspecifiedLegacy,
+            },
+            None,
+        )?;
+        require(
+            legacy.returned == 1 && legacy.rows[0].relation.kind() == references,
+            "legacy all-family query let a document edge consume its pre-limit candidate page",
+        )?;
+        let legacy_json = serde_json::to_value(&legacy)?;
+        require(
+            legacy_json.get("content_selection").is_none()
+                && legacy_json["anchor"].get("content_selection").is_none()
+                && legacy_json["rows"][0].get("inbound_view").is_none()
+                && legacy_json["rows"][0]["source"]
+                    .get("content_selection")
+                    .is_none()
+                && legacy_json["rows"][0]["next_call"]
+                    .get("content_selection")
+                    .is_none(),
+            "legacy relation output serialized a new selection field",
+        )?;
+
+        let explicit_documents = load_detailed_relations(
+            &store,
+            &DetailedRelationQuery {
+                anchor: anchor.clone(),
+                direction: RelationDirection::Outbound,
+                relation: Some(documents),
+                minimum_confidence: ConfidenceClass::Low,
+                resolution: RelationResolutionFilter::Resolved,
+                include_occurrences: false,
+                budget: DetailedRelationBudget::from_graph_limits(GraphLimits::new(
+                    10,
+                    5,
+                    3,
+                    256 * 1024,
+                )?)
+                .with_aggregate_limits(
+                    Some(10),
+                    Some(10),
+                    Some(10),
+                    None,
+                    None,
+                    None,
+                )?,
+                cursor: None,
+                content_selection: ContentSelection::Documentation,
+            },
+            None,
+        )?;
+        require(
+            explicit_documents.returned == 1
+                && explicit_documents.rows[0].inbound_view.is_none()
+                && explicit_documents.anchor.classification
+                    == Some(ContentClassification::Documentation)
+                && explicit_documents.rows[0]
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| {
+                        target.classification == Some(ContentClassification::Source)
+                            && target.content_selection == Some(ContentSelection::Source)
+                    })
+                && matches!(
+                    explicit_documents.rows[0].next_call,
+                    Some(RelationNextCall::Summary {
+                        content_selection: Some(ContentSelection::Source),
+                        ..
+                    })
+                ),
+            "explicit document relation did not retain its classified cross-class endpoint",
+        )?;
+        require(
+            explicit_documents.rows.iter().all(|row| row.depth == 1),
+            "cross-class document endpoint expanded as an unrelated traversal frontier",
+        )?;
+        require(
+            explicit_documents.total == RelationTotalState::Exact(1)
+                && explicit_documents.continuation.is_none()
+                && !explicit_documents.truncated,
+            "classified cross-class traversal did not report exact terminal completeness",
+        )?;
+        require(
+            explicit_documents.work.hydrated_classification_paths == 2,
+            "relation projection did not batch the two unique classified endpoint paths",
+        )?;
+        let explicit_documents_json = serde_json::to_value(&explicit_documents)?;
+        require(
+            explicit_documents_json["rows"][0]
+                .get("inbound_view")
+                .is_none(),
+            "outbound document relation serialized an inverse view",
+        )?;
+
+        let inbound_documents = load_detailed_relations(
+            &store,
+            &DetailedRelationQuery {
+                anchor: RelationAnchor::File {
+                    file: RepositoryFilePath::new(Path::new("src/lib.rs"))?,
+                },
+                direction: RelationDirection::Inbound,
+                relation: Some(documents),
+                minimum_confidence: ConfidenceClass::Low,
+                resolution: RelationResolutionFilter::Resolved,
+                include_occurrences: false,
+                budget: DetailedRelationBudget::from_graph_limits(GraphLimits::new(
+                    10,
+                    5,
+                    3,
+                    256 * 1024,
+                )?)
+                .with_aggregate_limits(
+                    Some(10),
+                    Some(10),
+                    Some(10),
+                    None,
+                    None,
+                    None,
+                )?,
+                cursor: None,
+                content_selection: ContentSelection::Source,
+            },
+            None,
+        )?;
+        require(
+            inbound_documents.returned == 1
+                && inbound_documents.rows[0].relation.kind() == documents
+                && inbound_documents.rows[0].inbound_view == Some("documented_by")
+                && inbound_documents.rows[0].source.classification
+                    == Some(ContentClassification::Documentation)
+                && matches!(
+                    inbound_documents.rows[0].next_call,
+                    Some(RelationNextCall::Summary {
+                        content_selection: Some(ContentSelection::Documentation),
+                        ..
+                    })
+                ),
+            "inbound document relation did not expose its read-only documented_by view",
+        )?;
+        let inbound_documents_json = serde_json::to_value(&inbound_documents)?;
+        let inbound_documents_encoded = serde_json::to_string(&inbound_documents)?;
+        require(
+            inbound_documents_json["rows"][0]["inbound_view"] == "documented_by"
+                && inbound_documents_encoded.len() as u64
+                    == inbound_documents.work.rendered_output_bytes,
+            "inbound document relation serialized the wrong inverse view",
+        )?;
+
+        let cursor_query = DetailedRelationQuery {
+            anchor,
+            direction: RelationDirection::Outbound,
+            relation: Some(references),
+            minimum_confidence: ConfidenceClass::Low,
+            resolution: RelationResolutionFilter::Resolved,
+            include_occurrences: false,
+            budget: DetailedRelationBudget::from_graph_limits(GraphLimits::new(
+                1,
+                5,
+                3,
+                256 * 1024,
+            )?)
+            .with_aggregate_limits(Some(10), Some(10), Some(10), None, None, None)?,
+            cursor: None,
+            content_selection: ContentSelection::Documentation,
+        };
+        let cursor = load_detailed_relations(&store, &cursor_query, None)?
+            .continuation
+            .ok_or("classified relation page omitted a continuation")?;
+        let mismatched = DetailedRelationQuery {
+            cursor: Some(cursor),
+            content_selection: ContentSelection::Both,
+            ..cursor_query
+        };
+        require(
+            matches!(
+                load_detailed_relations(&store, &mismatched, None),
+                Err(ServiceError::RelationCursorMismatched { field: "query" })
+            ),
+            "relation cursor accepted a different content selection",
+        )?;
         Ok(())
     }
 
@@ -3596,12 +4162,20 @@ mod tests {
     }
 
     fn test_node(path: &str, hash: &str) -> Node {
+        classified_test_node(path, hash, ".rs", "rust")
+    }
+
+    fn classified_test_node(path: &str, hash: &str, extension: &str, language: &str) -> Node {
         Node {
             path: path.to_string(),
             kind: NodeKind::File,
-            parent_path: Some("src".to_string()),
-            extension: Some(".rs".to_string()),
-            language: Some("rust".to_string()),
+            parent_path: Some(
+                path.rsplit_once('/')
+                    .map_or(".", |(parent, _file)| parent)
+                    .to_string(),
+            ),
+            extension: Some(extension.to_string()),
+            language: Some(language.to_string()),
             size_bytes: Some(16),
             mtime_ns: Some(1),
             content_hash: Some(hash.to_string()),

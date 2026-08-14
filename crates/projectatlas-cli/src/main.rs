@@ -23,14 +23,15 @@ use projectatlas_core::graph::{
     ConfidenceClass, GraphLimits, GraphRelationKind, LogicalRelation, RepositoryFilePath,
 };
 use projectatlas_core::health::Severity;
+use projectatlas_core::language::{ContentClassification, ContentSelection};
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::telemetry::{
     TokenCalibrationOverview, TokenTrendWindow as CoreTokenTrendWindow, UsageInstanceOwner,
 };
 use projectatlas_core::toon::{
     encode_agent_payload, encode_error_text, render_outline, render_overview,
-    render_ranked_node_rows, render_ranked_nodes, render_symbol_relations, render_symbols,
-    render_token_overview, render_token_trends,
+    render_ranked_node_rows, render_ranked_nodes, render_symbol_relations, render_token_overview,
+    render_token_trends,
 };
 use projectatlas_core::{
     IndexWorkControl, IndexWorkStage, PurposeSource, PurposeStatus, normalize_native_path_display,
@@ -47,11 +48,12 @@ use projectatlas_service::{
     GitImpactSelection, RelationAnalysisMode, RelationAnalysisQuery, RelationAnchor,
     RelationDirection, RelationResolutionFilter, SearchQuery, SearchReport, SearchRetrievalMode,
     ServiceError, SymbolSliceSelector, TokenReport, TokenReportRequest,
-    build_file_summary_from_source, load_coverage_discovery, load_detailed_relation_page,
-    load_federated_detailed_relations, load_federated_relation_analysis, load_relation_analysis,
-    load_token_report, parse_coverage_parser, parse_coverage_relation, parse_coverage_state,
-    parse_symbol_kind, read_indexed_code_slice_from_source_bounded,
-    read_symbol_slice_from_source_bounded, search_indexed_files_with_control,
+    build_file_summary_from_source_with_selection, load_coverage_discovery,
+    load_detailed_relation_page, load_federated_detailed_relations,
+    load_federated_relation_analysis, load_relation_analysis, load_token_report,
+    parse_coverage_parser, parse_coverage_relation, parse_coverage_state, parse_symbol_kind,
+    read_indexed_code_slice_from_source_bounded_with_selection,
+    read_symbol_slice_from_source_bounded_with_selection, search_indexed_files_with_control,
 };
 use rmcp::schemars;
 use runtime::{
@@ -60,17 +62,19 @@ use runtime::{
     PurposeReviewRequest, ScanRuntimePlan, SettingsReport, SymbolBuildOptions,
     UsageRuntimeInstance, WatchStatusReport, absolute_path, build_settings_report,
     byte_count_to_tokens, canonical_project_root, canonical_source_project_root,
-    config_root_mismatch_error, default_cli_project_root, default_mcp_project_root,
-    defaultable_cli_project_root, estimated_source_tokens_for_indexed_files,
-    estimated_source_tokens_for_paths, index_work_control, init_config_path, init_path_status,
-    lint_database_if_present, next_step_report, next_step_report_payload, normalized_folder_filter,
+    classified_ranked_file_nodes_with_reasons, config_root_mismatch_error,
+    default_cli_project_root, default_mcp_project_root, defaultable_cli_project_root,
+    estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
+    index_work_control, init_config_path, init_path_status, lint_database_if_present,
+    next_step_report_payload, next_step_report_with_selection, normalized_folder_filter,
     open_atlas_store_for_project, open_atlas_store_read_only_for_project,
     open_federated_atlas_stores_for_project, open_fresh_atlas_store_for_project,
-    purpose_curation_page, ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons,
-    read_indexed_file_content, record_directory_walk_usage_estimate, record_usage_estimate,
-    record_usage_text, render_coverage_report, render_health_page, render_purpose_curation_page,
-    render_purpose_review_report, reset_index_files, resolved_mcp_config_path, review_purposes,
-    run_init_bootstrap, run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
+    purpose_curation_page, ranked_folder_nodes_with_reasons, read_indexed_file_content,
+    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
+    render_classified_ranked_file_rows, render_classified_symbol_rows, render_coverage_report,
+    render_health_page, render_purpose_curation_page, render_purpose_review_report,
+    reset_index_files, resolved_mcp_config_path, review_purposes, run_init_bootstrap,
+    run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
     run_symbol_build_pipeline_controlled, run_watch_loop, standalone_index_work_control,
     strip_legacy_purpose, validate_purpose_review_admission, validated_indexed_file_key,
     watcher_status_report,
@@ -620,6 +624,9 @@ struct DetailedRelationAnchorArgs {
 /// Direction and trust filters for detailed relation navigation.
 #[derive(Args, Debug)]
 struct DetailedRelationFilterArgs {
+    /// Optional classified-content selection: source, documentation, or both.
+    #[arg(long, value_name = "source|documentation|both")]
+    content_selection: Option<ContentSelection>,
     /// Direction followed from every detailed frontier.
     #[arg(long, value_enum, default_value_t = RelationDirectionArg::Outbound)]
     direction: RelationDirectionArg,
@@ -1027,6 +1034,9 @@ enum Command {
         /// Include indexed file text as a bounded fallback ranking signal.
         #[arg(long, default_value_t = false)]
         include_content: bool,
+        /// Optional classified-content selection: source, documentation, or both.
+        #[arg(long, value_name = "source|documentation|both")]
+        content_selection: Option<ContentSelection>,
         /// Maximum number of files to return.
         #[arg(long, default_value_t = 10)]
         limit: usize,
@@ -1038,6 +1048,9 @@ enum Command {
         /// Maximum number of folders and files to return.
         #[arg(long, default_value_t = 3)]
         limit: usize,
+        /// Optional classified-content selection: source, documentation, or both.
+        #[arg(long, value_name = "source|documentation|both")]
+        content_selection: Option<ContentSelection>,
     },
     /// Build a compact outline for a chosen file.
     Outline {
@@ -1054,6 +1067,9 @@ enum Command {
         /// Maximum rows per functions/methods/classes/types/calls section.
         #[arg(long, default_value_t = DEFAULT_FILE_SUMMARY_LIMIT)]
         limit: usize,
+        /// Optional classified-content selection: source, documentation, or both.
+        #[arg(long, value_name = "source|documentation|both")]
+        content_selection: Option<ContentSelection>,
     },
     /// Search indexed files with literal, regex, or fuzzy matching.
     Search {
@@ -1083,6 +1099,9 @@ enum Command {
         /// Maximum matches to return.
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Optional classified-content selection: source, documentation, or both.
+        #[arg(long, value_name = "source|documentation|both")]
+        content_selection: Option<ContentSelection>,
     },
     /// Return an exact source line slice after a file has been selected.
     Slice {
@@ -1094,6 +1113,9 @@ enum Command {
         /// Optional one-based end line.
         #[arg(long)]
         end_line: Option<usize>,
+        /// Optional classified-content selection: source, documentation, or both.
+        #[arg(long, value_name = "source|documentation|both")]
+        content_selection: Option<ContentSelection>,
         /// Optional exact declaration selector.
         #[command(flatten)]
         selector: OptionalSymbolSelectorArgs,
@@ -1539,6 +1561,9 @@ enum SymbolsCommand {
         /// Optional symbol or signature query.
         #[arg(long)]
         query: Option<String>,
+        /// Optional classified-content selection: source, documentation, or both.
+        #[arg(long, value_name = "source|documentation|both")]
+        content_selection: Option<ContentSelection>,
         /// Maximum symbols to return.
         #[arg(long, default_value_t = 50)]
         limit: usize,
@@ -1565,6 +1590,9 @@ enum SymbolsCommand {
     Slice {
         /// Repository-relative file path.
         file: PathBuf,
+        /// Optional classified-content selection: source, documentation, or both.
+        #[arg(long, value_name = "source|documentation|both")]
+        content_selection: Option<ContentSelection>,
         /// Exact declaration selector.
         #[command(flatten)]
         selector: RequiredSymbolSelectorArgs,
@@ -1724,6 +1752,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             folder,
             file_pattern,
             include_content,
+            content_selection,
             limit,
         } => {
             let store = open_index_for_read(cli)?;
@@ -1732,16 +1761,17 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 .as_deref()
                 .map(normalized_folder_filter)
                 .transpose()?;
-            let selected = ranked_file_nodes_with_reasons(
+            let selected = classified_ranked_file_nodes_with_reasons(
                 &store,
                 query_text,
                 folder_filter.as_deref(),
                 file_pattern.as_deref(),
                 *limit,
                 *include_content,
+                content_selection.unwrap_or_default(),
             )?;
-            let toon = render_ranked_nodes("files", &selected);
-            let payload = render_ranked_node_rows("files", &selected);
+            let payload = render_classified_ranked_file_rows(&selected);
+            let toon = encode_agent_payload(&json!({ "files": &payload }));
             print_tracked_output_estimate(
                 cli.format,
                 &store,
@@ -1761,9 +1791,18 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 &payload,
             )?;
         }
-        Command::Next { query, limit } => {
+        Command::Next {
+            query,
+            limit,
+            content_selection,
+        } => {
             let store = open_index_for_read(cli)?;
-            let report = next_step_report(&store, query, Some(*limit))?;
+            let report = next_step_report_with_selection(
+                &store,
+                query,
+                Some(*limit),
+                content_selection.unwrap_or_default(),
+            )?;
             let payload = next_step_report_payload(&report);
             let toon = encode_agent_payload(&json!({ "next": payload }));
             print_tracked_directory_output_estimate(
@@ -1801,12 +1840,21 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 &outline,
             )?;
         }
-        Command::Summary { file, limit } => {
+        Command::Summary {
+            file,
+            limit,
+            content_selection,
+        } => {
             let store = open_index_for_read(cli)?;
             let file_key = validated_indexed_file_key(&store, file)?;
             let content = read_indexed_file_content(&store, &file_key)?;
-            let report =
-                build_file_summary_from_source(&store, Path::new(&file_key), *limit, &content)?;
+            let report = build_file_summary_from_source_with_selection(
+                &store,
+                Path::new(&file_key),
+                *limit,
+                &content,
+                content_selection.unwrap_or_default(),
+            )?;
             let toon = render_file_summary(&report);
             print_tracked_output_text(
                 cli.format,
@@ -1831,6 +1879,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             context_lines,
             start_index,
             limit,
+            content_selection,
         } => {
             let store = open_index_for_read(cli)?;
             let report = search_indexed_files_with_control(
@@ -1844,6 +1893,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     context_lines: *context_lines,
                     start_index: *start_index,
                     limit: *limit,
+                    content_selection: content_selection.unwrap_or_default(),
                     retrieval_mode: (*retrieval_mode).into(),
                 },
                 None,
@@ -1866,6 +1916,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             file,
             start_line,
             end_line,
+            content_selection,
             selector:
                 OptionalSymbolSelectorArgs {
                     symbol,
@@ -1881,7 +1932,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             let content = read_indexed_file_content(&store, &file_key)?;
             let output_budget = CodeSliceBudget::new(*output_bytes)?;
             let report = if let Some(symbol) = symbol {
-                read_symbol_slice_from_source_bounded(
+                read_symbol_slice_from_source_bounded_with_selection(
                     &store,
                     Path::new(&file_key),
                     &SymbolSliceSelector {
@@ -1893,6 +1944,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     },
                     &content,
                     output_budget,
+                    content_selection.unwrap_or_default(),
                 )?
             } else {
                 if symbol_parent.is_some()
@@ -1909,13 +1961,14 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         "start-line is required unless --symbol is provided".to_string(),
                     )
                 })?;
-                read_indexed_code_slice_from_source_bounded(
+                read_indexed_code_slice_from_source_bounded_with_selection(
                     &store,
                     Path::new(&file_key),
                     start_line,
                     *end_line,
                     &content,
                     output_budget,
+                    content_selection.unwrap_or_default(),
                 )?
             };
             print_tracked_slice_output(
@@ -1956,10 +2009,23 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     &report,
                 )?;
             }
-            SymbolsCommand::List { file, query, limit } => {
+            SymbolsCommand::List {
+                file,
+                query,
+                content_selection,
+                limit,
+            } => {
                 let store = open_index_for_read(cli)?;
-                let symbols = store.load_symbols(file.as_deref(), query.as_deref(), *limit)?;
-                let toon = render_symbols(&symbols);
+                let symbols = store.load_classified_symbols(
+                    file.as_deref(),
+                    query.as_deref(),
+                    content_selection.unwrap_or_default(),
+                    *limit,
+                )?;
+                let symbol_rows = render_classified_symbol_rows(&symbols);
+                let toon = encode_agent_payload(&json!({
+                    "symbols": &symbol_rows,
+                }));
                 print_tracked_output_estimate(
                     cli.format,
                     &store,
@@ -1971,11 +2037,13 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     || {
                         estimated_source_tokens_for_paths(
                             &store,
-                            symbols.iter().map(|symbol| symbol.path.as_str()),
+                            symbols
+                                .iter()
+                                .map(|classified| classified.symbol.path.as_str()),
                         )
                     },
                     &toon,
-                    &symbols,
+                    &symbol_rows,
                 )?;
             }
             SymbolsCommand::Relations {
@@ -1999,6 +2067,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         DetailedRelationFilterArgs {
                             direction,
                             relation,
+                            content_selection,
                             minimum_confidence,
                             resolution,
                         },
@@ -2039,6 +2108,12 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 if *view == RelationViewArg::Legacy && !roots.is_empty() {
                     return Err(CliError::Service(ServiceError::InvalidInput(
                         "--root requires --view detailed or --view analysis".to_string(),
+                    )));
+                }
+                if *view == RelationViewArg::Legacy && content_selection.is_some() {
+                    return Err(CliError::Service(ServiceError::InvalidInput(
+                        "--content-selection requires --view detailed or --view analysis"
+                            .to_string(),
                     )));
                 }
                 let federation_control = (!roots.is_empty()).then(|| {
@@ -2153,6 +2228,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                             .transpose()?,
                         minimum_confidence: (*minimum_confidence).into(),
                         resolution: (*resolution).into(),
+                        content_selection: content_selection.unwrap_or_default(),
                         include_occurrences: *include_occurrences,
                         budget: DetailedRelationBudget::from_graph_limits(limits)
                             .with_aggregate_limits(
@@ -2283,6 +2359,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             }
             SymbolsCommand::Slice {
                 file,
+                content_selection,
                 selector:
                     RequiredSymbolSelectorArgs {
                         symbol,
@@ -2296,7 +2373,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 let store = open_index_for_read(cli)?;
                 let file_key = validated_indexed_file_key(&store, file)?;
                 let content = read_indexed_file_content(&store, &file_key)?;
-                let report = read_symbol_slice_from_source_bounded(
+                let report = read_symbol_slice_from_source_bounded_with_selection(
                     &store,
                     Path::new(&file_key),
                     &SymbolSliceSelector {
@@ -2308,6 +2385,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     },
                     &content,
                     CodeSliceBudget::new(*output_bytes)?,
+                    content_selection.unwrap_or_default(),
                 )?;
                 print_tracked_slice_output(
                     cli.format,
@@ -2837,9 +2915,21 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             PurposeCommand::Set { path, purpose } => {
                 let store = open_index_for_mutation(cli)?;
                 store.set_purpose(path, purpose, PurposeSource::Agent)?;
+                let classification = if store
+                    .load_node_by_path(path)?
+                    .is_some_and(|node| node.node.kind == projectatlas_core::NodeKind::File)
+                {
+                    store
+                        .file_content_classifications_for_paths(std::slice::from_ref(path))?
+                        .first()
+                        .map(|row| row.classification)
+                } else {
+                    None
+                };
                 let report = PurposeSetReport {
                     purpose_set: PurposeSetPayload {
                         path: path.clone(),
+                        classification,
                         status: PurposeStatus::Approved,
                         source: PurposeSource::Agent,
                         agent_reviewed: true,
@@ -4065,6 +4155,9 @@ struct PurposeSetReport {
 struct PurposeSetPayload {
     /// Indexed repository-relative path whose purpose was updated.
     path: String,
+    /// Registry-owned content role when the selected path is a file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    classification: Option<ContentClassification>,
     /// Durable purpose status after the update.
     status: PurposeStatus,
     /// Source of the durable purpose after the update.
@@ -4270,11 +4363,13 @@ impl RequiredCliCommand {
                 folder: None,
                 file_pattern: None,
                 include_content: false,
+                content_selection: None,
                 limit: 1,
             },
             Self::Next => Command::Next {
                 query: String::new(),
                 limit: 1,
+                content_selection: None,
             },
             Self::Outline => Command::Outline {
                 file: PathBuf::from("src/lib.rs"),
@@ -4283,6 +4378,7 @@ impl RequiredCliCommand {
             Self::Summary => Command::Summary {
                 file: PathBuf::from("src/lib.rs"),
                 limit: 1,
+                content_selection: None,
             },
             Self::Search => Command::Search {
                 pattern: String::new(),
@@ -4294,11 +4390,13 @@ impl RequiredCliCommand {
                 context_lines: 0,
                 start_index: 0,
                 limit: 1,
+                content_selection: None,
             },
             Self::Slice => Command::Slice {
                 file: PathBuf::from("src/lib.rs"),
                 start_line: Some(1),
                 end_line: None,
+                content_selection: None,
                 selector: OptionalSymbolSelectorArgs {
                     symbol: None,
                     symbol_parent: None,
@@ -4312,6 +4410,7 @@ impl RequiredCliCommand {
                 command: Box::new(SymbolsCommand::List {
                     file: None,
                     query: None,
+                    content_selection: None,
                     limit: 1,
                 }),
             },
@@ -5216,14 +5315,14 @@ mod tests {
     }
 
     #[test]
-    fn symbol_candidate_policy_keeps_structural_formats_out_of_symbol_scan() {
+    fn symbol_candidate_policy_admits_owned_formats_only() {
         assert!(is_symbol_candidate("Cargo.toml", Some("cargo-manifest")));
         assert!(is_symbol_candidate("src/lib.rs", Some("rust")));
         assert!(!is_symbol_candidate(
             "fixtures/baselines.toon",
             Some("toon")
         ));
-        assert!(!is_symbol_candidate("README.md", Some("markdown")));
+        assert!(is_symbol_candidate("README.md", Some("markdown")));
     }
 
     #[test]
@@ -5403,34 +5502,34 @@ mod tests {
         for (error, found) in [
             (
                 CliError::Db(DbError::SchemaVersion {
-                    found: 17,
-                    expected: 16,
+                    found: 18,
+                    expected: 17,
                 }),
-                17,
+                18,
             ),
             (
                 CliError::Service(ServiceError::Db(DbError::SchemaVersion {
-                    found: 17,
-                    expected: 16,
+                    found: 18,
+                    expected: 17,
                 })),
-                17,
+                18,
             ),
             (
                 CliError::Db(DbError::SchemaVersion {
                     found: 7,
-                    expected: 16,
+                    expected: 17,
                 }),
                 7,
             ),
             (
                 CliError::Service(ServiceError::Db(DbError::SchemaVersion {
                     found: 7,
-                    expected: 16,
+                    expected: 17,
                 })),
                 7,
             ),
         ] {
-            let expected_message = format!("unsupported schema version {found}, expected 16");
+            let expected_message = format!("unsupported schema version {found}, expected 17");
             let json_text = render_cli_error(OutputFormat::Json, &error)?;
             let json: Value = serde_json::from_str(&json_text)?;
             require_condition(
@@ -5443,7 +5542,7 @@ mod tests {
                     && json
                         .pointer("/error/schema_version_mismatch/supported_schema_version")
                         .and_then(Value::as_i64)
-                        == Some(16)
+                        == Some(17)
                     && json
                         .pointer("/error/schema_version_mismatch/runtime_version")
                         .and_then(Value::as_str)
@@ -5467,7 +5566,7 @@ mod tests {
             require_condition(
                 toon.contains("kind: schema_version_mismatch")
                     && toon.contains(&format!("found_schema_version: {found}"))
-                    && toon.contains("supported_schema_version: 16")
+                    && toon.contains("supported_schema_version: 17")
                     && toon.contains(env!("CARGO_PKG_VERSION"))
                     && toon.contains("do not reset"),
                 "CLI TOON lost typed schema-version details or recovery guidance",
@@ -5476,11 +5575,11 @@ mod tests {
         for error in [
             CliError::Db(DbError::SchemaVersion {
                 found: 8,
-                expected: 16,
+                expected: 17,
             }),
             CliError::Service(ServiceError::Db(DbError::SchemaVersion {
                 found: 15,
-                expected: 16,
+                expected: 17,
             })),
         ] {
             require_condition(
@@ -5490,9 +5589,9 @@ mod tests {
             let migration = schema_migration_required_payload(&error).ok_or_else(|| {
                 std::io::Error::other("CLI omitted the admitted-predecessor migration handoff")
             })?;
-            let expected_steps = u32::try_from(16 - migration.found_schema_version)?;
+            let expected_steps = u32::try_from(17 - migration.found_schema_version)?;
             require_condition(
-                migration.supported_schema_version == 16
+                migration.supported_schema_version == 17
                     && migration.migration_steps_remaining == expected_steps,
                 "CLI migration handoff drifted from the database migration inventory",
             )?;
@@ -6395,6 +6494,7 @@ mod tests {
             documentation: None,
             line_start: 1,
             line_end: 1,
+            source_selector: None,
             parent: None,
             parser: ParserKind::TreeSitter,
             detail: None,

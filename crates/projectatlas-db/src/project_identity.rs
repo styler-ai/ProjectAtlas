@@ -1050,6 +1050,8 @@ mod tests {
         store.connection.execute_batch(
             "INSERT INTO nodes(path, kind, parent_path) VALUES('.', 'folder', NULL);
              INSERT INTO nodes(path, kind, parent_path) VALUES('src/lib.rs', 'file', '.');
+             INSERT INTO file_content_classifications(path, classification)
+                VALUES('src/lib.rs', 'source');
              INSERT INTO purposes(node_id, purpose, source, status, updated_by)
                 SELECT id, 'Own the local source entry point.', 'agent', 'approved', 'agent'
                   FROM nodes WHERE path = 'src/lib.rs';

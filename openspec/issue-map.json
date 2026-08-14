@@ -40,6 +40,7 @@
     "consolidate-projectatlas-landing-page": 381,
     "converge-claude-code-installer": 278,
     "converge-opencode-installer": 279,
+    "connect-classified-documentation-graph": 440,
     "delegate-bulk-purpose-curation": 301,
     "drain-mcp-test-responses-before-eof": 416,
     "enforce-rust-test-quality-gates": 309,
@@ -64,7 +65,7 @@
         {
           "issue": 314,
           "first_task": "1.1",
-          "last_task": "7.4"
+          "last_task": "7.5"
         }
       ]
     },

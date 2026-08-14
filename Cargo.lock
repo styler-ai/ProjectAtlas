@@ -1747,7 +1747,6 @@ dependencies = [
  "projectatlas-fs",
  "projectatlas-service",
  "projectatlas-symbols",
- "pulldown-cmark",
  "ratatui",
  "rayon",
  "regex",
@@ -1847,6 +1846,7 @@ version = "0.4.4"
 dependencies = [
  "blake3",
  "projectatlas-core",
+ "pulldown-cmark",
  "regex",
  "toml",
  "tree-sitter",

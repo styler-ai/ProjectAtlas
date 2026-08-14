@@ -3,10 +3,7 @@
 use cssparser::{Parser as CssParser, ParserInput as CssParserInput, Token as CssToken};
 use jsonc_parser::{ParseOptions as JsoncParseOptions, parse_to_serde_value};
 use projectatlas_core::language::{StructuralSummaryOwner, language_capability};
-use pulldown_cmark::{
-    Event as MarkdownEvent, HeadingLevel, Options as MarkdownOptions, Parser as MarkdownParser,
-    Tag as MarkdownTag, TagEnd as MarkdownTagEnd,
-};
+use projectatlas_symbols::{MarkdownFacts, extract_markdown_facts};
 use scraper::{Html, Selector};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
@@ -77,86 +74,43 @@ pub(crate) fn is_scanner_fallback_summary(summary: &str) -> bool {
 
 /// Summarize a Markdown or MDX document from parsed `CommonMark` headings.
 fn markdown_summary(content: &str) -> Option<String> {
-    let headings = markdown_headings(content);
-    if headings.is_empty() {
-        let lines = content
+    markdown_summary_from_facts(
+        &extract_markdown_facts(content),
+        content
             .lines()
             .filter(|line| !line.trim().is_empty())
-            .count();
-        return (lines > 0).then(|| format!("markdown document with {lines} non-empty lines."));
+            .count(),
+    )
+}
+
+/// Reuse one bounded Markdown parse for structural summary projection.
+pub(crate) fn markdown_summary_from_facts(
+    facts: &MarkdownFacts,
+    non_empty_lines: usize,
+) -> Option<String> {
+    let headings = &facts.headings;
+    if headings.is_empty() {
+        return (non_empty_lines > 0)
+            .then(|| format!("markdown document with {non_empty_lines} non-empty lines."));
     }
     let title = headings
         .iter()
         .find(|heading| heading.level == 1)
         .unwrap_or(&headings[0]);
+    let title_text = compact_label(&title.text);
     let section_names = headings
         .iter()
         .filter(|heading| heading.text != title.text)
-        .map(|heading| heading.text.as_str())
+        .map(|heading| compact_label(&heading.text))
         .collect::<Vec<_>>();
     if section_names.is_empty() {
-        Some(format!("markdown document titled {}.", title.text))
+        Some(format!("markdown document titled {title_text}."))
     } else {
         Some(format!(
             "markdown document titled {} with sections {}.",
-            title.text,
-            join_limited(section_names)
+            title_text,
+            join_limited(section_names.iter().map(String::as_str).collect())
         ))
-    }
-}
-
-/// One parsed Markdown heading.
-struct MarkdownHeading {
-    /// Heading level from one to six.
-    level: usize,
-    /// Compact heading text.
-    text: String,
-}
-
-/// Extract Markdown headings through `pulldown-cmark`.
-fn markdown_headings(content: &str) -> Vec<MarkdownHeading> {
-    let parser = MarkdownParser::new_ext(content, MarkdownOptions::all());
-    let mut current_heading: Option<MarkdownHeading> = None;
-    let mut headings = Vec::new();
-    for event in parser {
-        match event {
-            MarkdownEvent::Start(MarkdownTag::Heading { level, .. }) => {
-                current_heading = Some(MarkdownHeading {
-                    level: markdown_heading_level(level),
-                    text: String::new(),
-                });
-            }
-            MarkdownEvent::Text(text) | MarkdownEvent::Code(text) => {
-                if let Some(heading) = current_heading.as_mut() {
-                    if !heading.text.is_empty() {
-                        heading.text.push(' ');
-                    }
-                    heading.text.push_str(text.as_ref());
-                }
-            }
-            MarkdownEvent::End(MarkdownTagEnd::Heading(_level)) => {
-                if let Some(mut heading) = current_heading.take() {
-                    heading.text = compact_label(&heading.text);
-                    if !heading.text.is_empty() {
-                        headings.push(heading);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    headings
-}
-
-/// Convert a Markdown heading level into a display depth.
-fn markdown_heading_level(level: HeadingLevel) -> usize {
-    match level {
-        HeadingLevel::H1 => 1,
-        HeadingLevel::H2 => 2,
-        HeadingLevel::H3 => 3,
-        HeadingLevel::H4 => 4,
-        HeadingLevel::H5 => 5,
-        HeadingLevel::H6 => 6,
     }
 }
 
