@@ -78,6 +78,7 @@ use projectatlas_core::graph::{
     GraphEntity, GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind,
     ProjectInstanceId, RelationResolution,
 };
+use projectatlas_core::language::ContentSelection;
 use projectatlas_core::symbols::{CodeSymbol, RelationKind};
 use projectatlas_core::{IndexCancellation, IndexWorkControl, IndexWorkStage};
 use projectatlas_db::{
@@ -239,6 +240,9 @@ pub struct RelationAnalysisNextCall {
     pub resolution: RelationResolutionFilter,
     /// Minimum confidence that retains the exact relation trust class.
     pub minimum_confidence: ConfidenceClass,
+    /// Explicit classified-content restriction retained across the next call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_selection: Option<ContentSelection>,
 }
 
 /// Typed VCS availability retained in impact responses.
@@ -549,6 +553,9 @@ struct AnalysisCursorBinding {
     minimum_confidence: ConfidenceClass,
     /// Resolution-class filter.
     resolution: RelationResolutionFilter,
+    /// Classified-content restriction that changes admitted topology.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_selection: Option<ContentSelection>,
     /// Closed feature selections that affect results.
     options: AnalysisCursorOptions,
     /// Exact traversal resource envelope.
@@ -1073,6 +1080,11 @@ fn analysis_cursor_binding(
         relation: query.relations.relation,
         minimum_confidence: query.relations.minimum_confidence,
         resolution: query.relations.resolution,
+        content_selection: query
+            .relations
+            .content_selection
+            .explicit_value()
+            .map(|_| query.relations.content_selection),
         options: AnalysisCursorOptions {
             relation_occurrences: query.relations.include_occurrences.into(),
             communities: query.include_communities.into(),
@@ -1196,7 +1208,7 @@ fn resolution_gap_finding(
         metric: None,
         evidence: Some(AnalysisRelationEvidence {
             relation: relation.clone(),
-            next_call: relation_gap_next_call(relation, &source.entity),
+            next_call: relation_gap_next_call(relation, source),
         }),
     }
 }
@@ -1212,9 +1224,9 @@ fn resolution_gap_identity(finding: &AnalysisFinding) -> &str {
 /// Build an exact existing relation request for one source-side gap.
 fn relation_gap_next_call(
     relation: &projectatlas_core::graph::LogicalRelation,
-    source: &GraphEntity,
+    source: &DetailedRelationNode,
 ) -> Option<RelationAnalysisNextCall> {
-    let anchor = relation_anchor_for_entity(source)?;
+    let anchor = relation_anchor_for_entity(&source.entity)?;
     let resolution = match relation.resolution() {
         RelationResolution::Ambiguous { .. } => RelationResolutionFilter::Ambiguous,
         RelationResolution::Unresolved { .. } => RelationResolutionFilter::Unresolved,
@@ -1227,6 +1239,7 @@ fn relation_gap_next_call(
         relation: relation.kind(),
         resolution,
         minimum_confidence: relation.confidence(),
+        content_selection: source.content_selection,
     })
 }
 
@@ -1379,10 +1392,11 @@ fn close_induced_edges(
                 endpoints,
             )
             .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
-            let read = store.repository_graph_adjacency_page_filtered_bounded(
+            let read = store.repository_graph_adjacency_page_filtered_bounded_with_documents(
                 chunk,
                 RepositoryGraphDirection::Outbound,
                 query.relations.relation,
+                super::relations::include_document_relations(&query.relations),
                 continuation.as_ref(),
                 page_limit,
                 budget,
@@ -1536,33 +1550,7 @@ fn analysis_relation_matches(
     relation: &projectatlas_core::graph::LogicalRelation,
     query: &DetailedRelationQuery,
 ) -> bool {
-    query.relation.is_none_or(|kind| relation.kind() == kind)
-        && confidence_rank(relation.confidence()) >= confidence_rank(query.minimum_confidence)
-        && match query.resolution {
-            RelationResolutionFilter::Any => true,
-            RelationResolutionFilter::Resolved => {
-                matches!(relation.resolution(), RelationResolution::Resolved { .. })
-            }
-            RelationResolutionFilter::Ambiguous => {
-                matches!(relation.resolution(), RelationResolution::Ambiguous { .. })
-            }
-            RelationResolutionFilter::Unresolved => {
-                matches!(relation.resolution(), RelationResolution::Unresolved { .. })
-            }
-            RelationResolutionFilter::External => {
-                matches!(relation.resolution(), RelationResolution::External { .. })
-            }
-        }
-}
-
-/// Rank the closed confidence classes for inclusive threshold comparison.
-const fn confidence_rank(value: ConfidenceClass) -> u8 {
-    match value {
-        ConfidenceClass::Exact => 4,
-        ConfidenceClass::High => 3,
-        ConfidenceClass::Medium => 2,
-        ConfidenceClass::Low => 1,
-    }
+    super::relations::relation_matches(relation, query)
 }
 
 /// Compute bounded architecture findings over admitted topology and symbols.
@@ -2315,19 +2303,12 @@ fn analysis_nodes_for(
 
 /// Preserve one detailed node and its exact reusable next call.
 fn analysis_node(node: &DetailedRelationNode) -> AnalysisNode {
-    let next_call = match node.entity.selector() {
-        EntitySelector::Folder { path } => Some(RelationNextCall::Files {
-            folder: path.clone(),
-        }),
-        EntitySelector::File { path } => Some(RelationNextCall::Summary { file: path.clone() }),
-        EntitySelector::Package { package } => Some(RelationNextCall::Summary {
-            file: package.manifest.clone(),
-        }),
-        EntitySelector::Symbol { symbol } => Some(RelationNextCall::SymbolSlice {
-            symbol: symbol.clone(),
-        }),
-        EntitySelector::Project | EntitySelector::External { .. } => None,
-    };
+    let next_call = super::relations::next_call_for_entity(
+        &node.entity,
+        node.content_selection
+            .unwrap_or(ContentSelection::UnspecifiedLegacy),
+        node.classification,
+    );
     AnalysisNode {
         node: node.clone(),
         next_call,

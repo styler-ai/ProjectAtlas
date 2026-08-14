@@ -10,22 +10,23 @@ use crate::runtime::{
     DEFAULT_HEALTH_LIMIT, INDEX_WORKER_SAFE_CEILING, IndexInitRequired, IndexProjectMismatch,
     IndexRefreshRequired, IndexVerificationIncomplete, InitBootstrapOptions, MAX_HEALTH_LIMIT,
     MAX_SYMBOL_FILE_BYTES, ProjectWorktreeRequired, PurposeCuratorHandoff, PurposeLintLevel,
-    PurposeReviewRequest, ScanRuntimePlan, SourceObservationRegistry, SymbolBuildOptions,
-    UsageRuntimeInstance, VerifiedReadOutcome, VerifiedReadStamp, build_settings_report,
-    byte_count_to_tokens, canonical_project_root, canonical_source_project_root,
-    config_root_mismatch_error, default_mcp_project_root,
-    estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
-    index_init_required, index_work_control, init_config_path, lint_database_if_present,
-    next_step_report, next_step_report_payload, normalized_folder_filter,
-    open_atlas_store_for_project, open_atlas_store_read_only_for_project,
+    PurposeReviewRequest, ScanRuntimePlan, SettingsClassifiedNavigationReport,
+    SourceObservationRegistry, SymbolBuildOptions, UsageRuntimeInstance, VerifiedReadOutcome,
+    VerifiedReadStamp, build_settings_report, byte_count_to_tokens, canonical_project_root,
+    canonical_source_project_root, classified_navigation_capabilities,
+    classified_ranked_file_nodes_with_reasons, config_root_mismatch_error,
+    default_mcp_project_root, estimated_source_tokens_for_indexed_files,
+    estimated_source_tokens_for_paths, index_init_required, index_work_control, init_config_path,
+    lint_database_if_present, next_step_report_payload, next_step_report_with_selection,
+    normalized_folder_filter, open_atlas_store_for_project, open_atlas_store_read_only_for_project,
     open_federated_atlas_stores_for_project, purpose_curation_page, purpose_curator_handoff,
     ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
-    render_health_page, render_purpose_curation_page, render_purpose_review_report,
-    reset_index_files, review_purposes, run_init_bootstrap, run_scan_pipeline_controlled,
-    run_single_watch_refresh_controlled, run_symbol_build_pipeline_controlled,
-    strip_legacy_purpose, telemetry_disabled, validate_purpose_review_admission,
-    validated_indexed_file_key, watcher_status_report,
+    render_classified_ranked_file_rows, render_classified_symbol_rows, render_health_page,
+    render_purpose_curation_page, render_purpose_review_report, reset_index_files, review_purposes,
+    run_init_bootstrap, run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
+    run_symbol_build_pipeline_controlled, strip_legacy_purpose, telemetry_disabled,
+    validate_purpose_review_admission, validated_indexed_file_key, watcher_status_report,
 };
 #[cfg(test)]
 use crate::runtime::{PURPOSE_CURATOR_RECOMMENDED_REASONING, run_scan_pipeline};
@@ -49,12 +50,13 @@ use projectatlas_core::graph::{
     RelationOccurrence, RelationResolution, RepositoryFilePath, ReusableTargetSelector, SourceSpan,
 };
 use projectatlas_core::health::Severity;
+use projectatlas_core::language::{ContentClassification, ContentSelection};
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::symbols::ParserKind;
 use projectatlas_core::telemetry::{TokenTrendWindow, UsageInstanceOwner};
 use projectatlas_core::toon::{
     encode_agent_payload, render_outline, render_overview, render_ranked_nodes,
-    render_symbol_relations, render_symbols, render_token_overview, render_token_trends,
+    render_symbol_relations, render_token_overview, render_token_trends,
 };
 use projectatlas_core::{
     IndexGeneration, IndexWorkControl, IndexWorkFailure, NavigationNextCall,
@@ -67,6 +69,8 @@ use projectatlas_db::{
     AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, RepositoryCoverageQuery,
     read_project_root_read_only, verify_project_database,
 };
+#[cfg(test)]
+use projectatlas_service::build_file_summary_from_source;
 use projectatlas_service::{
     COVERAGE_PAGE_MAX_LIMIT, CodeSliceBudget, CoverageDigest, CoverageTrustState,
     DetailedRelationBudget, DetailedRelationNode, DetailedRelationQuery, DetailedRelationReport,
@@ -75,13 +79,14 @@ use projectatlas_service::{
     FileCallSummary, FileSummaryReport, FileSymbolSummary, GitImpactSelection,
     RelationAnalysisMode, RelationAnalysisQuery, RelationAnchor, RelationDirection,
     RelationNextCall, RelationPurpose, RelationTotalState, SearchQuery, ServiceError,
-    SymbolSliceSelector, TokenReport, TokenReportRequest, build_file_summary_from_source,
-    load_coverage_discovery, load_detailed_relation_page, load_federated_detailed_relations,
+    SymbolSliceSelector, TokenReport, TokenReportRequest,
+    build_file_summary_from_source_with_selection, load_coverage_discovery,
+    load_detailed_relation_page, load_federated_detailed_relations,
     load_federated_relation_analysis, load_relation_analysis, load_token_report,
     parse_coverage_parser, parse_coverage_relation, parse_coverage_state,
     parse_relation_confidence, parse_relation_direction, parse_relation_resolution,
-    parse_symbol_kind, read_indexed_code_slice_from_source_bounded,
-    read_symbol_slice_from_source_bounded, search_indexed_files_with_control,
+    parse_symbol_kind, read_indexed_code_slice_from_source_bounded_with_selection,
+    read_symbol_slice_from_source_bounded_with_selection, search_indexed_files_with_control,
 };
 use rmcp::handler::server::{
     router::tool::ToolRouter, tool::IntoCallToolResult, wrapper::Parameters,
@@ -437,6 +442,9 @@ const MCP_ERROR_DETAILED_RELATION_LIMIT: &str = "detailed relation limit exceeds
 /// MCP validation error for compact projection on a non-detailed relation view.
 const MCP_ERROR_COMPACT_DETAILED_RELATION_VIEW: &str =
     "compact symbol relations require view=detailed";
+/// MCP validation error for classified traversal on the legacy relation view.
+const MCP_ERROR_CONTENT_SELECTION_RELATION_VIEW: &str =
+    "content_selection requires view=detailed or view=analysis";
 /// MCP validation error for analysis controls on another relation view.
 const MCP_ERROR_ANALYSIS_VIEW_REQUIRED: &str = "analysis controls require view=analysis";
 /// MCP validation error for federation on the legacy relation view.
@@ -541,6 +549,8 @@ const MCP_ERROR_GUIDANCE_FRAGMENT: &str = "'; ";
 const NODE_LABEL_FOLDERS: &str = "folders";
 /// Node payload label for rendered file rows.
 const NODE_LABEL_FILES: &str = "files";
+/// Stable MCP payload key for classified symbol rows.
+const NODE_LABEL_SYMBOLS: &str = "symbols";
 /// Error when a symbol disambiguator is supplied without a symbol name.
 const SYMBOL_DISAMBIGUATOR_WITHOUT_SYMBOL_ERROR: &str = "symbol disambiguators require symbol";
 /// Error when a line slice omits its start line.
@@ -831,6 +841,19 @@ struct AtlasQueryParams {
     limit: Option<usize>,
 }
 
+/// MCP parameter payload for classified next-step recommendations.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasNextParams {
+    /// Optional project root for this call. Defaults to the active MCP project.
+    project_path: Option<String>,
+    /// Search query for path and purpose matching.
+    query: Option<String>,
+    /// Optional classified-content selection: source, documentation, or both.
+    content_selection: Option<String>,
+    /// Maximum number of rows to return.
+    limit: Option<usize>,
+}
+
 /// MCP parameter payload for ranked file lookup with optional absolute folder routing.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct AtlasFilesParams {
@@ -846,6 +869,8 @@ struct AtlasFilesParams {
     file_pattern: Option<String>,
     /// Include indexed file text as a bounded fallback ranking signal.
     include_content: Option<bool>,
+    /// Optional classified-content selection: source, documentation, or both.
+    content_selection: Option<String>,
     /// Maximum number of rows to return.
     limit: Option<usize>,
 }
@@ -874,6 +899,8 @@ struct AtlasFileSummaryParams {
     nearest_project: Option<bool>,
     /// Return the additive compact summary projection when true.
     compact: Option<bool>,
+    /// Optional classified-content selection: source, documentation, or both.
+    content_selection: Option<String>,
     /// Maximum rows per functions/methods/classes/types/calls section.
     limit: Option<usize>,
 }
@@ -899,6 +926,8 @@ struct AtlasSearchParams {
     context_lines: Option<usize>,
     /// Pagination start index.
     start_index: Option<usize>,
+    /// Optional classified-content selection: source, documentation, or both.
+    content_selection: Option<String>,
     /// Maximum matches to return.
     limit: Option<usize>,
 }
@@ -926,6 +955,8 @@ struct AtlasSliceParams {
     symbol_signature: Option<String>,
     /// Optional source line for disambiguating `symbol`.
     symbol_line: Option<usize>,
+    /// Optional classified-content selection: source, documentation, or both.
+    content_selection: Option<String>,
     /// Maximum encoded bytes admitted to the slice response.
     output_bytes: Option<u32>,
 }
@@ -941,6 +972,8 @@ struct AtlasSymbolsParams {
     nearest_project: Option<bool>,
     /// Optional symbol, signature, relation, or path query.
     query: Option<String>,
+    /// Optional classified-content selection: source, documentation, or both.
+    content_selection: Option<String>,
     /// Maximum rows to return.
     limit: Option<usize>,
 }
@@ -958,6 +991,8 @@ struct AtlasSymbolRelationsParams {
     query: Option<String>,
     /// Preserve `legacy`, opt in to `detailed`, or select closed `analysis`.
     view: Option<String>,
+    /// Optional classified-content selection: source, documentation, or both.
+    content_selection: Option<String>,
     /// Return the opt-in compact detailed projection while preserving exact selectors and trust.
     compact: Option<bool>,
     /// Resume one exact generation- and purpose-bound detailed page.
@@ -1732,6 +1767,9 @@ struct McpPurposeSetResponse {
 struct McpPurposeSetPayload {
     /// Indexed repository-relative path whose purpose was updated.
     path: String,
+    /// Registry-owned content role when the selected path is a file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    classification: Option<ContentClassification>,
     /// Durable purpose status after the update.
     status: PurposeStatus,
     /// Source of the durable purpose after the update.
@@ -1753,6 +1791,8 @@ struct McpSessionCapabilities {
     path_scope: McpPathScope,
     /// Scan behavior visible to harnesses.
     scan_policy: McpScanPolicy,
+    /// Closed classified-content navigation surface.
+    classified_navigation: SettingsClassifiedNavigationReport,
     /// Token telemetry write mode for this process.
     telemetry: McpTelemetryPolicy,
     /// Privacy guarantees for this payload.
@@ -1848,6 +1888,8 @@ struct McpFileSummaryPayload<'a> {
 struct McpFileSummary<'a> {
     /// Repository-relative file path.
     file_path: &'a str,
+    /// Persisted content role for the selected file.
+    classification: projectatlas_core::language::ContentClassification,
     /// Detected language or file family.
     language: &'a str,
     /// Source line count.
@@ -1970,6 +2012,7 @@ impl<'a> From<&'a FileSummaryReport> for McpFileSummary<'a> {
             || report.coverage.truncated;
         Self {
             file_path: &report.file_path,
+            classification: report.classification,
             language: &report.language,
             line_count: report.line_count,
             source_status: (report.source_status != MCP_FILE_SOURCE_STATUS_LIVE)
@@ -2493,6 +2536,15 @@ impl<'a> McpCompactFederatedDetailedRelationReport<'a> {
 /// Borrow non-empty text into one optional compact field.
 fn nonempty_str(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
+}
+
+/// Parse an optional adapter selection before any project or database work.
+fn parse_content_selection(value: Option<&str>) -> Result<ContentSelection, CliError> {
+    value
+        .map(str::parse::<ContentSelection>)
+        .transpose()
+        .map(Option::unwrap_or_default)
+        .map_err(|error| CliError::InvalidInput(error.to_string()))
 }
 
 /// Borrow non-empty rows into one optional compact section.
@@ -3674,6 +3726,7 @@ impl ProjectAtlasMcpServer {
                 implicit_scan: McpPolicyState::Disabled,
                 text_index_max_bytes,
             },
+            classified_navigation: classified_navigation_capabilities(),
             telemetry: McpTelemetryPolicy {
                 mode: Self::policy_state(!telemetry_disabled()),
             },
@@ -6041,6 +6094,7 @@ impl ProjectAtlasMcpServer {
         context: Option<RequestContext<RoleServer>>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
+            let content_selection = parse_content_selection(params.content_selection.as_deref())?;
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let (state, folder_filter, routed_project) = self.state_and_optional_folder_filter(
                 params.project_path.as_deref(),
@@ -6049,18 +6103,21 @@ impl ProjectAtlasMcpServer {
             )?;
             let query = Self::query_or_empty(params.query);
             self.with_fresh_string_and_usage_for_request(&state, context, |store, stamp| {
-                let selected = ranked_file_nodes_with_reasons(
+                let selected = classified_ranked_file_nodes_with_reasons(
                     store,
                     &query,
                     folder_filter.as_deref(),
                     params.file_pattern.as_deref(),
                     params.limit.unwrap_or(10),
                     params.include_content.unwrap_or(false),
+                    content_selection,
                 )?;
                 let toon = Self::with_selected_project_audit(
                     &state,
                     routed_project,
-                    render_ranked_nodes(NODE_LABEL_FILES, &selected),
+                    encode_agent_payload(&serde_json::json!({
+                        NODE_LABEL_FILES: render_classified_ranked_file_rows(&selected),
+                    })),
                 )?;
                 let usage = Self::telemetry_enabled()
                     .then(|| {
@@ -6096,14 +6153,20 @@ impl ProjectAtlasMcpServer {
     )]
     fn atlas_next(
         &self,
-        Parameters(params): Parameters<AtlasQueryParams>,
+        Parameters(params): Parameters<AtlasNextParams>,
         context: RequestContext<RoleServer>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
+            let content_selection = parse_content_selection(params.content_selection.as_deref())?;
             let state = self.state_for_project_path(params.project_path)?;
             let query = Self::query_or_empty(params.query);
             self.with_fresh_string_and_usage_for_request(&state, Some(context), |store, stamp| {
-                let report = next_step_report(store, &query, params.limit)?;
+                let report = next_step_report_with_selection(
+                    store,
+                    &query,
+                    params.limit,
+                    content_selection,
+                )?;
                 let payload = next_step_report_payload(&report);
                 let toon = Self::encode_named_payload(MCP_PAYLOAD_NEXT, &payload)?;
                 let usage = Self::telemetry_enabled()
@@ -6170,6 +6233,7 @@ impl ProjectAtlasMcpServer {
         context: Option<RequestContext<RoleServer>>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
+            let content_selection = parse_content_selection(params.content_selection.as_deref())?;
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let resolved = self.state_and_file_key(
                 params.project_path.as_deref(),
@@ -6180,11 +6244,12 @@ impl ProjectAtlasMcpServer {
             self.with_fresh_string_and_usage_for_request(&state, context, |store, _stamp| {
                 let file_key = validated_indexed_file_key(store, Path::new(&resolved.key))?;
                 let content = read_indexed_file_content(store, &file_key)?;
-                let report = build_file_summary_from_source(
+                let report = build_file_summary_from_source_with_selection(
                     store,
                     Path::new(&file_key),
                     params.limit.unwrap_or(DEFAULT_FILE_SUMMARY_LIMIT),
                     &content,
+                    content_selection,
                 )?;
                 let rendered = if params.compact.unwrap_or(false) {
                     encode_agent_payload(&McpFileSummaryPayload {
@@ -6229,6 +6294,7 @@ impl ProjectAtlasMcpServer {
         context: RequestContext<RoleServer>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
+            let content_selection = parse_content_selection(params.content_selection.as_deref())?;
             let state = self.state_for_project_path(params.project_path.clone())?;
             self.with_fresh_string_and_usage_controlled_for_request(
                 &state,
@@ -6245,6 +6311,7 @@ impl ProjectAtlasMcpServer {
                             context_lines: params.context_lines.unwrap_or(0),
                             start_index: params.start_index.unwrap_or(0),
                             limit: params.limit.unwrap_or(20),
+                            content_selection,
                             retrieval_mode: params.retrieval_mode.unwrap_or_default().into(),
                         },
                         Some(control),
@@ -6273,6 +6340,7 @@ impl ProjectAtlasMcpServer {
         context: RequestContext<RoleServer>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
+            let content_selection = parse_content_selection(params.content_selection.as_deref())?;
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let resolved = self.state_and_file_key(
                 params.project_path.as_deref(),
@@ -6290,7 +6358,7 @@ impl ProjectAtlasMcpServer {
                         .unwrap_or(CodeSliceBudget::DEFAULT_OUTPUT_BYTES),
                 )?;
                 let report = if let Some(symbol) = params.symbol.as_ref() {
-                    read_symbol_slice_from_source_bounded(
+                    read_symbol_slice_from_source_bounded_with_selection(
                         store,
                         &file,
                         &SymbolSliceSelector {
@@ -6302,6 +6370,7 @@ impl ProjectAtlasMcpServer {
                         },
                         &content,
                         output_budget,
+                        content_selection,
                     )?
                 } else {
                     if params
@@ -6328,13 +6397,14 @@ impl ProjectAtlasMcpServer {
                     let start_line = params.start_line.ok_or_else(|| {
                         CliError::InvalidInput(START_LINE_REQUIRED_ERROR.to_string())
                     })?;
-                    read_indexed_code_slice_from_source_bounded(
+                    read_indexed_code_slice_from_source_bounded_with_selection(
                         store,
                         &file,
                         start_line,
                         params.end_line,
                         &content,
                         output_budget,
+                        content_selection,
                     )?
                 };
                 let toon = report.fit_output(|report| {
@@ -6423,6 +6493,7 @@ impl ProjectAtlasMcpServer {
         context: Option<RequestContext<RoleServer>>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
+            let content_selection = parse_content_selection(params.content_selection.as_deref())?;
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let (state, file, routed_project) = self.state_and_optional_file_key(
                 params.project_path.as_deref(),
@@ -6434,21 +6505,26 @@ impl ProjectAtlasMcpServer {
                     .as_deref()
                     .map(|path| validated_indexed_file_key(store, Path::new(path)))
                     .transpose()?;
-                let symbols = store.load_symbols(
+                let symbols = store.load_classified_symbols(
                     file.as_deref(),
                     params.query.as_deref(),
+                    content_selection,
                     params.limit.unwrap_or(50),
                 )?;
                 let toon = Self::with_selected_project_audit(
                     &state,
                     routed_project,
-                    render_symbols(&symbols),
+                    encode_agent_payload(&serde_json::json!({
+                        NODE_LABEL_SYMBOLS: render_classified_symbol_rows(&symbols),
+                    })),
                 )?;
                 let usage = Self::telemetry_enabled()
                     .then(|| {
                         estimated_source_tokens_for_paths(
                             store,
-                            symbols.iter().map(|symbol| symbol.path.as_str()),
+                            symbols
+                                .iter()
+                                .map(|classified| classified.symbol.path.as_str()),
                         )
                     })
                     .and_then(Result::ok)
@@ -6484,6 +6560,7 @@ impl ProjectAtlasMcpServer {
         routed_project: bool,
         file: &str,
         params: &AtlasSymbolRelationsParams,
+        content_selection: ContentSelection,
         analysis: bool,
         stores: SymbolRelationStores<'_>,
         control: &IndexWorkControl,
@@ -6583,6 +6660,7 @@ impl ProjectAtlasMcpServer {
                     .as_deref()
                     .unwrap_or(MCP_SYMBOL_RELATION_RESOLUTION_DEFAULT),
             )?,
+            content_selection,
             include_occurrences: params.include_occurrences.unwrap_or(false),
             budget: DetailedRelationBudget::from_graph_limits(limits).with_aggregate_limits(
                 params.edge_limit,
@@ -6751,6 +6829,12 @@ impl ProjectAtlasMcpServer {
                     MCP_ERROR_ANALYSIS_VIEW_REQUIRED.to_string(),
                 )));
             }
+            let content_selection = parse_content_selection(params.content_selection.as_deref())?;
+            if !detailed && params.content_selection.is_some() {
+                return Err(CliError::Service(ServiceError::InvalidInput(
+                    MCP_ERROR_CONTENT_SELECTION_RELATION_VIEW.to_string(),
+                )));
+            }
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let (state, file, routed_project) = self.state_and_optional_file_key(
                 params.project_path.as_deref(),
@@ -6789,6 +6873,7 @@ impl ProjectAtlasMcpServer {
                     routed_project,
                     file,
                     params,
+                    content_selection,
                     analysis,
                     SymbolRelationStores::Federated(stores),
                     &control,
@@ -6822,6 +6907,7 @@ impl ProjectAtlasMcpServer {
                             routed_project,
                             file,
                             params,
+                            content_selection,
                             analysis,
                             SymbolRelationStores::Single(store),
                             control,
@@ -7372,9 +7458,21 @@ impl ProjectAtlasMcpServer {
             let store = Self::open_existing_mut_store(&state)?;
             let node_key = Self::validated_indexed_node_key(&store, &params.path)?;
             store.set_purpose(&node_key, &params.purpose, PurposeSource::Agent)?;
+            let classification = if store
+                .load_node_by_path(&node_key)?
+                .is_some_and(|node| node.node.kind == projectatlas_core::NodeKind::File)
+            {
+                store
+                    .file_content_classifications_for_paths(std::slice::from_ref(&node_key))?
+                    .first()
+                    .map(|row| row.classification)
+            } else {
+                None
+            };
             Self::encode_serialized_payload(McpPurposeSetResponse {
                 purpose_set: McpPurposeSetPayload {
                     path: node_key,
+                    classification,
                     status: PurposeStatus::Approved,
                     source: PurposeSource::Agent,
                     agent_reviewed: true,
@@ -8030,14 +8128,14 @@ mod tests {
     fn mcp_schema_version_mismatches_are_typed_and_content_free()
     -> Result<(), Box<dyn std::error::Error>> {
         let error = CliError::Db(DbError::SchemaVersion {
-            found: 17,
-            expected: 16,
+            found: 18,
+            expected: 17,
         });
         let payload = ProjectAtlasMcpServer::encode_error_payload(&error);
         require(
             payload.contains("kind: schema_version_mismatch")
-                && payload.contains("found_schema_version: 17")
-                && payload.contains("supported_schema_version: 16")
+                && payload.contains("found_schema_version: 18")
+                && payload.contains("supported_schema_version: 17")
                 && payload.contains(env!("CARGO_PKG_VERSION"))
                 && payload.contains("do not reset")
                 && !payload.contains(".projectatlas")
@@ -8048,7 +8146,7 @@ mod tests {
 
         let predecessor = CliError::Service(ServiceError::Db(DbError::SchemaVersion {
             found: 8,
-            expected: 16,
+            expected: 17,
         }));
         let McpToolTextResult(predecessor_result) =
             ProjectAtlasMcpServer::as_mcp_text(Err(predecessor));
@@ -8056,8 +8154,8 @@ mod tests {
         require(
             predecessor_payload.contains("kind: schema_migration_required")
                 && predecessor_payload.contains("found_schema_version: 8")
-                && predecessor_payload.contains("supported_schema_version: 16")
-                && predecessor_payload.contains("migration_steps_remaining: 8")
+                && predecessor_payload.contains("supported_schema_version: 17")
+                && predecessor_payload.contains("migration_steps_remaining: 9")
                 && predecessor_payload.contains("projectatlas init")
                 && predecessor_payload.contains("atlas_init")
                 && predecessor_payload.contains("same global `--db`/`--config` selection")
@@ -8245,6 +8343,7 @@ mod tests {
                 file: "src/lib.rs".to_string(),
                 nearest_project: Some(false),
                 compact: None,
+                content_selection: None,
                 limit: Some(25),
             },
             None,
@@ -8262,6 +8361,7 @@ mod tests {
                 file: Some("src/lib.rs".to_string()),
                 nearest_project: Some(false),
                 query: None,
+                content_selection: None,
                 limit: Some(50),
             },
             None,
@@ -9209,6 +9309,7 @@ mod tests {
                 nearest_project: Some(false),
                 file_pattern: None,
                 include_content: Some(false),
+                content_selection: None,
                 limit: Some(10),
             },
             None,

@@ -9,6 +9,7 @@ homepage.workspace = true
 [dependencies]
 blake3.workspace = true
 projectatlas-core.workspace = true
+pulldown-cmark.workspace = true
 regex.workspace = true
 toml.workspace = true
 tree-sitter.workspace = true

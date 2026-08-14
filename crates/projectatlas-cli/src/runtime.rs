@@ -16,7 +16,8 @@ use crate::atlas_map::{
     load_atlas_config_from_text,
 };
 use crate::structural::{
-    is_scanner_fallback_summary, is_structural_summary_candidate, structural_summary_for_path,
+    is_scanner_fallback_summary, is_structural_summary_candidate, markdown_summary_from_facts,
+    structural_summary_for_path,
 };
 use crate::{
     CliError, OutputFormat, WATCH_MODE_NOTIFY, WATCH_MODE_ONCE, WATCH_MODE_POLLING, truthy_env,
@@ -28,15 +29,17 @@ use projectatlas_cli::optional_parser_lifecycle::{
     OPTIONAL_PARSER_PACK_SELECTION_POLICY_PATH, OptionalParserPackLifecycle,
     OptionalParserPackLifecycleReport, OptionalParserPackProjectSelection,
 };
+use projectatlas_core::graph::{ExtendedRelationKind, GraphRelationKind};
 use projectatlas_core::health::{
     CATEGORY_DUPLICATE_PURPOSE, CATEGORY_MISSING_PURPOSE, CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
     CATEGORY_REPEATED_TEMPORARY_FOLDER, CATEGORY_STALE_PURPOSE, CATEGORY_SUGGESTED_PURPOSE_REVIEW,
     Severity,
 };
 use projectatlas_core::language::{
-    ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION, LANGUAGE_CAPABILITY_REGISTRY_VERSION,
-    LanguageRegistryReport, SymbolParserOwner, accepted_language_capability_digest,
-    language_capability, language_registry_digest, language_registry_report,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION, ContentClassification, ContentSelection,
+    LANGUAGE_CAPABILITY_REGISTRY_VERSION, LanguageRegistryReport, SymbolParserOwner,
+    accepted_language_capability_digest, content_classification, language_capability,
+    language_registry_digest, language_registry_report,
 };
 #[cfg(all(test, feature = "optional-parser-supervisor"))]
 use projectatlas_core::optional_parser_pack::OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION;
@@ -52,7 +55,7 @@ use projectatlas_core::telemetry::{
     TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_CONFIDENCE_INFERRED, TOKEN_CONFIDENCE_POLICY_ESTIMATE,
     UsageInstanceId, UsageInstanceOwner, usage_from_estimates_with_context, usage_from_text,
 };
-use projectatlas_core::toon::{encode_agent_payload, render_ranked_node_rows};
+use projectatlas_core::toon::{encode_agent_payload, render_ranked_node_rows, render_symbol_rows};
 use projectatlas_core::{
     IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkResource,
     IndexWorkStage, Node, NodeKind, Overview, PurposeSource, PurposeStatus,
@@ -60,9 +63,10 @@ use projectatlas_core::{
     purpose_review_signal, repo_path_to_native, validated_repo_file_key, validated_repo_node_key,
 };
 use projectatlas_db::{
-    AtlasStore, DatabasePublicationContractState, DatabasePublicationReport,
-    DatabaseSchemaCompatibility, DatabaseSettingsReport, HealthFindingsPage, HealthQuery,
-    HealthScope, IndexPublication, IndexPublicationGuard, IndexPublicationState, IndexedFileText,
+    AtlasStore, ClassifiedSymbol, DatabasePublicationContractState, DatabasePublicationReport,
+    DatabaseSchemaCompatibility, DatabaseSettingsReport, FileContentClassification,
+    HealthFindingsPage, HealthQuery, HealthScope, IndexPublication, IndexPublicationGuard,
+    IndexPublicationState, IndexedFileText, MAX_FILE_CONTENT_CLASSIFICATION_PATHS,
     MAX_PURPOSE_CURATION_BATCH_ROWS, PurposeConditionalApplyRequest, PurposeConditionalApplyState,
     TelemetryRetentionState, database_settings_report, read_project_root_read_only,
     validate_database_location,
@@ -73,12 +77,17 @@ use projectatlas_fs::{
     scan_repo_controlled_with_work,
 };
 use projectatlas_service::{
-    CoverageDiscoveryReport, FederatedInputWork, FederatedStore, FilePathMatcher,
-    MAX_FEDERATED_DATABASE_BYTES, MAX_FEDERATED_INPUT_BYTES, NextStepReport, build_next_report,
+    ClassifiedRankedNode, CoverageDiscoveryReport, FederatedInputWork, FederatedStore,
+    FilePathMatcher, MAX_FEDERATED_DATABASE_BYTES, MAX_FEDERATED_INPUT_BYTES, NextStepReport,
+    build_next_report_with_selection as build_next_report_with_selection_service,
+    load_classified_ranked_file_nodes_with_reasons as load_classified_ranked_file_nodes_with_reasons_service,
     load_ranked_file_nodes_with_reasons, load_ranked_folder_nodes_with_reasons,
     validate_federated_root_count,
 };
-use projectatlas_symbols::{extract_symbol_graph_controlled, semantic_resolution_contract_digest};
+use projectatlas_symbols::{
+    MarkdownFacts, extract_markdown_facts_controlled, extract_symbol_graph_controlled,
+    semantic_resolution_contract_digest,
+};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -579,6 +588,7 @@ fn open_exact_fresh_atlas_store_for_project_with_repair(
         let mut writer = open_atlas_store_for_project(db_path, &plan.root)?;
         let changes = WatchChangeSet {
             requires_full_scan: false,
+            document_paths: delta.paths.clone(),
             paths: delta.paths,
         };
         refresh_index_for_changes_controlled(
@@ -2489,11 +2499,15 @@ fn stage_full_index_publication(
         plan.text_options,
         control,
     )?;
+    let content_classifications = stage_file_content_classifications(&nodes, &text.rows);
     let retained_before_symbols =
         staged_publication_identity_bytes(&plan.root, &contract_fingerprint)
             .saturating_add(staged_string_bytes(&text_paths))
             .saturating_add(staged_node_bytes(&nodes))
             .saturating_add(staged_text_bytes(&text))
+            .saturating_add(staged_file_content_classification_bytes(
+                &content_classifications,
+            ))
             .saturating_add(staged_purpose_bytes(purpose_import.as_ref()));
     let symbol_limits = symbol_limits_with_remaining_staging_bytes(retained_before_symbols)?;
     let symbols = stage_symbols_for_nodes_with_limits(
@@ -2509,11 +2523,14 @@ fn stage_full_index_publication(
         control,
         symbol_limits,
     )?;
+    let scan_policy = RootScanPolicy::discover(&plan.root, &plan.scan_options, control)
+        .map_err(|source| source_inspection_error(&plan.root, source))?;
     let graph = graph_projection::stage_full_repository_graph(
         store,
         &plan.root,
         base_generation,
         &nodes,
+        &scan_policy,
         &symbols,
         control,
     )?;
@@ -2540,6 +2557,7 @@ fn stage_full_index_publication(
         purpose_import,
         text_paths,
         text,
+        content_classifications,
         symbols,
         graph,
         structural_summaries,
@@ -2610,6 +2628,37 @@ fn staged_text_bytes(text: &TextIndexRefresh) -> u64 {
                 )
                 .saturating_add(text.content.len() as u64)
         })
+    })
+}
+
+/// Derive one registry-owned or bounded-text fallback role per staged file.
+fn stage_file_content_classifications(
+    nodes: &[Node],
+    text_rows: &[TextIndexRow],
+) -> Vec<FileContentClassification> {
+    let languages = nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::File)
+        .map(|node| (node.path.as_str(), node.language.as_deref()))
+        .collect::<HashMap<_, _>>();
+    text_rows
+        .iter()
+        .map(|row| FileContentClassification {
+            path: row.path.clone(),
+            classification: content_classification(
+                languages.get(row.path.as_str()).copied().flatten(),
+                row.reason == TextIndexSkipReason::Indexed,
+            ),
+        })
+        .collect()
+}
+
+/// Count retained classification paths and stable enum spellings.
+fn staged_file_content_classification_bytes(rows: &[FileContentClassification]) -> u64 {
+    rows.iter().fold(0_u64, |bytes, row| {
+        bytes
+            .saturating_add(row.path.len() as u64)
+            .saturating_add(row.classification.as_str().len() as u64)
     })
 }
 
@@ -2712,10 +2761,12 @@ fn publish_index_batch(
         purpose_import,
         text_paths,
         text,
+        content_classifications,
         symbols,
         graph,
         structural_summaries,
     } = batch;
+    graph.revalidate_document_targets(&root)?;
     let mut publication =
         store.begin_index_publication_from(&contract_fingerprint, base_generation)?;
     publication.set_project_root(&root)?;
@@ -2726,6 +2777,11 @@ fn publish_index_batch(
                 control.check(IndexWorkStage::Publication)?;
                 publication.upsert_scan_node_batch(batch)?;
             }
+            apply_file_content_classification_stage(
+                &mut publication,
+                &content_classifications,
+                control,
+            )?;
             control.check(IndexWorkStage::Publication)?;
             publication.finish_scan_replacement()?;
             nodes
@@ -2743,6 +2799,11 @@ fn publish_index_batch(
                 control.check(IndexWorkStage::Publication)?;
                 publication.mark_paths_absent(batch)?;
             }
+            apply_file_content_classification_stage(
+                &mut publication,
+                &content_classifications,
+                control,
+            )?;
             nodes
         }
     };
@@ -2762,6 +2823,19 @@ fn publish_index_batch(
         structural_summaries: structural_summaries.report,
         symbols: symbols.report,
     })
+}
+
+/// Apply staged file roles inside the parent generation transaction.
+fn apply_file_content_classification_stage(
+    publication: &mut IndexPublicationGuard<'_>,
+    rows: &[FileContentClassification],
+    control: &IndexWorkControl,
+) -> Result<(), CliError> {
+    for batch in rows.chunks(MAX_FILE_CONTENT_CLASSIFICATION_PATHS) {
+        control.check(IndexWorkStage::Publication)?;
+        publication.upsert_file_content_classification_batch(batch)?;
+    }
+    Ok(())
 }
 
 /// Apply staged legacy-purpose rows without overwriting current reviewed intent.
@@ -2886,11 +2960,14 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
         control,
         symbol_limits,
     )?;
+    let scan_policy = RootScanPolicy::discover(&plan.root, &plan.scan_options, control)
+        .map_err(|source| source_inspection_error(&plan.root, source))?;
     let graph = graph_projection::stage_full_repository_graph(
         store,
         &plan.root,
         base_generation,
         &nodes,
+        &scan_policy,
         &staged,
         control,
     )?;
@@ -3143,13 +3220,40 @@ pub(crate) fn ranked_file_nodes_with_reasons(
     )?)
 }
 
-/// Build a next-step recommendation report from indexed metadata.
-pub(crate) fn next_step_report(
+/// Load ranked files with persisted classification and optional explicit selection.
+pub(crate) fn classified_ranked_file_nodes_with_reasons(
+    store: &AtlasStore,
+    query: &str,
+    folder: Option<&str>,
+    file_pattern: Option<&str>,
+    limit: usize,
+    include_content: bool,
+    content_selection: ContentSelection,
+) -> Result<Vec<ClassifiedRankedNode>, CliError> {
+    Ok(load_classified_ranked_file_nodes_with_reasons_service(
+        store,
+        query,
+        folder,
+        file_pattern,
+        limit,
+        include_content,
+        content_selection,
+    )?)
+}
+
+/// Build a next-step report under one optional classified-content selection.
+pub(crate) fn next_step_report_with_selection(
     store: &AtlasStore,
     query: &str,
     limit: Option<usize>,
+    content_selection: ContentSelection,
 ) -> Result<NextStepReport, CliError> {
-    Ok(build_next_report(store, query, limit)?)
+    Ok(build_next_report_with_selection_service(
+        store,
+        query,
+        limit,
+        content_selection,
+    )?)
 }
 
 /// Build the flattened agent-facing next-step payload.
@@ -3157,9 +3261,46 @@ pub(crate) fn next_step_report_payload(report: &NextStepReport) -> Value {
     json!({
         "query": &report.query,
         "folders": render_ranked_node_rows("folders", &report.folders),
-        "files": render_ranked_node_rows("files", &report.files),
+        "files": render_classified_ranked_file_rows(&report.files),
         "suggestions": &report.suggestions,
     })
+}
+
+/// Preserve existing ranked file rows while adding their persisted classification.
+pub(crate) fn render_classified_ranked_file_rows(files: &[ClassifiedRankedNode]) -> Vec<Value> {
+    files
+        .iter()
+        .map(|file| {
+            let mut row = render_ranked_node_rows("files", std::slice::from_ref(&file.ranked))
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| json!({}));
+            if let Some(object) = row.as_object_mut() {
+                object.insert("classification".to_string(), json!(file.classification));
+            }
+            row
+        })
+        .collect()
+}
+
+/// Preserve existing symbol rows while adding their owning file classification.
+pub(crate) fn render_classified_symbol_rows(symbols: &[ClassifiedSymbol]) -> Vec<Value> {
+    symbols
+        .iter()
+        .map(|classified| {
+            let mut row = render_symbol_rows(std::slice::from_ref(&classified.symbol))
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| json!({}));
+            if let Some(object) = row.as_object_mut() {
+                object.insert(
+                    "classification".to_string(),
+                    json!(classified.classification),
+                );
+            }
+            row
+        })
+        .collect()
 }
 
 /// Agent-facing purpose curation queue with bounded health metadata.
@@ -3236,6 +3377,8 @@ pub(crate) struct PurposeCurationItem {
     pub(crate) kind: String,
     /// Detected language for source files.
     pub(crate) language: String,
+    /// Registry-owned content role when this item is a file; folders serialize `null` so TOON rows stay tabular.
+    pub(crate) classification: Option<ContentClassification>,
     /// Current approved or suggested purpose text.
     pub(crate) purpose: String,
     /// Purpose lifecycle status.
@@ -3300,6 +3443,8 @@ pub(crate) struct PurposeReviewReport {
 pub(crate) struct PurposeReviewItem {
     /// Indexed repository-relative path.
     pub(crate) path: String,
+    /// Registry-owned content role when this item is a file; folders serialize `null` so TOON rows stay tabular.
+    pub(crate) classification: Option<ContentClassification>,
     /// Action selected for this path.
     pub(crate) action: PurposeReviewAction,
     /// Current purpose lifecycle status.
@@ -3354,17 +3499,46 @@ pub(crate) fn review_purposes(
     // complete report before the first write so an admission failure cannot
     // partially apply an otherwise valid batch.
     if apply && !has_conditional_fields {
-        let preview = collect_purpose_reviews(store, requests, false)?;
+        let mut preview = collect_purpose_reviews(store, requests, false)?;
+        hydrate_purpose_review_classifications(store, &mut preview)?;
         validate_purpose_review_report(&preview)?;
     }
 
-    let report = if apply && has_conditional_fields {
+    let mut report = if apply && has_conditional_fields {
         apply_conditional_purpose_reviews(store, requests)?
     } else {
         collect_purpose_reviews(store, requests, apply)?
     };
+    hydrate_purpose_review_classifications(store, &mut report)?;
     validate_purpose_review_report(&report)?;
     Ok(report)
+}
+
+/// Add registry-owned file roles without allowing purpose writes to alter them.
+fn hydrate_purpose_review_classifications(
+    store: &AtlasStore,
+    report: &mut PurposeReviewReport,
+) -> Result<(), CliError> {
+    let paths = report
+        .items
+        .iter()
+        .map(|item| item.path.clone())
+        .collect::<Vec<_>>();
+    let file_paths = store
+        .load_nodes_by_paths(&paths)?
+        .into_iter()
+        .filter(|node| node.node.kind == NodeKind::File)
+        .map(|node| node.node.path)
+        .collect::<Vec<_>>();
+    let classifications = store
+        .file_content_classifications_for_paths(&file_paths)?
+        .into_iter()
+        .map(|row| (row.path, row.classification))
+        .collect::<HashMap<_, _>>();
+    for item in &mut report.items {
+        item.classification = classifications.get(&item.path).copied();
+    }
+    Ok(())
 }
 
 /// Enforce shared CLI/MCP purpose-review request limits before database work.
@@ -3490,6 +3664,9 @@ fn purpose_review_item_bytes(item: &PurposeReviewItem) -> Result<usize, CliError
             .checked_add(value.len())
             .ok_or_else(|| purpose_review_report_too_large(usize::MAX))?;
     }
+    total = total
+        .checked_add(item.classification.map_or(0, |value| value.as_str().len()))
+        .ok_or_else(|| purpose_review_report_too_large(usize::MAX))?;
     Ok(total)
 }
 
@@ -3585,6 +3762,7 @@ fn apply_conditional_purpose_reviews(
             debug_assert_eq!(path, result.path);
             PurposeReviewItem {
                 path,
+                classification: None,
                 action: conditional_purpose_review_action(result.state, true),
                 current_status: result
                     .current_purpose
@@ -3689,6 +3867,7 @@ fn review_purpose_request(
         _ => {
             return Ok(PurposeReviewItem {
                 path,
+                classification: None,
                 action: PurposeReviewAction::Error,
                 current_status: String::new(),
                 current_source: String::new(),
@@ -3708,6 +3887,7 @@ fn review_purpose_request(
         let Some(reviewed_purpose) = reviewed_purpose else {
             return Ok(PurposeReviewItem {
                 path,
+                classification: None,
                 action: PurposeReviewAction::Error,
                 current_status: String::new(),
                 current_source: String::new(),
@@ -3724,6 +3904,7 @@ fn review_purpose_request(
         let current = store.load_node_by_path(&path)?;
         return Ok(PurposeReviewItem {
             path,
+            classification: None,
             action: conditional_purpose_review_action(state, apply),
             current_status: current
                 .as_ref()
@@ -3740,6 +3921,7 @@ fn review_purpose_request(
     let Some(indexed) = store.load_node_by_path(&path)? else {
         return Ok(PurposeReviewItem {
             path,
+            classification: None,
             action: PurposeReviewAction::Error,
             current_status: String::new(),
             current_source: String::new(),
@@ -3763,6 +3945,7 @@ fn review_purpose_request(
     }) else {
         return Ok(PurposeReviewItem {
             path,
+            classification: None,
             action: PurposeReviewAction::Error,
             current_status,
             current_source,
@@ -3778,6 +3961,7 @@ fn review_purpose_request(
     {
         return Ok(PurposeReviewItem {
             path,
+            classification: None,
             action: PurposeReviewAction::Error,
             current_status,
             current_source,
@@ -3797,6 +3981,7 @@ fn review_purpose_request(
     };
     Ok(PurposeReviewItem {
         path,
+        classification: None,
         action,
         current_status,
         current_source,
@@ -3857,6 +4042,17 @@ pub(crate) fn purpose_curation_page(
         .map(|finding| finding.path.clone())
         .collect::<Vec<_>>();
     let batch = store.load_purpose_curation_batch(task, &paths)?;
+    let file_paths = batch
+        .items
+        .iter()
+        .filter(|candidate| candidate.node.node.kind == NodeKind::File)
+        .map(|candidate| candidate.node.node.path.clone())
+        .collect::<Vec<_>>();
+    let classifications = store
+        .file_content_classifications_for_paths(&file_paths)?
+        .into_iter()
+        .map(|row| (row.path, row.classification))
+        .collect::<HashMap<_, _>>();
     let project_instance_id = batch.project_instance_id.to_string();
     let active_generation = batch.active_generation.get();
     let task = batch.task.clone();
@@ -3883,6 +4079,7 @@ pub(crate) fn purpose_curation_page(
                 related_path: finding.related_path.clone().unwrap_or_default(),
                 kind: node.node.kind.to_string(),
                 language: node.node.language.clone().unwrap_or_default(),
+                classification: classifications.get(&finding.path).copied(),
                 purpose: node.purpose.purpose.clone().unwrap_or_default(),
                 purpose_status: node.purpose.status.to_string(),
                 purpose_source: node.purpose.source.to_string(),
@@ -4209,6 +4406,8 @@ struct IndexPublicationBatch {
     text_paths: Vec<String>,
     /// Prepared persisted source-text rows and report.
     text: TextIndexRefresh,
+    /// Prepared registry-owned or bounded-text fallback roles.
+    content_classifications: Vec<FileContentClassification>,
     /// Prepared symbol graph, summary, and suggestion mutations.
     symbols: SymbolBuildStage,
     /// Prepared normalized repository graph and canonical resolution-key mutation.
@@ -4354,18 +4553,22 @@ pub(crate) struct WatchChangeSet {
     requires_full_scan: bool,
     /// Relevant native paths from event batches.
     paths: HashSet<PathBuf>,
+    /// Safe repository paths that can invalidate document-target resolution
+    /// even when the target is not itself indexable.
+    document_paths: HashSet<PathBuf>,
 }
 
 impl WatchChangeSet {
     /// Return whether there is work to refresh.
     fn has_changes(&self) -> bool {
-        self.requires_full_scan || !self.paths.is_empty()
+        self.requires_full_scan || !self.paths.is_empty() || !self.document_paths.is_empty()
     }
 
     /// Merge another event batch into this set.
     fn merge(&mut self, other: Self) {
         self.requires_full_scan |= other.requires_full_scan;
         self.paths.extend(other.paths);
+        self.document_paths.extend(other.document_paths);
     }
 }
 
@@ -4431,6 +4634,8 @@ pub(crate) struct SettingsReport {
     pub(crate) database: DatabaseSettingsReport,
     /// Content-free language capability registry identity and derived counts.
     pub(crate) language_registry: LanguageRegistryReport,
+    /// Closed classified-content navigation surface supported by this runtime.
+    pub(crate) classified_navigation: SettingsClassifiedNavigationReport,
     /// Digest of the currently implemented provider-backed relation contract.
     pub(crate) semantic_relation_contract_digest: String,
     /// Versioned accepted relation-family inventory and lifecycle state.
@@ -4439,6 +4644,39 @@ pub(crate) struct SettingsReport {
     pub(crate) search: SettingsSearchReport,
     /// Content-free optional parser-pack lifecycle state.
     pub(crate) optional_parser_pack: OptionalParserSettingsReport,
+}
+
+/// Content-free classified navigation capabilities shared by CLI and MCP settings.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SettingsClassifiedNavigationReport {
+    /// Closed persisted content roles.
+    pub(crate) classifications: [ContentClassification; 5],
+    /// Caller-visible explicit selection values.
+    pub(crate) selections: [ContentSelection; 3],
+    /// Canonical stored document relation.
+    pub(crate) document_relation: &'static str,
+    /// Inbound adapter view over the same stored relation.
+    pub(crate) inbound_document_view: &'static str,
+}
+
+/// Return the closed classified navigation contract without inspecting private data.
+pub(crate) fn classified_navigation_capabilities() -> SettingsClassifiedNavigationReport {
+    SettingsClassifiedNavigationReport {
+        classifications: [
+            ContentClassification::Source,
+            ContentClassification::Documentation,
+            ContentClassification::ConfigurationData,
+            ContentClassification::OtherText,
+            ContentClassification::Opaque,
+        ],
+        selections: [
+            ContentSelection::Source,
+            ContentSelection::Documentation,
+            ContentSelection::Both,
+        ],
+        document_relation: GraphRelationKind::Extended(ExtendedRelationKind::Documents).as_str(),
+        inbound_document_view: "documented_by",
+    }
 }
 
 /// Readiness of one settings capability.
@@ -4689,6 +4927,7 @@ pub(crate) fn build_settings_report(
         telemetry,
         database,
         language_registry: language_registry_report(),
+        classified_navigation: classified_navigation_capabilities(),
         semantic_relation_contract_digest: semantic_resolution_contract_digest(),
         relation_family_inventory: relation_family_inventory_report(),
         search,
@@ -5127,6 +5366,8 @@ pub(crate) struct SymbolParseSuccess {
     pub(crate) path: String,
     /// Extracted symbol graph.
     graph: SymbolGraph,
+    /// Bounded Markdown headings and explicit document candidates from the same parse.
+    markdown_facts: Option<Box<MarkdownFacts>>,
     /// File-level parser kept independent from fact-level parser provenance.
     source_parser: ParserKind,
     /// Observed one-line source summary.
@@ -5597,6 +5838,19 @@ fn symbol_parse_output_bytes(parsed: &SymbolParseSuccess) -> u64 {
                 + relation.context.len() as u64,
         );
     }
+    if let Some(facts) = &parsed.markdown_facts {
+        for heading in &facts.headings {
+            bytes = bytes
+                .saturating_add(heading.text.len() as u64)
+                .saturating_add(heading.slug.len() as u64);
+        }
+        for candidate in &facts.link_candidates {
+            bytes = bytes
+                .saturating_add(candidate.selector.len() as u64)
+                .saturating_add(candidate.label.as_ref().map_or(0, String::len) as u64)
+                .saturating_add(candidate.enclosing_heading.as_ref().map_or(0, String::len) as u64);
+        }
+    }
     bytes
 }
 
@@ -5700,18 +5954,44 @@ fn parse_admitted_symbol_job(
             stage: IndexWorkStage::SymbolParsing,
         });
     }
-    let graph =
-        match extract_symbol_graph_controlled(&job.path, job.language.as_deref(), content, control)
-        {
+    let (graph, markdown_facts) = if job
+        .language
+        .as_deref()
+        .and_then(language_capability)
+        .is_some_and(|capability| capability.symbol_parser == SymbolParserOwner::Markdown)
+    {
+        let facts = match extract_markdown_facts_controlled(content, control) {
+            Ok(facts) => facts,
+            Err(failure) => return SymbolParseOutcome::IndexWork(failure),
+        };
+        let graph = facts.symbol_graph(&job.path, job.language.as_deref());
+        (graph, Some(Box::new(facts)))
+    } else {
+        let graph = match extract_symbol_graph_controlled(
+            &job.path,
+            job.language.as_deref(),
+            content,
+            control,
+        ) {
             Ok(graph) => graph,
             Err(failure) => return SymbolParseOutcome::IndexWork(failure),
         };
+        (graph, None)
+    };
     let source_parser = source_parser.unwrap_or(graph.parser);
-    let structural_summary = graph
-        .symbols
-        .is_empty()
-        .then(|| structural_summary_for_path(&job.path, job.language.as_deref(), content));
-    let structural_summary = structural_summary.flatten();
+    let structural_summary = if let Some(facts) = &markdown_facts {
+        markdown_summary_from_facts(
+            facts,
+            content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count(),
+        )
+    } else if graph.symbols.is_empty() {
+        structural_summary_for_path(&job.path, job.language.as_deref(), content)
+    } else {
+        None
+    };
     let summary_is_structural = structural_summary.is_some();
     let summary = structural_summary
         .unwrap_or_else(|| summarize_symbol_graph(&graph, job.fallback_summary.as_deref()));
@@ -5721,6 +6001,7 @@ fn parse_admitted_symbol_job(
     SymbolParseOutcome::Parsed(SymbolParseSuccess {
         path: job.path.clone(),
         graph,
+        markdown_facts,
         source_parser,
         summary,
         summary_is_structural,
@@ -5766,6 +6047,9 @@ pub(crate) fn summarize_symbol_graph(graph: &SymbolGraph, fallback: Option<&str>
             return fallback.to_string();
         }
         let language = observed_language_label(graph.language.as_deref());
+        if observed_content_noun(graph.language.as_deref()) == "document" {
+            return format!("{language} document with no headings found.");
+        }
         return format!("{language} source file with no declarations found.");
     }
     let language = observed_language_label(graph.language.as_deref());
@@ -5789,11 +6073,29 @@ pub(crate) fn summarize_symbol_graph(graph: &SymbolGraph, fallback: Option<&str>
             imports.join(", ")
         );
     }
+    if observed_content_noun(graph.language.as_deref()) == "document" {
+        return format!(
+            "{language} document with {} {}.",
+            primary_kinds,
+            primary_names.join(", ")
+        );
+    }
     format!(
         "{language} source defining {} {}.",
         primary_kinds,
         primary_names.join(", ")
     )
+}
+
+/// Return the truthful noun for registry-classified source versus documentation.
+fn observed_content_noun(language: Option<&str>) -> &'static str {
+    if content_classification(language, true)
+        == projectatlas_core::language::ContentClassification::Documentation
+    {
+        "document"
+    } else {
+        "source"
+    }
 }
 
 /// Return a readable language label for agent-facing content summaries.
@@ -5824,6 +6126,7 @@ pub(crate) fn primary_symbol_kinds(graph: &SymbolGraph) -> String {
     let mut type_like = 0_usize;
     let mut manifest_like = 0_usize;
     let mut value_like = 0_usize;
+    let mut heading_like = 0_usize;
     for symbol in &graph.symbols {
         match symbol.kind {
             SymbolKind::Function | SymbolKind::Method => function_like += 1,
@@ -5837,6 +6140,7 @@ pub(crate) fn primary_symbol_kinds(graph: &SymbolGraph) -> String {
                 manifest_like += 1;
             }
             SymbolKind::Value => value_like += 1,
+            SymbolKind::Heading => heading_like += 1,
             SymbolKind::Module | SymbolKind::Import | SymbolKind::Unknown => {}
         }
     }
@@ -5845,6 +6149,13 @@ pub(crate) fn primary_symbol_kinds(graph: &SymbolGraph) -> String {
     }
     if value_like > 0 && function_like == 0 && type_like == 0 {
         return value_only_symbol_kind_label(graph, value_like);
+    }
+    if heading_like > 0 && function_like == 0 && type_like == 0 {
+        return if heading_like == 1 {
+            "heading".to_string()
+        } else {
+            "headings".to_string()
+        };
     }
     match (type_like, function_like) {
         (0, 0) => "symbols".to_string(),
@@ -6585,9 +6896,13 @@ pub(crate) fn notify_event_changes(
     let mut changes = WatchChangeSet {
         requires_full_scan: event.need_rescan(),
         paths: HashSet::new(),
+        document_paths: HashSet::new(),
     };
     for path in &event.paths {
         let candidate = absolute_watch_path(root, path);
+        if safe_watch_relative_path(root, &candidate).is_some() {
+            changes.document_paths.insert(candidate.clone());
+        }
         if watch_path_requires_full_scan(root, &candidate) {
             changes.requires_full_scan = true;
             changes.paths.insert(candidate);
@@ -6914,12 +7229,13 @@ pub(crate) fn refresh_index_for_changes_controlled(
     if changes.requires_full_scan || !publication_contract_matches(store, plan)? {
         return refresh_index_controlled(store, plan, symbol_options, control);
     }
-    if changes.paths.len() > MAX_INCREMENTAL_CHANGED_PATHS {
+    let changed_event_path_count = changes.paths.union(&changes.document_paths).count();
+    if changed_event_path_count > MAX_INCREMENTAL_CHANGED_PATHS {
         return Err(IndexWorkFailure::resource_limit(
             IndexWorkStage::RepositoryTraversal,
             IndexWorkResource::Entries,
             MAX_INCREMENTAL_CHANGED_PATHS as u64,
-            changes.paths.len() as u64,
+            changed_event_path_count as u64,
         )
         .into());
     }
@@ -6939,6 +7255,14 @@ pub(crate) fn refresh_index_for_changes_controlled(
     let mut source_bytes = 0_u64;
     let scan_policy = RootScanPolicy::discover(root, &plan.scan_options, control)
         .map_err(|source| source_inspection_error(root, source))?;
+    let mut direct_document_paths = changes
+        .paths
+        .union(&changes.document_paths)
+        .map(|path| normalized_deleted_path(root, path))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<BTreeSet<_>>();
     for path in sorted_watch_paths(&changes.paths) {
         control.check(IndexWorkStage::RepositoryTraversal)?;
         match path.try_exists() {
@@ -7020,34 +7344,37 @@ pub(crate) fn refresh_index_for_changes_controlled(
         return refresh_index_controlled(store, plan, symbol_options, control);
     }
     graph_projection::cleanup_abandoned_repository_graph_staging(store, root, control)?;
-    let direct_graph_paths = nodes
-        .iter()
-        .filter(|node| node.kind == NodeKind::File)
-        .map(|node| node.path.clone())
-        .chain(absent_paths.iter().cloned())
-        .collect::<BTreeSet<_>>();
+    direct_document_paths.extend(
+        nodes
+            .iter()
+            .map(|node| node.path.clone())
+            .chain(absent_paths.iter().cloned()),
+    );
     nodes.retain(|node| {
         existing_nodes
             .get(&node.path)
             .is_none_or(|indexed| !same_indexed_source(node, indexed))
     });
     absent_paths.retain(|path| existing_nodes.contains_key(path));
-    if nodes.is_empty() && absent_paths.is_empty() {
-        revalidate_staged_publication_inputs_controlled(plan, &baseline_nodes, None, control)?;
-        return Ok(empty_index_refresh_report(plan.text_options));
-    }
-    drop(existing_nodes);
-    drop(baseline_by_path);
     let changed_paths = nodes
         .iter()
         .map(|node| node.path.clone())
         .chain(absent_paths.iter().cloned())
         .collect::<HashSet<_>>();
+    direct_document_paths
+        .retain(|path| changed_paths.contains(path) || !baseline_by_path.contains_key(path));
+    if nodes.is_empty() && absent_paths.is_empty() && direct_document_paths.is_empty() {
+        revalidate_staged_publication_inputs_controlled(plan, &baseline_nodes, None, control)?;
+        return Ok(empty_index_refresh_report(plan.text_options));
+    }
+    drop(existing_nodes);
+    drop(baseline_by_path);
     let previous_hashes = indexed_file_hashes_for_paths(store, &changed_paths)?;
     let mut text_paths = changed_paths.iter().cloned().collect::<Vec<_>>();
     text_paths.sort();
     let text =
         stage_text_index_for_changed_paths_controlled(root, &nodes, plan.text_options, control)?;
+    let content_classifications = stage_file_content_classifications(&nodes, &text.rows);
     let protected_purpose_paths = protected_purpose_paths(&nodes, None);
     let target_paths = nodes
         .iter()
@@ -7061,7 +7388,10 @@ pub(crate) fn refresh_index_for_changes_controlled(
         .saturating_add(staged_string_bytes(&absent_paths))
         .saturating_add(staged_node_bytes(&expected_nodes))
         .saturating_add(staged_node_bytes(&nodes))
-        .saturating_add(staged_text_bytes(&text));
+        .saturating_add(staged_text_bytes(&text))
+        .saturating_add(staged_file_content_classification_bytes(
+            &content_classifications,
+        ));
     let symbol_limits = symbol_limits_with_remaining_staging_bytes(retained_before_symbols)?;
     let symbols = stage_symbols_for_nodes_with_limits(
         store,
@@ -7081,7 +7411,8 @@ pub(crate) fn refresh_index_for_changes_controlled(
         root,
         base_generation,
         &expected_nodes,
-        &direct_graph_paths.into_iter().collect::<Vec<_>>(),
+        &direct_document_paths.into_iter().collect::<Vec<_>>(),
+        &scan_policy,
         &symbols,
         control,
     )?;
@@ -7112,6 +7443,7 @@ pub(crate) fn refresh_index_for_changes_controlled(
         purpose_import: None,
         text_paths,
         text,
+        content_classifications,
         symbols,
         graph,
         structural_summaries,
@@ -7793,7 +8125,10 @@ pub(crate) fn purpose_header_candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use projectatlas_core::graph::{GraphRelationKind, RelationResolution, RepositoryNodePath};
+    use projectatlas_core::graph::{
+        DocumentTargetUnresolvedReason, ExtendedRelationKind, GraphRelationKind,
+        RelationResolution, RepositoryNodePath,
+    };
     use projectatlas_db::RepositoryGraphRelationQuery;
     use std::error::Error;
     use std::fmt::Debug;
@@ -7814,6 +8149,92 @@ mod tests {
                 "work_items={work_items}, max_workers={max_workers}"
             );
         }
+    }
+
+    #[test]
+    fn staged_classifications_prefer_registry_then_bounded_text_evidence() {
+        let file = |path: &str, language: Option<&str>| Node {
+            path: path.to_string(),
+            kind: NodeKind::File,
+            parent_path: None,
+            extension: None,
+            language: language.map(str::to_string),
+            size_bytes: Some(1),
+            mtime_ns: Some(1),
+            content_hash: Some("hash".to_string()),
+        };
+        let nodes = vec![
+            file("docs/guide.md", Some("markdown")),
+            file("notes", None),
+            file("blob", None),
+        ];
+        let rows = vec![
+            TextIndexRow {
+                path: "docs/guide.md".to_string(),
+                text: None,
+                reason: TextIndexSkipReason::BinaryOrNonUtf8,
+            },
+            TextIndexRow {
+                path: "notes".to_string(),
+                text: Some(IndexedFileText {
+                    path: "notes".to_string(),
+                    content_hash: Some("hash".to_string()),
+                    byte_count: 1,
+                    line_count: 1,
+                    content: "x".to_string(),
+                }),
+                reason: TextIndexSkipReason::Indexed,
+            },
+            TextIndexRow {
+                path: "blob".to_string(),
+                text: None,
+                reason: TextIndexSkipReason::BinaryOrNonUtf8,
+            },
+        ];
+
+        assert_eq!(
+            stage_file_content_classifications(&nodes, &rows),
+            vec![
+                FileContentClassification {
+                    path: "docs/guide.md".to_string(),
+                    classification:
+                        projectatlas_core::language::ContentClassification::Documentation,
+                },
+                FileContentClassification {
+                    path: "notes".to_string(),
+                    classification: projectatlas_core::language::ContentClassification::OtherText,
+                },
+                FileContentClassification {
+                    path: "blob".to_string(),
+                    classification: projectatlas_core::language::ContentClassification::Opaque,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn classified_navigation_capability_is_closed_and_directional() {
+        let report = classified_navigation_capabilities();
+        assert_eq!(
+            report.classifications,
+            [
+                ContentClassification::Source,
+                ContentClassification::Documentation,
+                ContentClassification::ConfigurationData,
+                ContentClassification::OtherText,
+                ContentClassification::Opaque,
+            ]
+        );
+        assert_eq!(
+            report.selections,
+            [
+                ContentSelection::Source,
+                ContentSelection::Documentation,
+                ContentSelection::Both,
+            ]
+        );
+        assert_eq!(report.document_relation, "extended:documents");
+        assert_eq!(report.inbound_document_view, "documented_by");
     }
 
     #[test]
@@ -8611,6 +9032,51 @@ mod tests {
         if report.symbols == 0 || report.relations == 0 {
             return Err(io::Error::other("bounded symbol build omitted parser output").into());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn markdown_parse_budget_counts_enclosing_heading_identity() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("guide.md");
+        let content = "# Guide\n\n[target](target.md)\n";
+        fs::write(&path, content)?;
+        let SymbolParseOutcome::Parsed(mut parsed) = parse_symbol_job(
+            &SymbolParseJob {
+                path: "guide.md".to_string(),
+                native_path: path,
+                expected_content_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
+                language: Some("markdown".to_string()),
+                fallback_summary: None,
+                purpose_needs_suggestion: false,
+            },
+            &SymbolBuildOptions::new(1_024, Some(1), None),
+            Instant::now(),
+        ) else {
+            return Err(io::Error::other("Markdown fixture did not parse").into());
+        };
+        let enclosing_heading_bytes = parsed
+            .markdown_facts
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Markdown facts missing"))?
+            .link_candidates
+            .iter()
+            .map(|candidate| candidate.enclosing_heading.as_ref().map_or(0, String::len) as u64)
+            .sum::<u64>();
+        let retained_with_heading_owners = symbol_parse_output_bytes(&parsed);
+        for candidate in &mut parsed
+            .markdown_facts
+            .as_mut()
+            .ok_or_else(|| io::Error::other("Markdown facts missing"))?
+            .link_candidates
+        {
+            candidate.enclosing_heading = None;
+        }
+        require_eq(
+            &retained_with_heading_owners.saturating_sub(symbol_parse_output_bytes(&parsed)),
+            &enclosing_heading_bytes,
+            "parser output enclosing-heading bytes",
+        )?;
         Ok(())
     }
 
@@ -9879,6 +10345,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             purpose_import: _,
             text_paths,
             text,
+            content_classifications,
             symbols: _,
             graph: _,
             structural_summaries: _,
@@ -9893,6 +10360,11 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         for batch in nodes.chunks(PUBLICATION_NODE_BATCH_SIZE) {
             staged.upsert_scan_node_batch(batch)?;
         }
+        apply_file_content_classification_stage(
+            &mut staged,
+            &content_classifications,
+            &preparation_control,
+        )?;
         staged.finish_scan_replacement()?;
         let late_cancel = IndexWorkControl::new(IndexCancellation::new(), None);
         late_cancel.cancel();
@@ -10120,6 +10592,85 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
     }
 
     #[test]
+    fn nonindexed_document_target_transitions_refresh_the_inbound_closure()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let docs = temp.path().join("docs");
+        fs::create_dir_all(&docs)?;
+        fs::write(temp.path().join(".gitignore"), "!docs/target.md\n")?;
+        fs::write(docs.join("guide.md"), "# Guide\n\n[target](target.md)\n")?;
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1_024))?;
+        let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut store = open_atlas_store_for_project(
+            &temp.path().join(".projectatlas/projectatlas.db"),
+            &plan.root,
+        )?;
+        refresh_index(&mut store, &plan, &symbol_options)?;
+        let documents = GraphRelationKind::Extended(ExtendedRelationKind::Documents);
+        let reason = |store: &AtlasStore| -> Result<_, Box<dyn Error>> {
+            let page = store.repository_graph_relation_rows(
+                RepositoryGraphRelationQuery::Family {
+                    relation: documents,
+                },
+                8,
+                None,
+            )?;
+            require_eq(&page.rows.len(), &1, "document relation count")?;
+            Ok(page.rows[0].document_unresolved_reason)
+        };
+        require_eq(
+            &reason(&store)?,
+            &Some(DocumentTargetUnresolvedReason::Missing),
+            "initial missing document target",
+        )?;
+
+        let outside = tempfile::tempdir()?;
+        let outside_target = outside.path().join("target.md");
+        fs::write(&outside_target, "outside\n")?;
+        let target = docs.join("target.md");
+        if !create_document_target_symlink(&outside_target, &target)? {
+            return Ok(());
+        }
+        let mut changes = WatchChangeSet::default();
+        changes.document_paths.insert(target.clone());
+        refresh_index_for_changes(&mut store, &plan, &changes, &symbol_options)?;
+        require_eq(
+            &reason(&store)?,
+            &Some(DocumentTargetUnresolvedReason::OutsideRoot),
+            "missing-to-outside-symlink document target",
+        )?;
+
+        fs::remove_file(&target)?;
+        refresh_index_for_changes(&mut store, &plan, &changes, &symbol_options)?;
+        require_eq(
+            &reason(&store)?,
+            &Some(DocumentTargetUnresolvedReason::Missing),
+            "outside-symlink-to-missing document target",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn create_document_target_symlink(target: &Path, link: &Path) -> io::Result<bool> {
+        std::os::unix::fs::symlink(target, link)?;
+        Ok(true)
+    }
+
+    #[cfg(windows)]
+    fn create_document_target_symlink(target: &Path, link: &Path) -> io::Result<bool> {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => Ok(true),
+            Err(source)
+                if source.kind() == io::ErrorKind::PermissionDenied
+                    || source.raw_os_error() == Some(1314) =>
+            {
+                Ok(false)
+            }
+            Err(source) => Err(source),
+        }
+    }
+
+    #[test]
     fn directory_only_deletion_re_resolves_external_inbound_callers() -> Result<(), Box<dyn Error>>
     {
         let temp = tempfile::tempdir()?;
@@ -10273,6 +10824,14 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         require_eq(&page.actionable, &true, "actionable queue")?;
         require_eq(&page.items.len(), &2, "queue item count")?;
         require_eq(&page.task, &task.to_string(), "queue task")?;
+        require_eq(
+            &page
+                .items
+                .iter()
+                .all(|item| item.classification == Some(ContentClassification::Opaque)),
+            &true,
+            "queue file classifications",
+        )?;
         let requests = page
             .items
             .iter()
@@ -10358,6 +10917,14 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         let applied = review_purposes(&store, &requests, true)?;
         require_eq(&applied.changed, &2, "conditional batch changed count")?;
         require_eq(&applied.conflicts, &0, "conditional batch conflicts")?;
+        require_eq(
+            &applied
+                .items
+                .iter()
+                .all(|item| item.classification == Some(ContentClassification::Opaque)),
+            &true,
+            "purpose review classifications",
+        )?;
         require_eq(
             &applied
                 .items
