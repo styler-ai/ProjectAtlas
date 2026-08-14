@@ -81,6 +81,33 @@ ProjectAtlas SHALL discover registered worktrees from structural Git metadata an
 - **WHEN** an advertised worktree, source, graph, purpose, task, lifecycle, seed, or telemetry operation is available through both adapters
 - **THEN** CLI and MCP return equivalent exact-root selection, generation, completeness, bounds, failure classification, and next-action semantics
 
+#### Scenario: Shared concurrent caller uses explicit per-call roots
+- **WHEN** one host interleaves concurrent MCP operations for sibling worktrees
+- **THEN** each call supplies or captures its exact `project_path`, already-running calls and tasks retain that immutable context, and a session-default change cannot redirect them
+
+### Requirement: v0.4.4 upgrades without worktree ceremony
+ProjectAtlas SHALL upgrade supported v0.4.4 installations without requiring users to recreate projects, databases, branches, worktrees, host configurations, or ProjectAtlas state, and SHALL preserve ordinary single-root behavior when no worktrees are used.
+
+#### Scenario: Ordinary single checkout upgrades in place
+- **WHEN** a user installs v0.4.5 over v0.4.4 for a valid single checkout
+- **THEN** the installer repairs runtime, plugin, version-matched skill, MCP registry, and generated configs; the existing exact-root database is preflighted and migrated through the supported verified path; and CLI, MCP, TUI, init, scan, purpose, token, task, map, and graph behavior continues without manager or seed setup
+
+#### Scenario: Existing linked worktrees upgrade in place
+- **WHEN** a v0.4.4 repository has a primary checkout and linked worktrees with valid separate active databases
+- **THEN** v0.4.5 discovers and registers their structural identities automatically, keeps every database exact-root and independently writable, imports compatible continuity state read-only, and requires no worktree recreation, relocation, database deletion, or manual server switching
+
+#### Scenario: Existing active atlas is never replaced by a seed
+- **WHEN** upgrade finds a valid local active database and a compatible remote seed is also available
+- **THEN** the local database remains authoritative, migration completes before seed consideration, and hydration is skipped for that root
+
+#### Scenario: Upgrade works offline or without Git execution
+- **WHEN** an existing project upgrades while GitHub/network or the Git executable is unavailable
+- **THEN** the installed runtime preserves full local behavior, skips remote seed optimization, and marks only remote/Git lifecycle evidence typed unavailable
+
+#### Scenario: Interrupted or blocked upgrade preserves last-valid state
+- **WHEN** migration is interrupted or encounters an owned older process, active WAL uncertainty, incompatible/newer schema, corruption, or filesystem uncertainty
+- **THEN** ProjectAtlas leaves the last-valid database and backups intact, retries idempotently when safe, returns bounded restart/recovery guidance, and never performs partial cutover or silent downgrade
+
 ### Requirement: Manager TUI is a complete repository/worktree overview
 ProjectAtlas SHALL let the root token TUI aggregate repository lifetime and per-worktree state while scoping every source/graph map to one visibly labeled selected worktree.
 

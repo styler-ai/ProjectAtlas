@@ -61,8 +61,8 @@ ProjectAtlas SHALL preserve the current conservative accounting layers, estimato
 - **WHEN** the token TUI renders repository-lifetime and selected-worktree values
 - **THEN** labels make both scopes unambiguous, version identity and selected root/generation are exact, repository/worktree overview remains complete within declared bounds, and narrow layouts do not silently substitute or blend one scope or graph for another
 
-### Requirement: Existing telemetry migrates without loss or double counting
-ProjectAtlas SHALL import compatible existing telemetry through consistent snapshots, source fingerprints, component reconciliation, atomic receipts, and preserved originals.
+### Requirement: Existing telemetry migration preserves truth without double counting
+ProjectAtlas SHALL import compatible existing telemetry through consistent snapshots, source fingerprints, component reconciliation, atomic receipts, preserved originals, and explicit completeness. It SHALL NOT claim an exact combined lifetime total when aggregate-only predecessor histories may overlap.
 
 #### Scenario: Compatible worktree history imports
 - **WHEN** an existing worktree database contains retained events and exact aggregates
@@ -78,7 +78,7 @@ ProjectAtlas SHALL import compatible existing telemetry through consistent snaps
 
 #### Scenario: Aggregate-only predecessors may overlap
 - **WHEN** copied or partially overlapping aggregate-only databases cannot prove disjoint authority epochs or instance ownership
-- **THEN** ProjectAtlas selects one explicit canonical source or refuses typed and never silently sums the uncertain totals
+- **THEN** ProjectAtlas preserves every source, selects one explicit canonical source only under deterministic policy or user authorization, otherwise reports typed incomplete/lower-bound history, never silently sums the uncertain totals, and does not block source navigation or the product upgrade
 
 #### Scenario: Incompatible source is preserved
 - **WHEN** a database is malformed, corrupt, wrong-root, or newer than the installed migration contract

@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: One immutable portable main seed
-ProjectAtlas SHALL let CI publish one content-addressed SQLite seed for a clean complete main atlas, SHALL keep that seed physically separate from every ignored writable active database, and SHALL never open the seed writable.
+ProjectAtlas SHALL let CI publish one content-addressed SQLite seed and digest-bound manifest as exact-version GitHub release assets for a clean complete main atlas, SHALL keep that seed physically separate from every ignored writable active database, and SHALL never open the seed writable.
 
 #### Scenario: CI publishes a clean main generation
 - **WHEN** a clean main checkout has a complete verified atlas generation and all compatible purpose promotions are resolved
@@ -19,6 +19,10 @@ ProjectAtlas SHALL let CI publish one content-addressed SQLite seed for a clean 
 - **WHEN** local repository continuity contains lifetime token telemetry or session detail
 - **THEN** sealing neither reads it as seed input nor writes it to the seed, manifest, purpose delta, or Git-hosted artifact
 
+#### Scenario: Local seed and active state remain ignored
+- **WHEN** ProjectAtlas downloads, stages, hydrates, or caches a seed in a checkout
+- **THEN** root ignore policy excludes active databases and sidecars, continuity, seed caches, staging paths, locks, generated host configs, and private runtime state while a structural scan exclusion prevents them from entering the source fingerprint
+
 ### Requirement: SQLite-safe deterministic sealing
 ProjectAtlas SHALL seal only from a quiescent complete publication using an engine-supported consistent snapshot, explicit portable normalization, and fail-closed validation before immutable publication.
 
@@ -34,9 +38,17 @@ ProjectAtlas SHALL seal only from a quiescent complete publication using an engi
 - **WHEN** seed material or its manifest is source-hosted
 - **THEN** ProjectAtlas structurally excludes all publication material from indexed input and binds the seed to a deterministic included-source tree fingerprint or an external exact source-commit artifact so neither commit nor digest must contain itself
 
-#### Scenario: Artifact transport changes
-- **WHEN** the reviewed policy selects normal Git, Git LFS, or a GitHub release/cache asset
-- **THEN** the committed manifest and verifier preserve the same immutable digest, attestation, compatibility, retention, size, offline, and rollback contract without changing source/graph semantics
+#### Scenario: RC seed uses its exact release tag
+- **WHEN** CI publishes an accepted `vMAJOR.MINOR.PATCH-rcN` release
+- **THEN** the release contains the candidate's seed and manifest under deterministic versioned names, their checksums enter the release inventory, hydration addresses that exact tag, and GitHub Latest remains unchanged
+
+#### Scenario: Stable seed uses its exact release tag
+- **WHEN** CI publishes final `vMAJOR.MINOR.PATCH`
+- **THEN** it regenerates the seed from final merged main, publishes it with that exact stable tag, and the release verifier proves the stable release and seed are current
+
+#### Scenario: Seed payloads stay out of Git history
+- **WHEN** release seed assets and a bounded local cache exist
+- **THEN** neither payload nor downloaded manifest is committed through normal Git or Git LFS, and source-controlled purpose promotions remain the only portable authored state
 
 ### Requirement: Automatic exact-root hydration
 ProjectAtlas SHALL automatically discover the nearest compatible seed for a new worktree or teammate clone, verify it before use, activate only an exact-root private copy, and incrementally refresh that copy to the current selected source.
@@ -75,6 +87,10 @@ ProjectAtlas SHALL keep ordinary local initialization and navigation fully funct
 #### Scenario: Single checkout has no manager or seed
 - **WHEN** an ordinary Git checkout is used without a common-manager control plane or seed publication
 - **THEN** existing zero-ceremony CLI, MCP, TUI, init, scan, purpose, token, and graph behavior remains unchanged
+
+#### Scenario: Existing valid atlas wins over seed hydration
+- **WHEN** an upgraded checkout already has a compatible exact-root active database
+- **THEN** ProjectAtlas preflights and migrates that local authority as required and does not download or activate a seed over it
 
 ### Requirement: Main CI rebuilds final relationships instead of merging branch atlases
 ProjectAtlas SHALL update the main baseline from final merged source and compatible semantic purpose promotions, reuse only facts keyed by exact content identity, recompute every affected cross-file relation, and seal a new immutable seed only after the final main atlas is complete.

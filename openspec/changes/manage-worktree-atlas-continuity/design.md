@@ -7,7 +7,7 @@ ProjectAtlas currently treats each selected project/worktree root and its `.proj
 
 It is also incomplete for team bootstrap. A clean main atlas is expensive but safely reusable; contributor SQLite files are not mergeable. New worktrees and teammate clones need an immutable portable baseline, pull requests need a semantic purpose-promotion format, and one long-lived MCP server must route simultaneous sibling agents without a mutable default leaking roots or generations.
 
-Existing databases use SQLite and may be live in WAL mode, older, newer, malformed, relocated, or bound to a bare/common manager that is not valid source. Several CLI and MCP processes can operate concurrently. Git and network access are optional for local ProjectAtlas operation. The v0.4.3 release must finish before implementation begins.
+Existing v0.4.4 databases use SQLite and may be live in WAL mode, older, newer, malformed, relocated, or bound to a bare/common manager that is not valid source. Several CLI and MCP processes can operate concurrently. Git and network access are optional for local ProjectAtlas operation. v0.4.5-rc1 must prove both fresh hydration and a zero-ceremony upgrade from these live shapes.
 
 ## Goals / Non-Goals
 
@@ -33,7 +33,7 @@ Existing databases use SQLite and may be live in WAL mode, older, newer, malform
 - Network tokenization or billing-token claims.
 - Requiring a seed, manager, Git executable, GitHub, or network for local ProjectAtlas use.
 - Special stacked-PR orchestration; stacked and independent pull requests use the same final-main promotion checks.
-- Implementing this v0.5 design during the v0.4.x bugfix line.
+- Replacing a valid existing local atlas with a downloaded seed during upgrade.
 
 ## Decisions
 
@@ -59,7 +59,9 @@ Before publication CI verifies application/schema identity, allowed tables/colum
 
 Seed payload and manifest paths are structurally excluded from indexing and the included-source fingerprint. The binding uses either a deterministic included-source tree fingerprint or an external exact source-commit artifact, so the seed or publication commit never has to hash or name itself. Exact bytes are immutable and content-addressed; logical row/manfest equivalence is deterministic. Byte-for-byte reproducibility is required only if the reviewed build/toolchain policy claims it.
 
-Normal Git, Git LFS, and a GitHub release/cache asset referenced by the committed manifest are transport alternatives, not data-model alternatives. The selected policy must set size/history, retention, trust/attestation, offline cache, rollback, and garbage-collection limits. Normal Git is rejected unless representative seed size and update frequency prove repository history remains acceptable.
+The transport is one seed payload and digest-bound manifest attached to the exact stable or RC GitHub release tag. Runtime version identity selects that exact tag; RC hydration never uses `/releases/latest`, so publishing a candidate cannot replace or reinterpret the stable baseline. The release checksum inventory covers both assets. A bounded ignored local cache supports repeat/offline use after first download. Payloads are not committed through normal Git or Git LFS, avoiding binary history growth and self-reference.
+
+The root `.gitignore` continues to exclude every active database and sidecar plus local continuity, downloaded seed cache, hydration staging, locks, generated host configs, and other private runtime state. The source fingerprint excludes those paths structurally as a second defense. Only deterministic purpose-promotion records live in a narrow explicitly documented source-controlled path.
 
 ### 3. Hydrate a private exact-root copy and refresh both sides of the diff
 
@@ -81,10 +83,11 @@ Alternative rejected: hash the absolute root path as repository identity. Reloca
 
 ### 5. Keep local acceptance durable and promote purposes semantically through Git
 
-A locally reviewed purpose record SHALL use typed entity kind, normalized repository-relative path, purpose text, and approval metadata/revision. Once accepted, its path responsibility survives source/summary/symbol/graph changes; current path existence and derived freshness remain worktree-local. A worktree projection SHALL:
+A locally reviewed purpose record SHALL use typed entity kind, normalized repository-relative path, purpose text, approval metadata/revision, and its review provenance. Once accepted inside that worktree, its path responsibility survives ordinary source/summary/symbol/graph changes; current path existence and derived freshness remain worktree-local. Cross-worktree or seed projection is authoritative only when exact reviewed content identity still matches or that target worktree records an explicit compatible approval revision. A worktree projection SHALL:
 
-- return accepted when the normalized path exists, with source freshness reported separately;
+- return accepted when the normalized path and exact reviewed content identity match, or when the target worktree owns an explicit compatible approval revision, with source freshness reported separately;
 - keep absent paths dormant without deleting repository history;
+- retain a changed-content inherited purpose as typed historical/review-needed context instead of silently applying stable-main responsibility to a deliberate branch repurpose;
 - refuse automatic rename transfer unless exact bounded identity evidence is unambiguous;
 - reuse an approved folder purpose when the folder path exists, while keeping branch-local existence/freshness separate.
 
@@ -102,7 +105,7 @@ The active worktree database is not a second telemetry writer after cutover. Thi
 
 ### 7. Use one concurrent control plane with request-captured selection
 
-The CLI SHALL expose a bounded worktree lifecycle command group. Setting a root SHALL establish one repository control root; when the supplied path is an exact worktree, ProjectAtlas SHALL preserve current behavior by resolving its repository authority and selecting that checkout. From the control root, ProjectAtlas SHALL discover worktrees from structural Git common-directory/worktree metadata and its continuity registry rather than directory-name conventions. Users and agents MAY explicitly register or remove additional exact worktree paths for unusual or outside-root layouts, subject to reciprocal identity validation; ProjectAtlas SHALL not recursively treat arbitrary descendant folders as worktrees. One long-lived MCP server SHALL concurrently route every registered worktree. An explicit per-call project/worktree selector is authoritative; a path nested anywhere inside a worktree, caller cwd, or generated config auto-binds that containing exact root, and a manager with one unambiguous active worktree may auto-select it. A manager with several worktrees lists them all automatically but requires explicit or persisted validated selection for source/graph work when the caller supplies no containing path. Resolution produces an immutable request context containing exact repository/worktree identity, normalized root, active database, continuity authority, generation, and selection provenance. No process-global or prior-call mutable default may redirect a simultaneous request.
+The CLI SHALL expose a bounded worktree lifecycle command group. Setting a root SHALL establish one repository control root; when the supplied path is an exact worktree, ProjectAtlas SHALL preserve current behavior by resolving its repository authority and selecting that checkout. From the control root, ProjectAtlas SHALL discover worktrees from structural Git common-directory/worktree metadata and its continuity registry rather than directory-name conventions. Users and agents MAY explicitly register or remove additional exact worktree paths for unusual or outside-root layouts, subject to reciprocal identity validation; ProjectAtlas SHALL not recursively treat arbitrary descendant folders as worktrees. One long-lived MCP server SHALL concurrently route every registered worktree. An explicit per-call `project_path` is authoritative and required for shared concurrent callers. A worktree-generated config may establish one immutable startup default for its own single-client stdio server. A deliberate session-default change is serialized and affects only requests captured after the change; already-running calls and tasks retain their immutable context. A path nested anywhere inside a worktree or a manager with one unambiguous active worktree may auto-bind only at request capture. A manager with several worktrees lists them all automatically but requires explicit selection for source/graph work. Resolution produces an immutable request context containing exact repository/worktree identity, normalized root, active database, continuity authority, generation, and selection provenance. No prior call or mutable process default may redirect a simultaneous request.
 
 CLI and MCP SHALL keep parity for advertised worktree, source, graph, purpose, task, lifecycle, seed, and telemetry behavior: exact selection/generation, bounds, completeness, errors, and next actions. A bare/common manager exposes repository-level operations but source/graph operations require one selected worktree and never guess a sibling.
 
@@ -135,11 +138,19 @@ A crash before the prepared destination commit leaves the unfenced source author
 
 Repeating an import returns the existing receipt. Newer, malformed, mismatched, corrupt, or unprovable state is preserved and reported typed. Once continuity accepts a new authoritative write, rollback is a forward reconciliation into a new epoch; it never reopens the old source as authority or hides newer writes.
 
+### 10. Upgrade v0.4.4 in place before using seed optimization
+
+The installer SHALL update the runtime, plugin, version-matched skill, generated host configs, and MCP registry through the existing verified handoff. Opening an existing project preflights its released v0.4.4 database before any write. A valid exact-root atlas remains the active authority and is upgraded through the supported staged migration/backup path; remote seed discovery is skipped for that root. Seed hydration is considered only when no valid active atlas exists.
+
+An ordinary single checkout keeps its current zero-ceremony root, commands, config, database path, purposes, telemetry, CLI/MCP/TUI behavior, and offline/non-Git fallbacks. A Git common directory with existing linked worktrees is discovered without requiring users to recreate or relocate them. Each worktree database remains independently writable and is imported read-only into repository continuity only after identity and snapshot proof. No valid source database is deleted or fenced before a verified destination exists.
+
+Event-level telemetry with stable identity is deduplicated exactly. Ambiguous copied aggregate-only history is preserved and reported with typed incomplete/lower-bound or explicitly selected canonical authority; it never blocks source navigation or the product upgrade and is never silently summed. Interrupted migration retries idempotently from receipts and backups. A running v0.4.4 process, active WAL, incompatible/newer schema, or uncertain filesystem yields bounded restart/recovery guidance without partial cutover. Rollback never downgrades a migrated database in place; preserved pre-upgrade backups remain available for explicit recovery.
+
 ## Risks / Trade-offs
 
 - [Git common directory is movable or externally deleted] -> Persist opaque identity, validate every open, support explicit relocation recovery, and never infer continuity from path alone.
 - [A published seed is corrupt, tampered, incompatible, or leaks private state] -> Use an allowlisted portable profile, digest/attestation, integrity/FK/schema checks, excluded-state assertions, real read-only smoke, quarantine, and local-build fallback before activation.
-- [A source-hosted binary grows Git history] -> Decide Git versus LFS versus external GitHub asset from representative size/update/retention measurements and keep transport independent of the manifest contract.
+- [Seed assets grow release storage or local caches] -> Publish one digest-bound exact-tag GitHub asset pair, measure candidate size, enforce retention/cache bounds, and keep payloads out of Git history.
 - [Hydration reports a main graph for diverged source] -> Diff additions, changes, and removals; rebuild the exact affected closure; publish atomically; label every response with exact selected root/generation.
 - [Concurrent MCP calls bleed a mutable default] -> Capture validated selection per request, prefer explicit project/worktree selectors, scope cwd/config defaults to request/session setup, and test simultaneous sibling reads/writes/tasks/telemetry.
 - [A pull request forges or races purpose approval] -> Require deterministic identity plus verifiable provenance and main policy admission; preserve incompatible promotions as typed conflict rather than accepting last writer.
@@ -154,22 +165,22 @@ Repeating an import returns the existing receipt. Newer, malformed, mismatched, 
 
 ## Migration Plan
 
-1. Land schema/types plus read-only three-mode discovery/status and request-captured routing behind no behavior cutover.
+1. Land schema/types plus read-only three-mode discovery/status, released-v0.4.4 preflight, and request-captured routing behind no behavior cutover.
 2. Prove local and portable repository identity, path containment, database/artifact location, query plans, concurrent selection isolation, backup, and failure classification.
-3. Define the deterministic purpose-promotion format/trust policy and seed manifest/transport/portable allowlist without enabling publication.
-4. Add idempotent import and dry-run reconciliation for purpose and telemetry state, including historical/unbound purposes and ambiguity-safe aggregate handling; preserve every source.
-5. Enable shared local purpose writes/reads, delta export, and final-main promotion admission, then verify init/scan/watch/CLI/MCP compatibility.
-6. Prove process quiescence and supported-predecessor write fencing, then cut over shared local authority epochs; otherwise remain read-only and report the blocker.
-7. Build the SQLite-safe sealer, verify a clean complete main seed read-only, then add automatic staged hydration with compatible-seed and ordinary-local fallbacks.
-8. Enable repository telemetry writes and reports after contiguous-sequence deduplication, detail eviction, instance sealing, aggregate reconciliation, and seed-exclusion proof pass.
-9. Add complete manager-root TUI overview, bounded retirement manifests, and user-facing lifecycle guidance without archiving rebuildable atlases.
-10. Run real single-root, multi-worktree, clone/team, non-Git/no-Git-PATH, offline, purpose-promotion, seed, concurrency, crash, active-WAL, corrupt/newer-schema, old-writer, migration, CLI/MCP/TUI, installer/upgrade, representative-scale, and release-gate proof on Windows, Linux, and macOS.
-11. Recover after cutover by forward reconciliation into a new authority epoch; never reopen an older source as authority or delete preserved backups.
+3. Prove a zero-ceremony v0.4.4 single-root and linked-worktree upgrade with preserved active databases, purposes, telemetry truth/completeness, plugin/skill/config repair, offline operation, and idempotent interrupted recovery.
+4. Define the deterministic purpose-promotion format/trust policy and exact-tag GitHub release seed manifest/portable allowlist without enabling publication.
+5. Add idempotent import and dry-run reconciliation for purpose and telemetry state, including historical/unbound purposes and ambiguity-safe aggregate handling; preserve every source.
+6. Enable shared local purpose writes/reads, delta export, and final-main promotion admission, then verify init/scan/watch/CLI/MCP compatibility.
+7. Prove process quiescence and supported-predecessor write fencing, then cut over shared local authority epochs; otherwise remain read-only and report the blocker.
+8. Build the SQLite-safe sealer, verify a clean complete main seed read-only, publish it with the exact release tag, then add automatic staged hydration with compatible-seed and ordinary-local fallbacks.
+9. Enable repository telemetry writes and reports after contiguous-sequence deduplication, detail eviction, instance sealing, aggregate reconciliation, and seed-exclusion proof pass.
+10. Add complete manager-root TUI overview, bounded retirement manifests, and user-facing lifecycle guidance without archiving rebuildable atlases.
+11. Run real single-root, multi-worktree, clone/team, non-Git/no-Git-PATH, offline, purpose-promotion, seed, concurrency, crash, active-WAL, corrupt/newer-schema, old-writer, migration, CLI/MCP/TUI, installer/upgrade, representative-scale, and release-gate proof on Windows, Linux, and macOS.
+12. Recover after cutover by forward reconciliation into a new authority epoch; never reopen an older source as authority or delete preserved backups.
 
 ## Open Questions
 
 - Confirm the final product-owned continuity directory name inside a Git common directory against Git tooling, backup, permissions, and repository-move behavior.
-- Select normal Git, Git LFS, or GitHub release/cache seed transport and define size/history, retention, attestation, offline cache, rollback, and garbage-collection limits.
 - Define the portable repository identifier and deterministic purpose-delta encoding/provenance admission policy without coupling team artifacts to clone-local identity.
 - Decide whether MCP lifecycle/seed status fits cleanly as an extension of the existing root/admin schema or warrants one replacement-free top-level tool while preserving CLI/MCP parity.
 - Establish measured raw-detail retention, active-instance/closed-range, busy timeout, checkpoint, retirement-manifest, and migration batch limits from representative many-worktree/high-event profiles.

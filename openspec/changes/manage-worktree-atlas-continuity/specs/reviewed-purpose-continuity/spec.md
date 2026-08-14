@@ -15,12 +15,16 @@ ProjectAtlas SHALL store agent-reviewed purpose text and approval metadata once 
 ProjectAtlas SHALL keep an accepted purpose as durable authored responsibility for its logical repository and normalized path; source, summary, symbol, graph, scan, and watcher changes SHALL NOT demote it, while worktree-local path existence and source freshness remain separate facts.
 
 #### Scenario: Identical file inherits approval
-- **WHEN** two local worktrees share continuity authority and contain the same normalized accepted file path
+- **WHEN** two local worktrees share continuity authority and contain the same normalized accepted file path with the exact reviewed content identity
 - **THEN** both report the same approved agent purpose without recreating it
 
 #### Scenario: Source changes after acceptance
-- **WHEN** a sibling branch changes source, summary, symbols, graph facts, or content identity at an accepted path
-- **THEN** ProjectAtlas retains the accepted purpose and separately reports derived freshness or an explicit repurposing review request
+- **WHEN** the worktree that owns an accepted approval later changes source, summary, symbols, or graph facts at that path
+- **THEN** ProjectAtlas retains its accepted path responsibility and separately reports derived freshness or an explicit repurposing review request
+
+#### Scenario: Changed sibling content does not inherit stable approval silently
+- **WHEN** a sibling worktree or hydrated seed copy has different content at a stable-main approved path and no explicit compatible local approval revision
+- **THEN** ProjectAtlas preserves the inherited purpose only as typed historical or review-needed context and does not expose it as an approved purpose for the changed sibling content
 
 #### Scenario: Branch-only file does not leak
 - **WHEN** an approved path exists only in one branch
