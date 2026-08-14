@@ -759,21 +759,16 @@ jobs:
             fi
             echo "Release $RELEASE_VERSION already exists; continuing asset repair publish."
           fi
-          if [[ "$EXPECTED_RELEASE_PRERELEASE" == "true" || "$release_exists" == "true" ]]; then
-            if [[ -z "$latest_before" ]]; then
-              echo "Cannot publish an RC or repair a release without observing the current Latest stable release" >&2
-              exit 1
-            fi
-            latest_is_prerelease="$({
-              python3 .github/scripts/release_version.py \
-                "$latest_before" \
-                --source release
-            } | sed -n 's/^is_prerelease=//p')"
-            if [[ "$latest_is_prerelease" != "false" ]]; then
-              echo "GitHub Latest is not a canonical stable ProjectAtlas tag: $latest_before" >&2
-              exit 1
-            fi
+          latest_policy=(--resolve-expected-latest --latest-before "$latest_before")
+          if [[ "$release_exists" == "true" ]]; then
+            latest_policy+=(--release-exists)
           fi
+          expected_latest="$({
+            python3 .github/scripts/release_version.py \
+              "$RELEASE_VERSION" \
+              --source release \
+              "${latest_policy[@]}"
+          } | sed -n 's/^expected_latest=//p')"
           if git rev-parse "$RELEASE_VERSION^{commit}" >/dev/null 2>&1; then
             tag_commit="$(git rev-parse "$RELEASE_VERSION^{commit}")"
             head_commit="$(git rev-parse HEAD)"
@@ -791,7 +786,7 @@ jobs:
             exit 1
           fi
           echo "PROJECTATLAS_RELEASE_EXISTS=$release_exists" >> "$GITHUB_ENV"
-          echo "PROJECTATLAS_LATEST_BEFORE=$latest_before" >> "$GITHUB_ENV"
+          echo "PROJECTATLAS_EXPECTED_LATEST=$expected_latest" >> "$GITHUB_ENV"
           python3 .github/scripts/verify-main-atlas-seed-release-assets.py \
             --source release-assets \
             --release-tag "$RELEASE_VERSION" \
@@ -872,17 +867,11 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/release-notes.py > release-notes.md
           if [[ "${PROJECTATLAS_RELEASE_EXISTS:-false}" == "true" ]]; then
-            declare -A immutable_hosted_seed=()
-            while IFS= read -r seed_asset; do
-              immutable_hosted_seed["$seed_asset"]=1
-            done < "$RUNNER_TEMP/projectatlas-hosted-main-atlas-seed-assets.txt"
-            upload_assets=()
-            while IFS= read -r -d '' asset; do
-              name="$(basename "$asset")"
-              if [[ -z "${immutable_hosted_seed[$name]+present}" ]]; then
-                upload_assets+=("$asset")
-              fi
-            done < <(find release-assets -maxdepth 1 -type f -print0)
+            python3 .github/scripts/verify-main-atlas-seed-release-assets.py \
+              --repair-upload-source release-assets \
+              --immutable-list-file "$RUNNER_TEMP/projectatlas-hosted-main-atlas-seed-assets.txt" \
+              --upload-list-file "$RUNNER_TEMP/projectatlas-release-repair-assets.txt"
+            mapfile -t upload_assets < "$RUNNER_TEMP/projectatlas-release-repair-assets.txt"
             gh release upload "$RELEASE_VERSION" "${upload_assets[@]}" --clobber
           else
             classification=()
@@ -913,10 +902,7 @@ jobs:
             echo "Published tag points to $tag_commit, not workflow head $head_commit" >&2
             exit 1
           fi
-          expected_latest="$RELEASE_VERSION"
-          if [[ "$EXPECTED_RELEASE_PRERELEASE" == "true" || "${PROJECTATLAS_RELEASE_EXISTS:-false}" == "true" ]]; then
-            expected_latest="${PROJECTATLAS_LATEST_BEFORE:-}"
-          fi
+          expected_latest="${PROJECTATLAS_EXPECTED_LATEST:?}"
           latest_after=""
           for attempt in 1 2 3 4 5 6; do
             latest_after="$(gh api "/repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"

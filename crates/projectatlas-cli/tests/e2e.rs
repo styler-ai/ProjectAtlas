@@ -5196,6 +5196,7 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         .into());
     }
     for required in [
+        "installer_workflow_pin_reports_preserve_exact_rc_identity",
         "plugin_update_skips_non_official_codex_marketplace",
         "plugin_update_leaves_current_codex_marketplace_untouched",
         "plugin_update_repairs_current_codex_plugin_with_stale_source_manifest",
@@ -6995,7 +6996,8 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         "continuing asset repair publish",
         "--prerelease --latest=false",
         "EXPECTED_RELEASE_PRERELEASE",
-        "PROJECTATLAS_LATEST_BEFORE",
+        "PROJECTATLAS_EXPECTED_LATEST",
+        "--resolve-expected-latest",
         "Verify hosted release state",
         "verify-main-atlas-seed-release-assets.py",
         "Enforce RC-first promotion",
@@ -7014,10 +7016,8 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         "projectatlas-main-atlas-seed-*",
         "--staged-source release-assets",
         "Existing release contains duplicate or non-regular main Atlas seed assets",
-        "immutable_hosted_seed",
-        "if [[ \"$EXPECTED_RELEASE_PRERELEASE\" == \"true\" || \"${PROJECTATLAS_RELEASE_EXISTS:-false}\" == \"true\" ]]; then",
-        "if [[ \"$EXPECTED_RELEASE_PRERELEASE\" == \"true\" || \"$release_exists\" == \"true\" ]]; then",
-        "Cannot publish an RC or repair a release without observing the current Latest stable release",
+        "--repair-upload-source release-assets",
+        "projectatlas-release-repair-assets.txt",
     ] {
         if !release_workflow.contains(required) {
             return Err(io::Error::other(format!(
@@ -7036,6 +7036,7 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         "is_prerelease",
         "rc_number",
         "latest_published_rc",
+        "expected_latest_tag",
     ] {
         if !release_version_policy.contains(required) {
             return Err(io::Error::other(format!(
@@ -7050,6 +7051,7 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         "\".manifest.json\"",
         "exact release tag",
         "validate_hosted_seed_assets",
+        "repair_upload_assets",
     ] {
         if !seed_asset_policy.contains(required) {
             return Err(io::Error::other(format!(
@@ -11710,6 +11712,112 @@ fn write_fake_codex_projectatlas_integration(
         )?;
     }
     Ok((marketplace_root, plugin_source, installed_cache))
+}
+
+#[test]
+fn installer_workflow_pin_reports_preserve_exact_rc_identity() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let workflow_dir = repo.join(".github").join("workflows");
+    fs::create_dir_all(&workflow_dir)?;
+    fs::write(
+        workflow_dir.join("pins.yml"),
+        "https://github.com/styler-ai/ProjectAtlas/releases/download/v1.2.3-rc12/current\n\
+https://github.com/styler-ai/ProjectAtlas/releases/download/v1.2.2/stale-stable\n\
+https://github.com/styler-ai/ProjectAtlas/releases/download/v1.2.3-rc2/stale-rc\n\
+https://github.com/example/ProjectAtlas/releases/download/v9.9.9/unrelated\n",
+    )?;
+    let workspace = workspace_root()?;
+    let output = if cfg!(windows) {
+        let installer = fs::read_to_string(
+            workspace
+                .join("plugins")
+                .join("projectatlas")
+                .join("scripts")
+                .join("install-runtime.ps1"),
+        )?;
+        let convert_start = installer
+            .find("function Convert-ProjectAtlasVersionTag {")
+            .ok_or_else(|| io::Error::other("PowerShell version conversion function missing"))?;
+        let convert_end = installer[convert_start..]
+            .find("function Initialize-ProjectAtlasRuntimeProbe")
+            .map(|offset| convert_start + offset)
+            .ok_or_else(|| io::Error::other("PowerShell version conversion boundary missing"))?;
+        let report_start = installer
+            .find("function Write-ProjectAtlasWorkflowPinReport {")
+            .ok_or_else(|| io::Error::other("PowerShell workflow-pin report function missing"))?;
+        let report_end = installer[report_start..]
+            .find("function Get-ReleaseRuntimeInstallPath")
+            .map(|offset| report_start + offset)
+            .ok_or_else(|| io::Error::other("PowerShell workflow-pin report boundary missing"))?;
+        let script = temp.path().join("workflow-pin-report.ps1");
+        fs::write(
+            &script,
+            format!(
+                "$ErrorActionPreference = 'Stop'\n{}\n{}\nWrite-ProjectAtlasWorkflowPinReport $env:PROJECTATLAS_FIXTURE_ROOT 'v1.2.3-rc12'\n",
+                &installer[convert_start..convert_end],
+                &installer[report_start..report_end]
+            ),
+        )?;
+        StdCommand::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(script)
+            .env("PROJECTATLAS_FIXTURE_ROOT", &repo)
+            .output()?
+    } else {
+        let installer = fs::read_to_string(
+            workspace
+                .join("plugins")
+                .join("projectatlas")
+                .join("scripts")
+                .join("install-runtime.sh"),
+        )?;
+        let version_start = installer
+            .find("expected_runtime_version() {")
+            .ok_or_else(|| io::Error::other("POSIX version conversion function missing"))?;
+        let version_end = installer[version_start..]
+            .find("is_projectatlas_runtime() {")
+            .map(|offset| version_start + offset)
+            .ok_or_else(|| io::Error::other("POSIX version conversion boundary missing"))?;
+        let report_start = installer
+            .find("report_projectatlas_workflow_pins() {")
+            .ok_or_else(|| io::Error::other("POSIX workflow-pin report function missing"))?;
+        let report_end = installer[report_start..]
+            .find("download_release_file() {")
+            .map(|offset| report_start + offset)
+            .ok_or_else(|| io::Error::other("POSIX workflow-pin report boundary missing"))?;
+        let script = temp.path().join("workflow-pin-report.sh");
+        fs::write(
+            &script,
+            format!(
+                "set -eu\nprojectatlas_version=v1.2.3-rc12\nprojectatlas_bin=\n{}\n{}\nproject_root=$PROJECTATLAS_FIXTURE_ROOT\nreport_projectatlas_workflow_pins\n",
+                &installer[version_start..version_end],
+                &installer[report_start..report_end]
+            ),
+        )?;
+        StdCommand::new("sh")
+            .arg(script)
+            .env("PROJECTATLAS_FIXTURE_ROOT", &repo)
+            .output()?
+    };
+    let report = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if !output.status.success()
+        || !report.contains("uses v1.2.2; expected v1.2.3-rc12")
+        || !report.contains("uses v1.2.3-rc2; expected v1.2.3-rc12")
+        || report.contains("uses v1.2.3-rc12;")
+        || report.contains("uses v1.2.3;")
+        || report.contains("v9.9.9")
+    {
+        return Err(io::Error::other(format!(
+            "installer workflow-pin report did not preserve exact RC identity:\n{report}"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 #[test]

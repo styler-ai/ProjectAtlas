@@ -105,6 +105,27 @@ def validate_hosted_seed_assets(
     return hosted_assets
 
 
+def repair_upload_assets(source: Path, immutable_names: list[str]) -> list[Path]:
+    """Return regular staged assets that are not immutable hosted seed objects."""
+
+    entries = sorted(source.iterdir(), key=lambda entry: entry.name)
+    if any(not entry.is_file() or entry.is_symlink() for entry in entries):
+        raise ValueError("release repair assets must be regular, non-symlink files")
+    if (
+        len(immutable_names) != len(set(immutable_names))
+        or any(not name or "/" in name or "\\" in name for name in immutable_names)
+    ):
+        raise ValueError("immutable hosted seed asset names must be unique leaf names")
+    staged_names = {entry.name for entry in entries}
+    missing = set(immutable_names) - staged_names
+    if missing:
+        raise ValueError(
+            f"immutable hosted seed asset is absent from staged release assets: {min(missing)}"
+        )
+    immutable = set(immutable_names)
+    return [entry for entry in entries if entry.name not in immutable]
+
+
 def self_test() -> None:
     """Cover absence, stable/RC identity, and malformed inventory failure."""
     with tempfile.TemporaryDirectory() as temporary:
@@ -220,6 +241,26 @@ def self_test() -> None:
         else:
             raise AssertionError("mismatched hosted seed pair was accepted")
 
+        hosted_manifest.write_bytes(b".manifest.json")
+        (staged / "projectatlas-v9.8.7-rc12-linux.tar.gz").write_bytes(b"package")
+        (staged / "SHA256SUMS").write_bytes(b"checksums")
+        assert [asset.name for asset in repair_upload_assets(
+            staged, [hosted_archive.name]
+        )] == [
+            "SHA256SUMS",
+            f"{basename}.manifest.json",
+            "projectatlas-v9.8.7-rc12-linux.tar.gz",
+        ]
+        assert [asset.name for asset in repair_upload_assets(
+            staged, [hosted_archive.name, hosted_manifest.name]
+        )] == ["SHA256SUMS", "projectatlas-v9.8.7-rc12-linux.tar.gz"]
+        try:
+            repair_upload_assets(staged, ["missing-seed.tar.zst"])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("missing immutable hosted seed asset was ignored")
+
 
 def main() -> None:
     """Validate optional seed assets and write their leaf names when requested."""
@@ -228,11 +269,32 @@ def main() -> None:
     parser.add_argument("--release-tag")
     parser.add_argument("--list-file", type=Path)
     parser.add_argument("--staged-source", type=Path)
+    parser.add_argument("--repair-upload-source", type=Path)
+    parser.add_argument("--immutable-list-file", type=Path)
+    parser.add_argument("--upload-list-file", type=Path)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         self_test()
         print("main Atlas seed release-asset self-test passed")
+        return
+    if args.repair_upload_source is not None:
+        if args.immutable_list_file is None or args.upload_list_file is None:
+            parser.error(
+                "--repair-upload-source requires --immutable-list-file and --upload-list-file"
+            )
+        try:
+            immutable_names = args.immutable_list_file.read_text(
+                encoding="utf-8"
+            ).splitlines()
+            uploads = repair_upload_assets(args.repair_upload_source, immutable_names)
+            args.upload_list_file.write_text(
+                "".join(f"{asset}\n" for asset in uploads), encoding="utf-8"
+            )
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+        for asset in uploads:
+            print(asset)
         return
     if args.source is None or args.release_tag is None:
         parser.error("--source and --release-tag are required")

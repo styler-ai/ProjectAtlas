@@ -81,6 +81,24 @@ def github_outputs(version: ReleaseVersion | None) -> dict[str, str]:
     }
 
 
+def expected_latest_tag(
+    version: ReleaseVersion, *, release_exists: bool, latest_before: str | None
+) -> str:
+    """Return the required post-publication Latest tag, failing closed for repairs."""
+    if not version.is_prerelease and not release_exists:
+        return version.tag
+    if not latest_before:
+        raise ValueError(
+            "an RC or release repair requires the current Latest stable release"
+        )
+    latest = parse_release_version(latest_before, source="release")
+    if latest.is_prerelease:
+        raise ValueError(
+            f"GitHub Latest is not a canonical stable ProjectAtlas tag: {latest_before}"
+        )
+    return latest.tag
+
+
 def release_records(payload: object) -> list[dict[str, object]]:
     """Normalize one raw or ``gh api --paginate --slurp`` release response."""
     if not isinstance(payload, list):
@@ -153,6 +171,34 @@ def self_test() -> None:
     assert classify_workspace_version("7.8.9-dev.12") is None
     assert github_outputs(None) == {"eligible": "false"}
     assert github_outputs(candidate)["is_prerelease"] == "true"
+    assert (
+        expected_latest_tag(stable, release_exists=False, latest_before=None)
+        == stable.tag
+    )
+    assert (
+        expected_latest_tag(candidate, release_exists=False, latest_before="v1.2.3")
+        == "v1.2.3"
+    )
+    assert (
+        expected_latest_tag(stable, release_exists=True, latest_before="v1.2.2")
+        == "v1.2.2"
+    )
+    for target, release_exists, latest_before in (
+        (candidate, False, None),
+        (stable, True, None),
+        (candidate, True, "v1.2.3-rc1"),
+        (stable, True, "nightly"),
+    ):
+        try:
+            expected_latest_tag(
+                target,
+                release_exists=release_exists,
+                latest_before=latest_before,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid Latest release state was accepted")
     releases = [
         [
             {"tag_name": "v10.20.30-rc2", "draft": False, "prerelease": True},
@@ -215,6 +261,9 @@ def main() -> None:
     parser.add_argument("--source", choices=("release", "workspace"), default="release")
     parser.add_argument("--github-output", type=Path)
     parser.add_argument("--require-prior-rc-from", type=Path)
+    parser.add_argument("--resolve-expected-latest", action="store_true")
+    parser.add_argument("--latest-before")
+    parser.add_argument("--release-exists", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
@@ -232,6 +281,19 @@ def main() -> None:
     except ValueError as error:
         parser.error(str(error))
     outputs = github_outputs(version)
+    if args.resolve_expected_latest:
+        if version is None:
+            parser.error("development versions cannot resolve release Latest state")
+        try:
+            outputs["expected_latest"] = expected_latest_tag(
+                version,
+                release_exists=args.release_exists,
+                latest_before=args.latest_before,
+            )
+        except ValueError as error:
+            parser.error(str(error))
+    elif args.latest_before is not None or args.release_exists:
+        parser.error("Latest-state inputs require --resolve-expected-latest")
     if args.require_prior_rc_from is not None:
         if version is None:
             parser.error("development versions cannot require a prior RC")
