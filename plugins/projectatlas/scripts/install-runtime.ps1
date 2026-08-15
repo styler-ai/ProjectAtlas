@@ -3653,12 +3653,9 @@ function Write-ProjectAtlasWorkflowPinReport {
         $lineNumber = 0
         foreach ($line in Get-Content -LiteralPath $file.FullName) {
             $lineNumber += 1
-            if ($line -notmatch 'github\.com/styler-ai/ProjectAtlas/releases/download/') {
-                continue
-            }
-            $pinMatches = [System.Text.RegularExpressions.Regex]::Matches($line, 'v[0-9]+\.[0-9]+\.[0-9]+(?:-rc[1-9][0-9]*)?')
+            $pinMatches = [System.Text.RegularExpressions.Regex]::Matches($line, 'https://github\.com/styler-ai/ProjectAtlas/releases/download/([^/\s]+)/')
             foreach ($match in $pinMatches) {
-                $foundTag = $match.Value
+                $foundTag = $match.Groups[1].Value
                 if ($foundTag -and $foundTag -ne $releaseTag) {
                     $relativePath = $file.FullName
                     if ($relativePath.StartsWith($rootPath, [System.StringComparison]::OrdinalIgnoreCase)) {

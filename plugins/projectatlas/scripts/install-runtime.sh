@@ -1389,9 +1389,10 @@ report_projectatlas_workflow_pins() {
     while IFS= read -r line || [ -n "$line" ]; do
       line_number=$((line_number + 1))
       case "$line" in
-        *github.com/styler-ai/ProjectAtlas/releases/download/v*)
+        *github.com/styler-ai/ProjectAtlas/releases/download/*/*)
           printf '%s\n' "$line" |
-            grep -Eo 'v[0-9]+\.[0-9]+\.[0-9]+(-rc[1-9][0-9]*)?' |
+            grep -Eo 'https://github\.com/styler-ai/ProjectAtlas/releases/download/[^/[:space:]]+/' |
+            sed -E 's#^.*/download/([^/]+)/$#\1#' |
             sort -u |
             while IFS= read -r found_tag; do
               if [ "$found_tag" != "$release_tag" ]; then

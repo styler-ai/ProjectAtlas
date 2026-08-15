@@ -95,21 +95,11 @@ jobs:
           fi
           releases="$RUNNER_TEMP/projectatlas-github-releases.json"
           gh api --paginate "/repos/$GITHUB_REPOSITORY/releases?per_page=100" --slurp > "$releases"
-          prior_rc_tag="$(
-            python3 .github/scripts/release_version.py \
-              "$RELEASE_VERSION" \
-              --source release \
-              --require-prior-rc-from "$releases" |
-              sed -n 's/^prior_rc_tag=//p'
-          )"
-          if [[ -z "$prior_rc_tag" ]] || ! git rev-parse "$prior_rc_tag^{commit}" >/dev/null 2>&1; then
-            echo "Published RC tag was not found in the release checkout: $prior_rc_tag" >&2
-            exit 1
-          fi
-          if ! git merge-base --is-ancestor "$prior_rc_tag^{commit}" HEAD; then
-            echo "Published RC $prior_rc_tag is not an ancestor of the stable release head" >&2
-            exit 1
-          fi
+          python3 .github/scripts/release_version.py \
+            "$RELEASE_VERSION" \
+            --source release \
+            --require-prior-rc-from "$releases" \
+            --require-prior-rc-ancestor-of "$GITHUB_SHA"
 
       - name: Require exact main head for publication
         if: ${{ !inputs.prepublish_only }}
@@ -987,6 +977,80 @@ jobs:
           require(Path(command[0]).resolve() == runtime, "opencode command path mismatch")
           require_args(command[1:])
           require(Path(opencode["cwd"]).resolve() == root, "opencode cwd mismatch")
+          PY
+
+      - name: Holistic release-candidate E2E
+        if: matrix.label == 'linux-x64-posix' && contains(env.RELEASE_VERSION, '-rc')
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_json="$RUNNER_TEMP/projectatlas-release-e2e.json"
+          gh release view "$RELEASE_VERSION" --json tagName,isDraft,isPrerelease > "$release_json"
+          jq -e --arg tag "$RELEASE_VERSION" \
+            '.tagName == $tag and .isDraft == false and .isPrerelease == true' \
+            "$release_json" > /dev/null
+          latest_tag="$(gh api "/repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          if [[ "$latest_tag" == "$RELEASE_VERSION" ]]; then
+            echo "Release candidate $RELEASE_VERSION unexpectedly became GitHub Latest" >&2
+            exit 1
+          fi
+          python3 .github/scripts/release_version.py "$latest_tag" --source release |
+            grep -Fx 'is_prerelease=false' > /dev/null
+
+          project_root="$RUNNER_TEMP/projectatlas-release-e2e"
+          runtime="$HOME/.local/bin/projectatlas"
+          mkdir -p "$project_root/src"
+          printf '%s\n' 'pub fn release_e2e_marker() {}' > "$project_root/src/lib.rs"
+          (
+            cd "$project_root"
+            PROJECTATLAS_NO_TELEMETRY=1 "$runtime" --require-version "$RELEASE_VERSION" init
+            PROJECTATLAS_NO_TELEMETRY=1 "$runtime" --require-version "$RELEASE_VERSION" watch --once
+          )
+          PROJECT_ROOT="$project_root" python3 <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          root = Path(os.environ["PROJECT_ROOT"]).resolve()
+          config = json.loads((root / ".projectatlas" / "projectatlas.mcp.json").read_text(encoding="utf-8"))
+          server = config["mcpServers"]["projectatlas"]
+          messages = [
+              {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "projectatlas-release-e2e", "version": "0.1.0"}}},
+              {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+              {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "atlas_session_brief", "arguments": {"project_path": str(root), "query": "release_e2e_marker", "compact": True}},
+              {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "atlas_slice", "arguments": {"project_path": str(root), "file": "src/lib.rs", "start_line": 1, "end_line": 1}}},
+          ]
+          completed = subprocess.run(
+              [server["command"], *server["args"]],
+              cwd=server.get("cwd", root),
+              env={**os.environ, "PROJECTATLAS_NO_TELEMETRY": "1"},
+              input="\n".join(json.dumps(message) for message in messages) + "\n",
+              text=True,
+              capture_output=True,
+              timeout=30,
+              check=False,
+          )
+          if completed.returncode != 0:
+              raise SystemExit(f"release MCP exited {completed.returncode}: {completed.stderr}")
+          responses = {
+              response["id"]: response
+              for line in completed.stdout.splitlines()
+              if (response := json.loads(line)).get("id") is not None
+          }
+
+          def tool_text(request_id):
+              result = responses.get(request_id, {}).get("result", {})
+              if result.get("isError"):
+                  raise SystemExit(f"MCP request {request_id} failed: {result}")
+              return "\n".join(block.get("text", "") for block in result.get("content", []))
+
+          brief = tool_text(2)
+          source = tool_text(3)
+          if "index_status: available" not in brief or "release_e2e_marker" not in source:
+              raise SystemExit(f"release MCP contract incomplete:\n{brief}\n{source}")
           PY
 
   installer-smoke-windows:

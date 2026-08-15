@@ -61,6 +61,10 @@ The release workflow SHALL serialize runs by exact requested version, SHALL publ
 - **WHEN** an RC is created or repaired and the workflow captured the current Latest tag before publication
 - **THEN** GitHub's Latest endpoint remains exactly that captured tag after publication
 
+#### Scenario: Published RC completes the installed agent workflow
+- **WHEN** an RC is published and the Linux installer smoke accepts its exact hosted artifact
+- **THEN** the RC remains a non-Latest prerelease, indexes a real project, serves fresh brief and source evidence through its generated stdio MCP configuration, and the release workflow succeeds only after the remaining platform smokes also pass
+
 #### Scenario: New stable publication becomes Latest
 - **WHEN** final `v0.4.5` is newly created after its milestone is complete
 - **THEN** the release record is not prerelease and GitHub's Latest endpoint identifies `v0.4.5`

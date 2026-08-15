@@ -2204,6 +2204,19 @@ flowchart TB
     Create -->|stable| Stable[Create non-draft stable release]
     RC --> VerifyRC[Verify prerelease metadata and tag head;<br/>previous stable remains Latest]
     Stable --> VerifyStable[Verify stable metadata and tag head;<br/>promoted stable becomes Latest]
+    VerifyRepair --> PlatformSmokes[Start hosted installer smoke lanes]
+    VerifyRC --> PlatformSmokes
+    VerifyStable --> PlatformSmokes
+    PlatformSmokes --> Linux[Install exact hosted release on Linux]
+    PlatformSmokes --> MacOS[Install exact hosted release on<br/>macOS x64 and arm64]
+    PlatformSmokes --> Windows[Install exact hosted release on Windows]
+    Linux --> Candidate{Release candidate?}
+    Candidate -->|no| LinuxReady[Linux lane succeeds]
+    Candidate -->|yes| AgentE2E[Index a real project and verify<br/>fresh brief and source through stdio MCP]
+    AgentE2E --> LinuxReady
+    LinuxReady --> Complete[All hosted lanes succeed;<br/>release workflow succeeds]
+    MacOS --> Complete
+    Windows --> Complete
 ```
 
 The optional-pack workflow may reuse only sanitized Cargo dependency build state.

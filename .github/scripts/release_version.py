@@ -7,6 +7,8 @@ import argparse
 import json
 import os
 import re
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -141,6 +143,33 @@ def latest_published_rc(payload: object, stable: ReleaseVersion) -> ReleaseVersi
     return max(candidates, key=lambda candidate: candidate.rc_number or 0, default=None)
 
 
+def require_prior_rc_ancestor(
+    prior_rc: ReleaseVersion, head: str, *, repo: Path = Path(".")
+) -> None:
+    """Require the selected published RC to be an ancestor of the stable head."""
+    result = subprocess.run(
+        [
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            f"{prior_rc.tag}^{{commit}}",
+            f"{head}^{{commit}}",
+        ],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return
+    if result.returncode == 1:
+        raise ValueError(
+            f"published RC {prior_rc.tag} is not an ancestor of stable head {head}"
+        )
+    detail = result.stderr.strip() or result.stdout.strip() or "git merge-base failed"
+    raise ValueError(f"could not verify published RC ancestry: {detail}")
+
+
 def self_test() -> None:
     """Exercise generic stable, RC, development, and malformed inputs."""
     stable = parse_release_version("v1.2.3", source="release")
@@ -221,6 +250,37 @@ def self_test() -> None:
     else:
         raise AssertionError("prior RC lookup accepted an RC target")
 
+    with tempfile.TemporaryDirectory(prefix="projectatlas-release-version-") as temp_dir:
+        repo = Path(temp_dir)
+
+        def git(*arguments: str) -> str:
+            return subprocess.run(
+                ["git", *arguments],
+                cwd=repo,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+
+        git("init", "--quiet")
+        git("config", "user.name", "ProjectAtlas release self-test")
+        git("config", "user.email", "release-self-test@example.invalid")
+        git("config", "commit.gpgsign", "false")
+        git("config", "tag.gpgsign", "false")
+        git("config", "core.hooksPath", ".git/disabled-hooks")
+        git("commit", "--quiet", "--allow-empty", "--message", "candidate")
+        git("tag", prior.tag)
+        git("commit", "--quiet", "--allow-empty", "--message", "stable")
+        require_prior_rc_ancestor(prior, git("rev-parse", "HEAD"), repo=repo)
+        git("checkout", "--quiet", "--orphan", "divergent")
+        git("commit", "--quiet", "--allow-empty", "--message", "divergent")
+        try:
+            require_prior_rc_ancestor(prior, git("rev-parse", "HEAD"), repo=repo)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("divergent stable head accepted published RC ancestry")
+
     invalid = (
         ("1.2.3", "release"),
         ("v1.2.3", "workspace"),
@@ -261,6 +321,7 @@ def main() -> None:
     parser.add_argument("--source", choices=("release", "workspace"), default="release")
     parser.add_argument("--github-output", type=Path)
     parser.add_argument("--require-prior-rc-from", type=Path)
+    parser.add_argument("--require-prior-rc-ancestor-of")
     parser.add_argument("--resolve-expected-latest", action="store_true")
     parser.add_argument("--latest-before")
     parser.add_argument("--release-exists", action="store_true")
@@ -294,6 +355,12 @@ def main() -> None:
             parser.error(str(error))
     elif args.latest_before is not None or args.release_exists:
         parser.error("Latest-state inputs require --resolve-expected-latest")
+    if (args.require_prior_rc_from is None) != (
+        args.require_prior_rc_ancestor_of is None
+    ):
+        parser.error(
+            "--require-prior-rc-from and --require-prior-rc-ancestor-of must be used together"
+        )
     if args.require_prior_rc_from is not None:
         if version is None:
             parser.error("development versions cannot require a prior RC")
@@ -306,6 +373,10 @@ def main() -> None:
             parser.error(
                 f"stable release {version.tag} requires a published prerelease for the same base version"
             )
+        try:
+            require_prior_rc_ancestor(prior_rc, args.require_prior_rc_ancestor_of)
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
         outputs["prior_rc_tag"] = prior_rc.tag
     output_path = args.github_output or (Path(path) if (path := os.environ.get("GITHUB_OUTPUT")) else None)
     if output_path is not None:

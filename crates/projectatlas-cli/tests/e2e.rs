@@ -5189,6 +5189,22 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             .into());
         }
     }
+    let unix_installer_smoke = workflow_job_block(&release_workflow, "installer-smoke-unix")?;
+    for required in [
+        "Holistic release-candidate E2E",
+        "contains(env.RELEASE_VERSION, '-rc')",
+        "atlas_session_brief",
+        "atlas_slice",
+        "index_status: available",
+        "release_e2e_marker",
+    ] {
+        if !unix_installer_smoke.contains(required) {
+            return Err(io::Error::other(format!(
+                "hosted release-candidate E2E is missing contract {required:?}"
+            ))
+            .into());
+        }
+    }
     let e2e_smoke = workflow_job_block(&ci_workflow, "e2e-smoke")?;
     if !e2e_smoke.contains("plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp") {
         return Err(io::Error::other(
@@ -6985,6 +7001,12 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         )
         .into());
     }
+    if release_workflow.contains("git merge-base --is-ancestor") {
+        return Err(io::Error::other(
+            "release workflow must route RC ancestry through release_version.py",
+        )
+        .into());
+    }
     for required in [
         "gh release create \"$RELEASE_VERSION\"",
         "gh release upload \"$RELEASE_VERSION\" \"${upload_assets[@]}\" --clobber",
@@ -7003,7 +7025,7 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         "verify-main-atlas-seed-release-assets.py",
         "Enforce RC-first promotion",
         "--require-prior-rc-from",
-        "git merge-base --is-ancestor",
+        "--require-prior-rc-ancestor-of",
         "Cannot publish an RC after stable tag",
         "projectatlas-release-${{ inputs.version }}",
         "cancel-in-progress: false",
@@ -11726,6 +11748,8 @@ fn installer_workflow_pin_reports_preserve_exact_rc_identity() -> Result<(), Box
         "https://github.com/styler-ai/ProjectAtlas/releases/download/v1.2.3-rc12/current\n\
 https://github.com/styler-ai/ProjectAtlas/releases/download/v1.2.2/stale-stable\n\
 https://github.com/styler-ai/ProjectAtlas/releases/download/v1.2.3-rc2/stale-rc\n\
+https://github.com/styler-ai/ProjectAtlas/releases/download/v1.2.3-rc12evil/malformed-rc\n\
+https://github.com/styler-ai/ProjectAtlas/releases/download/v1.2.3evil/malformed-stable\n\
 https://github.com/example/ProjectAtlas/releases/download/v9.9.9/unrelated\n",
     )?;
     let workspace = workspace_root()?;
@@ -11809,6 +11833,8 @@ https://github.com/example/ProjectAtlas/releases/download/v9.9.9/unrelated\n",
     if !output.status.success()
         || !report.contains("uses v1.2.2; expected v1.2.3-rc12")
         || !report.contains("uses v1.2.3-rc2; expected v1.2.3-rc12")
+        || !report.contains("uses v1.2.3-rc12evil; expected v1.2.3-rc12")
+        || !report.contains("uses v1.2.3evil; expected v1.2.3-rc12")
         || report.contains("uses v1.2.3-rc12;")
         || report.contains("uses v1.2.3;")
         || report.contains("v9.9.9")
