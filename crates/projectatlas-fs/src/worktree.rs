@@ -1745,10 +1745,8 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(
-                FsError::RepositoryBoundary { source, .. }
-                if source.kind() == io::ErrorKind::Unsupported,
-            )
+            Err(FsError::RepositoryBoundary { source, .. })
+                if source.kind() == io::ErrorKind::Unsupported
         ));
     }
 
