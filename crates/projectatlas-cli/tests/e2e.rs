@@ -4858,6 +4858,54 @@ fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<()
 }
 
 #[test]
+fn explicit_config_rebases_implicit_database_from_descendant_and_git_manager()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    git_success(&repo, &["init"])?;
+    let init = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "init", "--no-scan"])
+        .output()?;
+    if !init.status.success() {
+        return Err(io::Error::other(format!(
+            "fixture init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ))
+        .into());
+    }
+
+    let nested = repo.join(SRC_DIR_NAME).join("nested");
+    fs::create_dir_all(&nested)?;
+    let config = repo.join(ATLAS_DIR_NAME).join("config.toml");
+    for selected in [&nested, &repo.join(GIT_DIR_NAME)] {
+        let token = Command::cargo_bin("projectatlas")?
+            .current_dir(selected)
+            .arg("--config")
+            .arg(&config)
+            .args(["--format", "json", "token"])
+            .output()?;
+        if !token.status.success() {
+            return Err(io::Error::other(format!(
+                "config-selected token report did not use the project database from '{}': {}",
+                selected.display(),
+                String::from_utf8_lossy(&token.stderr)
+            ))
+            .into());
+        }
+        if selected.join(ATLAS_DIR_NAME).exists() {
+            return Err(io::Error::other(format!(
+                "config-selected token report created invocation-local state under '{}'",
+                selected.display()
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn implicit_bare_root_refuses_before_opening_a_future_schema_database() -> Result<(), Box<dyn Error>>
 {
     let temp = tempfile::tempdir()?;

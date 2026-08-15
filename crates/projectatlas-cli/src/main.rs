@@ -956,17 +956,20 @@ struct Cli {
 impl Cli {
     /// Rebase the conventional database path to the structurally selected source root.
     fn resolve_implicit_database_path(&mut self) -> Result<(), CliError> {
-        if self.database_path_is_explicit
-            || self.config.is_some()
-            || !command_uses_implicit_database(self.command.as_ref())
+        if self.database_path_is_explicit || !command_uses_implicit_database(self.command.as_ref())
         {
             return Ok(());
         }
-        let current_dir = std::env::current_dir().map_err(|source| CliError::Io {
-            path: PathBuf::from("."),
-            source,
-        })?;
-        self.db = canonical_source_project_root(&current_dir)?.join(DEFAULT_DB_PATH);
+        let root = if let Some(config_path) = self.config.as_deref() {
+            canonical_source_project_root(&load_atlas_config(Some(config_path))?.root)?
+        } else {
+            let current_dir = std::env::current_dir().map_err(|source| CliError::Io {
+                path: PathBuf::from("."),
+                source,
+            })?;
+            canonical_source_project_root(&current_dir)?
+        };
+        self.db = root.join(DEFAULT_DB_PATH);
         Ok(())
     }
 
