@@ -4864,8 +4864,11 @@ fn explicit_config_rebases_implicit_database_from_descendant_and_git_manager()
     let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
     git_success(&repo, &["init"])?;
+    let config = repo.join(ATLAS_DIR_NAME).join("custom-config.toml");
     let init = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
+        .arg("--config")
+        .arg(&config)
         .args(["--format", "json", "init", "--no-scan"])
         .output()?;
     if !init.status.success() {
@@ -4878,7 +4881,6 @@ fn explicit_config_rebases_implicit_database_from_descendant_and_git_manager()
 
     let nested = repo.join(SRC_DIR_NAME).join("nested");
     fs::create_dir_all(&nested)?;
-    let config = repo.join(ATLAS_DIR_NAME).join("config.toml");
     for selected in [&nested, &repo.join(GIT_DIR_NAME)] {
         let token = Command::cargo_bin("projectatlas")?
             .current_dir(selected)

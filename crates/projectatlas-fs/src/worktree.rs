@@ -216,7 +216,9 @@ pub fn discover_repository_structure_controlled(
             Ok(_) => {
                 return match inspect_worktree(ancestor) {
                     Ok(selected) => {
+                        // A source-owned `.git` file already selects its reciprocal checkout exactly.
                         let selection_kind = if selected.role == GitWorktreeRole::Primary
+                            && paths_equal(&selected.git_control_path, &selected.common_directory)
                             && (selected.common_directory_bare_setting == Some(true)
                                 || !selected.common_directory_source_root_inference_safe)
                         {
@@ -1385,6 +1387,37 @@ mod tests {
             )?;
         }
         run_git(&primary, ["config", "--unset", "core.worktree"])?;
+
+        let submodule_source = temp.path().join("submodule source");
+        fs::create_dir(&submodule_source)?;
+        run_git(&submodule_source, ["init"])?;
+        run_git(
+            &submodule_source,
+            ["config", "user.name", "ProjectAtlas Test"],
+        )?;
+        run_git(
+            &submodule_source,
+            ["config", "user.email", "projectatlas@example.invalid"],
+        )?;
+        fs::write(submodule_source.join("lib.rs"), "pub fn submodule() {}\n")?;
+        run_git(&submodule_source, ["add", "."])?;
+        run_git(&submodule_source, ["commit", "-m", "submodule fixture"])?;
+        let submodule = primary.join("vendor").join("submodule");
+        run_command(
+            Command::new("git")
+                .current_dir(&primary)
+                .args(["-c", "protocol.file.allow=always", "submodule", "add"])
+                .arg(&submodule_source)
+                .arg("vendor/submodule"),
+        )?;
+        let submodule_structure = require_git(discover_repository_structure(&submodule)?)?;
+        require_worktree_selection(
+            &submodule_structure,
+            &submodule.canonicalize()?,
+            GitWorktreeRole::Primary,
+        )?;
+        run_git(&primary, ["add", ".gitmodules", "vendor/submodule"])?;
+        run_git(&primary, ["commit", "-m", "submodule checkout fixture"])?;
 
         let lookalike = primary.join("src").join("application metadata");
         fs::create_dir(&lookalike)?;

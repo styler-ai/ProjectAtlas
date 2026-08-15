@@ -3039,7 +3039,8 @@ fn command_uses_implicit_database(command: &Command) -> bool {
     match command {
         #[cfg(feature = "optional-parser-supervisor")]
         Command::ParserPack { .. } => false,
-        Command::Root {
+        Command::Init { .. }
+        | Command::Root {
             command: Some(RootCommand::Set { .. } | RootCommand::Status { .. }),
         }
         | Command::RuntimeInfo => false,
