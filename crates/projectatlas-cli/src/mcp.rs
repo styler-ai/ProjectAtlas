@@ -509,6 +509,9 @@ const MCP_ERROR_IGNORE_KIND_REQUIRED: &str =
     "ignore kind is required; expected dir-name or path-prefix";
 /// Required ignore kind diagnostic for mutation tools.
 const MCP_ERROR_IGNORE_KIND_REQUIRED_FOR_ADD: &str = "ignore kind is required for atlas_ignore_add";
+/// Error for mutually exclusive exact-root and structural-control selection.
+const MCP_ERROR_ROOT_CONTROL_CONFLICT: &str =
+    "control_root cannot be combined with project_path or verify";
 /// Invalid coverage start-index diagnostic prefix.
 const MCP_ERROR_COVERAGE_START_INDEX_TOO_LARGE_PREFIX: &str = "coverage start index is too large: ";
 /// Invalid coverage limit diagnostic prefix.
@@ -5808,14 +5811,14 @@ impl ProjectAtlasMcpServer {
     /// Return root/DB/config diagnostics.
     #[tool(
         name = "atlas_root",
-        description = "Show or verify one exact ProjectAtlas root, or inspect bounded structural Git worktree routing from control_root."
+        description = "Show or verify ProjectAtlas root, DB, config, and runtime identity."
     )]
     fn atlas_root(&self, Parameters(params): Parameters<AtlasRootParams>) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             if let Some(control_root) = params.control_root.as_deref() {
                 if params.project_path.is_some() || params.verify.unwrap_or(false) {
                     return Err(CliError::InvalidInput(
-                        "control_root cannot be combined with project_path or verify".to_string(),
+                        MCP_ERROR_ROOT_CONTROL_CONFLICT.to_owned(),
                     ));
                 }
                 let report = build_repository_control_report(Path::new(control_root))?;

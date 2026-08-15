@@ -246,7 +246,7 @@
       "parity": ["report"],
       "parser-pack": ["verify", "install", "enable", "update", "disable", "remove", "status"],
       "purpose": ["set", "review", "queue"],
-      "root": ["set", "show", "verify"],
+      "root": ["set", "show", "status", "verify"],
       "symbols": ["build", "list", "relations", "slice"]
     },
     "actions": {
@@ -265,6 +265,7 @@
       "parity report": ["--profile=repository-intelligence"],
       "purpose queue": ["--start-index=0", "--limit=50"],
       "root set": ["--transition=bind"],
+      "root status": ["[PATH]=."],
       "scan": ["[PATH]=."],
       "search": ["--retrieval-mode=lexical", "--context-lines=0", "--start-index=0", "--limit=20"],
       "slice": ["--output-bytes=262144"],

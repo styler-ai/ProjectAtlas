@@ -51,7 +51,7 @@
 
 - [x] 7.1 Update durable architecture, database, graph, workflow, upgrade, privacy, and failure guidance so #430 and #440 describe one coherent exact-worktree lifecycle without duplicating authorities.
 - [x] 7.2 Render and visually inspect every changed Mermaid block, checking semantic ownership, arrow direction, termination, readability, and agreement with the live implementation.
-- [ ] 7.3 Run the affected focused tests, then `cargo fmt --check`, `cargo check --workspace --all-targets --all-features`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`, `cargo test --doc --all-features`, and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` with explicit timeouts.
+- [x] 7.3 Run the affected focused tests, then `cargo fmt --check`, `cargo check --workspace --all-targets --all-features`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`, `cargo test --doc --all-features`, and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` with explicit timeouts.
 - [ ] 7.4 Run ProjectAtlas lint, strict OpenSpec validation, IssueOps parity/readiness, installer/plugin/MCP drift checks, packaged cross-platform E2E, and exact-head GitHub checks; resolve or disposition every live review and automated finding.
 - [ ] 7.5 Synchronize issue #440's checklist and metadata only after all implementation, compatibility, verification, cross-issue, and release-blocker work is complete.
 - [ ] 7.6 Confirm the v0.4.5-rc1 release notes, shipped skill, installers, holistic agent E2E, and prerelease/latest-state verification include the complete #430/#440 behavior.

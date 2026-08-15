@@ -15,5 +15,5 @@
 
 - [x] 3.1 Add owning unit tests over real temporary Git repositories for primary/linked/bare-manager discovery, nested paths, arbitrary worktree locations, moves, missing registrations, non-Git roots, malformed control files, symlinks, reciprocal mismatches, no Git execution, cancellation, and registration bounds.
 - [x] 3.2 Strengthen and run one holistic E2E covering two isolated worktree atlases across init, released-schema migration, scan, branch/dirty refresh, watch, purposes, token/graph compatibility, interleaved one-process MCP calls, and CLI/MCP structural status without source or write bleed.
-- [ ] 3.3 Run focused Rust checks plus the full relevant workspace, issue-policy, OpenSpec, documentation, and cross-platform hosted gates; preserve ordinary single-root, non-Git, Git-missing, and current TUI behavior.
-- [ ] 3.4 Render and visually inspect every changed Mermaid diagram against the live implementation, then reconcile all actionable review feedback before task or issue closure.
+- [ ] 3.3 Run focused Rust checks plus the full relevant workspace, issue-policy, OpenSpec, documentation, and cross-platform hosted gates; reconcile all actionable review feedback and preserve ordinary single-root, non-Git, Git-missing, and current TUI behavior.
+- [ ] 3.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.

@@ -52,7 +52,7 @@ Normal agent operations continue to use explicit per-call `project_path`. The se
 
 The existing token TUI continues to render the selected worktree's existing token and graph views. Structural worktree inventory is machine-readable root status, not a new dashboard requirement.
 
-## Trust, Failure, and Scale
+## Risks / Trade-offs
 
 - Control files are bounded direct files; symbolic links/junctions, invalid UTF-8, multiple pointer records, missing targets, outside-common registrations, and reciprocal mismatches are typed invalid Git evidence.
 - Discovery is read-only and performs work proportional to the bounded registration inventory, not repository source size. The filesystem module caps registered worktrees at 1,024; public root status returns at most 256 rows and reports truncation.
@@ -61,7 +61,11 @@ The existing token TUI continues to render the selected worktree's existing toke
 
 Performance pattern fit: the path is startup/admin-oriented O(worktrees) filesystem metadata and small bounded-file reads. It performs no source scan, SQLite access, allocation proportional to source files, parallel work, or persistent write. Measurement is unnecessary unless repositories approach the fixed registration ceiling or startup profiling shows this bounded path is material.
 
-## Migration and Rollback
+## Dependencies / Cross-Issue Impact
+
+#430 owns structural worktree discovery and exact source selection. #440 consumes that selection for branch-local classified navigation and shares the holistic E2E. #448 owns RC-first release policy. None of these boundaries permits a shared writable atlas or ProjectAtlas-owned Git lifecycle.
+
+## Migration Plan
 
 There is no database or durable-state migration. Existing per-worktree databases, configs, purposes, telemetry, and generated MCP configs remain authoritative and compatible.
 
@@ -70,3 +74,7 @@ Rollback removes the structural status/selection layer and returns to the existi
 ## Architecture Invalidation
 
 Revisit this design only if a supported Git layout cannot be validated from bounded reciprocal metadata, status latency becomes material at the enforced ceiling, or an official already-adopted Git library can replace the concrete parser with materially less code and equal no-process behavior. Those conditions do not justify a new crate, service, database, or UI today.
+
+## Open Questions
+
+None.

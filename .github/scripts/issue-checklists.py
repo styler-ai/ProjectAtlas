@@ -777,9 +777,9 @@ def architecture_diagram_link_failures(section: str, repo: str, root: Path) -> l
                 f"architecture diagram link {url!r} must target repository {repo!r} over HTTPS"
             )
             continue
-        if segments[2:5] != ["blob", "dev", "docs"]:
+        if segments[2:5] != ["blob", "main", "docs"]:
             failures.append(
-                f"architecture diagram link {url!r} must use /blob/dev/docs/"
+                f"architecture diagram link {url!r} must use /blob/main/docs/"
             )
             continue
         relative_parts = segments[5:]
@@ -796,7 +796,7 @@ def architecture_diagram_link_failures(section: str, repo: str, root: Path) -> l
             continue
         if len(relative_parts) != 1:
             failures.append(
-                f"architecture diagram link {url!r} must target one direct document under /blob/dev/docs/"
+                f"architecture diagram link {url!r} must target one direct document under /blob/main/docs/"
             )
             continue
         candidate = docs_root.joinpath(*relative_parts).resolve()
@@ -1220,7 +1220,7 @@ Describe the change.
 ## Capabilities
 Name the capability.
 ## Architecture Diagrams
-- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)
+- [System architecture](https://github.com/owner/repo/blob/main/docs/projectatlas-3-architecture.md#architecture-views)
 ## Release Scope
 Target the release.
 ## Non-Goals
@@ -1245,7 +1245,7 @@ Mitigations:
 
     assert contract_failures({"state": "OPEN", "body": issue_contract}, expected) == []
     na_contract = issue_contract.replace(
-        "- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)",
+        "- [System architecture](https://github.com/owner/repo/blob/main/docs/projectatlas-3-architecture.md#architecture-views)",
         "N/A: This change has no architecture impact.",
     )
     assert contract_failures({"state": "OPEN", "body": na_contract}, expected) == []
@@ -1299,7 +1299,7 @@ Mitigations:
         docs.mkdir()
         architecture = docs / "architecture.md"
         link = (
-            "[Target](https://github.com/owner/repo/blob/dev/docs/"
+            "[Target](https://github.com/owner/repo/blob/main/docs/"
             "architecture.md#target-view)"
         )
         architecture.write_text(
@@ -1482,7 +1482,7 @@ Mitigations:
         )
     )
     missing_architecture_link = issue_contract.replace(
-        "- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)",
+        "- [System architecture](https://github.com/owner/repo/blob/main/docs/projectatlas-3-architecture.md#architecture-views)",
         "Architecture will be documented later.",
     )
     assert any(
@@ -1494,7 +1494,7 @@ Mitigations:
     for invalid_link in (
         "[Relative architecture](../AGENTS.md)",
         '[Titled relative architecture](../AGENTS.md "local copy")',
-        "[Insecure architecture](http://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md)",
+        "[Insecure architecture](http://github.com/owner/repo/blob/main/docs/projectatlas-3-architecture.md)",
         "[Mail architecture](mailto:architecture@example.com)",
         "[Nested [architecture]](../AGENTS.md)",
     ):
@@ -1514,11 +1514,18 @@ Mitigations:
             {"state": "OPEN", "body": foreign_architecture}, expected
         )
     )
+    legacy_dev_architecture = issue_contract.replace("/blob/main/", "/blob/dev/")
+    assert any(
+        "must use /blob/main/docs/" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": legacy_dev_architecture}, expected
+        )
+    )
     sha_architecture = issue_contract.replace(
-        "/blob/dev/", "/blob/0123456789abcdef0123456789abcdef01234567/"
+        "/blob/main/", "/blob/0123456789abcdef0123456789abcdef01234567/"
     )
     assert any(
-        "must use /blob/dev/docs/" in failure
+        "must use /blob/main/docs/" in failure
         for failure in contract_failures(
             {"state": "OPEN", "body": sha_architecture}, expected
         )
@@ -1578,7 +1585,7 @@ Mitigations:
     )
     duplicate_architecture = issue_contract.replace(
         "## Release Scope",
-        "## Architecture Diagrams\n- [Second view](https://github.com/owner/repo/blob/dev/docs/agent-navigation.md#initial-task-discovery)\n## Release Scope",
+        "## Architecture Diagrams\n- [Second view](https://github.com/owner/repo/blob/main/docs/agent-navigation.md#initial-task-discovery)\n## Release Scope",
     )
     assert any(
         "exactly one visible non-empty 'architecture diagrams' section" in failure
@@ -1587,7 +1594,7 @@ Mitigations:
         )
     )
     empty_architecture = issue_contract.replace(
-        "## Architecture Diagrams\n- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)\n",
+        "## Architecture Diagrams\n- [System architecture](https://github.com/owner/repo/blob/main/docs/projectatlas-3-architecture.md#architecture-views)\n",
         "## Architecture Diagrams\n",
     )
     assert any(
@@ -1597,8 +1604,8 @@ Mitigations:
         )
     )
     wrong_architecture_order = issue_contract.replace(
-        "## Capabilities\nName the capability.\n## Architecture Diagrams\n- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)\n",
-        "## Architecture Diagrams\n- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)\n## Capabilities\nName the capability.\n",
+        "## Capabilities\nName the capability.\n## Architecture Diagrams\n- [System architecture](https://github.com/owner/repo/blob/main/docs/projectatlas-3-architecture.md#architecture-views)\n",
+        "## Architecture Diagrams\n- [System architecture](https://github.com/owner/repo/blob/main/docs/projectatlas-3-architecture.md#architecture-views)\n## Capabilities\nName the capability.\n",
     )
     assert any(
         "required issue sections must follow the #305 order" in failure

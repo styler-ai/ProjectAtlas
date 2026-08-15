@@ -954,6 +954,22 @@ struct Cli {
 }
 
 impl Cli {
+    /// Rebase the conventional database path to the structurally selected source root.
+    fn resolve_implicit_database_path(&mut self) -> Result<(), CliError> {
+        if self.database_path_is_explicit
+            || self.config.is_some()
+            || !command_uses_implicit_database(self.command.as_ref())
+        {
+            return Ok(());
+        }
+        let current_dir = std::env::current_dir().map_err(|source| CliError::Io {
+            path: PathBuf::from("."),
+            source,
+        })?;
+        self.db = canonical_source_project_root(&current_dir)?.join(DEFAULT_DB_PATH);
+        Ok(())
+    }
+
     /// Resolve this invocation's selected source root before opening an implicit database.
     fn project_root(&self) -> Result<PathBuf, CliError> {
         default_cli_project_root(
@@ -1611,8 +1627,8 @@ enum SymbolsCommand {
 
 /// Parse arguments, execute the command, and convert failures to process exit.
 fn main() {
-    let cli = parse_cli();
-    if let Err(error) = run(&cli) {
+    let mut cli = parse_cli();
+    if let Err(error) = run(&mut cli) {
         let rendered =
             render_cli_error(cli.format, &error).unwrap_or_else(|_| format!("error: {error}\n"));
         if write_stderr(&rendered).is_err() {
@@ -1641,10 +1657,11 @@ fn load_cli_atlas_config(cli: &Cli) -> Result<AtlasMapConfig, CliError> {
 }
 
 /// Execute the selected CLI command.
-fn run(cli: &Cli) -> Result<(), CliError> {
+fn run(cli: &mut Cli) -> Result<(), CliError> {
     if let Some(required_version) = cli.require_version.as_deref() {
         validate_required_runtime_version(required_version)?;
     }
+    cli.resolve_implicit_database_path()?;
     let usage_instance = UsageRuntimeInstance::new(UsageInstanceOwner::CliInvocation);
     match cli.command.as_ref() {
         Command::Init {
@@ -1656,7 +1673,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 path: PathBuf::from("."),
                 source,
             })?;
-            let root = canonical_project_root(&current_dir)?;
+            let root = canonical_source_project_root(&current_dir)?;
             let db_path = if cli.db.is_absolute() {
                 cli.db.clone()
             } else {
@@ -3002,6 +3019,21 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         },
     }
     Ok(())
+}
+
+/// Return whether this command consumes the conventional project database selection.
+fn command_uses_implicit_database(command: &Command) -> bool {
+    match command {
+        #[cfg(feature = "optional-parser-supervisor")]
+        Command::ParserPack { .. } => false,
+        Command::Root {
+            command: Some(RootCommand::Set { .. } | RootCommand::Status { .. }),
+        }
+        | Command::RuntimeInfo => false,
+        #[cfg(unix)]
+        Command::AcquireInstallerLock { .. } => false,
+        _ => true,
+    }
 }
 
 /// Execute one explicit optional parser-pack lifecycle command from the selected project root.

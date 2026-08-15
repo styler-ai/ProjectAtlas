@@ -254,7 +254,7 @@ const SKILL_FILE_NAME: &str = "SKILL.md";
 const MCP_CONTRACT_EXECUTABLE_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE";
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 const MCP_CONTRACT_METADATA_CANARY: &str = "mcp_contract_metadata_canary";
-const MCP_TOOLS_SHA256: &str = "62281b4258cab70ecc72d1bb73353f5f8799e5dbf2486c9b7b7e1aec1932eed8";
+const MCP_TOOLS_SHA256: &str = "381fe3a67645dcb88bcf44c8d32f437808b322a54cd1e705a5a7a36a76caac4e";
 const AGENT_EFFICIENCY_BENCHMARK_PATH: &str =
     "../../docs/benchmarks/v0.4-agent-navigation-results.json";
 const AGENT_EFFICIENCY_PARTIAL_FILE: &str = "partial.json";
@@ -4107,19 +4107,30 @@ fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<()
     let common_git_dir = manager.join(".git");
     let common_dir_init = Command::cargo_bin("projectatlas")?
         .current_dir(&common_git_dir)
-        .args(["--format", "json", "init"])
+        .args(["--format", "json", "init", "--no-scan"])
         .output()?;
-    if common_dir_init.status.success() {
-        return Err(
-            io::Error::other("main checkout common Git directory initialized as source").into(),
-        );
+    if !common_dir_init.status.success() {
+        return Err(io::Error::other(format!(
+            "single-worktree common manager did not select its source: {}",
+            String::from_utf8_lossy(&common_dir_init.stderr)
+        ))
+        .into());
     }
-    let common_dir_error: Value = serde_json::from_slice(&common_dir_init.stderr)?;
-    require_json_string(&common_dir_error, &["error", "kind"], "worktree_required")?;
     if common_git_dir.join(ATLAS_DIR_NAME).exists() {
-        return Err(
-            io::Error::other("common Git directory refusal created ProjectAtlas state").into(),
-        );
+        return Err(io::Error::other(
+            "common-manager selection created ProjectAtlas state under .git",
+        )
+        .into());
+    }
+    if !manager
+        .join(ATLAS_DIR_NAME)
+        .join("projectatlas.db")
+        .is_file()
+    {
+        return Err(io::Error::other(
+            "common-manager selection did not initialize the selected worktree atlas",
+        )
+        .into());
     }
     let common_atlas_dir = common_git_dir.join(ATLAS_DIR_NAME);
     fs::create_dir(&common_atlas_dir)?;
@@ -4140,15 +4151,13 @@ fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<()
         .current_dir(&common_git_dir)
         .args(["--format", "json", "settings"])
         .output()?;
-    if common_dir_settings.status.success() {
-        return Err(io::Error::other("common Git directory settings read succeeded").into());
+    if !common_dir_settings.status.success() {
+        return Err(io::Error::other(format!(
+            "common-manager settings did not use the selected worktree atlas: {}",
+            String::from_utf8_lossy(&common_dir_settings.stderr)
+        ))
+        .into());
     }
-    let common_settings_error: Value = serde_json::from_slice(&common_dir_settings.stderr)?;
-    require_json_string(
-        &common_settings_error,
-        &["error", "kind"],
-        "worktree_required",
-    )?;
     if fs::read(&common_database)? != common_database_before {
         return Err(io::Error::other("common Git directory refusal changed database bytes").into());
     }
@@ -4182,7 +4191,7 @@ fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<()
         .into());
     }
 
-    for selected in [&bare, &manager, &separate_control] {
+    for selected in [&bare, &separate_control] {
         let init = Command::cargo_bin("projectatlas")?
             .current_dir(selected)
             .args(["--format", "json", "init"])
@@ -7413,7 +7422,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "label: What Changes",
         "label: Capabilities",
         "label: Architecture Diagrams",
-        "blob/dev/docs/",
+        "blob/main/docs/",
         "label: Release Scope",
         "label: Acceptance criteria",
         "label: Non-Goals",
@@ -7436,7 +7445,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     for required in [
         "Pre-Mortem",
         "Architecture Diagrams",
-        "dev/docs/*.md",
+        "docs/*.md#heading` view on `main",
         "OpenSpec tasks:",
         "commit/SHA permalink evidence",
     ] {
