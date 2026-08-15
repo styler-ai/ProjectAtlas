@@ -691,6 +691,9 @@ const MCP_ERROR_WORKTREE_ALIAS_NON_UTF8: &str =
 /// Active registrations must agree with their local atlas identity.
 const MCP_ERROR_WORKTREE_IDENTITY_CONFLICT: &str =
     "local atlas identity conflicts with its active registration";
+/// Recovery guidance when an initialized registration loses its exact atlas.
+const MCP_ERROR_BOUND_WORKTREE_ATLAS_MISSING: &str =
+    "registered worktree atlas is missing; retire and re-register the alias before initialization";
 /// A reused administrative path cannot inherit an earlier registration.
 const MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED: &str =
     "registered worktree administrative lifecycle changed; unregister and register it again";
@@ -5978,9 +5981,10 @@ impl ProjectAtlasMcpServer {
                 observed_epoch,
             )?
         };
-        if let Some(expected) = registration.project_instance_id
-            && let Some(store) = Self::open_local_worktree_atlas(&root)?
-        {
+        if let Some(expected) = registration.project_instance_id {
+            let store = Self::open_local_worktree_atlas(&root)?.ok_or_else(|| {
+                CliError::InvalidInput(MCP_ERROR_BOUND_WORKTREE_ATLAS_MISSING.to_string())
+            })?;
             let db_path = Self::projectatlas_db_path(&root);
             let observed = Self::local_worktree_project_instance_id(&store, &db_path)?;
             if observed != expected {
@@ -11824,6 +11828,27 @@ mod tests {
         require(
             git_after == git_before,
             "fallback or repeat init changed Git lifecycle state",
+        )?;
+
+        let config_path = init_config_path(&linked, None);
+        let config_before = fs::read(&config_path)?;
+        drop(preserved);
+        drop(control);
+        fs::remove_file(&target_db)?;
+        let refused = server.atlas_init(Parameters(AtlasInitParams {
+            project_path: None,
+            worktree: Some("fallback".to_string()),
+            no_scan: Some(false),
+            force_rescan: Some(false),
+            text_index_max_bytes: None,
+        }));
+        require(
+            refused.contains(MCP_ERROR_BOUND_WORKTREE_ATLAS_MISSING),
+            &format!("bound missing atlas did not fail before initialization: {refused}"),
+        )?;
+        require(
+            !target_db.exists() && fs::read(&config_path)? == config_before,
+            "bound missing atlas refusal changed target ProjectAtlas state",
         )
     }
 

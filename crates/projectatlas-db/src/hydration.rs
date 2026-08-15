@@ -122,12 +122,6 @@ impl WorktreeHydrationCandidate {
     pub fn activate(mut self, control: &IndexWorkControl) -> DbResult<WorktreeHydrationActivation> {
         control.check(IndexWorkStage::Publication)?;
         let candidate_path = self.path()?.to_path_buf();
-        if self.destination_database.exists() {
-            return Err(DbError::WorktreeHydrationDestinationExists {
-                path: self.destination_database.clone(),
-            });
-        }
-
         let store = AtlasStore::open_for_project(&candidate_path, &self.target_root)?;
         let publication = store.index_publication()?.filter(|publication| {
             publication.state == IndexPublicationState::Complete
@@ -177,9 +171,17 @@ impl WorktreeHydrationCandidate {
             reason: "hydration candidate path was already consumed",
         })?;
         path.persist_noclobber(&self.destination_database)
-            .map_err(|error| DbError::WorktreeHydrationIo {
-                path: self.destination_database.clone(),
-                source: error.error,
+            .map_err(|error| {
+                if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+                    DbError::WorktreeHydrationDestinationExists {
+                        path: self.destination_database.clone(),
+                    }
+                } else {
+                    DbError::WorktreeHydrationIo {
+                        path: self.destination_database.clone(),
+                        source: error.error,
+                    }
+                }
             })?;
 
         Ok(WorktreeHydrationActivation {
@@ -677,6 +679,27 @@ mod tests {
         require(
             destination_database.exists() && !candidate_path.exists(),
             "activation did not publish exactly one database path",
+        )?;
+
+        let raced_root = fixture.path().join("raced-target");
+        let raced_dir = raced_root.join(".projectatlas");
+        let raced_database = raced_dir.join("projectatlas.db");
+        fs::create_dir_all(&raced_dir)?;
+        let mut raced =
+            source.prepare_worktree_hydration(&raced_root, &raced_database, &control)?;
+        let raced_candidate = raced.path()?.to_path_buf();
+        raced.accept_verified_source_state(&control)?;
+        fs::write(&raced_database, b"competing initializer")?;
+        require(
+            matches!(
+                raced.activate(&control),
+                Err(DbError::WorktreeHydrationDestinationExists { .. })
+            ),
+            "activation collision did not retain the destination-exists fallback",
+        )?;
+        require(
+            fs::read(&raced_database)? == b"competing initializer" && !raced_candidate.exists(),
+            "activation collision changed the winning destination or retained its candidate",
         )?;
 
         let activated = AtlasStore::open_for_project(&destination_database, &target_root)?;
