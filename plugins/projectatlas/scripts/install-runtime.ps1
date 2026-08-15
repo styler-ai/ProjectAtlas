@@ -3656,7 +3656,10 @@ function Write-ProjectAtlasWorkflowPinReport {
             $pinMatches = [System.Text.RegularExpressions.Regex]::Matches($line, 'https://github\.com/styler-ai/ProjectAtlas/releases/download/([^/\s]+)/')
             foreach ($match in $pinMatches) {
                 $foundTag = $match.Groups[1].Value
-                if ($foundTag -and $foundTag -ne $releaseTag) {
+                if ($foundTag -notmatch '^v[0-9][A-Za-z0-9.+-]*$') {
+                    continue
+                }
+                if ($foundTag -ne $releaseTag) {
                     $relativePath = $file.FullName
                     if ($relativePath.StartsWith($rootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
                         $relativePath = $relativePath.Substring($rootPath.Length).TrimStart('\', '/')

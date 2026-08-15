@@ -11750,6 +11750,9 @@ https://github.com/styler-ai/ProjectAtlas/releases/download/v1.2.2/stale-stable\
 https://github.com/styler-ai/ProjectAtlas/releases/download/v1.2.3-rc2/stale-rc\n\
 https://github.com/styler-ai/ProjectAtlas/releases/download/v1.2.3-rc12evil/malformed-rc\n\
 https://github.com/styler-ai/ProjectAtlas/releases/download/v1.2.3evil/malformed-stable\n\
+https://github.com/styler-ai/ProjectAtlas/releases/download/v$PROJECTATLAS_VERSION/dynamic-variable\n\
+https://github.com/styler-ai/ProjectAtlas/releases/download/v${PROJECTATLAS_VERSION}/dynamic-braced\n\
+https://github.com/styler-ai/ProjectAtlas/releases/download/${{ inputs.version }}/dynamic-expression\n\
 https://github.com/example/ProjectAtlas/releases/download/v9.9.9/unrelated\n",
     )?;
     let workspace = workspace_root()?;
@@ -11837,6 +11840,8 @@ https://github.com/example/ProjectAtlas/releases/download/v9.9.9/unrelated\n",
         || !report.contains("uses v1.2.3evil; expected v1.2.3-rc12")
         || report.contains("uses v1.2.3-rc12;")
         || report.contains("uses v1.2.3;")
+        || report.contains("PROJECTATLAS_VERSION")
+        || report.contains("inputs.version")
         || report.contains("v9.9.9")
     {
         return Err(io::Error::other(format!(

@@ -6,9 +6,9 @@ If you spot a bug or have a suggestion, please open an issue with clear reproduc
 
 ## Internal workflow
 
-- Feature work lands on `dev`.
-- Releases are merged from `dev` into `main` via PR.
-- Ensure `dev` includes the latest `main` changes before releasing.
+- Feature work uses short-lived branches targeting `main`.
+- Keep change branches current with `main` before merge.
+- Release candidates and stable releases publish only from the exact verified `main` head.
 - Update the Cargo workspace version in `Cargo.toml` when preparing a release.
 - Release tags must match the Cargo version, for example `v0.3.1`.
 - Use the `02-Release` workflow for release publication; it validates the Rust workspace, builds Linux/macOS/Windows archives, creates the tag, and uploads the artifacts to the GitHub Release.
