@@ -1498,6 +1498,8 @@ flowchart TB
     Runtime --> Symbols
     DB --> Core
     FS --> Core
+    Service --> DB
+    Service --> Symbols
     Service --> Core
     Symbols --> Core
 ```
@@ -2148,6 +2150,54 @@ workflows. Those paths retain focused harness unit tests and artifact-integrity
 checks, but an input-incompatible campaign publication becomes historical or
 unavailable instead of triggering a run. Only an explicit user request starts a
 full campaign.
+
+Release promotion has one version-derived path for stable and candidate tags.
+Both use the same stable milestone and cumulative notes baseline, but GitHub
+publication keeps candidates explicitly outside Latest. The release adapter may
+consume a clean-main Atlas seed archive and manifest created by the separately
+owned seed producer; it validates their exact tag-bound names and checksums both,
+without creating or opening the immutable seed.
+
+```mermaid
+flowchart TB
+    subgraph Admission[Version-derived release admission]
+        Main[Exact origin/main candidate head] --> Serial[One in-flight workflow per requested tag]
+        Serial --> Classify{Classify workspace version}
+        Classify -->|development| Stop[No release dispatch]
+        Classify -->|malformed| Fail[Fail closed]
+        Classify -->|stable or rcN| Handoff[Verify clean parser handoff compatibility]
+        Handoff --> Milestone[Gate shared stable milestone]
+        Milestone --> Kind{Derived release kind}
+        Kind -->|rcN| RCGuard[Refuse when stable tag exists]
+        Kind -->|stable| PriorRC[Require highest published rcN<br/>as an ancestor of final head]
+    end
+    RCGuard --> Stage[Validate assets and checksum every file]
+    PriorRC --> Stage
+    Stage --> Existing{Existing release?}
+    Existing -->|yes| Repair[Validate exact metadata and tag head;<br/>repair replaceable assets;<br/>preserve immutable seed and captured Latest]
+    Existing -->|no| Create{Create requested release kind}
+    Seed[Optional clean-main seed producer] -. exact-tag archive and manifest .-> Stage
+    Prior[Greatest preceding stable tag] --> Notes[Cumulative notes for new releases]
+    Notes -. new releases only .-> Create
+    Repair --> VerifyRepair[Verify repaired metadata, tag head,<br/>and unchanged Latest]
+    Create -->|rcN| RC[Create non-draft prerelease<br/>Latest disabled]
+    Create -->|stable| Stable[Create non-draft stable release]
+    RC --> VerifyRC[Verify prerelease metadata and tag head;<br/>previous stable remains Latest]
+    Stable --> VerifyStable[Verify stable metadata and tag head;<br/>promoted stable becomes Latest]
+    VerifyRepair --> PlatformSmokes[Start hosted installer smoke lanes]
+    VerifyRC --> PlatformSmokes
+    VerifyStable --> PlatformSmokes
+    PlatformSmokes --> Linux[Install exact hosted release on Linux]
+    PlatformSmokes --> MacOS[Install exact hosted release on<br/>macOS x64 and arm64]
+    PlatformSmokes --> Windows[Install exact hosted release on Windows]
+    Linux --> Candidate{Release candidate?}
+    Candidate -->|no| LinuxReady[Linux lane succeeds]
+    Candidate -->|yes| AgentE2E[Index a real project and verify<br/>fresh brief and source through stdio MCP]
+    AgentE2E --> LinuxReady
+    LinuxReady --> Complete[All hosted lanes succeed;<br/>release workflow succeeds]
+    MacOS --> Complete
+    Windows --> Complete
+```
 
 The optional-pack workflow may reuse only sanitized Cargo dependency build state.
 An exact key binds the target, Rust and native toolchains, Cargo lockfile and

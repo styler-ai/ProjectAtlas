@@ -40,6 +40,8 @@ cargo test --doc --workspace --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 cargo deny --locked --all-features check -D warnings
+npm ci --ignore-scripts --prefix .github/mermaid-parser
+npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
 python3 .github/scripts/issue-checklists.py --self-test
 python3 .github/scripts/test-optional-parser-proof-inputs.py
 python3 .github/scripts/issue-checklists.py --repo "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" --root . --issue-map openspec/issue-map.json
@@ -70,7 +72,7 @@ For a bounded manual update or Dependabot review:
 4. Check the repository Rust toolchain and the dependency's MSRV, default and added features, license, advisories, registry or Git source, duplicate paths, upstream changelog, and breaking changes.
 5. Run the focused repository-policy E2E test, the dependency inventory and deny commands above, and the ordinary locked workspace gates.
 
-Weekly Cargo and GitHub Actions Dependabot updates target `dev`; only Cargo minor and patch updates are grouped, majors remain separate, and no repository automation merges them. Configuration merged only into `dev` is validated but does not become hosted-active until the later normal verified integration into the default branch. GitHub may originate a security-update pull request against the default branch; leave it unmerged until the same dependency change has been routed through and proven on `dev`.
+Weekly Cargo and GitHub Actions Dependabot updates target `main`; only Cargo minor and patch updates are grouped, majors remain separate, and no repository automation merges them. Dependency pull requests follow the same review and locked workspace gates as other changes. Obsolete automated pull requests against the retired `dev` release line are explicitly closed or superseded rather than merged into a release milestone as cleanup.
 
 ## Lean implementation and IssueOps
 
@@ -79,12 +81,14 @@ ProjectAtlas uses the implementation loop that produced v0.3.26:
 1. Implement a meaningful compiling behavior slice.
 2. Add or update the smallest focused unit, integration, E2E, smoke, or validation test appropriate to the risk. One coherent test may cover several related tasks.
 3. Run the ordinary locked Rust/workspace gates.
-4. Commit and integrate significant working slices into `dev`.
+4. Commit and integrate significant working slices into `main` through reviewed pull requests.
 5. Use normal CI and review, then synchronize the local OpenSpec checklist with its mapped GitHub issue.
 
 Task completion does not require unique test identifiers, task-level verification plans or ledgers, commit receipts, rendered evidence comments, hosted links per checkbox, or post-merge issue sealing. When useful, keep one compact shared behavior-coverage row in the issue with clickable owning test definitions and the passed test command. One test may cover several tasks, and several tests may jointly cover one coherent task. GitHub Actions already records normal hosted outcomes.
 
-Open mapped issues keep the concise v0.3.26 #305 planning shape: `Why`, `What Changes`, `Capabilities`, `Architecture Diagrams`, `Release Scope`, `Non-Goals`, `Pre-Mortem`, and one authoritative OpenSpec task section. `Architecture Diagrams` contains at least one durable HTTPS link to a versioned `dev/docs/*.md` view in this repository; reuse an existing architecture document when the change does not need a new one, and do not substitute `N/A`, a commit/SHA permalink, an external repository, or a duplicate PDF. The pre-mortem lists likely failures and visible mitigation checkboxes. Each mitigation ends with its owning task IDs, for example `(OpenSpec tasks: 2.1, 4.3)`, and is checked exactly when all referenced tasks are checked. This reuses the implementation checklist; it does not create mitigation-specific tests, receipts, or evidence artifacts.
+Open mapped issues keep the concise v0.3.26 #305 planning shape: `Why`, `What Changes`, `Capabilities`, `Architecture Diagrams`, `Release Scope`, `Non-Goals`, `Pre-Mortem`, and one authoritative OpenSpec task section. `Architecture Diagrams` either contains a durable HTTPS link to a versioned `dev/docs/*.md#heading` view in this repository or records exactly `N/A: <reason>` as a conscious no-architecture-change decision. Every linked heading's own section must contain a closed fenced `mermaid` block that passes the repository-locked Mermaid syntax parser; a heading, prose, empty or declaration-only fence, or invalid Mermaid does not satisfy the gate. The final OpenSpec task compares the completed implementation with those diagrams and updates either side until they agree, or reconfirms the reasoned `N/A`. The pre-mortem lists likely failures and visible mitigation checkboxes. Each mitigation ends with its owning task IDs, for example `(OpenSpec tasks: 2.1, 4.3)`, and is checked exactly when all referenced tasks are checked. This reuses the implementation checklist; it does not create mitigation-specific tests, receipts, or evidence artifacts.
+
+Assign an open issue to a canonical `vMAJOR.MINOR.PATCH-00` release milestone only when it has exactly `status:ready`, a local OpenSpec mapping, exactly one non-empty copy of every required proposal and design section, complete delta-spec/task artifacts, explicit dependency and cross-issue impact, no unresolved open questions, checked contract tasks, synchronized issue sections, architecture evidence, and the final reconciliation task. The issue-event IssueOps workflow enforces this implementation-ready boundary. Release-time milestone completion remains the stricter all-issues-closed gate.
 
 Ordinary pull requests require exact local/GitHub checklist synchronization but do not require the whole release milestone to be complete. Full milestone checklist completion is a release-only gate. SHA-pinned Actions, locked Cargo commands, least privilege, parser/package/signature/digest validation, release checksums, and other executable integrity controls remain independent of task bookkeeping.
 
@@ -111,15 +115,15 @@ Commit identity is provenance, not a general test invalidation key. After a comm
 
 ## Branching
 
-- `dev` for active development.
-- `main` for stable releases only.
-- Merge `dev` -> `main` via pull request after CI is green.
-- Ensure `dev` includes the latest `main` changes before releasing.
+- Open change branches and pull requests against `main`; `main` is the active integration and release authority.
+- Retain `dev` only while durable historical links or an explicit migration require it; dependency and release automation do not target it.
 - Update the Cargo workspace version in `Cargo.toml`.
-- Pushes to `main` create a GitHub release when the Cargo version is release-eligible.
-- The auto-release workflow generates GitHub release notes from merged PRs.
-- Release archives are published with a `SHA256SUMS` asset. Verify manually with `sha256sum -c SHA256SUMS` or `shasum -a 256 -c SHA256SUMS` from a directory containing the downloaded archives.
-- If a publish run fails after creating a tag or leaves a GitHub release with missing or stale assets, rerun the release workflow for the same version. The publish job recovers when the existing tag points at the current commit, creates the missing release when needed, and uploads release assets with replacement enabled for repair runs.
+- Pushes to `main` automatically dispatch a release for an exact stable `MAJOR.MINOR.PATCH` or candidate `MAJOR.MINOR.PATCH-rcN` workspace version when the tag is absent and the clean optional-parser handoff is input-compatible with the exact pushed commit. Merge-commit, squash, and rebase histories use that same commit-bound rule. Canonical Cargo development versions `MAJOR.MINOR.PATCH-dev.N` do not dispatch; malformed versions fail closed.
+- Publish at least `-rc1` before promoting a release series to its final stable version. The release gate refuses a final version unless the highest published non-draft RC for the same base version is an ancestor of the final head, and refuses a late RC after that stable tag exists. RCs are non-draft GitHub prereleases created with Latest disabled, so GitHub Latest stays on the preceding stable release. The final stable release is a normal release and becomes Latest.
+- Keep exact hosted tag/release/Latest verification in the release operation after all mapped milestone implementation issues are closed. Implementation checklists prove generic policy and prepublication packages; they must not require the hosted release whose prepublication milestone gate they block.
+- Release notes for every RC and the final stable promotion use the preceding stable tag as their baseline. Later candidates and the final notes therefore remain cumulative across the entire release series without duplicating an RC as the history baseline.
+- Release archives are published with a `SHA256SUMS` asset. If the clean-main seed producer supplies the optional exact-tag `projectatlas-main-atlas-seed-<tag>-<snapshot-digest>.tar.zst` and matching `.manifest.json`, release staging validates the pair and checksums both without opening or modifying the seed. Verify downloaded assets with `sha256sum -c SHA256SUMS` or `shasum -a 256 -c SHA256SUMS`.
+- If a publish run fails after creating a tag or leaves a GitHub release with missing or stale assets, rerun the release workflow for the same exact version. Repair is accepted only when the existing non-draft release classification and tag head match the derived stable/RC policy; replaceable assets may then be repaired without moving the tag or changing classification, while validated immutable seed assets are never clobbered. If interruption left exactly one seed-pair member, recovery also requires the complete staged pair and exact byte equality, then uploads only the missing companion. The workflow rechecks release metadata, exact head, and requires the previously captured Latest release to remain unchanged during repair.
 
 ## CI behavior
 
