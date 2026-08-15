@@ -43,7 +43,7 @@ atlas_watch_once(worktree: "issue-430")
 atlas_file_summary(worktree: "issue-430", file: "src/lib.rs", compact: true)
 ```
 
-`atlas_worktree_list` joins at most 256 deterministic structural rows to the bounded control catalog and returns stable selectors. `atlas_worktree_add` accepts one such selector or one uniquely matching human selector; ambiguity returns bounded candidates instead of guessing. Registration does not create the target atlas. `atlas_init(worktree=...)` is the explicit operation that initializes an absent registered target.
+`atlas_worktree_list` joins the complete admitted structural inventory (the primary plus at most 1,024 linked registrations) to the bounded control catalog and returns stable selectors. `atlas_worktree_add` accepts one such selector or one uniquely matching human selector; ambiguity returns bounded candidates instead of guessing. Registration does not create the target atlas. `atlas_init(worktree=...)` is the explicit operation that initializes an absent registered target.
 
 All normal root-scoped MCP tools use one mutually exclusive selection boundary:
 

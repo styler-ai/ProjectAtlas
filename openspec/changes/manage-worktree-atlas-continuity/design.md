@@ -112,7 +112,7 @@ Pattern fit: concrete existing owners plus validated newtypes and closed state e
 ## Data and Performance Model
 
 - Engine: the repository's supported bundled SQLite through `rusqlite`, local filesystem, WAL profile unchanged.
-- Cardinality: at most the existing structural ceiling of 1,024 worktrees; public results remain capped at 256. Registry lookup by active alias and stable administrative identity is indexed and bounded.
+- Cardinality: at most the existing structural ceiling of 1,024 linked registrations plus the primary checkout; the non-pageable list returns that complete admitted structural inventory. Registry lookup by active alias and stable administrative identity is indexed and bounded.
 - Registry writes: one short transaction per add/remove/move observation; no source parsing or filesystem traversal inside the transaction.
 - Hydration: one SQLite online backup plus incremental reconciliation. Peak persistent bytes are bounded to source database plus one target temporary candidate; peak memory remains streaming/batched and does not materialize the database or source tree.
 - Telemetry: routed MCP events retain existing O(1) normalized aggregate writes. Local snapshot synchronization is O(retained token dimensions plus retained daily buckets) for one worktree, batched in one transaction, with no raw-event transfer. Main aggregate reads are O(main aggregate rows plus registered/retired snapshot rows), bounded by dimension/retention ceilings and selected columns.

@@ -580,6 +580,9 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
             );
             continue;
         }
+        if !in_core {
+            continue;
+        }
         if key.eq_ignore_ascii_case("worktree") {
             source_root_inference_safe = false;
             continue;
@@ -1702,6 +1705,32 @@ mod tests {
         }
         let bare_config_path = bare_dot_git.join("config");
         let bare_config = fs::read(&bare_config_path)?;
+        run_command(
+            Command::new("git")
+                .arg("--git-dir")
+                .arg(&bare_dot_git)
+                .args(["config", "extensions.bare", "false"]),
+        )?;
+        let effective_bare = Command::new("git")
+            .arg("--git-dir")
+            .arg(&bare_dot_git)
+            .args(["config", "--bool", "core.bare"])
+            .output()?;
+        require(
+            effective_bare.status.success()
+                && String::from_utf8(effective_bare.stdout)?.trim() == "true",
+            "Git fixture let a non-core bare key override core.bare",
+        )?;
+        let non_core_bare = require_git(discover_repository_structure(&bare_dot_git)?)?;
+        require(
+            non_core_bare.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::None,
+                },
+            "non-core bare key invented the manager parent as source",
+        )?;
+        fs::write(&bare_config_path, &bare_config)?;
+
         run_command(
             Command::new("git")
                 .arg("--git-dir")

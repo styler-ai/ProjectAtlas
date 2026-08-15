@@ -67,10 +67,10 @@ use projectatlas_core::toon::{
     render_symbol_relations, render_token_overview, render_token_trends,
 };
 use projectatlas_core::{
-    IndexGeneration, IndexWorkControl, IndexWorkFailure, NavigationNextCall,
-    NavigationNextCapability, Overview, PurposeSource, PurposeStatus, RankedConnection,
-    RankedConnectionCount, RankedConnectionKind, RankedConnectionTarget, RankedNode,
-    RankedReasonCode, normalize_native_path_display, normalize_repo_path,
+    IndexGeneration, IndexWorkControl, IndexWorkFailure, MAX_GIT_WORKTREE_REGISTRATIONS,
+    NavigationNextCall, NavigationNextCapability, Overview, PurposeSource, PurposeStatus,
+    RankedConnection, RankedConnectionCount, RankedConnectionKind, RankedConnectionTarget,
+    RankedNode, RankedReasonCode, normalize_native_path_display, normalize_repo_path,
     normalize_repo_path_prefix, validated_repo_file_key, validated_repo_node_key,
 };
 use projectatlas_db::{
@@ -672,7 +672,7 @@ const MCP_WORKTREE_PROJECT_PATH_CONFLICT: &str =
 /// Reserved alias for the immutable MCP control authority.
 const MCP_MAIN_WORKTREE_ALIAS: &str = "main";
 /// Maximum structural worktree rows emitted in one MCP response.
-const MCP_WORKTREE_LIST_MAX_ROWS: usize = 256;
+const MCP_WORKTREE_LIST_MAX_ROWS: usize = MAX_GIT_WORKTREE_REGISTRATIONS + 1;
 /// Stable prefix for structural worktree candidates returned to agents.
 const MCP_WORKTREE_SELECTOR_PREFIX: &str = "wt-";
 /// Hex characters retained from the administrative-path digest.
