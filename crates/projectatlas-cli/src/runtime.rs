@@ -817,12 +817,13 @@ pub(crate) fn synchronize_registered_worktree_usage(
             continue;
         };
         let database = root.join(".projectatlas").join("projectatlas.db");
-        let Ok(target) = open_atlas_store_read_only_for_project(&database, root) else {
-            continue;
-        };
-        let Ok(snapshot) = target.export_worktree_usage_snapshot() else {
-            continue;
-        };
+        match fs::symlink_metadata(&database) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        }
+        let target = open_atlas_store_read_only_for_project(&database, root)?;
+        let snapshot = target.export_worktree_usage_snapshot()?;
         drop(target);
         if registration.project_instance_id.is_none() {
             control.bind_worktree_project(

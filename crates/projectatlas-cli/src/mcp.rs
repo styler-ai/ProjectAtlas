@@ -11738,7 +11738,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_synchronization_propagates_project_identity_failures()
+    fn aggregate_synchronization_propagates_local_atlas_and_identity_failures()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let primary = temp.path().join("control");
@@ -11843,6 +11843,27 @@ mod tests {
                 ))
             ),
             "aggregate synchronization hid the project identity failure behind stale success",
+        )?;
+
+        let corrupt = rusqlite::Connection::open(&target_db)?;
+        corrupt.pragma_update(None, "ignore_check_constraints", true)?;
+        corrupt.execute("UPDATE usage_aggregate_revisions SET revision = -1", [])?;
+        drop(corrupt);
+        require(
+            matches!(
+                synchronize_registered_worktree_usage(&control_db, &primary),
+                Err(CliError::Db(DbError::TelemetryIntegerOverflow {
+                    field: "usage_aggregate_revisions.revision"
+                }))
+            ),
+            "aggregate synchronization hid the local snapshot export failure",
+        )?;
+
+        fs::remove_file(&target_db)?;
+        fs::create_dir(&target_db)?;
+        require(
+            synchronize_registered_worktree_usage(&control_db, &primary).is_err(),
+            "aggregate synchronization hid the existing local atlas open failure",
         )
     }
 
