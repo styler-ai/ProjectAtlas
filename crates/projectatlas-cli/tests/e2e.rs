@@ -11864,16 +11864,17 @@ https://github.com/example/ProjectAtlas/releases/download/v9.9.9/unrelated\n",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let normalized_report = report.split_whitespace().collect::<Vec<_>>().join(" ");
     if !output.status.success()
-        || !report.contains("uses v1.2.2; expected v1.2.3-rc12")
-        || !report.contains("uses v1.2.3-rc2; expected v1.2.3-rc12")
-        || !report.contains("uses v1.2.3-rc12evil; expected v1.2.3-rc12")
-        || !report.contains("uses v1.2.3evil; expected v1.2.3-rc12")
-        || report.contains("uses v1.2.3-rc12;")
-        || report.contains("uses v1.2.3;")
-        || report.contains("PROJECTATLAS_VERSION")
-        || report.contains("inputs.version")
-        || report.contains("v9.9.9")
+        || !normalized_report.contains("uses v1.2.2; expected v1.2.3-rc12")
+        || !normalized_report.contains("uses v1.2.3-rc2; expected v1.2.3-rc12")
+        || !normalized_report.contains("uses v1.2.3-rc12evil; expected v1.2.3-rc12")
+        || !normalized_report.contains("uses v1.2.3evil; expected v1.2.3-rc12")
+        || normalized_report.contains("uses v1.2.3-rc12;")
+        || normalized_report.contains("uses v1.2.3;")
+        || normalized_report.contains("PROJECTATLAS_VERSION")
+        || normalized_report.contains("inputs.version")
+        || normalized_report.contains("v9.9.9")
     {
         return Err(io::Error::other(format!(
             "installer workflow-pin report did not preserve exact RC identity:\n{report}"
