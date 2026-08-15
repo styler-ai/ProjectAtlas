@@ -7116,6 +7116,23 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
             .into());
         }
     }
+    let notes = publish
+        .find("python3 .github/scripts/release-notes.py > release-notes.md")
+        .ok_or_else(|| io::Error::other("release notes generation is missing"))?;
+    let revalidation = publish
+        .find("git fetch --force origin main:refs/remotes/origin/main")
+        .ok_or_else(|| io::Error::other("exact-main revalidation is missing"))?;
+    for mutation in ["gh release upload", "gh release create"] {
+        let mutation = publish
+            .find(mutation)
+            .ok_or_else(|| io::Error::other(format!("release mutation {mutation:?} is missing")))?;
+        if notes >= revalidation || revalidation >= mutation {
+            return Err(io::Error::other(
+                "release notes must precede exact-main revalidation and every release mutation",
+            )
+            .into());
+        }
+    }
     for required in [
         "parser_pack_run_id:",
         "parser-pack-assets:",

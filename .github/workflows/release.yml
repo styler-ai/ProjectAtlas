@@ -844,6 +844,7 @@ jobs:
       - name: Revalidate exact main head before release mutation
         run: |
           set -euo pipefail
+          python3 .github/scripts/release-notes.py > release-notes.md
           git fetch --force origin main:refs/remotes/origin/main
           head_commit="$(git rev-parse HEAD^{commit})"
           main_commit="$(git rev-parse refs/remotes/origin/main^{commit})"
@@ -855,7 +856,6 @@ jobs:
       - name: Create GitHub release
         run: |
           set -euo pipefail
-          python3 .github/scripts/release-notes.py > release-notes.md
           if [[ "${PROJECTATLAS_RELEASE_EXISTS:-false}" == "true" ]]; then
             python3 .github/scripts/verify-main-atlas-seed-release-assets.py \
               --repair-upload-source release-assets \
