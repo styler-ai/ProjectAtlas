@@ -4366,7 +4366,9 @@ impl ProjectAtlasMcpServer {
         &self,
         state: &McpProjectState,
     ) -> Result<(), CliError> {
-        let repository = self.control_git_repository()?;
+        let Some(repository) = self.control_git_repository_if_present()? else {
+            return Ok(());
+        };
         let Some(entry) = repository
             .worktrees
             .iter()
@@ -5531,13 +5533,18 @@ impl ProjectAtlasMcpServer {
 
     /// Return the bounded reciprocal Git inventory for the immutable control checkout.
     fn control_git_repository(&self) -> Result<GitRepositoryStructure, CliError> {
+        self.control_git_repository_if_present()?.ok_or_else(|| {
+            CliError::InvalidInput(MCP_ERROR_WORKTREE_CONTROL_REPOSITORY_REQUIRED.to_string())
+        })
+    }
+
+    /// Return the control Git inventory, or none for a true non-Git control root.
+    fn control_git_repository_if_present(
+        &self,
+    ) -> Result<Option<GitRepositoryStructure>, CliError> {
         let repository = match discover_repository_structure(&self.control_state.root)? {
             RepositoryStructure::Git(repository) => repository,
-            RepositoryStructure::NonGit { .. } => {
-                return Err(CliError::InvalidInput(
-                    MCP_ERROR_WORKTREE_CONTROL_REPOSITORY_REQUIRED.to_string(),
-                ));
-            }
+            RepositoryStructure::NonGit { .. } => return Ok(None),
             RepositoryStructure::InvalidGit { issue, .. } => {
                 return Err(CliError::InvalidInput(format!(
                     "invalid control-repository Git evidence at '{}': {:?}",
@@ -5558,7 +5565,7 @@ impl ProjectAtlasMcpServer {
                 normalize_native_path_display(&self.control_state.root)
             )));
         }
-        Ok(repository)
+        Ok(Some(repository))
     }
 
     /// Derive one stable, short candidate selector from Git administrative identity.
