@@ -5059,7 +5059,7 @@ fn synchronous_mode(value: i64) -> DbResult<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AtlasStore, WorktreeAlias};
+    use crate::{AtlasStore, WorktreeAlias, WorktreeRegistrationState};
     use projectatlas_core::telemetry::{
         TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_DEDUPE_SCOPE_EVENT, usage_from_estimates,
         usage_from_text,
@@ -7333,7 +7333,37 @@ mod tests {
             ),
             "mismatched project snapshot was not rejected",
         )?;
-        control.retire_worktree(&alias, 20)?;
+        let contending_local = store_at(&worktree_root)?;
+        let local_reader = AtlasStore::open_read_only_for_project(
+            &worktree_root.join(".projectatlas").join("projectatlas.db"),
+            &worktree_root,
+        )?;
+        let (retired, final_sync) =
+            local_reader.with_exclusive_worktree_usage_snapshot(|snapshot| {
+                let blocked = contending_local.record_usage(&event("after-export", 70, 20));
+                if !blocked.as_ref().is_err_and(DbError::is_write_unavailable) {
+                    return Err(DbError::WorktreeRegistrationRow {
+                        reason: "local writer was not excluded during final synchronization",
+                    });
+                }
+                control.retire_worktree_with_usage_snapshot(&alias, snapshot, 20)
+            })?;
+        require_eq(
+            &retired.state,
+            &WorktreeRegistrationState::Retired,
+            "writer-excluded retirement state",
+        )?;
+        require_eq(
+            &final_sync,
+            &WorktreeUsageSyncState::Current,
+            "writer-excluded final synchronization",
+        )?;
+        contending_local.record_usage(&event("after-retirement", 70, 20))?;
+        require_eq(
+            &contending_local.token_overview(None)?.calls,
+            &3,
+            "local usage after retirement",
+        )?;
         require_eq(
             &control.repository_token_overview()?.calls,
             &3,

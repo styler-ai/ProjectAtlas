@@ -74,7 +74,7 @@ ProjectAtlas SHALL retain a worktree's last successfully synchronized aggregate 
 #### Scenario: ProjectAtlas remove performs final synchronization
 
 - **WHEN** an active registered worktree is structurally available and remove is requested
-- **THEN** ProjectAtlas accepts a final monotonic aggregate snapshot before retiring the registration, then continues including that retired origin in main totals
+- **THEN** ProjectAtlas holds local writer exclusion from exact snapshot export through one atomic control synchronize-and-retire transaction, then continues including that retired origin in main totals
 
 #### Scenario: External deletion retains prior aggregate
 

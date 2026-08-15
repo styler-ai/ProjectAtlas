@@ -355,6 +355,34 @@ impl AtlasStore {
         telemetry::export_worktree_usage_snapshot(&self.connection)
     }
 
+    /// Hold local writer exclusion while a caller consumes one exact usage snapshot.
+    ///
+    /// The callback must remain short: its lifetime is the final-synchronization
+    /// boundary that prevents a local usage commit from landing between export
+    /// and control-atlas retirement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact database binding changed, writer exclusion
+    /// cannot be acquired, snapshot export fails, or the callback fails.
+    pub fn with_exclusive_worktree_usage_snapshot<T>(
+        &self,
+        operation: impl FnOnce(&WorktreeUsageSnapshot) -> DbResult<T>,
+    ) -> DbResult<T> {
+        let binding = self.captured_project_binding()?;
+        self.with_telemetry_connection(|connection| {
+            crate::with_validated_write_transaction(
+                connection,
+                Some(&binding.project_root),
+                Some(binding.project_instance_id),
+                |transaction| {
+                    let snapshot = telemetry::export_worktree_usage_snapshot(transaction)?;
+                    operation(&snapshot)
+                },
+            )
+        })
+    }
+
     /// Accept a strictly newer local aggregate snapshot for one active alias.
     ///
     /// # Errors
@@ -445,20 +473,59 @@ impl AtlasStore {
                     alias: alias.to_string(),
                 }
             })?;
-            if retired_at_epoch < epoch_to_sqlite(existing.created_at_epoch)? {
-                return Err(DbError::WorktreeRegistrationRow {
-                    reason: "retirement time precedes creation time",
-                });
-            }
-            transaction.execute(
-                "UPDATE worktree_registrations
-             SET state = 'retired', retired_at_epoch = ?1
-             WHERE registration_id = ?2",
-                params![retired_at_epoch, existing.registration_id],
-            )?;
-            load_by_id(transaction, existing.registration_id)
+            retire_registration(transaction, &existing, retired_at_epoch)
         })
     }
+
+    /// Synchronize one writer-excluded local snapshot and retire its alias atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an absent alias, mismatched snapshot identity, invalid
+    /// time or aggregate state, changed control binding, or transactional `SQLite`
+    /// failure. Synchronization and retirement roll back together.
+    pub fn retire_worktree_with_usage_snapshot(
+        &self,
+        alias: &WorktreeAlias,
+        snapshot: &WorktreeUsageSnapshot,
+        retired_at_epoch: u64,
+    ) -> DbResult<(WorktreeRegistration, WorktreeUsageSyncState)> {
+        let retired_at_epoch = epoch_to_sqlite(retired_at_epoch)?;
+        self.with_validated_write(|transaction| {
+            let existing = load_active_by_alias(transaction, alias.as_str())?.ok_or_else(|| {
+                DbError::WorktreeRegistrationNotFound {
+                    alias: alias.to_string(),
+                }
+            })?;
+            let synchronized = telemetry::synchronize_worktree_usage_snapshot(
+                transaction,
+                existing.registration_id,
+                snapshot,
+            )?;
+            let retired = retire_registration(transaction, &existing, retired_at_epoch)?;
+            Ok((retired, synchronized))
+        })
+    }
+}
+
+/// Retire one already-loaded active registration inside its caller-owned transaction.
+fn retire_registration(
+    connection: &Connection,
+    registration: &WorktreeRegistration,
+    retired_at_epoch: i64,
+) -> DbResult<WorktreeRegistration> {
+    if retired_at_epoch < epoch_to_sqlite(registration.created_at_epoch)? {
+        return Err(DbError::WorktreeRegistrationRow {
+            reason: "retirement time precedes creation time",
+        });
+    }
+    connection.execute(
+        "UPDATE worktree_registrations
+         SET state = 'retired', retired_at_epoch = ?1
+         WHERE registration_id = ?2",
+        params![retired_at_epoch, registration.registration_id],
+    )?;
+    load_by_id(connection, registration.registration_id)
 }
 
 /// Build one typed public alias-validation error.

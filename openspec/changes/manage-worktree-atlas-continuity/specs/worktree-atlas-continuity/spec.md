@@ -83,10 +83,15 @@ ProjectAtlas SHALL let one explicitly selected primary/control atlas register st
 - **WHEN** Git removes a registered worktree and later creates a different administrative-directory lifecycle at the same path
 - **THEN** ProjectAtlas rejects alias routing without reading or writing the replacement atlas and permits the stale ProjectAtlas registration to be retired before the replacement is registered explicitly
 
+#### Scenario: Recreated atlas does not inherit a registered identity
+
+- **WHEN** the same structurally valid worktree root contains a database recreated through the legacy exact-path route with a different project identity
+- **THEN** alias routing rejects the replacement database until the stale registration is retired and the replacement is registered explicitly
+
 #### Scenario: Remove unregisters ProjectAtlas only
 
-- **WHEN** final local telemetry synchronization succeeds and an agent calls `atlas_worktree_remove` with an active alias
-- **THEN** ProjectAtlas retires the selectable mapping while preserving historical aggregate telemetry and leaving the Git worktree, files, branch, `.projectatlas`, and database untouched
+- **WHEN** writer-excluded final local telemetry synchronization succeeds and an agent calls `atlas_worktree_remove` with an active alias
+- **THEN** ProjectAtlas atomically synchronizes and retires the selectable mapping while preserving historical aggregate telemetry and leaving the Git worktree, files, branch, `.projectatlas`, and database untouched
 
 #### Scenario: Remove fails before retirement when final sync fails
 

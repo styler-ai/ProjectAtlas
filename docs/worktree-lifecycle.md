@@ -52,7 +52,7 @@ All normal root-scoped MCP tools use one mutually exclusive selection boundary:
 - `project_path: "<exact-root>"` remains the legacy compatibility route; and
 - supplying both selectors is invalid.
 
-Each admitted request captures its canonical root, database path, project identity, registration identity, control database, and alias before background or query work begins. Interleaved requests therefore do not depend on current directory or mutable session selection.
+Each admitted request captures its canonical root, database path, project identity, registration identity, control database, and alias before background or query work begins. An initialized alias also rechecks that the current database project identity still matches the registration, so recreating a database at the same valid root cannot inherit the old telemetry origin. Interleaved requests therefore do not depend on current directory or mutable session selection.
 
 If Git moves a checkout, its unchanged administrative directory preserves the alias. If Git deletes and later recreates a worktree while reusing the same administrative path, the lifecycle identity changes: routing fails closed until the stale alias is removed and the new checkout is registered. Unix requires device, inode, and creation time; Windows requires creation time plus retained-handle volume and 128-bit file identity. A filesystem that cannot provide the complete non-reusable evidence fails alias registration and routing; it never falls back to a reusable path, timestamp, or inode. A manager with `core.worktree` or unresolved config includes likewise requires exact source selection instead of guessing its parent. Removing the stale ProjectAtlas registration still leaves Git, source, and either checkout's `.projectatlas` state untouched.
 
@@ -194,7 +194,7 @@ Alias-routed MCP events commit once in control under the stable registration ori
 
 ## Removal, failures, and recovery
 
-`atlas_worktree_remove(worktree: "issue-430")` final-syncs an available local aggregate and retires only the ProjectAtlas registration. It does not delete or alter the Git worktree, branch, source, `.projectatlas` folder, or SQLite database. Retained totals continue to contribute to the control report. A later registration with the same text alias receives a distinct origin identity and cannot merge histories.
+`atlas_worktree_remove(worktree: "issue-430")` final-syncs an available local aggregate and retires only the ProjectAtlas registration. One short local SQLite writer-exclusion scope covers exact snapshot export plus the control atlas's atomic synchronize-and-retire transaction; a concurrent local usage commit therefore lands before the retained snapshot or only after retirement. It does not delete or alter the Git worktree, branch, source, `.projectatlas` folder, or SQLite database. Retained totals continue to contribute to the control report. A later registration with the same text alias receives a distinct origin identity and cannot merge histories.
 
 ```mermaid
 stateDiagram-v2

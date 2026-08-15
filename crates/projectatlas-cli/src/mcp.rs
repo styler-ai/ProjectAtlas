@@ -5594,19 +5594,38 @@ impl ProjectAtlasMcpServer {
         })
     }
 
-    /// Read one exact local worktree atlas and its bounded telemetry snapshot without migration.
-    fn local_worktree_atlas(root: &Path) -> Result<Option<LocalWorktreeAtlas>, CliError> {
+    /// Open one exact local worktree atlas without creating or migrating it.
+    fn open_local_worktree_atlas(root: &Path) -> Result<Option<AtlasStore>, CliError> {
         let db_path = Self::projectatlas_db_path(root);
         if !db_path.exists() {
             return Ok(None);
         }
-        let store = open_atlas_store_read_only_for_project(&db_path, root)?;
+        Ok(Some(open_atlas_store_read_only_for_project(
+            &db_path, root,
+        )?))
+    }
+
+    /// Require the exact project identity from one already-open local atlas.
+    fn local_worktree_project_instance_id(
+        store: &AtlasStore,
+        db_path: &Path,
+    ) -> Result<ProjectInstanceId, CliError> {
         let project_instance_id = store.project_instance_id()?.ok_or_else(|| {
             CliError::InvalidInput(format!(
                 "worktree atlas '{}' has no exact project identity",
-                normalize_native_path_display(&db_path)
+                normalize_native_path_display(db_path)
             ))
         })?;
+        Ok(project_instance_id)
+    }
+
+    /// Read one exact local worktree atlas and its bounded telemetry snapshot without migration.
+    fn local_worktree_atlas(root: &Path) -> Result<Option<LocalWorktreeAtlas>, CliError> {
+        let db_path = Self::projectatlas_db_path(root);
+        let Some(store) = Self::open_local_worktree_atlas(root)? else {
+            return Ok(None);
+        };
+        let project_instance_id = Self::local_worktree_project_instance_id(&store, &db_path)?;
         let snapshot = store.export_worktree_usage_snapshot()?;
         if snapshot.project_instance_id() != project_instance_id {
             return Err(CliError::InvalidInput(format!(
@@ -5900,6 +5919,17 @@ impl ProjectAtlasMcpServer {
                 observed_epoch,
             )?
         };
+        if let Some(expected) = registration.project_instance_id
+            && let Some(store) = Self::open_local_worktree_atlas(&root)?
+        {
+            let db_path = Self::projectatlas_db_path(&root);
+            let observed = Self::local_worktree_project_instance_id(&store, &db_path)?;
+            if observed != expected {
+                return Err(CliError::InvalidInput(
+                    MCP_ERROR_WORKTREE_IDENTITY_CONFLICT.to_string(),
+                ));
+            }
+        }
         let mut state = Self::project_state_from_root_with_config_validation(&root, validation)?;
         state.worktree = Some(McpWorktreeSelection {
             alias: alias.to_string(),
@@ -7265,14 +7295,28 @@ impl ProjectAtlasMcpServer {
                 None => None,
             };
             let mut telemetry_sync = None;
-            let root = match entry.map(|entry| &entry.state) {
+            let retired_at_epoch = Self::current_epoch_seconds()?;
+            let (root, retired) = match entry.map(|entry| &entry.state) {
                 Some(GitWorktreeState::Active { root, .. }) => {
-                    if let Some(local) = Self::local_worktree_atlas(root)? {
-                        control.bind_worktree_project(&alias, root, local.project_instance_id)?;
-                        telemetry_sync =
-                            Some(control.synchronize_worktree_usage(&alias, &local.snapshot)?);
-                    }
-                    root.clone()
+                    let retired = if let Some(local) = Self::open_local_worktree_atlas(root)? {
+                        let db_path = Self::projectatlas_db_path(root);
+                        let project_instance_id =
+                            Self::local_worktree_project_instance_id(&local, &db_path)?;
+                        control.bind_worktree_project(&alias, root, project_instance_id)?;
+                        let (retired, synchronized) = local
+                            .with_exclusive_worktree_usage_snapshot(|snapshot| {
+                                control.retire_worktree_with_usage_snapshot(
+                                    &alias,
+                                    snapshot,
+                                    retired_at_epoch,
+                                )
+                            })?;
+                        telemetry_sync = Some(synchronized);
+                        retired
+                    } else {
+                        control.retire_worktree(&alias, retired_at_epoch)?
+                    };
+                    (root.clone(), retired)
                 }
                 Some(GitWorktreeState::Invalid { issue }) => {
                     return Err(CliError::InvalidInput(format!(
@@ -7285,10 +7329,12 @@ impl ProjectAtlasMcpServer {
                 Some(GitWorktreeState::Missing { .. }) | None => {
                     blocker
                         .get_or_insert_with(|| MCP_WORKTREE_MISSING_RETENTION_REASON.to_string());
-                    PathBuf::from(&registration.last_root)
+                    (
+                        PathBuf::from(&registration.last_root),
+                        control.retire_worktree(&alias, retired_at_epoch)?,
+                    )
                 }
             };
-            let retired = control.retire_worktree(&alias, Self::current_epoch_seconds()?)?;
             Self::encode_named_payload(
                 MCP_PAYLOAD_WORKTREE,
                 &McpWorktreeMutationReport {
@@ -10853,6 +10899,30 @@ mod tests {
             "successful alias init did not bind the exact target atlas identity",
         )?;
         drop(control_after_init);
+        let target_state = worktree_a.join(PROJECTATLAS_DIR_NAME);
+        let preserved_target_state = worktree_a.join(".projectatlas-registered");
+        fs::rename(&target_state, &preserved_target_state)?;
+        fs::create_dir(&target_state)?;
+        let replacement_store = AtlasStore::open_for_project(&target_db, &worktree_a)?;
+        let replacement_project = replacement_store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("replacement target identity is missing"))?;
+        require(
+            replacement_project != target_project,
+            "replacement atlas reused the registered project identity",
+        )?;
+        drop(replacement_store);
+        let replacement_error = server.state_for_target(None, Some("issue-430".to_string()));
+        require(
+            replacement_error.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains(MCP_ERROR_WORKTREE_IDENTITY_CONFLICT)
+            }),
+            "alias routing accepted a replacement atlas at the registered root",
+        )?;
+        fs::remove_dir_all(&target_state)?;
+        fs::rename(&preserved_target_state, &target_state)?;
         let selected = server.state_for_target(None, Some("issue-430".to_string()))?;
         require(
             selected.root == canonical_a

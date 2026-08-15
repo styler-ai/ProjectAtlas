@@ -2688,10 +2688,11 @@ Hydration excludes every telemetry event, usage instance, aggregate, tombstone,
 and synchronization row so copied main history cannot be counted again.
 Synchronization transfers no raw source event, per-session query, or path;
 repeated/stale revisions are no-ops and invalid/overflowing snapshots roll back
-to the last-valid aggregate. Removal performs a final available synchronization
-before retirement, and retired origins continue contributing to repository
-totals. An exact worktree report remains local and never presents sibling
-detail as its own.
+to the last-valid aggregate. Removal holds one short local SQLite writer-exclusion
+scope while the control atlas atomically synchronizes and retires the origin, so
+a local usage commit cannot land in an export-to-retirement gap. Retired origins
+continue contributing to repository totals. An exact worktree report remains
+local and never presents sibling detail as its own.
 
 ### Read-Only Agent-Efficiency Benchmark
 
