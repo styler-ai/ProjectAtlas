@@ -101,8 +101,12 @@ jobs:
             <body>
               <main>
                 <h1>ProjectAtlas Documentation</h1>
-                <p class="lead">Generated Rust API documentation for the ProjectAtlas workspace.</p>
+                <p class="lead">Agent workflows, architecture, and generated Rust API documentation for the ProjectAtlas workspace.</p>
                 <div class="grid">
+                  <a class="card" href="https://github.com/styler-ai/ProjectAtlas/blob/main/docs/agent-integration.md">Agent Integration<span class="label">MCP-first startup, exact navigation, purpose curation, and runtime repair</span></a>
+                  <a class="card" href="https://github.com/styler-ai/ProjectAtlas/blob/main/docs/worktree-lifecycle.md#worktree-atlas-continuity">Worktree Atlas Continuity<span class="label">short aliases, safe hydration, isolated graphs, federation, and aggregate tokens</span></a>
+                  <a class="card" href="https://github.com/styler-ai/ProjectAtlas/blob/main/docs/v0.4.5-rc1-release-notes.md">v0.4.5-rc1<span class="label">candidate highlights, compatibility, deliberate boundaries, and proof policy</span></a>
+                  <a class="card" href="https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#architecture-views">Architecture Views<span class="label">system ownership, SQLite authority, indexing, communication, and failure flows</span></a>
                   <a class="card" href="language-support/">Language &amp; Ecosystem Support<span class="label">honest capability tiers, candidates, and classified ecosystem coverage</span></a>
                   <a class="card" href="projectatlas/">projectatlas<span class="label">CLI, MCP server, and release-facing runtime logic</span></a>
                   <a class="card" href="projectatlas_core/">projectatlas_core<span class="label">shared models, TOON rendering, and telemetry</span></a>

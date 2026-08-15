@@ -1,113 +1,224 @@
-# Worktree-aware agent routing
+# Worktree atlas continuity
 
-ProjectAtlas treats every checkout or linked worktree as an exact source boundary. Each root keeps its own ignored writable `.projectatlas/projectatlas.db`; sibling source, graph generations, purposes, tasks, and writes are never combined.
+ProjectAtlas v0.4.5-rc1 lets an agent remain in one explicitly selected control checkout while it registers, initializes, refreshes, and queries existing Git worktrees through short MCP aliases. The control checkout and every linked checkout may live anywhere on the filesystem, including under `.worktrees`; no branch or directory name defines control authority.
 
-This feature adds structural discovery and agent-readable routing status. It does not add a manager TUI, shared database, release seed, telemetry redesign, purpose-promotion pipeline, or ProjectAtlas-owned Git lifecycle.
+Every checkout still owns an ignored, independently writable `.projectatlas/projectatlas.db`. ProjectAtlas may hydrate a new target from reusable control-atlas state, but it never shares one writable graph or purpose database across divergent checkouts. It also never creates, switches, moves, prunes, or deletes Git worktrees or branches.
 
 ## System and ownership
 
 ```mermaid
-flowchart TD
-    Agent[Agent host] -->|project_path per call| MCP[One ProjectAtlas MCP process]
-    CLI[ProjectAtlas CLI] --> Discover[Structural worktree discovery<br/>projectatlas-fs]
-    MCP --> Discover
-    Discover --> GitMeta[Bounded Git control metadata]
-    Discover --> Select[Exact source selection]
-    Select --> MainDB[(Primary worktree atlas)]
-    Select --> LinkedDB[(Linked worktree atlas)]
-    MainDB -. never shared or merged .- LinkedDB
-    MCP -->|atlas_root control_root| Status[Bounded worktree status]
-    Status --> Discover
+flowchart LR
+    Agent[Agent remains in control checkout] -->|MCP call plus alias| MCP[One ProjectAtlas MCP process]
+    MCP --> Resolver[Immutable per-request alias resolver]
+    MCP --> Catalog[Worktree list, add, and remove]
+    Catalog --> Discovery[Bounded structural Git discovery]
+    Discovery --> GitMeta[Existing reciprocal Git metadata]
+    Catalog --> ControlDB[(Control atlas and registration catalog)]
+    Resolver -->|main| ControlDB
+    Resolver -->|issue-430| TargetDB[(Independent worktree atlas)]
+    ControlDB -. reusable baseline only .-> TargetDB
+    Human[Human token command in control checkout] --> TokenTUI[Existing token TUI layout]
+    TokenTUI --> ControlDB
 ```
 
-Ownership is deliberately small:
+Ownership remains inside the existing crates:
 
-- `projectatlas-fs` reads and validates structural Git worktree evidence without starting Git.
-- CLI runtime source selection accepts one exact worktree, selects the sole active manager worktree, or returns `worktree_required`.
-- CLI `root status` and MCP `atlas_root(control_root=...)` serialize the same bounded structural report.
-- Existing root/database identity checks continue to own all atlas reads and writes.
+- `projectatlas-fs` reads bounded structural Git evidence without starting Git.
+- `projectatlas-db` owns schema 18 registration, hydration, exact database identity, and normalized telemetry synchronization.
+- `projectatlas-cli` owns MCP schemas, alias resolution, targeted init orchestration, and aggregate token presentation.
+- `projectatlas-service` owns bounded read-only graph federation.
 
-## Source selection
+The explicitly selected MCP root is the control authority and receives the reserved alias `main`. `main` is not inferred from a branch name, primary-worktree role, folder name, or location. Active registrations bind a short alias to stable reciprocal Git administrative identity and, after initialization, to an exact ProjectAtlas project identity. Retired registrations remain as telemetry origins but cannot route source operations.
 
-```mermaid
-flowchart TD
-    Input[Checkout, descendant, or common directory] --> Inspect{Structural evidence}
-    Inspect -->|true non-Git| NonGit[Use exact non-Git root]
-    Inspect -->|inside primary or linked worktree| Exact[Use that canonical worktree]
-    Inspect -->|common manager| Count{Active worktrees}
-    Inspect -->|unsafe or inconsistent Git metadata| Invalid[Return typed invalid Git evidence]
-    Count -->|one| Sole[Use the sole exact worktree]
-    Count -->|zero| Required[Return worktree_required]
-    Count -->|several| Required
-    NonGit --> Local[(Root-local atlas)]
-    Exact --> Local
-    Sole --> Local
+## Register and route from one agent location
+
+Use the MCP tool names and arguments directly; the host owns the JSON-RPC transport envelope.
+
+```text
+atlas_worktree_list(include_retired: false)
+atlas_worktree_add(worktree: "wt-7c4e...", alias: "issue-430")
+atlas_init(worktree: "issue-430")
+atlas_session_brief(worktree: "issue-430", query: "registration resolver", compact: true)
+atlas_watch_once(worktree: "issue-430")
+atlas_file_summary(worktree: "issue-430", file: "src/lib.rs", compact: true)
 ```
 
-Discovery inspects only bounded direct control files and registered worktree directories. It rejects symlinks or junctions, wrong path types, oversized or non-UTF-8 pointers, missing targets, registrations outside the common directory, and reciprocal mismatches. Missing registrations remain visible in status but are never source candidates.
+`atlas_worktree_list` joins at most 256 deterministic structural rows to the bounded control catalog and returns stable selectors. `atlas_worktree_add` accepts one such selector or one uniquely matching human selector; ambiguity returns bounded candidates instead of guessing. Registration does not create the target atlas. `atlas_init(worktree=...)` is the explicit operation that initializes an absent registered target.
 
-The filesystem discovery ceiling is 1,024 registrations. Public CLI/MCP status returns at most 256 deterministic rows and marks truncation. Discovery performs no source traversal, SQLite access, network request, or filesystem mutation.
+All normal root-scoped MCP tools use one mutually exclusive selection boundary:
 
-## Concurrent agent sequence
+- `worktree: "main"` selects the captured control atlas;
+- `worktree: "issue-430"` selects that active registration;
+- `project_path: "<exact-root>"` remains the legacy compatibility route; and
+- supplying both selectors is invalid.
+
+Each admitted request captures its canonical root, database path, project identity, registration identity, control database, and alias before background or query work begins. Interleaved requests therefore do not depend on current directory or mutable session selection.
 
 ```mermaid
 sequenceDiagram
-    participant A as Agent client
-    participant M as MCP process
-    participant R as Request router
-    participant P as Primary atlas
-    participant W as Linked atlas
+    actor Agent
+    participant MCP as Control MCP process
+    participant Registry as Control registry
+    participant Main as Main atlas
+    participant Issue as issue-430 atlas
+    participant Service as Existing query service
 
-    A->>M: atlas_search(project_path=linked, pattern=feature)
-    M->>R: capture linked root, DB, and generation
-    R->>W: bounded read
-    W-->>R: linked-only result
-    R-->>M: serialize bounded result
-    M-->>A: linked-only result
-    A->>M: atlas_search(project_path=primary, pattern=main)
-    M->>R: capture primary root, DB, and generation
-    R->>P: bounded read
-    P-->>R: primary-only result
-    R-->>M: serialize bounded result
-    M-->>A: primary-only result
-    A->>M: atlas_root(control_root=common-dir)
-    M->>R: structural status request
-    R-->>M: bounded roles, states, selection, blockers
-    M-->>A: structural status result
+    Agent->>MCP: atlas_search(worktree issue-430)
+    MCP->>Registry: Resolve and capture issue-430 identity
+    Registry-->>MCP: Exact root, DB, project, registration
+    MCP->>Issue: Verify freshness and open read snapshot
+    MCP->>Service: Query captured issue-430 generation
+    Service-->>MCP: Bounded issue-430 result
+    MCP-->>Agent: Result or alias-preserving typed recovery
+    Agent->>MCP: atlas_search(worktree main)
+    MCP->>Registry: Capture reserved main authority
+    MCP->>Main: Verify freshness and query main generation
+    Main-->>MCP: Main-only result
+    MCP-->>Agent: Main result
 ```
 
-An explicit per-call `project_path` is authoritative for shared or concurrent hosts. Changing a session default remains useful for a single client, but it is not concurrency authority. A manager with several active worktrees cannot silently inherit a prior selection.
+## Safe target hydration
 
-## CLI and MCP use
+A compatible complete control atlas avoids rebuilding every reusable row, while target reconciliation keeps branch and dirty-file truth exact.
 
-From a checkout, descendant, or Git common directory:
+```mermaid
+sequenceDiagram
+    actor Agent
+    participant MCP as Control MCP process
+    participant Control as Control atlas
+    participant Candidate as Private target candidate
+    participant Target as Target atlas path
+
+    Agent->>MCP: atlas_init with registered alias
+    MCP->>Target: Verify exact existing database
+    alt Valid target atlas already exists
+        Target-->>MCP: Existing identity and complete publication
+        MCP-->>Agent: Existing preserved
+    else Target atlas is absent
+        MCP->>Control: Verify compatible complete source
+        alt Control source is unsuitable or incomplete
+            MCP->>Target: Ordinary full init and exact target scan
+            Target-->>MCP: Complete target generation
+            MCP-->>Agent: Visible fallback result
+        else Control source is safe
+            Control->>Candidate: SQLite backup reusable state
+            Candidate->>Candidate: Clear telemetry and transient state, assign target identity
+            MCP->>Candidate: Reconcile exact target branch and dirty bytes
+            Candidate->>Candidate: Verify identity, integrity, freshness, and publication
+            alt Candidate is valid and destination remains absent
+                Candidate->>Target: Atomic no-clobber activation
+                Target-->>MCP: Complete target generation
+                MCP-->>Agent: Hydrated result
+            else Cancellation, race, I/O, or validation failure
+                Candidate->>Candidate: Discard unpublished candidate
+                MCP-->>Agent: Typed failure with prior destination preserved
+            end
+        end
+    end
+```
+
+The candidate excludes control identity, telemetry events and aggregates, runtime instances, task/progress state, watcher state, transient health resolutions, and other non-transferable private rows. Applicable approved purposes survive as ordinary target-owned records. Cancellation, disk or backup failure, integrity mismatch, source race, reconciliation failure, or activation failure removes only the unpublished candidate; it never overwrites a valid destination.
+
+## Labelled read-only federation
+
+Use federation only for an explicit cross-worktree graph question:
 
 ```text
-projectatlas --format json root status <path>
+atlas_symbol_relations(
+  worktrees: ["main", "issue-430"],
+  view: "detailed",
+  file: "src/lib.rs",
+  compact: true
+)
 ```
 
-Through MCP:
+The first alias is primary. Two to eight aliases resolve through the same immutable request boundary. Existing participant, row, edge, intermediate, deadline, memory, output, and cancellation ceilings remain authoritative.
 
-```json
-{"control_root":"<checkout-or-common-directory>"}
+```mermaid
+sequenceDiagram
+    actor Agent
+    participant MCP as Relation adapter
+    participant Registry as Control registry
+    participant Runtime as Freshness boundary
+    participant Main as Main read snapshot
+    participant Issue as issue-430 read snapshot
+    participant Federation as Existing federation service
+
+    Agent->>MCP: detailed relations with worktrees main and issue-430
+    MCP->>Registry: Resolve complete ordered alias list
+    Registry-->>MCP: Labelled exact participants
+    par Capture main
+        MCP->>Runtime: Verify main
+        Runtime->>Main: Open query-only snapshot
+    and Capture issue-430
+        MCP->>Runtime: Verify issue-430
+        Runtime->>Issue: Open query-only snapshot
+    end
+    alt Any participant is stale, invalid, duplicate, or canceled
+        Runtime-->>MCP: Alias-labelled typed blocker and no rows
+        MCP-->>Agent: No partial result
+    else Every participant is current
+        MCP->>Federation: Owned labelled snapshots and bounded query
+        Federation->>Main: Primary traversal
+        Federation->>Issue: Exact typed rendezvous reads
+        Federation-->>MCP: Labelled result and continuation
+        MCP-->>Agent: One bounded report
+    end
 ```
 
-passed to `atlas_root`. `control_root` is mutually exclusive with `project_path` and `verify` because structural inventory is not database verification.
+Federation never persists participants, changes active selection, repairs a stale database, or merges sibling graph generations. Returned participants, evidence, blockers, coverage, and continuations retain their aliases.
 
-For normal agent navigation, keep using the exact worktree on every shared-host call:
+## Repository-wide token continuity
 
-```json
-{"project_path":"<exact-worktree>","pattern":"symbol_or_text"}
+The control atlas is the durable aggregate authority without becoming the writable source-graph authority for its worktrees.
+
+```mermaid
+flowchart TB
+    Routed[Alias-routed MCP usage] -->|one event with registration origin| Control[(Control telemetry)]
+    MainUsage[Native main usage] --> Control
+    Local[Independent worktree CLI usage] --> Target[(Target local telemetry)]
+    Target -->|monotonic normalized snapshot, no raw events| Snapshot[Active or retired origin snapshot]
+    Snapshot --> Control
+    Control --> Aggregate[Repository overview and trends]
+    Aggregate --> MainMCP[atlas_token_report worktree main]
+    Aggregate --> MainCLI[projectatlas token in control checkout]
+    Aggregate --> TUI[Existing token TUI layout]
+    Target --> Exact[Exact worktree report]
 ```
 
-## Lifecycle and recovery
+Alias-routed MCP events commit once in control under the stable registration origin and are not mirrored into the target. Independent worktree events remain local; aggregate reads and unregister opportunistically synchronize bounded lifetime and daily rows with a monotonically increasing revision. Repeated or stale synchronization is a no-op, validation failure preserves the last-valid snapshot, and raw per-session queries or paths never move to control.
 
-ProjectAtlas never creates, moves, prunes, retires, removes, switches, merges, or deletes a Git worktree or branch. Git remains the lifecycle authority.
+`projectatlas token` and `projectatlas token --view tui` from the control checkout combine native main, routed, and synchronized active/retired origins. The TUI layout and metric definitions do not change. An exact worktree token call stays scoped to that target's local detail and never presents sibling detail as local.
 
-- A Git-managed move keeps the worktree's files and local atlas together. If the recorded atlas root changes, use the existing explicit `projectatlas root set <new-root> --transition move` contract.
-- A copied atlas at another root fails the existing root/identity check; it is never silently rebound.
-- A missing registration is reported as missing and excluded from source selection. Use Git's own worktree commands after preserving any unique local state.
-- Invalid structural metadata fails closed. Repair the Git metadata with Git rather than weakening ProjectAtlas validation.
-- Non-Git projects and initialized exact roots remain usable when the Git executable is absent because structural discovery starts no process.
+## Removal, failures, and recovery
 
-The current token TUI is unchanged and remains scoped to the exact selected atlas.
+`atlas_worktree_remove(worktree: "issue-430")` final-syncs an available local aggregate and retires only the ProjectAtlas registration. It does not delete or alter the Git worktree, branch, source, `.projectatlas` folder, or SQLite database. Retained totals continue to contribute to the control report. A later registration with the same text alias receives a distinct origin identity and cannot merge histories.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Discovered
+    Discovered --> Ambiguous: selector matches several rows
+    Ambiguous --> Discovered: choose returned stable selector
+    Discovered --> Registered: atlas_worktree_add
+    Registered --> InitRequired: target DB absent
+    InitRequired --> Active: hydration or ordinary init succeeds
+    InitRequired --> Registered: typed init failure
+    Active --> RefreshRequired: saved bytes outpace publication
+    RefreshRequired --> Active: watch once or scan publishes
+    Active --> Retired: final sync and atlas_worktree_remove
+    Active --> Missing: external Git or filesystem deletion
+    Missing --> Retired: preserve last-valid aggregate
+    Retired --> [*]
+```
+
+Recovery remains explicit:
+
+- `ambiguous` returns bounded stable selectors; choose one and retry.
+- `init_required` includes `atlas_init` with the original alias.
+- `refresh_required` identifies the exact stale alias; refresh that target only.
+- invalid, unsafe, unrelated, or reciprocal-mismatched Git metadata fails closed.
+- a bare/common manager with zero or several active worktrees returns `worktree_required`; select an exact checkout as control.
+- an incompatible or corrupt database is never reset, downgraded, substituted, or silently rebuilt.
+- a missing target retains its last accepted telemetry aggregate but ProjectAtlas cannot fabricate unsynchronized bytes that were externally deleted.
+
+The future distributed/versioned released-main atlas tracked by issue #456 is intentionally separate. v0.4.5-rc1 coordinates only local registrations and local databases visible to one explicitly selected control process.

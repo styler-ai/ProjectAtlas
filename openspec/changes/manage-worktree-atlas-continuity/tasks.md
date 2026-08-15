@@ -1,19 +1,35 @@
-## 1. Contract and Scope
+## 1. Contract and Architecture
 
-- [x] 1.1 Map `manage-worktree-atlas-continuity` to issue #430 and keep the live checklist synchronized with this file.
-- [x] 1.2 Reduce the change to agent-facing worktree discovery, exact routing, status, compatibility, and holistic proof; explicitly exclude a new TUI, release seed, shared telemetry/purpose database, promotion pipeline, and ProjectAtlas-owned Git lifecycle.
-- [x] 1.3 Define structural trust boundaries, bounded output, exact-root database ownership, manager selection, missing/invalid state, and no-Git/non-Git behavior.
+- [x] 1.1 Keep `manage-worktree-atlas-continuity` mapped to issue #430 and synchronize the live issue checklist and pre-mortem mitigation state exactly with this file.
+- [x] 1.2 Define the v0.4.5-rc1 boundary for location-independent ProjectAtlas worktree registration, short alias routing, targeted init, safe main-atlas hydration, exact writable isolation, read-only labelled federation, durable combined token telemetry, current TUI design, and no ProjectAtlas-owned Git lifecycle or #456 distributed release baseline.
+- [x] 1.3 Define control/main authority, structural trust, alias identity, database/schema ownership, hydration publication and recovery, telemetry origin/synchronization/retirement, concurrency capture, bounds, compatibility, performance, and failure semantics before dependent adapter work.
 
-## 2. Agent Worktree Behavior
+## 2. Storage and Worktree Foundations
 
-- [x] 2.1 Add one bounded read-only structural discovery owner for primary, linked, bare/common-manager, missing, malformed, and non-Git roots; reject unsafe pointers, symlinks, reciprocal mismatches, and excessive registrations without starting or mutating Git.
-- [x] 2.2 Route canonical source selection through the structural owner so an exact worktree stays exact, one unambiguous manager worktree may be selected, and ambiguous or empty managers return `worktree_required`.
-- [x] 2.3 Expose bounded structural status through existing CLI `root status` and MCP `atlas_root(control_root=...)` surfaces with exact paths, selection, role/state, truncation, and deterministic blockers.
-- [x] 2.4 Update the version-matched shipped skill and lifecycle documentation for exact per-call `project_path`, worktree-local atlases, manager selection, and recovery without changing the current TUI.
+- [x] 2.1 Keep one bounded read-only structural discovery owner for primary, linked, bare/common-manager, missing, malformed, non-Git, arbitrary-location, and moved worktrees; reject unsafe pointers, symlinks, reciprocal mismatches, and excessive registrations without starting or mutating Git.
+- [x] 2.2 Land the smallest append-only SQLite migration and fresh-schema parity for active/retired worktree registrations, stable Git/project/origin identity, monotonic local-aggregate revisions, normalized lifetime/daily snapshot ownership, uniqueness/check/foreign-key/index contracts, and released-schema preservation.
+- [x] 2.3 Implement database-owned add/list/resolve/retire and monotonic telemetry synchronization/read APIs with short caller-owned transactions, prepared/batched SQL, bounded rows/bytes, idempotent stale retries, rollback on invalid/overflow state, and query-plan coverage for hot alias/admin/aggregate paths.
+- [x] 2.4 Implement safe same-repository worktree hydration through SQLite backup into a target-local candidate, allowlisted reusable graph/source/summary/purpose state, new exact identity/root, cleared telemetry/transient state, incremental target reconciliation, integrity/freshness checks, atomic activation, cancellation/fault cleanup, and visible full-init fallback without weakening the portable derived-snapshot contract.
 
-## 3. Verification and Release Readiness
+## 3. Agent-Facing Workflow
 
-- [x] 3.1 Add owning unit tests over real temporary Git repositories for primary/linked/bare-manager discovery, nested paths, arbitrary worktree locations, moves, missing registrations, non-Git roots, malformed control files, symlinks, reciprocal mismatches, no Git execution, cancellation, and registration bounds.
-- [x] 3.2 Strengthen and run one holistic E2E covering two isolated worktree atlases across init, released-schema migration, scan, branch/dirty refresh, watch, purposes, token/graph compatibility, interleaved one-process MCP calls, and CLI/MCP structural status without source or write bleed.
-- [ ] 3.3 Run focused Rust checks plus the full relevant workspace, issue-policy, OpenSpec, documentation, and cross-platform hosted gates; reconcile all actionable review feedback and preserve ordinary single-root, non-Git, Git-missing, and current TUI behavior.
-- [ ] 3.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 3.1 Keep canonical source selection on the structural owner so exact checkouts stay exact, one manager worktree may be selected, and ambiguous/empty managers return `worktree_required` without layout guesses.
+- [x] 3.2 Keep bounded structural status on CLI `root status` and MCP `atlas_root(control_root=...)` with exact paths, selection, role/state, truncation, and deterministic blockers.
+- [x] 3.3 Add MCP `atlas_worktree_list`, `atlas_worktree_add`, and `atlas_worktree_remove`, plus one shared mutually exclusive `worktree`/legacy `project_path` resolver across every root-scoped tool; reserve `main`, capture targets for concurrent/background calls, and return alias-preserving typed next calls.
+- [x] 3.4 Make `atlas_init(worktree=...)` initialize an absent registered atlas from the main hydration path or typed ordinary fallback, while preserving existing valid databases, non-Git/single-root behavior, source isolation, and Git lifecycle state.
+- [x] 3.5 Resolve explicit federated `worktrees` alias lists into the existing bounded read-only federation owner and label every participant/result/coverage/blocker/continuation without persisting or merging sibling graphs.
+- [x] 3.6 Route alias-based MCP telemetry exactly once into the control authority, synchronize independent local aggregates monotonically, retain active/retired origins, and make main token CLI/MCP/TUI reporting combine all origins without changing the current TUI layout or exact-worktree detail semantics.
+- [x] 3.7 Update the version-matched ProjectAtlas skill shipped in v0.4.5-rc1 in detail: tool schemas/examples, list/add/remove, `main`, arbitrary locations, alias routing across normal calls, targeted init hydration/fallback, federation, aggregate tokens, unregister retention, isolation, compatibility, typed failures, recovery, and the MCP-first agent workflow; enforce skill/runtime/plugin/package parity.
+- [ ] 3.8 Update public GitHub-facing and GitHub Pages documentation for v0.4.5-rc1, including README/agent integration where applicable, worktree lifecycle, architecture views, examples, release notes, #456 non-goal, and mapped issue diagram links; verify browser-native GitHub heading/Mermaid rendering and the published Pages result.
+
+## 4. Verification and RC1 Readiness
+
+- [x] 4.1 Retain owning structural unit coverage over real temporary Git repositories for arbitrary locations, primary/linked/bare-manager discovery, nested paths, moves, missing registrations, non-Git roots, malformed control files, symlinks/junctions, reciprocal mismatches, no Git execution, cancellation, and bounds.
+- [x] 4.2 Add real SQLite migration/fresh-schema, registration identity, hydration/backup/rebind, purpose preservation, telemetry non-duplication, monotonic/stale/concurrent synchronization, retirement retention, integrity/rollback/corruption, busy/WAL, query-plan, and last-valid recovery tests.
+- [x] 4.3 Add MCP/CLI contract tests for compiled tool discovery, short selectors on init and representative read/write/background tools, legacy path compatibility, mutual exclusion, ambiguity/conflicts, alias-preserving typed guidance, federated labels, aggregate/exact token scopes, and no Git/filesystem lifecycle mutation.
+- [x] 4.4 Strengthen and run one named holistic E2E covering a main checkout and two linked worktrees at unrelated paths across list/add, released-schema migration, safe hydration, branch/dirty reconciliation, init/scan/watch, purposes, exact/federated graph, combined tokens, interleaved one-process MCP calls, final-sync unregister, retained totals, negative/fault/cancellation/fallback paths, and no source/write/telemetry bleed.
+- [x] 4.5 Measure the intended-scale high-registration/hydration/aggregate paths with bounded CPU, wall time, RSS, SQLite statements and query plans, lock/WAL/I/O behavior, persistent bytes/rows, write amplification, and output; fix material regressions without unmeasured claims.
+- [x] 4.6 Update every affected focused Mermaid architecture/sequence/failure view, render all changed blocks with the locked Mermaid CLI, and visually plus semantically verify location independence, exact ownership, hydration order, telemetry authority, federation labels, concurrency, retry, and termination against live source.
+- [ ] 4.7 Run focused Rust checks plus the full relevant workspace, strict OpenSpec, IssueOps, documentation, skill/plugin/package, installer/release, and current-TUI regression gates; reconcile every actionable live Codex/Dependabot/reviewer thread at the exact candidate head.
+- [ ] 4.8 Publish the exact v0.4.5-rc1 candidate only after local gates, obtain hosted Ubuntu/Windows/macOS Intel/macOS ARM holistic proof, merge with synchronized issues/tasks, publish RC1 as a prerelease without replacing stable Latest, and complete post-publication runtime/MCP/skill/GitHub/Pages/architecture verification.
+- [ ] 4.9 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.

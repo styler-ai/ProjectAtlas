@@ -757,7 +757,7 @@ mod tests {
         )?;
         require_eq(
             &predecessor.schema.migration_steps_remaining,
-            &Some(9),
+            &Some(10),
             "predecessor migration steps",
         )?;
         require_eq(
@@ -770,7 +770,11 @@ mod tests {
         let resolution_store = AtlasStore::open_for_project(&resolution_path, &root)?;
         resolution_store.connection.execute_batch(
             "DROP TABLE file_content_classifications;
-             DROP INDEX idx_nodes_path_kind;",
+             DROP INDEX idx_nodes_path_kind;
+             DROP TABLE usage_instance_worktree_origins;
+             DROP TABLE worktree_usage_aggregates;
+             DROP TABLE worktree_registrations;
+             DROP TABLE usage_aggregate_revisions;",
         )?;
         crate::schema::recreate_disposable_graph_projection(&resolution_store.connection, false)?;
         crate::schema::recreate_pre_selector_symbol_storage_for_test(&resolution_store.connection)?;
@@ -806,7 +810,7 @@ mod tests {
         )?;
         require_eq(
             &resolution.schema.migration_steps_remaining,
-            &Some(5),
+            &Some(6),
             "schema-12 migration steps",
         )?;
         require_eq(

@@ -3374,8 +3374,8 @@ def publication_identity_errors(
         errors.append("runtime omitted required MCP, SQLite, or TOON capability")
     if runtime_info.get("text_format") != "TOON":
         errors.append("runtime text format is not TOON")
-    if len(runtime_info.get("mcp_tools", [])) != 40:
-        errors.append("runtime does not advertise the frozen 40-tool MCP surface")
+    if len(runtime_info.get("mcp_tools", [])) != 43:
+        errors.append("runtime does not advertise the current 43-tool MCP surface")
     if dirty_paths:
         errors.append(
             "tracked benchmark source is dirty: " + ", ".join(dirty_paths)

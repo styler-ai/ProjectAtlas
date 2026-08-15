@@ -902,7 +902,7 @@ are added.
 | `folders`, `files`, `next`, `atlas_session_brief` | Batch graph roles and only the crisp relevant connections for returned candidates, while projecting current accepted purpose plus approval/provenance state from `purposes`; never rank graph popularity above exact path/name and strong purpose evidence. | Current; final release acceptance remains part of #308. |
 | `summary`, `outline`, `symbols` | Hydrate a bounded selected-file coverage digest and route deeper related-identity inspection through the detailed relation surface without per-symbol or whole-graph query loops. | Current; final release acceptance remains part of #308. |
 | `symbol relations` extended with direction/depth and closed architecture/impact/trace modes | Resolve stable selectors, use separately indexed source/target adjacency and dependency keys, page retained occurrences, batch endpoint plus nearest owning-purpose and exact-path symbol projection, and return generation, trust, resolution, coverage, exact spans, candidate-labeled findings, reusable next calls, cursors, work, and explicit truncation. No generic graph query language or separate jump tool is introduced. | Current; final release acceptance remains part of #308. |
-| Explicit federated relation/analysis request | Validate the complete ordered root list, open each root's independent existing project database read-only/query-only under aggregate root/connection/database/row/edge/intermediate/time/output/cancellation budgets, bind results to every captured generation, close every handle, and retain nothing. | Current. Federation is call-only composition, never product sharding or a shared database. |
+| Explicit federated relation/analysis request | Validate either the complete ordered registered-worktree alias list or the legacy ordered root list, resolve every participant before opening data, then open each independent existing project database read-only/query-only under aggregate participant/connection/database/row/edge/intermediate/time/output/cancellation budgets. Bind results and labels to every captured generation, close every handle, and retain nothing. | Current. Federation is call-only composition, never product sharding or a shared database. |
 
 These mappings are verified through production query, service, and adapter
 paths. In-memory SQLite is sufficient only for
@@ -916,22 +916,30 @@ claim.
 ### Explicit Federation Communication Sequence
 
 Federation is an additive request shape on the existing detailed relation and
-analysis routes. The first supplied root is the selected anchor project; later
-roots contribute only exact typed external-identity rendezvous evidence.
-Similar unresolved text never joins projects.
+analysis routes. The preferred MCP request supplies two to eight registered
+`worktrees`; the legacy CLI/compatibility request may supply exact `roots`, but
+the two forms are mutually exclusive. The first participant is the selected
+anchor project; later participants contribute only exact typed
+external-identity rendezvous evidence. Similar unresolved text never joins
+projects.
 
 ```mermaid
 sequenceDiagram
     actor Agent
     participant Adapter as Existing CLI or MCP relation adapter
+    participant Registry as Control worktree registry
     participant Runtime as Runtime freshness boundary
     participant FS as Exact source verifier
     participant DB as Independent project SQLite databases
     participant Service as Relation and analysis service
 
-    Agent->>Adapter: detailed or analysis request plus complete ordered roots
-    Adapter->>Runtime: selected root, roots, aggregate deadline, cancellation
-    loop Each explicit root, maximum eight
+    Agent->>Adapter: detailed or analysis request plus worktrees or roots
+    opt Registered worktree aliases
+        Adapter->>Registry: resolve complete ordered aliases
+        Registry-->>Adapter: exact labelled roots and registration identities
+    end
+    Adapter->>Runtime: captured participants, aggregate deadline, cancellation
+    loop Each explicit participant, maximum eight
         Runtime->>DB: open existing root-bound query-only snapshot
         Runtime->>FS: verify current source and policy without repair
         Runtime->>DB: verify project, publication, schema, and generation
@@ -950,14 +958,16 @@ sequenceDiagram
         Service-->>Adapter: stale result and no rows
     else All participants remain current
         Service-->>Adapter: project-qualified bounded report
-        Adapter-->>Agent: one fitted JSON or TOON envelope
+        Adapter-->>Agent: one labelled fitted JSON or TOON envelope
     end
 ```
 
 No participant list, relation, cache, telemetry, setting, active-project
 selection, or connection survives the call. A cursor binds the ordered project
-identities, root digests, complete graph generations, and authored-purpose
-revisions before wrapping the existing relation or analysis continuation.
+identities, worktree labels, root digests, complete graph generations, and
+authored-purpose revisions before wrapping the existing relation or analysis
+continuation. A stale or invalid participant returns an alias-labelled blocker
+and no partial rows; federation never repairs a sibling database.
 
 ### MCP Read Communication Sequence
 
@@ -1796,37 +1806,42 @@ summary, relation, and slice routes expose the smallest trustworthy next step.
 
 ```mermaid
 flowchart TB
-    Manager[Git common manager] --> Discover[Bounded structural discovery]
-    Discover --> Count{Exactly one active worktree?}
-    Count -->|zero or several| Required[Return worktree_required]
-    Count -->|one| Selected{Exact selected worktree}
-    Agent[Agent call with explicit project_path] --> Selected
-
-    SavedA[Current and dirty bytes in A] --> BuildA[Classify, parse, resolve, and refresh A]
-    BuildA --> DbA[(Private ignored schema-17 atlas A)]
-    SavedB[Current and dirty bytes in B] --> BuildB[Classify, parse, resolve, and refresh B]
-    BuildB --> DbB[(Private ignored schema-17 atlas B)]
-    Selected -->|A| DbA
-    Selected -->|B| DbB
-    DbA --> NavigateA[Classified navigation in A]
+    Agent[Agent in explicitly selected control checkout] -->|worktree alias per call| Resolver[Immutable MCP target resolver]
+    Git[Bounded reciprocal Git metadata] --> Registry[Worktree list and registration]
+    Registry --> Control
+    Resolver -->|read registry or select main| Control[(Control schema-18 atlas and registry)]
+    Resolver -->|issue alias| DbB[(Private ignored schema-18 target atlas)]
+    Control -->|safe reusable baseline| Candidate[Private hydration candidate]
+    Candidate --> Reconcile[Reconcile exact branch and dirty bytes]
+    Reconcile --> DbB
+    SavedA[Current and dirty control bytes] --> BuildA[Classify, parse, resolve, and refresh control]
+    BuildA --> Control
+    SavedB[Current and dirty target bytes] --> BuildB[Classify, parse, resolve, and refresh target]
+    BuildB --> DbB
+    Control --> NavigateA[Classified navigation in control]
     DbB --> NavigateB[Classified navigation in B]
-    NavigateA --> SliceA[Exact source or heading slice A]
+    NavigateA --> SliceA[Exact source or heading slice in control]
     NavigateB --> SliceB[Exact source or heading slice B]
-    DbA -. never shared or merged .- DbB
+    Control -. never one shared writable graph .- DbB
 ```
 
-The selected worktree's active schema-17 generation owns classifications,
+The selected worktree's active schema-18 generation owns classifications,
 headings, exact selectors, canonical document relations, completeness,
-provenance, and typed unresolved evidence. A checkout with schema 16 migrates
-its existing local atlas; a checkout without one uses ordinary local init and
-scan. #430 adds only structural discovery, unambiguous source selection, and
-bounded root status. It does not introduce a seed, shared graph, or manager UI.
+provenance, purposes, and typed unresolved evidence. A valid released database
+migrates in place. An absent registered target may hydrate reusable graph,
+source, summary, and purpose state from a compatible complete control atlas,
+but initialization clears control identity, telemetry, tasks, and transient
+runtime state before reconciling and publishing the target's exact bytes. An
+unsuitable source falls back visibly to ordinary local initialization.
 
 Each scan or watcher refresh republishes current saved bytes into that exact
 worktree's private atlas. Requests capture the exact root, database, and
-generation for their lifetime. Classification, heading, relation, purpose,
-unresolved evidence, and next-call state therefore cannot leak between sibling
-worktrees, even when one MCP process interleaves explicit `project_path` calls.
+project identity, registration identity, alias, and generation for their
+lifetime. Classification, heading, relation, purpose, unresolved evidence, and
+next-call state therefore cannot leak between sibling worktrees, even when one
+MCP process interleaves short-alias calls. Explicit `worktrees` federation is
+bounded, read-only, fully labelled, and call-local; it never persists or merges
+sibling generations.
 
 A modernization tag highlights source families where exact dependency and
 source-evidence navigation is especially valuable for high-risk transformation
@@ -2628,6 +2643,45 @@ ProjectAtlas 3 should estimate and persist token savings for every agent-facing
 funnel usage. The goal is not perfect accounting; the goal is a useful,
 consistent local metric that shows whether ProjectAtlas is reducing context
 load.
+
+For registered worktrees, the explicitly selected control atlas is the durable
+repository-total authority while each worktree remains the authority for its
+own raw local events and exact per-session detail. Alias-routed MCP events
+already cross the control process, so they commit once in control with a stable
+registration origin. Independent worktree CLI events remain local and export
+only bounded normalized lifetime/daily aggregates with a monotonic revision.
+
+```mermaid
+sequenceDiagram
+    actor Caller
+    participant MCP as Control MCP process
+    participant Target as Exact worktree atlas
+    participant Control as Control telemetry and registry
+    participant Report as Existing token report and TUI
+
+    Caller->>MCP: Accepted read with worktree alias
+    MCP->>Target: Verify and read exact target generation
+    Target-->>MCP: Bounded result
+    MCP->>Control: Commit one routed event under registration origin
+    MCP-->>Caller: Result
+    Caller->>Target: Independent local CLI operation
+    Target->>Target: Commit raw local event
+    Caller->>MCP: Token report with worktree main
+    MCP->>Target: Read normalized aggregate snapshot
+    Target-->>MCP: Newer revision or unchanged revision
+    MCP->>Control: Atomic monotonic origin synchronization
+    Control->>Report: Native main plus routed plus active and retired snapshots
+    Report-->>Caller: Combined existing report or unchanged TUI layout
+```
+
+Hydration excludes every telemetry event, usage instance, aggregate, tombstone,
+and synchronization row so copied main history cannot be counted again.
+Synchronization transfers no raw source event, per-session query, or path;
+repeated/stale revisions are no-ops and invalid/overflowing snapshots roll back
+to the last-valid aggregate. Removal performs a final available synchronization
+before retirement, and retired origins continue contributing to repository
+totals. An exact worktree report remains local and never presents sibling
+detail as its own.
 
 ### Read-Only Agent-Efficiency Benchmark
 

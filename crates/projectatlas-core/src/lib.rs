@@ -17,6 +17,9 @@ pub use index_work::{
     IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkResource, IndexWorkStage,
 };
 
+/// Maximum Git worktree registrations admitted for one repository.
+pub const MAX_GIT_WORKTREE_REGISTRATIONS: usize = 1_024;
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf, StripPrefixError};

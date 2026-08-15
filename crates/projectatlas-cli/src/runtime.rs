@@ -72,7 +72,7 @@ use projectatlas_db::{
     validate_database_location,
 };
 use projectatlas_fs::worktree::{
-    GitManagerSourceSelection, GitRepositorySelection, RepositoryStructure,
+    GitManagerSourceSelection, GitRepositorySelection, GitWorktreeState, RepositoryStructure,
 };
 use projectatlas_fs::{
     FsError, RootScanPolicy, ScanLimits, ScanOptions, gitignore_excludes_path,
@@ -365,6 +365,9 @@ pub(crate) struct IndexInitRequired {
     pub(crate) project_root: String,
     /// Project-local durable index path that initialization will create.
     pub(crate) database: String,
+    /// Registered MCP alias when the selected root came from worktree routing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) worktree: Option<String>,
     /// Stable first-use state for adapters.
     pub(crate) status: IndexReadStatus,
 }
@@ -383,6 +386,9 @@ pub(crate) struct ProjectWorktreeRequired {
 pub(crate) struct IndexRefreshRequired {
     /// Canonical selected project root for a reusable recovery call.
     pub(crate) project_root: String,
+    /// Registered MCP alias when the selected root came from worktree routing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) worktree: Option<String>,
     /// Stable freshness state for adapters.
     pub(crate) status: IndexReadStatus,
     /// Why current saved source differs from the index.
@@ -406,6 +412,9 @@ pub(crate) struct IndexRefreshRequired {
 pub(crate) struct IndexVerificationIncomplete {
     /// Selected project root whose current source could not be verified.
     pub(crate) project_root: String,
+    /// Registered alias when one selected this project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) worktree: Option<String>,
     /// Stable verification state for adapters.
     pub(crate) status: IndexReadStatus,
     /// Why the verification could not complete.
@@ -421,6 +430,9 @@ pub(crate) struct IndexVerificationIncomplete {
 pub(crate) struct IndexProjectMismatch {
     /// Stable project binding state for adapters.
     pub(crate) status: IndexReadStatus,
+    /// Registered alias when one selected this project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) worktree: Option<String>,
     /// Canonical project root selected for this read.
     pub(crate) selected_project_root: String,
     /// Canonical project root recorded by the opened index.
@@ -429,26 +441,43 @@ pub(crate) struct IndexProjectMismatch {
 
 impl fmt::Display for IndexRefreshRequired {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let recovery = self.worktree.as_ref().map_or_else(
+            || "run `projectatlas watch --once` or `atlas_watch_once` before retrying".to_string(),
+            |alias| format!("call `atlas_watch_once` with `worktree: {alias}` before retrying"),
+        );
         if self.reason == IndexRefreshReason::PolicyDrift {
-            return formatter.write_str(
-                "refresh_required: derived index policy differs from the current project configuration; run `projectatlas watch --once` or `atlas_watch_once` before retrying",
+            return write!(
+                formatter,
+                "refresh_required: derived index policy differs from the current project configuration; {recovery}"
             );
         }
         if self.reason == IndexRefreshReason::DependencyClosureLimit {
-            return formatter.write_str(
-                "refresh_required: the dependency-aware incremental closure exceeded its safe limit; run a complete `projectatlas scan` or `atlas_scan` before retrying",
+            let recovery = self.worktree.as_ref().map_or_else(
+                || "run a complete `projectatlas scan` or `atlas_scan` before retrying".to_string(),
+                |alias| format!("call `atlas_scan` with `worktree: {alias}` before retrying"),
+            );
+            return write!(
+                formatter,
+                "refresh_required: the dependency-aware incremental closure exceeded its safe limit; {recovery}"
             );
         }
         write!(
             formatter,
-            "refresh_required: {} indexed path(s) differ from current local source; run `projectatlas watch --once` or `atlas_watch_once` before retrying",
-            self.changed
+            "refresh_required: {} indexed path(s) differ from current local source; {recovery}",
+            self.changed,
         )
     }
 }
 
 impl fmt::Display for IndexInitRequired {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(alias) = self.worktree.as_ref() {
+            return write!(
+                formatter,
+                "init_required: ProjectAtlas index '{}' is missing for registered worktree '{}'; call `atlas_init` with `worktree: {alias}`",
+                self.database, alias,
+            );
+        }
         write!(
             formatter,
             "init_required: ProjectAtlas index '{}' is missing for selected project root '{}'; run `projectatlas init` from that exact root or call `atlas_init` with that exact `project_path`",
@@ -617,9 +646,17 @@ pub(crate) fn open_federated_atlas_stores_for_project(
     selected_root: &Path,
     selected_config: Option<&Path>,
     roots: &[PathBuf],
+    worktrees: Option<&[String]>,
     control: &IndexWorkControl,
 ) -> Result<Vec<FederatedStore>, CliError> {
     validate_federated_root_count(roots.len()).map_err(CliError::Service)?;
+    if worktrees.is_some_and(|worktrees| worktrees.len() != roots.len()) {
+        return Err(CliError::Service(
+            projectatlas_service::ServiceError::InvalidInput(
+                "federated worktree labels must match the ordered root count".to_string(),
+            ),
+        ));
+    }
     let selected_root = fs::canonicalize(selected_root).map_err(|source| CliError::Io {
         path: selected_root.to_path_buf(),
         source,
@@ -708,6 +745,12 @@ pub(crate) fn open_federated_atlas_stores_for_project(
                 for store in stores {
                     drop(store.finish());
                 }
+                let error =
+                    if let Some(worktree) = worktrees.and_then(|worktrees| worktrees.get(order)) {
+                        federated_worktree_error(error, worktree)
+                    } else {
+                        error
+                    };
                 return Err(error);
             }
         };
@@ -719,7 +762,8 @@ pub(crate) fn open_federated_atlas_stores_for_project(
             decoded_nodes: exact.work.decoded_nodes,
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         };
-        match FederatedStore::new(exact.store, database, root, input_work) {
+        let worktree = worktrees.map(|worktrees| worktrees[order].clone());
+        match FederatedStore::new_with_worktree(exact.store, database, root, input_work, worktree) {
             Ok(store) => stores.push(store),
             Err(error) => {
                 for store in stores {
@@ -732,6 +776,67 @@ pub(crate) fn open_federated_atlas_stores_for_project(
     Ok(stores)
 }
 
+/// Synchronize every structurally available registered worktree's local aggregate snapshot.
+pub(crate) fn synchronize_registered_worktree_usage(
+    control_db: &Path,
+    control_root: &Path,
+) -> Result<(), CliError> {
+    let control_reader = open_atlas_store_read_only_for_project(control_db, control_root)?;
+    let registrations = control_reader.worktree_registrations(false)?;
+    drop(control_reader);
+    if registrations.is_empty() {
+        return Ok(());
+    }
+    let RepositoryStructure::Git(repository) =
+        projectatlas_fs::worktree::discover_repository_structure(control_root)?
+    else {
+        return Ok(());
+    };
+    let control = open_atlas_store_for_project(control_db, control_root)?;
+    let common = normalize_native_path_display(&repository.common_directory);
+    for registration in registrations {
+        if registration.git_common_directory != common {
+            continue;
+        }
+        let Some(entry) = repository.worktrees.iter().find(|entry| {
+            normalize_native_path_display(&entry.administrative_directory)
+                == registration.git_administrative_directory
+        }) else {
+            continue;
+        };
+        let GitWorktreeState::Active { root, .. } = &entry.state else {
+            continue;
+        };
+        let database = root.join(".projectatlas").join("projectatlas.db");
+        let Ok(target) = open_atlas_store_read_only_for_project(&database, root) else {
+            continue;
+        };
+        let Ok(snapshot) = target.export_worktree_usage_snapshot() else {
+            continue;
+        };
+        drop(target);
+        let _last_valid_preserved_on_error =
+            control.synchronize_worktree_usage(&registration.alias, &snapshot);
+    }
+    Ok(())
+}
+
+/// Attach the exact alias to every typed or generic federated participant failure.
+fn federated_worktree_error(mut error: CliError, worktree: &str) -> CliError {
+    match &mut error {
+        CliError::InitRequired(report) => report.worktree = Some(worktree.to_string()),
+        CliError::RefreshRequired(report) => report.worktree = Some(worktree.to_string()),
+        CliError::VerificationIncomplete(report) => report.worktree = Some(worktree.to_string()),
+        CliError::ProjectMismatch(report) => report.worktree = Some(worktree.to_string()),
+        _ => {
+            return CliError::InvalidInput(format!(
+                "federated worktree {worktree:?} failed: {error}"
+            ));
+        }
+    }
+    error
+}
+
 /// Distinguish optional repair contention from database-integrity failures.
 fn automatic_refresh_write_is_unavailable(error: &CliError) -> bool {
     matches!(error, CliError::Db(source) if source.is_write_unavailable())
@@ -741,6 +846,7 @@ fn automatic_refresh_write_is_unavailable(error: &CliError) -> bool {
 fn index_policy_refresh_required(root: &Path) -> IndexRefreshRequired {
     IndexRefreshRequired {
         project_root: normalize_native_path_display(root),
+        worktree: None,
         status: IndexReadStatus::RefreshRequired,
         reason: IndexRefreshReason::PolicyDrift,
         scope: IndexRefreshScope::Full,
@@ -872,6 +978,7 @@ fn source_node_delta(
     Some(IndexFreshnessDelta {
         report: IndexRefreshRequired {
             project_root: normalize_native_path_display(root),
+            worktree: None,
             status: IndexReadStatus::RefreshRequired,
             reason: if added_paths.is_empty() && removed_paths.is_empty() {
                 IndexRefreshReason::SourceChanged
@@ -923,6 +1030,7 @@ fn verify_index_project_root(store: &AtlasStore, selected_root: &Path) -> Result
     if indexed_root != selected_root {
         return Err(CliError::ProjectMismatch(Box::new(IndexProjectMismatch {
             status: IndexReadStatus::ProjectMismatch,
+            worktree: None,
             selected_project_root: normalize_native_path_display(selected_root),
             indexed_project_root: normalize_native_path_display(indexed_root),
         })));
@@ -1228,6 +1336,7 @@ fn source_inspection_error(root: &Path, source: FsError) -> CliError {
         FsError::RepositoryBoundary { .. } => {
             CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
                 project_root: normalize_native_path_display(root),
+                worktree: None,
                 status: IndexReadStatus::VerificationIncomplete,
                 reason: IndexVerificationReason::PolicyUnavailable,
                 scope: IndexRefreshScope::Full,
@@ -1236,6 +1345,7 @@ fn source_inspection_error(root: &Path, source: FsError) -> CliError {
         }
         other => CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
             project_root: normalize_native_path_display(root),
+            worktree: None,
             status: IndexReadStatus::VerificationIncomplete,
             reason: IndexVerificationReason::SourceInspectionFailed,
             scope: IndexRefreshScope::Full,
@@ -1270,6 +1380,7 @@ fn verification_incomplete(
 ) -> CliError {
     CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
         project_root: normalize_native_path_display(root),
+        worktree: None,
         status: IndexReadStatus::VerificationIncomplete,
         reason,
         scope: IndexRefreshScope::Full,
@@ -1292,6 +1403,7 @@ fn same_indexed_source(current: &Node, indexed: &Node) -> bool {
 fn source_changed_during_derivation(root: &Path, path: &str) -> CliError {
     CliError::RefreshRequired(Box::new(IndexRefreshRequired {
         project_root: normalize_native_path_display(root),
+        worktree: None,
         status: IndexReadStatus::RefreshRequired,
         reason: IndexRefreshReason::SourceChanged,
         scope: IndexRefreshScope::Full,
@@ -1835,6 +1947,9 @@ pub(crate) struct InitSetupReport {
     pub(crate) host_configs: Vec<InitHostConfigStatus>,
     /// Scan/index phase result.
     pub(crate) scan: InitScanPhase,
+    /// Registered-worktree hydration result when alias init selected one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hydration: Option<InitHydrationPhase>,
     /// Agent harness purpose curation handoff.
     pub(crate) purpose_handoff: PurposeCuratorHandoff,
     /// Human/agent next steps.
@@ -1878,6 +1993,43 @@ pub(crate) struct InitScanPhase {
     /// Error text when the scan/index phase failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
+}
+
+/// Registered-worktree initialization source state.
+#[derive(Debug, Serialize)]
+pub(crate) struct InitHydrationPhase {
+    /// Whether a reusable control baseline was activated, skipped, or rejected.
+    pub(crate) status: InitHydrationStatus,
+    /// Canonical control root evaluated as the optional source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_root: Option<String>,
+    /// Source control-atlas identity when hydration succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_project_instance_id: Option<String>,
+    /// New independently writable target-atlas identity when hydration succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) target_project_instance_id: Option<String>,
+    /// Detached baseline generation when hydration succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) baseline_generation: Option<u64>,
+    /// Complete target generation activated after reconciliation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reconciled_generation: Option<u64>,
+    /// Visible reason ordinary initialization was used instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fallback_reason: Option<String>,
+}
+
+/// Stable worktree hydration outcomes exposed by init.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum InitHydrationStatus {
+    /// The existing valid worktree atlas was preserved.
+    Existing,
+    /// A control-atlas baseline was reconciled and activated.
+    Hydrated,
+    /// Ordinary init completed after hydration was unavailable or unsafe.
+    Fallback,
 }
 
 /// Purpose curation handoff for agent/plugin harnesses.
@@ -1946,6 +2098,7 @@ pub(crate) fn index_init_required(root: &Path, database: &Path) -> CliError {
     CliError::InitRequired(Box::new(IndexInitRequired {
         project_root: normalize_native_path_display(root),
         database: normalize_native_path_display(database),
+        worktree: None,
         status: IndexReadStatus::InitRequired,
     }))
 }
@@ -2005,6 +2158,7 @@ pub(crate) fn project_store_error(source: projectatlas_db::DbError) -> CliError 
         projectatlas_db::DbError::ProjectRootMismatch { expected, found } => {
             CliError::ProjectMismatch(Box::new(IndexProjectMismatch {
                 status: IndexReadStatus::ProjectMismatch,
+                worktree: None,
                 selected_project_root: expected,
                 indexed_project_root: found,
             }))
@@ -2113,6 +2267,7 @@ pub(crate) fn run_init_bootstrap(
             report: scan_report,
             error: scan_error,
         },
+        hydration: None,
         purpose_handoff: purpose_curator_handoff(purpose_queue),
         next_steps,
     })
@@ -2152,7 +2307,7 @@ pub(crate) fn purpose_curator_handoff(queue: PurposeCurationPage) -> PurposeCura
 }
 
 /// Return concise next steps for humans and agents.
-fn init_next_steps(
+pub(crate) fn init_next_steps(
     scan_skipped: bool,
     scan_failed: bool,
     purpose_queue_total: usize,
@@ -2763,6 +2918,61 @@ pub(crate) fn run_scan_pipeline_controlled(
     })
 }
 
+/// Reconcile a copied worktree baseline through exact no-op, incremental, or full refresh.
+pub(crate) fn reconcile_hydrated_index_controlled(
+    store: &mut AtlasStore,
+    plan: &ScanRuntimePlan,
+    symbol_options: &SymbolBuildOptions,
+    control: &IndexWorkControl,
+) -> Result<(ScanReport, bool), CliError> {
+    if !publication_contract_matches(store, plan)? {
+        return run_scan_pipeline_controlled(store, plan, symbol_options, control)
+            .map(|report| (report, false));
+    }
+    let assessment =
+        detect_index_freshness_controlled(store, plan, ScanLimits::default(), control)?;
+    let (refresh, source_unchanged) = match assessment.delta {
+        None => (empty_index_refresh_report(plan.text_options), true),
+        Some(delta) if delta.report.scope == IndexRefreshScope::Incremental => {
+            let changes = WatchChangeSet {
+                requires_full_scan: false,
+                document_paths: delta.paths.clone(),
+                paths: delta.paths,
+            };
+            let refresh = match refresh_index_for_changes_controlled(
+                store,
+                plan,
+                &changes,
+                symbol_options,
+                control,
+            ) {
+                Ok(refresh) => refresh,
+                Err(CliError::RefreshRequired(report))
+                    if report.reason == IndexRefreshReason::DependencyClosureLimit =>
+                {
+                    refresh_index_controlled(store, plan, symbol_options, control)?
+                }
+                Err(error) => return Err(error),
+            };
+            (refresh, false)
+        }
+        Some(_delta) => (
+            refresh_index_controlled(store, plan, symbol_options, control)?,
+            false,
+        ),
+    };
+    Ok((
+        ScanReport {
+            overview: store.overview()?,
+            purpose_import: PurposeImportReport::default(),
+            text_index: refresh.text_index,
+            structural_summaries: refresh.structural_summaries,
+            symbols: refresh.symbols,
+        },
+        source_unchanged,
+    ))
+}
+
 /// Rebuild symbol projections while keeping incomplete work non-queryable.
 #[cfg(test)]
 pub(crate) fn run_symbol_build_pipeline(
@@ -2869,6 +3079,23 @@ impl UsageRuntimeInstance {
             self.owner,
             event,
             matches!(self.owner, UsageInstanceOwner::CliInvocation),
+        )?;
+        Ok(())
+    }
+
+    /// Record and seal one completed event under an exact worktree origin.
+    pub(crate) fn record_completed_for_worktree(
+        self,
+        store: &AtlasStore,
+        registration_id: i64,
+        event: &projectatlas_core::telemetry::UsageEvent,
+    ) -> Result<(), CliError> {
+        store.record_usage_for_worktree_instance(
+            self.id,
+            self.owner,
+            registration_id,
+            event,
+            true,
         )?;
         Ok(())
     }
@@ -6430,6 +6657,7 @@ pub(crate) fn read_indexed_file_content(
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
             return Err(CliError::RefreshRequired(Box::new(IndexRefreshRequired {
                 project_root,
+                worktree: None,
                 status: IndexReadStatus::RefreshRequired,
                 reason: IndexRefreshReason::PathsChanged,
                 scope: IndexRefreshScope::Full,
@@ -6444,6 +6672,7 @@ pub(crate) fn read_indexed_file_content(
             return Err(CliError::VerificationIncomplete(Box::new(
                 IndexVerificationIncomplete {
                     project_root,
+                    worktree: None,
                     status: IndexReadStatus::VerificationIncomplete,
                     reason: IndexVerificationReason::SourceInspectionFailed,
                     scope: IndexRefreshScope::Full,
@@ -6459,6 +6688,7 @@ pub(crate) fn read_indexed_file_content(
     {
         return Err(CliError::RefreshRequired(Box::new(IndexRefreshRequired {
             project_root,
+            worktree: None,
             status: IndexReadStatus::RefreshRequired,
             reason: IndexRefreshReason::SourceChanged,
             scope: IndexRefreshScope::Full,
@@ -6473,6 +6703,7 @@ pub(crate) fn read_indexed_file_content(
         return Err(CliError::VerificationIncomplete(Box::new(
             IndexVerificationIncomplete {
                 project_root,
+                worktree: None,
                 status: IndexReadStatus::VerificationIncomplete,
                 reason: IndexVerificationReason::SourceTooLarge,
                 scope: IndexRefreshScope::Full,
@@ -6486,6 +6717,7 @@ pub(crate) fn read_indexed_file_content(
     let file = fs::File::open(&native).map_err(|source| {
         CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
             project_root: project_root.clone(),
+            worktree: None,
             status: IndexReadStatus::VerificationIncomplete,
             reason: IndexVerificationReason::SourceInspectionFailed,
             scope: IndexRefreshScope::Full,
@@ -6498,6 +6730,7 @@ pub(crate) fn read_indexed_file_content(
         .map_err(|source| {
             CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
                 project_root: project_root.clone(),
+                worktree: None,
                 status: IndexReadStatus::VerificationIncomplete,
                 reason: IndexVerificationReason::SourceInspectionFailed,
                 scope: IndexRefreshScope::Full,
@@ -6509,6 +6742,7 @@ pub(crate) fn read_indexed_file_content(
     {
         return Err(CliError::RefreshRequired(Box::new(IndexRefreshRequired {
             project_root,
+            worktree: None,
             status: IndexReadStatus::RefreshRequired,
             reason: IndexRefreshReason::SourceChanged,
             scope: IndexRefreshScope::Full,
@@ -6523,6 +6757,7 @@ pub(crate) fn read_indexed_file_content(
     if indexed.node.content_hash.as_deref() != Some(current_hash.as_str()) {
         return Err(CliError::RefreshRequired(Box::new(IndexRefreshRequired {
             project_root,
+            worktree: None,
             status: IndexReadStatus::RefreshRequired,
             reason: IndexRefreshReason::SourceChanged,
             scope: IndexRefreshScope::Full,
@@ -6536,6 +6771,7 @@ pub(crate) fn read_indexed_file_content(
     String::from_utf8(bytes).map_err(|source| {
         CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
             project_root,
+            worktree: None,
             status: IndexReadStatus::VerificationIncomplete,
             reason: IndexVerificationReason::SourceInspectionFailed,
             scope: IndexRefreshScope::Full,
@@ -7162,6 +7398,7 @@ pub(crate) fn refresh_index_for_changes_controlled(
                 return Err(CliError::VerificationIncomplete(Box::new(
                     IndexVerificationIncomplete {
                         project_root: normalize_native_path_display(root),
+                        worktree: None,
                         status: IndexReadStatus::VerificationIncomplete,
                         reason: IndexVerificationReason::SourceInspectionFailed,
                         scope: IndexRefreshScope::Full,

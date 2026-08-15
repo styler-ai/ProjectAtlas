@@ -3,30 +3,34 @@
 
 use crate::atlas_map::{
     AtlasMapConfig, IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report,
-    init_gitignore, lint_map, list_ignore_entries, load_atlas_config, load_atlas_config_for_root,
-    remove_ignore_entry, write_map,
+    init_gitignore, init_project_with_config, lint_map, list_ignore_entries, load_atlas_config,
+    load_atlas_config_for_root, remove_ignore_entry, write_map,
 };
 use crate::runtime::{
     DEFAULT_HEALTH_LIMIT, INDEX_WORKER_SAFE_CEILING, IndexInitRequired, IndexProjectMismatch,
-    IndexRefreshRequired, IndexVerificationIncomplete, InitBootstrapOptions, MAX_HEALTH_LIMIT,
+    IndexRefreshRequired, IndexVerificationIncomplete, InitBootstrapOptions, InitHydrationPhase,
+    InitHydrationStatus, InitPhaseStatus, InitScanPhase, InitSetupReport, MAX_HEALTH_LIMIT,
     MAX_SYMBOL_FILE_BYTES, ProjectWorktreeRequired, PurposeCuratorHandoff, PurposeLintLevel,
-    PurposeReviewRequest, ScanRuntimePlan, SettingsClassifiedNavigationReport,
+    PurposeReviewRequest, ScanReport, ScanRuntimePlan, SettingsClassifiedNavigationReport,
     SourceObservationRegistry, SymbolBuildOptions, UsageRuntimeInstance, VerifiedReadOutcome,
     VerifiedReadStamp, build_settings_report, byte_count_to_tokens, canonical_project_root,
     canonical_source_project_root, classified_navigation_capabilities,
     classified_ranked_file_nodes_with_reasons, config_root_mismatch_error,
     default_mcp_project_root, estimated_source_tokens_for_indexed_files,
     estimated_source_tokens_for_paths, index_init_required, index_work_control, init_config_path,
-    lint_database_if_present, next_step_report_payload, next_step_report_with_selection,
-    normalized_folder_filter, open_atlas_store_for_project, open_atlas_store_read_only_for_project,
-    open_federated_atlas_stores_for_project, purpose_curation_page, purpose_curator_handoff,
-    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
-    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
-    render_classified_ranked_file_rows, render_classified_symbol_rows, render_health_page,
-    render_purpose_curation_page, render_purpose_review_report, reset_index_files, review_purposes,
-    run_init_bootstrap, run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
-    run_symbol_build_pipeline_controlled, strip_legacy_purpose, telemetry_disabled,
-    validate_purpose_review_admission, validated_indexed_file_key, watcher_status_report,
+    init_next_steps, lint_database_if_present, next_step_report_payload,
+    next_step_report_with_selection, normalized_folder_filter, open_atlas_store_for_project,
+    open_atlas_store_read_only_for_project, open_federated_atlas_stores_for_project,
+    purpose_curation_page, purpose_curator_handoff, ranked_file_nodes_with_reasons,
+    ranked_folder_nodes_with_reasons, read_indexed_file_content,
+    reconcile_hydrated_index_controlled, record_directory_walk_usage_estimate,
+    record_usage_estimate, record_usage_text, render_classified_ranked_file_rows,
+    render_classified_symbol_rows, render_health_page, render_purpose_curation_page,
+    render_purpose_review_report, reset_index_files, review_purposes, run_init_bootstrap,
+    run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
+    run_symbol_build_pipeline_controlled, strip_legacy_purpose,
+    synchronize_registered_worktree_usage, telemetry_disabled, validate_purpose_review_admission,
+    validated_indexed_file_key, watcher_status_report,
 };
 #[cfg(test)]
 use crate::runtime::{PURPOSE_CURATOR_RECOMMENDED_REASONING, run_scan_pipeline};
@@ -53,7 +57,11 @@ use projectatlas_core::health::Severity;
 use projectatlas_core::language::{ContentClassification, ContentSelection};
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::symbols::ParserKind;
-use projectatlas_core::telemetry::{TokenTrendWindow, UsageInstanceOwner};
+use projectatlas_core::telemetry::{
+    TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_SELECTED_CANDIDATES,
+    TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_CONFIDENCE_INFERRED, TOKEN_CONFIDENCE_POLICY_ESTIMATE,
+    TokenTrendWindow, UsageInstanceOwner, usage_from_estimates_with_context, usage_from_text,
+};
 use projectatlas_core::toon::{
     encode_agent_payload, render_outline, render_overview, render_ranked_nodes,
     render_symbol_relations, render_token_overview, render_token_trends,
@@ -67,7 +75,12 @@ use projectatlas_core::{
 };
 use projectatlas_db::{
     AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, RepositoryCoverageQuery,
-    read_project_root_read_only, verify_project_database,
+    WorktreeAlias, WorktreeRegistration, WorktreeRegistrationState, WorktreeUsageSnapshot,
+    WorktreeUsageSyncState, read_project_root_read_only, verify_project_database,
+};
+use projectatlas_fs::worktree::{
+    GitRepositoryStructure, GitWorktreeEntry, GitWorktreeRole, GitWorktreeState,
+    RepositoryStructure, discover_repository_structure,
 };
 #[cfg(test)]
 use projectatlas_service::build_file_summary_from_source;
@@ -87,6 +100,7 @@ use projectatlas_service::{
     parse_relation_confidence, parse_relation_direction, parse_relation_resolution,
     parse_symbol_kind, read_indexed_code_slice_from_source_bounded_with_selection,
     read_symbol_slice_from_source_bounded_with_selection, search_indexed_files_with_control,
+    validate_federated_root_count,
 };
 use rmcp::handler::server::{
     router::tool::ToolRouter, tool::IntoCallToolResult, wrapper::Parameters,
@@ -135,6 +149,9 @@ impl IntoCallToolResult for McpToolTextResult {
 /// MCP tools required for the agent-first repository-intelligence surface.
 pub(crate) const REQUIRED_MCP_TOOL_NAMES: &[&str] = &[
     MCP_TOOL_ATLAS_SET_PROJECT_PATH,
+    MCP_TOOL_ATLAS_WORKTREE_LIST,
+    MCP_TOOL_ATLAS_WORKTREE_ADD,
+    MCP_TOOL_ATLAS_WORKTREE_REMOVE,
     MCP_TOOL_ATLAS_INIT,
     MCP_TOOL_ATLAS_MAP,
     MCP_TOOL_ATLAS_ROOT,
@@ -178,6 +195,12 @@ pub(crate) const REQUIRED_MCP_TOOL_NAMES: &[&str] = &[
 
 /// MCP tool name for active project selection.
 const MCP_TOOL_ATLAS_SET_PROJECT_PATH: &str = "atlas_set_project_path";
+/// MCP tool name for bounded structural worktree inventory.
+const MCP_TOOL_ATLAS_WORKTREE_LIST: &str = "atlas_worktree_list";
+/// MCP tool name for control-atlas worktree registration.
+const MCP_TOOL_ATLAS_WORKTREE_ADD: &str = "atlas_worktree_add";
+/// MCP tool name for control-atlas worktree retirement.
+const MCP_TOOL_ATLAS_WORKTREE_REMOVE: &str = "atlas_worktree_remove";
 /// MCP tool name for project initialization.
 const MCP_TOOL_ATLAS_INIT: &str = "atlas_init";
 /// MCP tool name for compatibility map exports.
@@ -299,6 +322,10 @@ const MCP_ERROR_SERIALIZATION_FALLBACK_PREFIX: &str = "error: ";
 const MCP_PAYLOAD_SCAN: &str = "scan";
 /// MCP payload key for project initialization reports.
 const MCP_PAYLOAD_INIT: &str = "init";
+/// MCP payload key for structural worktree inventory.
+const MCP_PAYLOAD_WORKTREES: &str = "worktrees";
+/// MCP payload key for one worktree registration transition.
+const MCP_PAYLOAD_WORKTREE: &str = "worktree";
 /// MCP payload key for compatibility map reports.
 const MCP_PAYLOAD_MAP: &str = "map";
 /// MCP payload key for effective config reports.
@@ -349,6 +376,8 @@ const MCP_PAYLOAD_TASK_CANCEL: &str = "task_cancel";
 const MCP_PAYLOAD_SESSION_CAPABILITIES: &str = "mcp_session";
 /// Session-brief argument key for per-call project roots.
 const MCP_BRIEF_ARG_PROJECT_PATH: &str = "project_path";
+/// Session-brief argument key for registered worktree aliases.
+const MCP_BRIEF_ARG_WORKTREE: &str = "worktree";
 /// Session-brief argument key for exact repository-relative files.
 const MCP_BRIEF_ARG_FILE: &str = "file";
 /// Session-brief argument key for indexed search patterns.
@@ -449,7 +478,16 @@ const MCP_ERROR_CONTENT_SELECTION_RELATION_VIEW: &str =
 const MCP_ERROR_ANALYSIS_VIEW_REQUIRED: &str = "analysis controls require view=analysis";
 /// MCP validation error for federation on the legacy relation view.
 const MCP_ERROR_FEDERATED_RELATION_VIEW: &str =
-    "roots require the detailed or analysis relation view";
+    "roots or worktrees require the detailed or analysis relation view";
+/// MCP validation error for two federation selector families in one request.
+const MCP_ERROR_FEDERATED_SELECTOR_CONFLICT: &str =
+    "roots and worktrees are mutually exclusive federation selectors";
+/// MCP validation error for combining alias federation with a legacy root path.
+const MCP_ERROR_FEDERATED_PROJECT_PATH_CONFLICT: &str =
+    "worktrees federation cannot be combined with project_path";
+/// MCP validation error for a mismatched explicit primary alias.
+const MCP_ERROR_FEDERATED_PRIMARY_CONFLICT: &str =
+    "worktree must match the first ordered worktrees alias";
 /// MCP validation error for a symbol trace without a symbol-kind selector.
 const MCP_ERROR_TRACE_TARGET_KIND_REQUIRED: &str = "symbol trace targets require trace_target_kind";
 /// MCP validation error for a symbol trace without a signature selector.
@@ -628,12 +666,55 @@ const MCP_TASK_PROGRESS_CANCELED: &str = "canceled";
 const MCP_TASK_PROGRESS_CANCELLATION_REQUESTED: &str = "cancellation_requested";
 /// Agent-facing MCP server instructions.
 const MCP_SERVER_INSTRUCTIONS: &str = "ProjectAtlas provides TOON-first repository orientation, folder/file ranking, structured file summaries, symbol graph lookup, exact slices, health checks, and token telemetry for coding agents.";
+/// Root-scoped selector conflict returned before filesystem or database access.
+const MCP_WORKTREE_PROJECT_PATH_CONFLICT: &str =
+    "worktree and project_path are mutually exclusive; choose one target selector";
+/// Reserved alias for the immutable MCP control authority.
+const MCP_MAIN_WORKTREE_ALIAS: &str = "main";
+/// Maximum structural worktree rows emitted in one MCP response.
+const MCP_WORKTREE_LIST_MAX_ROWS: usize = 256;
+/// Stable prefix for structural worktree candidates returned to agents.
+const MCP_WORKTREE_SELECTOR_PREFIX: &str = "wt-";
+/// Hex characters retained from the administrative-path digest.
+const MCP_WORKTREE_SELECTOR_DIGEST_CHARS: usize = 16;
+/// Init-owned non-source metadata file copied or removed during hydration fallback.
+const MCP_NONSOURCE_FILE_NAME: &str = "projectatlas-nonsource-files.toon";
+/// Typed fallback when a caller explicitly suppresses the reconciliation scan.
+const MCP_HYDRATION_NO_SCAN_REASON: &str =
+    "hydration requires source reconciliation; ordinary no-scan init was requested";
+/// Worktree aliases require one structurally verified Git control repository.
+const MCP_ERROR_WORKTREE_CONTROL_REPOSITORY_REQUIRED: &str =
+    "worktree aliases require a structurally valid Git control repository";
+/// Default aliases cannot be derived from non-UTF-8 directory names.
+const MCP_ERROR_WORKTREE_ALIAS_NON_UTF8: &str =
+    "selected worktree has no UTF-8 directory name; provide alias explicitly";
+/// Active registrations must agree with their local atlas identity.
+const MCP_ERROR_WORKTREE_IDENTITY_CONFLICT: &str =
+    "local atlas identity conflicts with its active registration";
+/// Federation must retain the exact alias captured during target resolution.
+const MCP_ERROR_FEDERATED_ALIAS_MISSING: &str =
+    "federated worktree resolution lost its captured alias";
+/// Federation cannot address the same alias or root twice.
+const MCP_ERROR_FEDERATED_TARGET_DUPLICATE: &str =
+    "federated worktree aliases and roots must be unique";
+/// The immutable control checkout is addressed only through its reserved alias.
+const MCP_ERROR_CONTROL_ALIAS_REQUIRED: &str =
+    "the control checkout is selected through reserved alias main";
+/// Worktree registration requires one non-empty structural selector.
+const MCP_ERROR_WORKTREE_SELECTOR_EMPTY: &str = "worktree selector must not be empty";
+/// Structural evidence can disappear between selection and registration.
+const MCP_ERROR_WORKTREE_NO_LONGER_ACTIVE: &str = "selected worktree is no longer active";
+/// Retiring a missing registration preserves its last accepted aggregate.
+const MCP_WORKTREE_MISSING_RETENTION_REASON: &str =
+    "worktree is structurally missing; the last accepted telemetry total is retained";
 
 /// Optional active-project override accepted by MCP tools.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct AtlasProjectParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
 }
 
 /// MCP parameter payload for compact agent startup briefs.
@@ -641,6 +722,8 @@ struct AtlasProjectParams {
 struct AtlasSessionBriefParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Optional task query used for folder and file ranking.
     query: Option<String>,
     /// Optional host-owned task label for the purpose-curator handoff.
@@ -671,11 +754,36 @@ struct AtlasSetProjectPathParams {
     project_path: String,
 }
 
+/// MCP parameter payload for bounded structural worktree inventory.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasWorktreeListParams {
+    /// Include retired `ProjectAtlas` registrations after active structural rows.
+    include_retired: Option<bool>,
+}
+
+/// MCP parameter payload for registering one structurally discovered worktree.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasWorktreeAddParams {
+    /// Stable or uniquely matching short selector returned by `atlas_worktree_list`.
+    worktree: String,
+    /// Optional short alias; defaults to the selected worktree directory name when valid.
+    alias: Option<String>,
+}
+
+/// MCP parameter payload for retiring one active `ProjectAtlas` worktree alias.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasWorktreeRemoveParams {
+    /// Active registered alias to remove from `ProjectAtlas` selection.
+    worktree: String,
+}
+
 /// MCP parameter payload for initializing a project.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct AtlasInitParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Create/verify the project surface without running the scan/index pipeline.
     no_scan: Option<bool>,
     /// Run the scan/index phase even when a future freshness check could skip it.
@@ -689,6 +797,8 @@ struct AtlasInitParams {
 struct AtlasMapParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Write JSON compatibility content when true.
     json: Option<bool>,
     /// Force map generation even in CI-like environments.
@@ -700,6 +810,8 @@ struct AtlasMapParams {
 struct AtlasRootParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Optional checkout or Git common directory for mutation-free worktree status.
     control_root: Option<String>,
     /// Return the same report shape with `verified` available for gating.
@@ -722,6 +834,8 @@ struct AtlasRootSetParams {
 struct AtlasIgnoreMutationParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Ignore kind: dir-name or path-prefix. Omit only for broad remove.
     kind: Option<String>,
     /// Directory name or repository-relative path prefix.
@@ -733,6 +847,8 @@ struct AtlasIgnoreMutationParams {
 struct AtlasLintParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Deprecated compatibility flag matching the CLI.
     strict_folders: Option<bool>,
     /// Purpose lint strictness: low, medium, or strict.
@@ -748,6 +864,8 @@ struct AtlasLintParams {
 struct AtlasMcpConfigParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// MCP server name to emit. Defaults to projectatlas.
     server_name: Option<String>,
     /// Harness config shape: mcp-json, codex, claude-code, or opencode.
@@ -800,6 +918,8 @@ pub(crate) fn mcp_tool_route_present(name: &str) -> bool {
 struct AtlasScanParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Repository root path. Defaults to the configured or indexed project root.
     path: Option<String>,
     /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute paths.
@@ -821,6 +941,8 @@ struct AtlasScanParams {
 struct AtlasWatchOnceParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Repository root path. Defaults to the configured or indexed project root.
     path: Option<String>,
     /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute paths.
@@ -840,6 +962,8 @@ struct AtlasWatchOnceParams {
 struct AtlasQueryParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Search query for path and purpose matching.
     query: Option<String>,
     /// Maximum number of rows to return.
@@ -851,6 +975,8 @@ struct AtlasQueryParams {
 struct AtlasNextParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Search query for path and purpose matching.
     query: Option<String>,
     /// Optional classified-content selection: source, documentation, or both.
@@ -864,6 +990,8 @@ struct AtlasNextParams {
 struct AtlasFilesParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Search query for path and purpose matching.
     query: Option<String>,
     /// Folder path to constrain file lookup.
@@ -885,6 +1013,8 @@ struct AtlasFilesParams {
 struct AtlasOutlineParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Repository-relative file path.
     file: String,
     /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute file paths.
@@ -898,6 +1028,8 @@ struct AtlasOutlineParams {
 struct AtlasFileSummaryParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Repository-relative file path.
     file: String,
     /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute file paths.
@@ -915,6 +1047,8 @@ struct AtlasFileSummaryParams {
 struct AtlasSearchParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Literal, regex, or fuzzy pattern to search for.
     pattern: String,
     /// Retrieval family; lexical is the default and always-available mode.
@@ -942,6 +1076,8 @@ struct AtlasSearchParams {
 struct AtlasSliceParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Repository-relative file path.
     file: String,
     /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute file paths.
@@ -971,6 +1107,8 @@ struct AtlasSliceParams {
 struct AtlasSymbolsParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Optional repository-relative file path.
     file: Option<String>,
     /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute file paths.
@@ -988,6 +1126,8 @@ struct AtlasSymbolsParams {
 struct AtlasSymbolRelationsParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Optional repository-relative file path.
     file: Option<String>,
     /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute file paths.
@@ -1004,6 +1144,8 @@ struct AtlasSymbolRelationsParams {
     cursor: Option<String>,
     /// Complete ordered project-root set for one read-only federated call.
     roots: Option<Vec<String>>,
+    /// Complete ordered registered worktree aliases for one read-only federated call.
+    worktrees: Option<Vec<String>>,
     /// Exact symbol name used as the detailed anchor; omit for a file anchor.
     symbol: Option<String>,
     /// Optional exact parent used to disambiguate the detailed symbol anchor.
@@ -1183,6 +1325,8 @@ fn relation_analysis_vcs(
 struct AtlasTokenParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Optional session id filter.
     session: Option<String>,
     /// Include a readable ASCII chart in the MCP result.
@@ -1200,6 +1344,8 @@ struct AtlasTokenParams {
 struct AtlasHealthParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Pagination start index after filters are applied.
     start_index: Option<usize>,
     /// Maximum findings to return, capped to a safe MCP page size.
@@ -1247,6 +1393,8 @@ struct AtlasPurposeQueueParams {
 struct AtlasParityParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Parity profile. Defaults to repository-intelligence.
     profile: Option<String>,
 }
@@ -1256,6 +1404,8 @@ struct AtlasParityParams {
 struct AtlasStripLegacyParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Repository root path. Defaults to the configured or indexed project root.
     path: Option<String>,
     /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute paths.
@@ -1273,6 +1423,8 @@ struct AtlasStripLegacyParams {
 struct AtlasResetIndexParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Remove runtime index/cache files when true.
     apply: Option<bool>,
     /// Preview cleanup without modifying files.
@@ -1286,6 +1438,8 @@ struct AtlasResetIndexParams {
 struct AtlasPurposeSetParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Indexed repository-relative path.
     path: String,
     /// Agent-approved purpose one-liner.
@@ -1315,6 +1469,8 @@ struct AtlasPurposeReviewItem {
 struct AtlasPurposeReviewParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Purpose records to agent-review.
     items: Vec<AtlasPurposeReviewItem>,
     /// Apply reviewed purposes. Defaults to false for preview.
@@ -1326,6 +1482,8 @@ struct AtlasPurposeReviewParams {
 struct AtlasHealthResolveParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
+    worktree: Option<String>,
     /// Stable finding id from `atlas_health`.
     finding_id: String,
     /// Finding category.
@@ -1347,6 +1505,30 @@ struct McpProjectState {
     db_path: PathBuf,
     /// Selected scan/import configuration path.
     config_path: Option<PathBuf>,
+    /// Registered alias captured for this call, when alias routing selected the state.
+    worktree: Option<McpWorktreeSelection>,
+}
+
+/// Stable control-catalog identity captured with one alias-routed project state.
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct McpWorktreeSelection {
+    /// Reserved `main` or registered short alias.
+    alias: String,
+    /// Durable registration identity; absent only for reserved `main`.
+    registration_id: Option<i64>,
+}
+
+/// Outcome of evaluating the control atlas as an init hydration source.
+enum McpWorktreeHydration {
+    /// One target-exact candidate was reconciled and activated.
+    Activated {
+        /// Public init diagnostic.
+        hydration: InitHydrationPhase,
+        /// Normal scan result produced against the private candidate.
+        scan: Box<ScanReport>,
+    },
+    /// Ordinary init must be used and disclose this reason.
+    Fallback(String),
 }
 
 /// Store ownership selected by the existing relation tool request shape.
@@ -1376,6 +1558,8 @@ struct McpUsageProjectBinding {
     db_path: PathBuf,
     /// Project identity captured by the already-open selected store.
     project_instance_id: ProjectInstanceId,
+    /// Captured routed origin; absent for native events and source baselines.
+    worktree_registration_id: Option<i64>,
 }
 
 /// One bounded broad-source token baseline keyed to a complete generation.
@@ -1458,13 +1642,24 @@ impl McpUsageIntent {
 }
 
 impl McpUsageProjectBinding {
-    /// Capture one exact root/database/identity authority without another SQL read.
+    /// Capture one native telemetry binding in focused tests.
+    #[cfg(test)]
     fn capture(state: &McpProjectState, store: &AtlasStore) -> Result<Self, DbError> {
+        Self::capture_with_origin(state, store, None)
+    }
+
+    /// Capture one exact telemetry authority and optional registered origin.
+    fn capture_with_origin(
+        state: &McpProjectState,
+        store: &AtlasStore,
+        worktree_registration_id: Option<i64>,
+    ) -> Result<Self, DbError> {
         let captured = store.captured_project_binding()?;
         Ok(Self {
             root: state.root.clone(),
             db_path: state.db_path.clone(),
             project_instance_id: captured.project_instance_id,
+            worktree_registration_id,
         })
     }
 }
@@ -1570,6 +1765,214 @@ struct McpLintReport {
     exit_code: i32,
     /// Combined lint report text.
     report: String,
+}
+
+/// Bounded control-atlas view of Git and `ProjectAtlas` worktree state.
+#[derive(Debug, Serialize)]
+struct McpWorktreeListReport {
+    /// Reserved alias for the selected control checkout.
+    control_alias: &'static str,
+    /// Exact selected control checkout root.
+    control_root: String,
+    /// Structurally validated Git common directory.
+    common_directory: String,
+    /// Active Git inventory, bounded for one agent response.
+    worktrees: Vec<McpWorktreeRow>,
+    /// Optional retired `ProjectAtlas` registrations retained for telemetry history.
+    retired: Vec<McpRetiredWorktreeRow>,
+    /// Complete structural row count before response truncation.
+    total_worktrees: usize,
+    /// Whether structural rows exceeded the public response bound.
+    truncated: bool,
+}
+
+/// One structurally discovered Git worktree joined to `ProjectAtlas` state.
+#[derive(Debug, Serialize)]
+struct McpWorktreeRow {
+    /// Stable selector accepted by `atlas_worktree_add`.
+    selector: String,
+    /// Reserved `main` or active registered alias when present.
+    alias: Option<String>,
+    /// Structural primary/linked role.
+    role: McpGitWorktreeRole,
+    /// Current reciprocal Git state.
+    git_state: McpGitWorktreeState,
+    /// `ProjectAtlas` registration relationship.
+    registration: McpWorktreeRegistrationState,
+    /// Stable Git administrative identity.
+    administrative_directory: String,
+    /// Exact current source root when active.
+    root: Option<String>,
+    /// Exact atlas availability for the current source root.
+    atlas_state: McpWorktreeAtlasState,
+    /// Local aggregate relationship to the accepted control snapshot.
+    telemetry_state: McpWorktreeTelemetryState,
+    /// Last local aggregate revision accepted by the control atlas.
+    accepted_telemetry_revision: Option<u64>,
+    /// Current local aggregate revision when safely readable.
+    local_telemetry_revision: Option<u64>,
+    /// Exact initialized project identity when safely readable.
+    project_instance_id: Option<String>,
+    /// Typed structural or atlas diagnostic for unavailable rows.
+    blocker: Option<String>,
+}
+
+/// Retired `ProjectAtlas` registration retained outside source selection.
+#[derive(Debug, Serialize)]
+struct McpRetiredWorktreeRow {
+    /// Last human/agent-facing alias.
+    alias: String,
+    /// Last structurally validated source root.
+    last_root: String,
+    /// Exact initialized project identity when one was bound.
+    project_instance_id: Option<String>,
+    /// Last local aggregate revision accepted before retirement.
+    accepted_telemetry_revision: u64,
+}
+
+/// Compact candidate returned for ambiguous or missing add selection.
+#[derive(Debug, Serialize)]
+struct McpWorktreeCandidate {
+    /// Stable selector accepted by a later add call.
+    selector: String,
+    /// Exact active source root.
+    root: String,
+    /// Structural primary/linked role.
+    role: McpGitWorktreeRole,
+}
+
+/// Result of one ProjectAtlas-only worktree registration transition.
+#[derive(Debug, Serialize)]
+struct McpWorktreeMutationReport {
+    /// Registration operation that was requested.
+    operation: McpWorktreeMutationOperation,
+    /// Mutation or bounded selection outcome.
+    status: McpWorktreeMutationStatus,
+    /// Stable structural selector when one candidate was selected.
+    selector: Option<String>,
+    /// Active or retired `ProjectAtlas` alias when known.
+    alias: Option<String>,
+    /// Exact source root when known.
+    root: Option<String>,
+    /// Stable control-database registration identity when committed.
+    registration_id: Option<i64>,
+    /// Final local telemetry synchronization outcome when attempted.
+    telemetry_sync: Option<WorktreeUsageSyncState>,
+    /// Bounded candidates when a human selector was ambiguous.
+    candidates: Vec<McpWorktreeCandidate>,
+    /// Typed synchronization or structural note when the transition is partial by design.
+    blocker: Option<String>,
+    /// Git lifecycle is never changed by these operations.
+    git_unchanged: bool,
+    /// Source, `.projectatlas`, and database files are never deleted by unregister.
+    files_unchanged: bool,
+}
+
+/// Structural role serialized without leaking debug vocabulary.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpGitWorktreeRole {
+    /// Primary checkout for the Git common directory.
+    Primary,
+    /// Linked checkout with reciprocal registration evidence.
+    Linked,
+}
+
+impl From<GitWorktreeRole> for McpGitWorktreeRole {
+    fn from(value: GitWorktreeRole) -> Self {
+        match value {
+            GitWorktreeRole::Primary => Self::Primary,
+            GitWorktreeRole::Linked => Self::Linked,
+        }
+    }
+}
+
+/// Git state exposed by structural worktree inventory.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpGitWorktreeState {
+    /// Reciprocal evidence resolves an exact source root.
+    Active,
+    /// Git retains registration evidence but the checkout is absent.
+    Missing,
+    /// Structural evidence is malformed or unsafe.
+    Invalid,
+}
+
+/// `ProjectAtlas` registration relationship for one structural row.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpWorktreeRegistrationState {
+    /// Reserved selected control checkout.
+    Control,
+    /// Active short alias is stored in the control atlas.
+    Registered,
+    /// Git knows the worktree but `ProjectAtlas` does not.
+    Unregistered,
+}
+
+/// Exact local atlas availability without modifying its database.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpWorktreeAtlasState {
+    /// A compatible atlas is bound to the exact current root.
+    Initialized,
+    /// No target-local database exists.
+    Missing,
+    /// A database exists but cannot be admitted for this exact root.
+    Invalid,
+    /// Git does not expose an active source root.
+    Unavailable,
+}
+
+/// Relationship between independent local and durable control telemetry.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpWorktreeTelemetryState {
+    /// Native telemetry belongs to the selected control atlas.
+    Control,
+    /// The latest readable local snapshot has been accepted.
+    Current,
+    /// A newer readable local snapshot awaits synchronization.
+    Pending,
+    /// No local atlas exists yet.
+    MissingAtlas,
+    /// No `ProjectAtlas` registration owns this structural row.
+    Unregistered,
+    /// Structural or atlas state prevents a trustworthy comparison.
+    Unavailable,
+}
+
+/// ProjectAtlas-only registry operation.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpWorktreeMutationOperation {
+    /// Add or reactivate one alias.
+    Add,
+    /// Retire one active alias after final synchronization.
+    Remove,
+}
+
+/// Result state for one worktree registry operation.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpWorktreeMutationStatus {
+    /// One active registration was committed.
+    Registered,
+    /// One active registration was retired.
+    Retired,
+    /// No active structural candidate matched.
+    NotFound,
+    /// More than one active structural candidate matched.
+    Ambiguous,
+}
+
+/// Read-only local atlas facts used by list/add/remove orchestration.
+struct LocalWorktreeAtlas {
+    /// Exact atlas identity.
+    project_instance_id: ProjectInstanceId,
+    /// Bounded local aggregate snapshot.
+    snapshot: WorktreeUsageSnapshot,
 }
 
 /// Role-typed selected root for MCP path routing.
@@ -1728,8 +2131,12 @@ struct McpErrorPayload {
 struct McpNextCall {
     /// Existing MCP tool that safely recovers the selected project.
     tool: &'static str,
-    /// Canonical project root for per-call isolation.
-    project_path: String,
+    /// Canonical project root for legacy per-call isolation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_path: Option<String>,
+    /// Registered alias preserved by worktree-routed recovery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worktree: Option<String>,
 }
 
 /// Agent-facing payload for the selected MCP project.
@@ -1742,6 +2149,12 @@ struct McpProjectStateResponse {
 /// Stable serialized schema for the selected MCP project.
 #[derive(Debug, Serialize)]
 struct McpProjectStatePayload {
+    /// Registered alias used to capture this project state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worktree: Option<String>,
+    /// Durable control-catalog registration identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registration_id: Option<i64>,
     /// Canonical repository root.
     root: String,
     /// Selected durable `SQLite` index path.
@@ -1807,6 +2220,12 @@ struct McpSessionCapabilities {
 /// Selected project identity inside capability/settings payloads.
 #[derive(Debug, Serialize)]
 struct McpSelectedProjectCapability {
+    /// Registered alias used to capture this project state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worktree: Option<String>,
+    /// Durable control-catalog registration identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registration_id: Option<i64>,
     /// Canonical repository root.
     root: String,
     /// Selected durable `SQLite` index path.
@@ -2367,6 +2786,9 @@ struct McpCompactRelationContinuationArguments<'a> {
     /// Explicit project root when the original request supplied one.
     #[serde(skip_serializing_if = "Option::is_none")]
     project_path: Option<&'a str>,
+    /// Registered primary worktree when the original request supplied one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worktree: Option<&'a str>,
     /// Selected repository-relative anchor file.
     file: &'a str,
     /// Original nearest-project policy when explicitly supplied.
@@ -2375,6 +2797,9 @@ struct McpCompactRelationContinuationArguments<'a> {
     /// Original ordered federated roots when supplied.
     #[serde(skip_serializing_if = "Option::is_none")]
     roots: Option<&'a [String]>,
+    /// Original ordered registered worktree aliases when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worktrees: Option<&'a [String]>,
     /// Detailed relation view.
     view: &'static str,
     /// Preserve the compact response projection.
@@ -2460,9 +2885,11 @@ impl<'a> McpCompactDetailedRelationReport<'a> {
                     tool: MCP_TOOL_ATLAS_SYMBOL_RELATIONS,
                     arguments: McpCompactRelationContinuationArguments {
                         project_path: params.project_path.as_deref(),
+                        worktree: params.worktree.as_deref(),
                         file,
                         nearest_project: params.nearest_project,
                         roots: params.roots.as_deref(),
+                        worktrees: params.worktrees.as_deref(),
                         view: MCP_SYMBOL_RELATION_VIEW_DETAILED,
                         compact: true,
                         cursor,
@@ -2505,6 +2932,9 @@ impl<'a> McpCompactDetailedRelationReport<'a> {
 struct McpCompactFederatedDetailedRelationReport<'a> {
     /// Ordered validated participants.
     participants: &'a [FederatedParticipant],
+    /// Worktree alias of the first-root result when aliases selected federation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    primary_worktree: Option<&'a str>,
     /// Compact first-root detailed relation page.
     primary: McpCompactDetailedRelationReport<'a>,
     /// Exact cross-root external rendezvous evidence.
@@ -2529,6 +2959,7 @@ impl<'a> McpCompactFederatedDetailedRelationReport<'a> {
     ) -> Self {
         Self {
             participants: &report.participants,
+            primary_worktree: report.primary_worktree.as_deref(),
             primary: McpCompactDetailedRelationReport::new(&report.primary, file, params),
             rendezvous: nonempty_slice(&report.rendezvous),
             truncated: report.truncated,
@@ -2625,6 +3056,12 @@ struct McpCompactSessionBrief {
 /// Compact selected-project state for the startup path.
 #[derive(Debug, Serialize)]
 struct McpCompactBriefProject {
+    /// Registered alias used to capture this project state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worktree: Option<String>,
+    /// Durable control-catalog registration identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registration_id: Option<i64>,
     /// Canonical repository root.
     root: String,
     /// Whether the durable index is available.
@@ -3150,6 +3587,8 @@ impl McpBackgroundResourceEnvelope {
 /// Native `ProjectAtlas` MCP server backed by the same services as the CLI.
 #[derive(Debug, Clone)]
 pub(crate) struct ProjectAtlasMcpServer {
+    /// Immutable registry/control authority selected when the MCP process started.
+    control_state: McpProjectState,
     /// Active project state for calls that omit `project_path`.
     project_state: Arc<RwLock<McpProjectState>>,
     /// Caller-visible compatibility label applied to this MCP process's events.
@@ -3262,11 +3701,10 @@ impl ProjectAtlasMcpServer {
         session: String,
         allow_nearest_project: bool,
     ) -> Self {
+        let startup_state = Self::startup_project_state(db_path, config_path);
         Self {
-            project_state: Arc::new(RwLock::new(Self::startup_project_state(
-                db_path,
-                config_path,
-            ))),
+            control_state: startup_state.clone(),
+            project_state: Arc::new(RwLock::new(startup_state)),
             session,
             usage_runtime: Arc::new(Mutex::new(McpUsageRuntime::default())),
             allow_nearest_project,
@@ -3281,9 +3719,42 @@ impl ProjectAtlasMcpServer {
     /// Open the durable index through one root-bound read snapshot.
     fn open_read_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
         if !state.db_path.exists() {
-            return Err(index_init_required(&state.root, &state.db_path));
+            return Err(Self::with_target_error_context(
+                index_init_required(&state.root, &state.db_path),
+                state,
+            ));
         }
         open_atlas_store_read_only_for_project(&state.db_path, &state.root)
+    }
+
+    /// Require registered worktree aliases to be initialized outside `atlas_init`.
+    fn require_initialized_worktree_target(state: &McpProjectState) -> Result<(), CliError> {
+        if state.worktree.is_some() && !state.db_path.is_file() {
+            return Err(Self::with_target_error_context(
+                index_init_required(&state.root, &state.db_path),
+                state,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Preserve a captured worktree alias on typed init/refresh recovery state.
+    fn with_target_error_context(mut error: CliError, state: &McpProjectState) -> CliError {
+        let Some(selection) = state.worktree.as_ref() else {
+            return error;
+        };
+        match &mut error {
+            CliError::InitRequired(report) => report.worktree = Some(selection.alias.clone()),
+            CliError::RefreshRequired(report) => report.worktree = Some(selection.alias.clone()),
+            CliError::VerificationIncomplete(report) => {
+                report.worktree = Some(selection.alias.clone());
+            }
+            CliError::ProjectMismatch(report) => {
+                report.worktree = Some(selection.alias.clone());
+            }
+            _ => {}
+        }
+        error
     }
 
     /// Run one normal MCP query inside the verified source-epoch boundary.
@@ -3325,20 +3796,26 @@ impl ProjectAtlasMcpServer {
         F: FnMut(&AtlasStore, VerifiedReadStamp, &IndexWorkControl) -> Result<T, CliError>,
     {
         if !state.db_path.is_file() {
-            return Err(index_init_required(&state.root, &state.db_path));
+            return Err(Self::with_target_error_context(
+                index_init_required(&state.root, &state.db_path),
+                state,
+            ));
         }
         let control =
             index_work_control(&SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None));
         let bridge = context
             .map(|context| McpRequestCancellationBridge::start(context, &control))
             .transpose()?;
-        let result = self.source_observations.with_verified_read(
-            &state.db_path,
-            &state.root,
-            state.config_path.as_deref(),
-            &control,
-            |store, stamp| query(store, stamp, &control),
-        );
+        let result = self
+            .source_observations
+            .with_verified_read(
+                &state.db_path,
+                &state.root,
+                state.config_path.as_deref(),
+                &control,
+                |store, stamp| query(store, stamp, &control),
+            )
+            .map_err(|error| Self::with_target_error_context(error, state));
         if bridge
             .as_ref()
             .is_some_and(McpRequestCancellationBridge::is_cancelled)
@@ -3422,7 +3899,10 @@ impl ProjectAtlasMcpServer {
     /// Open an existing selected-project index for purpose or health mutation.
     fn open_existing_mut_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
         if !state.db_path.is_file() {
-            return Err(index_init_required(&state.root, &state.db_path));
+            return Err(Self::with_target_error_context(
+                index_init_required(&state.root, &state.db_path),
+                state,
+            ));
         }
         Self::open_mut_store(state)
     }
@@ -3433,14 +3913,29 @@ impl ProjectAtlasMcpServer {
     }
 
     /// Record telemetry and rotate only this project's scope if baselines are full.
-    fn record_usage_for_state<F>(&self, state: &McpProjectState, store: &AtlasStore, mut record: F)
+    fn record_usage_for_state<F>(&self, state: &McpProjectState, store: &AtlasStore, record: F)
     where
+        F: FnMut(UsageRuntimeInstance) -> Result<(), CliError>,
+    {
+        self.record_usage_for_origin(state, store, None, record);
+    }
+
+    /// Record telemetry under one exact authority and optional worktree origin.
+    fn record_usage_for_origin<F>(
+        &self,
+        state: &McpProjectState,
+        store: &AtlasStore,
+        worktree_registration_id: Option<i64>,
+        mut record: F,
+    ) where
         F: FnMut(UsageRuntimeInstance) -> Result<(), CliError>,
     {
         if telemetry_disabled() {
             return;
         }
-        let Ok(binding) = McpUsageProjectBinding::capture(state, store) else {
+        let Ok(binding) =
+            McpUsageProjectBinding::capture_with_origin(state, store, worktree_registration_id)
+        else {
             return;
         };
         let Some(project_instance) = self
@@ -3473,6 +3968,18 @@ impl ProjectAtlasMcpServer {
         drop(record(next_instance));
     }
 
+    /// Record one accepted alias-routed event without retaining an active instance per worktree.
+    fn record_completed_worktree_usage(
+        store: &AtlasStore,
+        registration_id: i64,
+        event: &projectatlas_core::telemetry::UsageEvent,
+    ) {
+        let Some(instance) = UsageRuntimeInstance::new(UsageInstanceOwner::McpProcess) else {
+            return;
+        };
+        drop(instance.record_completed_for_worktree(store, registration_id, event));
+    }
+
     /// Best-effort telemetry for one result whose source epoch has already been accepted.
     fn record_accepted_usage(
         &self,
@@ -3491,6 +3998,53 @@ impl ProjectAtlasMcpServer {
             return;
         };
         if binding.project_instance_id != stamp.project_instance_id {
+            return;
+        }
+        if let Some(registration_id) = state
+            .worktree
+            .as_ref()
+            .and_then(|selection| selection.registration_id)
+        {
+            let event = match &intent.baseline {
+                McpUsageBaseline::Estimate(baseline_tokens) => usage_from_estimates_with_context(
+                    &self.session,
+                    intent.command,
+                    intent.path.clone(),
+                    intent.query.clone(),
+                    *baseline_tokens,
+                    projectatlas_core::outline::estimate_tokens(output),
+                    TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
+                    TOKEN_BASELINE_SELECTED_CANDIDATES,
+                    TOKEN_CONFIDENCE_INFERRED,
+                ),
+                McpUsageBaseline::DirectoryWalk(baseline_tokens) => {
+                    usage_from_estimates_with_context(
+                        &self.session,
+                        intent.command,
+                        intent.path.clone(),
+                        intent.query.clone(),
+                        *baseline_tokens,
+                        projectatlas_core::outline::estimate_tokens(output),
+                        TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
+                        TOKEN_BASELINE_DIRECTORY_WALK,
+                        TOKEN_CONFIDENCE_POLICY_ESTIMATE,
+                    )
+                }
+                McpUsageBaseline::Text(baseline_text) => usage_from_text(
+                    &self.session,
+                    intent.command,
+                    intent.path.clone(),
+                    intent.query.clone(),
+                    baseline_text,
+                    output,
+                ),
+            };
+            let Ok(control) = Self::open_read_store(&self.control_state) else {
+                return;
+            };
+            if control.finish_index_read_snapshot().is_ok() {
+                Self::record_completed_worktree_usage(&control, registration_id, &event);
+            }
             return;
         }
         self.record_usage_for_state(state, &store, |usage_instance| match &intent.baseline {
@@ -3543,6 +4097,7 @@ impl ProjectAtlasMcpServer {
                 root: state.root.clone(),
                 db_path: state.db_path.clone(),
                 project_instance_id: stamp.project_instance_id,
+                worktree_registration_id: None,
             },
             generation: stamp.generation,
             folder: folder.map(ToOwned::to_owned),
@@ -3597,12 +4152,244 @@ impl ProjectAtlasMcpServer {
             .map(|config| config.with_database_path(&state.db_path))
     }
 
-    /// Return the selected project root used by admin-style MCP calls.
+    /// Return the selected project root used by initialization.
+    fn init_project_root(
+        &self,
+        project_path: Option<String>,
+        worktree: Option<String>,
+    ) -> Result<McpProjectState, CliError> {
+        self.state_for_target_with_config_validation(
+            project_path,
+            worktree,
+            McpConfigValidation::Immediate,
+        )
+    }
+
+    /// Initialize one registered worktree, preferring a reconciled control-atlas baseline.
+    fn run_registered_worktree_init(
+        &self,
+        state: &McpProjectState,
+        config_path: &Path,
+        options: &InitBootstrapOptions,
+    ) -> Result<InitSetupReport, CliError> {
+        let Some(selection) = state
+            .worktree
+            .as_ref()
+            .filter(|selection| selection.registration_id.is_some())
+        else {
+            return run_init_bootstrap(&state.root, &state.db_path, Some(config_path), options);
+        };
+        if state.db_path.is_file() {
+            let mut report =
+                run_init_bootstrap(&state.root, &state.db_path, Some(config_path), options)?;
+            report.hydration = Some(InitHydrationPhase {
+                status: InitHydrationStatus::Existing,
+                source_root: None,
+                source_project_instance_id: None,
+                target_project_instance_id: None,
+                baseline_generation: None,
+                reconciled_generation: None,
+                fallback_reason: None,
+            });
+            if report.ok {
+                self.bind_initialized_worktree(selection, state)?;
+            }
+            return Ok(report);
+        }
+
+        let project_dir = state.root.join(PROJECTATLAS_DIR_NAME);
+        let nonsource_file = project_dir.join(MCP_NONSOURCE_FILE_NAME);
+        let project_dir_existed = project_dir.exists();
+        let config_existed = config_path.exists();
+        let nonsource_existed = nonsource_file.exists();
+        init_project_with_config(&state.root, Some(config_path))?;
+
+        let hydration = if options.no_scan {
+            McpWorktreeHydration::Fallback(MCP_HYDRATION_NO_SCAN_REASON.to_string())
+        } else {
+            self.attempt_worktree_hydration(state, config_path, options)?
+        };
+        let mut report = match hydration {
+            McpWorktreeHydration::Activated { hydration, scan } => {
+                let mut report = run_init_bootstrap(
+                    &state.root,
+                    &state.db_path,
+                    Some(config_path),
+                    &InitBootstrapOptions {
+                        no_scan: true,
+                        force_rescan: options.force_rescan,
+                        text_index_max_bytes: options.text_index_max_bytes,
+                    },
+                )?;
+                report.scan = InitScanPhase {
+                    status: InitPhaseStatus::Verified,
+                    requested: true,
+                    force_rescan: options.force_rescan,
+                    report: Some(*scan),
+                    error: None,
+                };
+                report.next_steps =
+                    init_next_steps(false, false, report.purpose_handoff.queue.total);
+                report.hydration = Some(hydration);
+                report
+            }
+            McpWorktreeHydration::Fallback(reason) => {
+                let mut report =
+                    run_init_bootstrap(&state.root, &state.db_path, Some(config_path), options)?;
+                report.hydration = Some(InitHydrationPhase {
+                    status: InitHydrationStatus::Fallback,
+                    source_root: Some(normalize_native_path_display(&self.control_state.root)),
+                    source_project_instance_id: None,
+                    target_project_instance_id: None,
+                    baseline_generation: None,
+                    reconciled_generation: None,
+                    fallback_reason: Some(reason),
+                });
+                report
+            }
+        };
+        report.project_dir.status = if project_dir_existed {
+            InitPhaseStatus::Exists
+        } else {
+            InitPhaseStatus::Created
+        };
+        report.config.status = if config_existed {
+            InitPhaseStatus::Exists
+        } else {
+            InitPhaseStatus::Created
+        };
+        report.nonsource_files.status = if nonsource_existed {
+            InitPhaseStatus::Exists
+        } else {
+            InitPhaseStatus::Created
+        };
+        report.db.status = InitPhaseStatus::Created;
+        if report.ok {
+            self.bind_initialized_worktree(selection, state)?;
+        }
+        Ok(report)
+    }
+
+    /// Build, reconcile, and no-clobber activate one private hydration candidate.
+    fn attempt_worktree_hydration(
+        &self,
+        state: &McpProjectState,
+        config_path: &Path,
+        options: &InitBootstrapOptions,
+    ) -> Result<McpWorktreeHydration, CliError> {
+        let source = match Self::open_read_store(&self.control_state) {
+            Ok(source) => source,
+            Err(error) if Self::hydration_can_fallback(&error) => {
+                return Ok(McpWorktreeHydration::Fallback(error.to_string()));
+            }
+            Err(error) => return Err(error),
+        };
+        let symbol_options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None);
+        let control = index_work_control(&symbol_options);
+        let mut candidate =
+            match source.prepare_worktree_hydration(&state.root, &state.db_path, &control) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    let error = Self::hydration_db_error(error);
+                    if Self::hydration_can_fallback(&error) {
+                        return Ok(McpWorktreeHydration::Fallback(error.to_string()));
+                    }
+                    return Err(error);
+                }
+            };
+        let candidate_path = candidate
+            .path()
+            .map_err(Self::hydration_db_error)?
+            .to_path_buf();
+        let mut target = open_atlas_store_for_project(&candidate_path, &state.root)?;
+        let plan = ScanRuntimePlan::for_path_controlled(
+            Some(config_path),
+            &state.root,
+            options.text_index_max_bytes,
+            &control,
+        )?;
+        let (scan, source_unchanged) =
+            reconcile_hydrated_index_controlled(&mut target, &plan, &symbol_options, &control)?;
+        drop(target);
+        if source_unchanged {
+            candidate
+                .accept_verified_source_state(&control)
+                .map_err(Self::hydration_db_error)?;
+        }
+        let activation = match candidate.activate(&control) {
+            Ok(activation) => activation,
+            Err(error @ DbError::WorktreeHydrationDestinationExists { .. }) => {
+                return Ok(McpWorktreeHydration::Fallback(error.to_string()));
+            }
+            Err(error) => return Err(Self::hydration_db_error(error)),
+        };
+        Ok(McpWorktreeHydration::Activated {
+            hydration: InitHydrationPhase {
+                status: InitHydrationStatus::Hydrated,
+                source_root: Some(normalize_native_path_display(&self.control_state.root)),
+                source_project_instance_id: Some(activation.source_project_instance_id.to_string()),
+                target_project_instance_id: Some(activation.target_project_instance_id.to_string()),
+                baseline_generation: Some(activation.baseline_generation.get()),
+                reconciled_generation: Some(activation.reconciled_generation.get()),
+                fallback_reason: None,
+            },
+            scan: Box::new(scan),
+        })
+    }
+
+    /// Bind a successfully initialized alias to its exact local atlas identity.
+    fn bind_initialized_worktree(
+        &self,
+        selection: &McpWorktreeSelection,
+        state: &McpProjectState,
+    ) -> Result<(), CliError> {
+        let alias = WorktreeAlias::parse(&selection.alias)?;
+        let target = Self::open_read_store(state)?;
+        let project = target
+            .project_instance_id()?
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let control = Self::open_existing_mut_store(&self.control_state)?;
+        control.bind_worktree_project(&alias, &state.root, project)?;
+        Ok(())
+    }
+
+    /// Preserve cancellation/resource failures and fallback only for unusable source baselines.
+    fn hydration_can_fallback(error: &CliError) -> bool {
+        matches!(
+            error,
+            CliError::Db(
+                DbError::WorktreeHydrationInvalid { .. }
+                    | DbError::WorktreeHydrationDestinationExists { .. }
+                    | DbError::WorktreeHydrationBackupBusy { .. }
+                    | DbError::GraphPublicationUnavailable
+                    | DbError::GraphProjectIdentityMismatch { .. }
+                    | DbError::DerivedSnapshotInvalid { .. }
+                    | DbError::DerivedSnapshotLimit { .. }
+                    | DbError::SchemaVersion { .. }
+                    | DbError::SchemaVersionMissing
+                    | DbError::SchemaShape { .. }
+                    | DbError::IntegrityCheck { .. }
+                    | DbError::ProjectRootMissing
+                    | DbError::ProjectInstanceIdentityMissing
+            )
+        )
+    }
+
+    /// Lift database-owned cancellation into the shared CLI work-control error.
+    fn hydration_db_error(error: DbError) -> CliError {
+        match error {
+            DbError::IndexWork(failure) => failure.into(),
+            error => error.into(),
+        }
+    }
+
+    /// Return the initialized selected project root used by admin-style MCP calls.
     fn admin_project_root(
         &self,
         project_path: Option<String>,
+        worktree: Option<String>,
     ) -> Result<McpProjectState, CliError> {
-        self.state_for_project_path(project_path)
+        self.state_for_target(project_path, worktree)
     }
 
     /// Parse an MCP ignore kind parameter.
@@ -3774,6 +4561,14 @@ impl ProjectAtlasMcpServer {
     /// Build the selected-project capability row.
     fn selected_project_capability(state: &McpProjectState) -> McpSelectedProjectCapability {
         McpSelectedProjectCapability {
+            worktree: state
+                .worktree
+                .as_ref()
+                .map(|selection| selection.alias.clone()),
+            registration_id: state
+                .worktree
+                .as_ref()
+                .and_then(|selection| selection.registration_id),
             root: normalize_native_path_display(&state.root),
             db: normalize_native_path_display(&state.db_path),
             config: state
@@ -3820,7 +4615,9 @@ impl ProjectAtlasMcpServer {
         context: Option<RequestContext<RoleServer>>,
     ) -> Result<McpSessionBrief, CliError> {
         let selected_project_path = params.project_path.clone();
-        let state = self.state_for_project_path(selected_project_path.clone())?;
+        let selected_worktree = params.worktree.clone();
+        let state =
+            self.state_for_target(selected_project_path.clone(), selected_worktree.clone())?;
         let query = Self::query_or_empty(params.query);
         let purpose_task = params
             .purpose_task
@@ -3831,7 +4628,9 @@ impl ProjectAtlasMcpServer {
         let purpose_limit = Self::brief_limit(params.purpose_limit);
         let project = Self::selected_project_capability(&state);
         if !state.db_path.exists() {
-            let init_project_path = Some(normalize_native_path_display(&state.root));
+            let init_project_path = selected_worktree
+                .is_none()
+                .then(|| normalize_native_path_display(&state.root));
             return Ok(McpSessionBrief {
                 project,
                 policy: self.brief_policy(),
@@ -3845,7 +4644,10 @@ impl ProjectAtlasMcpServer {
                     items: Vec::new(),
                 },
                 purpose_handoff: None,
-                recommendations: Self::missing_index_recommendations(init_project_path),
+                recommendations: Self::missing_index_recommendations(
+                    init_project_path,
+                    selected_worktree,
+                ),
                 limits: McpBriefLimits {
                     folder_limit,
                     file_limit,
@@ -3904,6 +4706,7 @@ impl ProjectAtlasMcpServer {
                     blockers.total,
                     blocker_limit,
                     selected_project_path.clone(),
+                    selected_worktree.clone(),
                 ),
                 blockers,
                 purpose_handoff: purpose_queue
@@ -3938,6 +4741,7 @@ impl ProjectAtlasMcpServer {
         context: Option<RequestContext<RoleServer>>,
     ) -> Result<McpCompactSessionBrief, CliError> {
         let project_path = params.project_path.clone();
+        let worktree = params.worktree.clone();
         params.compact = None;
         params
             .folder_limit
@@ -3952,13 +4756,18 @@ impl ProjectAtlasMcpServer {
             .purpose_limit
             .get_or_insert(COMPACT_SESSION_BRIEF_DEFAULT_LIMIT);
         let brief = self.build_session_brief(params, context)?;
-        Ok(Self::compact_session_brief(&brief, project_path))
+        Ok(Self::compact_session_brief(
+            &brief,
+            project_path.as_deref(),
+            worktree.as_deref(),
+        ))
     }
 
     /// Project the compatibility report into the explicit compact response shape.
     fn compact_session_brief(
         brief: &McpSessionBrief,
-        project_path: Option<String>,
+        project_path: Option<&str>,
+        worktree: Option<&str>,
     ) -> McpCompactSessionBrief {
         let omit_folders = !brief.files.is_empty();
         let folders_truncated =
@@ -3981,6 +4790,8 @@ impl ProjectAtlasMcpServer {
             && !compact_limits.purposes_truncated;
         McpCompactSessionBrief {
             project: McpCompactBriefProject {
+                worktree: brief.project.worktree.clone(),
+                registration_id: brief.project.registration_id,
                 root: brief.project.root.clone(),
                 index_status: brief.project.index_status,
             },
@@ -4009,10 +4820,13 @@ impl ProjectAtlasMcpServer {
             blockers: (brief.blockers.total > 0).then_some(McpCompactBriefBlockers {
                 total: brief.blockers.total,
             }),
-            purpose_handoff: brief
-                .purpose_handoff
-                .as_ref()
-                .map(|handoff| Self::compact_brief_purpose_handoff(handoff, project_path)),
+            purpose_handoff: brief.purpose_handoff.as_ref().map(|handoff| {
+                Self::compact_brief_purpose_handoff(
+                    handoff,
+                    project_path.map(ToString::to_string),
+                    worktree.map(ToString::to_string),
+                )
+            }),
             recommendations: brief
                 .recommendations
                 .iter()
@@ -4085,6 +4899,7 @@ impl ProjectAtlasMcpServer {
     fn compact_brief_purpose_handoff(
         handoff: &PurposeCuratorHandoff,
         project_path: Option<String>,
+        worktree: Option<String>,
     ) -> McpCompactBriefPurposeHandoff {
         McpCompactBriefPurposeHandoff {
             agent_harness_expected: handoff.agent_harness_expected,
@@ -4100,6 +4915,7 @@ impl ProjectAtlasMcpServer {
                 reason: MCP_BRIEF_REASON_PURPOSE_QUEUE.to_string(),
                 arguments: Self::brief_call_arguments(
                     project_path,
+                    worktree,
                     &[(MCP_BRIEF_ARG_TASK, &handoff.queue.task)],
                     Some((MCP_BRIEF_ARG_LIMIT, handoff.queue.limit)),
                 ),
@@ -4185,19 +5001,22 @@ impl ProjectAtlasMcpServer {
     }
 
     /// Recommend next calls for a missing index.
-    fn missing_index_recommendations(project_path: Option<String>) -> Vec<McpBriefRecommendation> {
+    fn missing_index_recommendations(
+        project_path: Option<String>,
+        worktree: Option<String>,
+    ) -> Vec<McpBriefRecommendation> {
         vec![
             McpBriefRecommendation {
                 kind: McpBriefRecommendationKind::Init,
                 target: MCP_TOOL_ATLAS_INIT.to_string(),
                 reason: MCP_BRIEF_REASON_SELECTED_INDEX_MISSING.to_string(),
-                arguments: Self::project_path_arguments(project_path.clone()),
+                arguments: Self::target_arguments(project_path.clone(), worktree.clone()),
             },
             McpBriefRecommendation {
                 kind: McpBriefRecommendationKind::FilesystemTools,
                 target: MCP_BRIEF_TARGET_FILESYSTEM_TOOLS.to_string(),
                 reason: MCP_BRIEF_REASON_FILESYSTEM_UNTIL_INDEX.to_string(),
-                arguments: Self::project_path_arguments(project_path),
+                arguments: Self::target_arguments(project_path, worktree),
             },
         ]
     }
@@ -4209,6 +5028,7 @@ impl ProjectAtlasMcpServer {
         blocker_total: usize,
         blocker_limit: usize,
         project_path: Option<String>,
+        worktree: Option<String>,
     ) -> Vec<McpBriefRecommendation> {
         let mut recommendations = match next_navigation_call {
             Some(next_call) if next_call.capability == NavigationNextCapability::Summary => {
@@ -4218,6 +5038,7 @@ impl ProjectAtlasMcpServer {
                     reason: MCP_BRIEF_REASON_RANKED_FILE_SUMMARY.to_string(),
                     arguments: Self::brief_call_arguments(
                         project_path.clone(),
+                        worktree.clone(),
                         &[(MCP_BRIEF_ARG_FILE, &next_call.path)],
                         None,
                     ),
@@ -4230,6 +5051,7 @@ impl ProjectAtlasMcpServer {
                     reason: MCP_BRIEF_REASON_RANKED_FILE_RELATIONS.to_string(),
                     arguments: Self::brief_call_arguments(
                         project_path.clone(),
+                        worktree.clone(),
                         &[
                             (MCP_BRIEF_ARG_FILE, &next_call.path),
                             (MCP_BRIEF_ARG_VIEW, MCP_SYMBOL_RELATION_VIEW_DETAILED),
@@ -4244,6 +5066,7 @@ impl ProjectAtlasMcpServer {
                 reason: MCP_BRIEF_REASON_SEARCH_FALLBACK.to_string(),
                 arguments: Self::brief_call_arguments(
                     project_path.clone(),
+                    worktree.clone(),
                     &[(MCP_BRIEF_ARG_PATTERN, query)],
                     None,
                 ),
@@ -4252,7 +5075,7 @@ impl ProjectAtlasMcpServer {
                 kind: McpBriefRecommendationKind::FilesystemTools,
                 target: MCP_BRIEF_TARGET_FILESYSTEM_TOOLS.to_string(),
                 reason: MCP_BRIEF_REASON_NO_FILE_CANDIDATE.to_string(),
-                arguments: Self::project_path_arguments(project_path.clone()),
+                arguments: Self::target_arguments(project_path.clone(), worktree.clone()),
             }],
         };
         if blocker_total > 0 {
@@ -4262,6 +5085,7 @@ impl ProjectAtlasMcpServer {
                 reason: MCP_BRIEF_REASON_HEALTH_BLOCKERS.to_string(),
                 arguments: Self::brief_call_arguments(
                     project_path,
+                    worktree,
                     &[],
                     Some((MCP_BRIEF_ARG_LIMIT, blocker_limit)),
                 ),
@@ -4270,17 +5094,30 @@ impl ProjectAtlasMcpServer {
         recommendations
     }
 
-    /// Build a `JSON` object containing `project_path` when present.
-    fn project_path_arguments(project_path: Option<String>) -> serde_json::Value {
-        project_path.map_or_else(
-            || serde_json::Value::Object(serde_json::Map::new()),
-            |path| Self::string_argument(MCP_BRIEF_ARG_PROJECT_PATH, path),
-        )
+    /// Build a `JSON` object containing one mutually exclusive root selector.
+    fn target_arguments(
+        project_path: Option<String>,
+        worktree: Option<String>,
+    ) -> serde_json::Value {
+        let mut arguments = serde_json::Map::new();
+        if let Some(path) = project_path {
+            arguments.insert(
+                MCP_BRIEF_ARG_PROJECT_PATH.to_string(),
+                serde_json::Value::String(path),
+            );
+        } else if let Some(alias) = worktree {
+            arguments.insert(
+                MCP_BRIEF_ARG_WORKTREE.to_string(),
+                serde_json::Value::String(alias),
+            );
+        }
+        serde_json::Value::Object(arguments)
     }
 
     /// Build recommendation call arguments with optional project path and one payload argument.
     fn brief_call_arguments(
         project_path: Option<String>,
+        worktree: Option<String>,
         string_args: &[(&'static str, &str)],
         usize_arg: Option<(&'static str, usize)>,
     ) -> serde_json::Value {
@@ -4289,6 +5126,11 @@ impl ProjectAtlasMcpServer {
             arguments.insert(
                 MCP_BRIEF_ARG_PROJECT_PATH.to_string(),
                 serde_json::Value::String(path),
+            );
+        } else if let Some(alias) = worktree {
+            arguments.insert(
+                MCP_BRIEF_ARG_WORKTREE.to_string(),
+                serde_json::Value::String(alias),
             );
         }
         for (key, value) in string_args {
@@ -4300,13 +5142,6 @@ impl ProjectAtlasMcpServer {
         if let Some((key, value)) = usize_arg {
             arguments.insert(key.to_string(), serde_json::json!(value));
         }
-        serde_json::Value::Object(arguments)
-    }
-
-    /// Build a one-field string argument object for typed recommendations.
-    fn string_argument(key: &'static str, value: impl Into<String>) -> serde_json::Value {
-        let mut arguments = serde_json::Map::new();
-        arguments.insert(key.to_string(), serde_json::Value::String(value.into()));
         serde_json::Value::Object(arguments)
     }
 
@@ -4598,6 +5433,7 @@ impl ProjectAtlasMcpServer {
             root,
             db_path,
             config_path,
+            worktree: None,
         }
     }
 
@@ -4648,15 +5484,402 @@ impl ProjectAtlasMcpServer {
         Ok(())
     }
 
-    /// Return active state or a per-call project override.
-    fn state_for_project_path(
+    /// Return the bounded reciprocal Git inventory for the immutable control checkout.
+    fn control_git_repository(&self) -> Result<GitRepositoryStructure, CliError> {
+        let repository = match discover_repository_structure(&self.control_state.root)? {
+            RepositoryStructure::Git(repository) => repository,
+            RepositoryStructure::NonGit { .. } => {
+                return Err(CliError::InvalidInput(
+                    MCP_ERROR_WORKTREE_CONTROL_REPOSITORY_REQUIRED.to_string(),
+                ));
+            }
+            RepositoryStructure::InvalidGit { issue, .. } => {
+                return Err(CliError::InvalidInput(format!(
+                    "invalid control-repository Git evidence at '{}': {:?}",
+                    normalize_native_path_display(issue.path),
+                    issue.kind
+                )));
+            }
+        };
+        let control_present = repository.worktrees.iter().any(|entry| {
+            matches!(
+                &entry.state,
+                GitWorktreeState::Active { root, .. } if root == &self.control_state.root
+            )
+        });
+        if !control_present {
+            return Err(CliError::InvalidInput(format!(
+                "selected control root '{}' is not one active worktree in its reciprocal Git inventory",
+                normalize_native_path_display(&self.control_state.root)
+            )));
+        }
+        Ok(repository)
+    }
+
+    /// Derive one stable, short candidate selector from Git administrative identity.
+    fn worktree_candidate_selector(entry: &GitWorktreeEntry) -> String {
+        let identity = normalize_native_path_display(&entry.administrative_directory);
+        let digest = blake3::hash(identity.as_bytes()).to_hex();
+        let mut selector = String::with_capacity(
+            MCP_WORKTREE_SELECTOR_PREFIX.len() + MCP_WORKTREE_SELECTOR_DIGEST_CHARS,
+        );
+        selector.push_str(MCP_WORKTREE_SELECTOR_PREFIX);
+        selector.push_str(&digest.as_str()[..MCP_WORKTREE_SELECTOR_DIGEST_CHARS]);
+        selector
+    }
+
+    /// Borrow one active source root from structural worktree evidence.
+    fn active_worktree_root(entry: &GitWorktreeEntry) -> Option<&Path> {
+        match &entry.state {
+            GitWorktreeState::Active { root, .. } => Some(root),
+            GitWorktreeState::Missing { .. } | GitWorktreeState::Invalid { .. } => None,
+        }
+    }
+
+    /// Return whether one short selector identifies this structural candidate.
+    fn worktree_candidate_matches(entry: &GitWorktreeEntry, selector: &str) -> bool {
+        if Self::worktree_candidate_selector(entry) == selector {
+            return true;
+        }
+        let root_name = Self::active_worktree_root(entry)
+            .and_then(Path::file_name)
+            .and_then(std::ffi::OsStr::to_str);
+        let administrative_name = entry
+            .administrative_directory
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str);
+        root_name.is_some_and(|name| name.eq_ignore_ascii_case(selector))
+            || administrative_name.is_some_and(|name| name.eq_ignore_ascii_case(selector))
+    }
+
+    /// Return bounded active non-control candidates for one stable or human selector.
+    fn matching_worktree_candidates<'a>(
+        &'a self,
+        repository: &'a GitRepositoryStructure,
+        selector: &str,
+    ) -> Vec<&'a GitWorktreeEntry> {
+        repository
+            .worktrees
+            .iter()
+            .filter(|entry| {
+                Self::active_worktree_root(entry)
+                    .is_some_and(|root| root != self.control_state.root)
+            })
+            .filter(|entry| Self::worktree_candidate_matches(entry, selector))
+            .collect()
+    }
+
+    /// Build one concise add-candidate row from active structural evidence.
+    fn worktree_candidate(entry: &GitWorktreeEntry) -> Option<McpWorktreeCandidate> {
+        Some(McpWorktreeCandidate {
+            selector: Self::worktree_candidate_selector(entry),
+            root: normalize_native_path_display(Self::active_worktree_root(entry)?),
+            role: entry.role.into(),
+        })
+    }
+
+    /// Derive a valid default alias from one selected active worktree root.
+    fn default_worktree_alias(root: &Path) -> Result<WorktreeAlias, CliError> {
+        let name = root
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or_else(|| CliError::InvalidInput(MCP_ERROR_WORKTREE_ALIAS_NON_UTF8.to_string()))?;
+        WorktreeAlias::parse(&name.to_ascii_lowercase()).map_err(|source| {
+            CliError::InvalidInput(format!(
+                "selected worktree directory cannot be used as an alias; provide alias explicitly: {source}"
+            ))
+        })
+    }
+
+    /// Read one exact local worktree atlas and its bounded telemetry snapshot without migration.
+    fn local_worktree_atlas(root: &Path) -> Result<Option<LocalWorktreeAtlas>, CliError> {
+        let db_path = Self::projectatlas_db_path(root);
+        if !db_path.exists() {
+            return Ok(None);
+        }
+        let store = open_atlas_store_read_only_for_project(&db_path, root)?;
+        let project_instance_id = store.project_instance_id()?.ok_or_else(|| {
+            CliError::InvalidInput(format!(
+                "worktree atlas '{}' has no exact project identity",
+                normalize_native_path_display(&db_path)
+            ))
+        })?;
+        let snapshot = store.export_worktree_usage_snapshot()?;
+        if snapshot.project_instance_id() != project_instance_id {
+            return Err(CliError::InvalidInput(format!(
+                "worktree atlas '{}' telemetry identity does not match its project identity",
+                normalize_native_path_display(&db_path)
+            )));
+        }
+        Ok(Some(LocalWorktreeAtlas {
+            project_instance_id,
+            snapshot,
+        }))
+    }
+
+    /// Join one structural worktree entry to registry, atlas, and telemetry state.
+    fn worktree_list_row(
+        &self,
+        entry: &GitWorktreeEntry,
+        registrations: &[WorktreeRegistration],
+    ) -> McpWorktreeRow {
+        let administrative_directory =
+            normalize_native_path_display(&entry.administrative_directory);
+        let registration = registrations.iter().find(|registration| {
+            registration.state == WorktreeRegistrationState::Active
+                && registration.git_administrative_directory == administrative_directory
+        });
+        let root = Self::active_worktree_root(entry);
+        let control = root.is_some_and(|root| root == self.control_state.root);
+        let alias = if control {
+            Some(MCP_MAIN_WORKTREE_ALIAS.to_string())
+        } else {
+            registration.map(|registration| registration.alias.to_string())
+        };
+        let registration_state = if control {
+            McpWorktreeRegistrationState::Control
+        } else if registration.is_some() {
+            McpWorktreeRegistrationState::Registered
+        } else {
+            McpWorktreeRegistrationState::Unregistered
+        };
+        let mut atlas_state = McpWorktreeAtlasState::Unavailable;
+        let mut telemetry_state = McpWorktreeTelemetryState::Unavailable;
+        let mut local_telemetry_revision = None;
+        let mut project_instance_id = None;
+        let mut blocker = None;
+        let git_state = match &entry.state {
+            GitWorktreeState::Active { root, .. } => {
+                match Self::local_worktree_atlas(root) {
+                    Ok(Some(local)) => {
+                        let identity_matches = registration
+                            .and_then(|registration| registration.project_instance_id)
+                            .is_none_or(|expected| expected == local.project_instance_id);
+                        if identity_matches {
+                            atlas_state = McpWorktreeAtlasState::Initialized;
+                            local_telemetry_revision = Some(local.snapshot.revision());
+                            project_instance_id = Some(local.project_instance_id.to_string());
+                            telemetry_state = if control {
+                                McpWorktreeTelemetryState::Control
+                            } else if let Some(registration) = registration {
+                                if local.snapshot.revision()
+                                    > registration.accepted_telemetry_revision
+                                {
+                                    McpWorktreeTelemetryState::Pending
+                                } else {
+                                    McpWorktreeTelemetryState::Current
+                                }
+                            } else {
+                                McpWorktreeTelemetryState::Unregistered
+                            };
+                        } else {
+                            atlas_state = McpWorktreeAtlasState::Invalid;
+                            blocker = Some(MCP_ERROR_WORKTREE_IDENTITY_CONFLICT.to_string());
+                        }
+                    }
+                    Ok(None) => {
+                        atlas_state = McpWorktreeAtlasState::Missing;
+                        telemetry_state = if registration.is_some() {
+                            McpWorktreeTelemetryState::MissingAtlas
+                        } else {
+                            McpWorktreeTelemetryState::Unregistered
+                        };
+                    }
+                    Err(error) => {
+                        atlas_state = McpWorktreeAtlasState::Invalid;
+                        blocker = Some(error.to_string());
+                    }
+                }
+                McpGitWorktreeState::Active
+            }
+            GitWorktreeState::Missing { git_control_path } => {
+                blocker = Some(format!(
+                    "Git registration target is missing at '{}'",
+                    normalize_native_path_display(git_control_path)
+                ));
+                McpGitWorktreeState::Missing
+            }
+            GitWorktreeState::Invalid { issue } => {
+                blocker = Some(format!(
+                    "invalid Git evidence at '{}': {:?}",
+                    normalize_native_path_display(&issue.path),
+                    issue.kind
+                ));
+                McpGitWorktreeState::Invalid
+            }
+        };
+        McpWorktreeRow {
+            selector: Self::worktree_candidate_selector(entry),
+            alias,
+            role: entry.role.into(),
+            git_state,
+            registration: registration_state,
+            administrative_directory,
+            root: root.map(normalize_native_path_display),
+            atlas_state,
+            telemetry_state,
+            accepted_telemetry_revision: registration
+                .map(|registration| registration.accepted_telemetry_revision),
+            local_telemetry_revision,
+            project_instance_id,
+            blocker,
+        }
+    }
+
+    /// Return the current Unix epoch seconds within the persisted `SQLite` domain.
+    fn current_epoch_seconds() -> Result<u64, CliError> {
+        u64::try_from(mcp_unix_time_ms().saturating_div(1_000)).map_err(|source| {
+            CliError::InvalidInput(format!(
+                "current Unix epoch exceeds the supported worktree registry range: {source}"
+            ))
+        })
+    }
+
+    /// Return active/legacy state or one captured registered alias target.
+    fn state_for_target(
         &self,
         project_path: Option<String>,
+        worktree: Option<String>,
     ) -> Result<McpProjectState, CliError> {
-        self.state_for_project_path_with_config_validation(
+        let state = self.state_for_target_with_config_validation(
             project_path,
+            worktree,
             McpConfigValidation::Immediate,
-        )
+        )?;
+        Self::require_initialized_worktree_target(&state)?;
+        Ok(state)
+    }
+
+    /// Resolve an ordered alias federation into exact initialized roots and labels.
+    fn federated_worktree_roots(
+        &self,
+        worktrees: &[String],
+    ) -> Result<(Vec<PathBuf>, Vec<String>), CliError> {
+        validate_federated_root_count(worktrees.len()).map_err(CliError::Service)?;
+        let mut roots = Vec::with_capacity(worktrees.len());
+        let mut labels = Vec::with_capacity(worktrees.len());
+        for worktree in worktrees {
+            let state = self.state_for_target(None, Some(worktree.clone()))?;
+            let label = state
+                .worktree
+                .as_ref()
+                .map(|selection| selection.alias.clone())
+                .ok_or_else(|| {
+                    CliError::InvalidInput(MCP_ERROR_FEDERATED_ALIAS_MISSING.to_string())
+                })?;
+            if labels.contains(&label) || roots.contains(&state.root) {
+                return Err(CliError::Service(ServiceError::InvalidInput(
+                    MCP_ERROR_FEDERATED_TARGET_DUPLICATE.to_string(),
+                )));
+            }
+            labels.push(label);
+            roots.push(state.root);
+        }
+        Ok((roots, labels))
+    }
+
+    /// Resolve one mutually exclusive target under the selected config-validation timing.
+    fn state_for_target_with_config_validation(
+        &self,
+        project_path: Option<String>,
+        worktree: Option<String>,
+        validation: McpConfigValidation,
+    ) -> Result<McpProjectState, CliError> {
+        let project_path = Self::normalized_optional_path(project_path);
+        let worktree = worktree
+            .map(|alias| alias.trim().to_string())
+            .filter(|alias| !alias.is_empty());
+        if project_path.is_some() && worktree.is_some() {
+            return Err(CliError::InvalidInput(
+                MCP_WORKTREE_PROJECT_PATH_CONFLICT.to_string(),
+            ));
+        }
+        let Some(alias) = worktree else {
+            return self.state_for_project_path_with_config_validation(project_path, validation);
+        };
+        if alias == MCP_MAIN_WORKTREE_ALIAS {
+            let mut state = self.control_state.clone();
+            state.worktree = Some(McpWorktreeSelection {
+                alias,
+                registration_id: None,
+            });
+            return Ok(state);
+        }
+        let alias = WorktreeAlias::parse(&alias)?;
+        self.resolve_registered_worktree(&alias, validation)
+    }
+
+    /// Resolve one active registration through current reciprocal Git structure.
+    fn resolve_registered_worktree(
+        &self,
+        alias: &WorktreeAlias,
+        validation: McpConfigValidation,
+    ) -> Result<McpProjectState, CliError> {
+        let control = Self::open_existing_mut_store(&self.control_state)?;
+        let registration = control.worktree_registration(alias)?;
+        let repository = self.control_git_repository()?;
+        if normalize_native_path_display(&repository.common_directory)
+            != registration.git_common_directory
+        {
+            return Err(CliError::InvalidInput(format!(
+                "registered worktree '{}' belongs to a different Git common directory",
+                alias.as_str()
+            )));
+        }
+        let entry = repository
+            .worktrees
+            .iter()
+            .find(|entry| {
+                normalize_native_path_display(&entry.administrative_directory)
+                    == registration.git_administrative_directory
+            })
+            .ok_or_else(|| {
+                CliError::InvalidInput(format!(
+                    "registered worktree '{}' is no longer present in the bounded Git inventory",
+                    alias.as_str()
+                ))
+            })?;
+        let root = match &entry.state {
+            GitWorktreeState::Active { root, .. } => root.clone(),
+            GitWorktreeState::Missing { .. } => {
+                return Err(CliError::InvalidInput(format!(
+                    "registered worktree '{}' is missing; restore it through Git or unregister it",
+                    alias.as_str()
+                )));
+            }
+            GitWorktreeState::Invalid { issue } => {
+                return Err(CliError::InvalidInput(format!(
+                    "registered worktree '{}' has invalid Git evidence at '{}': {:?}",
+                    alias.as_str(),
+                    normalize_native_path_display(&issue.path),
+                    issue.kind
+                )));
+            }
+        };
+        if root == self.control_state.root {
+            return Err(CliError::InvalidInput(
+                MCP_ERROR_CONTROL_ALIAS_REQUIRED.to_string(),
+            ));
+        }
+        let registration = if normalize_native_path_display(&root) == registration.last_root {
+            registration
+        } else {
+            let observed_epoch = Self::current_epoch_seconds()?;
+            control.register_worktree(
+                alias,
+                &repository.common_directory,
+                &entry.administrative_directory,
+                &root,
+                registration.project_instance_id,
+                observed_epoch,
+            )?
+        };
+        let mut state = Self::project_state_from_root_with_config_validation(&root, validation)?;
+        state.worktree = Some(McpWorktreeSelection {
+            alias: alias.to_string(),
+            registration_id: Some(registration.registration_id),
+        });
+        Ok(state)
     }
 
     /// Return project state under the requested configuration-validation timing.
@@ -4683,11 +5906,13 @@ impl ProjectAtlasMcpServer {
     fn state_and_root_path(
         &self,
         project_path: Option<String>,
+        worktree: Option<String>,
         path: Option<String>,
         nearest_project: bool,
     ) -> Result<(McpProjectState, PathBuf), CliError> {
         self.state_and_root_path_with_config_validation(
             project_path,
+            worktree,
             path,
             nearest_project,
             McpConfigValidation::Immediate,
@@ -4698,11 +5923,13 @@ impl ProjectAtlasMcpServer {
     fn background_state_and_root_path(
         &self,
         project_path: Option<String>,
+        worktree: Option<String>,
         path: Option<String>,
         nearest_project: bool,
     ) -> Result<(McpProjectState, PathBuf), CliError> {
         self.state_and_root_path_with_config_validation(
             project_path,
+            worktree,
             path,
             nearest_project,
             McpConfigValidation::Deferred,
@@ -4713,37 +5940,45 @@ impl ProjectAtlasMcpServer {
     fn state_and_root_path_with_config_validation(
         &self,
         project_path: Option<String>,
+        worktree: Option<String>,
         path: Option<String>,
         nearest_project: bool,
         validation: McpConfigValidation,
     ) -> Result<(McpProjectState, PathBuf), CliError> {
-        let state =
-            self.state_for_project_path_with_config_validation(project_path.clone(), validation)?;
+        let explicit_target = project_path.is_some() || worktree.is_some();
+        let state = self.state_for_target_with_config_validation(
+            project_path.clone(),
+            worktree,
+            validation,
+        )?;
+        Self::require_initialized_worktree_target(&state)?;
         let root = match (
             Self::normalized_optional_path(project_path),
             Self::normalized_optional_path(path),
         ) {
-            (None, Some(path)) => match Self::path_or_project_root(&state, Some(path.clone())) {
-                Ok(root) => root,
-                Err(active_error) => {
-                    if !nearest_project {
-                        return Err(active_error);
+            (None, Some(path)) if !explicit_target => {
+                match Self::path_or_project_root(&state, Some(path.clone())) {
+                    Ok(root) => root,
+                    Err(active_error) => {
+                        if !nearest_project {
+                            return Err(active_error);
+                        }
+                        if Self::absolute_path_inside_selected_root(&state, &path)? {
+                            return Err(active_error);
+                        }
+                        let Some(indexed_state) =
+                            Self::nearest_root_state_for_root_argument_with_config_validation(
+                                Path::new(&path),
+                                validation,
+                            )?
+                        else {
+                            return Err(active_error);
+                        };
+                        let root = indexed_state.root.clone();
+                        return Ok((indexed_state, root));
                     }
-                    if Self::absolute_path_inside_selected_root(&state, &path)? {
-                        return Err(active_error);
-                    }
-                    let Some(indexed_state) =
-                        Self::nearest_root_state_for_root_argument_with_config_validation(
-                            Path::new(&path),
-                            validation,
-                        )?
-                    else {
-                        return Err(active_error);
-                    };
-                    let root = indexed_state.root.clone();
-                    return Ok((indexed_state, root));
                 }
-            },
+            }
             (_, path) => Self::path_or_project_root(&state, path)?,
         };
         Ok((state, root))
@@ -4786,10 +6021,14 @@ impl ProjectAtlasMcpServer {
     fn state_and_file_key(
         &self,
         project_path: Option<&str>,
+        worktree: Option<&str>,
         file: &str,
         nearest_project: bool,
     ) -> Result<McpResolvedRepoPath, CliError> {
-        let state = self.state_for_project_path(project_path.map(ToString::to_string))?;
+        let state = self.state_for_target(
+            project_path.map(ToString::to_string),
+            worktree.map(ToString::to_string),
+        )?;
         let file_path = PathBuf::from(&file);
         if !file_path.is_absolute() {
             let file_key = validated_repo_file_key(&file_path)
@@ -4800,7 +6039,7 @@ impl ProjectAtlasMcpServer {
                 routed_project: false,
             });
         }
-        if nearest_project && project_path.is_none() {
+        if nearest_project && project_path.is_none() && worktree.is_none() {
             let resolved = Self::nearest_state_and_repo_key(&state, file)?.ok_or_else(|| {
                 Self::selected_project_path_error(PATH_NOT_INSIDE_INDEXED_PROJECT_ERROR)
             })?;
@@ -4820,7 +6059,7 @@ impl ProjectAtlasMcpServer {
                 routed_project: false,
             });
         }
-        if project_path.is_some() {
+        if project_path.is_some() || worktree.is_some() {
             return Err(Self::selected_project_path_error(
                 PATH_NOT_INSIDE_INDEXED_PROJECT_ERROR,
             ));
@@ -4839,15 +6078,19 @@ impl ProjectAtlasMcpServer {
     fn state_and_optional_file_key(
         &self,
         project_path: Option<&str>,
+        worktree: Option<&str>,
         file: Option<&str>,
         nearest_project: bool,
     ) -> Result<(McpProjectState, Option<String>, bool), CliError> {
         let Some(file) = file else {
             return self
-                .state_for_project_path(project_path.map(ToString::to_string))
+                .state_for_target(
+                    project_path.map(ToString::to_string),
+                    worktree.map(ToString::to_string),
+                )
                 .map(|state| (state, None, false));
         };
-        let resolved = self.state_and_file_key(project_path, file, nearest_project)?;
+        let resolved = self.state_and_file_key(project_path, worktree, file, nearest_project)?;
         Ok((resolved.state, Some(resolved.key), resolved.routed_project))
     }
 
@@ -4855,10 +6098,14 @@ impl ProjectAtlasMcpServer {
     fn state_and_optional_folder_filter(
         &self,
         project_path: Option<&str>,
+        worktree: Option<&str>,
         folder: Option<&str>,
         nearest_project: bool,
     ) -> Result<(McpProjectState, Option<String>, bool), CliError> {
-        let state = self.state_for_project_path(project_path.map(ToString::to_string))?;
+        let state = self.state_for_target(
+            project_path.map(ToString::to_string),
+            worktree.map(ToString::to_string),
+        )?;
         let Some(folder) = folder.map(str::trim).filter(|folder| !folder.is_empty()) else {
             return Ok((state, None, false));
         };
@@ -4867,7 +6114,7 @@ impl ProjectAtlasMcpServer {
             let folder_filter = normalized_folder_filter(folder)?;
             return Ok((state, Some(folder_filter), false));
         }
-        if nearest_project && project_path.is_none() {
+        if nearest_project && project_path.is_none() && worktree.is_none() {
             let resolved = Self::nearest_state_and_repo_key(&state, folder)?.ok_or_else(|| {
                 Self::selected_project_path_error(FOLDER_NOT_INSIDE_INDEXED_PROJECT_ERROR)
             })?;
@@ -4880,7 +6127,7 @@ impl ProjectAtlasMcpServer {
             let folder_filter = normalized_folder_filter(&folder_filter)?;
             return Ok((state, Some(folder_filter), false));
         }
-        if project_path.is_some() {
+        if project_path.is_some() || worktree.is_some() {
             return Err(Self::selected_project_path_error(
                 FOLDER_NOT_INSIDE_INDEXED_PROJECT_ERROR,
             ));
@@ -4977,6 +6224,7 @@ impl ProjectAtlasMcpServer {
             root,
             db_path,
             config_path,
+            worktree: None,
         })
     }
 
@@ -5007,6 +6255,7 @@ impl ProjectAtlasMcpServer {
                     root: indexed_root.root,
                     db_path: indexed_root.db_path,
                     config_path,
+                    worktree: None,
                 }));
             }
             let Some(parent) = candidate.parent() else {
@@ -5051,6 +6300,7 @@ impl ProjectAtlasMcpServer {
                     root: indexed_root.root,
                     db_path: indexed_root.db_path,
                     config_path,
+                    worktree: None,
                 }));
             }
             let Some(parent) = candidate.parent() else {
@@ -5285,6 +6535,14 @@ impl ProjectAtlasMcpServer {
     /// Build selected-project payload fields.
     fn project_state_payload(state: &McpProjectState) -> McpProjectStatePayload {
         McpProjectStatePayload {
+            worktree: state
+                .worktree
+                .as_ref()
+                .map(|selection| selection.alias.clone()),
+            registration_id: state
+                .worktree
+                .as_ref()
+                .and_then(|selection| selection.registration_id),
             root: normalize_native_path_display(&state.root),
             db: normalize_native_path_display(&state.db_path),
             config: state
@@ -5466,7 +6724,11 @@ impl ProjectAtlasMcpServer {
                 None,
                 Some(McpNextCall {
                     tool: MCP_TOOL_ATLAS_INIT,
-                    project_path: report.project_root.clone(),
+                    project_path: report
+                        .worktree
+                        .is_none()
+                        .then(|| report.project_root.clone()),
+                    worktree: report.worktree.clone(),
                 }),
             ),
             CliError::WorktreeRequired(report) => (
@@ -5491,7 +6753,11 @@ impl ProjectAtlasMcpServer {
                 None,
                 Some(McpNextCall {
                     tool: MCP_TOOL_ATLAS_WATCH_ONCE,
-                    project_path: report.project_root.clone(),
+                    project_path: report
+                        .worktree
+                        .is_none()
+                        .then(|| report.project_root.clone()),
+                    worktree: report.worktree.clone(),
                 }),
             ),
             CliError::VerificationIncomplete(report) => (
@@ -5761,6 +7027,247 @@ impl ProjectAtlasMcpServer {
         })())
     }
 
+    /// Return bounded structural and `ProjectAtlas` worktree state without mutation.
+    #[tool(
+        name = "atlas_worktree_list",
+        description = "List structurally discovered Git worktrees, short ProjectAtlas aliases, atlas availability, and telemetry synchronization state without changing Git or files."
+    )]
+    fn atlas_worktree_list(
+        &self,
+        Parameters(params): Parameters<AtlasWorktreeListParams>,
+    ) -> McpToolTextResult {
+        Self::as_mcp_text((|| {
+            let repository = self.control_git_repository()?;
+            let store = open_atlas_store_read_only_for_project(
+                &self.control_state.db_path,
+                &self.control_state.root,
+            )?;
+            let include_retired = params.include_retired.unwrap_or(false);
+            let registrations = store.worktree_registrations(include_retired)?;
+            let total_worktrees = repository.worktrees.len();
+            let worktrees = repository
+                .worktrees
+                .iter()
+                .take(MCP_WORKTREE_LIST_MAX_ROWS)
+                .map(|entry| self.worktree_list_row(entry, &registrations))
+                .collect::<Vec<_>>();
+            let remaining = MCP_WORKTREE_LIST_MAX_ROWS.saturating_sub(worktrees.len());
+            let retired_rows = registrations
+                .iter()
+                .filter(|registration| registration.state == WorktreeRegistrationState::Retired)
+                .collect::<Vec<_>>();
+            let truncated = total_worktrees > worktrees.len()
+                || (include_retired && retired_rows.len() > remaining);
+            let retired = retired_rows
+                .into_iter()
+                .take(remaining)
+                .map(|registration| McpRetiredWorktreeRow {
+                    alias: registration.alias.to_string(),
+                    last_root: registration.last_root.clone(),
+                    project_instance_id: registration
+                        .project_instance_id
+                        .map(|identity| identity.to_string()),
+                    accepted_telemetry_revision: registration.accepted_telemetry_revision,
+                })
+                .collect();
+            Self::encode_named_payload(
+                MCP_PAYLOAD_WORKTREES,
+                &McpWorktreeListReport {
+                    control_alias: MCP_MAIN_WORKTREE_ALIAS,
+                    control_root: normalize_native_path_display(&self.control_state.root),
+                    common_directory: normalize_native_path_display(&repository.common_directory),
+                    worktrees,
+                    retired,
+                    total_worktrees,
+                    truncated,
+                },
+            )
+        })())
+    }
+
+    /// Register one active structural worktree in the immutable control atlas.
+    #[tool(
+        name = "atlas_worktree_add",
+        description = "Register one structurally discovered Git worktree under a short ProjectAtlas alias without creating, moving, or switching Git worktrees."
+    )]
+    fn atlas_worktree_add(
+        &self,
+        Parameters(params): Parameters<AtlasWorktreeAddParams>,
+    ) -> McpToolTextResult {
+        Self::as_mcp_text((|| {
+            let requested = params.worktree.trim();
+            if requested.is_empty() {
+                return Err(CliError::InvalidInput(
+                    MCP_ERROR_WORKTREE_SELECTOR_EMPTY.to_string(),
+                ));
+            }
+            let repository = self.control_git_repository()?;
+            let candidates = self.matching_worktree_candidates(&repository, requested);
+            if candidates.len() != 1 {
+                let ambiguous = !candidates.is_empty();
+                let candidate_rows: Vec<McpWorktreeCandidate> = if candidates.is_empty() {
+                    repository
+                        .worktrees
+                        .iter()
+                        .filter(|entry| {
+                            Self::active_worktree_root(entry)
+                                .is_some_and(|root| root != self.control_state.root)
+                        })
+                        .filter_map(Self::worktree_candidate)
+                        .take(MCP_WORKTREE_LIST_MAX_ROWS)
+                        .collect()
+                } else {
+                    candidates
+                        .into_iter()
+                        .filter_map(Self::worktree_candidate)
+                        .take(MCP_WORKTREE_LIST_MAX_ROWS)
+                        .collect()
+                };
+                return Self::encode_named_payload(
+                    MCP_PAYLOAD_WORKTREE,
+                    &McpWorktreeMutationReport {
+                        operation: McpWorktreeMutationOperation::Add,
+                        status: if ambiguous {
+                            McpWorktreeMutationStatus::Ambiguous
+                        } else {
+                            McpWorktreeMutationStatus::NotFound
+                        },
+                        selector: None,
+                        alias: None,
+                        root: None,
+                        registration_id: None,
+                        telemetry_sync: None,
+                        candidates: candidate_rows,
+                        blocker: Some(format!(
+                            "selector {requested:?} did not identify exactly one active non-control worktree"
+                        )),
+                        git_unchanged: true,
+                        files_unchanged: true,
+                    },
+                );
+            }
+            let entry = candidates[0];
+            let root = Self::active_worktree_root(entry).ok_or_else(|| {
+                CliError::InvalidInput(MCP_ERROR_WORKTREE_NO_LONGER_ACTIVE.to_string())
+            })?;
+            let alias = params
+                .alias
+                .as_deref()
+                .map(str::trim)
+                .filter(|alias| !alias.is_empty())
+                .map(WorktreeAlias::parse)
+                .transpose()?
+                .map_or_else(|| Self::default_worktree_alias(root), Ok)?;
+            let (local, mut blocker) = match Self::local_worktree_atlas(root) {
+                Ok(local) => (local, None),
+                Err(error) => (
+                    None,
+                    Some(format!(
+                        "registration committed without local telemetry import: {error}"
+                    )),
+                ),
+            };
+            let control = Self::open_existing_mut_store(&self.control_state)?;
+            let registration = control.register_worktree(
+                &alias,
+                &repository.common_directory,
+                &entry.administrative_directory,
+                root,
+                local.as_ref().map(|local| local.project_instance_id),
+                Self::current_epoch_seconds()?,
+            )?;
+            let telemetry_sync = local.as_ref().and_then(|local| {
+                match control.synchronize_worktree_usage(&alias, &local.snapshot) {
+                    Ok(state) => Some(state),
+                    Err(error) => {
+                        blocker = Some(format!(
+                            "registration committed; local telemetry remains pending: {error}"
+                        ));
+                        None
+                    }
+                }
+            });
+            Self::encode_named_payload(
+                MCP_PAYLOAD_WORKTREE,
+                &McpWorktreeMutationReport {
+                    operation: McpWorktreeMutationOperation::Add,
+                    status: McpWorktreeMutationStatus::Registered,
+                    selector: Some(Self::worktree_candidate_selector(entry)),
+                    alias: Some(alias.to_string()),
+                    root: Some(normalize_native_path_display(root)),
+                    registration_id: Some(registration.registration_id),
+                    telemetry_sync,
+                    candidates: Vec::new(),
+                    blocker,
+                    git_unchanged: true,
+                    files_unchanged: true,
+                },
+            )
+        })())
+    }
+
+    /// Final-sync and retire one `ProjectAtlas` alias without touching Git or files.
+    #[tool(
+        name = "atlas_worktree_remove",
+        description = "Final-sync and retire one ProjectAtlas worktree alias while preserving retained token totals and leaving Git, source files, .projectatlas, and SQLite files untouched."
+    )]
+    fn atlas_worktree_remove(
+        &self,
+        Parameters(params): Parameters<AtlasWorktreeRemoveParams>,
+    ) -> McpToolTextResult {
+        Self::as_mcp_text((|| {
+            let alias = WorktreeAlias::parse(params.worktree.trim())?;
+            let repository = self.control_git_repository()?;
+            let control = Self::open_existing_mut_store(&self.control_state)?;
+            let registration = control.worktree_registration(&alias)?;
+            let entry = repository.worktrees.iter().find(|entry| {
+                normalize_native_path_display(&entry.administrative_directory)
+                    == registration.git_administrative_directory
+            });
+            let mut telemetry_sync = None;
+            let mut blocker = None;
+            let root = match entry.map(|entry| &entry.state) {
+                Some(GitWorktreeState::Active { root, .. }) => {
+                    if let Some(local) = Self::local_worktree_atlas(root)? {
+                        control.bind_worktree_project(&alias, root, local.project_instance_id)?;
+                        telemetry_sync =
+                            Some(control.synchronize_worktree_usage(&alias, &local.snapshot)?);
+                    }
+                    root.clone()
+                }
+                Some(GitWorktreeState::Invalid { issue }) => {
+                    return Err(CliError::InvalidInput(format!(
+                        "cannot retire worktree '{}' while its Git evidence is invalid at '{}': {:?}",
+                        alias,
+                        normalize_native_path_display(&issue.path),
+                        issue.kind
+                    )));
+                }
+                Some(GitWorktreeState::Missing { .. }) | None => {
+                    blocker = Some(MCP_WORKTREE_MISSING_RETENTION_REASON.to_string());
+                    PathBuf::from(&registration.last_root)
+                }
+            };
+            let retired = control.retire_worktree(&alias, Self::current_epoch_seconds()?)?;
+            Self::encode_named_payload(
+                MCP_PAYLOAD_WORKTREE,
+                &McpWorktreeMutationReport {
+                    operation: McpWorktreeMutationOperation::Remove,
+                    status: McpWorktreeMutationStatus::Retired,
+                    selector: entry.map(Self::worktree_candidate_selector),
+                    alias: Some(alias.to_string()),
+                    root: Some(normalize_native_path_display(root)),
+                    registration_id: Some(retired.registration_id),
+                    telemetry_sync,
+                    candidates: Vec::new(),
+                    blocker,
+                    git_unchanged: true,
+                    files_unchanged: true,
+                },
+            )
+        })())
+    }
+
     /// Initialize a `ProjectAtlas` project-local config surface.
     #[tool(
         name = "atlas_init",
@@ -5768,12 +7275,11 @@ impl ProjectAtlasMcpServer {
     )]
     fn atlas_init(&self, Parameters(params): Parameters<AtlasInitParams>) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.admin_project_root(params.project_path)?;
+            let state = self.init_project_root(params.project_path, params.worktree)?;
             let config_path = init_config_path(&state.root, state.config_path.as_deref());
-            let mut report = run_init_bootstrap(
-                &state.root,
-                &state.db_path,
-                Some(&config_path),
+            let mut report = self.run_registered_worktree_init(
+                &state,
+                &config_path,
                 &InitBootstrapOptions {
                     no_scan: params.no_scan.unwrap_or(false),
                     force_rescan: params.force_rescan.unwrap_or(false),
@@ -5798,7 +7304,7 @@ impl ProjectAtlasMcpServer {
     )]
     fn atlas_map(&self, Parameters(params): Parameters<AtlasMapParams>) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.admin_project_root(params.project_path)?;
+            let state = self.admin_project_root(params.project_path, params.worktree)?;
             let report = Self::build_map_report(
                 &state,
                 params.json.unwrap_or(false),
@@ -5816,7 +7322,10 @@ impl ProjectAtlasMcpServer {
     fn atlas_root(&self, Parameters(params): Parameters<AtlasRootParams>) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             if let Some(control_root) = params.control_root.as_deref() {
-                if params.project_path.is_some() || params.verify.unwrap_or(false) {
+                if params.project_path.is_some()
+                    || params.worktree.is_some()
+                    || params.verify.unwrap_or(false)
+                {
                     return Err(CliError::InvalidInput(
                         MCP_ERROR_ROOT_CONTROL_CONFLICT.to_owned(),
                     ));
@@ -5824,12 +7333,16 @@ impl ProjectAtlasMcpServer {
                 let report = build_repository_control_report(Path::new(control_root))?;
                 return Ok(render_repository_control_report(&report));
             }
-            let state = self.admin_project_root(params.project_path)?;
+            let state = self.admin_project_root(params.project_path, params.worktree)?;
             let report = build_root_report(&state.db_path, state.config_path.as_deref())?;
             if params.verify.unwrap_or(false) && report.verified {
                 verify_project_database(&state.db_path, Path::new(&report.root))?;
             }
-            Ok(render_root_report(&report))
+            Self::with_selected_project_audit(
+                &state,
+                state.worktree.is_some(),
+                render_root_report(&report),
+            )
         })())
     }
 
@@ -5865,7 +7378,7 @@ impl ProjectAtlasMcpServer {
         Parameters(params): Parameters<AtlasProjectParams>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.admin_project_root(params.project_path)?;
+            let state = self.admin_project_root(params.project_path, params.worktree)?;
             let report = effective_config_report(&Self::load_config_for_state(&state)?);
             Self::encode_named_payload(MCP_PAYLOAD_CONFIG, &report)
         })())
@@ -5881,7 +7394,7 @@ impl ProjectAtlasMcpServer {
         Parameters(params): Parameters<AtlasProjectParams>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.admin_project_root(params.project_path)?;
+            let state = self.admin_project_root(params.project_path, params.worktree)?;
             let report = list_ignore_entries(state.config_path.as_deref(), &state.root)?;
             Self::encode_named_payload(MCP_PAYLOAD_IGNORE, &report)
         })())
@@ -5897,7 +7410,7 @@ impl ProjectAtlasMcpServer {
         Parameters(params): Parameters<AtlasProjectParams>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.admin_project_root(params.project_path)?;
+            let state = self.admin_project_root(params.project_path, params.worktree)?;
             let report = init_gitignore(state.config_path.as_deref(), &state.root)?;
             Self::encode_named_payload(MCP_PAYLOAD_GITIGNORE, &report)
         })())
@@ -5913,7 +7426,7 @@ impl ProjectAtlasMcpServer {
         Parameters(params): Parameters<AtlasIgnoreMutationParams>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.admin_project_root(params.project_path)?;
+            let state = self.admin_project_root(params.project_path, params.worktree)?;
             let kind = Self::parse_ignore_kind(params.kind.as_deref(), true)?.ok_or_else(|| {
                 CliError::InvalidInput(MCP_ERROR_IGNORE_KIND_REQUIRED_FOR_ADD.to_owned())
             })?;
@@ -5937,7 +7450,7 @@ impl ProjectAtlasMcpServer {
         Parameters(params): Parameters<AtlasIgnoreMutationParams>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.admin_project_root(params.project_path)?;
+            let state = self.admin_project_root(params.project_path, params.worktree)?;
             let kind = Self::parse_ignore_kind(params.kind.as_deref(), false)?;
             let report = remove_ignore_entry(
                 state.config_path.as_deref(),
@@ -5961,11 +7474,17 @@ impl ProjectAtlasMcpServer {
             let (state, path) = if background {
                 self.background_state_and_root_path(
                     params.project_path,
+                    params.worktree,
                     params.path,
                     nearest_project,
                 )?
             } else {
-                self.state_and_root_path(params.project_path, params.path, nearest_project)?
+                self.state_and_root_path(
+                    params.project_path,
+                    params.worktree,
+                    params.path,
+                    nearest_project,
+                )?
             };
             let symbol_options = SymbolBuildOptions::new(
                 params.max_bytes.unwrap_or(MAX_SYMBOL_FILE_BYTES),
@@ -6013,7 +7532,7 @@ impl ProjectAtlasMcpServer {
         context: Option<RequestContext<RoleServer>>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path)?;
+            let state = self.state_for_target(params.project_path, params.worktree)?;
             self.with_fresh_string_and_usage_for_request(&state, context, |store, stamp| {
                 let overview = store.overview()?;
                 let toon = render_overview(&overview);
@@ -6066,7 +7585,7 @@ impl ProjectAtlasMcpServer {
         context: Option<RequestContext<RoleServer>>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path)?;
+            let state = self.state_for_target(params.project_path, params.worktree)?;
             let query = Self::query_or_empty(params.query);
             self.with_fresh_string_and_usage_for_request(&state, context, |store, stamp| {
                 let selected =
@@ -6112,6 +7631,7 @@ impl ProjectAtlasMcpServer {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let (state, folder_filter, routed_project) = self.state_and_optional_folder_filter(
                 params.project_path.as_deref(),
+                params.worktree.as_deref(),
                 params.folder.as_deref(),
                 nearest_project,
             )?;
@@ -6172,7 +7692,7 @@ impl ProjectAtlasMcpServer {
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let content_selection = parse_content_selection(params.content_selection.as_deref())?;
-            let state = self.state_for_project_path(params.project_path)?;
+            let state = self.state_for_target(params.project_path, params.worktree)?;
             let query = Self::query_or_empty(params.query);
             self.with_fresh_string_and_usage_for_request(&state, Some(context), |store, stamp| {
                 let report = next_step_report_with_selection(
@@ -6213,6 +7733,7 @@ impl ProjectAtlasMcpServer {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let resolved = self.state_and_file_key(
                 params.project_path.as_deref(),
+                params.worktree.as_deref(),
                 &params.file,
                 nearest_project,
             )?;
@@ -6251,6 +7772,7 @@ impl ProjectAtlasMcpServer {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let resolved = self.state_and_file_key(
                 params.project_path.as_deref(),
+                params.worktree.as_deref(),
                 &params.file,
                 nearest_project,
             )?;
@@ -6309,7 +7831,8 @@ impl ProjectAtlasMcpServer {
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let content_selection = parse_content_selection(params.content_selection.as_deref())?;
-            let state = self.state_for_project_path(params.project_path.clone())?;
+            let state =
+                self.state_for_target(params.project_path.clone(), params.worktree.clone())?;
             self.with_fresh_string_and_usage_controlled_for_request(
                 &state,
                 Some(context),
@@ -6358,6 +7881,7 @@ impl ProjectAtlasMcpServer {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let resolved = self.state_and_file_key(
                 params.project_path.as_deref(),
+                params.worktree.as_deref(),
                 &params.file,
                 nearest_project,
             )?;
@@ -6453,11 +7977,17 @@ impl ProjectAtlasMcpServer {
             let (state, path) = if background {
                 self.background_state_and_root_path(
                     params.project_path,
+                    params.worktree,
                     params.path,
                     nearest_project,
                 )?
             } else {
-                self.state_and_root_path(params.project_path, params.path, nearest_project)?
+                self.state_and_root_path(
+                    params.project_path,
+                    params.worktree,
+                    params.path,
+                    nearest_project,
+                )?
             };
             let options = SymbolBuildOptions::new(
                 params.max_bytes.unwrap_or(MAX_SYMBOL_FILE_BYTES),
@@ -6511,6 +8041,7 @@ impl ProjectAtlasMcpServer {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let (state, file, routed_project) = self.state_and_optional_file_key(
                 params.project_path.as_deref(),
+                params.worktree.as_deref(),
                 params.file.as_deref(),
                 nearest_project,
             )?;
@@ -6849,13 +8380,41 @@ impl ProjectAtlasMcpServer {
                     MCP_ERROR_CONTENT_SELECTION_RELATION_VIEW.to_string(),
                 )));
             }
+            if params.roots.is_some() && params.worktrees.is_some() {
+                return Err(CliError::Service(ServiceError::InvalidInput(
+                    MCP_ERROR_FEDERATED_SELECTOR_CONFLICT.to_string(),
+                )));
+            }
+            let federated_worktrees = params.worktrees.as_deref();
+            if let Some(worktrees) = federated_worktrees {
+                validate_federated_root_count(worktrees.len()).map_err(CliError::Service)?;
+                if params.project_path.is_some() {
+                    return Err(CliError::Service(ServiceError::InvalidInput(
+                        MCP_ERROR_FEDERATED_PROJECT_PATH_CONFLICT.to_string(),
+                    )));
+                }
+                if params.worktree.as_deref().is_some_and(|primary| {
+                    worktrees
+                        .first()
+                        .is_none_or(|first| primary.trim() != first.trim())
+                }) {
+                    return Err(CliError::Service(ServiceError::InvalidInput(
+                        MCP_ERROR_FEDERATED_PRIMARY_CONFLICT.to_string(),
+                    )));
+                }
+            }
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
+            let selected_worktree = federated_worktrees
+                .and_then(|worktrees| worktrees.first())
+                .map(String::as_str)
+                .or(params.worktree.as_deref());
             let (state, file, routed_project) = self.state_and_optional_file_key(
                 params.project_path.as_deref(),
+                selected_worktree,
                 params.file.as_deref(),
                 nearest_project,
             )?;
-            if let Some(roots) = params.roots.as_ref() {
+            if params.roots.is_some() || federated_worktrees.is_some() {
                 if !detailed {
                     return Err(CliError::Service(ServiceError::InvalidInput(
                         MCP_ERROR_FEDERATED_RELATION_VIEW.to_string(),
@@ -6874,12 +8433,27 @@ impl ProjectAtlasMcpServer {
                 let bridge = context
                     .map(|context| McpRequestCancellationBridge::start(context, &control))
                     .transpose()?;
-                let roots = roots.iter().map(PathBuf::from).collect::<Vec<_>>();
+                let (roots, worktree_labels) = if let Some(worktrees) = federated_worktrees {
+                    let (roots, labels) = self.federated_worktree_roots(worktrees)?;
+                    (roots, Some(labels))
+                } else {
+                    (
+                        params
+                            .roots
+                            .as_deref()
+                            .unwrap_or_default()
+                            .iter()
+                            .map(PathBuf::from)
+                            .collect::<Vec<_>>(),
+                        None,
+                    )
+                };
                 let stores = open_federated_atlas_stores_for_project(
                     &state.db_path,
                     &state.root,
                     state.config_path.as_deref(),
                     &roots,
+                    worktree_labels.as_deref(),
                     &control,
                 )?;
                 let result = Self::detailed_symbol_relations_response(
@@ -6984,7 +8558,8 @@ impl ProjectAtlasMcpServer {
         context: RequestContext<RoleServer>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path.clone())?;
+            let state =
+                self.state_for_target(params.project_path.clone(), params.worktree.clone())?;
             if params.coverage.unwrap_or(false) {
                 let query = coverage_query_from_params(&params)?;
                 return self.with_fresh_string_and_usage_for_request(
@@ -7052,7 +8627,7 @@ impl ProjectAtlasMcpServer {
         Parameters(params): Parameters<AtlasHealthResolveParams>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path)?;
+            let state = self.state_for_target(params.project_path, params.worktree)?;
             let store = Self::open_existing_mut_store(&state)?;
             let resolution = HealthResolution {
                 finding_id: params.finding_id,
@@ -7073,7 +8648,8 @@ impl ProjectAtlasMcpServer {
     )]
     fn atlas_lint(&self, Parameters(params): Parameters<AtlasLintParams>) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.admin_project_root(params.project_path.clone())?;
+            let state =
+                self.admin_project_root(params.project_path.clone(), params.worktree.clone())?;
             let report = Self::lint_report_for_state(&state, &params)?;
             Self::encode_named_payload(MCP_PAYLOAD_LINT, &report)
         })())
@@ -7089,7 +8665,14 @@ impl ProjectAtlasMcpServer {
         Parameters(params): Parameters<AtlasTokenParams>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path.clone())?;
+            let state =
+                self.state_for_target(params.project_path.clone(), params.worktree.clone())?;
+            let repository_scope = params.session.is_none()
+                && state.root == self.control_state.root
+                && state.db_path == self.control_state.db_path;
+            if repository_scope {
+                synchronize_registered_worktree_usage(&state.db_path, &state.root)?;
+            }
             let store = Self::open_read_store(&state)?;
             let include_chart = params.include_chart.unwrap_or(false);
             let chart_theme = Self::parse_token_chart_theme(params.theme.as_deref())?;
@@ -7104,13 +8687,15 @@ impl ProjectAtlasMcpServer {
                         "unsupported token trend window {window:?}; {TOKEN_TREND_WINDOW_ERROR_SUFFIX}"
                     ))
                 })?;
-                let report = match load_token_report(
-                    &store,
+                let request = if repository_scope {
+                    TokenReportRequest::RepositoryTrends { window }
+                } else {
                     TokenReportRequest::Trends {
                         caller_label: params.session.as_deref(),
                         window,
-                    },
-                )? {
+                    }
+                };
+                let report = match load_token_report(&store, request)? {
                     TokenReport::Trends(report) => report,
                     TokenReport::Overview(_) => {
                         return Err(CliError::InvalidInput(
@@ -7120,22 +8705,35 @@ impl ProjectAtlasMcpServer {
                 };
                 if include_chart {
                     let chart = render_token_trend_dashboard_plain_with_theme(&report, chart_theme);
-                    return Self::encode_two_named_payloads(
+                    let output = Self::encode_two_named_payloads(
                         MCP_PAYLOAD_TOKEN_TRENDS,
                         &report,
                         MCP_PAYLOAD_CHART,
                         &chart,
+                    )?;
+                    return Self::with_selected_project_audit(
+                        &state,
+                        state.worktree.is_some(),
+                        output,
                     );
                 }
-                return Ok(render_token_trends(&report));
+                return Self::with_selected_project_audit(
+                    &state,
+                    state.worktree.is_some(),
+                    render_token_trends(&report),
+                );
             }
-            let overview = match load_token_report(
-                &store,
+            let request = if repository_scope {
+                TokenReportRequest::RepositoryOverview {
+                    benchmark_results: params.benchmark_results.as_deref().map(Path::new),
+                }
+            } else {
                 TokenReportRequest::Overview {
                     caller_label: params.session.as_deref(),
                     benchmark_results: params.benchmark_results.as_deref().map(Path::new),
-                },
-            )? {
+                }
+            };
+            let overview = match load_token_report(&store, request)? {
                 TokenReport::Overview(overview) => overview,
                 TokenReport::Trends(_) => {
                     return Err(CliError::InvalidInput(
@@ -7149,14 +8747,19 @@ impl ProjectAtlasMcpServer {
                     params.session.as_deref(),
                     chart_theme,
                 );
-                return Self::encode_two_named_payloads(
+                let output = Self::encode_two_named_payloads(
                     MCP_PAYLOAD_TOKEN_SAVINGS,
                     &overview,
                     MCP_PAYLOAD_CHART,
                     &chart,
-                );
+                )?;
+                return Self::with_selected_project_audit(&state, state.worktree.is_some(), output);
             }
-            Ok(render_token_overview(&overview))
+            Self::with_selected_project_audit(
+                &state,
+                state.worktree.is_some(),
+                render_token_overview(&overview),
+            )
         })())
     }
 
@@ -7171,7 +8774,7 @@ impl ProjectAtlasMcpServer {
         context: RequestContext<RoleServer>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path)?;
+            let state = self.state_for_target(params.project_path, params.worktree)?;
             let profile = params
                 .profile
                 .unwrap_or_else(|| crate::REPOSITORY_INTELLIGENCE_PROFILE.to_string());
@@ -7191,7 +8794,7 @@ impl ProjectAtlasMcpServer {
         Parameters(params): Parameters<AtlasProjectParams>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path)?;
+            let state = self.state_for_target(params.project_path, params.worktree)?;
             self.render_settings_with_capabilities(&state)
         })())
     }
@@ -7205,7 +8808,7 @@ impl ProjectAtlasMcpServer {
         &self,
         Parameters(params): Parameters<AtlasProjectParams>,
     ) -> McpToolTextResult {
-        let state = match self.state_for_project_path(params.project_path) {
+        let state = match self.state_for_target(params.project_path, params.worktree) {
             Ok(state) => state,
             Err(error) => return Self::as_mcp_text(Err(error)),
         };
@@ -7233,11 +8836,17 @@ impl ProjectAtlasMcpServer {
             let (state, path) = if background {
                 self.background_state_and_root_path(
                     params.project_path,
+                    params.worktree,
                     params.path,
                     nearest_project,
                 )?
             } else {
-                self.state_and_root_path(params.project_path, params.path, nearest_project)?
+                self.state_and_root_path(
+                    params.project_path,
+                    params.worktree,
+                    params.path,
+                    nearest_project,
+                )?
             };
             let symbol_options = SymbolBuildOptions::new(
                 MAX_SYMBOL_FILE_BYTES,
@@ -7294,8 +8903,12 @@ impl ProjectAtlasMcpServer {
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
-            let (state, path) =
-                self.state_and_root_path(params.project_path, params.path, nearest_project)?;
+            let (state, path) = self.state_and_root_path(
+                params.project_path,
+                params.worktree,
+                params.path,
+                nearest_project,
+            )?;
             let report = strip_legacy_purpose(
                 &path,
                 state.config_path.as_deref(),
@@ -7319,7 +8932,7 @@ impl ProjectAtlasMcpServer {
         Parameters(params): Parameters<AtlasResetIndexParams>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path)?;
+            let state = self.state_for_target(params.project_path, params.worktree)?;
             let report = reset_index_files(
                 &state.db_path,
                 params.apply.unwrap_or(false),
@@ -7340,7 +8953,7 @@ impl ProjectAtlasMcpServer {
         Parameters(params): Parameters<AtlasMcpConfigParams>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.admin_project_root(params.project_path)?;
+            let state = self.admin_project_root(params.project_path, params.worktree)?;
             let harness = Self::parse_harness_config(params.harness.as_deref())?;
             let server_name = params
                 .server_name
@@ -7431,7 +9044,10 @@ impl ProjectAtlasMcpServer {
         context: RequestContext<RoleServer>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.health.project_path.clone())?;
+            let state = self.state_for_target(
+                params.health.project_path.clone(),
+                params.health.worktree.clone(),
+            )?;
             let query =
                 health_query_from_params(&params.health, purpose_queue_scope(&params.health))?;
             let task = params
@@ -7468,7 +9084,7 @@ impl ProjectAtlasMcpServer {
         Parameters(params): Parameters<AtlasPurposeSetParams>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path)?;
+            let state = self.state_for_target(params.project_path, params.worktree)?;
             let store = Self::open_existing_mut_store(&state)?;
             let node_key = Self::validated_indexed_node_key(&store, &params.path)?;
             store.set_purpose(&node_key, &params.purpose, PurposeSource::Agent)?;
@@ -7520,7 +9136,7 @@ impl ProjectAtlasMcpServer {
                 })
                 .collect::<Vec<_>>();
             validate_purpose_review_admission(&requests)?;
-            let state = self.state_for_project_path(params.project_path)?;
+            let state = self.state_for_target(params.project_path, params.worktree)?;
             if apply {
                 let store = Self::open_existing_mut_store(&state)?;
                 let report = review_purposes(&store, &requests, true)?;
@@ -7605,6 +9221,20 @@ mod tests {
         }
     }
 
+    /// Execute one test-owned Git fixture command and retain exact diagnostics on failure.
+    fn run_fixture_command(command: &mut StdCommand) -> Result<String, Box<dyn std::error::Error>> {
+        let output = command.output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "fixture command failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        Ok(String::from_utf8(output.stdout)?)
+    }
+
     #[test]
     fn task_errors_classify_only_typed_cancellation_as_canceled() {
         let stage = IndexWorkStage::RepositoryTraversal;
@@ -7649,6 +9279,7 @@ mod tests {
                 root,
                 db_path,
                 config_path: None,
+                worktree: None,
             },
             store,
         ))
@@ -7803,6 +9434,7 @@ mod tests {
                     project_instance_id: ProjectInstanceId::from_bytes([identity_byte; 16])?,
                     root: PathBuf::from(format!("project-{index}")),
                     db_path: PathBuf::from(format!("project-{index}.db")),
+                    worktree_registration_id: None,
                 })
             })
             .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
@@ -7827,6 +9459,63 @@ mod tests {
         require(
             runtime.entries.len() == MCP_TELEMETRY_PROJECT_BINDING_LIMIT,
             "telemetry project binding registry exceeded its hard bound",
+        )
+    }
+
+    #[test]
+    fn routed_worktree_telemetry_does_not_consume_project_binding_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if telemetry_disabled() {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let (state, control) = usage_test_project(temp.path(), "control")?;
+        let server =
+            ProjectAtlasMcpServer::new(state.db_path, None, "worktree-scale".to_string(), false);
+        let common = temp.path().join("common.git");
+        let event = usage_from_text(
+            "worktree-scale",
+            "atlas_overview",
+            None,
+            None,
+            "mod source {}",
+            "repository overview",
+        );
+
+        for index in 0..=MCP_TELEMETRY_PROJECT_BINDING_LIMIT {
+            let suffix = index + 1;
+            let alias = WorktreeAlias::parse(&format!("worktree-{suffix:03}"))?;
+            let registration = control.register_worktree(
+                &alias,
+                &common,
+                &common.join(format!("worktrees/{suffix:03}")),
+                &temp.path().join(format!("worktree-{suffix:03}")),
+                Some(ProjectInstanceId::from_bytes([u8::try_from(suffix)?; 16])?),
+                u64::try_from(suffix)?,
+            )?;
+            ProjectAtlasMcpServer::record_completed_worktree_usage(
+                &control,
+                registration.registration_id,
+                &event,
+            );
+        }
+
+        require(
+            control.repository_token_overview()?.calls == MCP_TELEMETRY_PROJECT_BINDING_LIMIT + 1,
+            "alias-routed usage was dropped after the native MCP binding limit",
+        )?;
+        require(
+            control.telemetry_retention_state()?.active_instance_rows == 0,
+            "completed alias-routed usage retained active runtime instances",
+        )?;
+        require(
+            server
+                .usage_runtime
+                .lock()
+                .map_err(|_poisoned| io::Error::other("usage runtime lock poisoned"))?
+                .entries
+                .is_empty(),
+            "alias-routed usage consumed native MCP project binding capacity",
         )
     }
 
@@ -7951,6 +9640,7 @@ mod tests {
             root,
             db_path: db_path.clone(),
             config_path: None,
+            worktree: None,
         };
         let other_root = temp.path().join("other-project");
         fs::create_dir_all(other_root.join(".projectatlas"))?;
@@ -7960,6 +9650,7 @@ mod tests {
             root: other_root,
             db_path: other_db_path,
             config_path: None,
+            worktree: None,
         };
         let server = ProjectAtlasMcpServer::new(db_path, None, "shared-label".to_string(), false);
         server.record_usage_for_state(&state, &store, |usage_instance| {
@@ -8041,8 +9732,13 @@ mod tests {
             "shared-label".to_string(),
             false,
         );
-        let result =
-            server.atlas_overview_response(AtlasProjectParams { project_path: None }, None);
+        let result = server.atlas_overview_response(
+            AtlasProjectParams {
+                project_path: None,
+                worktree: None,
+            },
+            None,
+        );
         connection.execute_batch("ROLLBACK")?;
 
         if result.contains("overview:") && result.contains("files:") {
@@ -8078,7 +9774,13 @@ mod tests {
         drop(store);
 
         let call_overview = |server: &ProjectAtlasMcpServer| {
-            server.atlas_overview_response(AtlasProjectParams { project_path: None }, None)
+            server.atlas_overview_response(
+                AtlasProjectParams {
+                    project_path: None,
+                    worktree: None,
+                },
+                None,
+            )
         };
         let first = ProjectAtlasMcpServer::new(
             db_path.clone(),
@@ -8141,15 +9843,17 @@ mod tests {
     #[test]
     fn mcp_schema_version_mismatches_are_typed_and_content_free()
     -> Result<(), Box<dyn std::error::Error>> {
+        let supported = projectatlas_db::CURRENT_SCHEMA_VERSION;
+        let future = supported + 1;
         let error = CliError::Db(DbError::SchemaVersion {
-            found: 18,
-            expected: 17,
+            found: future,
+            expected: supported,
         });
         let payload = ProjectAtlasMcpServer::encode_error_payload(&error);
         require(
             payload.contains("kind: schema_version_mismatch")
-                && payload.contains("found_schema_version: 18")
-                && payload.contains("supported_schema_version: 17")
+                && payload.contains(&format!("found_schema_version: {future}"))
+                && payload.contains(&format!("supported_schema_version: {supported}"))
                 && payload.contains(env!("CARGO_PKG_VERSION"))
                 && payload.contains("do not reset")
                 && !payload.contains(".projectatlas")
@@ -8160,7 +9864,7 @@ mod tests {
 
         let predecessor = CliError::Service(ServiceError::Db(DbError::SchemaVersion {
             found: 8,
-            expected: 17,
+            expected: supported,
         }));
         let McpToolTextResult(predecessor_result) =
             ProjectAtlasMcpServer::as_mcp_text(Err(predecessor));
@@ -8168,8 +9872,9 @@ mod tests {
         require(
             predecessor_payload.contains("kind: schema_migration_required")
                 && predecessor_payload.contains("found_schema_version: 8")
-                && predecessor_payload.contains("supported_schema_version: 17")
-                && predecessor_payload.contains("migration_steps_remaining: 9")
+                && predecessor_payload.contains(&format!("supported_schema_version: {supported}"))
+                && predecessor_payload
+                    .contains(&format!("migration_steps_remaining: {}", supported - 8))
                 && predecessor_payload.contains("projectatlas init")
                 && predecessor_payload.contains("atlas_init")
                 && predecessor_payload.contains("same global `--db`/`--config` selection")
@@ -8232,6 +9937,7 @@ mod tests {
             root: repo.clone(),
             db_path: db_path.clone(),
             config_path: Some(config_path.clone()),
+            worktree: None,
         };
         let server = ProjectAtlasMcpServer::new(
             db_path.clone(),
@@ -8343,6 +10049,7 @@ mod tests {
         let overview = server.atlas_overview_response(
             AtlasProjectParams {
                 project_path: Some(project_path.to_string()),
+                worktree: None,
             },
             None,
         );
@@ -8354,6 +10061,7 @@ mod tests {
         let summary = server.atlas_file_summary_response(
             &AtlasFileSummaryParams {
                 project_path: Some(project_path.to_string()),
+                worktree: None,
                 file: "src/lib.rs".to_string(),
                 nearest_project: Some(false),
                 compact: None,
@@ -8372,6 +10080,7 @@ mod tests {
         let symbols = server.atlas_symbols_response(
             &AtlasSymbolsParams {
                 project_path: Some(project_path.to_string()),
+                worktree: None,
                 file: Some("src/lib.rs".to_string()),
                 nearest_project: Some(false),
                 query: None,
@@ -8745,6 +10454,7 @@ mod tests {
         let follow_up = server.atlas_overview_response(
             AtlasProjectParams {
                 project_path: Some(project_path.to_string()),
+                worktree: None,
             },
             None,
         );
@@ -8841,7 +10551,8 @@ mod tests {
         let server = ProjectAtlasMcpServer::new(db_path, None, "mcp-test".to_string(), false);
         let expected_root = canonical_project_root(&repo)?;
 
-        let (_state, root) = server.state_and_root_path(None, Some("./".to_string()), false)?;
+        let (_state, root) =
+            server.state_and_root_path(None, None, Some("./".to_string()), false)?;
         require(
             root == expected_root,
             "current-dir alias did not use active root",
@@ -8850,7 +10561,7 @@ mod tests {
         #[cfg(windows)]
         {
             let (_state, root) =
-                server.state_and_root_path(None, Some(".\\".to_string()), false)?;
+                server.state_and_root_path(None, None, Some(".\\".to_string()), false)?;
             require(
                 root == expected_root,
                 "windows current-dir alias did not use active root",
@@ -8858,6 +10569,577 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn worktree_tools_register_route_and_retire_without_git_or_file_lifecycle_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let primary = temp.path().join("selected control");
+        let worktree_a = temp.path().join("unrelated one").join("checkout");
+        let worktree_b = temp.path().join("unrelated two").join("checkout");
+        fs::create_dir_all(&primary)?;
+        fs::create_dir_all(
+            worktree_a
+                .parent()
+                .ok_or_else(|| io::Error::other("worktree A has no parent"))?,
+        )?;
+        fs::create_dir_all(
+            worktree_b
+                .parent()
+                .ok_or_else(|| io::Error::other("worktree B has no parent"))?,
+        )?;
+        run_fixture_command(StdCommand::new("git").current_dir(&primary).arg("init"))?;
+        for (key, value) in [
+            ("user.name", "ProjectAtlas Test"),
+            ("user.email", "projectatlas@example.invalid"),
+            ("commit.gpgsign", "false"),
+            ("core.autocrlf", "false"),
+        ] {
+            run_fixture_command(
+                StdCommand::new("git")
+                    .current_dir(&primary)
+                    .args(["config", key, value]),
+            )?;
+        }
+        fs::create_dir(primary.join("src"))?;
+        fs::write(
+            primary.join("src").join("lib.rs"),
+            "mod child;\npub fn main_only() { child::helper(); }\n",
+        )?;
+        fs::write(primary.join("src").join("child.rs"), "pub fn helper() {}\n")?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["add", "."]),
+        )?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["commit", "-m", "fixture"]),
+        )?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["worktree", "add", "-b", "issue-430-a"])
+                .arg(&worktree_a),
+        )?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["worktree", "add", "-b", "issue-430-b"])
+                .arg(&worktree_b),
+        )?;
+        fs::write(
+            worktree_a.join("src").join("branch.rs"),
+            "pub fn worktree_only() {}\n",
+        )?;
+        let git_before = run_fixture_command(StdCommand::new("git").current_dir(&primary).args([
+            "worktree",
+            "list",
+            "--porcelain",
+        ]))?;
+
+        let control_db = primary.join(".projectatlas").join("projectatlas.db");
+        let control_config = primary.join(".projectatlas").join("config.toml");
+        init_project_with_config(&primary, Some(&control_config))?;
+        let mut control_store = AtlasStore::open_for_project(&control_db, &primary)?;
+        let control_plan = ScanRuntimePlan::for_path(Some(&control_config), &primary, None)?;
+        run_scan_pipeline(
+            &mut control_store,
+            &control_plan,
+            &SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None),
+        )?;
+        control_store.set_purpose(
+            "src/lib.rs",
+            "Own the shared library contract.",
+            PurposeSource::Agent,
+        )?;
+        drop(control_store);
+        let server = ProjectAtlasMcpServer::new(
+            control_db.clone(),
+            Some(control_config),
+            "worktree-tools".to_string(),
+            false,
+        );
+        let repository = server.control_git_repository()?;
+        let canonical_a = worktree_a.canonicalize()?;
+        let entry_a = repository
+            .worktrees
+            .iter()
+            .find(|entry| {
+                ProjectAtlasMcpServer::active_worktree_root(entry) == Some(canonical_a.as_path())
+            })
+            .ok_or_else(|| io::Error::other("worktree A was not structurally discovered"))?;
+        let selector_a = ProjectAtlasMcpServer::worktree_candidate_selector(entry_a);
+
+        let listed = server.atlas_worktree_list(Parameters(AtlasWorktreeListParams {
+            include_retired: Some(false),
+        }));
+        require(
+            listed.contains("control_alias: main")
+                && listed.contains(&selector_a)
+                && listed.contains(&normalize_native_path_display(&canonical_a)),
+            "worktree list omitted control, stable selector, or arbitrary exact root",
+        )?;
+        let ambiguous = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
+            worktree: "checkout".to_string(),
+            alias: Some("issue-430".to_string()),
+        }));
+        require(
+            ambiguous.contains("status: ambiguous")
+                && ambiguous.matches(MCP_WORKTREE_SELECTOR_PREFIX).count() >= 2,
+            "ambiguous human selector guessed or omitted bounded stable candidates",
+        )?;
+
+        let added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
+            worktree: selector_a,
+            alias: Some("issue-430".to_string()),
+        }));
+        require(
+            added.contains("status: registered")
+                && added.contains("alias: \"issue-430\"")
+                && added.contains("git_unchanged: true")
+                && added.contains("files_unchanged: true"),
+            &format!("stable selector did not create one lifecycle-neutral registration: {added}"),
+        )?;
+        require(
+            !worktree_a.join(".projectatlas").exists(),
+            "registration created a target atlas before explicit init",
+        )?;
+
+        let missing = server.atlas_overview_response(
+            AtlasProjectParams {
+                project_path: None,
+                worktree: Some("issue-430".to_string()),
+            },
+            None,
+        );
+        require(
+            missing.contains("init_required")
+                && missing.contains("tool: atlas_init")
+                && missing.contains("worktree: \"issue-430\"")
+                && !missing.contains("project_path:"),
+            "missing alias target did not preserve its short selector in typed init guidance",
+        )?;
+        let conflict = server.atlas_overview_response(
+            AtlasProjectParams {
+                project_path: Some(primary.to_string_lossy().to_string()),
+                worktree: Some("issue-430".to_string()),
+            },
+            None,
+        );
+        require(
+            conflict.contains(MCP_WORKTREE_PROJECT_PATH_CONFLICT),
+            "worktree/project_path conflict was not rejected by the shared resolver",
+        )?;
+
+        let initialized = server.atlas_init(Parameters(AtlasInitParams {
+            project_path: None,
+            worktree: Some("issue-430".to_string()),
+            no_scan: Some(false),
+            force_rescan: Some(false),
+            text_index_max_bytes: None,
+        }));
+        require(
+            initialized.contains("status: hydrated")
+                && initialized.contains("source_project_instance_id:")
+                && initialized.contains("target_project_instance_id:")
+                && initialized.contains("reconciled_generation:")
+                && initialized.contains("parsed: 1"),
+            &format!("registered alias init did not expose one completed hydration: {initialized}"),
+        )?;
+        let target_db = worktree_a.join(".projectatlas").join("projectatlas.db");
+        let target_store = open_atlas_store_read_only_for_project(&target_db, &worktree_a)?;
+        require(
+            target_store.load_node_by_path("src/branch.rs")?.is_some(),
+            "hydration reconciliation omitted a target-only dirty source file",
+        )?;
+        require(
+            target_store
+                .load_node_by_path("src/lib.rs")?
+                .is_some_and(|node| {
+                    node.purpose.purpose.as_deref() == Some("Own the shared library contract.")
+                        && node.purpose.source == PurposeSource::Agent
+                }),
+            "hydration did not preserve an applicable approved main purpose",
+        )?;
+        let target_project = target_store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("hydrated target identity is missing"))?;
+        drop(target_store);
+        let control_after_init = open_atlas_store_read_only_for_project(&control_db, &primary)?;
+        require(
+            control_after_init
+                .load_node_by_path("src/branch.rs")?
+                .is_none(),
+            "target-only source state bled into the control graph",
+        )?;
+        require(
+            control_after_init
+                .worktree_registration(&WorktreeAlias::parse("issue-430")?)?
+                .project_instance_id
+                == Some(target_project),
+            "successful alias init did not bind the exact target atlas identity",
+        )?;
+        drop(control_after_init);
+        let selected = server.state_for_target(None, Some("issue-430".to_string()))?;
+        require(
+            selected.root == canonical_a
+                && selected
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|selection| selection.alias == "issue-430"),
+            "short alias did not capture the exact target root and identity",
+        )?;
+        let selected_diagnostics = ProjectAtlasMcpServer::render_project_state(&selected)?;
+        require(
+            selected_diagnostics.contains("worktree: \"issue-430\"")
+                && selected_diagnostics.contains("registration_id:"),
+            &format!(
+                "selected-project diagnostics omitted the captured alias or registration identity: {selected_diagnostics}"
+            ),
+        )?;
+        let settings = server.atlas_settings(Parameters(AtlasProjectParams {
+            project_path: None,
+            worktree: Some("issue-430".to_string()),
+        }));
+        require(
+            settings.contains("worktree: \"issue-430\"") && settings.contains("registration_id:"),
+            &format!(
+                "alias-routed settings omitted the captured alias or registration identity: {settings}"
+            ),
+        )?;
+        let root_report = server.atlas_root(Parameters(AtlasRootParams {
+            project_path: None,
+            worktree: Some("issue-430".to_string()),
+            verify: Some(false),
+            control_root: None,
+        }));
+        require(
+            root_report.contains("worktree: \"issue-430\"")
+                && root_report.contains("registration_id:"),
+            &format!(
+                "alias-routed root diagnostics omitted the captured alias or registration identity: {root_report}"
+            ),
+        )?;
+        let routed_overview = server.atlas_overview_response(
+            AtlasProjectParams {
+                project_path: None,
+                worktree: Some("issue-430".to_string()),
+            },
+            None,
+        );
+        require(
+            routed_overview.contains("overview:") && routed_overview.contains("files:"),
+            &format!("alias-routed overview failed: {routed_overview}"),
+        )?;
+        let alias = WorktreeAlias::parse("issue-430")?;
+        let control_after_routed = open_atlas_store_read_only_for_project(&control_db, &primary)?;
+        require(
+            control_after_routed
+                .registered_worktree_token_overview(&alias)?
+                .calls
+                == 1
+                && control_after_routed.repository_token_overview()?.calls == 1,
+            "alias-routed MCP usage was not recorded exactly once in the control atlas",
+        )?;
+        drop(control_after_routed);
+        let local_event = usage_from_text(
+            "worktree-local",
+            "atlas_summary",
+            Some("src/lib.rs".to_string()),
+            None,
+            "pub fn main_only() { child::helper(); }",
+            "Own the shared library contract.",
+        );
+        let local_target = AtlasStore::open_for_project(&target_db, &worktree_a)?;
+        local_target.record_usage(&local_event)?;
+        require(
+            local_target.token_overview(None)?.calls == 1,
+            "independent worktree usage was not retained in its exact local atlas",
+        )?;
+        drop(local_target);
+        let repository_tokens = server.atlas_token_report(Parameters(AtlasTokenParams {
+            project_path: None,
+            worktree: Some("main".to_string()),
+            session: None,
+            include_chart: Some(false),
+            trend_window: None,
+            benchmark_results: None,
+            theme: None,
+        }));
+        require(
+            repository_tokens.contains("worktree: main") && repository_tokens.contains("calls: 2"),
+            &format!(
+                "control token report did not combine routed and synchronized worktree usage: {repository_tokens}"
+            ),
+        )?;
+        let worktree_tokens = server.atlas_token_report(Parameters(AtlasTokenParams {
+            project_path: None,
+            worktree: Some("issue-430".to_string()),
+            session: None,
+            include_chart: Some(false),
+            trend_window: None,
+            benchmark_results: None,
+            theme: None,
+        }));
+        require(
+            worktree_tokens.contains("worktree: \"issue-430\"")
+                && worktree_tokens.contains("calls: 1"),
+            &format!(
+                "exact worktree token report included routed or sibling usage: {worktree_tokens}"
+            ),
+        )?;
+        let federated = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                file: Some("src/lib.rs".to_string()),
+                view: Some(MCP_SYMBOL_RELATION_VIEW_DETAILED.to_string()),
+                compact: Some(true),
+                worktrees: Some(vec!["main".to_string(), "issue-430".to_string()]),
+                limit: Some(1),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            federated.contains("primary_worktree: main")
+                && federated.contains("participants[2]{order,worktree")
+                && federated.contains("0,main,")
+                && federated.contains("1,\"issue-430\","),
+            &format!(
+                "alias federation did not label the primary and every participant: {federated}"
+            ),
+        )?;
+        let federation_conflict = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                file: Some("src/lib.rs".to_string()),
+                view: Some(MCP_SYMBOL_RELATION_VIEW_DETAILED.to_string()),
+                roots: Some(vec![
+                    normalize_native_path_display(&primary),
+                    normalize_native_path_display(&worktree_a),
+                ]),
+                worktrees: Some(vec!["main".to_string(), "issue-430".to_string()]),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            federation_conflict.contains(MCP_ERROR_FEDERATED_SELECTOR_CONFLICT),
+            "alias federation did not reject legacy roots before opening participants",
+        )?;
+        let target_database_before_blocker = fs::read(&target_db)?;
+        fs::write(
+            worktree_a.join("src").join("branch.rs"),
+            "pub fn worktree_only_changed() {}\n",
+        )?;
+        let blocked_federation = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                file: Some("src/lib.rs".to_string()),
+                view: Some(MCP_SYMBOL_RELATION_VIEW_DETAILED.to_string()),
+                worktrees: Some(vec!["main".to_string(), "issue-430".to_string()]),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            blocked_federation.contains("refresh_required")
+                && blocked_federation.contains("worktree: \"issue-430\""),
+            &format!(
+                "stale federated participant blocker omitted its exact worktree alias: {blocked_federation}"
+            ),
+        )?;
+        require(
+            fs::read(&target_db)? == target_database_before_blocker,
+            "read-only alias federation repaired or changed a sibling database",
+        )?;
+        let main = server.state_for_target(None, Some("main".to_string()))?;
+        require(
+            main.root == primary.canonicalize()? && selected.root != main.root,
+            "interleaved main and worktree selections bled into one target",
+        )?;
+        let source_before = fs::read(worktree_a.join("src").join("lib.rs"))?;
+        let removed = server.atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
+            worktree: "issue-430".to_string(),
+        }));
+        require(
+            removed.contains("status: retired")
+                && removed.contains("git_unchanged: true")
+                && removed.contains("files_unchanged: true"),
+            "unregister did not retire the alias with lifecycle-neutral status",
+        )?;
+        require(
+            target_db.is_file()
+                && worktree_a.join(".git").is_file()
+                && fs::read(worktree_a.join("src").join("lib.rs"))? == source_before,
+            "unregister deleted or modified target-owned Git, source, or atlas state",
+        )?;
+        let git_after = run_fixture_command(StdCommand::new("git").current_dir(&primary).args([
+            "worktree",
+            "list",
+            "--porcelain",
+        ]))?;
+        require(
+            git_after == git_before,
+            "ProjectAtlas worktree operations changed Git lifecycle state",
+        )?;
+        let control = open_atlas_store_read_only_for_project(&control_db, &primary)?;
+        let registrations = control.worktree_registrations(true)?;
+        require(
+            registrations.iter().any(|registration| {
+                registration.alias.as_str() == "issue-430"
+                    && registration.state == WorktreeRegistrationState::Retired
+            }),
+            "retired registration and retained telemetry identity were not durable",
+        )?;
+        require(
+            server
+                .state_for_target(None, Some("issue-430".to_string()))
+                .is_err(),
+            "retired alias remained selectable for source operations",
+        )
+    }
+
+    #[test]
+    fn registered_worktree_init_falls_back_from_incomplete_control_and_preserves_existing_atlas()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let primary = temp.path().join("control");
+        let linked = temp.path().join("external").join("linked");
+        fs::create_dir_all(&primary)?;
+        fs::create_dir_all(
+            linked
+                .parent()
+                .ok_or_else(|| io::Error::other("linked worktree has no parent"))?,
+        )?;
+        run_fixture_command(StdCommand::new("git").current_dir(&primary).arg("init"))?;
+        for (key, value) in [
+            ("user.name", "ProjectAtlas Test"),
+            ("user.email", "projectatlas@example.invalid"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run_fixture_command(
+                StdCommand::new("git")
+                    .current_dir(&primary)
+                    .args(["config", key, value]),
+            )?;
+        }
+        fs::write(primary.join("lib.rs"), "pub fn control() {}\n")?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["add", "."]),
+        )?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["commit", "-m", "fixture"]),
+        )?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["worktree", "add", "-b", "fallback"])
+                .arg(&linked),
+        )?;
+        let git_before = run_fixture_command(StdCommand::new("git").current_dir(&primary).args([
+            "worktree",
+            "list",
+            "--porcelain",
+        ]))?;
+
+        let control_db = primary.join(".projectatlas").join("projectatlas.db");
+        fs::create_dir_all(
+            control_db
+                .parent()
+                .ok_or_else(|| io::Error::other("control DB has no parent"))?,
+        )?;
+        drop(AtlasStore::open_for_project(&control_db, &primary)?);
+        let server = ProjectAtlasMcpServer::new(
+            control_db.clone(),
+            None,
+            "worktree-fallback".to_string(),
+            false,
+        );
+        let repository = server.control_git_repository()?;
+        let canonical_linked = linked.canonicalize()?;
+        let entry = repository
+            .worktrees
+            .iter()
+            .find(|entry| {
+                ProjectAtlasMcpServer::active_worktree_root(entry)
+                    == Some(canonical_linked.as_path())
+            })
+            .ok_or_else(|| io::Error::other("linked worktree was not discovered"))?;
+        let added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
+            worktree: ProjectAtlasMcpServer::worktree_candidate_selector(entry),
+            alias: Some("fallback".to_string()),
+        }));
+        require(
+            added.contains("status: registered"),
+            "fallback fixture registration failed",
+        )?;
+
+        let initialized = server.atlas_init(Parameters(AtlasInitParams {
+            project_path: None,
+            worktree: Some("fallback".to_string()),
+            no_scan: Some(false),
+            force_rescan: Some(false),
+            text_index_max_bytes: None,
+        }));
+        require(
+            initialized.contains("status: fallback")
+                && initialized.contains("fallback_reason:")
+                && initialized.contains("repository graph is unavailable"),
+            &format!(
+                "incomplete control atlas did not produce visible ordinary fallback: {initialized}"
+            ),
+        )?;
+        let target_db = linked.join(".projectatlas").join("projectatlas.db");
+        let target = open_atlas_store_read_only_for_project(&target_db, &linked)?;
+        let identity = target
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("fallback target identity is missing"))?;
+        require(
+            target.index_publication()?.is_some_and(|publication| {
+                publication.state == projectatlas_db::IndexPublicationState::Complete
+            }),
+            "ordinary fallback did not publish a complete target index",
+        )?;
+        drop(target);
+
+        let repeated = server.atlas_init(Parameters(AtlasInitParams {
+            project_path: None,
+            worktree: Some("fallback".to_string()),
+            no_scan: Some(true),
+            force_rescan: Some(false),
+            text_index_max_bytes: None,
+        }));
+        require(
+            repeated.contains("status: existing"),
+            &format!("repeat init did not preserve the valid target atlas: {repeated}"),
+        )?;
+        let preserved = open_atlas_store_read_only_for_project(&target_db, &linked)?;
+        require(
+            preserved.project_instance_id()? == Some(identity),
+            "repeat init replaced the valid target atlas identity",
+        )?;
+        let control = open_atlas_store_read_only_for_project(&control_db, &primary)?;
+        require(
+            control
+                .worktree_registration(&WorktreeAlias::parse("fallback")?)?
+                .project_instance_id
+                == Some(identity),
+            "fallback init did not bind the exact target identity",
+        )?;
+        let git_after = run_fixture_command(StdCommand::new("git").current_dir(&primary).args([
+            "worktree",
+            "list",
+            "--porcelain",
+        ]))?;
+        require(
+            git_after == git_before,
+            "fallback or repeat init changed Git lifecycle state",
+        )
     }
 
     #[test]
@@ -9005,6 +11287,7 @@ mod tests {
 
         let text = server.atlas_init(Parameters(AtlasInitParams {
             project_path: Some(repo_b.to_string_lossy().to_string()),
+            worktree: None,
             no_scan: Some(true),
             force_rescan: Some(false),
             text_index_max_bytes: None,
@@ -9082,6 +11365,7 @@ mod tests {
         let brief = server.build_session_brief(
             AtlasSessionBriefParams {
                 project_path: None,
+                worktree: None,
                 query: Some("startup".to_string()),
                 purpose_task: None,
                 compact: None,
@@ -9131,6 +11415,7 @@ mod tests {
             1,
             7,
             Some(project_path.clone()),
+            None,
         );
 
         require(
@@ -9174,6 +11459,7 @@ mod tests {
             0,
             7,
             Some(project_path),
+            None,
         );
         require(
             relation_recommendations.iter().any(|recommendation| {
@@ -9185,6 +11471,26 @@ mod tests {
                         == Some(&serde_json::Value::String("detailed".to_string()))
             }),
             "relation recommendation did not preserve the ranked file and detailed view",
+        )?;
+
+        let worktree_recommendations = ProjectAtlasMcpServer::indexed_project_recommendations(
+            "startup",
+            None,
+            1,
+            7,
+            None,
+            Some("issue-430".to_string()),
+        );
+        require(
+            worktree_recommendations.iter().all(|recommendation| {
+                recommendation.arguments.get(MCP_BRIEF_ARG_WORKTREE)
+                    == Some(&serde_json::Value::String("issue-430".to_string()))
+                    && recommendation
+                        .arguments
+                        .get(MCP_BRIEF_ARG_PROJECT_PATH)
+                        .is_none()
+            }),
+            "indexed brief recommendations did not preserve the mutually exclusive worktree alias",
         )?;
 
         Ok(())
@@ -9211,6 +11517,7 @@ mod tests {
         let brief = server.build_session_brief(
             AtlasSessionBriefParams {
                 project_path: None,
+                worktree: None,
                 query: Some("hiddenNeedle".to_string()),
                 purpose_task: None,
                 compact: None,
@@ -9239,6 +11546,7 @@ mod tests {
         let navigable = server.build_session_brief(
             AtlasSessionBriefParams {
                 project_path: None,
+                worktree: None,
                 query: Some("owner".to_string()),
                 purpose_task: None,
                 compact: None,
@@ -9310,6 +11618,7 @@ mod tests {
         let folders_text = server.atlas_folders_response(
             AtlasQueryParams {
                 project_path: None,
+                worktree: None,
                 query: Some("navigation".to_string()),
                 limit: Some(10),
             },
@@ -9318,6 +11627,7 @@ mod tests {
         let files_text = server.atlas_files_response(
             AtlasFilesParams {
                 project_path: None,
+                worktree: None,
                 query: Some("navigation".to_string()),
                 folder: None,
                 nearest_project: Some(false),
@@ -9345,6 +11655,7 @@ mod tests {
         let brief = server.build_session_brief(
             AtlasSessionBriefParams {
                 project_path: None,
+                worktree: None,
                 query: Some("navigation".to_string()),
                 purpose_task: None,
                 compact: None,
@@ -9410,6 +11721,7 @@ mod tests {
         let compact = server.build_compact_session_brief(
             AtlasSessionBriefParams {
                 project_path: None,
+                worktree: None,
                 query: Some("navigation_owner".to_string()),
                 purpose_task: None,
                 compact: Some(true),
@@ -9726,6 +12038,7 @@ mod tests {
         let brief = server.build_session_brief(
             AtlasSessionBriefParams {
                 project_path: None,
+                worktree: None,
                 query: Some("startup".to_string()),
                 purpose_task: Some("startup-task".to_string()),
                 compact: None,
@@ -9776,6 +12089,7 @@ mod tests {
         let compact = server.build_compact_session_brief(
             AtlasSessionBriefParams {
                 project_path: None,
+                worktree: None,
                 query: Some("startup".to_string()),
                 purpose_task: Some("startup-task".to_string()),
                 compact: Some(true),
@@ -10109,6 +12423,7 @@ mod tests {
 
         let response = server.atlas_scan(Parameters(AtlasScanParams {
             project_path: Some(repo.to_string_lossy().into_owned()),
+            worktree: None,
             path: None,
             nearest_project: Some(false),
             max_bytes: None,
@@ -10206,6 +12521,7 @@ mod tests {
                 McpTaskOperation::Scan | McpTaskOperation::SymbolsBuild => {
                     let params = AtlasScanParams {
                         project_path: Some(project_path.clone()),
+                        worktree: None,
                         path: None,
                         nearest_project: Some(false),
                         max_bytes: None,
@@ -10223,6 +12539,7 @@ mod tests {
                 McpTaskOperation::WatchOnce => {
                     server.atlas_watch_once(Parameters(AtlasWatchOnceParams {
                         project_path: Some(project_path.clone()),
+                        worktree: None,
                         path: None,
                         nearest_project: Some(false),
                         max_workers: Some(1),
@@ -10266,6 +12583,7 @@ mod tests {
         drop(store);
         let synchronous_symbols = server.atlas_symbols_build(Parameters(AtlasScanParams {
             project_path: Some(project_path.clone()),
+            worktree: None,
             path: None,
             nearest_project: Some(false),
             max_bytes: None,
@@ -10286,6 +12604,7 @@ mod tests {
         )?;
         let synchronous_watch = server.atlas_watch_once(Parameters(AtlasWatchOnceParams {
             project_path: Some(project_path.clone()),
+            worktree: None,
             path: None,
             nearest_project: Some(false),
             max_workers: Some(1),
@@ -10345,6 +12664,7 @@ mod tests {
                 root: repo,
                 db_path,
                 config_path: None,
+                worktree: None,
             };
             let first = server.with_fresh_store(&state, |store, _stamp| Ok(store.overview()?))?;
             require(
@@ -10537,6 +12857,7 @@ mod tests {
             root: canonical_project_root(&repo)?,
             db_path: repo.join(".projectatlas").join("projectatlas.db"),
             config_path: None,
+            worktree: None,
         };
 
         let inside_key =

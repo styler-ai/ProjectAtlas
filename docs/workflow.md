@@ -110,7 +110,7 @@ Commit identity is provenance, not a general test invalidation key. After a comm
 
 ## Documentation site
 
-- `04-Docs` builds Rust API docs plus the generated Language & Ecosystem Support page from the same catalog identity as `docs/language-support.md`, then deploys `target/doc` to GitHub Pages.
+- `04-Docs` builds the public landing page with agent-integration, worktree-continuity, and architecture entry points, Rust API docs, plus the generated Language & Ecosystem Support page from the same catalog identity as `docs/language-support.md`, then deploys `target/doc` to GitHub Pages.
 - GitHub Pages should be configured for GitHub Actions deployment.
 
 ## Branching

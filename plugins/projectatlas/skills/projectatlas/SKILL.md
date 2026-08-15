@@ -1,6 +1,6 @@
 ---
 name: projectatlas
-description: Use ProjectAtlas as the atlas-first orientation layer before broad source reads, with MCP-first task startup, ranked navigation, exact evidence, purpose curation, health, lint, and token reporting.
+description: Use ProjectAtlas as the atlas-first orientation layer before broad source reads, with MCP-first task startup, short-alias worktree registration and routing, safe targeted initialization, ranked navigation, exact or federated graph evidence, purpose curation, health, lint, and repository-wide token reporting.
 ---
 
 # ProjectAtlas
@@ -15,8 +15,8 @@ ProjectAtlas is an agent orientation layer. It combines reviewed folder/file res
 
 ## Task Startup
 
-1. On first use in each distinct project root, call `atlas_init` when exposed or run `projectatlas init` from that root. If a read-only call returns `init_required`, execute its exact `atlas_init` next call for the returned `project_path`; do not choose a database filename or reuse another root's state. Every project root owns its own `.projectatlas/projectatlas.db`, config, generated host configs, and initial index. Do not treat initialization of another repository as setup for the current one, and do not substitute a scan, symbol build, or hand-written MCP config for init.
-2. Bind the intended project. In shared or concurrent MCP hosts, pass `project_path` on every call; use `atlas_set_project_path` only as a single-client process default.
+1. On first use in each distinct project root, call `atlas_init` when exposed or run `projectatlas init` from that root. If a read-only call returns `init_required`, execute its exact `atlas_init` next call using the returned `worktree` alias or `project_path`; do not choose a database filename or reuse another root's writable state. Every project root owns its own `.projectatlas/projectatlas.db`, config, generated host configs, and exact index. Do not substitute a scan, symbol build, or hand-written MCP config for init.
+2. Bind the intended control project once. For a registered worktree, keep the agent in the control checkout and pass `worktree` on each root-scoped call. For unrelated or unregistered roots, pass `project_path`; use `atlas_set_project_path` only as a single-client process default. Never send both selectors.
 3. Refresh only when needed. Prefer `atlas_watch_once` for ordinary changed-file updates. Use `atlas_scan` only when the index is absent or typed ProjectAtlas guidance requires a full refresh; never scan merely because a session started.
 4. Call `atlas_session_brief` once at task-oriented startup with `query`, `project_path` when needed, and `compact: true`. For a focused code question, start with `file_limit: 3`, `folder_limit: 3`, `blocker_limit: 1`, and `purpose_limit: 1`; widen only when no actionable candidate is returned. Follow its typed next call directly; do not restart the brief or repeat folder/file discovery for a later caller, source, or public-boundary check.
    When the task has a content role, carry `content_selection: "source"`, `"documentation"`, or `"both"` on the returned files, search, summary, slice, symbol, and detailed-relation calls that expose it. Use `source` for ordinary implementation work, `documentation` for specification or guidance discovery, and `both` only when the task crosses the two. Omit the field only when the legacy candidate universe, including configuration/data and other text, is intentionally required.
@@ -27,6 +27,20 @@ ProjectAtlas is an agent orientation layer. It combines reviewed folder/file res
 9. Fall back to `atlas_overview` only when the session-brief MCP tool is unavailable, the brief has no actionable candidate, or broader repository structure is itself the task. Then use `atlas_folders` before `atlas_files`.
 
 `connections_truncated` describes the compact sample. It means more relationships exist, not that the selected next call is wrong. Use the returned detailed-relations call only when those additional relationships matter.
+
+## Worktree MCP Workflow
+
+Treat `main` as the reserved alias for the explicitly selected control atlas, not as a branch or directory name. The control checkout may itself be linked, live under `.worktrees`, or live anywhere else on the filesystem. ProjectAtlas discovers existing Git structure but never creates, switches, moves, prunes, or deletes a Git worktree or branch.
+
+1. Call `atlas_worktree_list(include_retired: false)` from the control MCP process. Select the returned stable `selector`; do not reconstruct a full path or guess from a colliding directory or branch name.
+2. Register an existing checkout with `atlas_worktree_add(worktree: "<selector>", alias: "issue-430")`. The alias is optional only when the target directory name is already a valid unique alias. Registration changes only the control atlas catalog; it does not create the target `.projectatlas` directory or mutate Git or source files.
+3. Initialize an absent target with `atlas_init(worktree: "issue-430")`. A complete compatible control atlas seeds a private candidate, removes control identity, telemetry, task, and runtime state, reconciles the candidate against the target branch and dirty files, and publishes it atomically. A valid existing target database is preserved. An unsuitable baseline produces an explicit ordinary-init fallback; cancellation or integrity failure leaves the destination absent or unchanged.
+4. Route ordinary calls without changing directory or mutable process selection: `atlas_session_brief(worktree: "issue-430", compact: true)`, `atlas_watch_once(worktree: "issue-430")`, `atlas_file_summary(worktree: "issue-430", file: "src/lib.rs", compact: true)`, or a purpose/health call with the same alias. Each admitted call captures its exact root, database, project identity, registration identity, and alias, so interleaved `main` and worktree calls cannot retarget one another.
+5. For a cross-worktree graph question, use one detailed or analysis `atlas_symbol_relations` call with `worktrees: ["main", "issue-430"]`. The first alias is primary. ProjectAtlas opens two to eight exact databases read-only, labels every participant/result/blocker/continuation, and never persists or merges sibling graphs. Do not also send legacy `roots`.
+6. Request repository totals with `atlas_token_report(worktree: "main")` or run `projectatlas token` / `projectatlas token --view tui` from the control checkout. The existing TUI layout combines native-control plus active and retired registered-worktree aggregates. `atlas_token_report(worktree: "issue-430")` stays exact to that target's local detail. Alias-routed MCP usage is recorded once in control; independent local usage synchronizes monotonically without copying raw per-session events.
+7. Retire only the ProjectAtlas registration with `atlas_worktree_remove(worktree: "issue-430")`. ProjectAtlas final-syncs available local telemetry, retains the accepted aggregate in control, and leaves the checkout, Git registration, branch, files, `.projectatlas`, and SQLite database untouched.
+
+Use the returned typed recovery state rather than switching to paths: `ambiguous` returns bounded selectors; `init_required` returns the exact alias init call; `refresh_required` names the stale alias; invalid or mismatched Git evidence fails closed; `worktree_required` asks for an exact active checkout when a bare/common manager cannot select one. `project_path` remains the compatibility route for unregistered and older workflows, but alias routing is the normal concurrent-agent path.
 
 ## Classified Documentation Navigation
 
@@ -53,6 +67,9 @@ Never reset or replace an incompatible database as an orientation shortcut. Foll
 | Task | Primary route | Follow-up |
 | --- | --- | --- |
 | Startup, project state, ranked candidates | `atlas_session_brief` with `compact: true` | Execute the returned summary, search, relations, slice, health, or scan request |
+| Existing Git worktree inventory and registration | `atlas_worktree_list`, then `atlas_worktree_add` with its stable selector | Use the short alias on all subsequent root-scoped calls |
+| Registered worktree first use | `atlas_init` with `worktree` | Accept safe hydration or the explicit ordinary-init fallback; never copy a live DB manually |
+| Registered worktree retirement | `atlas_worktree_remove` with `worktree` | Retained token totals remain in control; Git and target files remain untouched |
 | First use in a project | `atlas_init` | Honor the returned initial-index and purpose-curation handoff |
 | Changed files since the last verified index | `atlas_watch_once` | Continue only from the new complete generation |
 | Missing index or typed full-refresh requirement | `atlas_scan` | Do not use for routine session startup |
@@ -60,7 +77,7 @@ Never reset or replace an incompatible database as an orientation shortcut. Foll
 | Broad work-area selection | `atlas_overview`, `atlas_folders`, `atlas_files` | Summary for the selected file |
 | One-file intelligence or direct impact already shown by crisp connections | `atlas_file_summary` with `compact: true` and task-appropriate `content_selection` | Follow the selected connection to another compact summary or exact slice; use relations only when its stronger trust/path facts are material |
 | Declaration lookup | `atlas_symbols` | Slice the returned exact selector |
-| Inbound/outbound relations or bounded graph projection | `atlas_symbol_relations` with `view: "detailed"`, `compact: true`, and task-appropriate `content_selection` | Request `relation: "documents"` explicitly for documentation bridges; submit a continuation or row `next_call` unchanged |
+| Inbound/outbound relations or bounded graph projection | `atlas_symbol_relations` with `view: "detailed"`, `compact: true`, and task-appropriate `content_selection` | Request `relation: "documents"` explicitly for documentation bridges; use `worktrees` only for an explicit labelled read-only federation; submit a continuation or row `next_call` unchanged |
 | Public reachability | Trusted owning-file export or bounded search for the module/re-export declaration | Slice the exact declaration when source proof is required; a reviewed purpose and nested `pub` declaration are selection evidence, not exposure proof |
 | Architecture, impact, dead-code, cycle, or static path review | `atlas_symbol_relations` with its closed analysis view/mode | Treat candidate/inconclusive output as review evidence, then inspect returned source selectors |
 | Indexed text discovery | `atlas_search` with a bounded `file_pattern` and task-appropriate `content_selection` when possible | Slice the returned range; narrow before paging when truncated |
@@ -106,11 +123,11 @@ For a single known wrong or genuinely repurposed accepted purpose, inspect enoug
 ## Root, Ignore, and Isolation Rules
 
 - Run from the project root; the normal database is `<root>/.projectatlas/projectatlas.db`.
-- Every ordinary checkout and linked worktree owns that private ignored writable database. Never substitute a sibling checkout's database or make the common/bare manager a classified-navigation root.
-- One MCP server may serve several indexed roots. Per-call `project_path` is the concurrency-safe choice.
+- Every ordinary checkout and linked worktree owns a private ignored writable database. Hydration copies reusable baseline state only into an unpublished candidate; after activation, every checkout remains an independent graph, purpose, source, task, and generation authority.
+- One MCP server may serve several registered worktrees from the control checkout. Per-call `worktree` is the concurrency-safe normal route; per-call `project_path` remains available for an exact unregistered root.
 - Use `atlas_root` with `control_root` (or `projectatlas root status <path>`) for bounded mutation-free structural worktree status. A common manager with one active worktree may select it; zero or several active worktrees require an exact worktree path.
-- ProjectAtlas reports active, missing, and invalid structural registrations but never creates, moves, prunes, retires, removes, or switches Git worktrees. Git remains lifecycle authority.
-- The token TUI remains scoped to the selected exact-root atlas; worktree inventory is an agent-facing root-status contract, not a manager dashboard.
+- ProjectAtlas reports active, missing, and invalid Git structure and manages only its own alias registrations. It never creates, moves, prunes, removes, or switches Git worktrees. Git remains lifecycle authority.
+- The token TUI opened from the control checkout shows durable repository-wide totals across control plus active and retired registrations without adding a worktree selector UI. An exact worktree report remains origin-scoped.
 - Never route a path outside the selected root unless that addressed root is already indexed and explicitly selected.
 - If the selected DB is incompatible or belongs to another project, do not reset, migrate, attach, merge, substitute, or fall back silently. Use typed recovery guidance or an explicit isolated DB.
 - `.gitignore` is dynamically authoritative. ProjectAtlas manual ignores are a stricter atlas-only layer applied afterward.
@@ -121,7 +138,7 @@ For a single known wrong or genuinely repurposed accepted purpose, inspect enoug
 
 ## Setup and Runtime Repair
 
-For every new project root, run `atlas_init` when exposed or `projectatlas init` from that root. It creates or verifies that project's local config, DB, host configs, and initial index. Initialization does not carry across roots. Honor any returned purpose handoff.
+For an unregistered project root, run `atlas_init` when exposed or `projectatlas init` from that root. For a registered worktree, prefer `atlas_init(worktree: "<alias>")` from the control process so a valid control baseline can be reused safely. Both paths create or verify the target's local config, database, host configs, and exact index. Honor any returned hydration/fallback and purpose handoff.
 
 After installing ProjectAtlas, read and follow this shipped skill before broad source reads. If the harness does not load plugin skills automatically, preserve the repository's existing guidance and add one durable pointer to the nearest harness instruction file: `AGENTS.md` for Codex, `CLAUDE.md` for Claude Code, or the host's equivalent. The pointer should tell future agents to use the installed/version-matched ProjectAtlas skill and MCP tools, run init only when project-local state is absent, and follow the skill's incremental freshness policy. Do not replace unrelated project instructions or paste a duplicate copy of the full skill.
 
@@ -144,7 +161,7 @@ Prefer installer-generated absolute host configs:
 
 After plugin/runtime updates, verify `codex plugin list --marketplace projectatlas --json` and `codex mcp get projectatlas` (or `codex mcp list`). Rerun the installer if the official plugin cache, skill, MCP registry, runtime version, DB/config binding, or downstream release pin is stale. Use `PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1` or `PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1` only in intentionally managed environments. A parent host may need restart; absolute generated configs remain authoritative.
 
-For a stale official plugin snapshot, run `codex plugin marketplace upgrade projectatlas --json`, `codex plugin remove projectatlas --marketplace projectatlas`, `codex plugin add projectatlas --marketplace projectatlas`, then `codex plugin list --marketplace projectatlas --available --json`. If that source is pinned to an older release tag, replace only the dedicated `styler-ai/ProjectAtlas` source after confirming it has no unrelated consumers: `codex plugin marketplace remove projectatlas`, then `codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.4.4`.
+For a stale official plugin snapshot, run `codex plugin marketplace upgrade projectatlas --json`, `codex plugin remove projectatlas --marketplace projectatlas`, `codex plugin add projectatlas --marketplace projectatlas`, then `codex plugin list --marketplace projectatlas --available --json`. If that source is pinned to an older release tag, replace only the dedicated `styler-ai/ProjectAtlas` source after confirming it has no unrelated consumers: `codex plugin marketplace remove projectatlas`, then `codex plugin marketplace add styler-ai/ProjectAtlas --ref <matching-release-tag>`.
 
 MCP stdio uses newline-delimited JSON-RPC, not `Content-Length` framing.
 
@@ -152,7 +169,7 @@ MCP stdio uses newline-delimited JSON-RPC, not `Content-Length` framing.
 
 Use MCP for normal ProjectAtlas command families. Use CLI for installer/release/CI work, MCP startup/debugging, continuous watch, terminal TUI, or when a tool is unavailable.
 
-- Select/setup: `atlas_set_project_path`, `atlas_init`
+- Select/setup: `atlas_set_project_path`, `atlas_init`, `atlas_worktree_list`, `atlas_worktree_add`, `atlas_worktree_remove`
 - Refresh: `atlas_scan`, `atlas_watch_once`, `atlas_symbols_build`
 - Navigate: `atlas_session_brief`, `atlas_overview`, `atlas_folders`, `atlas_files`, `atlas_next`, `atlas_file_summary`, `atlas_outline`, `atlas_symbols`, `atlas_symbol_relations`, `atlas_search`, `atlas_slice`
 - Maintain: `atlas_health`, `atlas_health_resolve`, `atlas_purpose_queue`, `atlas_purpose_set`, `atlas_purpose_review`, `atlas_lint`
@@ -184,7 +201,7 @@ Read-only review or CI smoke must set `PROJECTATLAS_NO_TELEMETRY=1`.
 
 ## Token Reporting
 
-Use `atlas_token_report` or `projectatlas token` when asked. Treat `tokens_avoided` as the compatibility alias for the primary `average_tokens_avoided`: measured compression plus unchanged non-folder savings plus 50% of the deduped aggregate folder-navigation baseline, minus the complete Atlas payload. `maximum_tokens_avoided` retains the all-files folder-scope calculation. Inspect `average_policy`; 50% is a fixed policy estimate, not a benchmark-derived Codex average or provider-billing value. Default accounting is offline `ceil(chars_or_bytes / 4)` heuristic. Distinguish observed summary/slice replacement from modeled navigation narrowing; inspect accounting layer, baseline, confidence, provider/model/backend, and accuracy labels. Search-modeled file reads avoided are weaker than observed summary/slice replacements. Tokenizer calibration is explicit; normal reporting never calls network APIs.
+Use `atlas_token_report` or `projectatlas token` when asked. Control/main scope combines native control events with monotonically synchronized aggregates for active and retired registrations; an explicit worktree alias remains exact to that origin and does not present sibling detail as local. Treat `tokens_avoided` as the compatibility alias for the primary `average_tokens_avoided`: measured compression plus unchanged non-folder savings plus 50% of the deduped aggregate folder-navigation baseline, minus the complete Atlas payload. `maximum_tokens_avoided` retains the all-files folder-scope calculation. Inspect `average_policy`; 50% is a fixed policy estimate, not a benchmark-derived Codex average or provider-billing value. Default accounting is offline `ceil(chars_or_bytes / 4)` heuristic. Distinguish observed summary/slice replacement from modeled navigation narrowing; inspect accounting layer, baseline, confidence, provider/model/backend, accuracy, origin synchronization, and detail-availability labels. Search-modeled file reads avoided are weaker than observed summary/slice replacements. Tokenizer calibration is explicit; normal reporting never calls network APIs.
 
 ## Repository Gates
 

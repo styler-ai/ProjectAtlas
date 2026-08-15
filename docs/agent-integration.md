@@ -12,7 +12,7 @@ ProjectAtlas is designed to be read at agent startup so you can:
 
 ProjectAtlas is an atlas of the entire project, not a shortcut to full-file reads:
 
-1. Bind the intended project and refresh only when the index may be stale.
+1. Bind the intended control project, then use a registered `worktree` alias or exact `project_path` on each root-scoped call; refresh only when that selected index may be stale.
 2. Call `atlas_session_brief` once with the task and compact output.
 3. Follow its returned summary, search, relation, health, or slice request without repeating discovery.
 4. Inspect the smallest exact source slice only after the target is known.
@@ -53,13 +53,13 @@ result text is TOON by default, so agents get compact structured payloads withou
 
 ```
 ## Startup
-0. If ProjectAtlas MCP tools are available, use `atlas_*` tools for normal ProjectAtlas command families before shelling out. Expected parity tools include `atlas_init`, `atlas_config`, `atlas_root`/`atlas_root_set`, `atlas_ignore_list`/`atlas_ignore_init_gitignore`/`atlas_ignore_add`/`atlas_ignore_remove`, `atlas_lint`, `atlas_runtime_info`, `atlas_mcp_config`, `atlas_session_brief`, `atlas_task_status`/`atlas_task_cancel`, and `atlas_map`, plus the existing scan, overview, folder, file, summary, search, slice, health, purpose, token, settings, and watcher-status tools. Use the CLI for plugin install/update/release/CI workflows, MCP server startup/debugging, continuous `watch`, terminal TUI views, or when an MCP tool is unavailable.
+0. If ProjectAtlas MCP tools are available, use `atlas_*` tools for normal ProjectAtlas command families before shelling out. Expected parity tools include `atlas_init`, `atlas_worktree_list`/`atlas_worktree_add`/`atlas_worktree_remove`, `atlas_config`, `atlas_root`/`atlas_root_set`, `atlas_ignore_list`/`atlas_ignore_init_gitignore`/`atlas_ignore_add`/`atlas_ignore_remove`, `atlas_lint`, `atlas_runtime_info`, `atlas_mcp_config`, `atlas_session_brief`, `atlas_task_status`/`atlas_task_cancel`, and `atlas_map`, plus the existing scan, overview, folder, file, summary, search, slice, health, purpose, token, settings, and watcher-status tools. Use the CLI for plugin install/update/release/CI workflows, MCP server startup/debugging, continuous `watch`, terminal TUI views, or when an MCP tool is unavailable.
 0.1. When a GitHub issue has an OpenSpec change, use the concise v0.3.26 #305 shape: `Why`, `What Changes`, `Capabilities`, `Release Scope`, `Non-Goals`, `Pre-Mortem` with likely failures and mitigation checkboxes, then one `OpenSpec Tasks` or `OpenSpec Task Checklist` section. Map each mitigation checkbox to owned task IDs with `(OpenSpec tasks: 1.2, 3.4)` and check it exactly when all referenced tasks are checked. Mirror `openspec/changes/<id>/tasks.md` exactly, keep `openspec/issue-map.json` current, and run `.github/scripts/issue-checklists.py` before check-in, status updates, closure, or release. Do not add issue-level commit/SHA evidence, task receipts, rendered evidence comments, hosted links per checkbox, or per-task test IDs.
-1. Establish the project root. Run ProjectAtlas from that root so `.projectatlas/projectatlas.db` belongs to this project only.
-2. For first-run setup, run `atlas_init` or `projectatlas init`; it creates the local DB/config, runs the initial scan/index by default, writes generated MCP configs, and returns a purpose handoff.
+1. Establish the control project root. Every checkout keeps its own `.projectatlas/projectatlas.db`; a registered worktree is addressed with its short alias without changing the agent's current directory.
+2. For first-run setup, run `atlas_init` or `projectatlas init`. For an absent registered worktree, run `atlas_init` with its `worktree` alias so ProjectAtlas can hydrate a private candidate from a valid control atlas before exact reconciliation. Both routes create the target DB/config, run the initial index by default, write generated MCP configs, and return purpose and hydration/fallback state.
 2.1. When init returns an actionable purpose handoff and bounded isolated subagent execution is available, delegate that exact `low`-scope batch to a purpose curator at the lowest reliable reasoning and cost tier the host supports while the main task continues; otherwise process it in the main agent. Apply with the returned tokens through ProjectAtlas purpose APIs only.
 3. Refresh with `atlas_watch_once`, `atlas_scan`, `projectatlas watch --once`, or `projectatlas scan` only when the SQLite index may be stale after later edits.
-4. For task-directed MCP work, call `atlas_session_brief` once with `query`, `project_path` when needed, and `compact: true`; follow its typed next call directly.
+4. For task-directed MCP work, call `atlas_session_brief` once with `query`, the registered `worktree` alias or legacy `project_path` when needed, and `compact: true`; follow its typed next call directly. Never send both selectors.
 5. Use returned compact summaries and crisp connections for ordinary direct callers or dependencies. Use detailed relations only when resolution, completeness, ambiguity, omitted connections, or exact occurrences matter.
 6. Copy returned selectors and continuations into `atlas_slice`, `atlas_symbol_relations`, or the recommended next tool instead of guessing or repeating discovery.
 7. Fall back to `atlas_overview`, then `atlas_folders` and `atlas_files`, only when the brief is unavailable, has no actionable candidate, or broader repository structure is itself the task. The manual CLI equivalents remain `projectatlas overview`, `projectatlas folders <query>`, and `projectatlas files <query> --folder <path>`.
@@ -76,6 +76,31 @@ surfaces, not from a checked-in static map snapshot. Purpose review batch files 
 `projectatlas purpose review`; SQLite remains authoritative after the ProjectAtlas command applies them.
 ```
 
+## Registered worktree routing
+
+The MCP process's explicitly selected root is the control atlas and receives the reserved alias `main`. It may be an ordinary or linked checkout anywhere on the filesystem; `main` never means a branch name or folder convention. Git remains responsible for creating, switching, moving, pruning, and deleting worktrees.
+
+An agent can remain in the control checkout for the full workflow:
+
+```text
+atlas_worktree_list(include_retired: false)
+atlas_worktree_add(worktree: "<returned-stable-selector>", alias: "issue-430")
+atlas_init(worktree: "issue-430")
+atlas_session_brief(worktree: "issue-430", query: "target behavior", compact: true)
+atlas_watch_once(worktree: "issue-430")
+atlas_worktree_remove(worktree: "issue-430")
+```
+
+Registration changes only the bounded catalog in the control database. Target init preserves an existing valid database; otherwise it uses a compatible complete control atlas as a safe reusable baseline, clears non-transferable identity/telemetry/task/runtime state, reconciles the target branch and dirty bytes, validates the candidate, and activates it atomically. If the baseline is unsuitable, ProjectAtlas reports a visible ordinary-init fallback. It never manually copies a live SQLite file or shares one writable graph.
+
+Use `worktree: "<alias>"` on normal root-scoped tools instead of switching directories or mutable process state. `project_path` remains an exact compatibility route for unregistered roots, and the two selectors are mutually exclusive. Each request captures the exact root, database, project identity, registration identity, and alias before query or background work starts.
+
+For an explicit cross-worktree graph question, pass two to eight registered aliases in order through `atlas_symbol_relations(worktrees: ["main", "issue-430"], ...)`. The first alias is primary; every participant, result, blocker, coverage row, and continuation is labelled. Federation is bounded, read-only, and call-local.
+
+`atlas_token_report(worktree: "main")`, `projectatlas token`, and `projectatlas token --view tui` from the control checkout combine native-control usage with active and retired registered-worktree aggregates without changing the TUI layout. An exact worktree report remains local. Alias-routed MCP events commit once in control; independent local aggregates synchronize monotonically. `atlas_worktree_remove` final-syncs available totals, retires only the alias registration, retains its accepted aggregate, and leaves Git, source, `.projectatlas`, and SQLite files untouched.
+
+Follow typed recovery: choose one returned selector after `ambiguous`; run the returned alias-preserving init after `init_required`; refresh only the named target after `refresh_required`; select an exact active checkout after `worktree_required`; and never reset, substitute, or silently rebuild an incompatible database. See [Worktree atlas continuity](worktree-lifecycle.md) for ownership and sequence diagrams.
+
 ## MCP Server
 
 Prefer the `projectatlas init` or installer-generated project-local MCP config at `.projectatlas/projectatlas.mcp.json`
@@ -90,10 +115,11 @@ also resolves path-less root-sensitive tools from config, indexed DB metadata, o
 `.projectatlas/projectatlas.db` location so clients that ignore `cwd` still use the intended project
 root.
 
-One MCP server can serve multiple repositories. Use `atlas_set_project_path` to change the active
-process default for later calls in a single-client stdio session, or pass per-call `project_path`
-on normal `atlas_*` tools when a host knows the workspace root and needs request-level or shared
-server isolation. Do not use the active default as a concurrency boundary. Root-level compatibility arguments
+One MCP server can serve the selected control checkout, its registered worktrees, and unrelated
+indexed repositories. Prefer per-call `worktree` for a registered checkout and use `main` for the
+control atlas. Use `atlas_set_project_path` to change the active process default only in a
+single-client stdio session, or pass per-call `project_path` for an exact unregistered root. Never
+send both selectors, and do not use the active default as a concurrency boundary. Root-level compatibility arguments
 such as `atlas_scan.path` and `atlas_watch_once.path` are selected-root assertions first. If they
 resolve outside the active project and the addressed root already has
 `.projectatlas/projectatlas.db`, ProjectAtlas may route that call to the addressed indexed project.
@@ -316,19 +342,20 @@ and the expected release `version` when a plugin manifest or `PROJECTATLAS_VERSI
 
 Prefer MCP tools when the harness exposes them. Use CLI fallbacks only when the matching MCP tool is unavailable or the command is a reviewed exception.
 
-- `atlas_set_project_path` or per-call `project_path`: select the repository when one MCP server may serve multiple projects; prefer per-call `project_path` for shared or concurrent hosts.
+- `atlas_worktree_list`, `atlas_worktree_add`, and `atlas_worktree_remove`: list existing structural worktrees, register one stable selector under a short alias, or final-sync and retire only that ProjectAtlas registration. They never manage Git lifecycle.
+- Per-call `worktree`: select `main` or one registered worktree for normal concurrent calls without changing directory or process state. `atlas_set_project_path` and per-call `project_path` remain compatibility routes for an exact unregistered repository.
 - `atlas_watch_once` or `atlas_scan`: refresh only when the selected index may be stale.
 - `atlas_session_brief`: call once with the task and compact output, then follow its returned summary, search, relation, health, or slice request directly.
 - `atlas_overview`, `atlas_folders`, and `atlas_files`: fallback when the brief is unavailable, returns no actionable candidate, or broad repository structure is itself the task.
 - `atlas_file_summary`: read structured file facts and purpose state before opening source.
 - `atlas_outline`: read compressed line-level context for a selected file.
 - `atlas_symbols`: inspect functions/classes/methods/packages/dependencies.
-- `atlas_symbol_relations`: inspect imports, calls, dependencies, and containment.
+- `atlas_symbol_relations`: inspect imports, calls, dependencies, and containment; pass an ordered `worktrees` list only for an explicit labelled read-only federation.
 - `atlas_search`: search indexed files with filters and pagination.
 - `atlas_slice`: fetch exact line or symbol source only after selection.
 - `atlas_health`: find cleanup/refactor/DRY structure issues. Use `limit`, `start_index`, `category`, `severity`, `path_prefix`, `summary_only`, or `source_only` for large health surfaces.
 - `atlas_watch_once`: bounded refresh after local file changes when no continuous watcher is running.
-- `atlas_token_report`: report estimated token savings; optionally pass one repository-relative `benchmark_results` artifact for validated publication evidence.
+- `atlas_token_report`: report estimated token savings; `main` scope combines active and retired registered-worktree aggregates, while an exact alias remains local. Optionally pass one repository-relative `benchmark_results` artifact for validated publication evidence.
 - `atlas_settings` and `atlas_watch_status`: diagnose runtime/index/cache state.
 - `atlas_reset_index`: preview or clear local SQLite/cache files when the index is corrupt or intentionally being rebuilt.
 - `atlas_strip_legacy_purpose`: remove migrated `.purpose` files when explicitly requested.
@@ -354,8 +381,11 @@ This preserves normal atlas reads while preventing usage telemetry writes to `.p
 
 | Situation | Preferred MCP tool | CLI fallback |
 | --- | --- | --- |
-| One MCP server may serve another repository | `atlas_set_project_path` or per-call `project_path` | `projectatlas --db <repo>/.projectatlas/projectatlas.db ...` |
-| First-time ProjectAtlas setup | `atlas_init` | `projectatlas init` |
+| List and register an existing Git worktree | `atlas_worktree_list`, then `atlas_worktree_add` with its stable selector and a short alias | No CLI lifecycle equivalent; Git creates/manages the worktree and MCP registers only ProjectAtlas state |
+| Route a registered worktree from the control checkout | Per-call `worktree` alias; use `main` for control | Run the CLI from the exact checkout when MCP is unavailable |
+| Retire ProjectAtlas routing while retaining totals | `atlas_worktree_remove` with the alias | Preserve target files and use MCP for the catalog mutation |
+| One MCP server may serve an unregistered repository | `atlas_set_project_path` or per-call `project_path` | `projectatlas --db <repo>/.projectatlas/projectatlas.db ...` |
+| First-time ProjectAtlas setup | `atlas_init`; pass `worktree` for a registered target | `projectatlas init` from an unregistered exact root |
 | Runtime identity and capabilities | `atlas_runtime_info` | `projectatlas --format json runtime-info` |
 | Root diagnostics or binding | `atlas_root` with `verify` when needed, `atlas_root_set` | `projectatlas root show`, `projectatlas root verify`, `projectatlas root set <path>` |
 | Start a non-trivial repo task | Refresh only if stale, then call `atlas_session_brief` once with `compact: true` and follow its returned call | Use the manual overview/folders/files funnel when session brief is unavailable |
@@ -367,7 +397,7 @@ This preserves normal atlas reads while preventing usage telemetry writes to `.p
 | Manage manual ProjectAtlas ignores | `atlas_ignore_list`, `atlas_ignore_init_gitignore`, `atlas_ignore_add`, `atlas_ignore_remove` | `projectatlas ignore list`, `projectatlas ignore init-gitignore`, `projectatlas ignore add ...`, `projectatlas ignore remove ...` |
 | Need compressed file context | `atlas_outline` | `projectatlas outline <file>` |
 | Need functions/classes/methods/packages | `atlas_symbols` | `projectatlas symbols list --file <file>` |
-| Need imports/calls/dependencies/containment | `atlas_symbol_relations` | `projectatlas symbols relations --file <file>` |
+| Need imports/calls/dependencies/containment | `atlas_symbol_relations`; add `worktrees` for explicit labelled federation | `projectatlas symbols relations --file <file>` |
 | Need filtered text matches | `atlas_search` | `projectatlas search <pattern> --file-pattern <glob>` or `projectatlas search <pattern> --fuzzy --file-pattern <glob>` |
 | Need exact source | `atlas_slice` | `projectatlas slice ...` or `projectatlas symbols slice ... --symbol-parent <parent>` |
 | Files changed locally | `atlas_watch_once` | `projectatlas watch --once` |
@@ -376,7 +406,8 @@ This preserves normal atlas reads while preventing usage telemetry writes to `.p
 | Lint structure and purpose state | `atlas_lint` | `projectatlas lint --report-untracked --purpose-level low` |
 | Curating missing or generated purposes | `atlas_purpose_queue`, then `atlas_purpose_set` or `atlas_purpose_review` | `projectatlas purpose queue --limit <n>`, then `projectatlas purpose set ...` or `projectatlas purpose review --from-file <json> --apply` |
 | Intentional health conflict | `atlas_health_resolve` | `projectatlas health resolve ... --rationale <why>` |
-| User asks for saved tokens | `atlas_token_report` | `projectatlas token` |
+| User asks for repository-wide saved tokens | `atlas_token_report` with `worktree: "main"` | `projectatlas token` from the control checkout |
+| User asks for one worktree's exact local detail | `atlas_token_report` with that `worktree` alias | `projectatlas token` from the exact worktree |
 | Compare the controlled navigation benchmark with live token context | `atlas_token_report` with repository-relative `benchmark_results` | `projectatlas token --benchmark-results <path>` |
 | Human asks for a terminal token dashboard | `atlas_token_report` first for agent state | `projectatlas token --view tui` |
 | Runtime/index diagnostics | `atlas_settings`, `atlas_watch_status`, `atlas_runtime_info` | `projectatlas settings`, `projectatlas watch-status`, `projectatlas runtime-info` |
@@ -408,6 +439,8 @@ The default token report is a fast offline heuristic, not provider billing telem
 ProjectAtlas payload text with `ceil(chars / 4)` and file-size baselines with `ceil(bytes / 4)`. Reports expose
 bucket, baseline kind, confidence, accounting layer, provider, model, tokenizer backend, and accuracy labels so agents can separate
 observed full-file compression from modeled navigation savings. Use `tokens_avoided` or `average_tokens_avoided` for the primary value: measured compression plus unchanged non-folder savings plus `floor(deduped aggregate directory-walk baseline / 2)`, minus the complete Atlas payload. `maximum_tokens_avoided` uses the same inputs but retains the full all-files directory-walk baseline. `average_policy` identifies this as a fixed 50% policy estimate, not a benchmark, provider counter, or measured Codex average. `estimated_saved` remains the legacy gross compatibility value. Local tokenizer calibration is explicit with `projectatlas token --tokenizer o200k_base` or `projectatlas token --tokenizer cl100k_base`; normal orientation and `atlas_token_report` must stay local and fast.
+
+In a registered-worktree setup, control/main scope reports repository-wide totals: native control events, alias-routed MCP events recorded once with their worktree origin, and monotonically synchronized local aggregates from active and retired registrations. Hydration clears telemetry so a copied baseline cannot double count main history. Synchronization copies no raw per-session query/path detail and a stale retry cannot decrease or duplicate the accepted total. An exact worktree report stays local and labels the selected alias; the existing TUI receives the combined control overview without a new selector screen or layout change.
 
 To attach the controlled v0.4 navigation benchmark to the existing overview,
 pass its repository-relative path:

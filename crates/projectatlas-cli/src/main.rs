@@ -80,8 +80,8 @@ use runtime::{
     reset_index_files, resolved_mcp_config_path, review_purposes, run_init_bootstrap,
     run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
     run_symbol_build_pipeline_controlled, run_watch_loop, standalone_index_work_control,
-    strip_legacy_purpose, validate_purpose_review_admission, validated_indexed_file_key,
-    watcher_status_report,
+    strip_legacy_purpose, synchronize_registered_worktree_usage, validate_purpose_review_admission,
+    validated_indexed_file_key, watcher_status_report,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -2154,6 +2154,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                         &selected_root,
                         cli.config.as_deref(),
                         roots,
+                        None,
                         control,
                     )?)
                 } else {
@@ -2774,6 +2775,9 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             benchmark_results,
             theme,
         } => {
+            if session.is_none() {
+                synchronize_registered_worktree_usage(&cli.db, &cli.project_root()?)?;
+            }
             let store = open_index_for_current_read(cli)?;
             if let Some(window) = trend {
                 if tokenizer.is_some() {
@@ -2787,13 +2791,16 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                             .to_string(),
                     ));
                 }
-                let report = match load_token_report(
-                    &store,
-                    TokenReportRequest::Trends {
-                        caller_label: session.as_deref(),
+                let request = session.as_deref().map_or_else(
+                    || TokenReportRequest::RepositoryTrends {
                         window: (*window).into(),
                     },
-                )? {
+                    |caller_label| TokenReportRequest::Trends {
+                        caller_label: Some(caller_label),
+                        window: (*window).into(),
+                    },
+                );
+                let report = match load_token_report(&store, request)? {
                     TokenReport::Trends(report) => report,
                     TokenReport::Overview(_) => {
                         return Err(CliError::InvalidInput(
@@ -2813,13 +2820,16 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                     }
                 }
             } else {
-                let mut overview = match load_token_report(
-                    &store,
-                    TokenReportRequest::Overview {
-                        caller_label: session.as_deref(),
+                let request = session.as_deref().map_or_else(
+                    || TokenReportRequest::RepositoryOverview {
                         benchmark_results: benchmark_results.as_deref(),
                     },
-                )? {
+                    |caller_label| TokenReportRequest::Overview {
+                        caller_label: Some(caller_label),
+                        benchmark_results: benchmark_results.as_deref(),
+                    },
+                );
+                let mut overview = match load_token_report(&store, request)? {
                     TokenReport::Overview(overview) => overview,
                     TokenReport::Trends(_) => {
                         return Err(CliError::InvalidInput(
@@ -5725,37 +5735,40 @@ mod tests {
 
     #[test]
     fn cli_schema_version_mismatches_are_typed_and_content_free() -> Result<(), Box<dyn Error>> {
+        let supported = projectatlas_db::CURRENT_SCHEMA_VERSION;
+        let future = supported + 1;
         for (error, found) in [
             (
                 CliError::Db(DbError::SchemaVersion {
-                    found: 18,
-                    expected: 17,
+                    found: future,
+                    expected: supported,
                 }),
-                18,
+                future,
             ),
             (
                 CliError::Service(ServiceError::Db(DbError::SchemaVersion {
-                    found: 18,
-                    expected: 17,
+                    found: future,
+                    expected: supported,
                 })),
-                18,
+                future,
             ),
             (
                 CliError::Db(DbError::SchemaVersion {
                     found: 7,
-                    expected: 17,
+                    expected: supported,
                 }),
                 7,
             ),
             (
                 CliError::Service(ServiceError::Db(DbError::SchemaVersion {
                     found: 7,
-                    expected: 17,
+                    expected: supported,
                 })),
                 7,
             ),
         ] {
-            let expected_message = format!("unsupported schema version {found}, expected 17");
+            let expected_message =
+                format!("unsupported schema version {found}, expected {supported}");
             let json_text = render_cli_error(OutputFormat::Json, &error)?;
             let json: Value = serde_json::from_str(&json_text)?;
             require_condition(
@@ -5768,7 +5781,7 @@ mod tests {
                     && json
                         .pointer("/error/schema_version_mismatch/supported_schema_version")
                         .and_then(Value::as_i64)
-                        == Some(17)
+                        == Some(supported)
                     && json
                         .pointer("/error/schema_version_mismatch/runtime_version")
                         .and_then(Value::as_str)
@@ -5792,7 +5805,7 @@ mod tests {
             require_condition(
                 toon.contains("kind: schema_version_mismatch")
                     && toon.contains(&format!("found_schema_version: {found}"))
-                    && toon.contains("supported_schema_version: 17")
+                    && toon.contains(&format!("supported_schema_version: {supported}"))
                     && toon.contains(env!("CARGO_PKG_VERSION"))
                     && toon.contains("do not reset"),
                 "CLI TOON lost typed schema-version details or recovery guidance",
@@ -5801,11 +5814,11 @@ mod tests {
         for error in [
             CliError::Db(DbError::SchemaVersion {
                 found: 8,
-                expected: 17,
+                expected: supported,
             }),
             CliError::Service(ServiceError::Db(DbError::SchemaVersion {
                 found: 15,
-                expected: 17,
+                expected: supported,
             })),
         ] {
             require_condition(
@@ -5815,9 +5828,9 @@ mod tests {
             let migration = schema_migration_required_payload(&error).ok_or_else(|| {
                 std::io::Error::other("CLI omitted the admitted-predecessor migration handoff")
             })?;
-            let expected_steps = u32::try_from(17 - migration.found_schema_version)?;
+            let expected_steps = u32::try_from(supported - migration.found_schema_version)?;
             require_condition(
-                migration.supported_schema_version == 17
+                migration.supported_schema_version == supported
                     && migration.migration_steps_remaining == expected_steps,
                 "CLI migration handoff drifted from the database migration inventory",
             )?;

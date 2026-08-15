@@ -296,7 +296,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
                 "version": "0.4.0",
                 "capabilities": ["mcp", "sqlite", "toon"],
                 "text_format": "TOON",
-                "mcp_tools": [f"tool-{index}" for index in range(40)],
+                "mcp_tools": [f"tool-{index}" for index in range(43)],
             },
             dirty_paths=[],
             measurement_errors=[],

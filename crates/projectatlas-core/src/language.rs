@@ -17,7 +17,7 @@ pub const LANGUAGE_CAPABILITY_REGISTRY_VERSION: u32 = 4;
 pub const SEMANTIC_PROVIDER_CONTRACT_VERSION: u32 = 1;
 
 /// Version of the accepted language capability floor.
-pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION: u32 = 8;
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION: u32 = 9;
 
 /// Version of exact detector precedence and content-matching semantics.
 pub const LANGUAGE_DETECTION_POLICY_VERSION: u32 = 1;
@@ -77,6 +77,13 @@ pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V7_DIGEST: &str =
 /// symbols without weakening any version 7 capability.
 pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V8_DIGEST: &str =
     "2b26ae43b74475ea0dcb78d5b182329d500d76c33b2d87470d303400886ead1b";
+
+/// Historical acceptance seal for capability-set version 9.
+///
+/// Version 9 preserves version 8 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.4.5-rc1 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V9_DIGEST: &str =
+    "5fa0073094df29fba7160cecf85afa3ba5a9bcfa7ee4b5a53cde9e371b0077d2";
 
 /// Maximum content prefix inspected by the bounded content/dialect detector.
 pub const LANGUAGE_CONTENT_DETECTION_MAX_BYTES: usize = 512;
@@ -2301,6 +2308,7 @@ pub fn validate_language_registry() -> Result<(), LanguageRegistryError> {
         6 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V6_DIGEST,
         7 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V7_DIGEST,
         8 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V8_DIGEST,
+        9 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V9_DIGEST,
         version => {
             return Err(LanguageRegistryError::new(format!(
                 "accepted language capability-set version {version} lacks a historical digest seal"

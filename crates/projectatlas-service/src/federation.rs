@@ -126,6 +126,8 @@ pub struct FederatedStore {
     database_bytes: u64,
     /// Exact adapter-owned freshness work.
     input_work: FederatedInputWork,
+    /// Optional validated worktree alias supplied by the adapter.
+    worktree: Option<String>,
 }
 
 impl FederatedStore {
@@ -140,6 +142,21 @@ impl FederatedStore {
         database_path: PathBuf,
         root: PathBuf,
         input_work: FederatedInputWork,
+    ) -> ServiceResult<Self> {
+        Self::new_with_worktree(store, database_path, root, input_work, None)
+    }
+
+    /// Admit one labelled root-bound read-only snapshot into a federated call.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::new`]. Alias validation remains adapter-owned.
+    pub fn new_with_worktree(
+        store: AtlasStore,
+        database_path: PathBuf,
+        root: PathBuf,
+        input_work: FederatedInputWork,
+        worktree: Option<String>,
     ) -> ServiceResult<Self> {
         if !store.is_read_only() || !store.has_active_read_snapshot() {
             return Err(ServiceError::InvalidInput(
@@ -167,6 +184,7 @@ impl FederatedStore {
             root,
             database_bytes: metadata.len(),
             input_work,
+            worktree,
         })
     }
 
@@ -191,6 +209,9 @@ impl FederatedStore {
 pub struct FederatedParticipant {
     /// Zero-based order supplied by the caller.
     pub order: u32,
+    /// Registered worktree alias when the adapter selected aliases.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
     /// Project-qualified identity captured by the read-only store.
     pub project: ProjectInstanceId,
     /// Complete graph generation captured for this root.
@@ -202,6 +223,9 @@ pub struct FederatedParticipant {
 /// One project-qualified relation supporting an exact typed external rendezvous.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FederatedRelationEvidence {
+    /// Registered worktree alias when the adapter selected aliases.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
     /// Participating project identity.
     pub project: ProjectInstanceId,
     /// Participating graph generation.
@@ -255,6 +279,12 @@ pub struct FederatedRelationWork {
 pub struct FederatedDetailedRelationReport {
     /// Ordered validated participants.
     pub participants: Vec<FederatedParticipant>,
+    /// Worktree alias of the first-root result when aliases selected federation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_worktree: Option<String>,
+    /// Ordered aliases required to resume the primary continuation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation_worktrees: Option<Vec<String>>,
     /// Existing detailed relation result anchored in the first root.
     pub primary: DetailedRelationReport,
     /// Exact typed cross-root external rendezvous evidence.
@@ -272,6 +302,12 @@ pub struct FederatedDetailedRelationReport {
 pub struct FederatedAnalysisReport {
     /// Ordered validated participants.
     pub participants: Vec<FederatedParticipant>,
+    /// Worktree alias of the first-root result when aliases selected federation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_worktree: Option<String>,
+    /// Ordered aliases required to resume the primary continuation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation_worktrees: Option<Vec<String>>,
     /// Existing analysis result anchored in the first root.
     pub primary: RelationAnalysisReport,
     /// Exact typed cross-root external rendezvous evidence.
@@ -403,6 +439,14 @@ impl FederatedContext {
         )?;
         Ok(FederatedDetailedRelationReport {
             participants: self.participants.clone(),
+            primary_worktree: self
+                .participants
+                .first()
+                .and_then(|participant| participant.worktree.clone()),
+            continuation_worktrees: federation_continuation_worktrees(
+                &self.participants,
+                primary.continuation.is_some(),
+            ),
             truncated: primary.truncated || !self.rendezvous_limits.is_empty(),
             primary,
             rendezvous: self.rendezvous.clone(),
@@ -443,6 +487,14 @@ impl FederatedContext {
         check_control(control)?;
         Ok(FederatedAnalysisReport {
             participants: self.participants.clone(),
+            primary_worktree: self
+                .participants
+                .first()
+                .and_then(|participant| participant.worktree.clone()),
+            continuation_worktrees: federation_continuation_worktrees(
+                &self.participants,
+                primary.continuation.is_some(),
+            ),
             truncated: primary.truncated || !self.rendezvous_limits.is_empty(),
             primary,
             rendezvous: self.rendezvous.clone(),
@@ -450,6 +502,21 @@ impl FederatedContext {
             work,
         })
     }
+}
+
+/// Return the complete ordered aliases only when a continuation and all labels exist.
+fn federation_continuation_worktrees(
+    participants: &[FederatedParticipant],
+    has_continuation: bool,
+) -> Option<Vec<String>> {
+    has_continuation
+        .then(|| {
+            participants
+                .iter()
+                .map(|participant| participant.worktree.clone())
+                .collect::<Option<Vec<_>>>()
+        })
+        .flatten()
 }
 
 /// Versioned outer continuation for an ordered participant set.
@@ -693,6 +760,7 @@ fn capture_federation(
         })?;
         participants.push(FederatedParticipant {
             order,
+            worktree: participant.worktree.clone(),
             project: binding.project_instance_id,
             generation,
             authored_purpose_revision,
@@ -856,6 +924,7 @@ fn load_rendezvous(
                     evidence: Vec::new(),
                 });
                 group.evidence.push(FederatedRelationEvidence {
+                    worktree: participant.worktree.clone(),
                     project,
                     generation,
                     source: row.detail.source,

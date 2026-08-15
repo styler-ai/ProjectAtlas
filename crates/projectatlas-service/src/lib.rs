@@ -206,6 +206,16 @@ pub enum TokenReportRequest<'a> {
         /// Calendar grouping requested by the adapter.
         window: TokenTrendWindow,
     },
+    /// Load the control atlas's combined native-main and worktree overview.
+    RepositoryOverview {
+        /// Optional repository-relative controlled benchmark artifact.
+        benchmark_results: Option<&'a Path>,
+    },
+    /// Load combined native-main and worktree trends.
+    RepositoryTrends {
+        /// Calendar grouping requested by the adapter.
+        window: TokenTrendWindow,
+    },
 }
 
 /// Typed token-report result returned without transport rendering.
@@ -307,6 +317,17 @@ pub fn load_token_report(
             caller_label,
             window,
         } => TokenReport::Trends(store.token_trends(caller_label, window)?),
+        TokenReportRequest::RepositoryOverview { benchmark_results } => {
+            let mut overview = store.repository_token_overview()?;
+            overview.set_agent_efficiency(load_agent_efficiency_comparison(
+                &selected_project,
+                benchmark_results,
+            )?);
+            TokenReport::Overview(Box::new(overview))
+        }
+        TokenReportRequest::RepositoryTrends { window } => {
+            TokenReport::Trends(store.repository_token_trends(window)?)
+        }
     };
     revalidate_selected_project_binding(store)?;
     Ok(report)

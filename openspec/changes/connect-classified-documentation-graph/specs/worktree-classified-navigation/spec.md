@@ -34,12 +34,20 @@ Full and incremental classified-document publication SHALL use the selected chec
 - **WHEN** parsing, resolution, cancellation, or database publication fails
 - **THEN** readers retain the prior complete generation and no partial local or sibling facts become visible
 
-### Requirement: Exact project routing prevents worktree leakage
-CLI/MCP classified navigation SHALL capture one exact `project_path`, root, active database, and complete generation for the request lifetime. Shared hosts MUST NOT resolve later work from a mutable session default or sibling checkout.
+### Requirement: Registered short routing prevents worktree leakage
+CLI/MCP classified navigation SHALL capture one registered `worktree` alias or mutually exclusive legacy exact `project_path`, canonical root, active database, project identity, alias, and complete generation for the request lifetime. Shared hosts MUST NOT resolve later work from a mutable session default, changed registration, stale path, or sibling checkout.
 
-#### Scenario: Interleaved agents address sibling worktrees
-- **WHEN** one MCP process receives interleaved calls with different explicit worktree paths
-- **THEN** each result contains only the addressed checkout's classifications, relations, purposes, generation, unresolved selectors, and exact next calls
+#### Scenario: Interleaved agents address sibling aliases
+- **WHEN** one MCP process receives interleaved calls with `worktree: "main"`, `worktree: "issue-430"`, and another registered alias
+- **THEN** each result contains only the addressed checkout's classifications, relations, purposes, generation, unresolved selectors, alias-labelled coverage, and exact alias-preserving next calls
+
+#### Scenario: Legacy exact path remains compatible
+- **WHEN** an existing caller supplies only exact `project_path`
+- **THEN** classified navigation retains the existing exact-root behavior and additive classification contract
+
+#### Scenario: Alias and path cannot conflict
+- **WHEN** a request supplies both `worktree` and `project_path`
+- **THEN** validation fails before any database, graph, or source read and returns the same allowed-target contract across CLI/MCP where applicable
 
 #### Scenario: Session default changes during traversal
 - **WHEN** a serialized session-default change occurs after a classified relation request starts
@@ -49,8 +57,12 @@ CLI/MCP classified navigation SHALL capture one exact `project_path`, root, acti
 - **WHEN** CLI `root status` or MCP `atlas_root(control_root=...)` inspects a manager
 - **THEN** it returns bounded structural rows and blockers without reading or writing any worktree database and without changing the current TUI
 
-### Requirement: v0.4.4 upgrade remains local and zero ceremony
-An ordinary v0.4.4 checkout or linked worktree with a valid exact-root atlas SHALL retain that database and authored purposes, pass existing preflight and backup, migrate through schema 17, and refresh classified document state without manual deletion, movement, merging, or reinitialization.
+#### Scenario: Registered federation is explicit and labelled
+- **WHEN** a classified relation/analysis operation requests `worktrees: ["main", "issue-430"]`
+- **THEN** #430 resolves exact read-only participants and every classification, document relation, unresolved selector, coverage row, blocker, continuation, and next call retains its owning alias/root/generation without persisting a combined graph
+
+### Requirement: v0.4.4 upgrade and registered init remain local and zero ceremony
+An ordinary v0.4.4 checkout or linked worktree with a valid exact-root atlas SHALL retain that database and authored purposes, pass existing preflight and backup, migrate through schema 17 and the #430 v0.4.5-rc1 registry/telemetry schema, and refresh classified document state without manual deletion, movement, merging, or reinitialization. A registered worktree without an atlas SHALL use #430 safe main-atlas hydration when available and visible ordinary initialization fallback otherwise.
 
 #### Scenario: Ordinary checkout upgrades in place
 - **WHEN** a v0.4.4 user updates an ordinary checkout
@@ -60,13 +72,17 @@ An ordinary v0.4.4 checkout or linked worktree with a valid exact-root atlas SHA
 - **WHEN** several v0.4.4 worktrees each have a valid local atlas
 - **THEN** each database migrates and refreshes only when addressed and is never replaced by or merged with a sibling database
 
-#### Scenario: Missing worktree database builds locally
-- **WHEN** an existing worktree has no active database during upgrade
-- **THEN** ordinary local init and scan build its schema-17 classified graph before use
+#### Scenario: Missing registered worktree database hydrates safely
+- **WHEN** an existing registered worktree has no active database and main has a compatible complete atlas
+- **THEN** `atlas_init(worktree=...)` safely hydrates reusable classified source/graph/purpose state, clears main telemetry/transient state, reconciles exact branch/dirty bytes, and publishes an independently writable current-schema classified graph
+
+#### Scenario: Unsafe hydration source falls back visibly
+- **WHEN** main is absent, incomplete, incompatible, corrupt, unrelated, or otherwise unsafe as a hydration source
+- **THEN** targeted init visibly falls back to the ordinary clean build and never weakens classified publication, migration, integrity, or exact-root checks
 
 #### Scenario: Git executable is unavailable
 - **WHEN** Git is absent from `PATH`
-- **THEN** local migration, init, refresh, and structural worktree routing remain functional without manual database surgery
+- **THEN** local migration, targeted init/hydration, refresh, registry routing, and classified navigation remain functional through bounded structural metadata without manual database surgery
 
 #### Scenario: Newer, corrupt, busy, or interrupted state fails safe
 - **WHEN** migration sees an unsupported newer schema, corruption, a live busy writer, or interruption

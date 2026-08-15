@@ -1391,7 +1391,7 @@ mod tests {
         write_structural_primary(&repo)?;
         let registrations = repo.join(".git").join("worktrees");
         fs::create_dir(&registrations)?;
-        for index in 0..=crate::MAX_REGISTERED_WORKTREES {
+        for index in 0..=projectatlas_core::MAX_GIT_WORKTREE_REGISTRATIONS {
             fs::create_dir(registrations.join(format!("registration-{index:04}")))?;
         }
 
@@ -1406,8 +1406,8 @@ mod tests {
                         limit,
                         observed,
                     }
-                )) if limit == crate::MAX_REGISTERED_WORKTREES as u64
-                    && observed == crate::MAX_REGISTERED_WORKTREES as u64 + 1
+                )) if limit == projectatlas_core::MAX_GIT_WORKTREE_REGISTRATIONS as u64
+                    && observed == projectatlas_core::MAX_GIT_WORKTREE_REGISTRATIONS as u64 + 1
             ),
             "registration overflow returned partial or untyped repository state",
         )?;

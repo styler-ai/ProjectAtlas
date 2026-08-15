@@ -8,16 +8,14 @@ use crate::{DbError, DbResult};
 use projectatlas_core::graph::ProjectInstanceId;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 #[cfg(test)]
 use projectatlas_core::normalize_native_path_display;
-#[cfg(test)]
-use std::path::PathBuf;
 
 /// Current `SQLite` schema version supported by this crate.
-pub(crate) const SCHEMA_VERSION: i64 = 17;
+pub(crate) const SCHEMA_VERSION: i64 = 18;
 /// Released 0.3.26 schema accepted by the migration inventory.
 pub(crate) const PREVIOUS_SCHEMA_VERSION: i64 = 8;
 /// First internal schema with explicit publication invalidation.
@@ -36,6 +34,8 @@ pub(crate) const COVERAGE_DISCOVERY_SCHEMA_VERSION: i64 = 14;
 const LEXICAL_SCHEMA_VERSION: i64 = 15;
 /// Released schema with compact normalized graph keys.
 const COMPACT_GRAPH_SCHEMA_VERSION: i64 = 16;
+/// First schema with classified documentation graph storage.
+const CLASSIFIED_GRAPH_SCHEMA_VERSION: i64 = 17;
 /// Metadata key for the durable schema version.
 pub(crate) const SCHEMA_VERSION_KEY: &str = "schema_version";
 /// Metadata key for the owning project root.
@@ -133,8 +133,13 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         from: COMPACT_GRAPH_SCHEMA_VERSION,
-        to: SCHEMA_VERSION,
+        to: CLASSIFIED_GRAPH_SCHEMA_VERSION,
         apply: migrate_16_to_17,
+    },
+    Migration {
+        from: CLASSIFIED_GRAPH_SCHEMA_VERSION,
+        to: SCHEMA_VERSION,
+        apply: migrate_17_to_18,
     },
 ];
 
@@ -268,6 +273,8 @@ static PARSER_PROVENANCE_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> =
 static COVERAGE_DISCOVERY_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 /// Immutable schema-16 contract admitted before classified-document storage.
 static COMPACT_GRAPH_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
+/// Immutable expected schema-17 contract before worktree control storage.
+static CLASSIFIED_GRAPH_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 
 /// Immutable physical schema emitted by the released 0.3.26 runtime.
 #[cfg(test)]
@@ -804,6 +811,99 @@ const FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL: &str = "
     );
     CREATE INDEX idx_file_content_classifications_classification_path
         ON file_content_classifications(classification, path);
+";
+
+/// Durable local worktree registrations and bounded aggregate telemetry snapshots.
+const WORKTREE_CONTROL_SCHEMA_SQL: &str = "
+    CREATE TABLE usage_aggregate_revisions (
+        project_instance_id BLOB PRIMARY KEY NOT NULL
+            CHECK(typeof(project_instance_id) = 'blob' AND length(project_instance_id) = 16),
+        revision INTEGER NOT NULL DEFAULT 0
+            CHECK(typeof(revision) = 'integer' AND revision >= 0)
+    ) STRICT, WITHOUT ROWID;
+
+    CREATE TABLE worktree_registrations (
+        registration_id INTEGER PRIMARY KEY,
+        alias TEXT NOT NULL
+            CHECK(
+                typeof(alias) = 'text'
+                AND length(alias) BETWEEN 1 AND 64
+                AND alias <> 'main'
+                AND alias GLOB '[a-z0-9]*'
+                AND alias NOT GLOB '*[^a-z0-9._-]*'
+            ),
+        state TEXT NOT NULL DEFAULT 'active'
+            CHECK(state IN ('active', 'retired')),
+        git_common_directory TEXT NOT NULL
+            CHECK(typeof(git_common_directory) = 'text' AND length(git_common_directory) BETWEEN 1 AND 131072),
+        git_administrative_directory TEXT NOT NULL
+            CHECK(typeof(git_administrative_directory) = 'text' AND length(git_administrative_directory) BETWEEN 1 AND 131072),
+        last_root TEXT NOT NULL
+            CHECK(typeof(last_root) = 'text' AND length(last_root) BETWEEN 1 AND 131072),
+        project_instance_id BLOB
+            CHECK(project_instance_id IS NULL OR (
+                typeof(project_instance_id) = 'blob' AND length(project_instance_id) = 16
+            )),
+        accepted_telemetry_revision INTEGER NOT NULL DEFAULT 0
+            CHECK(typeof(accepted_telemetry_revision) = 'integer' AND accepted_telemetry_revision >= 0),
+        created_at_epoch INTEGER NOT NULL
+            CHECK(typeof(created_at_epoch) = 'integer' AND created_at_epoch >= 0),
+        retired_at_epoch INTEGER
+            CHECK(retired_at_epoch IS NULL OR (
+                typeof(retired_at_epoch) = 'integer' AND retired_at_epoch >= created_at_epoch
+            )),
+        CHECK(
+            (state = 'active' AND retired_at_epoch IS NULL)
+            OR (state = 'retired' AND retired_at_epoch IS NOT NULL)
+        )
+    ) STRICT;
+
+    CREATE UNIQUE INDEX idx_worktree_registrations_active_alias
+        ON worktree_registrations(alias) WHERE state = 'active';
+    CREATE UNIQUE INDEX idx_worktree_registrations_active_administrative_directory
+        ON worktree_registrations(git_administrative_directory) WHERE state = 'active';
+    CREATE UNIQUE INDEX idx_worktree_registrations_active_project
+        ON worktree_registrations(project_instance_id)
+        WHERE state = 'active' AND project_instance_id IS NOT NULL;
+    CREATE INDEX idx_worktree_registrations_state_alias
+        ON worktree_registrations(state, alias, registration_id);
+
+    CREATE TABLE worktree_usage_aggregates (
+        registration_id INTEGER NOT NULL
+            REFERENCES worktree_registrations(registration_id) ON DELETE RESTRICT,
+        source_kind TEXT NOT NULL
+            CHECK(source_kind IN ('routed', 'synchronized')),
+        day_epoch INTEGER NOT NULL DEFAULT -1
+            CHECK(typeof(day_epoch) = 'integer' AND day_epoch >= -1),
+        dimension_id INTEGER NOT NULL
+            REFERENCES usage_bucket_dimensions(dimension_id) ON DELETE RESTRICT,
+        calls INTEGER NOT NULL DEFAULT 0 CHECK(calls >= 0),
+        estimated_without INTEGER NOT NULL DEFAULT 0 CHECK(estimated_without >= 0),
+        estimated_with INTEGER NOT NULL DEFAULT 0 CHECK(estimated_with >= 0),
+        observed_without INTEGER NOT NULL DEFAULT 0 CHECK(observed_without >= 0),
+        observed_with INTEGER NOT NULL DEFAULT 0 CHECK(observed_with >= 0),
+        modeled_without INTEGER NOT NULL DEFAULT 0 CHECK(modeled_without >= 0),
+        modeled_with INTEGER NOT NULL DEFAULT 0 CHECK(modeled_with >= 0),
+        deduped_modeled_without INTEGER NOT NULL DEFAULT 0 CHECK(deduped_modeled_without >= 0),
+        deduped_modeled_with INTEGER NOT NULL DEFAULT 0 CHECK(deduped_modeled_with >= 0),
+        repeated_baselines INTEGER NOT NULL DEFAULT 0 CHECK(repeated_baselines >= 0),
+        observed_file_read_replacements INTEGER NOT NULL DEFAULT 0
+            CHECK(observed_file_read_replacements >= 0),
+        modeled_file_reads_avoided INTEGER NOT NULL DEFAULT 0
+            CHECK(modeled_file_reads_avoided >= 0),
+        PRIMARY KEY(registration_id, source_kind, day_epoch, dimension_id)
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX idx_worktree_usage_aggregates_day_registration
+        ON worktree_usage_aggregates(day_epoch, registration_id, source_kind, dimension_id);
+
+    CREATE TABLE usage_instance_worktree_origins (
+        instance_row_id INTEGER PRIMARY KEY
+            REFERENCES usage_instances(instance_row_id) ON DELETE CASCADE,
+        registration_id INTEGER NOT NULL
+            REFERENCES worktree_registrations(registration_id) ON DELETE RESTRICT
+    ) STRICT;
+    CREATE INDEX idx_usage_instance_worktree_origins_registration
+        ON usage_instance_worktree_origins(registration_id, instance_row_id);
 ";
 
 /// Produce the historical or current graph constraints from one DDL authority.
@@ -1580,6 +1680,7 @@ fn create_fresh(connection: &Connection, expected_root: Option<&str>) -> DbResul
     connection.execute_batch(FILE_TEXT_FTS_SCHEMA_SQL)?;
     connection.execute_batch(SYMBOL_RELATION_LOOKUP_SCHEMA_SQL)?;
     connection.execute_batch(FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL)?;
+    connection.execute_batch(WORKTREE_CONTROL_SCHEMA_SQL)?;
     set_metadata(connection, FILE_TEXT_FTS_SOURCE_REVISION_KEY, "0")?;
     set_metadata(connection, FILE_TEXT_FTS_PROJECTION_REVISION_KEY, "0")?;
     crate::telemetry::initialize_empty_storage(connection)?;
@@ -1687,6 +1788,19 @@ fn migrate_16_to_17(connection: &Connection) -> DbResult<()> {
     invalidate_derived_publication(connection)
 }
 
+/// Add local worktree registration and aggregate telemetry control state.
+fn migrate_17_to_18(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(WORKTREE_CONTROL_SCHEMA_SQL)?;
+    connection.execute(
+        "INSERT INTO usage_aggregate_revisions(project_instance_id, revision)
+         SELECT project_instance_id, SUM(calls)
+         FROM usage_global_aggregates
+         GROUP BY project_instance_id",
+        [],
+    )?;
+    Ok(())
+}
+
 /// Add selector columns by rebuilding the derived symbol table in the caller transaction.
 fn add_symbol_source_selector_storage(connection: &Connection) -> DbResult<()> {
     connection.execute_batch(SYMBOL_SOURCE_SELECTOR_SCHEMA_SQL)?;
@@ -1789,6 +1903,7 @@ fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResul
                     coverage_discovery_predecessor_schema_contract()?
                 }
                 COMPACT_GRAPH_SCHEMA_VERSION => compact_graph_predecessor_schema_contract()?,
+                CLASSIFIED_GRAPH_SCHEMA_VERSION => classified_graph_predecessor_schema_contract()?,
                 found => {
                     return Err(DbError::SchemaVersion {
                         found,
@@ -2102,6 +2217,7 @@ fn schema_contract() -> DbResult<&'static SchemaContract> {
     connection.execute_batch(FILE_TEXT_FTS_SCHEMA_SQL)?;
     connection.execute_batch(SYMBOL_RELATION_LOOKUP_SCHEMA_SQL)?;
     connection.execute_batch(FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL)?;
+    connection.execute_batch(WORKTREE_CONTROL_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
     Ok(SCHEMA_CONTRACT.get_or_init(|| contract))
 }
@@ -2198,6 +2314,27 @@ fn compact_graph_predecessor_schema_contract() -> DbResult<&'static SchemaContra
     connection.execute_batch(SYMBOL_RELATION_LOOKUP_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
     Ok(COMPACT_GRAPH_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
+}
+
+/// Build the immutable schema-17 contract before worktree control storage.
+fn classified_graph_predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
+    if let Some(contract) = CLASSIFIED_GRAPH_PREDECESSOR_SCHEMA_CONTRACT.get() {
+        return Ok(contract);
+    }
+    let connection = Connection::open_in_memory()?;
+    connection.execute_batch(BASE_SCHEMA_SQL)?;
+    add_symbol_source_selector_storage(&connection)?;
+    connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
+    create_graph_schema(&connection, true)?;
+    create_coverage_discovery_schema(&connection)?;
+    connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
+    connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
+    connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
+    connection.execute_batch(FILE_TEXT_FTS_SCHEMA_SQL)?;
+    connection.execute_batch(SYMBOL_RELATION_LOOKUP_SCHEMA_SQL)?;
+    connection.execute_batch(FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL)?;
+    let contract = read_schema_contract(&connection)?;
+    Ok(CLASSIFIED_GRAPH_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
 }
 
 /// Build the immutable schema-8/9 contract from the unchanged base DDL.
@@ -2520,7 +2657,6 @@ fn object_kind(connection: &Connection, name: &str) -> DbResult<Option<String>> 
 }
 
 /// Return a `SQLite` sidecar path for a database path.
-#[cfg(test)]
 pub(crate) fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut sidecar = path.as_os_str().to_os_string();
     sidecar.push(suffix);
@@ -3808,7 +3944,11 @@ mod tests {
         )?;
         store.connection.execute_batch(
             "DROP TABLE file_content_classifications;
-             DROP INDEX idx_nodes_path_kind;",
+             DROP INDEX idx_nodes_path_kind;
+             DROP TABLE usage_instance_worktree_origins;
+             DROP TABLE worktree_usage_aggregates;
+             DROP TABLE worktree_registrations;
+             DROP TABLE usage_aggregate_revisions;",
         )?;
         recreate_disposable_graph_projection(&store.connection, false)?;
         recreate_pre_selector_symbol_storage_for_test(&store.connection)?;
@@ -3938,7 +4078,11 @@ mod tests {
         )?;
         store.connection.execute_batch(
             "DROP TABLE file_content_classifications;
-             DROP INDEX idx_nodes_path_kind;",
+             DROP INDEX idx_nodes_path_kind;
+             DROP TABLE usage_instance_worktree_origins;
+             DROP TABLE worktree_usage_aggregates;
+             DROP TABLE worktree_registrations;
+             DROP TABLE usage_aggregate_revisions;",
         )?;
         recreate_disposable_graph_projection(&store.connection, false)?;
         recreate_pre_selector_symbol_storage_for_test(&store.connection)?;
@@ -4201,6 +4345,98 @@ mod tests {
             .into());
         }
         drop(read_only);
+        Ok(())
+    }
+
+    #[test]
+    fn schema_seventeen_upgrade_preserves_main_telemetry_and_matches_fresh_schema()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        let project_identity = store.connection.query_row(
+            "SELECT project_instance_id FROM project_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
+        store.connection.execute(
+            "INSERT INTO usage_bucket_dimensions(
+                token_savings_bucket, provider, model, tokenizer_backend, accuracy,
+                baseline_kind, confidence, accounting_layer, estimate_method,
+                denominator_kind, dedupe_scope, overflow
+             ) VALUES('summary', 'offline', 'heuristic', 'chars-div-4', 'estimated',
+                      'file', 'high', 'source', 'observed', 'tokens', 'file', 0)",
+            [],
+        )?;
+        let dimension_id = store.connection.last_insert_rowid();
+        store.connection.execute(
+            "INSERT INTO usage_global_aggregates(
+                project_instance_id, dimension_id, calls, estimated_without,
+                estimated_with
+             ) VALUES(?1, ?2, 7, 700, 70)",
+            params![project_identity.as_slice(), dimension_id],
+        )?;
+        store.connection.execute_batch(
+            "DROP TABLE usage_instance_worktree_origins;
+             DROP TABLE worktree_usage_aggregates;
+             DROP TABLE worktree_registrations;
+             DROP TABLE usage_aggregate_revisions;",
+        )?;
+        set_metadata(
+            &store.connection,
+            SCHEMA_VERSION_KEY,
+            &CLASSIFIED_GRAPH_SCHEMA_VERSION.to_string(),
+        )?;
+        drop(store);
+
+        let expected_root = normalize_native_path_display(&root);
+        let (before, _) = preflight(&database, Some(&expected_root))?;
+        if before.state != SchemaState::UpgradeRequired
+            || before.schema_version != Some(CLASSIFIED_GRAPH_SCHEMA_VERSION)
+        {
+            return Err(io::Error::other("schema-17 fixture was not admitted").into());
+        }
+
+        let migrated = AtlasStore::open_for_project(&database, &root)?;
+        let state = migrated.connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT revision FROM usage_aggregate_revisions
+                  WHERE project_instance_id = ?1),
+                (SELECT calls FROM usage_global_aggregates
+                  WHERE project_instance_id = ?1 AND dimension_id = ?2),
+                (SELECT COUNT(*) FROM worktree_registrations),
+                (SELECT COUNT(*) FROM worktree_usage_aggregates)",
+            params![project_identity.as_slice(), dimension_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )?;
+        if state != (SCHEMA_VERSION.to_string(), 7, 7, 0, 0) {
+            return Err(io::Error::other(format!(
+                "schema-17 migration changed main telemetry or control defaults: {state:?}"
+            ))
+            .into());
+        }
+        if read_schema_contract(&migrated.connection)? != *schema_contract()? {
+            return Err(io::Error::other("migrated and fresh schema contracts differ").into());
+        }
+        let foreign_key_errors = migrated
+            .connection
+            .prepare("PRAGMA foreign_key_check")?
+            .query_map([], |_| Ok(()))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !foreign_key_errors.is_empty() {
+            return Err(io::Error::other("schema-17 migration broke foreign keys").into());
+        }
         Ok(())
     }
 

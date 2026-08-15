@@ -1,13 +1,13 @@
 {
   "schema": "projectatlas.classified-document-refresh.v1",
   "candidate": {
-    "checkout_head": "706ff246faa9c21e2bbafae88157b1646a599e2e",
+    "checkout_head": "7f8ce515312bdddf359287ea1f34454fc369354a",
     "runtime": "{REPO_ROOT}\\target\\release\\projectatlas.exe",
-    "runtime_sha256": "60cc632b99155a24196eb410dacb21e14fa534a710b7e70d859ccb14758496aa",
+    "runtime_sha256": "b4f5773b667b08f13aaa5d1a704bbc29842827149706658445859dc0436827bf",
     "runtime_info": {
       "project": "ProjectAtlas",
       "major_version": 3,
-      "version": "0.4.4",
+      "version": "0.4.5-rc1",
       "executable": "{REPO_ROOT}/target/release/projectatlas.exe",
       "repository": "https://github.com/styler-ai/ProjectAtlas",
       "capabilities": [
@@ -27,6 +27,9 @@
       ],
       "mcp_tools": [
         "atlas_set_project_path",
+        "atlas_worktree_list",
+        "atlas_worktree_add",
+        "atlas_worktree_remove",
         "atlas_init",
         "atlas_map",
         "atlas_root",
@@ -100,23 +103,23 @@
         "threads",
         "storage"
       ],
-      "peak_rss_bytes": 43196416,
+      "peak_rss_bytes": 39841792,
       "peak_processes": 1,
       "peak_worker_processes": 0,
       "peak_threads": 20,
-      "cpu_seconds": 2.21875,
+      "cpu_seconds": 2.125,
       "observed_pids": [
-        28764
+        24996
       ],
       "peak_storage": {
-        "database_bytes": 18472960,
-        "wal_bytes": 18877872,
+        "database_bytes": 18477056,
+        "wal_bytes": 18881992,
         "shm_bytes": 65536,
         "staging_bytes": 0,
         "stage_directories": 0
       },
-      "read_count": 34674,
-      "write_count": 224611,
+      "read_count": 34984,
+      "write_count": 225191,
       "exact_total_processes": 1,
       "exact_terminal_active_processes": 0,
       "worker_process_bound": 0,
@@ -139,13 +142,13 @@
       ],
       "returncode": 0,
       "timed_out": false,
-      "wall_seconds": 4.582199,
-      "one_core_cpu_percent": 48.421,
-      "host_cpu_percent": 3.026,
+      "wall_seconds": 1.985722,
+      "one_core_cpu_percent": 107.014,
+      "host_cpu_percent": 6.688,
       "stdout_bytes": 924,
       "stderr_bytes": 0,
-      "process_read_transfer_bytes": 108693422,
-      "process_write_transfer_bytes": 464093936,
+      "process_read_transfer_bytes": 109943110,
+      "process_write_transfer_bytes": 465307308,
       "stderr": ""
     },
     "report": {
@@ -210,19 +213,19 @@
       }
     },
     "post_storage": {
-      "database_bytes": 18472960,
+      "database_bytes": 18477056,
       "wal_bytes": 0,
       "shm_bytes": 0,
       "staging_bytes": 0,
       "stage_directories": 0,
-      "total_bytes": 18472960
+      "total_bytes": 18477056
     },
     "database_profile": {
       "page_size": 4096,
-      "page_count": 4623,
-      "page_bytes": 18935808,
-      "freelist_pages": 8,
-      "freelist_ratio": 0.00173,
+      "page_count": 4624,
+      "page_bytes": 18939904,
+      "freelist_pages": 7,
+      "freelist_ratio": 0.001514,
       "quick_check": "ok",
       "sqlite_stat1_present": false,
       "project_root": "{REPO_ROOT}/target/benchmarks/classified-document-refresh/current"
@@ -238,17 +241,17 @@
         "threads",
         "storage"
       ],
-      "peak_rss_bytes": 23490560,
+      "peak_rss_bytes": 22347776,
       "peak_processes": 1,
       "peak_worker_processes": 0,
-      "peak_threads": 5,
-      "cpu_seconds": 0.40625,
+      "peak_threads": 21,
+      "cpu_seconds": 0.421875,
       "observed_pids": [
-        31620
+        30168
       ],
       "peak_storage": {
-        "database_bytes": 18935808,
-        "wal_bytes": 17032112,
+        "database_bytes": 18939904,
+        "wal_bytes": 17019752,
         "shm_bytes": 65536,
         "staging_bytes": 0,
         "stage_directories": 0
@@ -259,11 +262,11 @@
         "interval_seconds": 0.005,
         "attempts": 55,
         "busy_observations": 4,
-        "maximum_probe_gap_seconds": 0.031242,
-        "maximum_busy_upper_bound_seconds": 0.140419
+        "maximum_probe_gap_seconds": 0.032032,
+        "maximum_busy_upper_bound_seconds": 0.119459
       },
-      "read_count": 12567,
-      "write_count": 9903,
+      "read_count": 12537,
+      "write_count": 10180,
       "exact_total_processes": 1,
       "exact_terminal_active_processes": 0,
       "worker_process_bound": 0,
@@ -290,18 +293,18 @@
       ],
       "returncode": 0,
       "timed_out": false,
-      "wall_seconds": 1.298109,
-      "one_core_cpu_percent": 31.296,
-      "host_cpu_percent": 1.956,
+      "wall_seconds": 1.286415,
+      "one_core_cpu_percent": 32.795,
+      "host_cpu_percent": 2.05,
       "stdout_bytes": 690,
       "stderr_bytes": 0,
-      "process_read_transfer_bytes": 43045738,
-      "process_write_transfer_bytes": 20570848,
+      "process_read_transfer_bytes": 42922858,
+      "process_write_transfer_bytes": 21148928,
       "stderr": "",
-      "readiness_seconds": 1.825825,
+      "readiness_seconds": 1.763613,
       "readiness_path": "src/caller_0000.rs",
       "readiness_generation": 2,
-      "edit_to_complete_seconds": 1.298109
+      "edit_to_complete_seconds": 1.286415
     },
     "report": {
       "mode": "notify",
@@ -385,12 +388,12 @@
       "total": 1036
     },
     "final_storage": {
-      "database_bytes": 18935808,
+      "database_bytes": 18939904,
       "wal_bytes": 0,
       "shm_bytes": 32768,
       "staging_bytes": 0,
       "stage_directories": 0,
-      "total_bytes": 18968576
+      "total_bytes": 18972672
     },
     "output_bytes": 690
   },

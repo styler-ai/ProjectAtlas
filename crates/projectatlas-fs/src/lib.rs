@@ -10,7 +10,8 @@ use projectatlas_core::language::{
 };
 use projectatlas_core::{
     CoreError, IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkResource,
-    IndexWorkStage, Node, NodeKind, normalize_repo_path, normalized_extension, normalized_parent,
+    IndexWorkStage, MAX_GIT_WORKTREE_REGISTRATIONS, Node, NodeKind, normalize_repo_path,
+    normalized_extension, normalized_parent,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -47,9 +48,6 @@ const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const HASH_BUFFER_BYTES: usize = 8_192;
 /// Maximum linked-worktree `.git` pointer bytes inspected for policy discovery.
 const GIT_DIRECTORY_POINTER_MAX_BYTES: u64 = 64 * 1_024;
-/// Maximum linked-worktree registrations inspected for one repository.
-const MAX_REGISTERED_WORKTREES: usize = 1_024;
-
 /// Filesystem scanner errors.
 #[derive(Debug, Error)]
 pub enum FsError {
@@ -1026,11 +1024,11 @@ fn linked_worktree_excluded_prefixes(
 fn check_registered_worktree(control: &IndexWorkControl, index: usize) -> FsResult<()> {
     control.check(IndexWorkStage::RepositoryTraversal)?;
     let observed = index.saturating_add(1);
-    if observed > MAX_REGISTERED_WORKTREES {
+    if observed > MAX_GIT_WORKTREE_REGISTRATIONS {
         return Err(IndexWorkFailure::resource_limit(
             IndexWorkStage::RepositoryTraversal,
             IndexWorkResource::Entries,
-            u64::try_from(MAX_REGISTERED_WORKTREES).unwrap_or(u64::MAX),
+            u64::try_from(MAX_GIT_WORKTREE_REGISTRATIONS).unwrap_or(u64::MAX),
             u64::try_from(observed).unwrap_or(u64::MAX),
         )
         .into());
@@ -1579,9 +1577,9 @@ mod tests {
         ));
 
         let control = IndexWorkControl::new(IndexCancellation::new(), None);
-        assert!(check_registered_worktree(&control, MAX_REGISTERED_WORKTREES - 1).is_ok());
+        assert!(check_registered_worktree(&control, MAX_GIT_WORKTREE_REGISTRATIONS - 1).is_ok());
         assert!(matches!(
-            check_registered_worktree(&control, MAX_REGISTERED_WORKTREES),
+            check_registered_worktree(&control, MAX_GIT_WORKTREE_REGISTRATIONS),
             Err(FsError::IndexWork(
                 IndexWorkFailure::ResourceLimitExceeded {
                     stage: IndexWorkStage::RepositoryTraversal,
@@ -1589,8 +1587,8 @@ mod tests {
                     limit,
                     observed
                 }
-            )) if limit == MAX_REGISTERED_WORKTREES as u64
-                && observed == MAX_REGISTERED_WORKTREES as u64 + 1
+            )) if limit == MAX_GIT_WORKTREE_REGISTRATIONS as u64
+                && observed == MAX_GIT_WORKTREE_REGISTRATIONS as u64 + 1
         ));
     }
 

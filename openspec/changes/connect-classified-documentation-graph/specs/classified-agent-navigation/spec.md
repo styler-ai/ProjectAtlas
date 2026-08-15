@@ -73,7 +73,7 @@ When callers omit content selection and do not request document relations, exist
 - **THEN** cursor identity includes the behavior-relevant selection and rejects reuse under a different selection
 
 ### Requirement: Shipped guidance teaches the classified funnel
-The version-matched ProjectAtlas skill and user documentation SHALL teach agents to choose source, documentation, or both; use classified files/search before exact summaries; follow explicit `documents`/`documented_by`; inspect trust and unresolved reasons; bind shared-host calls with `project_path`; and end at exact current source slices before making implementation claims.
+The v0.4.5-rc1 version-matched ProjectAtlas skill and public user documentation SHALL teach agents to choose source, documentation, or both; use classified files/search before exact summaries; follow explicit `documents`/`documented_by`; inspect trust and unresolved reasons; bind shared-host calls with registered `worktree` aliases while retaining legacy `project_path` guidance; use labelled federation only when explicitly requested; and end at exact current source slices before making implementation claims.
 
 #### Scenario: Ordinary task needs source only
 - **WHEN** an agent is implementing code with no documentation question
@@ -83,6 +83,10 @@ The version-matched ProjectAtlas skill and user documentation SHALL teach agents
 - **WHEN** an agent starts from documentation or needs owning docs from source
 - **THEN** guidance shows the explicit relation and exact next-call sequence without broad repository reads
 
-#### Scenario: Worktree task binds exact root
-- **WHEN** several linked worktrees are available through one host
-- **THEN** guidance requires per-call `project_path` and warns that each checkout has its own writable classified graph
+#### Scenario: Worktree task uses a short captured alias
+- **WHEN** several registered linked worktrees are available through one host
+- **THEN** guidance prefers per-call `worktree`, documents `project_path` only as a mutually exclusive compatibility/diagnostic escape hatch, and warns that each checkout has its own writable classified graph
+
+#### Scenario: Cross-worktree document review remains labelled
+- **WHEN** an agent intentionally compares classified relations across registered worktrees
+- **THEN** guidance uses an explicit `worktrees` alias list, requires participant/root/generation labels, and never describes federation as a merged main graph
