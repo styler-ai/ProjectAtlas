@@ -576,7 +576,7 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
         if in_extensions && key.eq_ignore_ascii_case("worktreeconfig") {
             worktree_config_enabled = !matches!(
                 value.to_ascii_lowercase().as_str(),
-                "false" | "no" | "off" | "0"
+                "" | "false" | "no" | "off" | "0"
             );
             continue;
         }
@@ -589,7 +589,7 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
         }
         bare_setting = Some(!matches!(
             value.to_ascii_lowercase().as_str(),
-            "false" | "no" | "off" | "0"
+            "" | "false" | "no" | "off" | "0"
         ));
     }
     Ok(GitLocalConfigPolicy {
@@ -1390,7 +1390,31 @@ mod tests {
                 },
             "configless manager inferred a primary checkout without positive non-bare evidence",
         )?;
-        fs::write(&config_path, config)?;
+        fs::write(&config_path, &config)?;
+
+        run_git(&primary, ["config", "core.bare", ""])?;
+        let effective_bare = Command::new("git")
+            .arg("--git-dir")
+            .arg(primary.join(".git"))
+            .args(["config", "--bool", "core.bare"])
+            .output()?;
+        require(
+            effective_bare.status.success()
+                && String::from_utf8(effective_bare.stdout)?.trim() == "false",
+            "Git fixture did not interpret an empty core.bare value as false",
+        )?;
+        let empty_bare_manager =
+            require_git(discover_repository_structure(&primary.join(".git"))?)?;
+        require(
+            empty_bare_manager.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::Unambiguous {
+                        root: primary.canonicalize()?,
+                    },
+                },
+            "empty core.bare value hid the valid primary checkout",
+        )?;
+        fs::write(&config_path, &config)?;
 
         let configured_worktree = temp.path().join("configured external worktree");
         fs::create_dir(&configured_worktree)?;
