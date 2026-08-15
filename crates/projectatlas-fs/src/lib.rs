@@ -1,5 +1,7 @@
 //! Purpose: Scan repository files and folders for `ProjectAtlas` 3.
 
+pub mod worktree;
+
 use blake3::Hasher;
 use ignore::{DirEntry, WalkBuilder, WalkState, gitignore::GitignoreBuilder};
 use projectatlas_core::language::{

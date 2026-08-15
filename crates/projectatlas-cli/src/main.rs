@@ -42,6 +42,10 @@ use projectatlas_db::{
     ProjectRootTransitionResult, RepositoryCoverageQuery, RepositoryGraphDirection,
     verify_project_database,
 };
+use projectatlas_fs::worktree::{
+    GitManagerSourceSelection, GitRepositorySelection, GitWorktreeRole, GitWorktreeState,
+    RepositoryStructure, discover_repository_structure,
+};
 use projectatlas_service::{
     COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CodeSliceBudget, CodeSliceDraft, CoverageDiscoveryReport,
     DetailedRelationBudget, DetailedRelationQuery, FederatedStore, FileSummaryReport,
@@ -1424,6 +1428,12 @@ enum RootCommand {
     },
     /// Show the root, DB, config, and runtime identity `ProjectAtlas` will use.
     Show,
+    /// Show bounded structural Git worktree routing state without opening an atlas.
+    Status {
+        /// Checkout, descendant, or Git common directory to inspect.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Verify DB/config/root identity agree.
     Verify,
 }
@@ -2486,6 +2496,14 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 cli.preflight_implicit_project_root()?;
                 let report = build_root_report(&cli.db, cli.config.as_deref())?;
                 print_output(cli.format, &render_root_report(&report), &report)?;
+            }
+            Some(RootCommand::Status { path }) => {
+                let report = build_repository_control_report(path)?;
+                print_output(
+                    cli.format,
+                    &render_repository_control_report(&report),
+                    &report,
+                )?;
             }
             Some(RootCommand::Verify) => {
                 cli.preflight_implicit_project_root()?;
@@ -4609,6 +4627,182 @@ struct RuntimeInfoReport {
     output_formats: Vec<String>,
     /// Required MCP tool names compiled into the runtime.
     mcp_tools: Vec<String>,
+}
+
+/// Bounded structural routing state for agents operating across Git worktrees.
+#[derive(Debug, Serialize)]
+pub(crate) struct RepositoryControlReport {
+    /// Canonical checkout or Git common directory that owns the inventory.
+    control_root: String,
+    /// How the supplied path selected source.
+    source_selection: &'static str,
+    /// Exact source root selected without guessing, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_root: Option<String>,
+    /// Whether source operations require an explicit exact worktree root.
+    worktree_required: bool,
+    /// Bounded deterministic worktree inventory.
+    worktrees: Vec<RepositoryWorktreeReport>,
+    /// Whether additional structurally registered entries were omitted.
+    truncated: bool,
+    /// Closed diagnostics that prevent safe implicit selection.
+    blockers: Vec<String>,
+}
+
+/// One content-free structural worktree row.
+#[derive(Debug, Serialize)]
+struct RepositoryWorktreeReport {
+    /// Primary, linked, or non-Git source role.
+    role: &'static str,
+    /// Active, missing, or invalid structural state.
+    state: &'static str,
+    /// Exact source root when active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    root: Option<String>,
+    /// Git-owned administrative directory when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    administrative_directory: Option<String>,
+    /// Bounded structural failure when invalid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocker: Option<String>,
+}
+
+/// Maximum structural worktree rows returned through CLI or MCP status.
+const REPOSITORY_CONTROL_WORKTREE_LIMIT: usize = 256;
+
+/// Build one mutation-free structural repository/worktree status report.
+pub(crate) fn build_repository_control_report(
+    path: &Path,
+) -> Result<RepositoryControlReport, CliError> {
+    let structure = discover_repository_structure(path)?;
+    match structure {
+        RepositoryStructure::NonGit { selected_root } => Ok(RepositoryControlReport {
+            control_root: normalize_native_path_display(&selected_root),
+            source_selection: "exact_non_git",
+            selected_root: Some(normalize_native_path_display(&selected_root)),
+            worktree_required: false,
+            worktrees: vec![RepositoryWorktreeReport {
+                role: "non_git",
+                state: "active",
+                root: Some(normalize_native_path_display(&selected_root)),
+                administrative_directory: None,
+                blocker: None,
+            }],
+            truncated: false,
+            blockers: Vec::new(),
+        }),
+        RepositoryStructure::InvalidGit {
+            selected_root,
+            issue,
+        } => Ok(RepositoryControlReport {
+            control_root: normalize_native_path_display(&selected_root),
+            source_selection: "invalid_git",
+            selected_root: None,
+            worktree_required: true,
+            worktrees: Vec::new(),
+            truncated: false,
+            blockers: vec![format!(
+                "{:?}:{}",
+                issue.kind,
+                normalize_native_path_display(issue.path)
+            )],
+        }),
+        RepositoryStructure::Git(repository) => {
+            let (source_selection, selected_root, worktree_required, mut blockers) =
+                match repository.selection {
+                    GitRepositorySelection::Worktree { root, .. } => (
+                        "exact_worktree",
+                        Some(normalize_native_path_display(root)),
+                        false,
+                        Vec::new(),
+                    ),
+                    GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::Unambiguous { root },
+                    } => (
+                        "single_worktree",
+                        Some(normalize_native_path_display(root)),
+                        false,
+                        Vec::new(),
+                    ),
+                    GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::None,
+                    } => (
+                        "worktree_unavailable",
+                        None,
+                        true,
+                        vec!["active_worktree_unavailable".to_string()],
+                    ),
+                    GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::Ambiguous { .. },
+                    } => (
+                        "explicit_worktree_required",
+                        None,
+                        true,
+                        vec!["exact_worktree_selection_required".to_string()],
+                    ),
+                };
+            let truncated = repository.worktrees.len() > REPOSITORY_CONTROL_WORKTREE_LIMIT;
+            let worktrees = repository
+                .worktrees
+                .into_iter()
+                .take(REPOSITORY_CONTROL_WORKTREE_LIMIT)
+                .map(|entry| {
+                    let role = match entry.role {
+                        GitWorktreeRole::Primary => "primary",
+                        GitWorktreeRole::Linked => "linked",
+                    };
+                    let administrative_directory = Some(normalize_native_path_display(
+                        entry.administrative_directory,
+                    ));
+                    match entry.state {
+                        GitWorktreeState::Active { root, .. } => RepositoryWorktreeReport {
+                            role,
+                            state: "active",
+                            root: Some(normalize_native_path_display(root)),
+                            administrative_directory,
+                            blocker: None,
+                        },
+                        GitWorktreeState::Missing { git_control_path } => {
+                            RepositoryWorktreeReport {
+                                role,
+                                state: "missing",
+                                root: git_control_path.parent().map(normalize_native_path_display),
+                                administrative_directory,
+                                blocker: None,
+                            }
+                        }
+                        GitWorktreeState::Invalid { issue } => RepositoryWorktreeReport {
+                            role,
+                            state: "invalid",
+                            root: None,
+                            administrative_directory,
+                            blocker: Some(format!(
+                                "{:?}:{}",
+                                issue.kind,
+                                normalize_native_path_display(issue.path)
+                            )),
+                        },
+                    }
+                })
+                .collect();
+            blockers.sort();
+            blockers.dedup();
+            Ok(RepositoryControlReport {
+                control_root: normalize_native_path_display(repository.common_directory),
+                source_selection,
+                selected_root,
+                worktree_required,
+                worktrees,
+                truncated,
+                blockers,
+            })
+        }
+    }
+}
+
+/// Render structural worktree status for agent-facing text output.
+pub(crate) fn render_repository_control_report(report: &RepositoryControlReport) -> String {
+    encode_agent_payload(&json!({ "worktree_status": report }))
 }
 
 /// Project-local root identity report.

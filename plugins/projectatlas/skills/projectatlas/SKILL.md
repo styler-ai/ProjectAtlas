@@ -35,7 +35,7 @@ ProjectAtlas is an agent orientation layer. It combines reviewed folder/file res
 - Follow an explicit document bridge with `atlas_symbol_relations` using `view: "detailed"`, `relation: "documents"`, and the exact file or heading anchor. Outbound traversal moves from documentation to its validated repository target. Inbound traversal from source returns the same stored relation under the read-only `documented_by` view; no inverse fact is stored.
 - Inspect parser provenance, coverage, completeness, resolution, and typed unresolved reason together with classification. Missing, ignored, outside-root, case-conflicting, unsupported, and non-static targets are evidence to narrow or repair the navigation request, never permission to guess.
 - Submit the returned `next_call` unchanged. It preserves the exact file or heading selector, content selection, generation, and bounds; finish at current source evidence before making an implementation claim.
-- In linked-worktree or shared-host sessions, pass the exact checkout `project_path` on every call. Each checkout owns its ignored writable database and classified graph; a stable seed, when available, is verified read-only input and never a shared writable atlas.
+- In linked-worktree or shared-host sessions, pass the exact checkout `project_path` on every call. Each checkout owns its ignored writable database and classified graph; never substitute a sibling database or combine sibling graph generations.
 
 ## Indexing Strategy
 
@@ -108,6 +108,9 @@ For a single known wrong or genuinely repurposed accepted purpose, inspect enoug
 - Run from the project root; the normal database is `<root>/.projectatlas/projectatlas.db`.
 - Every ordinary checkout and linked worktree owns that private ignored writable database. Never substitute a sibling checkout's database or make the common/bare manager a classified-navigation root.
 - One MCP server may serve several indexed roots. Per-call `project_path` is the concurrency-safe choice.
+- Use `atlas_root` with `control_root` (or `projectatlas root status <path>`) for bounded mutation-free structural worktree status. A common manager with one active worktree may select it; zero or several active worktrees require an exact worktree path.
+- ProjectAtlas reports active, missing, and invalid structural registrations but never creates, moves, prunes, retires, removes, or switches Git worktrees. Git remains lifecycle authority.
+- The token TUI remains scoped to the selected exact-root atlas; worktree inventory is an agent-facing root-status contract, not a manager dashboard.
 - Never route a path outside the selected root unless that addressed root is already indexed and explicitly selected.
 - If the selected DB is incompatible or belongs to another project, do not reset, migrate, attach, merge, substitute, or fall back silently. Use typed recovery guidance or an explicit isolated DB.
 - `.gitignore` is dynamically authoritative. ProjectAtlas manual ignores are a stricter atlas-only layer applied afterward.

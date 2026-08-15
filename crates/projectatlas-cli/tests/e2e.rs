@@ -3487,8 +3487,8 @@ fn init_bootstrap_creates_db_scan_report_and_host_configs() -> Result<(), Box<dy
 }
 
 #[test]
-fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Result<(), Box<dyn Error>>
-{
+fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp()
+-> Result<(), Box<dyn Error>> {
     const DEEP_DIR_NAME: &str = "deep";
     const ELIGIBLE_DIR_NAME: &str = "eligible";
     const IGNORED_TREE_DIR_NAME: &str = "ignored-tree";
@@ -3507,11 +3507,16 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
             .join(DEEP_DIR_NAME)
             .join(ELIGIBLE_DIR_NAME),
     )?;
+    fs::create_dir(repo.join("docs"))?;
     fs::create_dir_all(repo.join(IGNORED_TREE_DIR_NAME).join(DEEP_DIR_NAME))?;
     fs::write(repo.join(".gitignore"), ".projectatlas/\n/ignored-tree/\n")?;
     fs::write(
         repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
         "pub fn main_checkout_marker() { main_checkout_leaf(); }\npub fn main_checkout_leaf() {}\n",
+    )?;
+    fs::write(
+        repo.join(GUIDE_MD_PATH),
+        "# Main Guide\n\nSee [the main source](../src/lib.rs).\n",
     )?;
     fs::write(
         repo.join(SRC_DIR_NAME)
@@ -3600,6 +3605,33 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
     if linked_ignore.code() != Some(1) {
         return Err(io::Error::other(format!(
             "git check-ignore could not verify the unignored worktree fixture: {linked_ignore}"
+        ))
+        .into());
+    }
+
+    let manager = repo.join(GIT_DIR_NAME);
+    let status = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "root", "status"])
+        .arg(&manager)
+        .output()?;
+    if !status.status.success() {
+        return Err(io::Error::other(format!(
+            "structural worktree status failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        ))
+        .into());
+    }
+    let status: Value = serde_json::from_slice(&status.stdout)?;
+    require_json_string(&status, &["source_selection"], "explicit_worktree_required")?;
+    require_json_bool(&status, &["worktree_required"], true)?;
+    require_json_array_len(&status, &["worktrees"], 2)?;
+    if status["worktrees"]
+        .as_array()
+        .is_none_or(|rows| rows.iter().any(|row| row["state"] != "active"))
+    {
+        return Err(io::Error::other(format!(
+            "structural status did not retain both active worktrees: {status}"
         ))
         .into());
     }
@@ -3860,6 +3892,10 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
         linked.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
         "pub fn linked_dirty_marker() {}\n",
     )?;
+    fs::write(
+        linked.join(GUIDE_MD_PATH),
+        "# Linked Guide\n\nSee [the dirty source](../src/dirty_only.rs).\n",
+    )?;
     run_watch_once(&linked, &linked_db)?;
     let dirty = AtlasStore::open_for_project(&linked_db, &linked)?;
     let dirty_library = dirty
@@ -3888,6 +3924,9 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
         serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_search","arguments":{"project_path":linked_root_text,"pattern":"linked_dirty_marker"}}}).to_string(),
         serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_search","arguments":{"project_path":projectatlas_core::normalize_native_path_display(repo.canonicalize()?),"pattern":"main_checkout_marker"}}}).to_string(),
         serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_search","arguments":{"project_path":projectatlas_core::normalize_native_path_display(linked.canonicalize()?),"pattern":"linked_dirty_marker"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"project_path":linked_root_text,"view":"detailed","file":"docs/guide.md","symbol":"Linked Guide","symbol_kind":"heading","direction":"outbound","relation":"documents","content_selection":"documentation","limit":10}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"project_path":projectatlas_core::normalize_native_path_display(repo.canonicalize()?),"view":"detailed","file":"src/lib.rs","direction":"inbound","relation":"documents","content_selection":"source","limit":10}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"atlas_root","arguments":{"control_root":projectatlas_core::normalize_native_path_display(&manager)}}}).to_string(),
     ];
     let stdout = run_mcp_stdio(&command, &linked, &args, &messages)?;
     for id in [2, 4] {
@@ -3903,6 +3942,40 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
     if !main_text.contains("main_checkout_marker") || main_text.contains("linked_dirty_marker") {
         return Err(io::Error::other(format!(
             "interleaved main-worktree MCP read crossed databases: {main_text}"
+        ))
+        .into());
+    }
+    let linked_documents = mcp_tool_text(&stdout, 5)?;
+    if !linked_documents.contains("documents")
+        || !linked_documents.contains("src/dirty_only.rs")
+        || linked_documents.contains("Main Guide")
+    {
+        return Err(io::Error::other(format!(
+            "linked classified navigation crossed worktree state: {linked_documents}"
+        ))
+        .into());
+    }
+    let main_documented_by = mcp_tool_text(&stdout, 6)?;
+    if !main_documented_by.contains("documented_by")
+        || !main_documented_by.contains("Main Guide")
+        || main_documented_by.contains("Linked Guide")
+    {
+        return Err(io::Error::other(format!(
+            "main classified navigation crossed worktree state: {main_documented_by}"
+        ))
+        .into());
+    }
+    let control_text = mcp_tool_text(&stdout, 7)?;
+    if !control_text.contains("explicit_worktree_required")
+        || !control_text.contains(&projectatlas_core::normalize_native_path_display(
+            repo.canonicalize()?,
+        ))
+        || !control_text.contains(&projectatlas_core::normalize_native_path_display(
+            linked.canonicalize()?,
+        ))
+    {
+        return Err(io::Error::other(format!(
+            "one MCP process lost its bounded structural worktree status: {control_text}"
         ))
         .into());
     }

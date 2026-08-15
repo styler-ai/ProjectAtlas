@@ -38,11 +38,11 @@ use crate::{
     AgentErrorKind, CliError, DEFAULT_FILE_SUMMARY_LIMIT, DatabaseFilesystemErrorPayload,
     HarnessConfig, OutputFormat, RootTransition, RuntimeInfoReport, SchemaMigrationRequiredPayload,
     SchemaVersionMismatchPayload, SearchRetrievalModeArg, build_harness_mcp_config_report,
-    build_parity_report, build_root_report, build_runtime_info, controlled_named_output,
-    database_filesystem_error_payload, finalize_coverage_output, render_code_slice,
-    render_file_summary, render_parity_report, render_root_report, render_runtime_info,
-    render_search_report, render_watch_status, schema_migration_required_payload,
-    schema_version_mismatch_payload,
+    build_parity_report, build_repository_control_report, build_root_report, build_runtime_info,
+    controlled_named_output, database_filesystem_error_payload, finalize_coverage_output,
+    render_code_slice, render_file_summary, render_parity_report, render_repository_control_report,
+    render_root_report, render_runtime_info, render_search_report, render_watch_status,
+    schema_migration_required_payload, schema_version_mismatch_payload,
 };
 use projectatlas_core::graph::{
     Completeness, ConfidenceClass, CoverageRecord, EntitySelector, ExternalSelector,
@@ -697,6 +697,8 @@ struct AtlasMapParams {
 struct AtlasRootParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Optional checkout or Git common directory for mutation-free worktree status.
+    control_root: Option<String>,
     /// Return the same report shape with `verified` available for gating.
     verify: Option<bool>,
 }
@@ -5806,10 +5808,19 @@ impl ProjectAtlasMcpServer {
     /// Return root/DB/config diagnostics.
     #[tool(
         name = "atlas_root",
-        description = "Show or verify ProjectAtlas root, DB, config, and runtime identity."
+        description = "Show or verify one exact ProjectAtlas root, or inspect bounded structural Git worktree routing from control_root."
     )]
     fn atlas_root(&self, Parameters(params): Parameters<AtlasRootParams>) -> McpToolTextResult {
         Self::as_mcp_text((|| {
+            if let Some(control_root) = params.control_root.as_deref() {
+                if params.project_path.is_some() || params.verify.unwrap_or(false) {
+                    return Err(CliError::InvalidInput(
+                        "control_root cannot be combined with project_path or verify".to_string(),
+                    ));
+                }
+                let report = build_repository_control_report(Path::new(control_root))?;
+                return Ok(render_repository_control_report(&report));
+            }
             let state = self.admin_project_root(params.project_path)?;
             let report = build_root_report(&state.db_path, state.config_path.as_deref())?;
             if params.verify.unwrap_or(false) && report.verified {

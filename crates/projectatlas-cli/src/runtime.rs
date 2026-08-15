@@ -71,6 +71,9 @@ use projectatlas_db::{
     TelemetryRetentionState, database_settings_report, read_project_root_read_only,
     validate_database_location,
 };
+use projectatlas_fs::worktree::{
+    GitManagerSourceSelection, GitRepositorySelection, RepositoryStructure,
+};
 use projectatlas_fs::{
     FsError, RootScanPolicy, ScanLimits, ScanOptions, gitignore_excludes_path,
     scan_path_with_policy_controlled, scan_repo, scan_repo_controlled,
@@ -98,7 +101,6 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command as StdCommand, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TrySendError};
@@ -115,11 +117,6 @@ pub(crate) const MAX_HEALTH_LIMIT: usize = 200;
 pub(crate) const MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES: u64 = 2 * 1_024 * 1_024;
 /// Stable serialized recommendation for host-owned purpose curator selection.
 pub(crate) const PURPOSE_CURATOR_RECOMMENDED_REASONING: &str = "lowest_reliable_host_supported";
-/// Maximum output retained from one effective Git config query.
-const MAX_GIT_CONFIG_QUERY_OUTPUT_BYTES: usize = 64 * 1_024;
-/// Maximum time allowed for one effective Git config query.
-const GIT_CONFIG_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
-
 /// Default whole-operation deadline when no narrower parser limit is supplied.
 const DEFAULT_INDEX_WORK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Maximum UTF-8 source bytes retained while one publication is staged.
@@ -1916,18 +1913,32 @@ pub(crate) fn canonical_project_root(root: &Path) -> Result<PathBuf, CliError> {
     })
 }
 
-/// Return a canonical checked-out source root, rejecting bare Git control roots.
+/// Return one exact source root from structural Git or non-Git evidence.
 pub(crate) fn canonical_source_project_root(root: &Path) -> Result<PathBuf, CliError> {
-    let root = canonical_project_root(root)?;
-    if is_bare_git_control_root(&root)? {
-        return Err(CliError::WorktreeRequired(Box::new(
-            ProjectWorktreeRequired {
-                project_root: normalize_native_path_display(&root),
-                status: IndexReadStatus::WorktreeRequired,
-            },
-        )));
+    match projectatlas_fs::worktree::discover_repository_structure(root)? {
+        RepositoryStructure::NonGit { selected_root } => Ok(selected_root),
+        RepositoryStructure::Git(repository) => match repository.selection {
+            GitRepositorySelection::Worktree { root, .. }
+            | GitRepositorySelection::CommonManager {
+                source_selection: GitManagerSourceSelection::Unambiguous { root },
+            } => Ok(root),
+            GitRepositorySelection::CommonManager { .. } => Err(CliError::WorktreeRequired(
+                Box::new(ProjectWorktreeRequired {
+                    project_root: normalize_native_path_display(repository.common_directory),
+                    status: IndexReadStatus::WorktreeRequired,
+                }),
+            )),
+        },
+        RepositoryStructure::InvalidGit {
+            selected_root,
+            issue,
+        } => Err(CliError::InvalidInput(format!(
+            "invalid structural Git evidence for '{}': {:?} at '{}'",
+            normalize_native_path_display(selected_root),
+            issue.kind,
+            normalize_native_path_display(issue.path)
+        ))),
     }
-    Ok(root)
 }
 
 /// Return a typed, non-mutating first-use handoff for one selected root.
@@ -1937,165 +1948,6 @@ pub(crate) fn index_init_required(root: &Path, database: &Path) -> CliError {
         database: normalize_native_path_display(database),
         status: IndexReadStatus::InitRequired,
     }))
-}
-
-/// Recognize a bare repository or selected common Git control directory.
-fn is_bare_git_control_root(root: &Path) -> Result<bool, CliError> {
-    let git = root.join(".git");
-    let control_root = match fs::metadata(&git) {
-        Ok(metadata) if metadata.is_file() => return Ok(false),
-        Ok(metadata) if metadata.is_dir() => git,
-        Ok(_) => return Ok(false),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => root.to_path_buf(),
-        Err(source) => {
-            return Err(CliError::Io { path: git, source });
-        }
-    };
-    let head = control_root.join("HEAD");
-    let config = control_root.join("config");
-    let objects = control_root.join("objects");
-    let refs = control_root.join("refs");
-    for path in [&head, &config, &objects, &refs] {
-        if !path.try_exists().map_err(|source| CliError::Io {
-            path: path.clone(),
-            source,
-        })? {
-            return Ok(false);
-        }
-    }
-    let structurally_git = fs::metadata(&head)
-        .map_err(|source| CliError::Io { path: head, source })?
-        .is_file()
-        && fs::metadata(&config)
-            .map_err(|source| CliError::Io {
-                path: config.clone(),
-                source,
-            })?
-            .is_file()
-        && fs::metadata(&objects)
-            .map_err(|source| CliError::Io {
-                path: objects,
-                source,
-            })?
-            .is_dir()
-        && fs::metadata(&refs)
-            .map_err(|source| CliError::Io { path: refs, source })?
-            .is_dir();
-    if !structurally_git {
-        return Ok(false);
-    }
-    if control_root == root {
-        return Ok(true);
-    }
-
-    effective_git_config_bare_setting(&control_root, &config).map(|bare| bare.unwrap_or(false))
-}
-
-/// Query Git's effective local `core.bare` value, including configured includes.
-///
-/// A missing Git executable leaves an ordinary checkout non-bare. Every failure
-/// after a child starts remains an error so timeouts, invalid output, and cleanup
-/// behavior retain their existing semantics.
-fn effective_git_config_bare_setting(
-    control_root: &Path,
-    config: &Path,
-) -> Result<Option<bool>, CliError> {
-    let child = StdCommand::new("git")
-        .arg("--git-dir")
-        .arg(normalize_native_path_display(control_root))
-        .args([
-            "config",
-            "--local",
-            "--includes",
-            "--get",
-            "--bool",
-            "core.bare",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match child {
-        Ok(child) => child,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(CliError::Io {
-                path: config.to_path_buf(),
-                source,
-            });
-        }
-    };
-    let deadline = Instant::now() + GIT_CONFIG_QUERY_TIMEOUT;
-    loop {
-        match child.try_wait().map_err(|source| CliError::Io {
-            path: config.to_path_buf(),
-            source,
-        })? {
-            Some(_) => break,
-            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            None => {
-                child.kill().map_err(|source| CliError::Io {
-                    path: config.to_path_buf(),
-                    source,
-                })?;
-                child.wait().map_err(|source| CliError::Io {
-                    path: config.to_path_buf(),
-                    source,
-                })?;
-                return Err(CliError::Io {
-                    path: config.to_path_buf(),
-                    source: io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "effective Git config query exceeded its deadline",
-                    ),
-                });
-            }
-        }
-    }
-    let output = child.wait_with_output().map_err(|source| CliError::Io {
-        path: config.to_path_buf(),
-        source,
-    })?;
-    if output.stdout.len().saturating_add(output.stderr.len()) > MAX_GIT_CONFIG_QUERY_OUTPUT_BYTES {
-        return Err(CliError::Io {
-            path: config.to_path_buf(),
-            source: io::Error::new(
-                io::ErrorKind::InvalidData,
-                "effective Git config query exceeded its output bound",
-            ),
-        });
-    }
-    if output.status.success() {
-        return match std::str::from_utf8(&output.stdout)
-            .map(str::trim)
-            .map_err(|source| CliError::Io {
-                path: config.to_path_buf(),
-                source: io::Error::new(io::ErrorKind::InvalidData, source),
-            })? {
-            "true" => Ok(Some(true)),
-            "false" => Ok(Some(false)),
-            value => Err(CliError::Io {
-                path: config.to_path_buf(),
-                source: io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Git returned invalid core.bare value {value:?}"),
-                ),
-            }),
-        };
-    }
-    if output.status.code() == Some(1) {
-        return Ok(None);
-    }
-    Err(CliError::Io {
-        path: config.to_path_buf(),
-        source: io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "effective Git config query failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        ),
-    })
 }
 
 /// Load map configuration for purpose import during scan.

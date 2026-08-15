@@ -1794,57 +1794,37 @@ summary, relation, and slice routes expose the smallest trustworthy next step.
 
 ```mermaid
 flowchart TB
-    subgraph Stable[Clean stable main]
-        Saved[Current saved source and documentation] --> Classify[Registry-owned content classification]
-        Saved --> Parse[Bounded Markdown headings and explicit local references]
-        Parse --> Resolve[Exact-root resolution with typed unresolved evidence]
-        Classify --> Publish[(Atomic complete schema-17 active-atlas generation)]
-        Resolve --> Publish
-        Publish -. "#430 release blocker" .-> Seal[Planned classified portable allowlist and complete-coverage verification]
-        Seal -.-> Seed[(Planned immutable content-addressed exact-tag seed)]
-    end
+    Manager[Git common manager] --> Discover[Bounded structural discovery]
+    Discover --> Count{Exactly one active worktree?}
+    Count -->|zero or several| Required[Return worktree_required]
+    Count -->|one| Selected{Exact selected worktree}
+    Agent[Agent call with explicit project_path] --> Selected
 
-    subgraph WorktreeA[Worktree A]
-        CopyA[Verified copy or safe reflink into staged private database] --> RebindA[Bind exact worktree root]
-        RebindA --> RefreshA[Two-sided branch and dirty-byte refresh]
-        SavedA[Current and dirty saved bytes] --> RefreshA
-        RefreshA --> DbA[(Activated private ignored writable database A)]
-        CallA[MCP call with project_path A] --> DbA
-        DbA --> NavigateA[Classified navigation and documents or documented_by]
-        NavigateA --> SliceA[Exact current source or heading slice]
-    end
-
-    subgraph WorktreeB[Worktree B]
-        CopyB[Verified copy or safe reflink into staged private database] --> RebindB[Bind exact worktree root]
-        RebindB --> RefreshB[Two-sided branch and dirty-byte refresh]
-        SavedB[Current and dirty saved bytes] --> RefreshB
-        RefreshB --> DbB[(Activated private ignored writable database B)]
-        CallB[MCP call with project_path B] --> DbB
-        DbB --> NavigateB[Classified navigation and documents or documented_by]
-        NavigateB --> SliceB[Exact current source or heading slice]
-    end
-
-    Seed -. "hydrate after #430" .-> CopyA
-    Seed -. "hydrate after #430" .-> CopyB
+    SavedA[Current and dirty bytes in A] --> BuildA[Classify, parse, resolve, and refresh A]
+    BuildA --> DbA[(Private ignored schema-17 atlas A)]
+    SavedB[Current and dirty bytes in B] --> BuildB[Classify, parse, resolve, and refresh B]
+    BuildB --> DbB[(Private ignored schema-17 atlas B)]
+    Selected -->|A| DbA
+    Selected -->|B| DbB
+    DbA --> NavigateA[Classified navigation in A]
+    DbB --> NavigateB[Classified navigation in B]
+    NavigateA --> SliceA[Exact source or heading slice A]
+    NavigateB --> SliceB[Exact source or heading slice B]
+    DbA -. never shared or merged .- DbB
 ```
 
-At the #440 head, the active schema-17 generation owns classifications,
+The selected worktree's active schema-17 generation owns classifications,
 headings, exact selectors, canonical document relations, completeness,
-provenance, and typed unresolved evidence. The dotted path is deliberately
-marked pending: #430 must extend the existing portable snapshot with stable
-heading facts and parser provenance, reject incomplete classified-document
-coverage, and prove the seed and hydration contracts before release.
+provenance, and typed unresolved evidence. A checkout with schema 16 migrates
+its existing local atlas; a checkout without one uses ordinary local init and
+scan. #430 adds only structural discovery, unambiguous source selection, and
+bounded root status. It does not introduce a seed, shared graph, or manager UI.
 
-Once that blocker lands, the seed is a verified read-only input, never a shared
-writable database. Its portable subset carries stable classifications, heading
-identities, canonical document relations, completeness, provenance, and typed
-unresolved evidence; it does not carry local identity, telemetry, absolute
-paths, writable sidecars, or ephemeral exact-source byte/column selectors.
-Each checkout rebinds the staged copy and republishes stable-main differences
-plus current dirty saved bytes before activation, regenerating its own exact
-heading selectors. Requests then capture the exact root, private database, and
-generation. Classification, heading, relation, purpose, unresolved evidence,
-and next-call state therefore cannot leak between sibling worktrees.
+Each scan or watcher refresh republishes current saved bytes into that exact
+worktree's private atlas. Requests capture the exact root, database, and
+generation for their lifetime. Classification, heading, relation, purpose,
+unresolved evidence, and next-call state therefore cannot leak between sibling
+worktrees, even when one MCP process interleaves explicit `project_path` calls.
 
 A modernization tag highlights source families where exact dependency and
 source-evidence navigation is especially valuable for high-risk transformation
