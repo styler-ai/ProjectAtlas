@@ -838,6 +838,12 @@ const WORKTREE_CONTROL_SCHEMA_SQL: &str = "
             CHECK(typeof(git_common_directory) = 'text' AND length(git_common_directory) BETWEEN 1 AND 131072),
         git_administrative_directory TEXT NOT NULL
             CHECK(typeof(git_administrative_directory) = 'text' AND length(git_administrative_directory) BETWEEN 1 AND 131072),
+        git_administrative_identity TEXT NOT NULL
+            CHECK(
+                typeof(git_administrative_identity) = 'text'
+                AND length(git_administrative_identity) = 64
+                AND git_administrative_identity NOT GLOB '*[^0-9a-f]*'
+            ),
         last_root TEXT NOT NULL
             CHECK(typeof(last_root) = 'text' AND length(last_root) BETWEEN 1 AND 131072),
         project_instance_id BLOB
@@ -862,6 +868,8 @@ const WORKTREE_CONTROL_SCHEMA_SQL: &str = "
         ON worktree_registrations(alias) WHERE state = 'active';
     CREATE UNIQUE INDEX idx_worktree_registrations_active_administrative_directory
         ON worktree_registrations(git_administrative_directory) WHERE state = 'active';
+    CREATE UNIQUE INDEX idx_worktree_registrations_active_administrative_identity
+        ON worktree_registrations(git_administrative_identity) WHERE state = 'active';
     CREATE UNIQUE INDEX idx_worktree_registrations_active_project
         ON worktree_registrations(project_instance_id)
         WHERE state = 'active' AND project_instance_id IS NOT NULL;

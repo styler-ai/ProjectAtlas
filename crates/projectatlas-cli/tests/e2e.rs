@@ -3518,6 +3518,7 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(MAIN_CHECKOUT_DIR_NAME);
     fs::create_dir(&repo)?;
+    let repo = repo.canonicalize()?;
     git_success(&repo, &["init"])?;
     git_success(&repo, &["config", "user.name", "ProjectAtlas Test"])?;
     git_success(
@@ -3611,6 +3612,7 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
         ))
         .into());
     }
+    let linked = linked.canonicalize()?;
     fs::write(
         linked.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
         "pub fn linked_feature_marker() { linked_feature_leaf(); }\npub fn linked_feature_second() { linked_feature_leaf(); }\npub fn linked_feature_leaf() {}\n",
@@ -3642,6 +3644,7 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
         ))
         .into());
     }
+    let review = review.canonicalize()?;
     fs::write(
         review.join(SRC_DIR_NAME).join(REVIEW_ONLY_RS_FILE_NAME),
         "pub fn review_only_marker() {}\n",

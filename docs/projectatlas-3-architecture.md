@@ -1807,7 +1807,7 @@ summary, relation, and slice routes expose the smallest trustworthy next step.
 ```mermaid
 flowchart TB
     Agent[Agent in explicitly selected control checkout] -->|worktree alias per call| Resolver[Immutable MCP target resolver]
-    Git[Bounded reciprocal Git metadata] --> Registry[Worktree list and registration]
+    Git[Bounded reciprocal Git metadata] --> Registry[Worktree list and lifecycle-bound registration]
     Registry --> Control
     Resolver -->|read registry or select main| Control[(Control schema-18 atlas and registry)]
     Resolver -->|issue alias| DbB[(Private ignored schema-18 target atlas)]
@@ -1842,6 +1842,11 @@ next-call state therefore cannot leak between sibling worktrees, even when one
 MCP process interleaves short-alias calls. Explicit `worktrees` federation is
 bounded, read-only, fully labelled, and call-local; it never persists or merges
 sibling generations.
+
+Registration also captures an opaque identity for the current Git
+administrative-directory filesystem object. Git-authorized checkout moves keep
+that object and its alias; deleting and recreating the directory at the same
+path fails closed so a replacement checkout cannot inherit the earlier alias.
 
 A modernization tag highlights source families where exact dependency and
 source-evidence navigation is especially valuable for high-risk transformation

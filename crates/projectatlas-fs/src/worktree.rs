@@ -311,6 +311,9 @@ fn build_git_structure(
     let common_directory = canonicalize(&selected.common_directory, &selected.common_directory)?;
     let primary_root =
         primary_worktree_root(&common_directory, selected.common_directory_bare_setting)?;
+    let primary_may_be_unlisted = primary_root.is_none()
+        && selected.common_directory_bare_setting.is_none()
+        && common_directory.file_name().and_then(|name| name.to_str()) == Some(".git");
     let selected_primary = (selection_kind == GitRepositorySelectionKind::Worktree
         && selected.role == GitWorktreeRole::Primary)
         .then_some(selected.clone());
@@ -328,7 +331,7 @@ fn build_git_structure(
             administrative_directory: selected.administrative_directory,
         },
         GitRepositorySelectionKind::Manager => GitRepositorySelection::CommonManager {
-            source_selection: manager_source_selection(&worktrees),
+            source_selection: manager_source_selection(&worktrees, primary_may_be_unlisted),
         },
     };
 
@@ -798,7 +801,10 @@ fn primary_worktree_root(
 }
 
 /// Derive manager auto-selection without branch, path-name, or recency guesses.
-fn manager_source_selection(worktrees: &[GitWorktreeEntry]) -> GitManagerSourceSelection {
+fn manager_source_selection(
+    worktrees: &[GitWorktreeEntry],
+    primary_may_be_unlisted: bool,
+) -> GitManagerSourceSelection {
     let mut count = 0_usize;
     let mut only_root = None;
     for entry in worktrees {
@@ -809,11 +815,81 @@ fn manager_source_selection(worktrees: &[GitWorktreeEntry]) -> GitManagerSourceS
             }
         }
     }
+    if primary_may_be_unlisted && count == 1 {
+        return GitManagerSourceSelection::Ambiguous { worktree_count: 2 };
+    }
     match (count, only_root) {
         (0, _) => GitManagerSourceSelection::None,
         (1, Some(root)) => GitManagerSourceSelection::Unambiguous { root },
         (worktree_count, _) => GitManagerSourceSelection::Ambiguous { worktree_count },
     }
+}
+
+/// Return an opaque identity for one current Git administrative-directory lifecycle.
+///
+/// The value remains stable when Git moves the checked-out worktree because the
+/// administrative directory itself remains in place. Removing and recreating that
+/// directory produces a different filesystem identity even when Git reuses its path.
+///
+/// # Errors
+///
+/// Returns an error when metadata cannot be read, the path is indirect or not a
+/// directory, or the supported platform cannot provide stable lifecycle evidence.
+pub fn git_administrative_identity(path: &Path) -> FsResult<String> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| FsError::RepositoryBoundary {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if metadata_is_indirect(&metadata) || !metadata.is_dir() {
+        return Err(FsError::RepositoryBoundary {
+            path: path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Git administrative identity requires a direct directory",
+            ),
+        });
+    }
+
+    let mut identity = blake3::Hasher::new();
+    identity.update(b"projectatlas-git-administrative-identity-v1\0");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        identity.update(b"unix\0");
+        identity.update(&metadata.dev().to_le_bytes());
+        identity.update(&metadata.ino().to_le_bytes());
+        if let Ok(created) = metadata.created()
+            && let Ok(duration) = created.duration_since(std::time::UNIX_EPOCH)
+        {
+            identity.update(&duration.as_nanos().to_le_bytes());
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        identity.update(b"windows\0");
+        identity.update(&metadata.creation_time().to_le_bytes());
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let created = metadata
+            .created()
+            .map_err(|source| FsError::RepositoryBoundary {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let duration = created
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|source| FsError::RepositoryBoundary {
+                path: path.to_path_buf(),
+                source: io::Error::new(io::ErrorKind::InvalidData, source),
+            })?;
+        identity.update(b"portable\0");
+        identity.update(&duration.as_nanos().to_le_bytes());
+    }
+    Ok(identity.finalize().to_hex().to_string())
 }
 
 /// Read exactly one `prefix path` pointer record.
@@ -1121,6 +1197,18 @@ mod tests {
 
         let nested_linked = primary.join("arbitrary container").join("linked checkout");
         add_worktree(&primary, "nested-linked", &nested_linked)?;
+        let config = fs::read(&config_path)?;
+        fs::remove_file(&config_path)?;
+        let configless_mixed_manager =
+            require_git(discover_repository_structure(&primary.join(".git"))?)?;
+        require(
+            configless_mixed_manager.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::Ambiguous { worktree_count: 2 },
+                },
+            "configless mixed manager routed to its sole inventoried linked checkout",
+        )?;
+        fs::write(&config_path, config)?;
         let outside_linked = temp
             .path()
             .join("outside arbitrary 工作树")

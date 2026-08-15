@@ -539,6 +539,7 @@ mod tests {
             &alias,
             &source_root.join(".git"),
             &source_root.join(".git/worktrees/seeded"),
+            &"22".repeat(32),
             target_root,
             None,
             1,

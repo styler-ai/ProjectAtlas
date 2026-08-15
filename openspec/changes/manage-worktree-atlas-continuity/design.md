@@ -35,7 +35,7 @@ Non-goals:
 
 The MCP server's explicitly selected ProjectAtlas root is the control atlas for registry commands and owns the reserved alias `main`. The checkout may be an ordinary primary Git checkout or a linked checkout stored anywhere; neither branch name nor folder position defines it. Existing explicit root binding remains the way a user chooses that authority.
 
-The control database stores a bounded catalog of active and retired registrations. An active registration contains a validated alias, the stable Git administrative identity returned by structural discovery, the worktree project identity once initialized, and the last observed canonical root. The administrative identity, not the cached path, is used to resolve a Git-authorized move. Retired records retain telemetry identity and last alias but are not selectable for source operations.
+The control database stores a bounded catalog of active and retired registrations. An active registration contains a validated alias, the reciprocal Git administrative-directory path, an opaque identity for that directory's current filesystem lifecycle, the worktree project identity once initialized, and the last observed canonical root. The administrative directory remains stable across a Git-authorized checkout move; the opaque lifecycle identity prevents a later replacement directory at the same path from inheriting the registration. Retired records retain telemetry identity and last alias but are not selectable for source operations.
 
 Aliases are validated normalized identifiers with a fixed length bound. `main` is reserved. Active aliases and active Git administrative identities are unique. A request never infers an alias from a mutable branch name after registration.
 
@@ -133,7 +133,7 @@ Rollback of the application requires a runtime that supports the migrated schema
 ## Risks / Trade-offs
 
 - Human selectors can collide. The list tool returns stable candidates and add fails with bounded alternatives instead of guessing.
-- A Git worktree may move. Stable administrative identity is re-resolved structurally and the cached path updates only after reciprocal validation.
+- A Git worktree may move. Its stable administrative directory is re-resolved structurally and the cached path updates only after reciprocal and lifecycle validation. A replacement directory at the same path fails closed until the stale alias is removed and the replacement is registered.
 - Hydrated main state may differ substantially from a branch. Reconciliation owns the exact delta and escalates to the existing full-refresh path when the affected closure is uncertain or exceeds bounds.
 - A manually deleted worktree can contain local CLI telemetry not yet synchronized. Routed MCP usage is already central; typed pending-sync status and required final-sync removal cover ProjectAtlas-managed unregister, but no local tool can recover bytes externally deleted before any successful durable sync.
 - Aggregate main reporting intentionally omits raw per-session worktree detail after retirement. Durable totals, dimensions, trends, origin labels, and detail availability remain honest.

@@ -63,6 +63,11 @@ ProjectAtlas SHALL let one explicitly selected primary/control atlas register st
 - **WHEN** Git moves a registered worktree while retaining its validated administrative identity
 - **THEN** the next resolution updates the cached canonical path and preserves the alias, database identity, and token origin
 
+#### Scenario: Reused administrative path does not inherit an alias
+
+- **WHEN** Git removes a registered worktree and later creates a different administrative-directory lifecycle at the same path
+- **THEN** ProjectAtlas rejects alias routing without reading or writing the replacement atlas and permits the stale ProjectAtlas registration to be retired before the replacement is registered explicitly
+
 #### Scenario: Remove unregisters ProjectAtlas only
 
 - **WHEN** final local telemetry synchronization succeeds and an agent calls `atlas_worktree_remove` with an active alias

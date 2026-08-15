@@ -7154,6 +7154,7 @@ mod tests {
             &alias,
             &common,
             &administrative,
+            &"11".repeat(32),
             &worktree_root,
             Some(worktree_project),
             10,
@@ -7305,7 +7306,7 @@ mod tests {
     fn worktree_continuity_high_registration_aggregate_has_bounded_sql_and_rows()
     -> Result<(), Box<dyn Error>> {
         const ORIGINS: usize = 128;
-        const EXPECTED_STATEMENTS: usize = 11_151;
+        const EXPECTED_STATEMENTS: usize = 11_279;
         const EXPECTED_CHANGED_ROWS: u64 = 3_203;
 
         let temp = tempfile::tempdir()?;
@@ -7327,6 +7328,7 @@ mod tests {
                 &alias,
                 &common,
                 &common.join(format!("worktrees/{suffix:03}")),
+                &format!("{suffix:064x}"),
                 &temp.path().join(format!("worktree-{suffix:03}")),
                 Some(ProjectInstanceId::from_bytes([u8::try_from(suffix)?; 16])?),
                 u64::try_from(suffix)?,

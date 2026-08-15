@@ -80,7 +80,7 @@ use projectatlas_db::{
 };
 use projectatlas_fs::worktree::{
     GitRepositoryStructure, GitWorktreeEntry, GitWorktreeRole, GitWorktreeState,
-    RepositoryStructure, discover_repository_structure,
+    RepositoryStructure, discover_repository_structure, git_administrative_identity,
 };
 #[cfg(test)]
 use projectatlas_service::build_file_summary_from_source;
@@ -691,6 +691,9 @@ const MCP_ERROR_WORKTREE_ALIAS_NON_UTF8: &str =
 /// Active registrations must agree with their local atlas identity.
 const MCP_ERROR_WORKTREE_IDENTITY_CONFLICT: &str =
     "local atlas identity conflicts with its active registration";
+/// A reused administrative path cannot inherit an earlier registration.
+const MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED: &str =
+    "registered worktree administrative lifecycle changed; unregister and register it again";
 /// Federation must retain the exact alias captured during target resolution.
 const MCP_ERROR_FEDERATED_ALIAS_MISSING: &str =
     "federated worktree resolution lost its captured alias";
@@ -5629,6 +5632,12 @@ impl ProjectAtlasMcpServer {
             registration.state == WorktreeRegistrationState::Active
                 && registration.git_administrative_directory == administrative_directory
         });
+        let administrative_identity = git_administrative_identity(&entry.administrative_directory);
+        let lifecycle_matches = registration.is_none_or(|registration| {
+            administrative_identity
+                .as_ref()
+                .is_ok_and(|identity| identity == &registration.git_administrative_identity)
+        });
         let root = Self::active_worktree_root(entry);
         let control = root.is_some_and(|root| root == self.control_state.root);
         let alias = if control {
@@ -5647,48 +5656,55 @@ impl ProjectAtlasMcpServer {
         let mut telemetry_state = McpWorktreeTelemetryState::Unavailable;
         let mut local_telemetry_revision = None;
         let mut project_instance_id = None;
-        let mut blocker = None;
+        let mut blocker = (!lifecycle_matches)
+            .then(|| MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED.to_string())
+            .or_else(|| administrative_identity.err().map(|error| error.to_string()));
         let git_state = match &entry.state {
             GitWorktreeState::Active { root, .. } => {
-                match Self::local_worktree_atlas(root) {
-                    Ok(Some(local)) => {
-                        let identity_matches = registration
-                            .and_then(|registration| registration.project_instance_id)
-                            .is_none_or(|expected| expected == local.project_instance_id);
-                        if identity_matches {
-                            atlas_state = McpWorktreeAtlasState::Initialized;
-                            local_telemetry_revision = Some(local.snapshot.revision());
-                            project_instance_id = Some(local.project_instance_id.to_string());
-                            telemetry_state = if control {
-                                McpWorktreeTelemetryState::Control
-                            } else if let Some(registration) = registration {
-                                if local.snapshot.revision()
-                                    > registration.accepted_telemetry_revision
-                                {
-                                    McpWorktreeTelemetryState::Pending
+                if lifecycle_matches {
+                    match Self::local_worktree_atlas(root) {
+                        Ok(Some(local)) => {
+                            let identity_matches = registration
+                                .and_then(|registration| registration.project_instance_id)
+                                .is_none_or(|expected| expected == local.project_instance_id);
+                            if identity_matches {
+                                atlas_state = McpWorktreeAtlasState::Initialized;
+                                local_telemetry_revision = Some(local.snapshot.revision());
+                                project_instance_id = Some(local.project_instance_id.to_string());
+                                telemetry_state = if control {
+                                    McpWorktreeTelemetryState::Control
+                                } else if let Some(registration) = registration {
+                                    if local.snapshot.revision()
+                                        > registration.accepted_telemetry_revision
+                                    {
+                                        McpWorktreeTelemetryState::Pending
+                                    } else {
+                                        McpWorktreeTelemetryState::Current
+                                    }
                                 } else {
-                                    McpWorktreeTelemetryState::Current
-                                }
+                                    McpWorktreeTelemetryState::Unregistered
+                                };
+                            } else {
+                                atlas_state = McpWorktreeAtlasState::Invalid;
+                                blocker = Some(MCP_ERROR_WORKTREE_IDENTITY_CONFLICT.to_string());
+                            }
+                        }
+                        Ok(None) => {
+                            atlas_state = McpWorktreeAtlasState::Missing;
+                            telemetry_state = if registration.is_some() {
+                                McpWorktreeTelemetryState::MissingAtlas
                             } else {
                                 McpWorktreeTelemetryState::Unregistered
                             };
-                        } else {
+                        }
+                        Err(error) => {
                             atlas_state = McpWorktreeAtlasState::Invalid;
-                            blocker = Some(MCP_ERROR_WORKTREE_IDENTITY_CONFLICT.to_string());
+                            blocker = Some(error.to_string());
                         }
                     }
-                    Ok(None) => {
-                        atlas_state = McpWorktreeAtlasState::Missing;
-                        telemetry_state = if registration.is_some() {
-                            McpWorktreeTelemetryState::MissingAtlas
-                        } else {
-                            McpWorktreeTelemetryState::Unregistered
-                        };
-                    }
-                    Err(error) => {
-                        atlas_state = McpWorktreeAtlasState::Invalid;
-                        blocker = Some(error.to_string());
-                    }
+                } else {
+                    atlas_state = McpWorktreeAtlasState::Invalid;
+                    telemetry_state = McpWorktreeTelemetryState::Unavailable;
                 }
                 McpGitWorktreeState::Active
             }
@@ -5786,9 +5802,7 @@ impl ProjectAtlasMcpServer {
         validation: McpConfigValidation,
     ) -> Result<McpProjectState, CliError> {
         let project_path = Self::normalized_optional_path(project_path);
-        let worktree = worktree
-            .map(|alias| alias.trim().to_string())
-            .filter(|alias| !alias.is_empty());
+        let worktree = worktree.map(|alias| alias.trim().to_string());
         if project_path.is_some() && worktree.is_some() {
             return Err(CliError::InvalidInput(
                 MCP_WORKTREE_PROJECT_PATH_CONFLICT.to_string(),
@@ -5797,6 +5811,11 @@ impl ProjectAtlasMcpServer {
         let Some(alias) = worktree else {
             return self.state_for_project_path_with_config_validation(project_path, validation);
         };
+        if alias.is_empty() {
+            return Err(CliError::InvalidInput(
+                MCP_ERROR_WORKTREE_SELECTOR_EMPTY.to_string(),
+            ));
+        }
         if alias == MCP_MAIN_WORKTREE_ALIAS {
             let mut state = self.control_state.clone();
             state.worktree = Some(McpWorktreeSelection {
@@ -5839,6 +5858,12 @@ impl ProjectAtlasMcpServer {
                     alias.as_str()
                 ))
             })?;
+        let administrative_identity = git_administrative_identity(&entry.administrative_directory)?;
+        if administrative_identity != registration.git_administrative_identity {
+            return Err(CliError::InvalidInput(
+                MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED.to_string(),
+            ));
+        }
         let root = match &entry.state {
             GitWorktreeState::Active { root, .. } => root.clone(),
             GitWorktreeState::Missing { .. } => {
@@ -5869,6 +5894,7 @@ impl ProjectAtlasMcpServer {
                 alias,
                 &repository.common_directory,
                 &entry.administrative_directory,
+                &administrative_identity,
                 &root,
                 registration.project_instance_id,
                 observed_epoch,
@@ -7172,6 +7198,7 @@ impl ProjectAtlasMcpServer {
                 &alias,
                 &repository.common_directory,
                 &entry.administrative_directory,
+                &git_administrative_identity(&entry.administrative_directory)?,
                 root,
                 local.as_ref().map(|local| local.project_instance_id),
                 Self::current_epoch_seconds()?,
@@ -7220,12 +7247,28 @@ impl ProjectAtlasMcpServer {
             let repository = self.control_git_repository()?;
             let control = Self::open_existing_mut_store(&self.control_state)?;
             let registration = control.worktree_registration(&alias)?;
+            let mut blocker = None;
             let entry = repository.worktrees.iter().find(|entry| {
                 normalize_native_path_display(&entry.administrative_directory)
                     == registration.git_administrative_directory
             });
+            let entry = match entry {
+                Some(entry) => match git_administrative_identity(&entry.administrative_directory) {
+                    Ok(identity) if identity == registration.git_administrative_identity => {
+                        Some(entry)
+                    }
+                    Ok(_) => {
+                        blocker = Some(MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED.to_string());
+                        None
+                    }
+                    Err(error) => {
+                        blocker = Some(error.to_string());
+                        None
+                    }
+                },
+                None => None,
+            };
             let mut telemetry_sync = None;
-            let mut blocker = None;
             let root = match entry.map(|entry| &entry.state) {
                 Some(GitWorktreeState::Active { root, .. }) => {
                     if let Some(local) = Self::local_worktree_atlas(root)? {
@@ -7244,7 +7287,8 @@ impl ProjectAtlasMcpServer {
                     )));
                 }
                 Some(GitWorktreeState::Missing { .. }) | None => {
-                    blocker = Some(MCP_WORKTREE_MISSING_RETENTION_REASON.to_string());
+                    blocker
+                        .get_or_insert_with(|| MCP_WORKTREE_MISSING_RETENTION_REASON.to_string());
                     PathBuf::from(&registration.last_root)
                 }
             };
@@ -9489,6 +9533,7 @@ mod tests {
                 &alias,
                 &common,
                 &common.join(format!("worktrees/{suffix:03}")),
+                &format!("{suffix:064x}"),
                 &temp.path().join(format!("worktree-{suffix:03}")),
                 Some(ProjectInstanceId::from_bytes([u8::try_from(suffix)?; 16])?),
                 u64::try_from(suffix)?,
@@ -10662,6 +10707,22 @@ mod tests {
             "worktree-tools".to_string(),
             false,
         );
+        let control_before_blank_selector = fs::read(&control_db)?;
+        let blank_selector = server.atlas_reset_index(Parameters(AtlasResetIndexParams {
+            project_path: None,
+            worktree: Some("   ".to_string()),
+            apply: Some(true),
+            dry_run: Some(false),
+            include_mcp_config: Some(true),
+        }));
+        require(
+            blank_selector.contains(MCP_ERROR_WORKTREE_SELECTOR_EMPTY),
+            "blank worktree selector fell back to the control atlas",
+        )?;
+        require(
+            fs::read(&control_db)? == control_before_blank_selector,
+            "blank worktree selector changed the control database",
+        )?;
         let repository = server.control_git_repository()?;
         let canonical_a = worktree_a.canonicalize()?;
         let entry_a = repository
@@ -10997,6 +11058,156 @@ mod tests {
                 .state_for_target(None, Some("issue-430".to_string()))
                 .is_err(),
             "retired alias remained selectable for source operations",
+        )
+    }
+
+    #[test]
+    fn uninitialized_alias_rejects_a_reused_git_administrative_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let primary = temp.path().join("control");
+        let original = temp.path().join("first location").join("checkout");
+        let replacement = temp.path().join("second location").join("checkout");
+        fs::create_dir_all(&primary)?;
+        fs::create_dir_all(
+            original
+                .parent()
+                .ok_or_else(|| io::Error::other("original worktree has no parent"))?,
+        )?;
+        fs::create_dir_all(
+            replacement
+                .parent()
+                .ok_or_else(|| io::Error::other("replacement worktree has no parent"))?,
+        )?;
+        run_fixture_command(StdCommand::new("git").current_dir(&primary).arg("init"))?;
+        for (key, value) in [
+            ("user.name", "ProjectAtlas Test"),
+            ("user.email", "projectatlas@example.invalid"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run_fixture_command(
+                StdCommand::new("git")
+                    .current_dir(&primary)
+                    .args(["config", key, value]),
+            )?;
+        }
+        fs::write(primary.join("lib.rs"), "pub fn control() {}\n")?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["add", "."]),
+        )?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["commit", "-m", "fixture"]),
+        )?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["worktree", "add", "-b", "original"])
+                .arg(&original),
+        )?;
+
+        let control_db = primary.join(".projectatlas").join("projectatlas.db");
+        let control_config = primary.join(".projectatlas").join("config.toml");
+        init_project_with_config(&primary, Some(&control_config))?;
+        drop(AtlasStore::open_for_project(&control_db, &primary)?);
+        let server = ProjectAtlasMcpServer::new(
+            control_db,
+            Some(control_config),
+            "worktree-lifecycle".to_string(),
+            false,
+        );
+        let repository = server.control_git_repository()?;
+        let original_root = original.canonicalize()?;
+        let original_entry = repository
+            .worktrees
+            .iter()
+            .find(|entry| {
+                ProjectAtlasMcpServer::active_worktree_root(entry) == Some(original_root.as_path())
+            })
+            .ok_or_else(|| io::Error::other("original worktree was not discovered"))?;
+        let administrative_directory = original_entry.administrative_directory.clone();
+        let administrative_identity = git_administrative_identity(&administrative_directory)?;
+        let added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
+            worktree: ProjectAtlasMcpServer::worktree_candidate_selector(original_entry),
+            alias: Some("replacement-check".to_string()),
+        }));
+        require(
+            added.contains("status: registered"),
+            &format!("original uninitialized worktree was not registered: {added}"),
+        )?;
+
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["worktree", "remove", "--force"])
+                .arg(&original),
+        )?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["worktree", "add", "-b", "replacement"])
+                .arg(&replacement),
+        )?;
+        let replacement_repository = server.control_git_repository()?;
+        let replacement_root = replacement.canonicalize()?;
+        let replacement_entry = replacement_repository
+            .worktrees
+            .iter()
+            .find(|entry| {
+                ProjectAtlasMcpServer::active_worktree_root(entry)
+                    == Some(replacement_root.as_path())
+            })
+            .ok_or_else(|| io::Error::other("replacement worktree was not discovered"))?;
+        require(
+            replacement_entry.administrative_directory == administrative_directory,
+            "Git fixture did not reuse the administrative path",
+        )?;
+        require(
+            git_administrative_identity(&replacement_entry.administrative_directory)?
+                != administrative_identity,
+            "replacement Git worktree reused the prior lifecycle identity",
+        )?;
+
+        let resolution_error = server
+            .state_for_target(None, Some("replacement-check".to_string()))
+            .err()
+            .ok_or_else(|| io::Error::other("reused administrative path was accepted"))?;
+        require(
+            resolution_error
+                .to_string()
+                .contains(MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED),
+            "reused administrative path did not return the lifecycle blocker",
+        )?;
+        require(
+            !replacement.join(".projectatlas").exists(),
+            "failed lifecycle validation initialized the replacement worktree",
+        )?;
+        let before_remove =
+            run_fixture_command(StdCommand::new("git").current_dir(&primary).args([
+                "worktree",
+                "list",
+                "--porcelain",
+            ]))?;
+        let removed = server.atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
+            worktree: "replacement-check".to_string(),
+        }));
+        require(
+            removed.contains("status: retired")
+                && removed.contains(MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED),
+            &format!("stale registration could not be retired safely: {removed}"),
+        )?;
+        let after_remove =
+            run_fixture_command(StdCommand::new("git").current_dir(&primary).args([
+                "worktree",
+                "list",
+                "--porcelain",
+            ]))?;
+        require(
+            after_remove == before_remove,
+            "retiring a stale registration changed Git lifecycle state",
         )
     }
 
