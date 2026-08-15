@@ -36,22 +36,25 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Check release eligibility
+      - name: Classify release version
         id: release
         run: |
-          if [[ "${{ steps.version.outputs.version }}" == *".dev"* ]]; then
-            echo "eligible=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "eligible=true" >> "$GITHUB_OUTPUT"
-          fi
+          python3 .github/scripts/release_version.py --self-test
+          python3 .github/scripts/release_version.py \
+            "${{ steps.version.outputs.version }}" \
+            --source workspace \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Fetch tags
         run: git fetch --tags
 
       - name: Check tag
         id: tag
+        if: steps.release.outputs.eligible == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
-          if git tag -l "v${{ steps.version.outputs.version }}" | grep -q .; then
+          if git tag -l "$RELEASE_TAG" | grep -q .; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -64,9 +67,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          promotion_sha="$(git rev-parse HEAD^2)"
-          if [[ "$(git rev-parse 'HEAD^{tree}')" != "$(git rev-parse "$promotion_sha^{tree}")" ]]; then
-            echo "Main promotion tree differs from its verified dev parent" >&2
+          promotion_sha="$(git rev-parse 'HEAD^{commit}')"
+          if [[ "$promotion_sha" != "$GITHUB_SHA" ]]; then
+            echo "Auto-release checkout differs from the exact main push" >&2
             exit 1
           fi
           parser_pack_run_id="$(
@@ -83,5 +86,5 @@ jobs:
         run: |
           gh workflow run release.yml \
             --ref main \
-            --field version="v${{ steps.version.outputs.version }}" \
+            --field version="${{ steps.release.outputs.tag }}" \
             --field parser_pack_run_id="${{ steps.parser_pack.outputs.run_id }}"

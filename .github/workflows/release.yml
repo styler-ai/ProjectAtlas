@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. v0.3.0)"
+        description: "Stable or release-candidate version (for example v1.2.3 or v1.2.3-rc1)"
         required: true
         type: string
       prepublish_only:
@@ -31,13 +31,87 @@ env:
   RELEASE_VERSION: ${{ inputs.version }}
   RUSTUP_TOOLCHAIN: "1.93.1"
 
+concurrency:
+  group: projectatlas-release-${{ inputs.version }}
+  cancel-in-progress: false
+
 jobs:
   verify:
     name: verify
     runs-on: ubuntu-latest
+    outputs:
+      package_version: ${{ steps.release_version.outputs.package_version }}
+      release_tag: ${{ steps.release_version.outputs.tag }}
+      stable_tag: ${{ steps.release_version.outputs.stable_tag }}
+      milestone: ${{ steps.release_version.outputs.milestone }}
+      is_prerelease: ${{ steps.release_version.outputs.is_prerelease }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Classify release version
+        id: release_version
+        run: |
+          python3 .github/scripts/release_version.py --self-test
+          python3 .github/scripts/release_version.py \
+            "$RELEASE_VERSION" \
+            --source release \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Verify workspace version
+        env:
+          EXPECTED_PACKAGE_VERSION: ${{ steps.release_version.outputs.package_version }}
+        run: |
+          version="$(awk -F'"' '
+            /^\[workspace.package\]/ { in_workspace_package = 1; next }
+            /^\[/ { if (in_workspace_package) exit }
+            in_workspace_package && /^version = / { print $2; exit }
+          ' Cargo.toml)"
+          if [[ -z "$version" ]]; then
+            echo "Could not read workspace package version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [[ "$version" != "$EXPECTED_PACKAGE_VERSION" ]]; then
+            echo "Cargo.toml version $version does not match requested $EXPECTED_PACKAGE_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Enforce RC-first promotion
+        if: ${{ !inputs.prepublish_only }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_IS_PRERELEASE: ${{ steps.release_version.outputs.is_prerelease }}
+          EXPECTED_STABLE_TAG: ${{ steps.release_version.outputs.stable_tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$EXPECTED_IS_PRERELEASE" == "true" ]]; then
+            if git rev-parse "$EXPECTED_STABLE_TAG^{commit}" >/dev/null 2>&1; then
+              echo "Cannot publish an RC after stable tag $EXPECTED_STABLE_TAG exists" >&2
+              exit 1
+            fi
+            exit 0
+          fi
+          releases="$RUNNER_TEMP/projectatlas-github-releases.json"
+          gh api --paginate "/repos/$GITHUB_REPOSITORY/releases?per_page=100" --slurp > "$releases"
+          python3 .github/scripts/release_version.py \
+            "$RELEASE_VERSION" \
+            --source release \
+            --require-prior-rc-from "$releases" \
+            --require-prior-rc-ancestor-of "$GITHUB_SHA"
+
+      - name: Require exact main head for publication
+        if: ${{ !inputs.prepublish_only }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin main:refs/remotes/origin/main
+          head_commit="$(git rev-parse HEAD^{commit})"
+          main_commit="$(git rev-parse refs/remotes/origin/main^{commit})"
+          if [[ "$head_commit" != "$GITHUB_SHA" || "$head_commit" != "$main_commit" ]]; then
+            echo "Release publication requires the exact origin/main head" >&2
+            exit 1
+          fi
 
       - name: Setup Rust
         run: |
@@ -81,13 +155,19 @@ jobs:
         run: python3 .github/scripts/release-notes.py --self-test
 
       - name: Issue checklist self-test
-        run: python3 .github/scripts/issue-checklists.py --self-test
+        run: |
+          npm ci --ignore-scripts --prefix .github/mermaid-parser
+          npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
+          python3 .github/scripts/issue-checklists.py --self-test
 
       - name: Optional-parser proof-input unit test
         run: python3 .github/scripts/test-optional-parser-proof-inputs.py
 
       - name: Optional-parser release-asset self-test
         run: python3 .github/scripts/verify-optional-parser-release-assets.py --self-test
+
+      - name: Main Atlas seed release-asset self-test
+        run: python3 .github/scripts/verify-main-atlas-seed-release-assets.py --self-test
 
       - name: MCP composition integrity
         run: python3 docs/benchmarks/harness/mcp_composition.py --self-test
@@ -98,28 +178,6 @@ jobs:
       - name: Published benchmark measurement locks
         run: python3 .github/scripts/verify-published-benchmark-locks.py
 
-      - name: Verify version
-        run: |
-          requested="$RELEASE_VERSION"
-          if [[ ! "$requested" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Release version must match vMAJOR.MINOR.PATCH" >&2
-            exit 1
-          fi
-          requested="${requested#v}"
-          version="$(awk -F'"' '
-            /^\[workspace.package\]/ { in_workspace_package = 1; next }
-            /^\[/ { if (in_workspace_package) exit }
-            in_workspace_package && /^version = / { print $2; exit }
-          ' Cargo.toml)"
-          if [[ -z "$version" ]]; then
-            echo "Could not read workspace package version from Cargo.toml" >&2
-            exit 1
-          fi
-          if [[ "$version" != "$requested" ]]; then
-            echo "Cargo.toml version $version does not match requested $requested" >&2
-            exit 1
-          fi
-
       - name: Release issue checklist gate
         if: ${{ !inputs.prepublish_only }}
         env:
@@ -127,7 +185,7 @@ jobs:
         run: |
           python3 .github/scripts/issue-checklists.py \
             --repo "$GITHUB_REPOSITORY" \
-            --milestone "${RELEASE_VERSION}-00"
+            --milestone "${{ steps.release_version.outputs.milestone }}"
 
   package-unix:
     name: package ${{ matrix.label }}
@@ -244,10 +302,6 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          if ($env:RELEASE_VERSION -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
-            Write-Error "Release version must match vMAJOR.MINOR.PATCH"
-            exit 1
-          }
           $archive = "projectatlas-$($env:RELEASE_VERSION)-x86_64-pc-windows-msvc.zip"
           New-Item -ItemType Directory -Force -Path "dist/projectatlas" | Out-Null
           Copy-Item "target/release/projectatlas.exe" "dist/projectatlas/"
@@ -651,7 +705,10 @@ jobs:
     name: publish
     if: ${{ !inputs.prepublish_only }}
     needs:
-      [prepublish-installer-smoke-unix, prepublish-installer-smoke-windows, parser-pack-assets]
+      - verify
+      - prepublish-installer-smoke-unix
+      - prepublish-installer-smoke-windows
+      - parser-pack-assets
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -659,6 +716,8 @@ jobs:
       pull-requests: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      EXPECTED_RELEASE_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
+      EXPECTED_STABLE_TAG: ${{ needs.verify.outputs.stable_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -674,16 +733,33 @@ jobs:
 
       - name: Prepare release assets
         run: |
-          if [[ ! "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Release version must match vMAJOR.MINOR.PATCH" >&2
-            exit 1
-          fi
+          set -euo pipefail
           git fetch --tags
+          latest_before="$(gh api "/repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"
           release_exists=false
-          if gh release view "$RELEASE_VERSION" >/dev/null 2>&1; then
+          release_json="$RUNNER_TEMP/projectatlas-release.json"
+          if gh release view "$RELEASE_VERSION" --json tagName,isDraft,isPrerelease,assets > "$release_json" 2>/dev/null; then
             release_exists=true
+            if ! jq -e \
+              --arg tag "$RELEASE_VERSION" \
+              --argjson prerelease "$EXPECTED_RELEASE_PRERELEASE" \
+              '.tagName == $tag and .isDraft == false and .isPrerelease == $prerelease' \
+              "$release_json" > /dev/null; then
+              echo "Existing release is draft, has the wrong tag, or has the wrong prerelease classification" >&2
+              exit 1
+            fi
             echo "Release $RELEASE_VERSION already exists; continuing asset repair publish."
           fi
+          latest_policy=(--resolve-expected-latest --latest-before "$latest_before")
+          if [[ "$release_exists" == "true" ]]; then
+            latest_policy+=(--release-exists)
+          fi
+          expected_latest="$({
+            python3 .github/scripts/release_version.py \
+              "$RELEASE_VERSION" \
+              --source release \
+              "${latest_policy[@]}"
+          } | sed -n 's/^expected_latest=//p')"
           if git rev-parse "$RELEASE_VERSION^{commit}" >/dev/null 2>&1; then
             tag_commit="$(git rev-parse "$RELEASE_VERSION^{commit}")"
             head_commit="$(git rev-parse HEAD)"
@@ -701,6 +777,41 @@ jobs:
             exit 1
           fi
           echo "PROJECTATLAS_RELEASE_EXISTS=$release_exists" >> "$GITHUB_ENV"
+          echo "PROJECTATLAS_EXPECTED_LATEST=$expected_latest" >> "$GITHUB_ENV"
+          python3 .github/scripts/verify-main-atlas-seed-release-assets.py \
+            --source release-assets \
+            --release-tag "$RELEASE_VERSION" \
+            --list-file "$RUNNER_TEMP/projectatlas-main-atlas-seed-assets.txt"
+          : > "$RUNNER_TEMP/projectatlas-hosted-main-atlas-seed-assets.txt"
+          if [[ "$release_exists" == "true" ]]; then
+            hosted_seed_dir="$RUNNER_TEMP/projectatlas-hosted-main-seed"
+            mkdir -p "$hosted_seed_dir"
+            hosted_seed_count="$(
+              jq '[.assets[].name | select(startswith("projectatlas-main-atlas-seed-"))] | length' \
+                "$release_json"
+            )"
+            if [[ "$hosted_seed_count" -gt 0 ]]; then
+              gh release download "$RELEASE_VERSION" \
+                --pattern 'projectatlas-main-atlas-seed-*' \
+                --dir "$hosted_seed_dir"
+              python3 .github/scripts/verify-main-atlas-seed-release-assets.py \
+                --source "$hosted_seed_dir" \
+                --staged-source release-assets \
+                --release-tag "$RELEASE_VERSION" \
+                --list-file "$RUNNER_TEMP/projectatlas-hosted-main-atlas-seed-assets.txt"
+              if [[ "$(wc -l < "$RUNNER_TEMP/projectatlas-hosted-main-atlas-seed-assets.txt")" -ne "$hosted_seed_count" ]]; then
+                echo "Existing release contains duplicate or non-regular main Atlas seed assets" >&2
+                exit 1
+              fi
+              if [[ ! -s "$RUNNER_TEMP/projectatlas-main-atlas-seed-assets.txt" ]]; then
+                while IFS= read -r seed_asset; do
+                  cp "$hosted_seed_dir/$seed_asset" "release-assets/$seed_asset"
+                done < "$RUNNER_TEMP/projectatlas-hosted-main-atlas-seed-assets.txt"
+                cp "$RUNNER_TEMP/projectatlas-hosted-main-atlas-seed-assets.txt" \
+                  "$RUNNER_TEMP/projectatlas-main-atlas-seed-assets.txt"
+              fi
+            fi
+          fi
           (
             cd release-assets
             mapfile -d '' assets < <(find . -maxdepth 1 -type f -name "projectatlas-${RELEASE_VERSION}-*" -printf '%f\0' | sort -z)
@@ -708,22 +819,109 @@ jobs:
               echo "No release archives matched projectatlas-${RELEASE_VERSION}-*" >&2
               exit 1
             fi
+            mapfile -t seed_assets < "$RUNNER_TEMP/projectatlas-main-atlas-seed-assets.txt"
+            assets+=("${seed_assets[@]}")
+            declare -A expected_assets=()
+            for asset in "${assets[@]}"; do
+              expected_assets["$asset"]=1
+            done
+            mapfile -d '' inventory < <(find . -mindepth 1 -maxdepth 1 -printf '%f\0' | sort -z)
+            if [[ ${#inventory[@]} -ne ${#expected_assets[@]} ]]; then
+              echo "Release artifact inventory contains an unexpected, duplicate, or non-regular entry" >&2
+              exit 1
+            fi
+            for entry in "${inventory[@]}"; do
+              if [[ -z "${expected_assets[$entry]+present}" ]]; then
+                echo "Unexpected release artifact: $entry" >&2
+                exit 1
+              fi
+            done
             : > SHA256SUMS
             for asset in "${assets[@]}"; do
               sha256sum "$asset" >> SHA256SUMS
             done
           )
 
+      - name: Revalidate exact main head before release mutation
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release-notes.py > release-notes.md
+          git fetch --force origin main:refs/remotes/origin/main
+          head_commit="$(git rev-parse HEAD^{commit})"
+          main_commit="$(git rev-parse refs/remotes/origin/main^{commit})"
+          if [[ "$head_commit" != "$GITHUB_SHA" || "$head_commit" != "$main_commit" ]]; then
+            echo "Release mutation requires the exact current origin/main head" >&2
+            exit 1
+          fi
+
       - name: Create GitHub release
         run: |
-          python3 .github/scripts/release-notes.py > release-notes.md
+          set -euo pipefail
+          require_stable_tag_absent_for_rc() {
+            if [[ "$EXPECTED_RELEASE_PRERELEASE" != "true" ]]; then
+              return
+            fi
+            if git ls-remote --exit-code --tags origin "refs/tags/$EXPECTED_STABLE_TAG" > /dev/null; then
+              echo "Cannot publish an RC after stable tag $EXPECTED_STABLE_TAG exists" >&2
+              exit 1
+            else
+              status=$?
+              if [[ "$status" -ne 2 ]]; then
+                echo "Could not verify that stable tag $EXPECTED_STABLE_TAG is absent" >&2
+                exit "$status"
+              fi
+            fi
+          }
           if [[ "${PROJECTATLAS_RELEASE_EXISTS:-false}" == "true" ]]; then
-            gh release upload "$RELEASE_VERSION" release-assets/* --clobber
+            python3 .github/scripts/verify-main-atlas-seed-release-assets.py \
+              --repair-upload-source release-assets \
+              --immutable-list-file "$RUNNER_TEMP/projectatlas-hosted-main-atlas-seed-assets.txt" \
+              --upload-list-file "$RUNNER_TEMP/projectatlas-release-repair-assets.txt"
+            mapfile -t upload_assets < "$RUNNER_TEMP/projectatlas-release-repair-assets.txt"
+            require_stable_tag_absent_for_rc
+            gh release upload "$RELEASE_VERSION" "${upload_assets[@]}" --clobber
           else
+            classification=()
+            if [[ "$EXPECTED_RELEASE_PRERELEASE" == "true" ]]; then
+              classification+=(--prerelease --latest=false)
+            fi
+            require_stable_tag_absent_for_rc
             gh release create "$RELEASE_VERSION" release-assets/* \
               --target "$GITHUB_SHA" \
               --title "$RELEASE_VERSION" \
-              --notes-file release-notes.md
+              --notes-file release-notes.md \
+              "${classification[@]}"
+          fi
+
+      - name: Verify hosted release state
+        run: |
+          set -euo pipefail
+          release_json="$RUNNER_TEMP/projectatlas-published-release.json"
+          gh release view "$RELEASE_VERSION" --json tagName,isDraft,isPrerelease > "$release_json"
+          jq -e \
+            --arg tag "$RELEASE_VERSION" \
+            --argjson prerelease "$EXPECTED_RELEASE_PRERELEASE" \
+            '.tagName == $tag and .isDraft == false and .isPrerelease == $prerelease' \
+            "$release_json" > /dev/null
+          git fetch --tags --force
+          tag_commit="$(git rev-parse "$RELEASE_VERSION^{commit}")"
+          head_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
+          if [[ "$tag_commit" != "$head_commit" ]]; then
+            echo "Published tag points to $tag_commit, not workflow head $head_commit" >&2
+            exit 1
+          fi
+          expected_latest="${PROJECTATLAS_EXPECTED_LATEST:?}"
+          latest_after=""
+          for attempt in 1 2 3 4 5 6; do
+            latest_after="$(gh api "/repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"
+            if [[ "$latest_after" == "$expected_latest" ]]; then
+              break
+            fi
+            sleep 5
+          done
+          if [[ "$latest_after" != "$expected_latest" ]]; then
+            echo "GitHub Latest is '$latest_after', expected '$expected_latest'" >&2
+            exit 1
           fi
 
   installer-smoke-unix:
@@ -797,6 +995,80 @@ jobs:
           require(Path(command[0]).resolve() == runtime, "opencode command path mismatch")
           require_args(command[1:])
           require(Path(opencode["cwd"]).resolve() == root, "opencode cwd mismatch")
+          PY
+
+      - name: Holistic release-candidate E2E
+        if: matrix.label == 'linux-x64-posix' && contains(env.RELEASE_VERSION, '-rc')
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_json="$RUNNER_TEMP/projectatlas-release-e2e.json"
+          gh release view "$RELEASE_VERSION" --json tagName,isDraft,isPrerelease > "$release_json"
+          jq -e --arg tag "$RELEASE_VERSION" \
+            '.tagName == $tag and .isDraft == false and .isPrerelease == true' \
+            "$release_json" > /dev/null
+          latest_tag="$(gh api "/repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          if [[ "$latest_tag" == "$RELEASE_VERSION" ]]; then
+            echo "Release candidate $RELEASE_VERSION unexpectedly became GitHub Latest" >&2
+            exit 1
+          fi
+          python3 .github/scripts/release_version.py "$latest_tag" --source release |
+            grep -Fx 'is_prerelease=false' > /dev/null
+
+          project_root="$RUNNER_TEMP/projectatlas-release-e2e"
+          runtime="$HOME/.local/bin/projectatlas"
+          mkdir -p "$project_root/src"
+          printf '%s\n' 'pub fn release_e2e_marker() {}' > "$project_root/src/lib.rs"
+          (
+            cd "$project_root"
+            PROJECTATLAS_NO_TELEMETRY=1 "$runtime" --require-version "$RELEASE_VERSION" init
+            PROJECTATLAS_NO_TELEMETRY=1 "$runtime" --require-version "$RELEASE_VERSION" watch --once
+          )
+          PROJECT_ROOT="$project_root" python3 <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          root = Path(os.environ["PROJECT_ROOT"]).resolve()
+          config = json.loads((root / ".projectatlas" / "projectatlas.mcp.json").read_text(encoding="utf-8"))
+          server = config["mcpServers"]["projectatlas"]
+          messages = [
+              {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "projectatlas-release-e2e", "version": "0.1.0"}}},
+              {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+              {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "atlas_session_brief", "arguments": {"project_path": str(root), "query": "release_e2e_marker", "compact": True}},
+              {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "atlas_slice", "arguments": {"project_path": str(root), "file": "src/lib.rs", "start_line": 1, "end_line": 1}}},
+          ]
+          completed = subprocess.run(
+              [server["command"], *server["args"]],
+              cwd=server.get("cwd", root),
+              env={**os.environ, "PROJECTATLAS_NO_TELEMETRY": "1"},
+              input="\n".join(json.dumps(message) for message in messages) + "\n",
+              text=True,
+              capture_output=True,
+              timeout=30,
+              check=False,
+          )
+          if completed.returncode != 0:
+              raise SystemExit(f"release MCP exited {completed.returncode}: {completed.stderr}")
+          responses = {
+              response["id"]: response
+              for line in completed.stdout.splitlines()
+              if (response := json.loads(line)).get("id") is not None
+          }
+
+          def tool_text(request_id):
+              result = responses.get(request_id, {}).get("result", {})
+              if result.get("isError"):
+                  raise SystemExit(f"MCP request {request_id} failed: {result}")
+              return "\n".join(block.get("text", "") for block in result.get("content", []))
+
+          brief = tool_text(2)
+          source = tool_text(3)
+          if "index_status: available" not in brief or "release_e2e_marker" not in source:
+              raise SystemExit(f"release MCP contract incomplete:\n{brief}\n{source}")
           PY
 
   installer-smoke-windows:

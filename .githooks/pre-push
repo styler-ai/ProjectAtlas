@@ -19,6 +19,8 @@ cargo deny --locked --all-features check -D warnings
 cargo test --workspace --all-features --locked
 cargo test --doc --workspace --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+npm ci --ignore-scripts --prefix .github/mermaid-parser
+npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
 python3 .github/scripts/issue-checklists.py --self-test
 python3 .github/scripts/test-optional-parser-proof-inputs.py
 command -v gh >/dev/null 2>&1

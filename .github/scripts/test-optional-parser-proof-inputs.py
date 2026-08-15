@@ -3,11 +3,67 @@
 
 import runpy
 import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 
 class OptionalParserProofInputsTests(unittest.TestCase):
+    def test_handoff_accepts_equivalent_merge_squash_and_rebase_trees(self) -> None:
+        policy = Path(__file__).with_name("optional-parser-proof-inputs.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+
+            def git(*arguments: str) -> str:
+                result = subprocess.run(
+                    ["git", *arguments],
+                    cwd=repository,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return result.stdout.strip()
+
+            git("init", "--initial-branch=main")
+            git("config", "user.name", "ProjectAtlas test")
+            git("config", "user.email", "projectatlas@example.invalid")
+            (repository / "source.txt").write_text("base\n", encoding="utf-8")
+            git("add", "source.txt")
+            git("commit", "-m", "base")
+            base = git("rev-parse", "HEAD")
+            git("checkout", "-b", "proof")
+            (repository / "source.txt").write_text("candidate\n", encoding="utf-8")
+            git("commit", "-am", "candidate")
+            proof = git("rev-parse", "HEAD")
+
+            for mode in ("merge", "squash", "rebase"):
+                with self.subTest(mode=mode):
+                    git("checkout", "-B", f"main-{mode}", base)
+                    if mode == "merge":
+                        git("merge", "--no-ff", "--no-edit", "proof")
+                    elif mode == "squash":
+                        git("merge", "--squash", "proof")
+                        git("commit", "-m", "squash candidate")
+                    else:
+                        git("cherry-pick", proof)
+                    promotion = git("rev-parse", "HEAD")
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(policy),
+                            "--base",
+                            proof,
+                            "--head",
+                            promotion,
+                        ],
+                        cwd=repository,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_metadata_reuses_proof_and_every_other_input_invalidates(self) -> None:
         classify = runpy.run_path(
             Path(__file__).with_name("optional-parser-proof-inputs.py")

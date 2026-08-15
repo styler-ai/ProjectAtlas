@@ -1,0 +1,39 @@
+name: 00-IssueOps
+
+on:
+  issues:
+    types: [opened, edited, reopened, labeled, unlabeled, milestoned]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: "Open issue number to validate for release-milestone readiness"
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  planned-issue:
+    name: planned-issue-readiness
+    if: github.event_name == 'workflow_dispatch' || github.event.issue.milestone != null
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Validate IssueOps contract
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue }}
+        run: |
+          npm ci --ignore-scripts --prefix .github/mermaid-parser
+          npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
+          python3 .github/scripts/issue-checklists.py --self-test
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --root . \
+            --issue-map openspec/issue-map.json \
+            --planned-issue "$ISSUE_NUMBER"
