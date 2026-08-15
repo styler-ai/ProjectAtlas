@@ -19,6 +19,11 @@ ProjectAtlas SHALL classify a supplied directory as a true non-Git root, an exac
 - **WHEN** a selected control path is a symlink/junction, oversized, malformed, outside the common directory, missing its required target, or disagrees with reciprocal evidence
 - **THEN** ProjectAtlas returns typed invalid Git evidence without following it, guessing a source root, or mutating Git
 
+#### Scenario: Unresolved Git config includes prevent manager guesses
+
+- **WHEN** a common manager's bounded local config contains `include` or `includeIf` directives whose effective `core.bare` value cannot be established without following external config
+- **THEN** ProjectAtlas treats bare state as unknown and never invents the manager's parent as a source checkout
+
 #### Scenario: Registration inventory exceeds the bound
 
 - **WHEN** structural registrations exceed the fixed discovery ceiling
@@ -57,6 +62,11 @@ ProjectAtlas SHALL let one explicitly selected primary/control atlas register st
 
 - **WHEN** an alias is invalid/reserved/in use or the Git administrative identity is already registered
 - **THEN** ProjectAtlas returns a typed conflict and leaves the catalog unchanged
+
+#### Scenario: Reusable filesystem identity evidence is refused
+
+- **WHEN** the platform cannot provide a non-reusable creation identity for the selected Git administrative directory
+- **THEN** ProjectAtlas rejects alias registration and routing rather than falling back to a reusable path, device, or inode identity
 
 #### Scenario: Git-authorized move preserves registration
 

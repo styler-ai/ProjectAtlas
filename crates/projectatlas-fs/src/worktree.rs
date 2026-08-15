@@ -92,8 +92,8 @@ pub struct GitWorktreeEntry {
     /// Canonical Git administrative directory, stable across a Git-managed move.
     ///
     /// This locator is structural evidence, not a durable identity by itself: a
-    /// later recreation may reuse the same administrative path. Persistence owns
-    /// the opaque nonce needed to distinguish that lifecycle boundary.
+    /// later recreation may reuse the same administrative path. Persistence stores
+    /// the opaque filesystem identity that distinguishes that lifecycle boundary.
     pub administrative_directory: PathBuf,
     /// Current read-only registration state.
     pub state: GitWorktreeState,
@@ -479,6 +479,7 @@ fn has_git_control_markers(path: &Path) -> FsResult<bool> {
 fn config_declares_bare(path: &Path) -> Result<Option<bool>, GitStructureIssue> {
     let text = read_bounded_text(path, GIT_DIRECTORY_POINTER_MAX_BYTES)?;
     let mut in_core = false;
+    let mut has_include = false;
     let mut bare_setting = None;
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -489,7 +490,11 @@ fn config_declares_bare(path: &Path) -> Result<Option<bool>, GitStructureIssue> 
             .strip_prefix('[')
             .and_then(|value| value.split(']').next())
         {
-            in_core = section.trim().eq_ignore_ascii_case("core");
+            let section = section.trim();
+            let section_name = section.split_ascii_whitespace().next().unwrap_or_default();
+            has_include |= section_name.eq_ignore_ascii_case("include")
+                || section_name.eq_ignore_ascii_case("includeif");
+            in_core = section.eq_ignore_ascii_case("core");
             continue;
         }
         if !in_core {
@@ -512,7 +517,11 @@ fn config_declares_bare(path: &Path) -> Result<Option<bool>, GitStructureIssue> 
             "false" | "no" | "off" | "0"
         ));
     }
-    Ok(bare_setting)
+    if has_include {
+        Ok(None)
+    } else {
+        Ok(bare_setting)
+    }
 }
 
 /// Build the primary plus registered linked-worktree inventory.
@@ -859,11 +868,7 @@ pub fn git_administrative_identity(path: &Path) -> FsResult<String> {
         identity.update(b"unix\0");
         identity.update(&metadata.dev().to_le_bytes());
         identity.update(&metadata.ino().to_le_bytes());
-        if let Ok(created) = metadata.created()
-            && let Ok(duration) = created.duration_since(std::time::UNIX_EPOCH)
-        {
-            identity.update(&duration.as_nanos().to_le_bytes());
-        }
+        identity.update(&required_creation_nanos(path, metadata.created())?.to_le_bytes());
     }
     #[cfg(windows)]
     {
@@ -874,22 +879,29 @@ pub fn git_administrative_identity(path: &Path) -> FsResult<String> {
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let created = metadata
-            .created()
-            .map_err(|source| FsError::RepositoryBoundary {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        let duration = created
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|source| FsError::RepositoryBoundary {
-                path: path.to_path_buf(),
-                source: io::Error::new(io::ErrorKind::InvalidData, source),
-            })?;
         identity.update(b"portable\0");
-        identity.update(&duration.as_nanos().to_le_bytes());
+        identity.update(&required_creation_nanos(path, metadata.created())?.to_le_bytes());
     }
     Ok(identity.finalize().to_hex().to_string())
+}
+
+/// Require a non-reusable filesystem creation timestamp for lifecycle identity.
+#[cfg(not(windows))]
+fn required_creation_nanos(
+    path: &Path,
+    created: io::Result<std::time::SystemTime>,
+) -> FsResult<u128> {
+    let created = created.map_err(|source| FsError::RepositoryBoundary {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    created
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .map_err(|source| FsError::RepositoryBoundary {
+            path: path.to_path_buf(),
+            source: io::Error::new(io::ErrorKind::InvalidData, source),
+        })
 }
 
 /// Read exactly one `prefix path` pointer record.
@@ -1353,6 +1365,35 @@ mod tests {
         )?;
         fs::write(bare_dot_git.join("config"), bare_config)?;
 
+        let included_config = temp.path().join("included bare config");
+        fs::write(&included_config, "[core]\n bare = true\n")?;
+        let included_path = included_config
+            .to_string_lossy()
+            .replace('\\', "/")
+            .replace('"', "\\\"");
+        fs::write(
+            bare_dot_git.join("config"),
+            format!("[core]\n bare = false\n[include]\n path = \"{included_path}\"\n"),
+        )?;
+        let effective_bare = Command::new("git")
+            .arg("--git-dir")
+            .arg(&bare_dot_git)
+            .args(["config", "--bool", "core.bare"])
+            .output()?;
+        require(
+            effective_bare.status.success()
+                && String::from_utf8(effective_bare.stdout)?.trim() == "true",
+            "Git fixture include did not override the local core.bare value",
+        )?;
+        let included_bare_manager = require_git(discover_repository_structure(&bare_dot_git)?)?;
+        require(
+            included_bare_manager.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::None,
+                },
+            "unresolved config include invented the manager parent as source",
+        )?;
+
         let non_git = temp.path().join("plain directory");
         let non_git_nested = non_git.join("nested").join("cwd");
         fs::create_dir_all(non_git.join(".projectatlas"))?;
@@ -1500,6 +1541,24 @@ mod tests {
             "registration overflow returned partial or untyped repository state",
         )?;
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_identity_requires_a_creation_timestamp() {
+        let error = required_creation_nanos(
+            Path::new("administrative-directory"),
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "creation time unavailable",
+            )),
+        )
+        .expect_err("missing creation time was accepted as lifecycle identity");
+        assert!(matches!(
+            error,
+            FsError::RepositoryBoundary { source, .. }
+                if source.kind() == io::ErrorKind::Unsupported
+        ));
     }
 
     /// Run one Git command with fixed UTF-8 arguments.

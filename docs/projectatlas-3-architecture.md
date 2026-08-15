@@ -1847,6 +1847,8 @@ Registration also captures an opaque identity for the current Git
 administrative-directory filesystem object. Git-authorized checkout moves keep
 that object and its alias; deleting and recreating the directory at the same
 path fails closed so a replacement checkout cannot inherit the earlier alias.
+Filesystems without non-reusable creation identity reject alias registration
+and routing instead of falling back to a reusable path or inode.
 
 A modernization tag highlights source families where exact dependency and
 source-evidence navigation is especially valuable for high-risk transformation

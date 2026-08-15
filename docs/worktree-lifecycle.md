@@ -54,7 +54,7 @@ All normal root-scoped MCP tools use one mutually exclusive selection boundary:
 
 Each admitted request captures its canonical root, database path, project identity, registration identity, control database, and alias before background or query work begins. Interleaved requests therefore do not depend on current directory or mutable session selection.
 
-If Git moves a checkout, its unchanged administrative directory preserves the alias. If Git deletes and later recreates a worktree while reusing the same administrative path, the lifecycle identity changes: routing fails closed until the stale alias is removed and the new checkout is registered. Removing the stale ProjectAtlas registration still leaves Git, source, and either checkout's `.projectatlas` state untouched.
+If Git moves a checkout, its unchanged administrative directory preserves the alias. If Git deletes and later recreates a worktree while reusing the same administrative path, the lifecycle identity changes: routing fails closed until the stale alias is removed and the new checkout is registered. A filesystem that cannot provide non-reusable creation identity also fails alias registration and routing; it never falls back to a reusable path or inode. Removing the stale ProjectAtlas registration still leaves Git, source, and either checkout's `.projectatlas` state untouched.
 
 ```mermaid
 sequenceDiagram
