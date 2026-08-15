@@ -147,6 +147,10 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup default "$RUSTUP_TOOLCHAIN"
 
+      - name: Holistic classified worktree agent E2E
+        timeout-minutes: 10
+        run: cargo test --locked -p projectatlas-cli --test e2e holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored --nocapture
+
       - name: Plugin installer E2E
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli plugin_installer_writes_real_harness_configs --test e2e
