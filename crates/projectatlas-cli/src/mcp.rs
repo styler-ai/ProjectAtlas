@@ -7170,16 +7170,10 @@ impl ProjectAtlasMcpServer {
                 .take(MCP_WORKTREE_LIST_MAX_ROWS)
                 .map(|entry| self.worktree_list_row(entry, &registrations))
                 .collect::<Vec<_>>();
-            let remaining = MCP_WORKTREE_LIST_MAX_ROWS.saturating_sub(worktrees.len());
-            let retired_rows = registrations
+            let truncated = total_worktrees > worktrees.len();
+            let retired = registrations
                 .iter()
                 .filter(|registration| registration.state == WorktreeRegistrationState::Retired)
-                .collect::<Vec<_>>();
-            let truncated = total_worktrees > worktrees.len()
-                || (include_retired && retired_rows.len() > remaining);
-            let retired = retired_rows
-                .into_iter()
-                .take(remaining)
                 .map(|registration| McpRetiredWorktreeRow {
                     alias: registration.alias.to_string(),
                     last_root: registration.last_root.clone(),
@@ -10734,6 +10728,60 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn worktree_list_retains_retired_rows_at_structural_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let primary = temp.path().join("control");
+        fs::create_dir(&primary)?;
+        run_fixture_command(StdCommand::new("git").current_dir(&primary).arg("init"))?;
+        let git_directory = primary.join(".git");
+        let structural_registrations = git_directory.join("worktrees");
+        fs::create_dir(&structural_registrations)?;
+        for index in 0..MAX_GIT_WORKTREE_REGISTRATIONS {
+            let administrative_directory =
+                structural_registrations.join(format!("missing-{index:04}"));
+            fs::create_dir(&administrative_directory)?;
+            fs::write(
+                administrative_directory.join("gitdir"),
+                temp.path()
+                    .join(format!("missing-{index:04}"))
+                    .join(".git")
+                    .to_string_lossy()
+                    .as_bytes(),
+            )?;
+        }
+
+        let database = primary.join(".projectatlas").join("projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("control database has no parent"))?,
+        )?;
+        let store = AtlasStore::open_for_project(&database, &primary)?;
+        let retired_alias = WorktreeAlias::parse("retired-at-capacity")?;
+        store.register_worktree(
+            &retired_alias,
+            &git_directory,
+            &structural_registrations.join("retired"),
+            &"ab".repeat(32),
+            &temp.path().join("retired"),
+            None,
+            1,
+        )?;
+        store.retire_worktree(&retired_alias, 2)?;
+        drop(store);
+
+        let server = ProjectAtlasMcpServer::new(database, None, "worktree-list".to_string(), false);
+        let listed = server.atlas_worktree_list(Parameters(AtlasWorktreeListParams {
+            include_retired: Some(true),
+        }));
+        require(
+            listed.contains("total_worktrees: 1025") && listed.contains("retired-at-capacity"),
+            "full structural inventory starved the requested retired registration",
+        )
     }
 
     #[test]

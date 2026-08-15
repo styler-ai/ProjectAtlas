@@ -206,6 +206,19 @@ impl AtlasStore {
                             .map_or_else(String::new, |value| value.to_string()),
                     });
                 }
+                if let Some(project_bytes) = project_bytes.as_ref()
+                    && project_identity_exists_for_other(
+                        transaction,
+                        Some(existing.registration_id),
+                        project_bytes.as_slice(),
+                    )?
+                {
+                    return Err(DbError::WorktreeRegistrationConflict {
+                        field: "project_instance_id",
+                        value: project_instance_id
+                            .map_or_else(String::new, |value| value.to_string()),
+                    });
+                }
                 transaction.execute(
                     "UPDATE worktree_registrations
                  SET git_common_directory = ?1, last_root = ?2,
@@ -221,24 +234,34 @@ impl AtlasStore {
                 return load_by_id(transaction, existing.registration_id);
             }
 
-            if active_identity_exists(
-                transaction,
-                &git_administrative_directory,
-                &git_administrative_identity,
-                project_bytes.as_ref(),
-            )? {
-                return Err(DbError::WorktreeRegistrationConflict {
-                    field: "git_or_project_identity",
-                    value: git_administrative_directory,
-                });
-            }
-
             let retired_id = load_matching_retired_id(
                 transaction,
                 &git_administrative_directory,
                 &git_administrative_identity,
                 project_bytes.as_ref(),
             )?;
+            if active_git_identity_exists(
+                transaction,
+                &git_administrative_directory,
+                &git_administrative_identity,
+            )? {
+                return Err(DbError::WorktreeRegistrationConflict {
+                    field: "git_or_project_identity",
+                    value: git_administrative_directory,
+                });
+            }
+            if let Some(project_bytes) = project_bytes.as_ref()
+                && project_identity_exists_for_other(
+                    transaction,
+                    retired_id,
+                    project_bytes.as_slice(),
+                )?
+            {
+                return Err(DbError::WorktreeRegistrationConflict {
+                    field: "project_instance_id",
+                    value: project_instance_id.map_or_else(String::new, |value| value.to_string()),
+                });
+            }
             let registration_id = if let Some(registration_id) = retired_id {
                 transaction.execute(
                     "UPDATE worktree_registrations
@@ -504,9 +527,9 @@ fn bind_registration_project(
         });
     }
     let project_bytes = project_instance_id.as_bytes();
-    if active_project_exists_for_other(
+    if project_identity_exists_for_other(
         connection,
-        registration.registration_id,
+        Some(registration.registration_id),
         project_bytes.as_slice(),
     )? {
         return Err(DbError::WorktreeRegistrationConflict {
@@ -690,12 +713,11 @@ fn load_by_id(connection: &Connection, registration_id: i64) -> DbResult<Worktre
     try_registration(row)
 }
 
-/// Check active Git and initialized-project identity conflicts through owned indexes.
-fn active_identity_exists(
+/// Check active Git identity conflicts through owned indexes.
+fn active_git_identity_exists(
     connection: &Connection,
     administrative_directory: &str,
     administrative_identity: &str,
-    project_instance_id: Option<&[u8; 16]>,
 ) -> DbResult<bool> {
     let administrative_identity_exists = connection.query_row(
         "SELECT EXISTS(
@@ -721,33 +743,19 @@ fn active_identity_exists(
     if lifecycle_identity_exists {
         return Ok(true);
     }
-    let Some(project_instance_id) = project_instance_id else {
-        return Ok(false);
-    };
-    connection
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM worktree_registrations
-                     INDEXED BY idx_worktree_registrations_active_project
-                WHERE state = 'active' AND project_instance_id = ?1
-             )",
-            [project_instance_id.as_slice()],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(DbError::from)
+    Ok(false)
 }
 
-/// Check whether another active row owns one initialized project identity.
-fn active_project_exists_for_other(
+/// Check whether another active or retired row owns one initialized project identity.
+fn project_identity_exists_for_other(
     connection: &Connection,
-    registration_id: i64,
+    registration_id: Option<i64>,
     project_instance_id: &[u8],
 ) -> DbResult<bool> {
     let found = connection.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM worktree_registrations
-            WHERE state = 'active' AND registration_id <> ?1
-              AND project_instance_id = ?2
+            WHERE registration_id IS NOT ?1 AND project_instance_id = ?2
          )",
         params![registration_id, project_instance_id],
         |row| row.get::<_, bool>(0),
@@ -999,6 +1007,82 @@ mod tests {
             "active registration after failed final synchronization",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn retired_project_identity_cannot_bind_another_registration() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control = temp.path().join("control");
+        let common = temp.path().join("common.git");
+        fs::create_dir_all(&control)?;
+        let store = AtlasStore::open_for_project(&control.join("projectatlas.db"), &control)?;
+        let original = WorktreeAlias::parse("original")?;
+        store.register_worktree(
+            &original,
+            &common,
+            &common.join("worktrees/original"),
+            &administrative_identity(1),
+            &temp.path().join("original"),
+            Some(identity(1)?),
+            1,
+        )?;
+        store.retire_worktree(&original, 2)?;
+
+        let unbound = WorktreeAlias::parse("unbound")?;
+        store.register_worktree(
+            &unbound,
+            &common,
+            &common.join("worktrees/unbound"),
+            &administrative_identity(2),
+            &temp.path().join("unbound"),
+            None,
+            3,
+        )?;
+        for result in [
+            store
+                .bind_worktree_project(&unbound, &temp.path().join("unbound"), identity(1)?)
+                .map(|_| ()),
+            store
+                .register_worktree(
+                    &unbound,
+                    &common,
+                    &common.join("worktrees/unbound"),
+                    &administrative_identity(2),
+                    &temp.path().join("unbound"),
+                    Some(identity(1)?),
+                    4,
+                )
+                .map(|_| ()),
+            store
+                .register_worktree(
+                    &WorktreeAlias::parse("direct")?,
+                    &common,
+                    &common.join("worktrees/direct"),
+                    &administrative_identity(3),
+                    &temp.path().join("direct"),
+                    Some(identity(1)?),
+                    4,
+                )
+                .map(|_| ()),
+        ] {
+            require(
+                matches!(
+                    result,
+                    Err(DbError::WorktreeRegistrationConflict {
+                        field: "project_instance_id",
+                        ..
+                    })
+                ),
+                "retired project identity was rebound to another registration",
+            )?;
+        }
+        require(
+            store
+                .worktree_registration(&unbound)?
+                .project_instance_id
+                .is_none(),
+            "failed retired-identity binding changed the active registration",
+        )
     }
 
     #[test]
