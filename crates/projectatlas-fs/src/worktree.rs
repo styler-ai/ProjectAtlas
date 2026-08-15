@@ -217,7 +217,8 @@ pub fn discover_repository_structure_controlled(
                 return match inspect_worktree(ancestor) {
                     Ok(selected) => {
                         let selection_kind = if selected.role == GitWorktreeRole::Primary
-                            && selected.common_directory_bare_setting == Some(true)
+                            && (selected.common_directory_bare_setting == Some(true)
+                                || !selected.common_directory_source_root_inference_safe)
                         {
                             GitRepositorySelectionKind::Manager
                         } else {
@@ -250,6 +251,8 @@ pub fn discover_repository_structure_controlled(
                         administrative_directory: common_directory.path.clone(),
                         common_directory: common_directory.path,
                         common_directory_bare_setting: common_directory.bare_setting,
+                        common_directory_source_root_inference_safe: common_directory
+                            .source_root_inference_safe,
                         role: GitWorktreeRole::Primary,
                     },
                     GitRepositorySelectionKind::Manager,
@@ -280,6 +283,8 @@ struct SelectedWorktree {
     common_directory: PathBuf,
     /// Explicit local `core.bare` setting, when present.
     common_directory_bare_setting: Option<bool>,
+    /// Whether local config permits inferring source beside the common directory.
+    common_directory_source_root_inference_safe: bool,
     /// Structural worktree role.
     role: GitWorktreeRole,
 }
@@ -291,6 +296,17 @@ struct InspectedCommonDirectory {
     path: PathBuf,
     /// Explicit local `core.bare` setting, when present.
     bare_setting: Option<bool>,
+    /// Whether local config permits inferring source beside the common directory.
+    source_root_inference_safe: bool,
+}
+
+/// Bounded local Git config facts needed for read-only source selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GitLocalConfigPolicy {
+    /// Explicit local `core.bare` setting, when present and include-free.
+    bare_setting: Option<bool>,
+    /// False when `core.worktree` or unresolved includes may relocate source.
+    source_root_inference_safe: bool,
 }
 
 /// Internal selection branch used while constructing the common inventory.
@@ -309,10 +325,14 @@ fn build_git_structure(
     control: &IndexWorkControl,
 ) -> FsResult<GitRepositoryStructure> {
     let common_directory = canonicalize(&selected.common_directory, &selected.common_directory)?;
-    let primary_root =
-        primary_worktree_root(&common_directory, selected.common_directory_bare_setting)?;
+    let primary_root = primary_worktree_root(
+        &common_directory,
+        selected.common_directory_bare_setting,
+        selected.common_directory_source_root_inference_safe,
+    )?;
     let primary_may_be_unlisted = primary_root.is_none()
-        && selected.common_directory_bare_setting.is_none()
+        && (selected.common_directory_bare_setting.is_none()
+            || !selected.common_directory_source_root_inference_safe)
         && common_directory.file_name().and_then(|name| name.to_str()) == Some(".git");
     let selected_primary = (selection_kind == GitRepositorySelectionKind::Worktree
         && selected.role == GitWorktreeRole::Primary)
@@ -355,6 +375,8 @@ fn inspect_worktree(root: &Path) -> Result<SelectedWorktree, GitStructureIssue> 
             administrative_directory: common_directory.path.clone(),
             common_directory: common_directory.path,
             common_directory_bare_setting: common_directory.bare_setting,
+            common_directory_source_root_inference_safe: common_directory
+                .source_root_inference_safe,
             role: GitWorktreeRole::Primary,
         });
     }
@@ -393,6 +415,8 @@ fn inspect_worktree(root: &Path) -> Result<SelectedWorktree, GitStructureIssue> 
                 administrative_directory,
                 common_directory: common_directory.path,
                 common_directory_bare_setting: common_directory.bare_setting,
+                common_directory_source_root_inference_safe: common_directory
+                    .source_root_inference_safe,
                 role: GitWorktreeRole::Linked,
             })
         }
@@ -404,6 +428,8 @@ fn inspect_worktree(root: &Path) -> Result<SelectedWorktree, GitStructureIssue> 
                 administrative_directory,
                 common_directory: common_directory.path,
                 common_directory_bare_setting: common_directory.bare_setting,
+                common_directory_source_root_inference_safe: common_directory
+                    .source_root_inference_safe,
                 role: GitWorktreeRole::Primary,
             })
         }
@@ -428,9 +454,12 @@ fn inspect_common_directory(path: &Path) -> Result<InspectedCommonDirectory, Git
         }
     }
     let config = common_directory.join("config");
-    let bare_setting = match fs::symlink_metadata(&config) {
-        Ok(_) => config_declares_bare(&config)?,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => None,
+    let config_policy = match fs::symlink_metadata(&config) {
+        Ok(_) => local_config_policy(&config)?,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => GitLocalConfigPolicy {
+            bare_setting: None,
+            source_root_inference_safe: true,
+        },
         Err(source) => {
             return Err(issue(
                 config,
@@ -463,7 +492,8 @@ fn inspect_common_directory(path: &Path) -> Result<InspectedCommonDirectory, Git
     }
     Ok(InspectedCommonDirectory {
         path: common_directory,
-        bare_setting,
+        bare_setting: config_policy.bare_setting,
+        source_root_inference_safe: config_policy.source_root_inference_safe,
     })
 }
 
@@ -475,12 +505,13 @@ fn has_git_control_markers(path: &Path) -> FsResult<bool> {
     Ok(path_is_present(&head)? && path_is_present(&objects)? && path_is_present(&refs)?)
 }
 
-/// Read the local `core.bare` value conservatively without following includes or starting Git.
-fn config_declares_bare(path: &Path) -> Result<Option<bool>, GitStructureIssue> {
+/// Read bounded local source-selection policy without following includes or starting Git.
+fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructureIssue> {
     let text = read_bounded_text(path, GIT_DIRECTORY_POINTER_MAX_BYTES)?;
     let mut in_core = false;
     let mut has_include = false;
     let mut bare_setting = None;
+    let mut source_root_inference_safe = true;
     for raw_line in text.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
@@ -503,7 +534,12 @@ fn config_declares_bare(path: &Path) -> Result<Option<bool>, GitStructureIssue> 
         let (key, value) = line
             .split_once('=')
             .map_or((line, "true"), |(key, value)| (key, value));
-        if !key.trim().eq_ignore_ascii_case("bare") {
+        let key = key.trim();
+        if key.eq_ignore_ascii_case("worktree") {
+            source_root_inference_safe = false;
+            continue;
+        }
+        if !key.eq_ignore_ascii_case("bare") {
             continue;
         }
         let value = value
@@ -517,11 +553,10 @@ fn config_declares_bare(path: &Path) -> Result<Option<bool>, GitStructureIssue> 
             "false" | "no" | "off" | "0"
         ));
     }
-    if has_include {
-        Ok(None)
-    } else {
-        Ok(bare_setting)
-    }
+    Ok(GitLocalConfigPolicy {
+        bare_setting: (!has_include).then_some(bare_setting).flatten(),
+        source_root_inference_safe: source_root_inference_safe && !has_include,
+    })
 }
 
 /// Build the primary plus registered linked-worktree inventory.
@@ -778,8 +813,10 @@ fn validate_reciprocal_control(
 fn primary_worktree_root(
     common_directory: &Path,
     common_directory_bare_setting: Option<bool>,
+    source_root_inference_safe: bool,
 ) -> FsResult<Option<PathBuf>> {
-    if common_directory_bare_setting != Some(false)
+    if !source_root_inference_safe
+        || common_directory_bare_setting != Some(false)
         || common_directory.file_name().and_then(|name| name.to_str()) != Some(".git")
     {
         return Ok(None);
@@ -872,10 +909,11 @@ pub fn git_administrative_identity(path: &Path) -> FsResult<String> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-
+        let windows = windows_file_identity::read(path)?;
         identity.update(b"windows\0");
-        identity.update(&metadata.creation_time().to_le_bytes());
+        identity.update(&windows.creation_time.to_le_bytes());
+        identity.update(&windows.volume_serial_number.to_le_bytes());
+        identity.update(&windows.file_id);
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -902,6 +940,124 @@ fn required_creation_nanos(
             path: path.to_path_buf(),
             source: io::Error::new(io::ErrorKind::InvalidData, source),
         })
+}
+
+/// Windows directory identity from the retained native handle.
+#[cfg(windows)]
+#[expect(
+    unsafe_code,
+    reason = "the stable standard library does not expose Windows volume and 128-bit file identity; this bounded native query avoids a release dependency"
+)]
+mod windows_file_identity {
+    use super::{FsError, FsResult, metadata_is_indirect};
+    use std::ffi::c_void;
+    use std::fs::OpenOptions;
+    use std::io;
+    use std::mem::size_of;
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::{AsRawHandle, RawHandle};
+    use std::path::Path;
+
+    /// Permit concurrent readers while the directory identity handle is open.
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    /// Permit ordinary Git writes while the directory identity handle is open.
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    /// Permit ordinary Git deletion while the directory identity handle is open.
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+    /// Admit a directory handle through standard Windows file opening.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    /// Inspect rather than traverse a replacement reparse point.
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    /// Native `FileIdInfo` query discriminator.
+    const FILE_ID_INFO_CLASS: i32 = 18;
+
+    /// Native fixed-size `FILE_ID_INFO` output layout.
+    #[repr(C)]
+    #[derive(Default)]
+    struct NativeFileIdInfo {
+        /// Volume identity owning the file.
+        volume_serial_number: u64,
+        /// Filesystem-provided 128-bit file identity.
+        file_id: [u8; 16],
+    }
+
+    #[link(name = "Kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandleEx(
+            file: RawHandle,
+            information_class: i32,
+            information: *mut c_void,
+            information_bytes: u32,
+        ) -> i32;
+    }
+
+    /// Stable fields combined with creation time by the lifecycle hash.
+    pub(super) struct Identity {
+        /// Windows creation timestamp from the retained handle.
+        pub(super) creation_time: u64,
+        /// Volume identity from `FileIdInfo`.
+        pub(super) volume_serial_number: u64,
+        /// Filesystem-provided 128-bit file identity.
+        pub(super) file_id: [u8; 16],
+    }
+
+    /// Open one direct directory and return its retained-handle identity.
+    pub(super) fn read(path: &Path) -> FsResult<Identity> {
+        let directory = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .map_err(|source| FsError::RepositoryBoundary {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let metadata = directory
+            .metadata()
+            .map_err(|source| FsError::RepositoryBoundary {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if metadata_is_indirect(&metadata) || !metadata.is_dir() {
+            return Err(FsError::RepositoryBoundary {
+                path: path.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Git administrative identity requires a direct directory handle",
+                ),
+            });
+        }
+
+        let mut native = NativeFileIdInfo::default();
+        let information_bytes =
+            u32::try_from(size_of::<NativeFileIdInfo>()).map_err(|_source| {
+                FsError::RepositoryBoundary {
+                    path: path.to_path_buf(),
+                    source: io::Error::other("Windows file identity structure exceeds DWORD size"),
+                }
+            })?;
+        // SAFETY: `directory` is a live owned handle and `native` is the exact
+        // FILE_ID_INFO layout for the fixed-size FileIdInfo query.
+        let succeeded = unsafe {
+            GetFileInformationByHandleEx(
+                directory.as_raw_handle(),
+                FILE_ID_INFO_CLASS,
+                (&raw mut native).cast(),
+                information_bytes,
+            )
+        };
+        if succeeded == 0 {
+            return Err(FsError::RepositoryBoundary {
+                path: path.to_path_buf(),
+                source: io::Error::last_os_error(),
+            });
+        }
+        Ok(Identity {
+            creation_time: metadata.creation_time(),
+            volume_serial_number: native.volume_serial_number,
+            file_id: native.file_id,
+        })
+    }
 }
 
 /// Read exactly one `prefix path` pointer record.
@@ -1195,6 +1351,40 @@ mod tests {
             "configless manager inferred a primary checkout without positive non-bare evidence",
         )?;
         fs::write(&config_path, config)?;
+
+        let configured_worktree = temp.path().join("configured external worktree");
+        fs::create_dir(&configured_worktree)?;
+        run_command(
+            Command::new("git")
+                .current_dir(&primary)
+                .args(["config", "core.worktree"])
+                .arg(&configured_worktree),
+        )?;
+        let effective_worktree = Command::new("git")
+            .arg("--git-dir")
+            .arg(primary.join(".git"))
+            .args(["rev-parse", "--show-toplevel"])
+            .output()?;
+        require(
+            effective_worktree.status.success()
+                && paths_equal(
+                    &PathBuf::from(String::from_utf8(effective_worktree.stdout)?.trim())
+                        .canonicalize()?,
+                    &configured_worktree.canonicalize()?,
+                ),
+            "Git fixture did not relocate its configured worktree",
+        )?;
+        for selected in [&primary, &primary.join(".git")] {
+            let relocated = require_git(discover_repository_structure(selected)?)?;
+            require(
+                relocated.selection
+                    == GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::None,
+                    },
+                "core.worktree inferred the common-directory parent as source",
+            )?;
+        }
+        run_git(&primary, ["config", "--unset", "core.worktree"])?;
 
         let lookalike = primary.join("src").join("application metadata");
         fs::create_dir(&lookalike)?;
@@ -1546,19 +1736,54 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn lifecycle_identity_requires_a_creation_timestamp() {
-        let error = required_creation_nanos(
+        let result = required_creation_nanos(
             Path::new("administrative-directory"),
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "creation time unavailable",
             )),
-        )
-        .expect_err("missing creation time was accepted as lifecycle identity");
+        );
         assert!(matches!(
-            error,
-            FsError::RepositoryBoundary { source, .. }
-                if source.kind() == io::ErrorKind::Unsupported
+            result,
+            Err(
+                FsError::RepositoryBoundary { source, .. }
+                if source.kind() == io::ErrorKind::Unsupported,
+            )
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lifecycle_identity_includes_stable_volume_and_file_identity()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let administrative_directory = temp.path().join("administrative directory");
+        fs::create_dir(&administrative_directory)?;
+        let first_native = windows_file_identity::read(&administrative_directory)?;
+        let first = git_administrative_identity(&administrative_directory)?;
+        let stable_native = windows_file_identity::read(&administrative_directory)?;
+        let stable = git_administrative_identity(&administrative_directory)?;
+        require(
+            first_native.volume_serial_number == stable_native.volume_serial_number
+                && first_native.file_id == stable_native.file_id
+                && first == stable,
+            "Windows directory identity changed within one lifecycle",
+        )?;
+
+        fs::remove_dir(&administrative_directory)?;
+        fs::create_dir(&administrative_directory)?;
+        let replacement_native = windows_file_identity::read(&administrative_directory)?;
+        let replacement = git_administrative_identity(&administrative_directory)?;
+        require(
+            first_native.volume_serial_number != replacement_native.volume_serial_number
+                || first_native.file_id != replacement_native.file_id,
+            "Windows replacement reused the original volume and file identity",
+        )?;
+        require(
+            first != replacement,
+            "Windows replacement reused the original lifecycle hash",
+        )?;
+        Ok(())
     }
 
     /// Run one Git command with fixed UTF-8 arguments.

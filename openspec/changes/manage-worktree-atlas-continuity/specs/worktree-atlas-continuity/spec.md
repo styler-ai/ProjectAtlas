@@ -24,6 +24,11 @@ ProjectAtlas SHALL classify a supplied directory as a true non-Git root, an exac
 - **WHEN** a common manager's bounded local config contains `include` or `includeIf` directives whose effective `core.bare` value cannot be established without following external config
 - **THEN** ProjectAtlas treats bare state as unknown and never invents the manager's parent as a source checkout
 
+#### Scenario: Configured worktree roots prevent parent inference
+
+- **WHEN** a common manager's bounded local config sets `core.worktree` to another directory
+- **THEN** ProjectAtlas treats the manager as having relocated source and requires an exact worktree selection instead of indexing the common-directory parent
+
 #### Scenario: Registration inventory exceeds the bound
 
 - **WHEN** structural registrations exceed the fixed discovery ceiling
@@ -65,7 +70,7 @@ ProjectAtlas SHALL let one explicitly selected primary/control atlas register st
 
 #### Scenario: Reusable filesystem identity evidence is refused
 
-- **WHEN** the platform cannot provide a non-reusable creation identity for the selected Git administrative directory
+- **WHEN** the platform cannot provide non-reusable lifecycle evidence for the selected Git administrative directory, including creation time plus the platform's stable file-object identity
 - **THEN** ProjectAtlas rejects alias registration and routing rather than falling back to a reusable path, device, or inode identity
 
 #### Scenario: Git-authorized move preserves registration
@@ -87,6 +92,11 @@ ProjectAtlas SHALL let one explicitly selected primary/control atlas register st
 
 - **WHEN** ProjectAtlas cannot establish a last-valid aggregate snapshot for an otherwise available registered worktree
 - **THEN** remove returns a typed synchronization failure and keeps the active registration unchanged
+
+#### Scenario: Exported telemetry revision and aggregates share one read snapshot
+
+- **WHEN** independent local usage commits while a worktree aggregate export is in progress
+- **THEN** the exported revision, dimensions, and aggregate rows all come from one SQLite read snapshot and the later commit appears only in a newer export
 
 ### Requirement: Every root-scoped MCP operation accepts a concurrency-safe short selector
 

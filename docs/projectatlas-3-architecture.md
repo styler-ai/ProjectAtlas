@@ -1847,8 +1847,11 @@ Registration also captures an opaque identity for the current Git
 administrative-directory filesystem object. Git-authorized checkout moves keep
 that object and its alias; deleting and recreating the directory at the same
 path fails closed so a replacement checkout cannot inherit the earlier alias.
-Filesystems without non-reusable creation identity reject alias registration
-and routing instead of falling back to a reusable path or inode.
+Unix requires device, inode, and creation time; Windows requires creation time
+plus retained-handle volume and 128-bit file identity. Filesystems without the
+complete non-reusable evidence reject alias registration and routing instead of
+falling back to a reusable path, timestamp, or inode. `core.worktree` and
+unresolved config includes also prevent manager-parent inference.
 
 A modernization tag highlights source families where exact dependency and
 source-evidence navigation is especially valuable for high-risk transformation
@@ -2674,7 +2677,7 @@ sequenceDiagram
     Caller->>Target: Independent local CLI operation
     Target->>Target: Commit raw local event
     Caller->>MCP: Token report with worktree main
-    MCP->>Target: Read normalized aggregate snapshot
+    MCP->>Target: Read revision, dimensions, and rows in one SQLite snapshot
     Target-->>MCP: Newer revision or unchanged revision
     MCP->>Control: Atomic monotonic origin synchronization
     Control->>Report: Native main plus routed plus active and retired snapshots

@@ -54,7 +54,7 @@ All normal root-scoped MCP tools use one mutually exclusive selection boundary:
 
 Each admitted request captures its canonical root, database path, project identity, registration identity, control database, and alias before background or query work begins. Interleaved requests therefore do not depend on current directory or mutable session selection.
 
-If Git moves a checkout, its unchanged administrative directory preserves the alias. If Git deletes and later recreates a worktree while reusing the same administrative path, the lifecycle identity changes: routing fails closed until the stale alias is removed and the new checkout is registered. A filesystem that cannot provide non-reusable creation identity also fails alias registration and routing; it never falls back to a reusable path or inode. Removing the stale ProjectAtlas registration still leaves Git, source, and either checkout's `.projectatlas` state untouched.
+If Git moves a checkout, its unchanged administrative directory preserves the alias. If Git deletes and later recreates a worktree while reusing the same administrative path, the lifecycle identity changes: routing fails closed until the stale alias is removed and the new checkout is registered. Unix requires device, inode, and creation time; Windows requires creation time plus retained-handle volume and 128-bit file identity. A filesystem that cannot provide the complete non-reusable evidence fails alias registration and routing; it never falls back to a reusable path, timestamp, or inode. A manager with `core.worktree` or unresolved config includes likewise requires exact source selection instead of guessing its parent. Removing the stale ProjectAtlas registration still leaves Git, source, and either checkout's `.projectatlas` state untouched.
 
 ```mermaid
 sequenceDiagram
@@ -179,7 +179,7 @@ flowchart TB
     Routed[Alias-routed MCP usage] -->|one event with registration origin| Control[(Control telemetry)]
     MainUsage[Native main usage] --> Control
     Local[Independent worktree CLI usage] --> Target[(Target local telemetry)]
-    Target -->|monotonic normalized snapshot, no raw events| Snapshot[Active or retired origin snapshot]
+    Target -->|one read snapshot: revision plus normalized rows| Snapshot[Active or retired origin snapshot]
     Snapshot --> Control
     Control --> Aggregate[Repository overview and trends]
     Aggregate --> MainMCP[atlas_token_report worktree main]
@@ -188,7 +188,7 @@ flowchart TB
     Target --> Exact[Exact worktree report]
 ```
 
-Alias-routed MCP events commit once in control under the stable registration origin and are not mirrored into the target. Independent worktree events remain local; aggregate reads and unregister opportunistically synchronize bounded lifetime and daily rows with a monotonically increasing revision. Repeated or stale synchronization is a no-op, validation failure preserves the last-valid snapshot, and raw per-session queries or paths never move to control.
+Alias-routed MCP events commit once in control under the stable registration origin and are not mirrored into the target. Independent worktree events remain local; one deferred SQLite read transaction exports revision, referenced dimensions, and bounded lifetime/daily rows from the same snapshot before aggregate reads or unregister synchronize them. Repeated or stale synchronization is a no-op, a concurrent later commit appears in the next revision, validation failure preserves the last-valid snapshot, and raw per-session queries or paths never move to control.
 
 `projectatlas token` and `projectatlas token --view tui` from the control checkout combine native main, routed, and synchronized active/retired origins. The TUI layout and metric definitions do not change. An exact worktree token call stays scoped to that target's local detail and never presents sibling detail as local.
 

@@ -1499,6 +1499,16 @@ fn usage_events_for_project(
 pub(crate) fn export_worktree_usage_snapshot(
     connection: &Connection,
 ) -> DbResult<WorktreeUsageSnapshot> {
+    let owned_snapshot = connection
+        .is_autocommit()
+        .then(|| {
+            rusqlite::Transaction::new_unchecked(
+                connection,
+                rusqlite::TransactionBehavior::Deferred,
+            )
+        })
+        .transpose()?;
+    let connection = owned_snapshot.as_deref().unwrap_or(connection);
     let project = current_project(connection)?;
     crate::project_identity::require_bound_project_identity(connection, project)?;
     let policy = TelemetryRetentionPolicy::default().validate()?;
@@ -1584,19 +1594,26 @@ pub(crate) fn export_worktree_usage_snapshot(
             dimensions.insert(dimension_id, read_dimension(row, 1)?);
         }
     }
+    drop(dimension_rows);
+    drop(dimension_statement);
+    drop(statement);
     if dimensions.len() != referenced_dimensions.len() {
         return Err(DbError::WorktreeRegistrationRow {
             reason: "aggregate snapshot references a missing dimension",
         });
     }
     let logical_bytes = validate_worktree_usage_snapshot(&dimensions, &rows, policy)?;
-    Ok(WorktreeUsageSnapshot {
+    let snapshot = WorktreeUsageSnapshot {
         project_instance_id: project,
         revision,
         dimensions,
         rows,
         logical_bytes,
-    })
+    };
+    if let Some(snapshot) = owned_snapshot {
+        snapshot.commit()?;
+    }
+    Ok(snapshot)
 }
 
 /// Replace one registration's synchronized aggregate rows when the revision advances.
@@ -5052,14 +5069,37 @@ mod tests {
     use std::cell::RefCell;
     use std::error::Error;
     use std::fs;
+    use std::io;
+    use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
     thread_local! {
         /// Statements executed by the connection under the intended-scale worktree probe.
         static WORKTREE_TRACE: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        /// One deterministic pause between revision and aggregate reads.
+        static WORKTREE_SNAPSHOT_EXPORT_BLOCKER: RefCell<Option<SnapshotExportBlocker>> = const { RefCell::new(None) };
+    }
+
+    struct SnapshotExportBlocker {
+        entered: SyncSender<()>,
+        resume: Receiver<()>,
     }
 
     fn record_worktree_statement(sql: &str) {
         WORKTREE_TRACE.with(|statements| statements.borrow_mut().push(sql.to_string()));
+    }
+
+    fn block_worktree_snapshot_aggregate_query(sql: &str) {
+        if !sql.contains("SELECT -1 AS day_epoch") {
+            return;
+        }
+        WORKTREE_SNAPSHOT_EXPORT_BLOCKER.with(|slot| {
+            let Some(blocker) = slot.borrow_mut().take() else {
+                return;
+            };
+            if blocker.entered.send(()).is_ok() {
+                let _resume = blocker.resume.recv_timeout(Duration::from_secs(10));
+            }
+        });
     }
 
     struct TestDatabase {
@@ -7299,6 +7339,80 @@ mod tests {
             &3,
             "retired repository total",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn worktree_usage_export_keeps_revision_and_aggregates_in_one_read_snapshot()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("worktree");
+        fs::create_dir(&root)?;
+        let database_path = root.join("projectatlas.db");
+        let mut worktree = AtlasStore::open_for_project(&database_path, &root)?;
+        worktree.record_usage(&event("snapshot", 100, 20))?;
+
+        let (entered_sender, entered_receiver) = sync_channel(1);
+        let (resume_sender, resume_receiver) = sync_channel(1);
+        WORKTREE_SNAPSHOT_EXPORT_BLOCKER.with(|slot| {
+            *slot.borrow_mut() = Some(SnapshotExportBlocker {
+                entered: entered_sender,
+                resume: resume_receiver,
+            });
+        });
+        worktree
+            .connection
+            .trace(Some(block_worktree_snapshot_aggregate_query));
+
+        let writer_root = root.clone();
+        let writer_database = database_path.clone();
+        let writer = std::thread::spawn(move || {
+            let result = (|| -> Result<(), String> {
+                entered_receiver
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(|error| error.to_string())?;
+                let writer = AtlasStore::open_for_project(&writer_database, &writer_root)
+                    .map_err(|error| error.to_string())?;
+                writer
+                    .record_usage(&event("snapshot", 90, 20))
+                    .map_err(|error| error.to_string())
+            })();
+            let _resume = resume_sender.send(());
+            result
+        });
+
+        let snapshot_result = worktree.export_worktree_usage_snapshot();
+        worktree.connection.trace(None);
+        WORKTREE_SNAPSHOT_EXPORT_BLOCKER.with(|slot| {
+            slot.borrow_mut().take();
+        });
+        writer
+            .join()
+            .map_err(|_panic| io::Error::other("snapshot writer panicked"))?
+            .map_err(io::Error::other)?;
+        let snapshot = snapshot_result?;
+        require_eq(&snapshot.revision(), &1, "exported snapshot revision")?;
+        let exported_calls = snapshot
+            .rows
+            .iter()
+            .filter(|row| row.day_epoch == -1)
+            .map(|row| row.counters.calls)
+            .sum::<i64>();
+        require_eq(&exported_calls, &1, "exported aggregate calls")?;
+
+        let current = worktree.export_worktree_usage_snapshot()?;
+        require_eq(&current.revision(), &2, "current snapshot revision")?;
+        let current_calls = current
+            .rows
+            .iter()
+            .filter(|row| row.day_epoch == -1)
+            .map(|row| row.counters.calls)
+            .sum::<i64>();
+        require_eq(&current_calls, &2, "current aggregate calls")?;
+        let reader = AtlasStore::open_read_only_for_project(&database_path, &root)?;
+        let read_only = reader.export_worktree_usage_snapshot()?;
+        require_eq(&read_only.revision(), &2, "read-only snapshot revision")?;
+        reader.finish_index_read_snapshot()?;
         Ok(())
     }
 
