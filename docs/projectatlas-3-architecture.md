@@ -1850,8 +1850,9 @@ path fails closed so a replacement checkout cannot inherit the earlier alias.
 Unix requires device, inode, and creation time; Windows requires creation time
 plus retained-handle volume and 128-bit file identity. Filesystems without the
 complete non-reusable evidence reject alias registration and routing instead of
-falling back to a reusable path, timestamp, or inode. `core.worktree` and
-unresolved config includes also prevent manager-parent inference.
+falling back to a reusable path, timestamp, or inode. `core.worktree`, enabled
+`config.worktree` overrides, and unresolved config includes also prevent
+manager-parent inference.
 
 A modernization tag highlights source families where exact dependency and
 source-evidence navigation is especially valuable for high-risk transformation

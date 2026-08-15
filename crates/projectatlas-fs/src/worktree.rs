@@ -307,8 +307,10 @@ struct InspectedCommonDirectory {
 struct GitLocalConfigPolicy {
     /// Explicit local `core.bare` setting, when present and include-free.
     bare_setting: Option<bool>,
-    /// False when `core.worktree` or unresolved includes may relocate source.
+    /// False when local worktree settings or unresolved includes may relocate source.
     source_root_inference_safe: bool,
+    /// Whether Git reads per-worktree values from `config.worktree`.
+    worktree_config_enabled: bool,
 }
 
 /// Internal selection branch used while constructing the common inventory.
@@ -456,11 +458,12 @@ fn inspect_common_directory(path: &Path) -> Result<InspectedCommonDirectory, Git
         }
     }
     let config = common_directory.join("config");
-    let config_policy = match fs::symlink_metadata(&config) {
+    let mut config_policy = match fs::symlink_metadata(&config) {
         Ok(_) => local_config_policy(&config)?,
         Err(source) if source.kind() == io::ErrorKind::NotFound => GitLocalConfigPolicy {
             bare_setting: None,
             source_root_inference_safe: true,
+            worktree_config_enabled: false,
         },
         Err(source) => {
             return Err(issue(
@@ -471,6 +474,30 @@ fn inspect_common_directory(path: &Path) -> Result<InspectedCommonDirectory, Git
             ));
         }
     };
+    if config_policy.worktree_config_enabled {
+        let worktree_config = common_directory.join("config.worktree");
+        match fs::symlink_metadata(&worktree_config) {
+            Ok(_) => {
+                let worktree_policy = local_config_policy(&worktree_config)?;
+                config_policy.bare_setting = if worktree_policy.source_root_inference_safe {
+                    worktree_policy.bare_setting.or(config_policy.bare_setting)
+                } else {
+                    None
+                };
+                config_policy.source_root_inference_safe &=
+                    worktree_policy.source_root_inference_safe;
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(issue(
+                    worktree_config,
+                    GitStructureIssueKind::FilesystemUnavailable {
+                        error_kind: source.kind(),
+                    },
+                ));
+            }
+        }
+    }
     let registrations = common_directory.join("worktrees");
     match fs::symlink_metadata(&registrations) {
         Ok(_) => {
@@ -511,9 +538,11 @@ fn has_git_control_markers(path: &Path) -> FsResult<bool> {
 fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructureIssue> {
     let text = read_bounded_text(path, GIT_DIRECTORY_POINTER_MAX_BYTES)?;
     let mut in_core = false;
+    let mut in_extensions = false;
     let mut has_include = false;
     let mut bare_setting = None;
     let mut source_root_inference_safe = true;
+    let mut worktree_config_enabled = false;
     for raw_line in text.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
@@ -528,15 +557,29 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
             has_include |= section_name.eq_ignore_ascii_case("include")
                 || section_name.eq_ignore_ascii_case("includeif");
             in_core = section.eq_ignore_ascii_case("core");
+            in_extensions = section.eq_ignore_ascii_case("extensions");
             continue;
         }
-        if !in_core {
+        if !in_core && !in_extensions {
             continue;
         }
         let (key, value) = line
             .split_once('=')
             .map_or((line, "true"), |(key, value)| (key, value));
         let key = key.trim();
+        let value = value
+            .split(['#', ';'])
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_matches('"');
+        if in_extensions && key.eq_ignore_ascii_case("worktreeconfig") {
+            worktree_config_enabled = !matches!(
+                value.to_ascii_lowercase().as_str(),
+                "false" | "no" | "off" | "0"
+            );
+            continue;
+        }
         if key.eq_ignore_ascii_case("worktree") {
             source_root_inference_safe = false;
             continue;
@@ -544,12 +587,6 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
         if !key.eq_ignore_ascii_case("bare") {
             continue;
         }
-        let value = value
-            .split(['#', ';'])
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .trim_matches('"');
         bare_setting = Some(!matches!(
             value.to_ascii_lowercase().as_str(),
             "false" | "no" | "off" | "0"
@@ -558,6 +595,7 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
     Ok(GitLocalConfigPolicy {
         bare_setting: (!has_include).then_some(bare_setting).flatten(),
         source_root_inference_safe: source_root_inference_safe && !has_include,
+        worktree_config_enabled,
     })
 }
 
@@ -1387,6 +1425,68 @@ mod tests {
             )?;
         }
         run_git(&primary, ["config", "--unset", "core.worktree"])?;
+
+        run_git(&primary, ["config", "extensions.worktreeConfig", "true"])?;
+        run_command(
+            Command::new("git")
+                .current_dir(&primary)
+                .args(["config", "--worktree", "core.worktree"])
+                .arg(&configured_worktree),
+        )?;
+        let worktree_config_path = primary.join(".git").join("config.worktree");
+        require(
+            worktree_config_path.is_file(),
+            "Git fixture did not create config.worktree",
+        )?;
+        let effective_worktree = Command::new("git")
+            .arg("--git-dir")
+            .arg(primary.join(".git"))
+            .args(["rev-parse", "--show-toplevel"])
+            .output()?;
+        require(
+            effective_worktree.status.success()
+                && Path::new(String::from_utf8(effective_worktree.stdout)?.trim())
+                    .canonicalize()?
+                    == configured_worktree.canonicalize()?,
+            "Git fixture did not honor config.worktree core.worktree",
+        )?;
+        for selected in [&primary, &primary.join(".git")] {
+            let relocated = require_git(discover_repository_structure(selected)?)?;
+            require(
+                relocated.selection
+                    == GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::None,
+                    },
+                "config.worktree core.worktree inferred the common-directory parent as source",
+            )?;
+        }
+        run_git(
+            &primary,
+            ["config", "--worktree", "--unset", "core.worktree"],
+        )?;
+        run_git(&primary, ["config", "--worktree", "core.bare", "true"])?;
+        let effective_bare = Command::new("git")
+            .arg("--git-dir")
+            .arg(primary.join(".git"))
+            .args(["config", "--bool", "core.bare"])
+            .output()?;
+        require(
+            effective_bare.status.success()
+                && String::from_utf8(effective_bare.stdout)?.trim() == "true",
+            "Git fixture did not honor config.worktree core.bare",
+        )?;
+        for selected in [&primary, &primary.join(".git")] {
+            let per_worktree_bare = require_git(discover_repository_structure(selected)?)?;
+            require(
+                per_worktree_bare.selection
+                    == GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::None,
+                    },
+                "config.worktree core.bare invented the common-directory parent as source",
+            )?;
+        }
+        run_git(&primary, ["config", "--worktree", "--unset", "core.bare"])?;
+        run_git(&primary, ["config", "--unset", "extensions.worktreeConfig"])?;
 
         let submodule_source = temp.path().join("submodule source");
         fs::create_dir(&submodule_source)?;

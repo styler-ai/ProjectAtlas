@@ -26,8 +26,13 @@ ProjectAtlas SHALL classify a supplied directory as a true non-Git root, an exac
 
 #### Scenario: Configured worktree roots prevent parent inference
 
-- **WHEN** a common manager's bounded local config sets `core.worktree` to another directory
+- **WHEN** a common manager's bounded common config sets `core.worktree` to another directory
 - **THEN** ProjectAtlas treats the manager as having relocated source and requires an exact worktree selection instead of indexing the common-directory parent
+
+#### Scenario: Enabled per-worktree config overrides common manager policy
+
+- **WHEN** the common config enables `extensions.worktreeConfig` and bounded `config.worktree` changes `core.worktree` or `core.bare`
+- **THEN** ProjectAtlas applies the per-worktree override before manager source inference and never indexes the common-directory parent when Git treats it as relocated or bare
 
 #### Scenario: Registration inventory exceeds the bound
 
