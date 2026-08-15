@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import re
 import sqlite3
 import subprocess
@@ -292,6 +293,15 @@ def run(runtime: Path, work_root: Path) -> dict[str, Any]:
     after_rows = document_rows(database)
     final_storage = persistent_sizes(work_root)
     sqlite_probe = sqlite_publication_probe()
+    runtime_info = json.loads(
+        subprocess.check_output(
+            [str(runtime), "--format", "json", "runtime-info"],
+            cwd=work_root,
+            env=env,
+            text=True,
+            timeout=30,
+        )
+    )
     output_bytes = refresh_process["stdout_bytes"] + refresh_process["stderr_bytes"]
     checks = [
         check(
@@ -365,6 +375,13 @@ def run(runtime: Path, work_root: Path) -> dict[str, Any]:
             ).strip(),
             "runtime": str(runtime),
             "runtime_sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
+            "runtime_info": runtime_info,
+        },
+        "host": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "logical_cpus": os.cpu_count(),
         },
         "fixture": {
             "source_files": SOURCE_FILES,
