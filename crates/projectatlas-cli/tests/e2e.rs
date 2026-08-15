@@ -7019,6 +7019,7 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         "continuing asset repair publish",
         "--prerelease --latest=false",
         "EXPECTED_RELEASE_PRERELEASE",
+        "EXPECTED_STABLE_TAG: ${{ needs.verify.outputs.stable_tag }}",
         "PROJECTATLAS_EXPECTED_LATEST",
         "--resolve-expected-latest",
         "Verify hosted release state",
@@ -7108,6 +7109,8 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         "Revalidate exact main head before release mutation",
         "Release mutation requires the exact current origin/main head",
         "git fetch --force origin main:refs/remotes/origin/main",
+        "git ls-remote --exit-code --tags origin \"refs/tags/$EXPECTED_STABLE_TAG\"",
+        "Could not verify that stable tag $EXPECTED_STABLE_TAG is absent",
     ] {
         if !publish.contains(required) {
             return Err(io::Error::other(format!(
@@ -7129,6 +7132,17 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         if notes >= revalidation || revalidation >= mutation {
             return Err(io::Error::other(
                 "release notes must precede exact-main revalidation and every release mutation",
+            )
+            .into());
+        }
+    }
+    for guarded_mutation in [
+        "require_stable_tag_absent_for_rc\n            gh release upload",
+        "require_stable_tag_absent_for_rc\n            gh release create",
+    ] {
+        if !publish.contains(guarded_mutation) {
+            return Err(io::Error::other(
+                "each release mutation must immediately recheck the remote stable tag",
             )
             .into());
         }

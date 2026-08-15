@@ -717,6 +717,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       EXPECTED_RELEASE_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
+      EXPECTED_STABLE_TAG: ${{ needs.verify.outputs.stable_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -856,18 +857,35 @@ jobs:
       - name: Create GitHub release
         run: |
           set -euo pipefail
+          require_stable_tag_absent_for_rc() {
+            if [[ "$EXPECTED_RELEASE_PRERELEASE" != "true" ]]; then
+              return
+            fi
+            if git ls-remote --exit-code --tags origin "refs/tags/$EXPECTED_STABLE_TAG" > /dev/null; then
+              echo "Cannot publish an RC after stable tag $EXPECTED_STABLE_TAG exists" >&2
+              exit 1
+            else
+              status=$?
+              if [[ "$status" -ne 2 ]]; then
+                echo "Could not verify that stable tag $EXPECTED_STABLE_TAG is absent" >&2
+                exit "$status"
+              fi
+            fi
+          }
           if [[ "${PROJECTATLAS_RELEASE_EXISTS:-false}" == "true" ]]; then
             python3 .github/scripts/verify-main-atlas-seed-release-assets.py \
               --repair-upload-source release-assets \
               --immutable-list-file "$RUNNER_TEMP/projectatlas-hosted-main-atlas-seed-assets.txt" \
               --upload-list-file "$RUNNER_TEMP/projectatlas-release-repair-assets.txt"
             mapfile -t upload_assets < "$RUNNER_TEMP/projectatlas-release-repair-assets.txt"
+            require_stable_tag_absent_for_rc
             gh release upload "$RELEASE_VERSION" "${upload_assets[@]}" --clobber
           else
             classification=()
             if [[ "$EXPECTED_RELEASE_PRERELEASE" == "true" ]]; then
               classification+=(--prerelease --latest=false)
             fi
+            require_stable_tag_absent_for_rc
             gh release create "$RELEASE_VERSION" release-assets/* \
               --target "$GITHUB_SHA" \
               --title "$RELEASE_VERSION" \
