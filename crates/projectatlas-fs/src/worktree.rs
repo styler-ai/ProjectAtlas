@@ -216,7 +216,14 @@ pub fn discover_repository_structure_controlled(
             Ok(_) => {
                 return match inspect_worktree(ancestor) {
                     Ok(selected) => {
-                        build_git_structure(selected, GitRepositorySelectionKind::Worktree, control)
+                        let selection_kind = if selected.role == GitWorktreeRole::Primary
+                            && selected.common_directory_bare_setting == Some(true)
+                        {
+                            GitRepositorySelectionKind::Manager
+                        } else {
+                            GitRepositorySelectionKind::Worktree
+                        };
+                        build_git_structure(selected, selection_kind, control)
                             .map(RepositoryStructure::Git)
                     }
                     Err(issue) => Ok(RepositoryStructure::InvalidGit {
@@ -239,9 +246,10 @@ pub fn discover_repository_structure_controlled(
                 Ok(common_directory) => build_git_structure(
                     SelectedWorktree {
                         root: ancestor.to_path_buf(),
-                        git_control_path: common_directory.clone(),
-                        administrative_directory: common_directory,
-                        common_directory: ancestor.to_path_buf(),
+                        git_control_path: common_directory.path.clone(),
+                        administrative_directory: common_directory.path.clone(),
+                        common_directory: common_directory.path,
+                        common_directory_bare_setting: common_directory.bare_setting,
                         role: GitWorktreeRole::Primary,
                     },
                     GitRepositorySelectionKind::Manager,
@@ -270,8 +278,19 @@ struct SelectedWorktree {
     administrative_directory: PathBuf,
     /// Canonical repository common directory.
     common_directory: PathBuf,
+    /// Explicit local `core.bare` setting, when present.
+    common_directory_bare_setting: Option<bool>,
     /// Structural worktree role.
     role: GitWorktreeRole,
+}
+
+/// Validated common-directory identity and local bare-worktree policy.
+#[derive(Clone, Debug)]
+struct InspectedCommonDirectory {
+    /// Canonical common control directory.
+    path: PathBuf,
+    /// Explicit local `core.bare` setting, when present.
+    bare_setting: Option<bool>,
 }
 
 /// Internal selection branch used while constructing the common inventory.
@@ -290,7 +309,8 @@ fn build_git_structure(
     control: &IndexWorkControl,
 ) -> FsResult<GitRepositoryStructure> {
     let common_directory = canonicalize(&selected.common_directory, &selected.common_directory)?;
-    let primary_root = primary_worktree_root(&common_directory)?;
+    let primary_root =
+        primary_worktree_root(&common_directory, selected.common_directory_bare_setting)?;
     let selected_primary = (selection_kind == GitRepositorySelectionKind::Worktree
         && selected.role == GitWorktreeRole::Primary)
         .then_some(selected.clone());
@@ -328,9 +348,10 @@ fn inspect_worktree(root: &Path) -> Result<SelectedWorktree, GitStructureIssue> 
         let common_directory = inspect_common_directory(&git_control_path)?;
         return Ok(SelectedWorktree {
             root,
-            git_control_path: common_directory.clone(),
-            administrative_directory: common_directory.clone(),
-            common_directory,
+            git_control_path: common_directory.path.clone(),
+            administrative_directory: common_directory.path.clone(),
+            common_directory: common_directory.path,
+            common_directory_bare_setting: common_directory.bare_setting,
             role: GitWorktreeRole::Primary,
         });
     }
@@ -348,33 +369,38 @@ fn inspect_worktree(root: &Path) -> Result<SelectedWorktree, GitStructureIssue> 
     match fs::symlink_metadata(&common_pointer_path) {
         Ok(_) => {
             let common_pointer = read_plain_pointer(&common_pointer_path)?;
-            let common_directory = resolve_existing_directory(
+            let common_directory_path = resolve_existing_directory(
                 &common_pointer_path,
                 &administrative_directory,
                 &common_pointer,
             )?;
-            inspect_common_directory(&common_directory)?;
-            validate_linked_administrative_directory(&administrative_directory, &common_directory)?;
+            let common_directory = inspect_common_directory(&common_directory_path)?;
+            validate_linked_administrative_directory(
+                &administrative_directory,
+                &common_directory.path,
+            )?;
             validate_reciprocal_control(
                 &administrative_directory,
                 &git_control_path,
-                &common_directory,
+                &common_directory.path,
             )?;
             Ok(SelectedWorktree {
                 root,
                 git_control_path: canonicalize_issue(&git_control_path, &git_control_path)?,
                 administrative_directory,
-                common_directory,
+                common_directory: common_directory.path,
+                common_directory_bare_setting: common_directory.bare_setting,
                 role: GitWorktreeRole::Linked,
             })
         }
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
-            inspect_common_directory(&administrative_directory)?;
+            let common_directory = inspect_common_directory(&administrative_directory)?;
             Ok(SelectedWorktree {
                 root,
                 git_control_path: canonicalize_issue(&git_control_path, &git_control_path)?,
                 administrative_directory: administrative_directory.clone(),
-                common_directory: administrative_directory,
+                common_directory: common_directory.path,
+                common_directory_bare_setting: common_directory.bare_setting,
                 role: GitWorktreeRole::Primary,
             })
         }
@@ -386,14 +412,9 @@ fn inspect_worktree(root: &Path) -> Result<SelectedWorktree, GitStructureIssue> 
 }
 
 /// Validate and canonicalize one Git common control directory.
-fn inspect_common_directory(path: &Path) -> Result<PathBuf, GitStructureIssue> {
+fn inspect_common_directory(path: &Path) -> Result<InspectedCommonDirectory, GitStructureIssue> {
     let common_directory = canonicalize_issue(path, path)?;
-    for (name, directory) in [
-        ("HEAD", false),
-        ("config", false),
-        ("objects", true),
-        ("refs", true),
-    ] {
+    for (name, directory) in [("HEAD", false), ("objects", true), ("refs", true)] {
         let marker = common_directory.join(name);
         let metadata = structural_metadata(&marker)?;
         if metadata.is_dir() != directory || metadata.is_file() == directory {
@@ -403,14 +424,93 @@ fn inspect_common_directory(path: &Path) -> Result<PathBuf, GitStructureIssue> {
             ));
         }
     }
-    Ok(common_directory)
+    let config = common_directory.join("config");
+    let bare_setting = match fs::symlink_metadata(&config) {
+        Ok(_) => config_declares_bare(&config)?,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(issue(
+                config,
+                GitStructureIssueKind::FilesystemUnavailable {
+                    error_kind: source.kind(),
+                },
+            ));
+        }
+    };
+    let registrations = common_directory.join("worktrees");
+    match fs::symlink_metadata(&registrations) {
+        Ok(_) => {
+            let metadata = structural_metadata(&registrations)?;
+            if !metadata.is_dir() {
+                return Err(issue(
+                    registrations,
+                    GitStructureIssueKind::UnsupportedPathType,
+                ));
+            }
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(issue(
+                registrations,
+                GitStructureIssueKind::FilesystemUnavailable {
+                    error_kind: source.kind(),
+                },
+            ));
+        }
+    }
+    Ok(InspectedCommonDirectory {
+        path: common_directory,
+        bare_setting,
+    })
 }
 
 /// Return whether a path has enough structural markers to be treated as a Git manager candidate.
 fn has_git_control_markers(path: &Path) -> FsResult<bool> {
     let head = path.join("HEAD");
-    let config = path.join("config");
-    Ok(path_is_present(&head)? && path_is_present(&config)?)
+    let objects = path.join("objects");
+    let refs = path.join("refs");
+    Ok(path_is_present(&head)? && path_is_present(&objects)? && path_is_present(&refs)?)
+}
+
+/// Read the local `core.bare` value conservatively without following includes or starting Git.
+fn config_declares_bare(path: &Path) -> Result<Option<bool>, GitStructureIssue> {
+    let text = read_bounded_text(path, GIT_DIRECTORY_POINTER_MAX_BYTES)?;
+    let mut in_core = false;
+    let mut bare_setting = None;
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(section) = line
+            .strip_prefix('[')
+            .and_then(|value| value.split(']').next())
+        {
+            in_core = section.trim().eq_ignore_ascii_case("core");
+            continue;
+        }
+        if !in_core {
+            continue;
+        }
+        let (key, value) = line
+            .split_once('=')
+            .map_or((line, "true"), |(key, value)| (key, value));
+        if !key.trim().eq_ignore_ascii_case("bare") {
+            continue;
+        }
+        let value = value
+            .split(['#', ';'])
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_matches('"');
+        bare_setting = Some(match value.to_ascii_lowercase().as_str() {
+            "false" | "no" | "off" | "0" => false,
+            "true" | "yes" | "on" | "1" => true,
+            _ => true,
+        });
+    }
+    Ok(bare_setting)
 }
 
 /// Build the primary plus registered linked-worktree inventory.
@@ -604,10 +704,14 @@ fn validate_linked_administrative_directory(
     administrative_directory: &Path,
     common_directory: &Path,
 ) -> Result<(), GitStructureIssue> {
-    let registrations = canonicalize_issue(
-        &common_directory.join("worktrees"),
-        &common_directory.join("worktrees"),
-    )?;
+    let registrations = common_directory.join("worktrees");
+    let metadata = structural_metadata(&registrations)?;
+    if !metadata.is_dir() {
+        return Err(issue(
+            registrations,
+            GitStructureIssueKind::UnsupportedPathType,
+        ));
+    }
     if administrative_directory
         .parent()
         .is_some_and(|parent| paths_equal(parent, &registrations))
@@ -660,8 +764,13 @@ fn validate_reciprocal_control(
 }
 
 /// Infer an ordinary primary worktree from a common `.git` directory.
-fn primary_worktree_root(common_directory: &Path) -> FsResult<Option<PathBuf>> {
-    if common_directory.file_name().and_then(|name| name.to_str()) != Some(".git") {
+fn primary_worktree_root(
+    common_directory: &Path,
+    common_directory_bare_setting: Option<bool>,
+) -> FsResult<Option<PathBuf>> {
+    if common_directory_bare_setting != Some(false)
+        || common_directory.file_name().and_then(|name| name.to_str()) != Some(".git")
+    {
         return Ok(None);
     }
     let Some(parent) = common_directory.parent() else {
@@ -863,7 +972,7 @@ fn resolve_existing_file(
 /// Read leaf metadata without accepting a symbolic link as control identity.
 fn structural_metadata(path: &Path) -> Result<fs::Metadata, GitStructureIssue> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(issue(
+        Ok(metadata) if metadata_is_indirect(&metadata) => Err(issue(
             path.to_path_buf(),
             GitStructureIssueKind::SymbolicLink,
         )),
@@ -878,6 +987,24 @@ fn structural_metadata(path: &Path) -> Result<fs::Metadata, GitStructureIssue> {
                 error_kind: source.kind(),
             },
         )),
+    }
+}
+
+/// Return whether metadata represents a symbolic link or Windows reparse point.
+fn metadata_is_indirect(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
     }
 }
 
@@ -961,6 +1088,37 @@ mod tests {
         fs::write(primary.join("src").join("main.rs"), "fn main() {}\n")?;
         run_git(&primary, ["add", "."])?;
         run_git(&primary, ["commit", "-m", "fixture"])?;
+
+        let config_path = primary.join(".git").join("config");
+        let config = fs::read(&config_path)?;
+        fs::remove_file(&config_path)?;
+        let configless = require_git(discover_repository_structure(&primary.join("src"))?)?;
+        require_worktree_selection(
+            &configless,
+            &primary.canonicalize()?,
+            GitWorktreeRole::Primary,
+        )?;
+        let configless_manager =
+            require_git(discover_repository_structure(&primary.join(".git"))?)?;
+        require(
+            configless_manager.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::None,
+                },
+            "configless manager inferred a primary checkout without positive non-bare evidence",
+        )?;
+        fs::write(&config_path, config)?;
+
+        let lookalike = primary.join("src").join("application metadata");
+        fs::create_dir(&lookalike)?;
+        fs::write(lookalike.join("HEAD"), "ordinary application data\n")?;
+        fs::write(lookalike.join("config"), "ordinary application data\n")?;
+        let lookalike_structure = require_git(discover_repository_structure(&lookalike)?)?;
+        require_worktree_selection(
+            &lookalike_structure,
+            &primary.canonicalize()?,
+            GitWorktreeRole::Primary,
+        )?;
 
         let nested_linked = primary.join("arbitrary container").join("linked checkout");
         add_worktree(&primary, "nested-linked", &nested_linked)?;
@@ -1082,6 +1240,32 @@ mod tests {
             "bare manager did not expose its one unambiguous registered worktree",
         )?;
 
+        let dot_git_container = temp.path().join("bare dot-git container");
+        fs::create_dir(&dot_git_container)?;
+        let bare_dot_git = dot_git_container.join(".git");
+        clone_bare(&primary, &bare_dot_git)?;
+        for selected in [&bare_dot_git, &dot_git_container] {
+            let structure = require_git(discover_repository_structure(selected)?)?;
+            require(
+                structure.selection
+                    == GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::None,
+                    },
+                "bare repository named .git invented its unrelated parent as source",
+            )?;
+        }
+        let bare_config = fs::read(bare_dot_git.join("config"))?;
+        fs::remove_file(bare_dot_git.join("config"))?;
+        let configless_bare_manager = require_git(discover_repository_structure(&bare_dot_git)?)?;
+        require(
+            configless_bare_manager.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::None,
+                },
+            "configless .git manager inferred a primary checkout without non-bare evidence",
+        )?;
+        fs::write(bare_dot_git.join("config"), bare_config)?;
+
         let non_git = temp.path().join("plain directory");
         let non_git_nested = non_git.join("nested").join("cwd");
         fs::create_dir_all(non_git.join(".projectatlas"))?;
@@ -1141,13 +1325,46 @@ mod tests {
 
         let symlinked = temp.path().join("symlinked control");
         fs::create_dir(&symlinked)?;
-        if create_control_symlink(&handwritten.join(".git"), &symlinked.join(".git"))? {
-            require_invalid_kind(
-                discover_repository_structure(&symlinked)?,
-                |kind| matches!(kind, GitStructureIssueKind::SymbolicLink),
-                "symbolic-link Git control metadata was followed as identity evidence",
-            )?;
-        }
+        create_control_symlink(&handwritten.join(".git"), &symlinked.join(".git"))?;
+        require_invalid_kind(
+            discover_repository_structure(&symlinked)?,
+            |kind| matches!(kind, GitStructureIssueKind::SymbolicLink),
+            "symbolic-link Git control metadata was followed as identity evidence",
+        )?;
+
+        let common_directory = handwritten.join(".git");
+        let external_registrations = temp.path().join("external registrations");
+        fs::create_dir(&external_registrations)?;
+        let registrations = common_directory.join("worktrees");
+        create_control_symlink(&external_registrations, &registrations)?;
+        require_invalid_kind(
+            discover_repository_structure(&handwritten)?,
+            |kind| matches!(kind, GitStructureIssueKind::SymbolicLink),
+            "indirect worktree registration container was followed outside the common root",
+        )?;
+        remove_control_symlink(&registrations)?;
+
+        fs::create_dir(&registrations)?;
+        let external_registration = temp.path().join("external registration");
+        fs::create_dir(&external_registration)?;
+        let indirect_registration = registrations.join("indirect registration");
+        create_control_symlink(&external_registration, &indirect_registration)?;
+        let structure = require_git(discover_repository_structure(&handwritten)?)?;
+        require(
+            structure.worktrees.iter().any(|entry| {
+                matches!(
+                    &entry.state,
+                    GitWorktreeState::Invalid {
+                        issue: GitStructureIssue {
+                            kind: GitStructureIssueKind::SymbolicLink,
+                            ..
+                        }
+                    }
+                )
+            }),
+            "indirect registration entry was not retained as typed invalid evidence",
+        )?;
+        remove_control_symlink(&indirect_registration)?;
 
         let cancellation = IndexCancellation::new();
         cancellation.cancel();
@@ -1280,26 +1497,46 @@ mod tests {
         Ok(())
     }
 
-    /// Create a directory control symlink, skipping only when Windows denies symlink creation.
+    /// Create a directory control symlink.
     #[cfg(unix)]
-    fn create_control_symlink(target: &Path, link: &Path) -> Result<bool, Box<dyn Error>> {
+    fn create_control_symlink(target: &Path, link: &Path) -> Result<(), Box<dyn Error>> {
         std::os::unix::fs::symlink(target, link)?;
-        Ok(true)
+        Ok(())
     }
 
-    /// Create a directory control symlink, skipping only when Windows denies symlink creation.
+    /// Create a directory control symlink or junction.
     #[cfg(windows)]
-    fn create_control_symlink(target: &Path, link: &Path) -> Result<bool, Box<dyn Error>> {
+    fn create_control_symlink(target: &Path, link: &Path) -> Result<(), Box<dyn Error>> {
         match std::os::windows::fs::symlink_dir(target, link) {
-            Ok(()) => Ok(true),
+            Ok(()) => Ok(()),
             Err(error)
                 if error.kind() == io::ErrorKind::PermissionDenied
                     || error.raw_os_error() == Some(1314) =>
             {
-                Ok(false)
+                run_command(
+                    Command::new("cmd.exe")
+                        .args(["/D", "/C", "mklink", "/J"])
+                        .arg(link)
+                        .arg(target),
+                )?;
+                Ok(())
             }
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Remove only the test-owned directory indirection leaf.
+    #[cfg(unix)]
+    fn remove_control_symlink(link: &Path) -> Result<(), Box<dyn Error>> {
+        fs::remove_file(link)?;
+        Ok(())
+    }
+
+    /// Remove only the test-owned directory indirection leaf.
+    #[cfg(windows)]
+    fn remove_control_symlink(link: &Path) -> Result<(), Box<dyn Error>> {
+        fs::remove_dir(link)?;
+        Ok(())
     }
 
     /// Extract validated Git state from a discovery result.

@@ -61,14 +61,19 @@ sequenceDiagram
     A->>M: atlas_search(project_path=linked, pattern=feature)
     M->>R: capture linked root, DB, and generation
     R->>W: bounded read
-    W-->>A: linked-only result
+    W-->>R: linked-only result
+    R-->>M: serialize bounded result
+    M-->>A: linked-only result
     A->>M: atlas_search(project_path=primary, pattern=main)
     M->>R: capture primary root, DB, and generation
     R->>P: bounded read
-    P-->>A: primary-only result
+    P-->>R: primary-only result
+    R-->>M: serialize bounded result
+    M-->>A: primary-only result
     A->>M: atlas_root(control_root=common-dir)
     M->>R: structural status request
-    R-->>A: bounded roles, states, selection, blockers
+    R-->>M: bounded roles, states, selection, blockers
+    M-->>A: structural status result
 ```
 
 An explicit per-call `project_path` is authoritative for shared or concurrent hosts. Changing a session default remains useful for a single client, but it is not concurrency authority. A manager with several active worktrees cannot silently inherit a prior selection.

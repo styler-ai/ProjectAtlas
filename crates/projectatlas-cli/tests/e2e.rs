@@ -3490,9 +3490,14 @@ fn init_bootstrap_creates_db_scan_report_and_host_configs() -> Result<(), Box<dy
 #[test]
 fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp()
 -> Result<(), Box<dyn Error>> {
+    const CASE_RENAMED_RS_FILE_NAME: &str = "casetarget.rs";
+    const CASE_SOURCE_RS_FILE_NAME: &str = "CaseTarget.rs";
     const DEEP_DIR_NAME: &str = "deep";
     const ELIGIBLE_DIR_NAME: &str = "eligible";
     const IGNORED_TREE_DIR_NAME: &str = "ignored-tree";
+    const INDIRECT_SOURCE_DIR_NAME: &str = "indirect-source";
+    const LINKED_WORKTREE_DIR_NAME: &str = "feature 工作树";
+    const UNICODE_RS_FILE_NAME: &str = "unicode_ß.rs";
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(MAIN_CHECKOUT_DIR_NAME);
     fs::create_dir(&repo)?;
@@ -3568,7 +3573,9 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
     }
     git_success(&repo, &["commit", "-m", "add submodule fixture"])?;
 
-    let linked = repo.join(LINKED_CHECKOUTS_DIR_NAME).join("feature");
+    let linked = repo
+        .join(LINKED_CHECKOUTS_DIR_NAME)
+        .join(LINKED_WORKTREE_DIR_NAME);
     let worktree_output = git_command_for_root(&repo)
         .args(["worktree", "add", "-b", "feature"])
         .arg(&linked)
@@ -3594,7 +3601,7 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
     let linked_ignore = git_command_for_root(&repo)
         .args(["check-ignore", "--quiet", "--no-index"])
         .arg(format!(
-            "{LINKED_CHECKOUTS_DIR_NAME}/feature/{SRC_DIR_NAME}/{FEATURE_ONLY_RS_FILE_NAME}"
+            "{LINKED_CHECKOUTS_DIR_NAME}/{LINKED_WORKTREE_DIR_NAME}/{SRC_DIR_NAME}/{FEATURE_ONLY_RS_FILE_NAME}"
         ))
         .status()?;
     if linked_ignore.success() {
@@ -3718,15 +3725,17 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
     let linked_db = linked_atlas_dir.join("projectatlas.db");
     let connection = Connection::open(&linked_db)?;
     connection.execute_batch(include_str!(
-        "../../projectatlas-db/tests/fixtures/released-schema-8-evolved.sql"
+        "../../projectatlas-db/tests/fixtures/released-schema-16.sql"
     ))?;
     connection.execute(
-        "INSERT INTO metadata(key, value) VALUES ('schema_version', '8')",
-        [],
-    )?;
-    connection.execute(
-        "INSERT INTO metadata(key, value) VALUES ('project_root', ?1)",
+        "UPDATE metadata SET value = ?1 WHERE key = 'project_root'",
         [&linked_root_text],
+    )?;
+    connection.execute_batch(
+        "INSERT INTO nodes(id, path, kind, extension, language, exists_now)
+             VALUES(1, 'src/lib.rs', 'file', 'rs', 'rust', 1);
+         INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+             VALUES(1, 'Preserved v0.4.4 worktree purpose.', 'agent', 'approved', 'agent');",
     )?;
     drop(connection);
 
@@ -3747,16 +3756,20 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
         .into());
     }
     let linked_after_first_write = AtlasStore::open_for_project(&linked_db, &linked)?;
-    if linked_after_first_write
-        .load_node_by_path("src/feature_only.rs")?
-        .is_none()
+    let migrated_library = linked_after_first_write
+        .load_node_by_path("src/lib.rs")?
+        .ok_or_else(|| io::Error::other("linked migration omitted its authored source"))?;
+    if migrated_library.purpose.purpose.as_deref() != Some("Preserved v0.4.4 worktree purpose.")
+        || linked_after_first_write
+            .load_node_by_path("src/feature_only.rs")?
+            .is_none()
         || linked_after_first_write
             .load_nodes()?
             .iter()
             .any(|node| node.node.path.contains("main-checkout"))
     {
         return Err(io::Error::other(
-            "linked first-write scan crossed its selected source boundary",
+            "linked v0.4.4 migration lost authored state or crossed its source boundary",
         )
         .into());
     }
@@ -3846,6 +3859,45 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
         return Err(io::Error::other("worktree-local purposes crossed databases").into());
     }
 
+    fs::write(
+        linked.join(SRC_DIR_NAME).join(CASE_SOURCE_RS_FILE_NAME),
+        "pub fn case_target_before_rename() {}\n",
+    )?;
+    fs::write(
+        linked.join(SRC_DIR_NAME).join(UNICODE_RS_FILE_NAME),
+        "pub fn unicode_path_marker() {}\n",
+    )?;
+    let external_source = temp.path().join("outside indirect source");
+    fs::create_dir(&external_source)?;
+    fs::write(
+        external_source.join("outside.rs"),
+        "pub fn outside_indirect_marker() {}\n",
+    )?;
+    let indirect_source = linked.join(INDIRECT_SOURCE_DIR_NAME);
+    create_test_directory_indirection(&external_source, &indirect_source)?;
+    run_watch_once(&linked, &linked_db)?;
+    let platform_paths = AtlasStore::open_for_project(&linked_db, &linked)?;
+    if platform_paths
+        .load_node_by_path(&format!("{SRC_DIR_NAME}/{CASE_SOURCE_RS_FILE_NAME}"))?
+        .is_none()
+        || platform_paths
+            .load_node_by_path(&format!("{SRC_DIR_NAME}/{UNICODE_RS_FILE_NAME}"))?
+            .is_none()
+        || platform_paths
+            .load_nodes()?
+            .iter()
+            .any(|node| node.node.path.starts_with(INDIRECT_SOURCE_DIR_NAME))
+    {
+        return Err(io::Error::other(
+            "linked refresh lost Unicode/current paths or followed a symlink/junction",
+        )
+        .into());
+    }
+    drop(platform_paths);
+    remove_test_directory_indirection(&indirect_source)?;
+    git_success(&linked, &["add", "-A"])?;
+    git_success(&linked, &["commit", "-m", "platform path fixture"])?;
+
     let mcp_config = mcp_config_for_harness(&linked, &linked_db, "mcp-json")?;
     let mcp_cwd = json_string_at(&mcp_config, &["mcpServers", "projectatlas", "cwd"])?;
     if Path::new(mcp_cwd).canonicalize()? != linked_root {
@@ -3862,6 +3914,12 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
     )?;
 
     git_success(&linked, &["switch", "-c", "alternate"])?;
+    let case_source = linked.join(SRC_DIR_NAME).join(CASE_SOURCE_RS_FILE_NAME);
+    let case_step = linked.join(SRC_DIR_NAME).join("case-rename-step.rs");
+    let case_renamed = linked.join(SRC_DIR_NAME).join(CASE_RENAMED_RS_FILE_NAME);
+    fs::rename(&case_source, &case_step)?;
+    fs::rename(&case_step, &case_renamed)?;
+    fs::write(&case_renamed, "pub fn case_target_after_rename() {}\n")?;
     fs::remove_file(linked.join(SRC_DIR_NAME).join(FEATURE_ONLY_RS_FILE_NAME))?;
     fs::write(
         linked.join(SRC_DIR_NAME).join(ALTERNATE_ONLY_RS_FILE_NAME),
@@ -3879,12 +3937,30 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
         || switched
             .load_node_by_path("src/alternate_only.rs")?
             .is_none()
+        || switched
+            .load_node_by_path(&format!("{SRC_DIR_NAME}/{CASE_SOURCE_RS_FILE_NAME}"))?
+            .is_some()
+        || switched
+            .load_node_by_path(&format!("{SRC_DIR_NAME}/{CASE_RENAMED_RS_FILE_NAME}"))?
+            .is_none()
+        || switched
+            .load_symbols(
+                Some(&format!("{SRC_DIR_NAME}/{CASE_RENAMED_RS_FILE_NAME}")),
+                None,
+                20,
+            )?
+            .iter()
+            .all(|symbol| symbol.name != "case_target_after_rename")
     {
-        return Err(io::Error::other("branch-switch refresh published mixed branch state").into());
+        return Err(io::Error::other(
+            "branch-switch refresh published mixed branch or case-rename state",
+        )
+        .into());
     }
     drop(switched);
 
     fs::remove_file(linked.join(SRC_DIR_NAME).join(ALTERNATE_ONLY_RS_FILE_NAME))?;
+    fs::remove_file(linked.join(SRC_DIR_NAME).join(UNICODE_RS_FILE_NAME))?;
     fs::write(
         linked.join(SRC_DIR_NAME).join("dirty_only.rs"),
         "pub fn dirty_only_marker() {}\n",
@@ -3906,6 +3982,9 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
         || dirty.repository_graph_generation()?.is_none()
         || dirty_library.purpose.purpose.as_deref() != Some("Feature worktree Rust library.")
         || dirty.load_node_by_path("src/alternate_only.rs")?.is_some()
+        || dirty
+            .load_node_by_path(&format!("{SRC_DIR_NAME}/{UNICODE_RS_FILE_NAME}"))?
+            .is_some()
         || dirty.load_node_by_path("src/dirty_only.rs")?.is_none()
         || dirty
             .load_symbols(Some("src/lib.rs"), None, 20)?
@@ -4099,6 +4178,21 @@ fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<()
         ))
         .into());
     }
+    let bare_dot_git_parent = temp.path().join("bare-dot-git-parent");
+    fs::create_dir(&bare_dot_git_parent)?;
+    let bare_dot_git = bare_dot_git_parent.join(GIT_DIR_NAME);
+    let output = StdCommand::new("git")
+        .args(["init", "--bare"])
+        .arg(&bare_dot_git)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "git init --bare .git failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
     git_success(&bare, &["config", "--unset", "core.bare"])?;
 
     let manager = temp.path().join("repository-manager");
@@ -4131,6 +4225,27 @@ fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<()
             "common-manager selection did not initialize the selected worktree atlas",
         )
         .into());
+    }
+    let manager_db = manager.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let manager_mcp_config = mcp_config_for_harness(&manager, &manager_db, "mcp-json")?;
+    let (manager_mcp_command, manager_mcp_args) = mcp_command_and_args(&manager_mcp_config)?;
+    let messages = vec![
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-bare-dot-git-e2e","version":"0.1.0"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_root","arguments":{"control_root":projectatlas_core::normalize_native_path_display(bare_dot_git.canonicalize()?)}}}).to_string(),
+    ];
+    let stdout = run_mcp_stdio(&manager_mcp_command, &manager, &manager_mcp_args, &messages)?;
+    let bare_dot_git_status = mcp_tool_text(&stdout, 2)?;
+    if !bare_dot_git_status.contains("worktree_required: true")
+        || !bare_dot_git_status.contains("source_selection: worktree_unavailable")
+    {
+        return Err(io::Error::other(format!(
+            "MCP bare .git status invented a source worktree: {bare_dot_git_status}"
+        ))
+        .into());
+    }
+    if bare_dot_git_parent.join(ATLAS_DIR_NAME).exists() {
+        return Err(io::Error::other("MCP bare .git status created parent atlas state").into());
     }
     let common_atlas_dir = common_git_dir.join(ATLAS_DIR_NAME);
     fs::create_dir(&common_atlas_dir)?;
@@ -4191,7 +4306,12 @@ fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<()
         .into());
     }
 
-    for selected in [&bare, &separate_control] {
+    for selected in [
+        &bare,
+        &separate_control,
+        &bare_dot_git,
+        &bare_dot_git_parent,
+    ] {
         let init = Command::cargo_bin("projectatlas")?
             .current_dir(selected)
             .args(["--format", "json", "init"])
@@ -25239,6 +25359,52 @@ fn git_success(root: &Path, arguments: &[&str]) -> Result<(), Box<dyn Error>> {
         String::from_utf8_lossy(&output.stderr)
     ))
     .into())
+}
+
+#[cfg(unix)]
+fn create_test_directory_indirection(target: &Path, link: &Path) -> Result<(), Box<dyn Error>> {
+    std::os::unix::fs::symlink(target, link)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn create_test_directory_indirection(target: &Path, link: &Path) -> Result<(), Box<dyn Error>> {
+    match std::os::windows::fs::symlink_dir(target, link) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if error.kind() == io::ErrorKind::PermissionDenied
+                || error.raw_os_error() == Some(1314) =>
+        {
+            let output = StdCommand::new("cmd.exe")
+                .args(["/D", "/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(io::Error::other(format!(
+                    "test junction creation failed: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into())
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(unix)]
+fn remove_test_directory_indirection(link: &Path) -> Result<(), Box<dyn Error>> {
+    fs::remove_file(link)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn remove_test_directory_indirection(link: &Path) -> Result<(), Box<dyn Error>> {
+    fs::remove_dir(link)?;
+    Ok(())
 }
 
 #[test]
