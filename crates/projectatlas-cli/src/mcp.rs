@@ -4180,7 +4180,12 @@ impl ProjectAtlasMcpServer {
             .as_ref()
             .filter(|selection| selection.registration_id.is_some())
         else {
-            return run_init_bootstrap(&state.root, &state.db_path, Some(config_path), options);
+            let report =
+                run_init_bootstrap(&state.root, &state.db_path, Some(config_path), options)?;
+            if report.ok {
+                self.bind_initialized_registration_for_root(state)?;
+            }
+            return Ok(report);
         };
         if state.db_path.is_file() {
             let mut report =
@@ -4354,6 +4359,43 @@ impl ProjectAtlasMcpServer {
         let control = Self::open_existing_mut_store(&self.control_state)?;
         control.bind_worktree_project(&alias, &state.root, project)?;
         Ok(())
+    }
+
+    /// Bind a legacy exact-path init when its root already has an active alias.
+    fn bind_initialized_registration_for_root(
+        &self,
+        state: &McpProjectState,
+    ) -> Result<(), CliError> {
+        let repository = self.control_git_repository()?;
+        let Some(entry) = repository
+            .worktrees
+            .iter()
+            .find(|entry| Self::active_worktree_root(entry).is_some_and(|root| root == state.root))
+        else {
+            return Ok(());
+        };
+        let administrative_directory =
+            normalize_native_path_display(&entry.administrative_directory);
+        let administrative_identity = git_administrative_identity(&entry.administrative_directory)?;
+        let control = Self::open_existing_mut_store(&self.control_state)?;
+        let Some(registration) =
+            control
+                .worktree_registrations(false)?
+                .into_iter()
+                .find(|registration| {
+                    registration.git_administrative_directory == administrative_directory
+                        && registration.git_administrative_identity == administrative_identity
+                })
+        else {
+            return Ok(());
+        };
+        self.bind_initialized_worktree(
+            &McpWorktreeSelection {
+                alias: registration.alias.to_string(),
+                registration_id: Some(registration.registration_id),
+            },
+            state,
+        )
     }
 
     /// Preserve cancellation/resource failures and fallback only for unusable source baselines.
@@ -10868,7 +10910,7 @@ mod tests {
         )?;
         drop(corrupt);
         let identity_only = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
-            worktree: selector_b,
+            worktree: selector_b.clone(),
             alias: Some("snapshot-blocked".to_string()),
         }));
         require(
@@ -10920,6 +10962,71 @@ mod tests {
             ),
         )?;
         fs::remove_dir_all(&preserved_target_b_state)?;
+
+        let legacy_added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
+            worktree: selector_b,
+            alias: Some("legacy-init".to_string()),
+        }));
+        require(
+            legacy_added.contains("status: registered"),
+            &format!("legacy-init fixture registration failed: {legacy_added}"),
+        )?;
+        let legacy_initialized = server.atlas_init(Parameters(AtlasInitParams {
+            project_path: Some(normalize_native_path_display(&canonical_b)),
+            worktree: None,
+            no_scan: Some(true),
+            force_rescan: Some(false),
+            text_index_max_bytes: None,
+        }));
+        require(
+            legacy_initialized.contains("ok: true"),
+            &format!(
+                "legacy exact-path init did not initialize the registered root: {legacy_initialized}"
+            ),
+        )?;
+        let legacy_target = open_atlas_store_read_only_for_project(&target_b_db, &worktree_b)?;
+        let legacy_project = legacy_target
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("legacy-init target identity is missing"))?;
+        drop(legacy_target);
+        let control_after_legacy_init =
+            open_atlas_store_read_only_for_project(&control_db, &primary)?;
+        require(
+            control_after_legacy_init
+                .worktree_registration(&WorktreeAlias::parse("legacy-init")?)?
+                .project_instance_id
+                == Some(legacy_project),
+            "legacy exact-path init did not bind the existing alias identity",
+        )?;
+        drop(control_after_legacy_init);
+        let preserved_legacy_state = worktree_b.join(".projectatlas-legacy-init");
+        fs::rename(&target_b_state, &preserved_legacy_state)?;
+        fs::create_dir(&target_b_state)?;
+        let legacy_replacement = AtlasStore::open_for_project(&target_b_db, &worktree_b)?;
+        require(
+            legacy_replacement.project_instance_id()? != Some(legacy_project),
+            "legacy-init replacement reused the registered project identity",
+        )?;
+        drop(legacy_replacement);
+        let legacy_replacement_error =
+            server.state_for_target(None, Some("legacy-init".to_string()));
+        require(
+            legacy_replacement_error.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains(MCP_ERROR_WORKTREE_IDENTITY_CONFLICT)
+            }),
+            "legacy exact-path init left its alias unbound to a replacement atlas",
+        )?;
+        fs::remove_dir_all(&target_b_state)?;
+        let retired_legacy = server.atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
+            worktree: "legacy-init".to_string(),
+        }));
+        require(
+            retired_legacy.contains("status: retired"),
+            &format!("legacy-init registration could not be retired: {retired_legacy}"),
+        )?;
+        fs::remove_dir_all(&preserved_legacy_state)?;
 
         let added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
             worktree: selector_a,
