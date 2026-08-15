@@ -5619,6 +5619,22 @@ impl ProjectAtlasMcpServer {
         Ok(project_instance_id)
     }
 
+    /// Export one local usage snapshot bound to an independently read project identity.
+    fn local_worktree_usage_snapshot(
+        store: &AtlasStore,
+        db_path: &Path,
+        project_instance_id: ProjectInstanceId,
+    ) -> Result<WorktreeUsageSnapshot, CliError> {
+        let snapshot = store.export_worktree_usage_snapshot()?;
+        if snapshot.project_instance_id() != project_instance_id {
+            return Err(CliError::InvalidInput(format!(
+                "worktree atlas '{}' telemetry identity does not match its project identity",
+                normalize_native_path_display(db_path)
+            )));
+        }
+        Ok(snapshot)
+    }
+
     /// Read one exact local worktree atlas and its bounded telemetry snapshot without migration.
     fn local_worktree_atlas(root: &Path) -> Result<Option<LocalWorktreeAtlas>, CliError> {
         let db_path = Self::projectatlas_db_path(root);
@@ -5626,13 +5642,7 @@ impl ProjectAtlasMcpServer {
             return Ok(None);
         };
         let project_instance_id = Self::local_worktree_project_instance_id(&store, &db_path)?;
-        let snapshot = store.export_worktree_usage_snapshot()?;
-        if snapshot.project_instance_id() != project_instance_id {
-            return Err(CliError::InvalidInput(format!(
-                "worktree atlas '{}' telemetry identity does not match its project identity",
-                normalize_native_path_display(&db_path)
-            )));
-        }
+        let snapshot = Self::local_worktree_usage_snapshot(&store, &db_path, project_instance_id)?;
         Ok(Some(LocalWorktreeAtlas {
             project_instance_id,
             snapshot,
@@ -7210,7 +7220,21 @@ impl ProjectAtlasMcpServer {
                 Some(alias) => WorktreeAlias::parse(alias.trim())?,
                 None => Self::default_worktree_alias(root)?,
             };
-            let (local, mut blocker) = match Self::local_worktree_atlas(root) {
+            let db_path = Self::projectatlas_db_path(root);
+            let mut project_instance_id = None;
+            let local = (|| {
+                let Some(store) = Self::open_local_worktree_atlas(root)? else {
+                    return Ok(None);
+                };
+                let identity = Self::local_worktree_project_instance_id(&store, &db_path)?;
+                project_instance_id = Some(identity);
+                let snapshot = Self::local_worktree_usage_snapshot(&store, &db_path, identity)?;
+                Ok::<_, CliError>(Some(LocalWorktreeAtlas {
+                    project_instance_id: identity,
+                    snapshot,
+                }))
+            })();
+            let (local, mut blocker) = match local {
                 Ok(local) => (local, None),
                 Err(error) => (
                     None,
@@ -7226,7 +7250,7 @@ impl ProjectAtlasMcpServer {
                 &entry.administrative_directory,
                 &git_administrative_identity(&entry.administrative_directory)?,
                 root,
-                local.as_ref().map(|local| local.project_instance_id),
+                project_instance_id,
                 Self::current_epoch_seconds()?,
             )?;
             let telemetry_sync = local.as_ref().and_then(|local| {
@@ -10775,6 +10799,15 @@ mod tests {
             })
             .ok_or_else(|| io::Error::other("worktree A was not structurally discovered"))?;
         let selector_a = ProjectAtlasMcpServer::worktree_candidate_selector(entry_a);
+        let canonical_b = worktree_b.canonicalize()?;
+        let entry_b = repository
+            .worktrees
+            .iter()
+            .find(|entry| {
+                ProjectAtlasMcpServer::active_worktree_root(entry) == Some(canonical_b.as_path())
+            })
+            .ok_or_else(|| io::Error::other("worktree B was not structurally discovered"))?;
+        let selector_b = ProjectAtlasMcpServer::worktree_candidate_selector(entry_b);
 
         let listed = server.atlas_worktree_list(Parameters(AtlasWorktreeListParams {
             include_retired: Some(false),
@@ -10807,6 +10840,86 @@ mod tests {
             fs::read(&control_db)? == control_before_blank_alias,
             "blank explicit alias changed the control database",
         )?;
+
+        let target_b_config = worktree_b.join(PROJECTATLAS_DIR_NAME).join("config.toml");
+        init_project_with_config(&worktree_b, Some(&target_b_config))?;
+        let target_b_db = worktree_b
+            .join(PROJECTATLAS_DIR_NAME)
+            .join(PROJECTATLAS_DB_FILE_NAME);
+        let target_b_store = AtlasStore::open_for_project(&target_b_db, &worktree_b)?;
+        target_b_store.record_usage(&usage_from_text(
+            "snapshot-blocked",
+            "atlas_overview",
+            None,
+            None,
+            "pub fn main_only() {}",
+            "repository overview",
+        ))?;
+        let target_b_project = target_b_store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("worktree B project identity is missing"))?;
+        drop(target_b_store);
+        let corrupt = rusqlite::Connection::open(&target_b_db)?;
+        corrupt.execute_batch("PRAGMA ignore_check_constraints = ON;")?;
+        let corrupted = corrupt.execute("UPDATE usage_global_aggregates SET calls = -1", [])?;
+        require(
+            corrupted > 0,
+            "worktree B fixture did not invalidate an aggregate row",
+        )?;
+        drop(corrupt);
+        let identity_only = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
+            worktree: selector_b,
+            alias: Some("snapshot-blocked".to_string()),
+        }));
+        require(
+            identity_only.contains("status: registered")
+                && identity_only.contains("registration committed without local telemetry import"),
+            &format!(
+                "worktree registration did not preserve the identity-only fallback: {identity_only}"
+            ),
+        )?;
+        let control_after_identity_only =
+            open_atlas_store_read_only_for_project(&control_db, &primary)?;
+        require(
+            control_after_identity_only
+                .worktree_registration(&WorktreeAlias::parse("snapshot-blocked")?)?
+                .project_instance_id
+                == Some(target_b_project),
+            "telemetry export failure discarded the readable worktree project identity",
+        )?;
+        drop(control_after_identity_only);
+        let target_b_state = worktree_b.join(PROJECTATLAS_DIR_NAME);
+        let preserved_target_b_state = worktree_b.join(".projectatlas-snapshot-blocked");
+        fs::rename(&target_b_state, &preserved_target_b_state)?;
+        fs::create_dir(&target_b_state)?;
+        let replacement_b = AtlasStore::open_for_project(&target_b_db, &worktree_b)?;
+        require(
+            replacement_b.project_instance_id()? != Some(target_b_project),
+            "worktree B replacement reused the registered project identity",
+        )?;
+        drop(replacement_b);
+        let replacement_b_error =
+            server.state_for_target(None, Some("snapshot-blocked".to_string()));
+        require(
+            replacement_b_error.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains(MCP_ERROR_WORKTREE_IDENTITY_CONFLICT)
+            }),
+            "identity-only registration routed to a replacement atlas",
+        )?;
+        fs::remove_dir_all(&target_b_state)?;
+        let retired_identity_only =
+            server.atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
+                worktree: "snapshot-blocked".to_string(),
+            }));
+        require(
+            retired_identity_only.contains("status: retired"),
+            &format!(
+                "identity-only registration could not be retired without a local atlas: {retired_identity_only}"
+            ),
+        )?;
+        fs::remove_dir_all(&preserved_target_b_state)?;
 
         let added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
             worktree: selector_a,
