@@ -1700,8 +1700,40 @@ mod tests {
                 "bare repository named .git invented its unrelated parent as source",
             )?;
         }
-        let bare_config = fs::read(bare_dot_git.join("config"))?;
-        fs::remove_file(bare_dot_git.join("config"))?;
+        let bare_config_path = bare_dot_git.join("config");
+        let bare_config = fs::read(&bare_config_path)?;
+        run_command(
+            Command::new("git")
+                .arg("--git-dir")
+                .arg(&bare_dot_git)
+                .args(["config", "extensions.worktreeConfig", ""]),
+        )?;
+        fs::write(
+            bare_dot_git.join("config.worktree"),
+            "[core]\n bare = false\n",
+        )?;
+        let effective_worktree_config = Command::new("git")
+            .arg("--git-dir")
+            .arg(&bare_dot_git)
+            .args(["config", "--bool", "extensions.worktreeConfig"])
+            .output()?;
+        require(
+            effective_worktree_config.status.success()
+                && String::from_utf8(effective_worktree_config.stdout)?.trim() == "false",
+            "Git fixture did not interpret an empty extensions.worktreeConfig value as false",
+        )?;
+        let empty_worktree_config = require_git(discover_repository_structure(&bare_dot_git)?)?;
+        require(
+            empty_worktree_config.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::None,
+                },
+            "empty extensions.worktreeConfig enabled config.worktree and invented a source",
+        )?;
+        fs::remove_file(bare_dot_git.join("config.worktree"))?;
+        fs::write(&bare_config_path, &bare_config)?;
+
+        fs::remove_file(&bare_config_path)?;
         let configless_bare_manager = require_git(discover_repository_structure(&bare_dot_git)?)?;
         require(
             configless_bare_manager.selection
@@ -1710,7 +1742,7 @@ mod tests {
                 },
             "configless .git manager inferred a primary checkout without non-bare evidence",
         )?;
-        fs::write(bare_dot_git.join("config"), bare_config)?;
+        fs::write(&bare_config_path, bare_config)?;
 
         let included_config = temp.path().join("included bare config");
         fs::write(&included_config, "[core]\n bare = true\n")?;
