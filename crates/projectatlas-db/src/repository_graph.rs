@@ -10691,6 +10691,8 @@ mod tests {
     fn high_fanout_document_refresh_has_bounded_sql_and_changed_rows() -> Result<(), Box<dyn Error>>
     {
         const FANOUT: usize = 256;
+        const EXPECTED_STATEMENTS: usize = 2_081;
+        const EXPECTED_CHANGED_ROWS: u64 = 1_031;
 
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("high-fanout-document");
@@ -10713,7 +10715,7 @@ mod tests {
             let mut entities = vec![document.clone()];
             let mut relations = Vec::with_capacity(FANOUT);
             let mut occurrences = Vec::with_capacity(FANOUT);
-            for index in 0..FANOUT {
+            for (index, line) in (2_u32..).take(FANOUT).enumerate() {
                 let target = GraphEntity::new(
                     project,
                     EntitySelector::File {
@@ -10731,7 +10733,6 @@ mod tests {
                     Completeness::Complete,
                     generation,
                 )?;
-                let line = u32::try_from(index + 2).expect("fixed fanout fits u32");
                 occurrences.push(RelationOccurrence::new(
                     &relation,
                     document_path.clone(),
@@ -10797,16 +10798,15 @@ mod tests {
         let statements =
             TRACED_STATEMENTS.with(|statements| std::mem::take(&mut *statements.borrow_mut()));
 
-        require(
-            statements.len() <= FANOUT * 9 + 96,
-            &format!(
-                "high-fanout refresh executed {} statements for {FANOUT} links",
-                statements.len()
-            ),
+        require_eq(
+            &statements.len(),
+            &EXPECTED_STATEMENTS,
+            "high-fanout refresh statement count",
         )?;
-        require(
-            changed_rows <= u64::try_from(FANOUT * 8 + 128)?,
-            &format!("high-fanout refresh changed {changed_rows} rows for {FANOUT} links"),
+        require_eq(
+            &changed_rows,
+            &EXPECTED_CHANGED_ROWS,
+            "high-fanout refresh changed rows",
         )?;
         let relation_count = store.connection.query_row(
             "SELECT COUNT(*) FROM graph_relations
@@ -10815,10 +10815,6 @@ mod tests {
             |row| row.get::<_, usize>(0),
         )?;
         require_eq(&relation_count, &FANOUT, "retained document relation count")?;
-        eprintln!(
-            "high-fanout document refresh: links={FANOUT} statements={} changed_rows={changed_rows}",
-            statements.len()
-        );
         Ok(())
     }
 

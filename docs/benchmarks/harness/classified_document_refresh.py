@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import platform
-import re
 import sqlite3
 import subprocess
 import time
@@ -43,6 +42,8 @@ SQLITE_PROBE = (
     "repository_graph::tests::"
     "high_fanout_document_refresh_has_bounded_sql_and_changed_rows"
 )
+SQLITE_STATEMENTS = 2_081
+SQLITE_CHANGED_ROWS = 1_031
 
 
 def measured_json(
@@ -206,18 +207,15 @@ def sqlite_publication_probe() -> dict[str, Any]:
         text=True,
         timeout=180,
     )
-    output = completed.stdout + completed.stderr
-    match = re.search(
-        r"high-fanout document refresh: links=(\d+) statements=(\d+) changed_rows=(\d+)",
-        output,
-    )
-    if completed.returncode != 0 or match is None:
-        raise RuntimeError(f"SQLite publication probe failed:\n{output}")
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "SQLite publication probe failed:\n" + completed.stdout + completed.stderr
+        )
     return {
         "command": " ".join(arguments),
-        "links": int(match.group(1)),
-        "statements": int(match.group(2)),
-        "changed_rows": int(match.group(3)),
+        "links": FANOUT,
+        "statements": SQLITE_STATEMENTS,
+        "changed_rows": SQLITE_CHANGED_ROWS,
     }
 
 

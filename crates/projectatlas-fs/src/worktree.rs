@@ -398,7 +398,7 @@ fn inspect_worktree(root: &Path) -> Result<SelectedWorktree, GitStructureIssue> 
             Ok(SelectedWorktree {
                 root,
                 git_control_path: canonicalize_issue(&git_control_path, &git_control_path)?,
-                administrative_directory: administrative_directory.clone(),
+                administrative_directory,
                 common_directory: common_directory.path,
                 common_directory_bare_setting: common_directory.bare_setting,
                 role: GitWorktreeRole::Primary,
@@ -504,11 +504,10 @@ fn config_declares_bare(path: &Path) -> Result<Option<bool>, GitStructureIssue> 
             .unwrap_or_default()
             .trim()
             .trim_matches('"');
-        bare_setting = Some(match value.to_ascii_lowercase().as_str() {
-            "false" | "no" | "off" | "0" => false,
-            "true" | "yes" | "on" | "1" => true,
-            _ => true,
-        });
+        bare_setting = Some(!matches!(
+            value.to_ascii_lowercase().as_str(),
+            "false" | "no" | "off" | "0"
+        ));
     }
     Ok(bare_setting)
 }
