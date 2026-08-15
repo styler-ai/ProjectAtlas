@@ -7375,11 +7375,12 @@ impl ProjectAtlasMcpServer {
                         let db_path = Self::projectatlas_db_path(root);
                         let project_instance_id =
                             Self::local_worktree_project_instance_id(&local, &db_path)?;
-                        control.bind_worktree_project(&alias, root, project_instance_id)?;
                         let (retired, synchronized) = local
                             .with_exclusive_worktree_usage_snapshot(|snapshot| {
                                 control.retire_worktree_with_usage_snapshot(
                                     &alias,
+                                    root,
+                                    project_instance_id,
                                     snapshot,
                                     retired_at_epoch,
                                 )

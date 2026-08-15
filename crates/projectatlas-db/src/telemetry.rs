@@ -7346,7 +7346,13 @@ mod tests {
                         reason: "local writer was not excluded during final synchronization",
                     });
                 }
-                control.retire_worktree_with_usage_snapshot(&alias, snapshot, 20)
+                control.retire_worktree_with_usage_snapshot(
+                    &alias,
+                    &worktree_root,
+                    snapshot.project_instance_id(),
+                    snapshot,
+                    20,
+                )
             })?;
         require_eq(
             &retired.state,

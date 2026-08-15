@@ -419,36 +419,13 @@ impl AtlasStore {
         project_instance_id: ProjectInstanceId,
     ) -> DbResult<WorktreeRegistration> {
         let root = normalized_absolute_path("root", root)?;
-        let project_bytes = project_instance_id.as_bytes();
         self.with_validated_write(|transaction| {
             let existing = load_active_by_alias(transaction, alias.as_str())?.ok_or_else(|| {
                 DbError::WorktreeRegistrationNotFound {
                     alias: alias.to_string(),
                 }
             })?;
-            if identities_conflict(existing.project_instance_id, Some(project_instance_id)) {
-                return Err(DbError::WorktreeRegistrationConflict {
-                    field: "project_instance_id",
-                    value: project_instance_id.to_string(),
-                });
-            }
-            if active_project_exists_for_other(
-                transaction,
-                existing.registration_id,
-                project_bytes.as_slice(),
-            )? {
-                return Err(DbError::WorktreeRegistrationConflict {
-                    field: "project_instance_id",
-                    value: project_instance_id.to_string(),
-                });
-            }
-            transaction.execute(
-                "UPDATE worktree_registrations
-             SET last_root = ?1, project_instance_id = ?2
-             WHERE registration_id = ?3",
-                params![root, project_bytes.as_slice(), existing.registration_id],
-            )?;
-            load_by_id(transaction, existing.registration_id)
+            bind_registration_project(transaction, &existing, &root, project_instance_id)
         })
     }
 
@@ -477,19 +454,22 @@ impl AtlasStore {
         })
     }
 
-    /// Synchronize one writer-excluded local snapshot and retire its alias atomically.
+    /// Bind, synchronize one writer-excluded local snapshot, and retire its alias atomically.
     ///
     /// # Errors
     ///
     /// Returns an error for an absent alias, mismatched snapshot identity, invalid
     /// time or aggregate state, changed control binding, or transactional `SQLite`
-    /// failure. Synchronization and retirement roll back together.
+    /// failure. Binding, synchronization, and retirement roll back together.
     pub fn retire_worktree_with_usage_snapshot(
         &self,
         alias: &WorktreeAlias,
+        root: &Path,
+        project_instance_id: ProjectInstanceId,
         snapshot: &WorktreeUsageSnapshot,
         retired_at_epoch: u64,
     ) -> DbResult<(WorktreeRegistration, WorktreeUsageSyncState)> {
+        let root = normalized_absolute_path("root", root)?;
         let retired_at_epoch = epoch_to_sqlite(retired_at_epoch)?;
         self.with_validated_write(|transaction| {
             let existing = load_active_by_alias(transaction, alias.as_str())?.ok_or_else(|| {
@@ -497,15 +477,50 @@ impl AtlasStore {
                     alias: alias.to_string(),
                 }
             })?;
+            let bound =
+                bind_registration_project(transaction, &existing, &root, project_instance_id)?;
             let synchronized = telemetry::synchronize_worktree_usage_snapshot(
                 transaction,
-                existing.registration_id,
+                bound.registration_id,
                 snapshot,
             )?;
-            let retired = retire_registration(transaction, &existing, retired_at_epoch)?;
+            let retired = retire_registration(transaction, &bound, retired_at_epoch)?;
             Ok((retired, synchronized))
         })
     }
+}
+
+/// Bind one already-loaded active registration inside its caller-owned transaction.
+fn bind_registration_project(
+    connection: &Connection,
+    registration: &WorktreeRegistration,
+    root: &str,
+    project_instance_id: ProjectInstanceId,
+) -> DbResult<WorktreeRegistration> {
+    if identities_conflict(registration.project_instance_id, Some(project_instance_id)) {
+        return Err(DbError::WorktreeRegistrationConflict {
+            field: "project_instance_id",
+            value: project_instance_id.to_string(),
+        });
+    }
+    let project_bytes = project_instance_id.as_bytes();
+    if active_project_exists_for_other(
+        connection,
+        registration.registration_id,
+        project_bytes.as_slice(),
+    )? {
+        return Err(DbError::WorktreeRegistrationConflict {
+            field: "project_instance_id",
+            value: project_instance_id.to_string(),
+        });
+    }
+    connection.execute(
+        "UPDATE worktree_registrations
+         SET last_root = ?1, project_instance_id = ?2
+         WHERE registration_id = ?3",
+        params![root, project_bytes.as_slice(), registration.registration_id],
+    )?;
+    load_by_id(connection, registration.registration_id)
 }
 
 /// Retire one already-loaded active registration inside its caller-owned transaction.
@@ -922,6 +937,66 @@ mod tests {
                 .iter()
                 .all(|row| row.state == WorktreeRegistrationState::Active),
             "active-only list returned retired history",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_final_sync_rolls_back_project_binding_and_retirement() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control_root = temp.path().join("control");
+        let common = temp.path().join("common.git");
+        let admin = common.join("worktrees/issue-430");
+        let original_root = temp.path().join("original");
+        let moved_root = temp.path().join("moved");
+        let other_root = temp.path().join("other");
+        for path in [
+            &control_root,
+            &admin,
+            &original_root,
+            &moved_root,
+            &other_root,
+        ] {
+            fs::create_dir_all(path)?;
+        }
+
+        let control =
+            AtlasStore::open_for_project(&control_root.join("projectatlas.db"), &control_root)?;
+        let other = AtlasStore::open_for_project(&other_root.join("projectatlas.db"), &other_root)?;
+        let mismatched_snapshot = other.export_worktree_usage_snapshot()?;
+        let target_project = if mismatched_snapshot.project_instance_id() == identity(7)? {
+            identity(8)?
+        } else {
+            identity(7)?
+        };
+        let alias = WorktreeAlias::parse("issue-430")?;
+        let before = control.register_worktree(
+            &alias,
+            &common,
+            &admin,
+            &administrative_identity(1),
+            &original_root,
+            None,
+            10,
+        )?;
+
+        require(
+            matches!(
+                control.retire_worktree_with_usage_snapshot(
+                    &alias,
+                    &moved_root,
+                    target_project,
+                    &mismatched_snapshot,
+                    20,
+                ),
+                Err(DbError::WorktreeTelemetryProjectMismatch { .. })
+            ),
+            "mismatched final snapshot was not rejected",
+        )?;
+        require_eq(
+            &control.worktree_registration(&alias)?,
+            &before,
+            "active registration after failed final synchronization",
         )?;
         Ok(())
     }
