@@ -3004,7 +3004,7 @@ fn reserve_routed_worktree_daily_row(
          WHERE (registration_id, source_kind, day_epoch, dimension_id) IN (
              SELECT registration_id, source_kind, day_epoch, dimension_id
              FROM worktree_usage_aggregates
-             WHERE day_epoch >= 0
+             WHERE day_epoch >= 0 AND source_kind = ?2
                AND NOT (
                    registration_id = ?1 AND source_kind = ?2
                    AND day_epoch = ?3 AND dimension_id = ?4
@@ -7443,6 +7443,101 @@ mod tests {
         let read_only = reader.export_worktree_usage_snapshot()?;
         require_eq(&read_only.revision(), &2, "read-only snapshot revision")?;
         reader.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn routed_daily_capacity_preserves_synchronized_snapshot() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control_root = temp.path().join("control");
+        let worktree_root = temp.path().join("feature");
+        let administrative = temp.path().join("common.git/worktrees/feature");
+        for path in [&control_root, &worktree_root, &administrative] {
+            fs::create_dir_all(path)?;
+        }
+        let control = store_at(&control_root)?;
+        let worktree = store_at(&worktree_root)?;
+        let worktree_project = worktree
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let alias = WorktreeAlias::parse("capacity")?;
+        let registration = control.register_worktree(
+            &alias,
+            &temp.path().join("common.git"),
+            &administrative,
+            &"22".repeat(32),
+            &worktree_root,
+            Some(worktree_project),
+            10,
+        )?;
+        let now = now_epoch_seconds()?;
+        for (offset, instance_id) in [(2, 40), (1, 41)] {
+            record_transaction_at(
+                &worktree.connection,
+                worktree_project,
+                instance(instance_id)?,
+                UsageInstanceOwner::CliInvocation,
+                &event("synchronized", 100, 20),
+                TelemetryRetentionPolicy::default(),
+                true,
+                now - i64::from(offset) * SECONDS_PER_DAY,
+            )?;
+        }
+        let snapshot = worktree.export_worktree_usage_snapshot()?;
+        require_eq(
+            &control.synchronize_worktree_usage(&alias, &snapshot)?,
+            &WorktreeUsageSyncState::Synchronized,
+            "initial synchronized snapshot",
+        )?;
+
+        let policy = TelemetryRetentionPolicy {
+            max_daily_rows: 2,
+            ..TelemetryRetentionPolicy::default()
+        };
+        let control_project = control
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let routed_instance = instance(42)?;
+        let routed = control.with_validated_write(|connection| {
+            record_usage_for_project(
+                connection,
+                control_project,
+                routed_instance,
+                UsageInstanceOwner::McpProcess,
+                Some(registration.registration_id),
+                &event("routed", 90, 20),
+                policy,
+                true,
+            )
+        });
+        require(
+            matches!(
+                routed,
+                Err(DbError::WorktreeTelemetrySnapshotLimit {
+                    resource: "daily_rows",
+                    limit: 2,
+                    observed: 3
+                })
+            ),
+            "routed usage displaced a synchronized daily snapshot",
+        )?;
+        require_eq(
+            &control.synchronize_worktree_usage(&alias, &snapshot)?,
+            &WorktreeUsageSyncState::Current,
+            "accepted snapshot revision after routed capacity failure",
+        )?;
+        require_eq(
+            &control.registered_worktree_token_overview(&alias)?.calls,
+            &2,
+            "synchronized total after routed capacity failure",
+        )?;
+        let synchronized_daily = control.connection.query_row(
+            "SELECT COUNT(*) FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch >= 0",
+            params![registration.registration_id, WORKTREE_USAGE_SYNCHRONIZED],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&synchronized_daily, &2, "retained synchronized daily rows")?;
         Ok(())
     }
 

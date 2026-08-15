@@ -10978,24 +10978,31 @@ mod tests {
             legacy_added.contains("status: registered"),
             &format!("legacy-init fixture registration failed: {legacy_added}"),
         )?;
-        let legacy_initialized = server.atlas_init(Parameters(AtlasInitParams {
-            project_path: Some(normalize_native_path_display(&canonical_b)),
-            worktree: None,
-            no_scan: Some(true),
-            force_rescan: Some(false),
-            text_index_max_bytes: None,
-        }));
+        init_project_with_config(&worktree_b, Some(&target_b_config))?;
+        let control_before_legacy_sync =
+            open_atlas_store_read_only_for_project(&control_db, &primary)?;
         require(
-            legacy_initialized.contains("ok: true"),
-            &format!(
-                "legacy exact-path init did not initialize the registered root: {legacy_initialized}"
-            ),
+            control_before_legacy_sync
+                .worktree_registration(&WorktreeAlias::parse("legacy-init")?)?
+                .project_instance_id
+                .is_none(),
+            "independent exact-path init unexpectedly mutated the control registration",
         )?;
-        let legacy_target = open_atlas_store_read_only_for_project(&target_b_db, &worktree_b)?;
+        drop(control_before_legacy_sync);
+        let legacy_target = AtlasStore::open_for_project(&target_b_db, &worktree_b)?;
+        legacy_target.record_usage(&usage_from_text(
+            "legacy-init",
+            "atlas_overview",
+            None,
+            None,
+            "pub fn independent() {}",
+            "repository overview",
+        ))?;
         let legacy_project = legacy_target
             .project_instance_id()?
             .ok_or_else(|| io::Error::other("legacy-init target identity is missing"))?;
         drop(legacy_target);
+        synchronize_registered_worktree_usage(&control_db, &primary)?;
         let control_after_legacy_init =
             open_atlas_store_read_only_for_project(&control_db, &primary)?;
         require(
@@ -11003,7 +11010,14 @@ mod tests {
                 .worktree_registration(&WorktreeAlias::parse("legacy-init")?)?
                 .project_instance_id
                 == Some(legacy_project),
-            "legacy exact-path init did not bind the existing alias identity",
+            "aggregate synchronization did not bind the independently initialized alias",
+        )?;
+        require(
+            control_after_legacy_init
+                .registered_worktree_token_overview(&WorktreeAlias::parse("legacy-init")?)?
+                .calls
+                == 1,
+            "aggregate synchronization omitted independently initialized worktree usage",
         )?;
         drop(control_after_legacy_init);
         let preserved_legacy_state = worktree_b.join(".projectatlas-legacy-init");
@@ -11208,8 +11222,8 @@ mod tests {
                 .registered_worktree_token_overview(&alias)?
                 .calls
                 == 1
-                && control_after_routed.repository_token_overview()?.calls == 1,
-            "alias-routed MCP usage was not recorded exactly once in the control atlas",
+                && control_after_routed.repository_token_overview()?.calls == 2,
+            "alias-routed MCP usage or retained independently initialized usage was miscounted",
         )?;
         drop(control_after_routed);
         let local_event = usage_from_text(
@@ -11237,7 +11251,7 @@ mod tests {
             theme: None,
         }));
         require(
-            repository_tokens.contains("worktree: main") && repository_tokens.contains("calls: 2"),
+            repository_tokens.contains("worktree: main") && repository_tokens.contains("calls: 3"),
             &format!(
                 "control token report did not combine routed and synchronized worktree usage: {repository_tokens}"
             ),
