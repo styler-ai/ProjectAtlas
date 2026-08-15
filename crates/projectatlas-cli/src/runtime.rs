@@ -73,6 +73,7 @@ use projectatlas_db::{
 };
 use projectatlas_fs::worktree::{
     GitManagerSourceSelection, GitRepositorySelection, GitWorktreeState, RepositoryStructure,
+    git_administrative_identity,
 };
 use projectatlas_fs::{
     FsError, RootScanPolicy, ScanLimits, ScanOptions, gitignore_excludes_path,
@@ -804,6 +805,14 @@ pub(crate) fn synchronize_registered_worktree_usage(
         }) else {
             continue;
         };
+        let Ok(administrative_identity) =
+            git_administrative_identity(&entry.administrative_directory)
+        else {
+            continue;
+        };
+        if administrative_identity != registration.git_administrative_identity {
+            continue;
+        }
         let GitWorktreeState::Active { root, .. } = &entry.state else {
             continue;
         };

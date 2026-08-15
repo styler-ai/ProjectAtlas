@@ -7176,14 +7176,10 @@ impl ProjectAtlasMcpServer {
             let root = Self::active_worktree_root(entry).ok_or_else(|| {
                 CliError::InvalidInput(MCP_ERROR_WORKTREE_NO_LONGER_ACTIVE.to_string())
             })?;
-            let alias = params
-                .alias
-                .as_deref()
-                .map(str::trim)
-                .filter(|alias| !alias.is_empty())
-                .map(WorktreeAlias::parse)
-                .transpose()?
-                .map_or_else(|| Self::default_worktree_alias(root), Ok)?;
+            let alias = match params.alias.as_deref() {
+                Some(alias) => WorktreeAlias::parse(alias.trim())?,
+                None => Self::default_worktree_alias(root)?,
+            };
             let (local, mut blocker) = match Self::local_worktree_atlas(root) {
                 Ok(local) => (local, None),
                 Err(error) => (
@@ -10752,6 +10748,19 @@ mod tests {
                 && ambiguous.matches(MCP_WORKTREE_SELECTOR_PREFIX).count() >= 2,
             "ambiguous human selector guessed or omitted bounded stable candidates",
         )?;
+        let control_before_blank_alias = fs::read(&control_db)?;
+        let blank_alias = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
+            worktree: selector_a.clone(),
+            alias: Some("   ".to_string()),
+        }));
+        require(
+            blank_alias.contains("alias is empty"),
+            "blank explicit alias fell back to the selected directory name",
+        )?;
+        require(
+            fs::read(&control_db)? == control_before_blank_alias,
+            "blank explicit alias changed the control database",
+        )?;
 
         let added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
             worktree: selector_a,
@@ -11208,6 +11217,159 @@ mod tests {
         require(
             after_remove == before_remove,
             "retiring a stale registration changed Git lifecycle state",
+        )
+    }
+
+    #[test]
+    fn reused_git_administrative_path_cannot_synchronize_replacement_telemetry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let primary = temp.path().join("control");
+        let worktree = temp.path().join("checkout");
+        fs::create_dir_all(&primary)?;
+        run_fixture_command(StdCommand::new("git").current_dir(&primary).arg("init"))?;
+        for (key, value) in [
+            ("user.name", "ProjectAtlas Test"),
+            ("user.email", "projectatlas@example.invalid"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run_fixture_command(
+                StdCommand::new("git")
+                    .current_dir(&primary)
+                    .args(["config", key, value]),
+            )?;
+        }
+        fs::write(primary.join("lib.rs"), "pub fn control() {}\n")?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["add", "."]),
+        )?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["commit", "-m", "fixture"]),
+        )?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["worktree", "add", "-b", "original-telemetry"])
+                .arg(&worktree),
+        )?;
+
+        let control_db = primary.join(".projectatlas").join("projectatlas.db");
+        let target_db = worktree.join(".projectatlas").join("projectatlas.db");
+        fs::create_dir_all(
+            control_db
+                .parent()
+                .ok_or_else(|| io::Error::other("control database has no parent"))?,
+        )?;
+        fs::create_dir_all(
+            target_db
+                .parent()
+                .ok_or_else(|| io::Error::other("target database has no parent"))?,
+        )?;
+        let event = usage_from_text(
+            "worktree-lifecycle",
+            "atlas_overview",
+            None,
+            None,
+            "pub fn source() {}",
+            "repository overview",
+        );
+        let target = AtlasStore::open_for_project(&target_db, &worktree)?;
+        target.record_usage(&event)?;
+        let target_project = target
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("target project identity is missing"))?;
+        drop(target);
+
+        let RepositoryStructure::Git(repository) = discover_repository_structure(&primary)? else {
+            return Err(io::Error::other("Git repository was not discovered").into());
+        };
+        let canonical_worktree = worktree.canonicalize()?;
+        let entry = repository
+            .worktrees
+            .iter()
+            .find(|entry| {
+                ProjectAtlasMcpServer::active_worktree_root(entry)
+                    == Some(canonical_worktree.as_path())
+            })
+            .ok_or_else(|| io::Error::other("worktree was not discovered"))?;
+        let administrative_directory = entry.administrative_directory.clone();
+        let administrative_identity = git_administrative_identity(&administrative_directory)?;
+        let alias = WorktreeAlias::parse("lifecycle-telemetry")?;
+        let control = AtlasStore::open_for_project(&control_db, &primary)?;
+        control.register_worktree(
+            &alias,
+            &repository.common_directory,
+            &administrative_directory,
+            &administrative_identity,
+            &canonical_worktree,
+            Some(target_project),
+            1,
+        )?;
+        drop(control);
+        synchronize_registered_worktree_usage(&control_db, &primary)?;
+        let control = AtlasStore::open_for_project(&control_db, &primary)?;
+        require(
+            control.registered_worktree_token_overview(&alias)?.calls == 1,
+            "initial worktree telemetry was not synchronized",
+        )?;
+        drop(control);
+
+        let saved_db = temp.path().join("saved-projectatlas.db");
+        fs::copy(&target_db, &saved_db)?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["worktree", "remove", "--force"])
+                .arg(&worktree),
+        )?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["worktree", "add", "-b", "replacement-telemetry"])
+                .arg(&worktree),
+        )?;
+        fs::create_dir_all(
+            target_db
+                .parent()
+                .ok_or_else(|| io::Error::other("target database has no parent"))?,
+        )?;
+        fs::copy(&saved_db, &target_db)?;
+        let replacement = AtlasStore::open_for_project(&target_db, &worktree)?;
+        replacement.record_usage(&event)?;
+        drop(replacement);
+
+        let RepositoryStructure::Git(replacement_repository) =
+            discover_repository_structure(&primary)?
+        else {
+            return Err(io::Error::other("replacement Git repository was not discovered").into());
+        };
+        let replacement_entry = replacement_repository
+            .worktrees
+            .iter()
+            .find(|entry| {
+                ProjectAtlasMcpServer::active_worktree_root(entry)
+                    == Some(canonical_worktree.as_path())
+            })
+            .ok_or_else(|| io::Error::other("replacement worktree was not discovered"))?;
+        require(
+            replacement_entry.administrative_directory == administrative_directory,
+            "Git fixture did not reuse the administrative path",
+        )?;
+        require(
+            git_administrative_identity(&replacement_entry.administrative_directory)?
+                != administrative_identity,
+            "replacement Git worktree reused the prior lifecycle identity",
+        )?;
+
+        synchronize_registered_worktree_usage(&control_db, &primary)?;
+        let control = open_atlas_store_read_only_for_project(&control_db, &primary)?;
+        require(
+            control.registered_worktree_token_overview(&alias)?.calls == 1,
+            "replacement lifecycle telemetry was imported into the retired origin",
         )
     }
 
