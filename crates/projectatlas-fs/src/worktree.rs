@@ -535,8 +535,19 @@ fn has_git_control_markers(path: &Path) -> FsResult<bool> {
 }
 
 /// Read bounded local source-selection policy without following includes or starting Git.
+/// Continued values fail closed because this bounded reader does not interpret full Git syntax.
 fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructureIssue> {
     let text = read_bounded_text(path, GIT_DIRECTORY_POINTER_MAX_BYTES)?;
+    if text.lines().any(|raw_line| {
+        let line = raw_line.trim();
+        !line.is_empty() && !line.starts_with('#') && !line.starts_with(';') && line.ends_with('\\')
+    }) {
+        return Ok(GitLocalConfigPolicy {
+            bare_setting: None,
+            source_root_inference_safe: false,
+            worktree_config_enabled: false,
+        });
+    }
     let mut in_core = false;
     let mut in_extensions = false;
     let mut has_include = false;
@@ -1758,6 +1769,35 @@ mod tests {
                     source_selection: GitManagerSourceSelection::None,
                 },
             "empty extensions.worktreeConfig enabled config.worktree and invented a source",
+        )?;
+        fs::remove_file(bare_dot_git.join("config.worktree"))?;
+        fs::write(&bare_config_path, &bare_config)?;
+
+        fs::write(
+            &bare_config_path,
+            "[core]\n bare = true\n[extensions]\n worktreeConfig = fals\\\ne\n",
+        )?;
+        fs::write(
+            bare_dot_git.join("config.worktree"),
+            "[core]\n bare = false\n",
+        )?;
+        let effective_worktree_config = Command::new("git")
+            .arg("--git-dir")
+            .arg(&bare_dot_git)
+            .args(["config", "--bool", "extensions.worktreeConfig"])
+            .output()?;
+        require(
+            effective_worktree_config.status.success()
+                && String::from_utf8(effective_worktree_config.stdout)?.trim() == "false",
+            "Git fixture did not join the continued extensions.worktreeConfig value",
+        )?;
+        let continued_worktree_config = require_git(discover_repository_structure(&bare_dot_git)?)?;
+        require(
+            continued_worktree_config.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::None,
+                },
+            "continued extensions.worktreeConfig value invented the manager parent as source",
         )?;
         fs::remove_file(bare_dot_git.join("config.worktree"))?;
         fs::write(&bare_config_path, &bare_config)?;

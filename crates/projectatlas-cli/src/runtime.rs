@@ -831,8 +831,7 @@ pub(crate) fn synchronize_registered_worktree_usage(
                 snapshot.project_instance_id(),
             )?;
         }
-        let _last_valid_preserved_on_error =
-            control.synchronize_worktree_usage(&registration.alias, &snapshot);
+        control.synchronize_worktree_usage(&registration.alias, &snapshot)?;
     }
     Ok(())
 }

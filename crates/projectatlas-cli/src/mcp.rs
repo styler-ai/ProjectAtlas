@@ -11690,6 +11690,115 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_synchronization_propagates_project_identity_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let primary = temp.path().join("control");
+        let worktree = temp.path().join("external").join("worktree");
+        fs::create_dir_all(&primary)?;
+        fs::create_dir_all(
+            worktree
+                .parent()
+                .ok_or_else(|| io::Error::other("worktree has no parent"))?,
+        )?;
+        run_fixture_command(StdCommand::new("git").current_dir(&primary).arg("init"))?;
+        for (key, value) in [
+            ("user.name", "ProjectAtlas Test"),
+            ("user.email", "projectatlas@example.invalid"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run_fixture_command(
+                StdCommand::new("git")
+                    .current_dir(&primary)
+                    .args(["config", key, value]),
+            )?;
+        }
+        fs::write(primary.join("README.md"), "# fixture\n")?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["add", "."]),
+        )?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["commit", "-m", "fixture"]),
+        )?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["worktree", "add", "-b", "sync-failure"])
+                .arg(&worktree),
+        )?;
+
+        let control_db = primary.join(".projectatlas").join("projectatlas.db");
+        let target_db = worktree.join(".projectatlas").join("projectatlas.db");
+        fs::create_dir_all(
+            control_db
+                .parent()
+                .ok_or_else(|| io::Error::other("control database has no parent"))?,
+        )?;
+        fs::create_dir_all(
+            target_db
+                .parent()
+                .ok_or_else(|| io::Error::other("target database has no parent"))?,
+        )?;
+        let target = AtlasStore::open_for_project(&target_db, &worktree)?;
+        target.record_usage(&usage_from_text(
+            "worktree-sync",
+            "atlas_overview",
+            None,
+            None,
+            "pub fn source() {}",
+            "repository overview",
+        ))?;
+        let target_project = target
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("target project identity is missing"))?;
+        drop(target);
+
+        let RepositoryStructure::Git(repository) = discover_repository_structure(&primary)? else {
+            return Err(io::Error::other("Git repository was not discovered").into());
+        };
+        let canonical_worktree = worktree.canonicalize()?;
+        let entry = repository
+            .worktrees
+            .iter()
+            .find(|entry| {
+                ProjectAtlasMcpServer::active_worktree_root(entry)
+                    == Some(canonical_worktree.as_path())
+            })
+            .ok_or_else(|| io::Error::other("worktree was not discovered"))?;
+        let alias = WorktreeAlias::parse("sync-failure")?;
+        let foreign_project = if target_project == ProjectInstanceId::from_bytes([0x7f; 16])? {
+            ProjectInstanceId::from_bytes([0x7e; 16])?
+        } else {
+            ProjectInstanceId::from_bytes([0x7f; 16])?
+        };
+        let control = AtlasStore::open_for_project(&control_db, &primary)?;
+        control.register_worktree(
+            &alias,
+            &repository.common_directory,
+            &entry.administrative_directory,
+            &git_administrative_identity(&entry.administrative_directory)?,
+            &canonical_worktree,
+            Some(foreign_project),
+            1,
+        )?;
+        drop(control);
+
+        require(
+            matches!(
+                synchronize_registered_worktree_usage(&control_db, &primary),
+                Err(CliError::Db(
+                    DbError::WorktreeTelemetryProjectMismatch { .. }
+                ))
+            ),
+            "aggregate synchronization hid the project identity failure behind stale success",
+        )
+    }
+
+    #[test]
     fn registered_worktree_init_falls_back_from_incomplete_control_and_preserves_existing_atlas()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
