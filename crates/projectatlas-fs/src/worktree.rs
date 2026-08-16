@@ -573,18 +573,6 @@ fn has_git_control_markers(path: &Path) -> FsResult<bool> {
 /// Continued values fail closed because this bounded reader does not interpret full Git syntax.
 fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructureIssue> {
     let text = read_bounded_text(path, GIT_DIRECTORY_POINTER_MAX_BYTES)?;
-    if text.lines().any(|raw_line| {
-        let line = raw_line.trim();
-        !line.is_empty() && !line.starts_with('#') && !line.starts_with(';') && line.ends_with('\\')
-    }) {
-        return Ok(GitLocalConfigPolicy {
-            bare_setting: None,
-            source_root_inference_safe: false,
-            worktree_config_enabled: false,
-            worktree_setting: None,
-            source_selection_policy_complete: false,
-        });
-    }
     let mut in_core = false;
     let mut in_extensions = false;
     let mut has_include = false;
@@ -632,16 +620,28 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
                 source_selection_policy_complete: false,
             });
         }
+        let Some(value) = git_config_value(raw_value) else {
+            return Ok(GitLocalConfigPolicy {
+                bare_setting: None,
+                source_root_inference_safe: false,
+                worktree_config_enabled: false,
+                worktree_setting: None,
+                source_selection_policy_complete: false,
+            });
+        };
+        if value.ends_with('\\') {
+            return Ok(GitLocalConfigPolicy {
+                bare_setting: None,
+                source_root_inference_safe: false,
+                worktree_config_enabled: false,
+                worktree_setting: None,
+                source_selection_policy_complete: false,
+            });
+        }
         if !in_core && !in_extensions {
             continue;
         }
         if in_extensions && key.eq_ignore_ascii_case("worktreeconfig") {
-            let Some(value) = git_config_value(raw_value) else {
-                source_root_inference_safe = false;
-                worktree_config_enabled = false;
-                source_selection_policy_complete = false;
-                continue;
-            };
             if let Some(enabled) = parse_git_boolean(value) {
                 worktree_config_enabled = enabled;
             } else {
@@ -655,12 +655,6 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
             continue;
         }
         if key.eq_ignore_ascii_case("worktree") {
-            let Some(value) = git_config_value(raw_value) else {
-                source_root_inference_safe = false;
-                worktree_setting = None;
-                source_selection_policy_complete = false;
-                continue;
-            };
             worktree_setting = (!value.is_empty()).then(|| PathBuf::from(value));
             source_root_inference_safe = false;
             source_selection_policy_complete &= worktree_setting.is_some();
@@ -669,12 +663,6 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
         if !key.eq_ignore_ascii_case("bare") {
             continue;
         }
-        let Some(value) = git_config_value(raw_value) else {
-            bare_setting = None;
-            source_root_inference_safe = false;
-            source_selection_policy_complete = false;
-            continue;
-        };
         if let Some(bare) = parse_git_boolean(value) {
             bare_setting = Some(bare);
         } else {
@@ -2214,6 +2202,54 @@ mod tests {
                 "malformed local config invented the manager parent as source",
             )?;
         }
+        fs::write(&bare_config_path, &bare_config)?;
+
+        fs::write(
+            &bare_config_path,
+            "[other]\n value = \"unterminated\n[core]\n bare = false\n",
+        )?;
+        let malformed_unrelated_value = Command::new("git")
+            .arg("--git-dir")
+            .arg(&bare_dot_git)
+            .args(["config", "--bool", "core.bare"])
+            .output()?;
+        require(
+            !malformed_unrelated_value.status.success(),
+            "Git fixture accepted a malformed value in an unrelated section",
+        )?;
+        let malformed_unrelated_value = require_git(discover_repository_structure(&bare_dot_git)?)?;
+        require(
+            malformed_unrelated_value.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::None,
+                },
+            "malformed unrelated config value invented the manager parent as source",
+        )?;
+
+        fs::write(
+            &bare_config_path,
+            "[core]\n bare = false # ignored Windows path C:\\\n",
+        )?;
+        let commented_backslash = Command::new("git")
+            .arg("--git-dir")
+            .arg(&bare_dot_git)
+            .args(["config", "--bool", "core.bare"])
+            .output()?;
+        require(
+            commented_backslash.status.success()
+                && String::from_utf8(commented_backslash.stdout)?.trim() == "false",
+            "Git fixture treated a trailing backslash in a comment as continuation",
+        )?;
+        let commented_backslash = require_git(discover_repository_structure(&bare_dot_git)?)?;
+        require(
+            commented_backslash.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::Unambiguous {
+                        root: dot_git_container.canonicalize()?,
+                    },
+                },
+            "trailing backslash inside a comment hid the exact manager source",
+        )?;
         fs::write(&bare_config_path, &bare_config)?;
 
         fs::write(
