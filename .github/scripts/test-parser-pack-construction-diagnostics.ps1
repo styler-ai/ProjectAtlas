@@ -471,7 +471,6 @@ try {
         "cssparser",
         "jsonc-parser",
         "notify",
-        "pulldown-cmark",
         "projectatlas-db",
         "projectatlas-fs",
         "projectatlas-service",
