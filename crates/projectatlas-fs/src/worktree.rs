@@ -752,11 +752,19 @@ fn git_config_section(line: &str) -> Option<(&str, bool)> {
 /// Remove only unquoted Git comments and unwrap one simple quoted value.
 fn git_config_value(raw_value: &str) -> Option<&str> {
     let mut quoted = false;
+    let mut escaped = false;
     let mut value_end = raw_value.len();
     for (index, character) in raw_value.char_indices() {
+        if escaped {
+            if !matches!(character, '\\' | '"' | 'n' | 't' | 'b') {
+                return None;
+            }
+            escaped = false;
+            continue;
+        }
         match character {
+            '\\' => escaped = true,
             '"' => quoted = !quoted,
-            '\\' if quoted => return None,
             '#' | ';' if !quoted => {
                 value_end = index;
                 break;
@@ -764,7 +772,7 @@ fn git_config_value(raw_value: &str) -> Option<&str> {
             _ => {}
         }
     }
-    if quoted {
+    if quoted || escaped {
         return None;
     }
     let value = trim_git_config_whitespace(&raw_value[..value_end]);
@@ -2238,27 +2246,30 @@ mod tests {
         }
         fs::write(&bare_config_path, &bare_config)?;
 
-        fs::write(
-            &bare_config_path,
-            "[other]\n value = \"unterminated\n[core]\n bare = false\n",
-        )?;
-        let malformed_unrelated_value = Command::new("git")
-            .arg("--git-dir")
-            .arg(&bare_dot_git)
-            .args(["config", "--bool", "core.bare"])
-            .output()?;
-        require(
-            !malformed_unrelated_value.status.success(),
-            "Git fixture accepted a malformed value in an unrelated section",
-        )?;
-        let malformed_unrelated_value = require_git(discover_repository_structure(&bare_dot_git)?)?;
-        require(
-            malformed_unrelated_value.selection
-                == GitRepositorySelection::CommonManager {
-                    source_selection: GitManagerSourceSelection::None,
-                },
-            "malformed unrelated config value invented the manager parent as source",
-        )?;
+        for malformed_value in ["\"unterminated", r"invalid\q"] {
+            fs::write(
+                &bare_config_path,
+                format!("[other]\n value = {malformed_value}\n[core]\n bare = false\n"),
+            )?;
+            let malformed_unrelated_value = Command::new("git")
+                .arg("--git-dir")
+                .arg(&bare_dot_git)
+                .args(["config", "--bool", "core.bare"])
+                .output()?;
+            require(
+                !malformed_unrelated_value.status.success(),
+                "Git fixture accepted a malformed value in an unrelated section",
+            )?;
+            let malformed_unrelated_value =
+                require_git(discover_repository_structure(&bare_dot_git)?)?;
+            require(
+                malformed_unrelated_value.selection
+                    == GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::None,
+                    },
+                "malformed unrelated config value invented the manager parent as source",
+            )?;
+        }
 
         fs::write(
             &bare_config_path,
