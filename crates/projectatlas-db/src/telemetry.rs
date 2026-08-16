@@ -1809,7 +1809,7 @@ pub(crate) fn synchronize_worktree_usage_snapshot(
     let incoming_daily_rows = snapshot
         .rows
         .iter()
-        .filter(|row| row.day_epoch >= 0)
+        .filter(|row| row.day_epoch >= retained_daily_cutoff)
         .count();
     let other_daily_rows = connection.query_row(
         "SELECT COUNT(*) FROM worktree_usage_aggregates
@@ -1848,7 +1848,11 @@ pub(crate) fn synchronize_worktree_usage_snapshot(
             observed_file_read_replacements, modeled_file_reads_avoided
          ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
     )?;
-    for row in &snapshot.rows {
+    for row in snapshot
+        .rows
+        .iter()
+        .filter(|row| row.day_epoch == -1 || row.day_epoch >= retained_daily_cutoff)
+    {
         let dimension_id =
             target_dimensions
                 .get(&row.dimension_id)
@@ -7981,11 +7985,24 @@ mod tests {
             30,
         )?;
         current.record_usage(&event("current", 90, 20))?;
+        let mut current_snapshot = current.export_worktree_usage_snapshot()?;
+        let mut expired = current_snapshot
+            .rows
+            .iter()
+            .find(|row| row.day_epoch >= 0)
+            .cloned()
+            .ok_or_else(|| io::Error::other("current daily row missing"))?;
+        expired.day_epoch = 0;
+        current_snapshot
+            .rows
+            .extend(std::iter::repeat_n(expired, policy.max_daily_rows));
+        current_snapshot.logical_bytes = validate_worktree_usage_snapshot(
+            &current_snapshot.dimensions,
+            &current_snapshot.rows,
+            policy,
+        )?;
         require_eq(
-            &control.synchronize_worktree_usage(
-                &current_alias,
-                &current.export_worktree_usage_snapshot()?,
-            )?,
+            &control.synchronize_worktree_usage(&current_alias, &current_snapshot)?,
             &WorktreeUsageSyncState::Synchronized,
             "current-origin synchronization after global pruning",
         )?;
