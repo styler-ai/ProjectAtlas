@@ -582,7 +582,7 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
     let mut worktree_setting = None;
     let mut source_selection_policy_complete = true;
     for raw_line in text.lines() {
-        let line = raw_line.trim();
+        let line = trim_git_config_whitespace(raw_line);
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
             continue;
         }
@@ -605,7 +605,7 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
         let (key, raw_value) = line
             .split_once('=')
             .map_or((line, "true"), |(key, value)| (key, value));
-        let key = key.trim();
+        let key = trim_git_config_whitespace(key);
         let mut key_bytes = key.bytes();
         if !key_bytes
             .next()
@@ -681,6 +681,11 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
     })
 }
 
+/// Trim only the space and horizontal tab bytes admitted by Git config syntax.
+fn trim_git_config_whitespace(value: &str) -> &str {
+    value.trim_matches([' ', '\t'])
+}
+
 /// Parse one complete Git section header while allowing only a trailing comment.
 fn git_config_section(line: &str) -> Option<(&str, bool)> {
     let mut quoted = false;
@@ -704,11 +709,10 @@ fn git_config_section(line: &str) -> Option<(&str, bool)> {
     if quoted || escaped {
         return None;
     }
-    let section = line[..header_end]
-        .trim()
+    let section = trim_git_config_whitespace(&line[..header_end])
         .strip_prefix('[')?
         .strip_suffix(']')?
-        .trim();
+        .trim_matches([' ', '\t']);
     if section.is_empty() || section.contains(['[', ']']) {
         return None;
     }
@@ -722,7 +726,7 @@ fn git_config_section(line: &str) -> Option<(&str, bool)> {
     {
         return None;
     }
-    let subsection = section[name_end..].trim();
+    let subsection = trim_git_config_whitespace(&section[name_end..]);
     if subsection.is_empty() {
         return Some((name, false));
     }
@@ -758,7 +762,7 @@ fn git_config_value(raw_value: &str) -> Option<&str> {
     if quoted {
         return None;
     }
-    let value = raw_value[..value_end].trim();
+    let value = trim_git_config_whitespace(&raw_value[..value_end]);
     let value = value
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
@@ -2200,6 +2204,31 @@ mod tests {
                         source_selection: GitManagerSourceSelection::None,
                     },
                 "malformed local config invented the manager parent as source",
+            )?;
+        }
+        fs::write(&bare_config_path, &bare_config)?;
+
+        for invalid_spacing in ['\u{000b}', '\u{000c}', '\r', '\u{00a0}'] {
+            fs::write(
+                &bare_config_path,
+                format!("[other]\n value{invalid_spacing} = accepted\n[core]\n bare = false\n"),
+            )?;
+            let malformed_spacing = Command::new("git")
+                .arg("--git-dir")
+                .arg(&bare_dot_git)
+                .args(["config", "--bool", "core.bare"])
+                .output()?;
+            require(
+                !malformed_spacing.status.success(),
+                "Git fixture accepted invalid variable-name whitespace",
+            )?;
+            let malformed_spacing = require_git(discover_repository_structure(&bare_dot_git)?)?;
+            require(
+                malformed_spacing.selection
+                    == GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::None,
+                    },
+                "invalid variable-name whitespace invented the manager parent as source",
             )?;
         }
         fs::write(&bare_config_path, &bare_config)?;

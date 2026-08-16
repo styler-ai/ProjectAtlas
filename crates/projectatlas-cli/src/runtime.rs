@@ -788,10 +788,25 @@ pub(crate) fn synchronize_registered_worktree_usage(
     if registrations.is_empty() {
         return Ok(());
     }
-    let RepositoryStructure::Git(repository) =
-        projectatlas_fs::worktree::discover_repository_structure(control_root)?
-    else {
-        return Ok(());
+    let repository = match projectatlas_fs::worktree::discover_repository_structure(control_root)? {
+        RepositoryStructure::Git(repository) => repository,
+        RepositoryStructure::NonGit { selected_root } => {
+            return Err(CliError::InvalidInput(format!(
+                "registered worktree synchronization requires Git control evidence at '{}'",
+                normalize_native_path_display(selected_root)
+            )));
+        }
+        RepositoryStructure::InvalidGit {
+            selected_root,
+            issue,
+        } => {
+            return Err(CliError::InvalidInput(format!(
+                "registered worktree synchronization found invalid Git evidence for '{}': {:?} at '{}'",
+                normalize_native_path_display(selected_root),
+                issue.kind,
+                normalize_native_path_display(issue.path)
+            )));
+        }
     };
     let control = open_atlas_store_for_project(control_db, control_root)?;
     let common = normalize_native_path_display(&repository.common_directory);

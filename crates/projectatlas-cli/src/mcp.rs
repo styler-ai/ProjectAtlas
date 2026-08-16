@@ -12165,6 +12165,34 @@ mod tests {
             "aggregate synchronization hid the project identity failure behind stale success",
         )?;
 
+        let git_directory = primary.join(".git");
+        let unavailable_git_directory = temp.path().join("unavailable-control-git");
+        fs::rename(&git_directory, &unavailable_git_directory)?;
+        require(
+            matches!(
+                synchronize_registered_worktree_usage(&control_db, &primary),
+                Err(CliError::InvalidInput(message))
+                    if message.contains("requires Git control evidence")
+            ),
+            "aggregate synchronization treated missing control Git evidence as success",
+        )?;
+        fs::rename(&unavailable_git_directory, &git_directory)?;
+
+        let control_head = git_directory.join("HEAD");
+        let valid_control_head = temp.path().join("valid-control-head");
+        fs::rename(&control_head, &valid_control_head)?;
+        fs::create_dir(&control_head)?;
+        require(
+            matches!(
+                synchronize_registered_worktree_usage(&control_db, &primary),
+                Err(CliError::InvalidInput(message))
+                    if message.contains("invalid Git evidence")
+            ),
+            "aggregate synchronization treated invalid control Git evidence as success",
+        )?;
+        fs::remove_dir(&control_head)?;
+        fs::rename(&valid_control_head, &control_head)?;
+
         let corrupt = rusqlite::Connection::open(&target_db)?;
         corrupt.pragma_update(None, "ignore_check_constraints", true)?;
         corrupt.execute("UPDATE usage_aggregate_revisions SET revision = -1", [])?;
