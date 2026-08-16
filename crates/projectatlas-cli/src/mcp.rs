@@ -287,7 +287,7 @@ const PROJECTATLAS_DB_FILE_NAME: &str = "projectatlas.db";
 const PROJECTATLAS_CONFIG_FILE_NAME: &str = "config.toml";
 /// Project-local flat config filename.
 const PROJECTATLAS_FLAT_CONFIG_FILE_NAME: &str = "projectatlas.toml";
-/// Maximum distinct project bindings whose MCP telemetry can be sealed at shutdown.
+/// Maximum distinct project bindings retained before inactive telemetry rotation.
 const MCP_TELEMETRY_PROJECT_BINDING_LIMIT: usize = 64;
 /// Hard ceiling for the default agent-facing settings diagnostic.
 const MCP_SETTINGS_RESPONSE_MAX_BYTES: usize = 64_000;
@@ -1670,6 +1670,13 @@ impl McpUsageProjectBinding {
             worktree_registration_id,
         })
     }
+
+    /// Return whether two origin bindings share one exact project database authority.
+    fn same_project(&self, other: &Self) -> bool {
+        self.root == other.root
+            && self.db_path == other.db_path
+            && self.project_instance_id == other.project_instance_id
+    }
 }
 
 /// Current telemetry identity for one exact selected project binding.
@@ -1695,21 +1702,59 @@ impl McpUsageRuntime {
     fn instance_for_binding(
         &mut self,
         binding: McpUsageProjectBinding,
+        selected_store: &AtlasStore,
     ) -> Option<Arc<Mutex<UsageRuntimeInstance>>> {
-        if let Some(entry) = self.entries.iter().find(|entry| entry.binding == binding) {
-            return Some(Arc::clone(&entry.instance));
-        }
-        if self.entries.len() >= MCP_TELEMETRY_PROJECT_BINDING_LIMIT {
-            return None;
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.binding == binding)
+        {
+            let entry = self.entries.remove(index);
+            let instance = Arc::clone(&entry.instance);
+            self.entries.push(entry);
+            return Some(instance);
         }
         let instance = Arc::new(Mutex::new(UsageRuntimeInstance::new(
             UsageInstanceOwner::McpProcess,
         )?));
+        if self.entries.len() >= MCP_TELEMETRY_PROJECT_BINDING_LIMIT {
+            let index = (0..self.entries.len()).find(|index| {
+                Self::seal_inactive_entry(&self.entries[*index], &binding, selected_store)
+            })?;
+            self.entries.remove(index);
+        }
         self.entries.push(McpUsageProjectRuntime {
             binding,
             instance: Arc::clone(&instance),
         });
         Some(instance)
+    }
+
+    /// Seal one unborrowed least-recent binding before bounded replacement.
+    fn seal_inactive_entry(
+        entry: &McpUsageProjectRuntime,
+        selected_binding: &McpUsageProjectBinding,
+        selected_store: &AtlasStore,
+    ) -> bool {
+        if Arc::strong_count(&entry.instance) != 1 {
+            return false;
+        }
+        let Ok(instance) = entry.instance.try_lock() else {
+            return false;
+        };
+        let seal = |store: &AtlasStore| {
+            store.captured_project_binding().is_ok_and(|binding| {
+                binding.project_instance_id == entry.binding.project_instance_id
+            }) && matches!(
+                (*instance).seal(store),
+                Ok(()) | Err(CliError::Db(DbError::TelemetryInstanceInactive))
+            )
+        };
+        if entry.binding.same_project(selected_binding) {
+            return seal(selected_store);
+        }
+        open_atlas_store_for_project(&entry.binding.db_path, &entry.binding.root)
+            .is_ok_and(|store| seal(&store))
     }
 
     /// Clone the bounded project/runtime set before shutdown database I/O.
@@ -3974,7 +4019,7 @@ impl ProjectAtlasMcpServer {
             .usage_runtime
             .lock()
             .ok()
-            .and_then(|mut runtime| runtime.instance_for_binding(binding))
+            .and_then(|mut runtime| runtime.instance_for_binding(binding, store))
         else {
             return;
         };
@@ -9610,40 +9655,75 @@ mod tests {
     }
 
     #[test]
-    fn mcp_telemetry_project_bindings_are_deduplicated_and_hard_bounded()
+    fn mcp_telemetry_rotates_inactive_bindings_without_dropping_later_worktrees()
     -> Result<(), Box<dyn std::error::Error>> {
-        let bindings = (0..=MCP_TELEMETRY_PROJECT_BINDING_LIMIT)
-            .map(|index| {
-                let identity_byte = u8::try_from(index + 1)?;
-                Ok(McpUsageProjectBinding {
-                    project_instance_id: ProjectInstanceId::from_bytes([identity_byte; 16])?,
-                    root: PathBuf::from(format!("project-{index}")),
-                    db_path: PathBuf::from(format!("project-{index}.db")),
-                    worktree_registration_id: None,
-                })
-            })
-            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
-        let mut runtime = McpUsageRuntime::default();
-
-        for binding in bindings.iter().take(MCP_TELEMETRY_PROJECT_BINDING_LIMIT) {
-            require(
-                runtime.instance_for_binding(binding.clone()).is_some(),
-                "a binding inside the telemetry project bound was rejected",
-            )?;
+        if telemetry_disabled() {
+            return Ok(());
         }
+        let temp = tempfile::tempdir()?;
+        let (state, control) = usage_test_project(temp.path(), "control")?;
+        let server =
+            ProjectAtlasMcpServer::new(state.db_path, None, "worktree-capacity".to_string(), false);
+        let common = temp.path().join("common.git");
+        let event = usage_from_estimates_with_context(
+            "worktree-capacity",
+            "atlas_overview",
+            None,
+            None,
+            100,
+            10,
+            TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
+            TOKEN_BASELINE_SELECTED_CANDIDATES,
+            TOKEN_CONFIDENCE_INFERRED,
+        );
+        for index in 0..=MCP_TELEMETRY_PROJECT_BINDING_LIMIT {
+            let registration = control.register_worktree(
+                &WorktreeAlias::parse(&format!("worktree-{index:03}"))?,
+                &common,
+                &common.join(format!("worktrees/{index:03}")),
+                &format!("{:064x}", index + 1),
+                &temp.path().join(format!("worktree-{index:03}")),
+                Some(ProjectInstanceId::from_bytes(
+                    [u8::try_from(index + 1)?; 16],
+                )?),
+                u64::try_from(index + 1)?,
+            )?;
+            server.record_usage_for_origin(
+                &server.control_state,
+                &control,
+                Some(registration.registration_id),
+                |usage_instance| {
+                    usage_instance.record_for_worktree(
+                        &control,
+                        registration.registration_id,
+                        &event,
+                    )
+                },
+            );
+        }
+
         require(
-            runtime.instance_for_binding(bindings[0].clone()).is_some(),
-            "an existing binding was rejected after the telemetry project bound was full",
+            control.repository_token_overview()?.calls == MCP_TELEMETRY_PROJECT_BINDING_LIMIT + 1,
+            "a worktree beyond the in-memory telemetry bound lost its accepted event",
         )?;
-        require(
-            runtime
-                .instance_for_binding(bindings[MCP_TELEMETRY_PROJECT_BINDING_LIMIT].clone())
-                .is_none(),
-            "a new binding exceeded the telemetry project bound",
-        )?;
+        let runtime = server
+            .usage_runtime
+            .lock()
+            .map_err(|_poisoned| io::Error::other("usage runtime lock poisoned"))?;
         require(
             runtime.entries.len() == MCP_TELEMETRY_PROJECT_BINDING_LIMIT,
             "telemetry project binding registry exceeded its hard bound",
+        )?;
+        drop(runtime);
+        require(
+            control.telemetry_retention_state()?.active_instance_rows
+                == MCP_TELEMETRY_PROJECT_BINDING_LIMIT,
+            "inactive binding rotation did not seal before replacement",
+        )?;
+        server.seal_usage_instances_for_projects();
+        require(
+            control.telemetry_retention_state()?.active_instance_rows == 0,
+            "rotated telemetry bindings were not sealed at MCP shutdown",
         )
     }
 
