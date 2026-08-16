@@ -465,13 +465,15 @@ try {
             ) -and
             $runtimeBoundaryMeasurementText.Contains('[AllowEmptyString()]')) `
         "Absent-pack control must build the runnable CLI core without the optional supervisor."
+    Require `
+        (-not $cliManifestText.Contains("pulldown-cmark")) `
+        "The Markdown parser dependency must remain outside the main CLI ownership boundary."
     foreach ($dependency in @(
         "blake3",
         "clap",
         "cssparser",
         "jsonc-parser",
         "notify",
-        "pulldown-cmark",
         "projectatlas-db",
         "projectatlas-fs",
         "projectatlas-service",
