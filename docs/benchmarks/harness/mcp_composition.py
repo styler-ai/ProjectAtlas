@@ -694,12 +694,13 @@ class McpClient:
         fixture: Path,
         env: dict[str, str],
         request_timeout_seconds: float = MCP_REQUEST_TIMEOUT_SECONDS,
+        required_version: str = "0.4.0",
     ) -> None:
         if request_timeout_seconds <= 0:
             raise ValueError("MCP request timeout must be positive")
         self.request_timeout_seconds = request_timeout_seconds
         self.process, self.job = spawn_owned_process(
-            [str(runtime), "--require-version", "0.4.0", "mcp"],
+            [str(runtime), "--require-version", required_version, "mcp"],
             cwd=fixture,
             env=env,
             stdin=subprocess.PIPE,

@@ -3,11 +3,13 @@
 mod content_classification;
 mod derived_snapshot;
 mod diagnostics;
+mod hydration;
 mod project_identity;
 mod repository_graph;
 mod schema;
 mod sqlite_profile;
 mod telemetry;
+mod worktree_registry;
 
 pub use content_classification::{
     FileContentClassification, FileContentClassificationPage,
@@ -24,6 +26,9 @@ pub use diagnostics::{
     DatabaseSettingsReport, SqliteCompileOptionsIdentity, SqliteRuntimeReport,
     database_settings_report,
 };
+pub use hydration::{
+    PreparedWorktreeHydrationCandidate, WorktreeHydrationActivation, WorktreeHydrationCandidate,
+};
 pub use project_identity::{ProjectRootTransition, ProjectRootTransitionResult};
 pub use repository_graph::{
     MAX_REPOSITORY_GRAPH_FRONTIER, RepositoryAffectedSourceFootprint, RepositoryCoverageQuery,
@@ -38,7 +43,12 @@ pub use repository_graph::{
 pub use sqlite_profile::validate_database_location;
 pub use telemetry::{
     PlannerStatisticsPolicy, PlannerStatisticsState, SpillCleanupState, TelemetryCheckpointState,
-    TelemetryRetentionPolicy, TelemetryRetentionState,
+    TelemetryRetentionPolicy, TelemetryRetentionState, WorktreeUsageSnapshot,
+    WorktreeUsageSyncState,
+};
+pub use worktree_registry::{
+    ActiveWorktreeRegistrationGuard, MAIN_WORKTREE_ALIAS, MAX_WORKTREE_ALIAS_BYTES, WorktreeAlias,
+    WorktreeRegistration, WorktreeRegistrationState,
 };
 
 use blake3::Hasher;
@@ -101,6 +111,8 @@ const SQLITE_PUBLICATION_ACQUIRE_TIMEOUT: Duration = Duration::ZERO;
 const SQLITE_TELEMETRY_BUSY_TIMEOUT: Duration = Duration::from_millis(25);
 /// Maximum paths admitted to one purpose-curation hydration statement.
 pub const MAX_PURPOSE_CURATION_BATCH_ROWS: usize = 200;
+/// `SQLite` schema version supported by this runtime.
+pub const CURRENT_SCHEMA_VERSION: i64 = schema::SCHEMA_VERSION;
 /// Maximum FTS candidates decoded for one exact-verification request.
 pub const MAX_FILE_TEXT_FTS_CANDIDATES: usize = 4_096;
 /// Path-indexed metadata cursor for one exact path-or-descendant fallback scope.
@@ -203,6 +215,104 @@ pub enum DbError {
     /// A telemetry identity violates its typed domain contract.
     #[error("telemetry contract error: {0}")]
     TelemetryContract(#[from] TelemetryContractError),
+    /// A requested worktree alias violates the public registry contract.
+    #[error("invalid worktree alias {alias:?}: {reason}")]
+    InvalidWorktreeAlias {
+        /// Rejected caller value.
+        alias: String,
+        /// Stable validation reason.
+        reason: &'static str,
+    },
+    /// No active worktree registration has the requested alias.
+    #[error("active worktree registration {alias:?} was not found")]
+    WorktreeRegistrationNotFound {
+        /// Requested normalized alias.
+        alias: String,
+    },
+    /// A registration identity is already owned by another active worktree.
+    #[error("worktree registration {field} conflicts with active value {value:?}")]
+    WorktreeRegistrationConflict {
+        /// Conflicting identity field.
+        field: &'static str,
+        /// Bounded caller-visible value.
+        value: String,
+    },
+    /// The bounded worktree-registration catalog is full.
+    #[error("worktree registration capacity {limit} is exhausted")]
+    WorktreeRegistrationCapacity {
+        /// Maximum active and retired registrations retained by one control atlas.
+        limit: usize,
+    },
+    /// A registration path is not an absolute caller-validated structural identity.
+    #[error("invalid worktree registration {field} path {path:?}")]
+    InvalidWorktreeRegistrationPath {
+        /// Path responsibility being validated.
+        field: &'static str,
+        /// Rejected normalized path.
+        path: String,
+    },
+    /// A persisted worktree registration row violates its typed contract.
+    #[error("invalid worktree registration row: {reason}")]
+    WorktreeRegistrationRow {
+        /// Stable validation failure.
+        reason: &'static str,
+    },
+    /// A worktree aggregate snapshot belongs to a different initialized atlas.
+    #[error("worktree telemetry project identity does not match registration {registration_id}")]
+    WorktreeTelemetryProjectMismatch {
+        /// Stable control-database registration identity.
+        registration_id: i64,
+    },
+    /// A bounded worktree telemetry snapshot resource ceiling was exceeded.
+    #[error("worktree telemetry snapshot {resource} exceeded limit {limit}: observed {observed}")]
+    WorktreeTelemetrySnapshotLimit {
+        /// Resource whose fixed bound was exceeded.
+        resource: &'static str,
+        /// Maximum admitted value.
+        limit: usize,
+        /// Observed rejected value.
+        observed: usize,
+    },
+    /// One telemetry runtime instance was reused across incompatible origins.
+    #[error("telemetry runtime instance has a conflicting worktree origin")]
+    WorktreeTelemetryOriginConflict,
+    /// A worktree hydration request violates its target-local safety contract.
+    #[error("invalid worktree hydration request: {reason}")]
+    WorktreeHydrationInvalid {
+        /// Stable rejection reason.
+        reason: &'static str,
+    },
+    /// A hydration destination already contains a database and cannot be replaced.
+    #[error("worktree hydration destination already exists: {path:?}")]
+    WorktreeHydrationDestinationExists {
+        /// Existing destination preserved without mutation.
+        path: PathBuf,
+    },
+    /// Worktree hydration could not create, clean, or activate its private candidate.
+    #[error("worktree hydration I/O failed for {path:?}: {source}")]
+    WorktreeHydrationIo {
+        /// Candidate or destination path involved in the failure.
+        path: PathBuf,
+        /// Underlying filesystem failure.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Online backup could not make progress within its fixed busy retry budget.
+    #[error("worktree hydration backup remained busy after {attempts} attempts")]
+    WorktreeHydrationBackupBusy {
+        /// Consecutive busy or locked backup steps.
+        attempts: usize,
+    },
+    /// The candidate has not completed a post-hydration source reconciliation.
+    #[error(
+        "worktree hydration candidate is not reconciled: baseline generation {baseline}, found {found}"
+    )]
+    WorktreeHydrationNotReconciled {
+        /// Generation published by baseline rebinding.
+        baseline: IndexGeneration,
+        /// Current complete generation, or zero when unavailable.
+        found: IndexGeneration,
+    },
     /// Persisted graph project identity differs from the selected identity.
     #[error(
         "repository graph project identity {found} does not match selected identity {expected}"
@@ -5767,6 +5877,42 @@ impl AtlasStore {
         event: &UsageEvent,
         seal_after_record: bool,
     ) -> DbResult<()> {
+        self.record_usage_for_instance_origin(instance_id, owner, None, event, seal_after_record)
+    }
+
+    /// Record one centrally routed event for a captured worktree registration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected control binding changes, the
+    /// registration or runtime origin conflicts, a retention bound rejects the
+    /// event, or `SQLite` cannot commit the complete telemetry transaction.
+    pub fn record_usage_for_worktree_instance(
+        &self,
+        instance_id: UsageInstanceId,
+        owner: UsageInstanceOwner,
+        registration_id: i64,
+        event: &UsageEvent,
+        seal_after_record: bool,
+    ) -> DbResult<()> {
+        self.record_usage_for_instance_origin(
+            instance_id,
+            owner,
+            Some(registration_id),
+            event,
+            seal_after_record,
+        )
+    }
+
+    /// Record one event with an optional captured worktree origin.
+    fn record_usage_for_instance_origin(
+        &self,
+        instance_id: UsageInstanceId,
+        owner: UsageInstanceOwner,
+        registration_id: Option<i64>,
+        event: &UsageEvent,
+        seal_after_record: bool,
+    ) -> DbResult<()> {
         let policy = TelemetryRetentionPolicy::default();
         let project_instance_id = self
             .validated_project_instance_id
@@ -5782,6 +5928,7 @@ impl AtlasStore {
                         project_instance_id,
                         instance_id,
                         owner,
+                        registration_id,
                         event,
                         policy,
                         seal_after_record,
@@ -5845,6 +5992,30 @@ impl AtlasStore {
         telemetry::token_overview(&self.connection, session_id)
     }
 
+    /// Build the control atlas's combined native-main and synchronized-worktree overview.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected binding or aggregate state is invalid,
+    /// arithmetic overflows, or `SQLite` cannot complete the bounded read.
+    pub fn repository_token_overview(&self) -> DbResult<TokenOverview> {
+        telemetry::repository_token_overview(&self.connection)
+    }
+
+    /// Build exact retained routed plus synchronized totals for one active alias.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the alias is absent, aggregate state is invalid,
+    /// arithmetic overflows, or `SQLite` cannot complete the bounded read.
+    pub fn registered_worktree_token_overview(
+        &self,
+        alias: &WorktreeAlias,
+    ) -> DbResult<TokenOverview> {
+        let registration = self.worktree_registration(alias)?;
+        telemetry::worktree_token_overview(&self.connection, registration.registration_id)
+    }
+
     /// Build token trend aggregates grouped by day, week, month, or year.
     ///
     /// # Errors
@@ -5856,6 +6027,31 @@ impl AtlasStore {
         window: TokenTrendWindow,
     ) -> DbResult<TokenTrendReport> {
         telemetry::token_trends(&self.connection, session_id, window)
+    }
+
+    /// Build combined native-main and synchronized-worktree token trends.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsupported window, invalid aggregate state,
+    /// arithmetic overflow, or a bounded `SQLite` read failure.
+    pub fn repository_token_trends(&self, window: TokenTrendWindow) -> DbResult<TokenTrendReport> {
+        telemetry::repository_token_trends(&self.connection, window)
+    }
+
+    /// Build exact retained routed plus synchronized trends for one active alias.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the alias is absent, the window or aggregate state
+    /// is invalid, arithmetic overflows, or `SQLite` cannot complete the read.
+    pub fn registered_worktree_token_trends(
+        &self,
+        alias: &WorktreeAlias,
+        window: TokenTrendWindow,
+    ) -> DbResult<TokenTrendReport> {
+        let registration = self.worktree_registration(alias)?;
+        telemetry::worktree_token_trends(&self.connection, registration.registration_id, window)
     }
 
     /// Mark a deterministic health finding as agent-resolved.
@@ -11472,7 +11668,11 @@ mod tests {
         )?;
         store.connection.execute_batch(
             "DROP TABLE file_content_classifications;
-             DROP INDEX idx_nodes_path_kind;",
+             DROP INDEX idx_nodes_path_kind;
+             DROP TABLE usage_instance_worktree_origins;
+             DROP TABLE worktree_usage_aggregates;
+             DROP TABLE worktree_registrations;
+             DROP TABLE usage_aggregate_revisions;",
         )?;
         crate::schema::recreate_disposable_graph_projection(&store.connection, false)?;
         crate::schema::recreate_pre_selector_symbol_storage_for_test(&store.connection)?;

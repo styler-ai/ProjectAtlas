@@ -10688,6 +10688,137 @@ mod tests {
     }
 
     #[test]
+    fn high_fanout_document_refresh_has_bounded_sql_and_changed_rows() -> Result<(), Box<dyn Error>>
+    {
+        const FANOUT: usize = 256;
+        const EXPECTED_STATEMENTS: usize = 2_081;
+        const EXPECTED_CHANGED_ROWS: u64 = 1_031;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("high-fanout-document");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("high-fanout fixture identity is missing"))?;
+        let document_path = RepositoryFilePath::new(Path::new("docs/high-fanout.md"))?;
+
+        let graph = |generation: IndexGeneration| -> DbResult<_> {
+            let document = GraphEntity::new(
+                project,
+                EntitySelector::File {
+                    path: document_path.clone(),
+                },
+                generation,
+            )?;
+            let mut entities = vec![document.clone()];
+            let mut relations = Vec::with_capacity(FANOUT);
+            let mut occurrences = Vec::with_capacity(FANOUT);
+            for (index, line) in (2_u32..).take(FANOUT).enumerate() {
+                let target = GraphEntity::new(
+                    project,
+                    EntitySelector::File {
+                        path: RepositoryFilePath::new(Path::new(&format!(
+                            "src/target_{index:04}.rs"
+                        )))?,
+                    },
+                    generation,
+                )?;
+                let relation = LogicalRelation::new(
+                    &document,
+                    GraphRelationKind::Extended(ExtendedRelationKind::Documents),
+                    RelationResolution::resolved(&target)?,
+                    ConfidenceClass::Exact,
+                    Completeness::Complete,
+                    generation,
+                )?;
+                occurrences.push(RelationOccurrence::new(
+                    &relation,
+                    document_path.clone(),
+                    SourceSpan::new(line, 0, line, 20)?,
+                    generation,
+                )?);
+                entities.push(target);
+                relations.push(relation);
+            }
+            Ok((entities, relations, occurrences))
+        };
+
+        let mut nodes = vec![
+            graph_node(".", NodeKind::Folder, None),
+            graph_node("docs", NodeKind::Folder, Some(".")),
+            graph_node("docs/high-fanout.md", NodeKind::File, Some("docs")),
+            graph_node("src", NodeKind::Folder, Some(".")),
+        ];
+        nodes.extend((0..FANOUT).map(|index| {
+            graph_node(
+                &format!("src/target_{index:04}.rs"),
+                NodeKind::File,
+                Some("src"),
+            )
+        }));
+        let (entities, relations, occurrences) = graph(IndexGeneration::new(1))?;
+        {
+            let mut publication = store.begin_index_publication("high-fanout-document")?;
+            publication.begin_scan_replacement()?;
+            for batch in nodes.chunks(128) {
+                publication.upsert_scan_node_batch(batch)?;
+            }
+            publication.finish_scan_replacement()?;
+            publication.replace_repository_graph(
+                project,
+                &entities,
+                &relations,
+                &occurrences,
+                &[],
+            )?;
+            publication.complete()?;
+        }
+
+        let (entities, relations, occurrences) = graph(IndexGeneration::new(2))?;
+        TRACED_STATEMENTS.with(|statements| statements.borrow_mut().clear());
+        store.connection.trace(Some(record_traced_statement));
+        let changed_before = store.connection.total_changes();
+        let refresh = (|| -> DbResult<()> {
+            let mut publication = store.begin_index_publication("high-fanout-document")?;
+            publication.replace_repository_graph_for_paths(
+                project,
+                &["docs/high-fanout.md".to_string()],
+                &entities,
+                &relations,
+                &occurrences,
+                &[],
+            )?;
+            publication.complete()
+        })();
+        store.connection.trace(None);
+        refresh?;
+        let changed_rows = store.connection.total_changes() - changed_before;
+        let statements =
+            TRACED_STATEMENTS.with(|statements| std::mem::take(&mut *statements.borrow_mut()));
+
+        require_eq(
+            &statements.len(),
+            &EXPECTED_STATEMENTS,
+            "high-fanout refresh statement count",
+        )?;
+        require_eq(
+            &changed_rows,
+            &EXPECTED_CHANGED_ROWS,
+            "high-fanout refresh changed rows",
+        )?;
+        let relation_count = store.connection.query_row(
+            "SELECT COUNT(*) FROM graph_relations
+              WHERE relation_scope = 'extended' AND relation_kind = 'documents'",
+            [],
+            |row| row.get::<_, usize>(0),
+        )?;
+        require_eq(&relation_count, &FANOUT, "retained document relation count")?;
+        Ok(())
+    }
+
+    #[test]
     fn typed_graph_round_trips_through_bounded_indexed_queries() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let project_root = temp.path().join("typed-graph");

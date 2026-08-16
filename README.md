@@ -68,7 +68,7 @@ projectatlas token --view tui
 
 Compare the live dashboard with the [versioned TUI design reference](docs/design/token-impact-tui-reference.png).
 
-The TUI is a local snapshot, not provider billing data. It combines the reconciled token estimate, observed and modeled navigation work, source attribution, calibration status, and—at wide terminal sizes—a bounded live map from resolved repository relations. Rerun the command to refresh it; use `--theme light` for light terminals or `--theme terminal` to preserve the terminal background.
+The TUI is a local snapshot, not provider billing data. In a control checkout with registered worktrees, it combines native-control and active/retired worktree aggregates without changing the dashboard layout; an exact worktree report remains local. It also shows the reconciled token estimate, observed and modeled navigation work, source attribution, calibration status, and—at wide terminal sizes—a bounded live map from resolved repository relations. Rerun the command to refresh it; use `--theme light` for light terminals or `--theme terminal` to preserve the terminal background.
 
 Read the [token methodology](docs/benchmarks/large-application-token-savings.md) or the [TUI and agent-integration guide](docs/agent-integration.md#token-reporting-and-human-tui) for the detailed accounting and theme controls.
 
@@ -84,6 +84,21 @@ Read the [token methodology](docs/benchmarks/large-application-token-savings.md)
 
 The complete [agent and MCP workflow](docs/agent-integration.md) owns tool routing, project isolation, generated host configuration, cancellation, and runtime repair. The [workflow guide](docs/workflow.md) covers human CLI use.
 
+## Work Across Existing Git Worktrees
+
+ProjectAtlas v0.4.5-rc1 lets an agent stay in one selected control checkout and address existing Git worktrees anywhere on the filesystem by short MCP alias:
+
+```text
+atlas_worktree_list(include_retired: false)
+atlas_worktree_add(worktree: "<returned-stable-selector>", alias: "issue-430")
+atlas_init(worktree: "issue-430")
+atlas_session_brief(worktree: "issue-430", query: "target behavior", compact: true)
+```
+
+A missing target atlas can reuse validated control-atlas data, then reconcile the exact branch and dirty files into its own writable database. `main` names the selected control atlas, not a branch or folder. It owns labelled read-only federation and repository-wide token totals; unregister retains accepted totals without deleting Git, source, `.projectatlas`, or SQLite state.
+
+Git remains the worktree lifecycle authority. See [Worktree atlas continuity](docs/worktree-lifecycle.md) for isolation, recovery, and diagrams; team-shared released atlases remain future [issue #456](https://github.com/styler-ai/ProjectAtlas/issues/456) work.
+
 ## What Agents Get
 
 | Need | ProjectAtlas surface |
@@ -93,8 +108,9 @@ The complete [agent and MCP workflow](docs/agent-integration.md) owns tool routi
 | Connections | Symbols and resolved graph relationships with bounded selectors |
 | Exact evidence | Current summaries, outlines, searches, and source slices |
 | Freshness | `.gitignore`-aware scan plus incremental watcher refresh |
+| Worktree continuity | Short-alias routing, safe target hydration, labelled read-only federation, and exact isolated databases |
 | Maintenance | Purpose queues, health findings, lint, and project-local configuration |
-| Human overview | The token-impact TUI and bounded Atlas map shown above |
+| Human overview | The existing token-impact TUI with repository-wide control totals and a bounded Atlas map |
 
 See the [CLI/MCP capability guide](docs/agent-integration.md#mcp-tool-sequence), [configuration reference](docs/configuration.md), and generated [language](docs/language-support.md) and [relation](docs/relation-support.md) support inventories.
 
@@ -130,6 +146,8 @@ Warm indexed CLI reads in the same audit stayed around 160–166 ms. Repository 
 
 Full benchmark campaigns are manual-only and run only when explicitly requested.
 
+The [v0.4.5-rc1 candidate](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5-rc1) and [release notes](docs/v0.4.5-rc1-release-notes.md) cover short-alias routing, hydration, isolated federation, aggregate tokens, compatibility, and cross-platform proof. RC1 is published as a prerelease and does not replace the preceding stable GitHub Latest release.
+
 ## Documentation
 
 | Topic | Guide |
@@ -137,6 +155,8 @@ Full benchmark campaigns are manual-only and run only when explicitly requested.
 | Install, agent workflow, MCP, host configs, runtime repair | [Agent integration](docs/agent-integration.md) |
 | Scan, ignore, purpose, and runtime settings | [Configuration](docs/configuration.md) |
 | Human CLI workflow | [Workflow](docs/workflow.md) |
+| Existing Git worktree registration, hydration, routing, federation, and token continuity | [Worktree atlas continuity](docs/worktree-lifecycle.md) |
+| v0.4.5-rc1 highlights, compatibility, boundaries, and proof policy | [RC1 release notes](docs/v0.4.5-rc1-release-notes.md) |
 | Formats and compact agent output | [Format](docs/format.md) |
 | Structural summaries | [Structural summaries](docs/structural-summaries.md) |
 | Language and relation coverage | [Language support](https://styler-ai.github.io/ProjectAtlas/language-support/) · [Relation support](https://styler-ai.github.io/ProjectAtlas/relation-support/) |

@@ -3909,6 +3909,7 @@ fn dependency_closure_limit(
 ) -> CliError {
     CliError::RefreshRequired(Box::new(IndexRefreshRequired {
         project_root: normalize_native_path_display(root),
+        worktree: None,
         status: IndexReadStatus::RefreshRequired,
         reason: IndexRefreshReason::DependencyClosureLimit,
         scope: IndexRefreshScope::Full,

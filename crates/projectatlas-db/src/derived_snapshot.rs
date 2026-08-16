@@ -284,44 +284,89 @@ impl AtlasStore {
             let backup = Backup::new(&self.connection, &mut capture)?;
             backup.run_to_completion(256, Duration::from_millis(1), None)?;
         }
-        let quick_check =
-            capture.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))?;
-        if quick_check != "ok" {
-            return invalid("private SQLite capture failed integrity check");
-        }
+        snapshot_from_stable_capture(&capture)
+    }
 
-        let publication = load_index_publication(&capture)?
-            .filter(|publication| {
-                publication.state == IndexPublicationState::Complete
-                    && publication.generation != IndexGeneration::ZERO
-            })
-            .ok_or(DbError::GraphPublicationUnavailable)?;
-        let capability_fingerprint = publication
-            .contract_fingerprint
-            .filter(|value| !value.is_empty())
-            .ok_or(DbError::DerivedSnapshotInvalid {
-                reason: "complete publication has no capability fingerprint",
-            })?;
-        let project =
-            load_project_identity(&capture)?.ok_or(DbError::ProjectInstanceIdentityMissing)?;
-        if load_graph_generation(&capture)? != Some(publication.generation) {
-            return invalid("private capture graph generation is not complete");
+    /// Build a portable graph snapshot from a private stable database copy.
+    pub(crate) fn export_derived_graph_snapshot_from_stable_copy(
+        &self,
+    ) -> DbResult<DerivedGraphSnapshot> {
+        snapshot_from_stable_capture(&self.connection)
+    }
+
+    /// Rebind and publish a source-exact baseline into a detached hydration candidate.
+    pub(crate) fn import_worktree_hydration_snapshot(
+        &mut self,
+        snapshot: &DerivedGraphSnapshot,
+    ) -> DbResult<DerivedGraphSnapshotImport> {
+        snapshot.validate()?;
+        if self.index_publication()?.is_some()
+            || load_graph_generation(&self.connection)? != Some(IndexGeneration::ZERO)
+        {
+            return invalid("worktree hydration destination is already published");
         }
-        let source_state_digest = source_state_digest(&capture)?;
-        let mut budget = SnapshotBudget::new();
-        let mut captured = repository_graph::capture_derived_graph(
-            &capture,
+        if source_state_digest(&self.connection)? != snapshot.metadata.source_state_digest {
+            return invalid("worktree hydration source state changed before rebinding");
+        }
+        let project = self
+            .project_instance_id()?
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        self.publish_snapshot(snapshot, project, IndexGeneration::ZERO, false, || Ok(()))
+    }
+
+    /// Publish a validated graph snapshot through the full or projection contract.
+    fn publish_snapshot(
+        &mut self,
+        snapshot: &DerivedGraphSnapshot,
+        project: ProjectInstanceId,
+        base_generation: IndexGeneration,
+        projection: bool,
+        before_publication: impl FnOnce() -> DbResult<()>,
+    ) -> DbResult<DerivedGraphSnapshotImport> {
+        let next_generation = base_generation
+            .checked_next()
+            .ok_or(DbError::PublicationGenerationOverflow)?;
+        let graph = snapshot.graph.bind(project, next_generation)?;
+        validate_snapshot_classification_coverage(&self.connection, &graph.file_classifications)?;
+        before_publication()?;
+        let mut guard = if projection {
+            self.begin_index_projection_refresh_from(
+                &snapshot.metadata.capability_fingerprint,
+                base_generation,
+            )?
+        } else {
+            self.begin_index_publication_from(
+                &snapshot.metadata.capability_fingerprint,
+                base_generation,
+            )?
+        };
+        if source_state_digest(&guard.connection)? != snapshot.metadata.source_state_digest {
+            return invalid("destination source state does not match the snapshot");
+        }
+        validate_snapshot_classification_coverage(&guard.connection, &graph.file_classifications)?;
+        for rows in graph
+            .file_classifications
+            .chunks(MAX_FILE_CONTENT_CLASSIFICATION_PATHS)
+        {
+            guard.upsert_file_content_classification_batch(rows)?;
+        }
+        guard.replace_repository_graph_with_resolution_keys(
             project,
-            publication.generation,
-            &mut budget,
+            &graph.entities,
+            &graph.relations,
+            &graph.occurrences,
+            &graph.coverage,
+            &graph.entity_exports,
+            &graph.relation_dependencies,
         )?;
-        captured.file_classifications = capture_file_classifications(&capture, &mut budget)?;
-        DerivedGraphSnapshot::from_capture(
-            captured,
-            publication.generation,
-            source_state_digest,
-            capability_fingerprint,
-        )
+        guard.set_document_unresolved_reasons(&graph.document_unresolved_reasons)?;
+        guard.complete()?;
+        Ok(DerivedGraphSnapshotImport {
+            previous_generation: base_generation,
+            published_generation: next_generation,
+            digest: snapshot.digest.clone(),
+            content: snapshot.content.clone(),
+        })
     }
 
     /// Validate and atomically publish a portable graph into this project.
@@ -368,45 +413,55 @@ impl AtlasStore {
         let project = self
             .project_instance_id()?
             .ok_or(DbError::ProjectInstanceIdentityMissing)?;
-        let next_generation = publication
-            .generation
-            .checked_next()
-            .ok_or(DbError::PublicationGenerationOverflow)?;
-        let graph = snapshot.graph.bind(project, next_generation)?;
-        validate_snapshot_classification_coverage(&self.connection, &graph.file_classifications)?;
-        before_publication()?;
-        let mut guard = self.begin_index_projection_refresh_from(
-            &snapshot.metadata.capability_fingerprint,
-            publication.generation,
-        )?;
-        if source_state_digest(&guard.connection)? != snapshot.metadata.source_state_digest {
-            return invalid("destination source state does not match the snapshot");
-        }
-        validate_snapshot_classification_coverage(&guard.connection, &graph.file_classifications)?;
-        for rows in graph
-            .file_classifications
-            .chunks(MAX_FILE_CONTENT_CLASSIFICATION_PATHS)
-        {
-            guard.upsert_file_content_classification_batch(rows)?;
-        }
-        guard.replace_repository_graph_with_resolution_keys(
+        self.publish_snapshot(
+            snapshot,
             project,
-            &graph.entities,
-            &graph.relations,
-            &graph.occurrences,
-            &graph.coverage,
-            &graph.entity_exports,
-            &graph.relation_dependencies,
-        )?;
-        guard.set_document_unresolved_reasons(&graph.document_unresolved_reasons)?;
-        guard.complete()?;
-        Ok(DerivedGraphSnapshotImport {
-            previous_generation: publication.generation,
-            published_generation: next_generation,
-            digest: snapshot.digest.clone(),
-            content: snapshot.content.clone(),
-        })
+            publication.generation,
+            true,
+            before_publication,
+        )
     }
+}
+
+/// Validate and decode one stable private `SQLite` capture.
+fn snapshot_from_stable_capture(capture: &Connection) -> DbResult<DerivedGraphSnapshot> {
+    require_private_capture_size(capture)?;
+    let quick_check = capture.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))?;
+    if quick_check != "ok" {
+        return invalid("private SQLite capture failed integrity check");
+    }
+
+    let publication = load_index_publication(capture)?
+        .filter(|publication| {
+            publication.state == IndexPublicationState::Complete
+                && publication.generation != IndexGeneration::ZERO
+        })
+        .ok_or(DbError::GraphPublicationUnavailable)?;
+    let capability_fingerprint = publication
+        .contract_fingerprint
+        .filter(|value| !value.is_empty())
+        .ok_or(DbError::DerivedSnapshotInvalid {
+            reason: "complete publication has no capability fingerprint",
+        })?;
+    let project = load_project_identity(capture)?.ok_or(DbError::ProjectInstanceIdentityMissing)?;
+    if load_graph_generation(capture)? != Some(publication.generation) {
+        return invalid("private capture graph generation is not complete");
+    }
+    let source_state_digest = source_state_digest(capture)?;
+    let mut budget = SnapshotBudget::new();
+    let mut captured = repository_graph::capture_derived_graph(
+        capture,
+        project,
+        publication.generation,
+        &mut budget,
+    )?;
+    captured.file_classifications = capture_file_classifications(capture, &mut budget)?;
+    DerivedGraphSnapshot::from_capture(
+        captured,
+        publication.generation,
+        source_state_digest,
+        capability_fingerprint,
+    )
 }
 
 impl DerivedGraphSnapshot {

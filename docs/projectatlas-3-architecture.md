@@ -883,7 +883,7 @@ are added.
 | `purpose review` preview/apply | `atlas_purpose_review` | Admit at most 200 rows, 4 KiB per path, 64 KiB per other string field, and 512 KiB of aggregate request strings before project/database selection; CLI file input is metadata-preflighted and `limit + 1` read under a 2 MiB ceiling. Then read each requested indexed node and preview or apply agent-reviewed purpose rows in the same database. | Preview uses a fresh read snapshot. Conditional apply keeps one SQLite transaction. Explicit correction remains item-oriented for semantic row outcomes, but every admitted row plus the exact supported JSON-with-newline and TOON report is preflighted before the first write, so a later oversized stored value or output cannot partially apply an earlier item. Purpose writes do not advance graph generation. | Retained report strings and each exact supported encoding are capped at 4 MiB. CLI and MCP propagate count, field, and aggregate admission failures without mutation; small JSON, TOON, UTF-8, preview, explicit-apply, and conditional-apply compatibility remains current. No telemetry. |
 | `health resolve` | `atlas_health_resolve` | Validate one currently active deterministic finding and write one authored `health_resolutions` row in the same database. | The resolution write is item-atomic and does not mutate derived graph rows or advance generation. | One item, no telemetry. Resolution lookup and later health pages remain subject to the bounded-read contract above. |
 | `root set` with bind/move/detach | `atlas_root_set` | Validate destination identity, mutate project/root identity in the same database, and regenerate project-local MCP config files. Detach assigns an independent identity to a copied destination database without merging authorities. | One explicit root-transition transaction owns identity changes and rollback. A copied worktree database becomes the authority only for that different selected source tree. | Bounded metadata operation, no telemetry, no cross-project graph write. |
-| `reset-index` | `atlas_reset_index` | Preview or explicitly delete the selected database and owned WAL/SHM/journal sidecars, plus optional generated MCP config. | File lifecycle, not a SQLite transaction. It removes the one selected project index; it never creates a replacement or second authority implicitly. | Explicit apply only, fixed owned target inventory, no telemetry. |
+| `reset-index` | `atlas_reset_index` | Preview or explicitly delete the selected database and owned WAL/SHM/journal sidecars, plus optional generated MCP config. | Applied reset for a registered alias holds the control catalog's active-registration `BEGIN IMMEDIATE`, reloads the exact row as still unbound, revalidates the current Git lifecycle, stages only the fixed owned inventory in a unique target-local recovery directory, and revalidates before deleting only staged paths. A changed lifecycle restores staged entries without clobbering replacement files or retains an explicit recovery directory if restoration cannot complete. Every production binder uses the same guard, so bind-wins refuses reset and reset-wins cannot be recreated or bound by a late caller. | Explicit apply only, five fixed target paths, no telemetry; staging uses same-filesystem no-clobber moves and never scans recursively. |
 
 #### Diagnostics, administration, and non-database routes
 
@@ -902,7 +902,7 @@ are added.
 | `folders`, `files`, `next`, `atlas_session_brief` | Batch graph roles and only the crisp relevant connections for returned candidates, while projecting current accepted purpose plus approval/provenance state from `purposes`; never rank graph popularity above exact path/name and strong purpose evidence. | Current; final release acceptance remains part of #308. |
 | `summary`, `outline`, `symbols` | Hydrate a bounded selected-file coverage digest and route deeper related-identity inspection through the detailed relation surface without per-symbol or whole-graph query loops. | Current; final release acceptance remains part of #308. |
 | `symbol relations` extended with direction/depth and closed architecture/impact/trace modes | Resolve stable selectors, use separately indexed source/target adjacency and dependency keys, page retained occurrences, batch endpoint plus nearest owning-purpose and exact-path symbol projection, and return generation, trust, resolution, coverage, exact spans, candidate-labeled findings, reusable next calls, cursors, work, and explicit truncation. No generic graph query language or separate jump tool is introduced. | Current; final release acceptance remains part of #308. |
-| Explicit federated relation/analysis request | Validate the complete ordered root list, open each root's independent existing project database read-only/query-only under aggregate root/connection/database/row/edge/intermediate/time/output/cancellation budgets, bind results to every captured generation, close every handle, and retain nothing. | Current. Federation is call-only composition, never product sharding or a shared database. |
+| Explicit federated relation/analysis request | Validate either the complete ordered registered-worktree alias list or the legacy ordered root list, resolve every participant before opening data, then open each independent existing project database read-only/query-only under aggregate participant/connection/database/row/edge/intermediate/time/output/cancellation budgets. Bind results and labels to every captured generation, close every handle, and retain nothing. | Current. Federation is call-only composition, never product sharding or a shared database. |
 
 These mappings are verified through production query, service, and adapter
 paths. In-memory SQLite is sufficient only for
@@ -916,22 +916,30 @@ claim.
 ### Explicit Federation Communication Sequence
 
 Federation is an additive request shape on the existing detailed relation and
-analysis routes. The first supplied root is the selected anchor project; later
-roots contribute only exact typed external-identity rendezvous evidence.
-Similar unresolved text never joins projects.
+analysis routes. The preferred MCP request supplies two to eight registered
+`worktrees`; the legacy CLI/compatibility request may supply exact `roots`, but
+the two forms are mutually exclusive. The first participant is the selected
+anchor project; later participants contribute only exact typed
+external-identity rendezvous evidence. Similar unresolved text never joins
+projects.
 
 ```mermaid
 sequenceDiagram
     actor Agent
     participant Adapter as Existing CLI or MCP relation adapter
+    participant Registry as Control worktree registry
     participant Runtime as Runtime freshness boundary
     participant FS as Exact source verifier
     participant DB as Independent project SQLite databases
     participant Service as Relation and analysis service
 
-    Agent->>Adapter: detailed or analysis request plus complete ordered roots
-    Adapter->>Runtime: selected root, roots, aggregate deadline, cancellation
-    loop Each explicit root, maximum eight
+    Agent->>Adapter: detailed or analysis request plus worktrees or roots
+    opt Registered worktree aliases
+        Adapter->>Registry: resolve complete ordered aliases
+        Registry-->>Adapter: exact labelled roots and registration identities
+    end
+    Adapter->>Runtime: captured participants, aggregate deadline, cancellation
+    loop Each explicit participant, maximum eight
         Runtime->>DB: open existing root-bound query-only snapshot
         Runtime->>FS: verify current source and policy without repair
         Runtime->>DB: verify project, publication, schema, and generation
@@ -950,14 +958,16 @@ sequenceDiagram
         Service-->>Adapter: stale result and no rows
     else All participants remain current
         Service-->>Adapter: project-qualified bounded report
-        Adapter-->>Agent: one fitted JSON or TOON envelope
+        Adapter-->>Agent: one labelled fitted JSON or TOON envelope
     end
 ```
 
 No participant list, relation, cache, telemetry, setting, active-project
 selection, or connection survives the call. A cursor binds the ordered project
-identities, root digests, complete graph generations, and authored-purpose
-revisions before wrapping the existing relation or analysis continuation.
+identities, worktree labels, root digests, complete graph generations, and
+authored-purpose revisions before wrapping the existing relation or analysis
+continuation. A stale or invalid participant returns an alias-labelled blocker
+and no partial rows; federation never repairs a sibling database.
 
 ### MCP Read Communication Sequence
 
@@ -1554,13 +1564,14 @@ The durable responsibilities and access paths are:
 
 | Responsibility | Principal physical state | Authority and primary access | Current/target state |
 | --- | --- | --- | --- |
-| Compatibility and publication | `metadata`, `project_identity` | Durable schema/root/contract identity; read-only preflight, migration, root transition, and active-generation lookup. | Schema 17 is current and retains one append-only migration owner. |
-| Local structure | `nodes`, `summaries`, `file_texts`, `file_text_fts`, `source_parse_metadata`, `file_content_classifications` | Rebuildable exact path/parent/kind, authoritative persisted text, a trigger-free rebuildable FTS5 trigram candidate projection keyed by `file_texts.rowid`, summary, hash, source-parse provenance, independently persisted fact-graph parser provenance, and one closed classification per current file. | Parser-provenance separation introduced in schema 13 remains authoritative in schema 17; parser/provider discovery uses `(source_parser, path)` and `(fact_parser, path)` indexes without duplicating provenance into coverage rows. Schema 17 adds indexed classification/path ownership. FTS mutation, revision publication, and backfill share the authoritative text transaction; revision drift disables acceleration and never replaces exact fallback semantics. |
-| Purpose | `purposes` joined to `nodes` plus an authored-purpose revision | Generated/suggested versus agent/approved lifecycle; accepted path-owned responsibility remains authored across derived changes and is projected by exact owning path or nearest applicable folder. | Schema 17 preserves accepted purposes without hash-driven invalidation and normalizes legacy stale rows; bounded projection and cursor revision binding are current. |
-| Compatible code facts | `symbols`, `symbol_relations` | Rebuildable file-level symbols, exact current-source selectors, and relation calls. | Schema 17 stores optional heading byte/column selectors with the existing symbol rows; facts remain co-published from the same typed extraction result as normalized graph facts. |
-| Normalized graph | `graph_entities`, `graph_relations`, `graph_relation_occurrences`, `graph_coverage`, `graph_resolution_keys`, `graph_entity_exports`, `graph_relation_dependencies`, `document_unresolved_reason` | Rebuildable stable identity, source/target adjacency, occurrences, coverage, dependency-key closure, and one typed reason only for unresolved canonical document relations. | Schema 17 keeps compact stable-key ordering, adds the constrained unresolved-document evidence, preserves project identity and authored state, and invalidates predecessor derived publication for a clean rebuild. Bounded hydration, traversal, cursors, and aggregate budgets are current. |
+| Compatibility and publication | `metadata`, `project_identity` | Durable schema/root/contract identity; read-only preflight, migration, root transition, and active-generation lookup. | Schema 18 is current and retains one append-only migration owner. |
+| Local structure | `nodes`, `summaries`, `file_texts`, `file_text_fts`, `source_parse_metadata`, `file_content_classifications` | Rebuildable exact path/parent/kind, authoritative persisted text, a trigger-free rebuildable FTS5 trigram candidate projection keyed by `file_texts.rowid`, summary, hash, source-parse provenance, independently persisted fact-graph parser provenance, and one closed classification per current file. | Parser-provenance separation introduced in schema 13 remains authoritative in schema 18; parser/provider discovery uses `(source_parser, path)` and `(fact_parser, path)` indexes without duplicating provenance into coverage rows. Schema 17 added indexed classification/path ownership. FTS mutation, revision publication, and backfill share the authoritative text transaction; revision drift disables acceleration and never replaces exact fallback semantics. |
+| Purpose | `purposes` joined to `nodes` plus an authored-purpose revision | Generated/suggested versus agent/approved lifecycle; accepted path-owned responsibility remains authored across derived changes and is projected by exact owning path or nearest applicable folder. | Schema 18 preserves the schema-17 accepted-purpose contract without hash-driven invalidation; bounded projection and cursor revision binding are current. |
+| Compatible code facts | `symbols`, `symbol_relations` | Rebuildable file-level symbols, exact current-source selectors, and relation calls. | Schema 17 introduced optional heading byte/column selectors; schema 18 preserves those rows and their co-publication with normalized graph facts. |
+| Normalized graph | `graph_entities`, `graph_relations`, `graph_relation_occurrences`, `graph_coverage`, `graph_resolution_keys`, `graph_entity_exports`, `graph_relation_dependencies`, `document_unresolved_reason` | Rebuildable stable identity, source/target adjacency, occurrences, coverage, dependency-key closure, and one typed reason only for unresolved canonical document relations. | Schema 18 preserves the schema-17 compact graph, constrained unresolved-document evidence, project identity, and authored state. Bounded hydration, traversal, cursors, and aggregate budgets are current. |
 | Health resolution | `health_resolutions` | Authored exact finding disposition. | Current and preserved across derived publication. |
-| Usage measurement | `usage_instances`, `usage_bucket_dimensions`, `usage_instance_baselines`, `usage_labels`, exact global/instance/day aggregate tables, bounded `usage_events`, retention state, and label/instance tombstones | Internal runtime lifecycle, active modeled-baseline witnesses, exact durable totals/trends, recent optional detail, and content-free maintenance truth. Source rows are project-scoped; indexes own label/state/age and raw instance/time access. | Introduced by schema 11 and preserved by schema 17; every detail dimension is bounded independently, supported totals remain exact after pruning, and retained/partial/expired/unavailable detail is reported without a second database. |
+| Usage measurement | `usage_instances`, `usage_bucket_dimensions`, `usage_instance_baselines`, `usage_labels`, exact global/instance/day aggregate tables, bounded `usage_events`, retention state, and label/instance tombstones | Internal runtime lifecycle, active modeled-baseline witnesses, exact durable totals/trends, recent optional detail, and content-free maintenance truth. Source rows are project-scoped; indexes own label/state/age and raw instance/time access. | Introduced by schema 11 and preserved by schema 18; every detail dimension is bounded independently, supported totals remain exact after pruning, and retained/partial/expired/unavailable detail is reported without a second database. |
+| Worktree coordination | `usage_aggregate_revisions`, `worktree_registrations`, `worktree_usage_aggregates`, `usage_instance_worktree_origins` | Bounded active/retired alias identity, exact routed origins, monotonic synchronized lifetime/daily aggregates, and repository-total attribution in the explicitly selected control atlas. | Schema 18 adds the indexed local-control model; each worktree graph remains private and independently writable. |
 | Future Memory Atlas | #314-owned tables | Separately capped authored context and independent context revision. | Conceptual boundary only; #308 does not prebuild its schema. |
 
 Legacy symbol rows and normalized graph rows are compatible co-published
@@ -1571,7 +1582,7 @@ The validated SQLite operating profile is explicit:
 
 | Concern | Current live state | Accepted target and owner |
 | --- | --- | --- |
-| Schema | Version 17 with append-only 8 through 17 migration ownership; 10 to 11 streams telemetry into normalized instances, dimensions, aggregates, raw detail, and retention state, 11 to 12 adds dependency-resolution keys and normalizes the accepted-purpose lifecycle, 12 to 13 records parser provenance and parser-failure state, 13 to 14 adds bounded coverage-discovery indexes, 14 to 15 adds the trigger-free FTS5 candidate projection, 15 to 16 compacts stable graph-key storage, and 16 to 17 adds constrained file classifications, exact symbol selectors, and typed unresolved-document evidence while preserving identity and authored state and invalidating predecessor derived publication for a clean rebuild. | Keep one append-only owner; migration rollback preserves the complete predecessor for deterministic retry, and incompatible future state is refused without mutation. |
+| Schema | Version 18 with append-only 8 through 18 migration ownership; 10 to 11 streams telemetry into normalized instances, dimensions, aggregates, raw detail, and retention state, 11 to 12 adds dependency-resolution keys and normalizes the accepted-purpose lifecycle, 12 to 13 records parser provenance and parser-failure state, 13 to 14 adds bounded coverage-discovery indexes, 14 to 15 adds the trigger-free FTS5 candidate projection, 15 to 16 compacts stable graph-key storage, 16 to 17 adds constrained file classifications, exact symbol selectors, and typed unresolved-document evidence, and 17 to 18 adds local worktree registrations, aggregate revisions, routed origins, and normalized synchronized aggregates without replacing existing graph, purpose, or telemetry authority. | Keep one append-only owner; migration rollback preserves the complete predecessor for deterministic retry, and incompatible future state is refused without mutation. |
 | Rust/SQLite build | Workspace `rusqlite` 0.32.1, `libsqlite3-sys` 0.30.1, bundled SQLite 3.46.0. | Settings reports the actual linked runtime version and a bounded compile-option identity; source package versions alone are not runtime proof. |
 | Filesystem | One project-local database on a filesystem with supported SQLite locking/shared-memory behavior; writable preflight returns typed supported, unsupported, or uncertain state before mutation. | Keep rejecting unsupported or uncertain live network filesystems without a silent durability downgrade. |
 | Writable connections | `foreign_keys=ON`, WAL, `synchronous=FULL`, five-second ordinary busy timeout with bounded WAL-establishment retry for concurrent validated openers; publication acquisition remains fail-fast and ancillary telemetry remains 25 ms. | The accepted mixed authored/derived durability profile is enforced and verified on production writable paths, including concurrent MCP requests with short authored and telemetry writes. |
@@ -1796,57 +1807,61 @@ summary, relation, and slice routes expose the smallest trustworthy next step.
 
 ```mermaid
 flowchart TB
-    subgraph Stable[Clean stable main]
-        Saved[Current saved source and documentation] --> Classify[Registry-owned content classification]
-        Saved --> Parse[Bounded Markdown headings and explicit local references]
-        Parse --> Resolve[Exact-root resolution with typed unresolved evidence]
-        Classify --> Publish[(Atomic complete schema-17 active-atlas generation)]
-        Resolve --> Publish
-        Publish -. "#430 release blocker" .-> Seal[Planned classified portable allowlist and complete-coverage verification]
-        Seal -.-> Seed[(Planned immutable content-addressed exact-tag seed)]
-    end
-
-    subgraph WorktreeA[Worktree A]
-        CopyA[Verified copy or safe reflink into staged private database] --> RebindA[Bind exact worktree root]
-        RebindA --> RefreshA[Two-sided branch and dirty-byte refresh]
-        SavedA[Current and dirty saved bytes] --> RefreshA
-        RefreshA --> DbA[(Activated private ignored writable database A)]
-        CallA[MCP call with project_path A] --> DbA
-        DbA --> NavigateA[Classified navigation and documents or documented_by]
-        NavigateA --> SliceA[Exact current source or heading slice]
-    end
-
-    subgraph WorktreeB[Worktree B]
-        CopyB[Verified copy or safe reflink into staged private database] --> RebindB[Bind exact worktree root]
-        RebindB --> RefreshB[Two-sided branch and dirty-byte refresh]
-        SavedB[Current and dirty saved bytes] --> RefreshB
-        RefreshB --> DbB[(Activated private ignored writable database B)]
-        CallB[MCP call with project_path B] --> DbB
-        DbB --> NavigateB[Classified navigation and documents or documented_by]
-        NavigateB --> SliceB[Exact current source or heading slice]
-    end
-
-    Seed -. "hydrate after #430" .-> CopyA
-    Seed -. "hydrate after #430" .-> CopyB
+    Agent[Agent in explicitly selected control checkout] -->|worktree alias per call| Resolver[Immutable MCP target resolver]
+    Git[Bounded reciprocal Git metadata] --> Revalidate[Selection plus prewrite root, lifecycle, and local atlas identity revalidation]
+    Revalidate --> Registry[Worktree list and lifecycle-bound registration]
+    Resolver -->|active-row CAS for a moved root| Registry
+    Registry --> Control
+    Resolver -->|read registry or select main| Control[(Control schema-18 atlas and registry)]
+    Resolver -->|issue alias| DbB[(Private ignored schema-18 target atlas)]
+    Control -->|safe reusable baseline| Candidate[Private hydration candidate]
+    Candidate --> Reconcile[Reconcile exact branch and dirty bytes]
+    Reconcile --> DbB
+    SavedA[Current and dirty control bytes] --> BuildA[Classify, parse, resolve, and refresh control]
+    BuildA --> Control
+    SavedB[Current and dirty target bytes] --> BuildB[Classify, parse, resolve, and refresh target]
+    BuildB --> DbB
+    Control --> NavigateA[Classified navigation in control]
+    DbB --> NavigateB[Classified navigation in B]
+    NavigateA --> SliceA[Exact source or heading slice in control]
+    NavigateB --> SliceB[Exact source or heading slice B]
+    Control -. never one shared writable graph .- DbB
 ```
 
-At the #440 head, the active schema-17 generation owns classifications,
+The selected worktree's active schema-18 generation owns classifications,
 headings, exact selectors, canonical document relations, completeness,
-provenance, and typed unresolved evidence. The dotted path is deliberately
-marked pending: #430 must extend the existing portable snapshot with stable
-heading facts and parser provenance, reject incomplete classified-document
-coverage, and prove the seed and hydration contracts before release.
+provenance, purposes, and typed unresolved evidence. A valid released database
+migrates in place. An absent registered target may hydrate reusable graph,
+source, summary, and purpose state from a compatible complete control atlas,
+but initialization clears control identity, telemetry, tasks, and transient
+runtime state before reconciling and publishing the target's exact bytes. An
+unsuitable source falls back visibly to ordinary local initialization.
 
-Once that blocker lands, the seed is a verified read-only input, never a shared
-writable database. Its portable subset carries stable classifications, heading
-identities, canonical document relations, completeness, provenance, and typed
-unresolved evidence; it does not carry local identity, telemetry, absolute
-paths, writable sidecars, or ephemeral exact-source byte/column selectors.
-Each checkout rebinds the staged copy and republishes stable-main differences
-plus current dirty saved bytes before activation, regenerating its own exact
-heading selectors. Requests then capture the exact root, private database, and
-generation. Classification, heading, relation, purpose, unresolved evidence,
-and next-call state therefore cannot leak between sibling worktrees.
+Each scan or watcher refresh republishes current saved bytes into that exact
+worktree's private atlas. Requests capture the exact root, database, and
+project identity, registration identity, alias, and generation for their
+lifetime. Classification, heading, relation, purpose, unresolved evidence, and
+next-call state therefore cannot leak between sibling worktrees, even when one
+MCP process interleaves short-alias calls. Explicit `worktrees` federation is
+bounded, read-only, fully labelled, and call-local; it never persists or merges
+sibling generations.
+
+Registration also captures an opaque identity for the current Git
+administrative-directory filesystem object. Add revalidates the selected root
+and lifecycle immediately before the catalog transaction. When the initial
+selection captured an existing local atlas, add also reopens it at that boundary
+and requires the same project identity before binding the alias or importing its
+snapshot. Moved-root resolution conditionally updates only the captured active
+registration, so a concurrent removal cannot reactivate its alias. Git-authorized
+checkout moves keep that object and its alias; deleting and recreating the
+directory at the same path fails closed so a replacement checkout cannot inherit
+the earlier alias.
+Unix requires device, inode, and creation time; Windows requires creation time
+plus retained-handle volume and 128-bit file identity. Filesystems without the
+complete non-reusable evidence reject alias registration and routing instead of
+falling back to a reusable path, timestamp, or inode. `core.worktree`, enabled
+`config.worktree` overrides, and unresolved config includes also prevent
+manager-parent inference.
 
 A modernization tag highlights source families where exact dependency and
 source-evidence navigation is especially valuable for high-risk transformation
@@ -2648,6 +2663,73 @@ ProjectAtlas 3 should estimate and persist token savings for every agent-facing
 funnel usage. The goal is not perfect accounting; the goal is a useful,
 consistent local metric that shows whether ProjectAtlas is reducing context
 load.
+
+For registered worktrees, the explicitly selected control atlas is the durable
+repository-total authority while each worktree remains the authority for its
+own raw local events and exact per-session detail. Alias-routed MCP events
+already cross the control process, so they commit once in control with a stable
+registration origin. Independent worktree CLI events remain local and export
+only bounded normalized lifetime/daily aggregates with a monotonic revision.
+
+```mermaid
+sequenceDiagram
+    actor Caller
+    participant Runtime as Control CLI or MCP runtime
+    participant Structure as Bounded Git structure
+    participant Target as Exact worktree atlas
+    participant Control as Control telemetry and registry
+    participant Report as Existing token report and TUI
+
+    Caller->>Runtime: Accepted read with worktree alias
+    Runtime->>Target: Verify and read exact target generation
+    Target-->>Runtime: Bounded result
+    Runtime->>Control: Commit one routed event under registration origin
+    Runtime-->>Caller: Result
+    Caller->>Target: Independent local CLI operation
+    Target->>Target: Commit raw local event
+    Caller->>Runtime: Token report with worktree main
+    Runtime->>Control: Capture control identity and registrations read-only
+    Runtime->>Structure: Resolve exact registered lifecycles
+    Structure-->>Runtime: Active roots or typed missing and invalid state
+    Runtime->>Control: BEGIN IMMEDIATE, require captured control identity, and reload active origin
+    Control-->>Runtime: Transaction-owned guard or typed failure before target read
+    Runtime->>Structure: Revalidate the registered lifecycle under the guard
+    Structure-->>Runtime: Same lifecycle or typed failure
+    Runtime->>Target: Read revision, dimensions, and rows in one SQLite snapshot
+    Target-->>Runtime: Newer revision or unchanged revision
+    Runtime->>Structure: Revalidate an unbound origin immediately before binding
+    Structure-->>Runtime: Same lifecycle or typed failure before catalog write
+    Runtime->>Control: Bind if needed and COMMIT the active-registration guard
+    Runtime->>Control: Atomically synchronize the origin snapshot
+    Control->>Report: Native main plus routed plus active and retired snapshots
+    Report-->>Caller: Combined existing report or unchanged TUI layout
+```
+
+Hydration excludes every telemetry event, usage instance, aggregate, tombstone,
+and synchronization row so copied main history cannot be counted again.
+Synchronization transfers no raw source event, per-session query, or path;
+repeated/stale revisions are no-ops, and a newer revision must preserve every
+accepted lifetime dimension plus every daily day/dimension still inside the
+trend-retention window. A recent backup rollback or invalid/overflowing snapshot
+preserves the last-valid aggregate. Before capacity admission, synchronization
+prunes expired synchronized daily rows across active and retired origins inside
+the same write transaction; any later failure rolls that reclamation back with
+the attempted update. The read-only catalog snapshot also captures the control
+project identity, which the later writer must retain. An origin without a bound
+project identity acquires the control active-registration guard, revalidates its
+exact Git administrative lifecycle before and after the local snapshot, and
+binds before releasing writer exclusion, so neither control-atlas replacement,
+worktree replacement, nor a concurrent applied reset can import an aggregate
+into stale authority. Snapshot synchronization then owns its existing separate
+atomic origin-replacement transaction.
+Removal uses the same control-first lock order, then holds one short local SQLite
+writer-exclusion scope while the transaction-owned guard atomically binds,
+synchronizes, and retires the origin. A local usage commit cannot land in an
+export-to-retirement gap. Any local open, identity, or export error is followed
+by a fresh lifecycle check; a replacement is retired without binding, importing,
+or modifying its atlas. Retired origins
+continue contributing to repository totals. An exact worktree report remains
+local and never presents sibling detail as its own.
 
 ### Read-Only Agent-Efficiency Benchmark
 

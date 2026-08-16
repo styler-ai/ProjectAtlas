@@ -142,6 +142,10 @@ jobs:
       - name: Tests
         run: cargo test --workspace --all-features --locked
 
+      - name: Holistic classified worktree agent E2E
+        timeout-minutes: 10
+        run: cargo test --locked -p projectatlas-cli --test e2e holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored --nocapture
+
       - name: Filtered custom harness compatibility
         run: cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled
 

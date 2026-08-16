@@ -90,6 +90,7 @@ const LINKED_CHECKOUTS_DIR_NAME: &str = "branches";
 const BARE_REPOSITORY_DIR_NAME: &str = "repository.git";
 const FEATURE_ONLY_RS_FILE_NAME: &str = "feature_only.rs";
 const ALTERNATE_ONLY_RS_FILE_NAME: &str = "alternate_only.rs";
+const REVIEW_ONLY_RS_FILE_NAME: &str = "review_only.rs";
 const OUTSIDE_CANARY_FILE_NAME: &str = "outside-canary.txt";
 const PARENT_CANARY_FILE_NAME: &str = "parent-canary.txt";
 const ATLAS_DIR_NAME: &str = ".projectatlas";
@@ -254,7 +255,7 @@ const SKILL_FILE_NAME: &str = "SKILL.md";
 const MCP_CONTRACT_EXECUTABLE_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE";
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 const MCP_CONTRACT_METADATA_CANARY: &str = "mcp_contract_metadata_canary";
-const MCP_TOOLS_SHA256: &str = "62281b4258cab70ecc72d1bb73353f5f8799e5dbf2486c9b7b7e1aec1932eed8";
+const MCP_TOOLS_SHA256: &str = "c364a97710088181c61ebf3ba57573fae5cf26b0eb21fe12f49d956a18ad6fcd";
 const AGENT_EFFICIENCY_BENCHMARK_PATH: &str =
     "../../docs/benchmarks/v0.4-agent-navigation-results.json";
 const AGENT_EFFICIENCY_PARTIAL_FILE: &str = "partial.json";
@@ -279,6 +280,7 @@ fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 enum McpSqliteEffect {
     None,
     Telemetry,
+    WorktreeRegistryAdvance,
     DerivedSourceAdvance,
     DerivedGraphAdvance,
     PurposeAdvance(&'static str),
@@ -2985,6 +2987,8 @@ fn assert_settings_reports_supported_predecessor_without_migration(
     label: &str,
     schema: &str,
 ) -> Result<(), Box<dyn Error>> {
+    let supported_schema = projectatlas_db::CURRENT_SCHEMA_VERSION;
+    let migration_steps = u64::try_from(supported_schema - 8)?;
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
@@ -3011,7 +3015,14 @@ fn assert_settings_reports_supported_predecessor_without_migration(
         .arg("token")
         .output()?;
     let token_error = String::from_utf8_lossy(&token.stderr);
-    let token_error_json: Value = serde_json::from_slice(&token.stderr)?;
+    let token_error_json: Value = serde_json::from_slice(&token.stderr).map_err(|source| {
+        io::Error::other(format!(
+            "token predecessor response was not JSON: status={:?} stdout={} stderr={} error={source}",
+            token.status.code(),
+            String::from_utf8_lossy(&token.stdout),
+            token_error,
+        ))
+    })?;
     if token.status.success()
         || token_error_json
             .pointer("/error/kind")
@@ -3024,11 +3035,11 @@ fn assert_settings_reports_supported_predecessor_without_migration(
         || token_error_json
             .pointer("/error/schema_migration_required/supported_schema_version")
             .and_then(Value::as_i64)
-            != Some(17)
+            != Some(supported_schema)
         || token_error_json
             .pointer("/error/schema_migration_required/migration_steps_remaining")
             .and_then(Value::as_u64)
-            != Some(9)
+            != Some(migration_steps)
         || !token_error.contains("projectatlas init")
         || !token_error.contains("atlas_init")
         || !token_error.contains("same global `--db`/`--config` selection")
@@ -3048,8 +3059,8 @@ fn assert_settings_reports_supported_predecessor_without_migration(
         let token_report = mcp.call_tool("atlas_token_report", &json!({}))?;
         if !token_report.contains("kind: schema_migration_required")
             || !token_report.contains("found_schema_version: 8")
-            || !token_report.contains("supported_schema_version: 17")
-            || !token_report.contains("migration_steps_remaining: 9")
+            || !token_report.contains(&format!("supported_schema_version: {supported_schema}"))
+            || !token_report.contains(&format!("migration_steps_remaining: {migration_steps}"))
             || !token_report.contains("projectatlas init")
             || !token_report.contains("atlas_init")
             || !token_report.contains("same global `--db`/`--config` selection")
@@ -3064,12 +3075,12 @@ fn assert_settings_reports_supported_predecessor_without_migration(
         }
         let mcp_settings = mcp.call_tool("atlas_settings", &json!({}))?;
         for required in [
-            "compatibility: supported_predecessor",
-            "migration_required: true",
-            "migration_supported: true",
-            "migration_steps_remaining: 9",
+            "compatibility: supported_predecessor".to_string(),
+            "migration_required: true".to_string(),
+            "migration_supported: true".to_string(),
+            format!("migration_steps_remaining: {migration_steps}"),
         ] {
-            if !mcp_settings.contains(required) {
+            if !mcp_settings.contains(&required) {
                 return Err(io::Error::other(format!(
                     "MCP settings omitted predecessor field {required:?} for {label}: {mcp_settings}"
                 ))
@@ -3104,7 +3115,7 @@ fn assert_settings_reports_supported_predecessor_without_migration(
         || schema
             .get("migration_steps_remaining")
             .and_then(Value::as_u64)
-            != Some(9)
+            != Some(migration_steps)
         || !settings.get("index").is_some_and(Value::is_null)
         || !settings.get("telemetry").is_some_and(Value::is_null)
     {
@@ -3184,7 +3195,9 @@ fn supported_predecessor_recovery_preserves_explicit_database_selection()
         || !cli_error_text.contains("same global `--db`/`--config` selection")
     {
         return Err(io::Error::other(format!(
-            "CLI recovery did not preserve the explicit database selection: {cli_error_text}"
+            "CLI recovery did not preserve the explicit database selection: status={:?} stdout={} stderr={cli_error_text}",
+            cli_error.status.code(),
+            String::from_utf8_lossy(&cli_error.stdout),
         ))
         .into());
     }
@@ -3237,7 +3250,7 @@ fn supported_predecessor_recovery_preserves_explicit_database_selection()
             [],
             |row| row.get(0),
         )?;
-        if stored_version != "17" {
+        if stored_version != projectatlas_db::CURRENT_SCHEMA_VERSION.to_string() {
             return Err(io::Error::other(format!(
                 "{adapter} recovery did not migrate the explicitly selected database"
             ))
@@ -3317,7 +3330,9 @@ fn assert_cli_migrates_released_schema_layout(
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    if stored_version != "17" || stored_root != project_root {
+    if stored_version != projectatlas_db::CURRENT_SCHEMA_VERSION.to_string()
+        || stored_root != project_root
+    {
         return Err(io::Error::other(format!(
             "{command} did not preserve and migrate {label}: version={stored_version}, root={stored_root}"
         ))
@@ -3488,14 +3503,22 @@ fn init_bootstrap_creates_db_scan_report_and_host_configs() -> Result<(), Box<dy
 }
 
 #[test]
-fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Result<(), Box<dyn Error>>
-{
+#[ignore = "dedicated hosted cross-platform holistic worktree proof"]
+fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp()
+-> Result<(), Box<dyn Error>> {
+    const CASE_RENAMED_RS_FILE_NAME: &str = "casetarget.rs";
+    const CASE_SOURCE_RS_FILE_NAME: &str = "CaseTarget.rs";
     const DEEP_DIR_NAME: &str = "deep";
     const ELIGIBLE_DIR_NAME: &str = "eligible";
     const IGNORED_TREE_DIR_NAME: &str = "ignored-tree";
+    const INDIRECT_SOURCE_DIR_NAME: &str = "indirect-source";
+    const LINKED_WORKTREE_DIR_NAME: &str = "feature checkout 工作树";
+    const REVIEW_WORKTREE_DIR_NAME: &str = "review checkout";
+    const UNICODE_RS_FILE_NAME: &str = "unicode_ß.rs";
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(MAIN_CHECKOUT_DIR_NAME);
     fs::create_dir(&repo)?;
+    let repo = repo.canonicalize()?;
     git_success(&repo, &["init"])?;
     git_success(&repo, &["config", "user.name", "ProjectAtlas Test"])?;
     git_success(
@@ -3508,11 +3531,16 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
             .join(DEEP_DIR_NAME)
             .join(ELIGIBLE_DIR_NAME),
     )?;
+    fs::create_dir(repo.join("docs"))?;
     fs::create_dir_all(repo.join(IGNORED_TREE_DIR_NAME).join(DEEP_DIR_NAME))?;
     fs::write(repo.join(".gitignore"), ".projectatlas/\n/ignored-tree/\n")?;
     fs::write(
         repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
         "pub fn main_checkout_marker() { main_checkout_leaf(); }\npub fn main_checkout_leaf() {}\n",
+    )?;
+    fs::write(
+        repo.join(GUIDE_MD_PATH),
+        "# Main Guide\n\nSee [the main source](../src/lib.rs).\n",
     )?;
     fs::write(
         repo.join(SRC_DIR_NAME)
@@ -3563,7 +3591,15 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
     }
     git_success(&repo, &["commit", "-m", "add submodule fixture"])?;
 
-    let linked = repo.join(LINKED_CHECKOUTS_DIR_NAME).join("feature");
+    let linked = temp
+        .path()
+        .join("unrelated feature root")
+        .join(LINKED_WORKTREE_DIR_NAME);
+    fs::create_dir_all(
+        linked
+            .parent()
+            .ok_or_else(|| io::Error::other("linked worktree has no parent"))?,
+    )?;
     let worktree_output = git_command_for_root(&repo)
         .args(["worktree", "add", "-b", "feature"])
         .arg(&linked)
@@ -3576,6 +3612,7 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
         ))
         .into());
     }
+    let linked = linked.canonicalize()?;
     fs::write(
         linked.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
         "pub fn linked_feature_marker() { linked_feature_leaf(); }\npub fn linked_feature_second() { linked_feature_leaf(); }\npub fn linked_feature_leaf() {}\n",
@@ -3586,21 +3623,62 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
     )?;
     git_success(&linked, &["add", "."])?;
     git_success(&linked, &["commit", "-m", "feature fixture"])?;
-    let linked_ignore = git_command_for_root(&repo)
-        .args(["check-ignore", "--quiet", "--no-index"])
-        .arg(format!(
-            "{LINKED_CHECKOUTS_DIR_NAME}/feature/{SRC_DIR_NAME}/{FEATURE_ONLY_RS_FILE_NAME}"
+    let review = temp
+        .path()
+        .join("another independent root")
+        .join(REVIEW_WORKTREE_DIR_NAME);
+    fs::create_dir_all(
+        review
+            .parent()
+            .ok_or_else(|| io::Error::other("review worktree has no parent"))?,
+    )?;
+    let review_worktree_output = git_command_for_root(&repo)
+        .args(["worktree", "add", "-b", "review"])
+        .arg(&review)
+        .output()?;
+    if !review_worktree_output.status.success() {
+        return Err(io::Error::other(format!(
+            "git review worktree add failed: {}{}",
+            String::from_utf8_lossy(&review_worktree_output.stdout),
+            String::from_utf8_lossy(&review_worktree_output.stderr)
         ))
-        .status()?;
-    if linked_ignore.success() {
-        return Err(io::Error::other(
-            "real-worktree fixture unexpectedly relied on a worktree-container ignore rule",
-        )
         .into());
     }
-    if linked_ignore.code() != Some(1) {
+    let review = review.canonicalize()?;
+    fs::write(
+        review.join(SRC_DIR_NAME).join(REVIEW_ONLY_RS_FILE_NAME),
+        "pub fn review_only_marker() {}\n",
+    )?;
+    fs::write(
+        review.join(GUIDE_MD_PATH),
+        "# Review Guide\n\nSee [the review source](../src/review_only.rs).\n",
+    )?;
+    git_success(&review, &["add", "."])?;
+    git_success(&review, &["commit", "-m", "review fixture"])?;
+
+    let manager = repo.join(GIT_DIR_NAME);
+    let status = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "root", "status"])
+        .arg(&manager)
+        .output()?;
+    if !status.status.success() {
         return Err(io::Error::other(format!(
-            "git check-ignore could not verify the unignored worktree fixture: {linked_ignore}"
+            "structural worktree status failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        ))
+        .into());
+    }
+    let status: Value = serde_json::from_slice(&status.stdout)?;
+    require_json_string(&status, &["source_selection"], "explicit_worktree_required")?;
+    require_json_bool(&status, &["worktree_required"], true)?;
+    require_json_array_len(&status, &["worktrees"], 3)?;
+    if status["worktrees"]
+        .as_array()
+        .is_none_or(|rows| rows.iter().any(|row| row["state"] != "active"))
+    {
+        return Err(io::Error::other(format!(
+            "structural status did not retain both active worktrees: {status}"
         ))
         .into());
     }
@@ -3679,52 +3757,217 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
         PurposeSource::Agent,
     )?;
     drop(main_store);
-    let main_before_linked_operations = mcp_database_snapshot(&main_db)?;
 
     let linked_atlas_dir = linked.join(ATLAS_DIR_NAME);
     fs::create_dir(&linked_atlas_dir)?;
     let linked_db = linked_atlas_dir.join("projectatlas.db");
     let connection = Connection::open(&linked_db)?;
     connection.execute_batch(include_str!(
-        "../../projectatlas-db/tests/fixtures/released-schema-8-evolved.sql"
+        "../../projectatlas-db/tests/fixtures/released-schema-16.sql"
     ))?;
     connection.execute(
-        "INSERT INTO metadata(key, value) VALUES ('schema_version', '8')",
-        [],
-    )?;
-    connection.execute(
-        "INSERT INTO metadata(key, value) VALUES ('project_root', ?1)",
+        "UPDATE metadata SET value = ?1 WHERE key = 'project_root'",
         [&linked_root_text],
+    )?;
+    connection.execute_batch(
+        "INSERT INTO nodes(id, path, kind, extension, language, exists_now)
+             VALUES(1, 'src/lib.rs', 'file', 'rs', 'rust', 1);
+         INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+             VALUES(1, 'Preserved v0.4.4 worktree purpose.', 'agent', 'approved', 'agent');",
     )?;
     drop(connection);
 
-    Command::cargo_bin("projectatlas")?
-        .current_dir(&linked)
-        .args(["--format", "json", "scan", "."])
-        .assert()
-        .success();
+    let control_mcp_config = mcp_config_for_harness(&repo, &main_db, "mcp-json")?;
+    let (control_mcp_command, _control_mcp_args) = mcp_command_and_args(&control_mcp_config)?;
+    let (mut worktree_session, _initialized) = McpContractSession::spawn_initialized(
+        &control_mcp_command,
+        &repo,
+        &main_db,
+        &[("PROJECTATLAS_NO_TELEMETRY", None)],
+    )?;
+    let inventory = worktree_session.call_tool(
+        "atlas_worktree_list",
+        &serde_json::json!({"include_retired": false}),
+    )?;
+    if !inventory.contains("control_alias: main")
+        || !inventory.contains(&projectatlas_core::normalize_native_path_display(
+            linked.canonicalize()?,
+        ))
+        || !inventory.contains(&projectatlas_core::normalize_native_path_display(
+            review.canonicalize()?,
+        ))
+        || inventory.matches("wt-").count() < 2
+    {
+        return Err(io::Error::other(format!(
+            "control worktree inventory omitted stable selectors or arbitrary roots: {inventory}"
+        ))
+        .into());
+    }
+    let selector_for = |root: &Path| -> Result<String, Box<dyn Error>> {
+        let root = projectatlas_core::normalize_native_path_display(root.canonicalize()?);
+        inventory
+            .lines()
+            .find(|line| line.contains(&root))
+            .and_then(|line| line.split(',').next())
+            .map(|selector| selector.trim().trim_matches('"').to_string())
+            .filter(|selector| selector.starts_with("wt-"))
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "worktree inventory omitted the stable selector for {root}"
+                ))
+                .into()
+            })
+    };
+    let feature_selector = selector_for(&linked)?;
+    let review_selector = selector_for(&review)?;
+    let ambiguous_registration = worktree_session.call_tool(
+        "atlas_worktree_add",
+        &serde_json::json!({"worktree": "checkout", "alias": "ambiguous"}),
+    )?;
+    if !(ambiguous_registration.contains("status: ambiguous")
+        || ambiguous_registration.contains("status: not_found"))
+        || ambiguous_registration.matches("wt-").count() < 2
+    {
+        return Err(io::Error::other(format!(
+            "ambiguous short selector guessed instead of returning bounded candidates: {ambiguous_registration}"
+        ))
+        .into());
+    }
+    for (selector, alias) in [(&feature_selector, "feature"), (&review_selector, "review")] {
+        let registration = worktree_session.call_tool(
+            "atlas_worktree_add",
+            &serde_json::json!({"worktree": selector, "alias": alias}),
+        )?;
+        if !registration.contains("status: registered")
+            || !(registration.contains(&format!("alias: {alias}"))
+                || registration.contains(&format!("alias: \"{alias}\"")))
+            || !registration.contains("git_unchanged: true")
+            || !registration.contains("files_unchanged: true")
+        {
+            return Err(io::Error::other(format!(
+                "{alias} registration changed lifecycle state or lost its short alias: {registration}"
+            ))
+            .into());
+        }
+    }
+    let feature_init =
+        worktree_session.call_tool("atlas_init", &serde_json::json!({"worktree": "feature"}))?;
+    if !feature_init.contains("status: existing") {
+        return Err(io::Error::other(format!(
+            "released feature atlas was not migrated and preserved through targeted init: {feature_init}"
+        ))
+        .into());
+    }
+    let review_init =
+        worktree_session.call_tool("atlas_init", &serde_json::json!({"worktree": "review"}))?;
+    if !review_init.contains("status: hydrated")
+        || !review_init.contains("source_project_instance_id:")
+        || !review_init.contains("target_project_instance_id:")
+        || !review_init.contains("reconciled_generation:")
+    {
+        return Err(io::Error::other(format!(
+            "absent review atlas did not safely hydrate and reconcile from control: {review_init}"
+        ))
+        .into());
+    }
+    let routing_conflict = worktree_session.call_tool(
+        "atlas_overview",
+        &serde_json::json!({
+            "worktree": "feature",
+            "project_path": projectatlas_core::normalize_native_path_display(repo.canonicalize()?)
+        }),
+    )?;
+    if !routing_conflict.contains("mutually exclusive") {
+        return Err(io::Error::other(format!(
+            "worktree and legacy project_path were not rejected before routing: {routing_conflict}"
+        ))
+        .into());
+    }
+
     let migrated: String = Connection::open(&linked_db)?.query_row(
         "SELECT value FROM metadata WHERE key = 'schema_version'",
         [],
         |row| row.get(0),
     )?;
-    if migrated != "17" {
+    let current_schema: String = Connection::open(&main_db)?.query_row(
+        "SELECT value FROM metadata WHERE key = 'schema_version'",
+        [],
+        |row| row.get(0),
+    )?;
+    if migrated != current_schema {
         return Err(io::Error::other(format!(
-            "linked first-write scan did not migrate its released schema: {migrated}"
+            "linked first-write scan did not migrate its released schema: expected {current_schema}, found {migrated}"
         ))
         .into());
     }
+    let review_db = review.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let review_store = AtlasStore::open_for_project(&review_db, &review)?;
+    let review_identity = review_store
+        .project_instance_id()?
+        .ok_or_else(|| io::Error::other("review project identity missing"))?;
+    if review_identity == main_identity
+        || review_store
+            .load_node_by_path("src/review_only.rs")?
+            .is_none()
+        || review_store
+            .load_node_by_path("src/feature_only.rs")?
+            .is_some()
+        || review_store
+            .load_node_by_path("src/lib.rs")?
+            .is_none_or(|node| {
+                node.purpose.purpose.as_deref() != Some("Main checkout Rust library.")
+            })
+    {
+        return Err(io::Error::other(
+            "hydrated review atlas lost reusable purpose state or crossed a sibling source boundary",
+        )
+        .into());
+    }
+    drop(review_store);
+    let hydration_source = AtlasStore::open_for_project(&main_db, &repo)?;
+    let hydration_control =
+        projectatlas_core::IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None);
+    if !matches!(
+        hydration_source.prepare_worktree_hydration(&review, &review_db, &hydration_control),
+        Err(projectatlas_db::DbError::WorktreeHydrationDestinationExists { .. })
+    ) {
+        return Err(io::Error::other(
+            "hydration fault path did not preserve an existing target database",
+        )
+        .into());
+    }
+    let canceled_database = review_db.with_file_name("canceled-hydration.db");
+    let canceled_control =
+        projectatlas_core::IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None);
+    canceled_control.cancel();
+    if !matches!(
+        hydration_source
+            .prepare_worktree_hydration(&review, &canceled_database, &canceled_control,),
+        Err(projectatlas_db::DbError::IndexWork(_))
+    ) || canceled_database.exists()
+    {
+        return Err(io::Error::other(
+            "canceled hydration published or lost its typed cancellation failure",
+        )
+        .into());
+    }
+    drop(hydration_source);
+    let main_before_linked_operations = mcp_database_snapshot(&main_db)?;
     let linked_after_first_write = AtlasStore::open_for_project(&linked_db, &linked)?;
-    if linked_after_first_write
-        .load_node_by_path("src/feature_only.rs")?
-        .is_none()
+    let migrated_library = linked_after_first_write
+        .load_node_by_path("src/lib.rs")?
+        .ok_or_else(|| io::Error::other("linked migration omitted its authored source"))?;
+    if migrated_library.purpose.purpose.as_deref() != Some("Preserved v0.4.4 worktree purpose.")
+        || linked_after_first_write
+            .load_node_by_path("src/feature_only.rs")?
+            .is_none()
         || linked_after_first_write
             .load_nodes()?
             .iter()
             .any(|node| node.node.path.contains("main-checkout"))
     {
         return Err(io::Error::other(
-            "linked first-write scan crossed its selected source boundary",
+            "linked v0.4.4 migration lost authored state or crossed its source boundary",
         )
         .into());
     }
@@ -3814,11 +4057,49 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
         return Err(io::Error::other("worktree-local purposes crossed databases").into());
     }
 
-    let mcp_config = mcp_config_for_harness(&linked, &linked_db, "mcp-json")?;
-    let mcp_cwd = json_string_at(&mcp_config, &["mcpServers", "projectatlas", "cwd"])?;
-    if Path::new(mcp_cwd).canonicalize()? != linked_root {
+    fs::write(
+        linked.join(SRC_DIR_NAME).join(CASE_SOURCE_RS_FILE_NAME),
+        "pub fn case_target_before_rename() {}\n",
+    )?;
+    fs::write(
+        linked.join(SRC_DIR_NAME).join(UNICODE_RS_FILE_NAME),
+        "pub fn unicode_path_marker() {}\n",
+    )?;
+    let external_source = temp.path().join("outside indirect source");
+    fs::create_dir(&external_source)?;
+    fs::write(
+        external_source.join("outside.rs"),
+        "pub fn outside_indirect_marker() {}\n",
+    )?;
+    let indirect_source = linked.join(INDIRECT_SOURCE_DIR_NAME);
+    create_test_directory_indirection(&external_source, &indirect_source)?;
+    run_watch_once(&linked, &linked_db)?;
+    let platform_paths = AtlasStore::open_for_project(&linked_db, &linked)?;
+    if platform_paths
+        .load_node_by_path(&format!("{SRC_DIR_NAME}/{CASE_SOURCE_RS_FILE_NAME}"))?
+        .is_none()
+        || platform_paths
+            .load_node_by_path(&format!("{SRC_DIR_NAME}/{UNICODE_RS_FILE_NAME}"))?
+            .is_none()
+        || platform_paths
+            .load_nodes()?
+            .iter()
+            .any(|node| node.node.path.starts_with(INDIRECT_SOURCE_DIR_NAME))
+    {
+        return Err(io::Error::other(
+            "linked refresh lost Unicode/current paths or followed a symlink/junction",
+        )
+        .into());
+    }
+    drop(platform_paths);
+    remove_test_directory_indirection(&indirect_source)?;
+    git_success(&linked, &["add", "-A"])?;
+    git_success(&linked, &["commit", "-m", "platform path fixture"])?;
+
+    let mcp_cwd = json_string_at(&control_mcp_config, &["mcpServers", "projectatlas", "cwd"])?;
+    if Path::new(mcp_cwd).canonicalize()? != repo.canonicalize()? {
         return Err(io::Error::other(format!(
-            "linked MCP config selected the wrong working directory: {mcp_cwd}"
+            "control MCP config selected the wrong working directory: {mcp_cwd}"
         ))
         .into());
     }
@@ -3830,6 +4111,12 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
     )?;
 
     git_success(&linked, &["switch", "-c", "alternate"])?;
+    let case_source = linked.join(SRC_DIR_NAME).join(CASE_SOURCE_RS_FILE_NAME);
+    let case_step = linked.join(SRC_DIR_NAME).join("case-rename-step.rs");
+    let case_renamed = linked.join(SRC_DIR_NAME).join(CASE_RENAMED_RS_FILE_NAME);
+    fs::rename(&case_source, &case_step)?;
+    fs::rename(&case_step, &case_renamed)?;
+    fs::write(&case_renamed, "pub fn case_target_after_rename() {}\n")?;
     fs::remove_file(linked.join(SRC_DIR_NAME).join(FEATURE_ONLY_RS_FILE_NAME))?;
     fs::write(
         linked.join(SRC_DIR_NAME).join(ALTERNATE_ONLY_RS_FILE_NAME),
@@ -3847,12 +4134,30 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
         || switched
             .load_node_by_path("src/alternate_only.rs")?
             .is_none()
+        || switched
+            .load_node_by_path(&format!("{SRC_DIR_NAME}/{CASE_SOURCE_RS_FILE_NAME}"))?
+            .is_some()
+        || switched
+            .load_node_by_path(&format!("{SRC_DIR_NAME}/{CASE_RENAMED_RS_FILE_NAME}"))?
+            .is_none()
+        || switched
+            .load_symbols(
+                Some(&format!("{SRC_DIR_NAME}/{CASE_RENAMED_RS_FILE_NAME}")),
+                None,
+                20,
+            )?
+            .iter()
+            .all(|symbol| symbol.name != "case_target_after_rename")
     {
-        return Err(io::Error::other("branch-switch refresh published mixed branch state").into());
+        return Err(io::Error::other(
+            "branch-switch refresh published mixed branch or case-rename state",
+        )
+        .into());
     }
     drop(switched);
 
     fs::remove_file(linked.join(SRC_DIR_NAME).join(ALTERNATE_ONLY_RS_FILE_NAME))?;
+    fs::remove_file(linked.join(SRC_DIR_NAME).join(UNICODE_RS_FILE_NAME))?;
     fs::write(
         linked.join(SRC_DIR_NAME).join("dirty_only.rs"),
         "pub fn dirty_only_marker() {}\n",
@@ -3861,7 +4166,20 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
         linked.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
         "pub fn linked_dirty_marker() {}\n",
     )?;
+    fs::write(
+        linked.join(GUIDE_MD_PATH),
+        "# Linked Guide\n\nSee [the dirty source](../src/dirty_only.rs).\n",
+    )?;
+    fs::write(
+        review.join(SRC_DIR_NAME).join(REVIEW_ONLY_RS_FILE_NAME),
+        "pub fn review_dirty_marker() {}\n",
+    )?;
+    fs::write(
+        review.join(GUIDE_MD_PATH),
+        "# Review Guide\n\nSee [the review source](../src/review_only.rs).\n",
+    )?;
     run_watch_once(&linked, &linked_db)?;
+    run_watch_once(&review, &review_db)?;
     let dirty = AtlasStore::open_for_project(&linked_db, &linked)?;
     let dirty_library = dirty
         .load_node_by_path("src/lib.rs")?
@@ -3870,6 +4188,9 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
         || dirty.repository_graph_generation()?.is_none()
         || dirty_library.purpose.purpose.as_deref() != Some("Feature worktree Rust library.")
         || dirty.load_node_by_path("src/alternate_only.rs")?.is_some()
+        || dirty
+            .load_node_by_path(&format!("{SRC_DIR_NAME}/{UNICODE_RS_FILE_NAME}"))?
+            .is_some()
         || dirty.load_node_by_path("src/dirty_only.rs")?.is_none()
         || dirty
             .load_symbols(Some("src/lib.rs"), None, 20)?
@@ -3881,36 +4202,335 @@ fn linked_worktrees_keep_local_atlases_across_scan_init_watch_and_mcp() -> Resul
     drop(dirty);
     let dirty_summary = json_summary_command(&linked, &linked_db, "src/lib.rs")?;
     require_json_contains(&dirty_summary, &["content_summary"], "linked_dirty_marker")?;
+    let review_summary = json_summary_command(&review, &review_db, "src/review_only.rs")?;
+    require_json_contains(&review_summary, &["content_summary"], "review_dirty_marker")?;
 
-    let (command, args) = mcp_command_and_args(&mcp_config)?;
-    let messages = vec![
-        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-worktree-e2e","version":"0.1.0"}}}).to_string(),
-        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}).to_string(),
-        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_search","arguments":{"project_path":linked_root_text,"pattern":"linked_dirty_marker"}}}).to_string(),
-        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_search","arguments":{"project_path":projectatlas_core::normalize_native_path_display(repo.canonicalize()?),"pattern":"main_checkout_marker"}}}).to_string(),
-        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_search","arguments":{"project_path":projectatlas_core::normalize_native_path_display(linked.canonicalize()?),"pattern":"linked_dirty_marker"}}}).to_string(),
-    ];
-    let stdout = run_mcp_stdio(&command, &linked, &args, &messages)?;
-    for id in [2, 4] {
-        let text = mcp_tool_text(&stdout, id)?;
+    let linked_local_calls_before = AtlasStore::open_for_project(&linked_db, &linked)?
+        .token_overview(None)?
+        .calls;
+    let review_local_calls_before = AtlasStore::open_for_project(&review_db, &review)?
+        .token_overview(None)?
+        .calls;
+    let linked_text = worktree_session.call_tool(
+        "atlas_search",
+        &serde_json::json!({"worktree": "feature", "pattern": "linked_dirty_marker"}),
+    )?;
+    let legacy_linked_text = worktree_session.call_tool(
+        "atlas_search",
+        &serde_json::json!({"project_path": linked_root_text, "pattern": "linked_dirty_marker"}),
+    )?;
+    for (route, text) in [("alias", linked_text), ("legacy path", legacy_linked_text)] {
         if !text.contains("linked_dirty_marker") || text.contains("main_checkout_marker") {
             return Err(io::Error::other(format!(
-                "interleaved linked-worktree MCP read {id} crossed databases: {text}"
+                "interleaved linked-worktree MCP {route} read crossed databases: {text}"
             ))
             .into());
         }
     }
-    let main_text = mcp_tool_text(&stdout, 3)?;
+    let main_text = worktree_session.call_tool(
+        "atlas_search",
+        &serde_json::json!({"worktree": "main", "pattern": "main_checkout_marker"}),
+    )?;
     if !main_text.contains("main_checkout_marker") || main_text.contains("linked_dirty_marker") {
         return Err(io::Error::other(format!(
             "interleaved main-worktree MCP read crossed databases: {main_text}"
         ))
         .into());
     }
+    let review_text = worktree_session.call_tool(
+        "atlas_search",
+        &serde_json::json!({"worktree": "review", "pattern": "review_dirty_marker"}),
+    )?;
+    if !review_text.contains("review_dirty_marker")
+        || review_text.contains("linked_dirty_marker")
+        || review_text.contains("main_checkout_marker")
+    {
+        return Err(io::Error::other(format!(
+            "interleaved review-worktree MCP read crossed databases: {review_text}"
+        ))
+        .into());
+    }
+    let background_scan: Value = toon_format::decode_default(&worktree_session.call_tool(
+        "atlas_scan",
+        &serde_json::json!({"worktree":"review","background":true,"max_workers":1}),
+    )?)?;
+    let background_task = json_string_at(&background_scan, &["task_start", "task_id"])?;
+    require_json_string(&background_scan, &["task_start", "operation"], "scan")?;
+    let main_during_background = worktree_session.call_tool(
+        "atlas_search",
+        &serde_json::json!({"worktree": "main", "pattern": "main_checkout_marker"}),
+    )?;
+    if !main_during_background.contains("main_checkout_marker")
+        || main_during_background.contains("review_dirty_marker")
+    {
+        return Err(io::Error::other(
+            "an interleaved main call inherited the registered background target",
+        )
+        .into());
+    }
+    let background_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status: Value = toon_format::decode_default(&worktree_session.call_tool(
+            "atlas_task_status",
+            &serde_json::json!({"task_id": background_task}),
+        )?)?;
+        match json_string_at(&status, &["task_status", "task", "state"])? {
+            "complete" => break,
+            "pending" | "running" if Instant::now() < background_deadline => {
+                thread::sleep(Duration::from_millis(25));
+            }
+            state => {
+                return Err(io::Error::other(format!(
+                    "registered background scan did not complete against its captured target: state={state} status={status}"
+                ))
+                .into());
+            }
+        }
+    }
+    let linked_documents = worktree_session.call_tool(
+        "atlas_symbol_relations",
+        &serde_json::json!({"worktree":"feature","view":"detailed","file":"docs/guide.md","symbol":"Linked Guide","symbol_kind":"heading","direction":"outbound","relation":"documents","content_selection":"documentation","limit":10}),
+    )?;
+    if !linked_documents.contains("documents")
+        || !linked_documents.contains("src/dirty_only.rs")
+        || linked_documents.contains("Main Guide")
+    {
+        return Err(io::Error::other(format!(
+            "linked classified navigation crossed worktree state: {linked_documents}"
+        ))
+        .into());
+    }
+    let main_documented_by = worktree_session.call_tool(
+        "atlas_symbol_relations",
+        &serde_json::json!({"worktree":"main","view":"detailed","file":"src/lib.rs","direction":"inbound","relation":"documents","content_selection":"source","limit":10}),
+    )?;
+    if !main_documented_by.contains("documented_by")
+        || !main_documented_by.contains("Main Guide")
+        || main_documented_by.contains("Linked Guide")
+    {
+        return Err(io::Error::other(format!(
+            "main classified navigation crossed worktree state: {main_documented_by}"
+        ))
+        .into());
+    }
+    let review_documents = worktree_session.call_tool(
+        "atlas_symbol_relations",
+        &serde_json::json!({"worktree":"review","view":"detailed","file":"docs/guide.md","symbol":"Review Guide","symbol_kind":"heading","direction":"outbound","relation":"documents","content_selection":"documentation","limit":10}),
+    )?;
+    if !review_documents.contains("documents")
+        || !review_documents.contains("src/review_only.rs")
+        || review_documents.contains("Linked Guide")
+    {
+        return Err(io::Error::other(format!(
+            "review classified navigation crossed worktree state: {review_documents}"
+        ))
+        .into());
+    }
+    let federated = worktree_session.call_tool(
+        "atlas_symbol_relations",
+        &serde_json::json!({"view":"detailed","file":"src/lib.rs","worktrees":["main","feature","review"],"limit":10}),
+    )?;
+    if !federated.contains("primary_worktree: main")
+        || !federated.contains("participants[3]{order,worktree")
+        || !federated.contains("0,main,")
+        || !federated.contains("1,feature,")
+        || !federated.contains("2,review,")
+    {
+        return Err(io::Error::other(format!(
+            "three-worktree federation omitted ordered labels or control authority: {federated}"
+        ))
+        .into());
+    }
+    let control_text = worktree_session.call_tool(
+        "atlas_root",
+        &serde_json::json!({"control_root": projectatlas_core::normalize_native_path_display(&manager)}),
+    )?;
+    if !control_text.contains("explicit_worktree_required")
+        || !control_text.contains(&projectatlas_core::normalize_native_path_display(
+            repo.canonicalize()?,
+        ))
+        || !control_text.contains(&projectatlas_core::normalize_native_path_display(
+            linked.canonicalize()?,
+        ))
+    {
+        return Err(io::Error::other(format!(
+            "one MCP process lost its bounded structural worktree status: {control_text}"
+        ))
+        .into());
+    }
+    let main_tokens = worktree_session.call_tool(
+        "atlas_token_report",
+        &serde_json::json!({"worktree":"main","include_chart":false}),
+    )?;
+    let feature_tokens = worktree_session.call_tool(
+        "atlas_token_report",
+        &serde_json::json!({"worktree":"feature","include_chart":false}),
+    )?;
+    let review_tokens = worktree_session.call_tool(
+        "atlas_token_report",
+        &serde_json::json!({"worktree":"review","include_chart":false}),
+    )?;
+    if !main_tokens.contains("worktree: main")
+        || !main_tokens.contains("calls:")
+        || !feature_tokens.contains("worktree: feature")
+        || !review_tokens.contains("worktree: review")
+    {
+        return Err(io::Error::other(format!(
+            "aggregate or exact token scopes were not labelled: main={main_tokens} feature={feature_tokens} review={review_tokens}"
+        ))
+        .into());
+    }
+    let linked_local_calls_after = AtlasStore::open_for_project(&linked_db, &linked)?
+        .token_overview(None)?
+        .calls;
+    let review_local_calls_after = AtlasStore::open_for_project(&review_db, &review)?
+        .token_overview(None)?
+        .calls;
+    if linked_local_calls_after
+        != linked_local_calls_before
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("linked local call counter overflowed"))?
+        || review_local_calls_after != review_local_calls_before
+    {
+        return Err(io::Error::other(
+            "alias-routed MCP telemetry bled locally or legacy project_path telemetry was lost",
+        )
+        .into());
+    }
+    let control_after_aggregate = AtlasStore::open_for_project(&main_db, &repo)?;
+    let aggregate_calls_before_remove = control_after_aggregate.repository_token_overview()?.calls;
+    if aggregate_calls_before_remove <= linked_local_calls_after + review_local_calls_after {
+        return Err(io::Error::other(
+            "control token aggregate omitted native or alias-routed MCP usage",
+        )
+        .into());
+    }
+    drop(control_after_aggregate);
+    let aggregate_tui = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("COLUMNS", "200")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["token", "--view", "tui"])
+        .output()?;
+    let aggregate_dashboard = String::from_utf8(aggregate_tui.stdout)?;
+    let aggregate_dashboard_text = aggregate_dashboard
+        .split('\u{1b}')
+        .map(|segment| segment.split_once('m').map_or(segment, |(_, text)| text))
+        .collect::<String>();
+    let aggregate_calls_after_tui = AtlasStore::open_for_project(&main_db, &repo)?
+        .repository_token_overview()?
+        .calls;
+    if !aggregate_tui.status.success()
+        || !aggregate_dashboard_text.contains(&format!("Lookups: {aggregate_calls_after_tui}"))
+        || aggregate_calls_after_tui < aggregate_calls_before_remove
+    {
+        return Err(io::Error::other(format!(
+            "unchanged control token TUI omitted repository-wide worktree totals: {aggregate_dashboard}"
+        ))
+        .into());
+    }
+    let aggregate_calls_before_remove = aggregate_calls_after_tui;
+
+    let git_before_remove = git_command_for_root(&repo)
+        .args(["worktree", "list", "--porcelain"])
+        .output()?;
+    if !git_before_remove.status.success() {
+        return Err(io::Error::other("git worktree list failed before unregister").into());
+    }
+    let linked_source_before_remove = fs::read(linked.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME))?;
+    let review_source_before_remove =
+        fs::read(review.join(SRC_DIR_NAME).join(REVIEW_ONLY_RS_FILE_NAME))?;
+    for alias in ["feature", "review"] {
+        let removed = worktree_session.call_tool(
+            "atlas_worktree_remove",
+            &serde_json::json!({"worktree": alias}),
+        )?;
+        if !removed.contains("status: retired")
+            || !removed.contains("git_unchanged: true")
+            || !removed.contains("files_unchanged: true")
+        {
+            return Err(io::Error::other(format!(
+                "{alias} unregister changed Git/files or lost retirement state: {removed}"
+            ))
+            .into());
+        }
+    }
+    let retired_inventory = worktree_session.call_tool(
+        "atlas_worktree_list",
+        &serde_json::json!({"include_retired": true}),
+    )?;
+    if !retired_inventory.contains("feature")
+        || !retired_inventory.contains("review")
+        || !retired_inventory.contains("retired[2]{")
+    {
+        return Err(io::Error::other(format!(
+            "retired registrations were not retained and labelled: {retired_inventory}"
+        ))
+        .into());
+    }
+    let retired_read = worktree_session.call_tool(
+        "atlas_overview",
+        &serde_json::json!({"worktree": "feature"}),
+    )?;
+    if !retired_read.contains("active worktree registration")
+        || !retired_read.contains("was not found")
+    {
+        return Err(
+            io::Error::other(format!("retired alias remained routable: {retired_read}")).into(),
+        );
+    }
+    let retained_tokens = worktree_session.call_tool(
+        "atlas_token_report",
+        &serde_json::json!({"worktree":"main","include_chart":false}),
+    )?;
+    if !retained_tokens.contains("worktree: main") {
+        return Err(io::Error::other(format!(
+            "control token report failed after unregister: {retained_tokens}"
+        ))
+        .into());
+    }
+    worktree_session.shutdown()?;
+
+    let git_after_remove = git_command_for_root(&repo)
+        .args(["worktree", "list", "--porcelain"])
+        .output()?;
+    if !git_after_remove.status.success()
+        || git_after_remove.stdout != git_before_remove.stdout
+        || fs::read(linked.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME))?
+            != linked_source_before_remove
+        || fs::read(review.join(SRC_DIR_NAME).join(REVIEW_ONLY_RS_FILE_NAME))?
+            != review_source_before_remove
+        || !linked_db.is_file()
+        || !review_db.is_file()
+    {
+        return Err(io::Error::other(
+            "ProjectAtlas unregister changed Git, source, or target atlas lifecycle state",
+        )
+        .into());
+    }
+    let control_after_remove = AtlasStore::open_for_project(&main_db, &repo)?;
+    if control_after_remove.repository_token_overview()?.calls < aggregate_calls_before_remove
+        || control_after_remove
+            .worktree_registrations(true)?
+            .iter()
+            .filter(|registration| {
+                matches!(
+                    registration.state,
+                    projectatlas_db::WorktreeRegistrationState::Retired
+                )
+            })
+            .count()
+            < 2
+    {
+        return Err(io::Error::other(
+            "unregister discarded retained aggregate telemetry or registration identity",
+        )
+        .into());
+    }
+    drop(control_after_remove);
     let main_after_linked_operations = mcp_database_snapshot(&main_db)?;
-    if main_after_linked_operations.authoritative != main_before_linked_operations.authoritative
-        || main_after_linked_operations.authored_purposes
-            != main_before_linked_operations.authored_purposes
+    if main_after_linked_operations.authored_purposes
+        != main_before_linked_operations.authored_purposes
         || main_after_linked_operations.project_instance_id
             != main_before_linked_operations.project_instance_id
         || main_after_linked_operations.generation != main_before_linked_operations.generation
@@ -4026,6 +4646,21 @@ fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<()
         ))
         .into());
     }
+    let bare_dot_git_parent = temp.path().join("bare-dot-git-parent");
+    fs::create_dir(&bare_dot_git_parent)?;
+    let bare_dot_git = bare_dot_git_parent.join(GIT_DIR_NAME);
+    let output = StdCommand::new("git")
+        .args(["init", "--bare"])
+        .arg(&bare_dot_git)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "git init --bare .git failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
     git_success(&bare, &["config", "--unset", "core.bare"])?;
 
     let manager = temp.path().join("repository-manager");
@@ -4034,19 +4669,51 @@ fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<()
     let common_git_dir = manager.join(".git");
     let common_dir_init = Command::cargo_bin("projectatlas")?
         .current_dir(&common_git_dir)
-        .args(["--format", "json", "init"])
+        .args(["--format", "json", "init", "--no-scan"])
         .output()?;
-    if common_dir_init.status.success() {
-        return Err(
-            io::Error::other("main checkout common Git directory initialized as source").into(),
-        );
+    if !common_dir_init.status.success() {
+        return Err(io::Error::other(format!(
+            "single-worktree common manager did not select its source: {}",
+            String::from_utf8_lossy(&common_dir_init.stderr)
+        ))
+        .into());
     }
-    let common_dir_error: Value = serde_json::from_slice(&common_dir_init.stderr)?;
-    require_json_string(&common_dir_error, &["error", "kind"], "worktree_required")?;
     if common_git_dir.join(ATLAS_DIR_NAME).exists() {
-        return Err(
-            io::Error::other("common Git directory refusal created ProjectAtlas state").into(),
-        );
+        return Err(io::Error::other(
+            "common-manager selection created ProjectAtlas state under .git",
+        )
+        .into());
+    }
+    if !manager
+        .join(ATLAS_DIR_NAME)
+        .join("projectatlas.db")
+        .is_file()
+    {
+        return Err(io::Error::other(
+            "common-manager selection did not initialize the selected worktree atlas",
+        )
+        .into());
+    }
+    let manager_db = manager.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let manager_mcp_config = mcp_config_for_harness(&manager, &manager_db, "mcp-json")?;
+    let (manager_mcp_command, manager_mcp_args) = mcp_command_and_args(&manager_mcp_config)?;
+    let messages = vec![
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-bare-dot-git-e2e","version":"0.1.0"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_root","arguments":{"control_root":projectatlas_core::normalize_native_path_display(bare_dot_git.canonicalize()?)}}}).to_string(),
+    ];
+    let stdout = run_mcp_stdio(&manager_mcp_command, &manager, &manager_mcp_args, &messages)?;
+    let bare_dot_git_status = mcp_tool_text(&stdout, 2)?;
+    if !bare_dot_git_status.contains("worktree_required: true")
+        || !bare_dot_git_status.contains("source_selection: worktree_unavailable")
+    {
+        return Err(io::Error::other(format!(
+            "MCP bare .git status invented a source worktree: {bare_dot_git_status}"
+        ))
+        .into());
+    }
+    if bare_dot_git_parent.join(ATLAS_DIR_NAME).exists() {
+        return Err(io::Error::other("MCP bare .git status created parent atlas state").into());
     }
     let common_atlas_dir = common_git_dir.join(ATLAS_DIR_NAME);
     fs::create_dir(&common_atlas_dir)?;
@@ -4067,15 +4734,13 @@ fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<()
         .current_dir(&common_git_dir)
         .args(["--format", "json", "settings"])
         .output()?;
-    if common_dir_settings.status.success() {
-        return Err(io::Error::other("common Git directory settings read succeeded").into());
+    if !common_dir_settings.status.success() {
+        return Err(io::Error::other(format!(
+            "common-manager settings did not use the selected worktree atlas: {}",
+            String::from_utf8_lossy(&common_dir_settings.stderr)
+        ))
+        .into());
     }
-    let common_settings_error: Value = serde_json::from_slice(&common_dir_settings.stderr)?;
-    require_json_string(
-        &common_settings_error,
-        &["error", "kind"],
-        "worktree_required",
-    )?;
     if fs::read(&common_database)? != common_database_before {
         return Err(io::Error::other("common Git directory refusal changed database bytes").into());
     }
@@ -4109,7 +4774,12 @@ fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<()
         .into());
     }
 
-    for selected in [&bare, &manager, &separate_control] {
+    for selected in [
+        &bare,
+        &separate_control,
+        &bare_dot_git,
+        &bare_dot_git_parent,
+    ] {
         let init = Command::cargo_bin("projectatlas")?
             .current_dir(selected)
             .args(["--format", "json", "init"])
@@ -4188,6 +4858,56 @@ fn git_control_roots_return_typed_worktree_guidance_without_state() -> Result<()
 }
 
 #[test]
+fn explicit_config_rebases_implicit_database_from_descendant_and_git_manager()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    git_success(&repo, &["init"])?;
+    let config = repo.join(ATLAS_DIR_NAME).join("custom-config.toml");
+    let init = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--config")
+        .arg(&config)
+        .args(["--format", "json", "init", "--no-scan"])
+        .output()?;
+    if !init.status.success() {
+        return Err(io::Error::other(format!(
+            "fixture init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ))
+        .into());
+    }
+
+    let nested = repo.join(SRC_DIR_NAME).join("nested");
+    fs::create_dir_all(&nested)?;
+    for selected in [&nested, &repo.join(GIT_DIR_NAME)] {
+        let token = Command::cargo_bin("projectatlas")?
+            .current_dir(selected)
+            .arg("--config")
+            .arg(&config)
+            .args(["--format", "json", "token"])
+            .output()?;
+        if !token.status.success() {
+            return Err(io::Error::other(format!(
+                "config-selected token report did not use the project database from '{}': {}",
+                selected.display(),
+                String::from_utf8_lossy(&token.stderr)
+            ))
+            .into());
+        }
+        if selected.join(ATLAS_DIR_NAME).exists() {
+            return Err(io::Error::other(format!(
+                "config-selected token report created invocation-local state under '{}'",
+                selected.display()
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn implicit_bare_root_refuses_before_opening_a_future_schema_database() -> Result<(), Box<dyn Error>>
 {
     let temp = tempfile::tempdir()?;
@@ -4208,15 +4928,20 @@ fn implicit_bare_root_refuses_before_opening_a_future_schema_database() -> Resul
     let atlas_dir = bare.join(ATLAS_DIR_NAME);
     fs::create_dir(&atlas_dir)?;
     let database = atlas_dir.join("projectatlas.db");
+    let supported_schema_version = usize::try_from(projectatlas_db::CURRENT_SCHEMA_VERSION)?;
+    let future_schema_version = supported_schema_version.saturating_add(1);
     {
         let connection = Connection::open(&database)?;
         connection.execute_batch(
             "
             CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            INSERT INTO metadata(key, value) VALUES('schema_version', '18');
             CREATE TABLE authored_state(value TEXT NOT NULL);
             INSERT INTO authored_state(value) VALUES('preserve-me');
             ",
+        )?;
+        connection.execute(
+            "INSERT INTO metadata(key, value) VALUES('schema_version', ?1)",
+            [future_schema_version.to_string()],
         )?;
     }
     let database_before = fs::read(&database)?;
@@ -4262,7 +4987,7 @@ fn implicit_bare_root_refuses_before_opening_a_future_schema_database() -> Resul
     require_json_usize(
         &explicit_error,
         &["error", "schema_version_mismatch", "found_schema_version"],
-        18,
+        future_schema_version,
     )?;
     require_json_usize(
         &explicit_error,
@@ -4271,7 +4996,7 @@ fn implicit_bare_root_refuses_before_opening_a_future_schema_database() -> Resul
             "schema_version_mismatch",
             "supported_schema_version",
         ],
-        17,
+        supported_schema_version,
     )?;
     require_json_string(
         &explicit_error,
@@ -5139,18 +5864,47 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         }
     }
     let release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
-    for required in [
-        format!("releases/tag/{release_tag}"),
-        format!("badge/release-{release_tag}-blue"),
-        format!("--ref {release_tag}"),
-        format!("--tag {release_tag}"),
-        format!("`{release_tag}` ships through the full release matrix"),
-    ] {
-        if !readme.contains(&required) {
-            return Err(io::Error::other(format!(
-                "README release/install docs are missing current version reference {required:?}"
-            ))
-            .into());
+    if env!("CARGO_PKG_VERSION").contains("-rc") {
+        for required in [
+            format!("releases/tag/{release_tag}"),
+            format!("docs/{release_tag}-release-notes.md"),
+            "published as a prerelease".to_string(),
+            "does not replace the preceding stable GitHub Latest release".to_string(),
+        ] {
+            if !readme.contains(&required) {
+                return Err(io::Error::other(format!(
+                    "README release docs are missing candidate reference {required:?}"
+                ))
+                .into());
+            }
+        }
+        for forbidden in [
+            format!("badge/release-{release_tag}-blue"),
+            format!("--ref {release_tag}"),
+            format!("--tag {release_tag}"),
+            format!("`{release_tag}` ships through the full release matrix"),
+        ] {
+            if readme.contains(&forbidden) {
+                return Err(io::Error::other(format!(
+                    "README must not promote release candidate {forbidden:?} as the stable install default"
+                ))
+                .into());
+            }
+        }
+    } else {
+        for required in [
+            format!("releases/tag/{release_tag}"),
+            format!("badge/release-{release_tag}-blue"),
+            format!("--ref {release_tag}"),
+            format!("--tag {release_tag}"),
+            format!("`{release_tag}` ships through the full release matrix"),
+        ] {
+            if !readme.contains(&required) {
+                return Err(io::Error::other(format!(
+                    "README release/install docs are missing current version reference {required:?}"
+                ))
+                .into());
+            }
         }
     }
     for (job, expected, forbidden) in [
@@ -5959,7 +6713,7 @@ finally {
 }
 
 #[test]
-fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<dyn Error>> {
+fn packaged_skill_routes_startup_and_registered_worktrees() -> Result<(), Box<dyn Error>> {
     let workspace_root = workspace_root()?;
     let skill = fs::read_to_string(
         workspace_root
@@ -5972,8 +6726,8 @@ fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<
     for required in [
         "For task-directed work in an existing indexed repository",
         "On first use in each distinct project root",
-        "If a read-only call returns `init_required`, execute its exact `atlas_init` next call for the returned `project_path`",
-        "Every project root owns its own `.projectatlas/projectatlas.db`",
+        "execute its exact `atlas_init` next call using the returned `worktree` alias or `project_path`",
+        "Every project root owns its own `.projectatlas/projectatlas.db`, config, generated host configs, and exact index",
         "**Fresh existing index:** make no indexing call",
         "**Changed files:** use `atlas_watch_once`",
         "**Deep symbol/graph rebuild:** use `atlas_symbols_build` only when",
@@ -6001,6 +6755,18 @@ fn packaged_skill_routes_task_startup_through_session_brief() -> Result<(), Box<
         "resolve the installer from the installed, version-matched ProjectAtlas plugin root",
         "-ProjectRoot \"<target-project-root>\"",
         "Do not assume an unrelated target repository contains `plugins/projectatlas/scripts`",
+        "## Worktree MCP Workflow",
+        "The control checkout may itself be linked, live under `.worktrees`, or live anywhere else on the filesystem",
+        "atlas_worktree_list(include_retired: false)",
+        r#"atlas_worktree_add(worktree: "<selector>", alias: "issue-430")"#,
+        r#"atlas_init(worktree: "issue-430")"#,
+        r#"atlas_session_brief(worktree: "issue-430", compact: true)"#,
+        r#"worktrees: ["main", "issue-430"]"#,
+        r#"atlas_token_report(worktree: "main")"#,
+        r#"atlas_worktree_remove(worktree: "issue-430")"#,
+        "leaves the checkout, Git registration, branch, files, `.projectatlas`, and SQLite database untouched",
+        "`project_path` remains the compatibility route for unregistered and older workflows",
+        "without adding a worktree selector UI",
     ] {
         if !skill.contains(required) {
             return Err(io::Error::other(format!(
@@ -7340,7 +8106,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "label: What Changes",
         "label: Capabilities",
         "label: Architecture Diagrams",
-        "blob/dev/docs/",
+        "blob/main/docs/",
         "label: Release Scope",
         "label: Acceptance criteria",
         "label: Non-Goals",
@@ -7363,7 +8129,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     for required in [
         "Pre-Mortem",
         "Architecture Diagrams",
-        "dev/docs/*.md",
+        "docs/*.md#user-content-heading` view on `main",
         "OpenSpec tasks:",
         "commit/SHA permalink evidence",
     ] {
@@ -19475,6 +20241,18 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
             .into());
         }
     }
+    let linked = temp.path().join("mcp-contract-linked");
+    let linked_output = git_command_for_root(&repo)
+        .args(["worktree", "add", "-b", "mcp-contract-linked"])
+        .arg(&linked)
+        .output()?;
+    if !linked_output.status.success() {
+        return Err(io::Error::other(format!(
+            "MCP contract linked-worktree setup failed: {}",
+            String::from_utf8_lossy(&linked_output.stderr)
+        ))
+        .into());
+    }
     let db = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
     let executable = mcp_contract_executable();
     assert_mcp_contract_runtime_and_skill(&executable)?;
@@ -19533,6 +20311,30 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
             expected_marker: "project:",
             payload_key: Some("project"),
             effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_worktree_list",
+            arguments: serde_json::json!({"include_retired": false}),
+            expected_marker: "worktrees:",
+            payload_key: Some("worktrees"),
+            effect: McpSqliteEffect::None,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_worktree_add",
+            arguments: serde_json::json!({"worktree": "mcp-contract-linked", "alias": "contract-linked"}),
+            expected_marker: "worktree:",
+            payload_key: Some("worktree"),
+            effect: McpSqliteEffect::WorktreeRegistryAdvance,
+            telemetry_enabled: false,
+        },
+        McpToolContractCase {
+            name: "atlas_worktree_remove",
+            arguments: serde_json::json!({"worktree": "contract-linked"}),
+            expected_marker: "worktree:",
+            payload_key: Some("worktree"),
+            effect: McpSqliteEffect::WorktreeRegistryAdvance,
             telemetry_enabled: false,
         },
         McpToolContractCase {
@@ -25159,6 +25961,52 @@ fn git_success(root: &Path, arguments: &[&str]) -> Result<(), Box<dyn Error>> {
     .into())
 }
 
+#[cfg(unix)]
+fn create_test_directory_indirection(target: &Path, link: &Path) -> Result<(), Box<dyn Error>> {
+    std::os::unix::fs::symlink(target, link)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn create_test_directory_indirection(target: &Path, link: &Path) -> Result<(), Box<dyn Error>> {
+    match std::os::windows::fs::symlink_dir(target, link) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if error.kind() == io::ErrorKind::PermissionDenied
+                || error.raw_os_error() == Some(1314) =>
+        {
+            let output = StdCommand::new("cmd.exe")
+                .args(["/D", "/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(io::Error::other(format!(
+                    "test junction creation failed: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into())
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(unix)]
+fn remove_test_directory_indirection(link: &Path) -> Result<(), Box<dyn Error>> {
+    fs::remove_file(link)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn remove_test_directory_indirection(link: &Path) -> Result<(), Box<dyn Error>> {
+    fs::remove_dir(link)?;
+    Ok(())
+}
+
 #[test]
 fn watch_once_preserves_unchanged_deep_summary_and_text_index() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
@@ -28073,10 +28921,15 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
             .join(SKILL_FILE_NAME),
     )?;
     for route in [
+        "atlas_worktree_list",
+        "atlas_worktree_add",
+        "atlas_worktree_remove",
+        "atlas_init",
         "atlas_session_brief",
         "atlas_file_summary",
         "atlas_symbol_relations",
         "atlas_slice",
+        "atlas_token_report",
     ] {
         if !skill.contains(route) {
             return Err(io::Error::other(format!(
@@ -28304,7 +29157,7 @@ fn assert_cli_contract_payload(name: &str, payload: &Value) -> Result<(), Box<dy
         }
         "strip-legacy-purpose" => require_json_bool(payload, &["applied"], false)?,
         "reset-index" => require_json_bool(payload, &["dry_run"], true)?,
-        "mcp" => require_json_array_len(payload, &["result", "tools"], 40)?,
+        "mcp" => require_json_array_len(payload, &["result", "tools"], 43)?,
         "mcp-config" => {
             let arguments = json_at(payload, &["mcpServers", "projectatlas", "args"])?
                 .as_array()
@@ -28322,7 +29175,7 @@ fn assert_cli_contract_payload(name: &str, payload: &Value) -> Result<(), Box<dy
         }
         "runtime-info" => {
             require_json_string(payload, &["version"], env!("CARGO_PKG_VERSION"))?;
-            require_json_array_len(payload, &["mcp_tools"], 40)?;
+            require_json_array_len(payload, &["mcp_tools"], 43)?;
         }
         "purpose" => {
             require_json_string(payload, &["purpose_set", "path"], "src/watched.rs")?;
@@ -30079,10 +30932,14 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
         .ok_or_else(|| io::Error::other("current MCP tools/list response has no tools array"))?;
     let baseline_by_name = mcp_tools_by_name(baseline_tools)?;
     let current_by_name = mcp_tools_by_name(current_tools)?;
-    if baseline_by_name.keys().collect::<Vec<_>>() != current_by_name.keys().collect::<Vec<_>>() {
+    let missing_tools = baseline_by_name
+        .keys()
+        .filter(|name| !current_by_name.contains_key(**name))
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing_tools.is_empty() {
         return Err(io::Error::other(format!(
-            "MCP inventory drifted from v0.3.26: baseline={:?}, current={:?}",
-            baseline_by_name.keys().collect::<Vec<_>>(),
+            "MCP inventory removed frozen v0.3.26 tools: missing={missing_tools:?} current={:?}",
             current_by_name.keys().collect::<Vec<_>>()
         ))
         .into());
@@ -30166,6 +31023,78 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
                 "additive compact opt-in is missing from {name}"
             ))
             .into());
+        }
+    }
+    for name in [
+        "atlas_init",
+        "atlas_map",
+        "atlas_root",
+        "atlas_config",
+        "atlas_ignore_list",
+        "atlas_ignore_init_gitignore",
+        "atlas_ignore_add",
+        "atlas_ignore_remove",
+        "atlas_scan",
+        "atlas_overview",
+        "atlas_folders",
+        "atlas_files",
+        "atlas_next",
+        "atlas_outline",
+        "atlas_file_summary",
+        "atlas_search",
+        "atlas_slice",
+        "atlas_symbols_build",
+        "atlas_symbols",
+        "atlas_symbol_relations",
+        "atlas_health",
+        "atlas_health_resolve",
+        "atlas_lint",
+        "atlas_token_report",
+        "atlas_parity_report",
+        "atlas_settings",
+        "atlas_watch_status",
+        "atlas_watch_once",
+        "atlas_strip_legacy_purpose",
+        "atlas_reset_index",
+        "atlas_mcp_config",
+        "atlas_session_brief",
+        "atlas_purpose_queue",
+        "atlas_purpose_set",
+        "atlas_purpose_review",
+    ] {
+        let schema_properties = current_by_name
+            .get(name)
+            .and_then(|tool| tool.get("inputSchema"))
+            .and_then(|schema| schema.get("properties"))
+            .and_then(Value::as_object)
+            .ok_or_else(|| io::Error::other(format!("current MCP tool {name} is missing")))?;
+        for property in ["project_path", "worktree"] {
+            if !schema_properties.contains_key(property) {
+                return Err(io::Error::other(format!(
+                    "root-scoped MCP tool {name} omitted {property}"
+                ))
+                .into());
+            }
+        }
+    }
+    for (name, properties) in [
+        ("atlas_worktree_list", &["include_retired"][..]),
+        ("atlas_worktree_add", &["worktree", "alias"][..]),
+        ("atlas_worktree_remove", &["worktree"][..]),
+    ] {
+        let schema_properties = current_by_name
+            .get(name)
+            .and_then(|tool| tool.get("inputSchema"))
+            .and_then(|schema| schema.get("properties"))
+            .and_then(Value::as_object)
+            .ok_or_else(|| io::Error::other(format!("current MCP tool {name} is missing")))?;
+        for property in properties {
+            if !schema_properties.contains_key(*property) {
+                return Err(io::Error::other(format!(
+                    "current MCP tool {name} omitted {property}"
+                ))
+                .into());
+            }
         }
     }
     Ok(())
@@ -30761,6 +31690,19 @@ fn assert_contract_sqlite_effect(
                 .into());
             }
         }
+        McpSqliteEffect::WorktreeRegistryAdvance => {
+            if authoritative != BTreeSet::from(["worktree_registrations".to_string()])
+                || !usage.is_empty()
+                || before.authored_purposes != after.authored_purposes
+                || before.generation != after.generation
+                || before.purpose_revision != after.purpose_revision
+            {
+                return Err(io::Error::other(format!(
+                    "{name} escaped worktree-registry ownership: authoritative={authoritative:?} usage={usage:?}"
+                ))
+                .into());
+            }
+        }
         McpSqliteEffect::DerivedSourceAdvance => {
             let required = BTreeSet::from([
                 "file_texts".to_string(),
@@ -30879,6 +31821,26 @@ fn assert_mcp_typed_payload(
         "atlas_set_project_path" => {
             require_json_string(decoded, &["project", "status"], "active")?;
             json_string_at(decoded, &["project", "db"])?;
+        }
+        "atlas_worktree_list" => {
+            require_json_string(decoded, &["worktrees", "control_alias"], "main")?;
+            require_json_usize_at_least(decoded, &["worktrees", "total_worktrees"], 2)?;
+            require_json_bool(decoded, &["worktrees", "truncated"], false)?;
+            require_json_array_len(decoded, &["worktrees", "worktrees"], 2)?;
+        }
+        "atlas_worktree_add" => {
+            require_json_string(decoded, &["worktree", "operation"], "add")?;
+            require_json_string(decoded, &["worktree", "status"], "registered")?;
+            require_json_string(decoded, &["worktree", "alias"], "contract-linked")?;
+            require_json_bool(decoded, &["worktree", "git_unchanged"], true)?;
+            require_json_bool(decoded, &["worktree", "files_unchanged"], true)?;
+        }
+        "atlas_worktree_remove" => {
+            require_json_string(decoded, &["worktree", "operation"], "remove")?;
+            require_json_string(decoded, &["worktree", "status"], "retired")?;
+            require_json_string(decoded, &["worktree", "alias"], "contract-linked")?;
+            require_json_bool(decoded, &["worktree", "git_unchanged"], true)?;
+            require_json_bool(decoded, &["worktree", "files_unchanged"], true)?;
         }
         "atlas_init" => {
             require_json_bool(decoded, &["init", "ok"], true)?;
@@ -31193,7 +32155,7 @@ fn assert_mcp_typed_payload(
         "atlas_runtime_info" => {
             require_json_string(decoded, &["runtime", "version"], env!("CARGO_PKG_VERSION"))?;
             require_json_usize(decoded, &["runtime", "major_version"], 3)?;
-            require_json_array_len(decoded, &["runtime", "mcp_tools"], 40)?;
+            require_json_array_len(decoded, &["runtime", "mcp_tools"], 43)?;
         }
         "atlas_session_brief" => {
             require_json_string(

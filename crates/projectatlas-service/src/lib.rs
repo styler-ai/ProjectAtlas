@@ -26,7 +26,7 @@ pub use relations::{
     parse_relation_confidence, parse_relation_direction, parse_relation_resolution,
 };
 
-use agent_efficiency::load_agent_efficiency_comparison;
+use agent_efficiency::load_agent_efficiency_comparison as load_agent_efficiency_for_binding;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use import_aliases::{ImportAliasMap, load_import_alias_map};
 use projectatlas_core::graph::{
@@ -38,7 +38,9 @@ use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolKind, SymbolRelation,
 };
-use projectatlas_core::telemetry::{TokenOverview, TokenTrendReport, TokenTrendWindow};
+use projectatlas_core::telemetry::{
+    AgentEfficiencyComparison, TokenOverview, TokenTrendReport, TokenTrendWindow,
+};
 use projectatlas_core::{
     IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
     IndexedNode, NavigationNextCall, NavigationNextCapability, NodeKind, RankedConnectionKind,
@@ -206,6 +208,16 @@ pub enum TokenReportRequest<'a> {
         /// Calendar grouping requested by the adapter.
         window: TokenTrendWindow,
     },
+    /// Load the control atlas's combined native-main and worktree overview.
+    RepositoryOverview {
+        /// Optional repository-relative controlled benchmark artifact.
+        benchmark_results: Option<&'a Path>,
+    },
+    /// Load combined native-main and worktree trends.
+    RepositoryTrends {
+        /// Calendar grouping requested by the adapter.
+        window: TokenTrendWindow,
+    },
 }
 
 /// Typed token-report result returned without transport rendering.
@@ -297,7 +309,7 @@ pub fn load_token_report(
             benchmark_results,
         } => {
             let mut overview = store.token_overview(caller_label)?;
-            overview.set_agent_efficiency(load_agent_efficiency_comparison(
+            overview.set_agent_efficiency(load_agent_efficiency_for_binding(
                 &selected_project,
                 benchmark_results,
             )?);
@@ -307,9 +319,36 @@ pub fn load_token_report(
             caller_label,
             window,
         } => TokenReport::Trends(store.token_trends(caller_label, window)?),
+        TokenReportRequest::RepositoryOverview { benchmark_results } => {
+            let mut overview = store.repository_token_overview()?;
+            overview.set_agent_efficiency(load_agent_efficiency_for_binding(
+                &selected_project,
+                benchmark_results,
+            )?);
+            TokenReport::Overview(Box::new(overview))
+        }
+        TokenReportRequest::RepositoryTrends { window } => {
+            TokenReport::Trends(store.repository_token_trends(window)?)
+        }
     };
     revalidate_selected_project_binding(store)?;
     Ok(report)
+}
+
+/// Load optional benchmark evidence for one exact selected project.
+///
+/// # Errors
+///
+/// Returns an error when the selected project is unavailable or changes while
+/// the bounded artifact is loaded.
+pub fn load_agent_efficiency_comparison(
+    store: &AtlasStore,
+    benchmark_results: Option<&Path>,
+) -> ServiceResult<AgentEfficiencyComparison> {
+    let selected_project = selected_project_binding(store)?;
+    let comparison = load_agent_efficiency_for_binding(&selected_project, benchmark_results)?;
+    revalidate_selected_project_binding(store)?;
+    Ok(comparison)
 }
 
 /// Closed trust projection for one normalized coverage state.
@@ -4096,6 +4135,13 @@ mod tests {
             &report.agent_efficiency.state,
             &AgentEfficiencyEvidenceState::Partial,
             "published benchmark state",
+        )?;
+        let comparison =
+            load_agent_efficiency_comparison(&store, Some(Path::new("published.json")))?;
+        require_eq(
+            &comparison.state,
+            &AgentEfficiencyEvidenceState::Partial,
+            "standalone benchmark enrichment state",
         )?;
         let frozen = report
             .agent_efficiency

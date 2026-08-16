@@ -1116,8 +1116,13 @@ mod tests {
     fn git_exclude_changes_are_witnessed_with_a_git_directory() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let (database, _source) = indexed_project(temp.path())?;
-        let git_info = temp.path().join(".git").join("info");
+        let git = temp.path().join(".git");
+        let git_info = git.join("info");
         fs::create_dir_all(&git_info)?;
+        fs::create_dir_all(git.join("objects"))?;
+        fs::create_dir_all(git.join("refs"))?;
+        fs::write(git.join("HEAD"), "ref: refs/heads/main\n")?;
+        fs::write(git.join("config"), "[core]\n")?;
         fs::write(git_info.join("exclude"), "")?;
         let registry = SourceObservationRegistry::default();
         let first = registry.with_verified_read(

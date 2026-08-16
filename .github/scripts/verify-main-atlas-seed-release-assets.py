@@ -72,6 +72,7 @@ def validate_hosted_seed_assets(
 ) -> list[Path]:
     """Validate immutable hosted assets, including one-member upload recovery."""
 
+    filecmp.clear_cache()
     hosted_candidates = seed_candidates(hosted)
     if not hosted_candidates:
         return []

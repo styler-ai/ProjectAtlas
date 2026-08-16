@@ -42,6 +42,10 @@ use projectatlas_db::{
     ProjectRootTransitionResult, RepositoryCoverageQuery, RepositoryGraphDirection,
     verify_project_database,
 };
+use projectatlas_fs::worktree::{
+    GitManagerSourceSelection, GitRepositorySelection, GitWorktreeRole, GitWorktreeState,
+    RepositoryStructure, discover_repository_structure,
+};
 use projectatlas_service::{
     COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CodeSliceBudget, CodeSliceDraft, CoverageDiscoveryReport,
     DetailedRelationBudget, DetailedRelationQuery, FederatedStore, FileSummaryReport,
@@ -66,15 +70,15 @@ use runtime::{
     default_cli_project_root, default_mcp_project_root, defaultable_cli_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     index_work_control, init_config_path, init_path_status, lint_database_if_present,
-    next_step_report_payload, next_step_report_with_selection, normalized_folder_filter,
-    open_atlas_store_for_project, open_atlas_store_read_only_for_project,
-    open_federated_atlas_stores_for_project, open_fresh_atlas_store_for_project,
-    purpose_curation_page, ranked_folder_nodes_with_reasons, read_indexed_file_content,
-    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
-    render_classified_ranked_file_rows, render_classified_symbol_rows, render_coverage_report,
-    render_health_page, render_purpose_curation_page, render_purpose_review_report,
-    reset_index_files, resolved_mcp_config_path, review_purposes, run_init_bootstrap,
-    run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
+    load_synchronized_repository_token_report, next_step_report_payload,
+    next_step_report_with_selection, normalized_folder_filter, open_atlas_store_for_project,
+    open_atlas_store_read_only_for_project, open_federated_atlas_stores_for_project,
+    open_fresh_atlas_store_for_project, purpose_curation_page, ranked_folder_nodes_with_reasons,
+    read_indexed_file_content, record_directory_walk_usage_estimate, record_usage_estimate,
+    record_usage_text, render_classified_ranked_file_rows, render_classified_symbol_rows,
+    render_coverage_report, render_health_page, render_purpose_curation_page,
+    render_purpose_review_report, reset_index_files, resolved_mcp_config_path, review_purposes,
+    run_init_bootstrap, run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
     run_symbol_build_pipeline_controlled, run_watch_loop, standalone_index_work_control,
     strip_legacy_purpose, validate_purpose_review_admission, validated_indexed_file_key,
     watcher_status_report,
@@ -950,6 +954,25 @@ struct Cli {
 }
 
 impl Cli {
+    /// Rebase the conventional database path to the structurally selected source root.
+    fn resolve_implicit_database_path(&mut self) -> Result<(), CliError> {
+        if self.database_path_is_explicit || !command_uses_implicit_database(self.command.as_ref())
+        {
+            return Ok(());
+        }
+        let root = if let Some(config_path) = self.config.as_deref() {
+            canonical_source_project_root(&load_atlas_config(Some(config_path))?.root)?
+        } else {
+            let current_dir = std::env::current_dir().map_err(|source| CliError::Io {
+                path: PathBuf::from("."),
+                source,
+            })?;
+            canonical_source_project_root(&current_dir)?
+        };
+        self.db = root.join(DEFAULT_DB_PATH);
+        Ok(())
+    }
+
     /// Resolve this invocation's selected source root before opening an implicit database.
     fn project_root(&self) -> Result<PathBuf, CliError> {
         default_cli_project_root(
@@ -1424,6 +1447,12 @@ enum RootCommand {
     },
     /// Show the root, DB, config, and runtime identity `ProjectAtlas` will use.
     Show,
+    /// Show bounded structural Git worktree routing state without opening an atlas.
+    Status {
+        /// Checkout, descendant, or Git common directory to inspect.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Verify DB/config/root identity agree.
     Verify,
 }
@@ -1601,8 +1630,8 @@ enum SymbolsCommand {
 
 /// Parse arguments, execute the command, and convert failures to process exit.
 fn main() {
-    let cli = parse_cli();
-    if let Err(error) = run(&cli) {
+    let mut cli = parse_cli();
+    if let Err(error) = run(&mut cli) {
         let rendered =
             render_cli_error(cli.format, &error).unwrap_or_else(|_| format!("error: {error}\n"));
         if write_stderr(&rendered).is_err() {
@@ -1631,10 +1660,11 @@ fn load_cli_atlas_config(cli: &Cli) -> Result<AtlasMapConfig, CliError> {
 }
 
 /// Execute the selected CLI command.
-fn run(cli: &Cli) -> Result<(), CliError> {
+fn run(cli: &mut Cli) -> Result<(), CliError> {
     if let Some(required_version) = cli.require_version.as_deref() {
         validate_required_runtime_version(required_version)?;
     }
+    cli.resolve_implicit_database_path()?;
     let usage_instance = UsageRuntimeInstance::new(UsageInstanceOwner::CliInvocation);
     match cli.command.as_ref() {
         Command::Init {
@@ -1646,7 +1676,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 path: PathBuf::from("."),
                 source,
             })?;
-            let root = canonical_project_root(&current_dir)?;
+            let root = canonical_source_project_root(&current_dir)?;
             let db_path = if cli.db.is_absolute() {
                 cli.db.clone()
             } else {
@@ -2127,6 +2157,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         &selected_root,
                         cli.config.as_deref(),
                         roots,
+                        None,
                         control,
                     )?)
                 } else {
@@ -2487,6 +2518,14 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 let report = build_root_report(&cli.db, cli.config.as_deref())?;
                 print_output(cli.format, &render_root_report(&report), &report)?;
             }
+            Some(RootCommand::Status { path }) => {
+                let report = build_repository_control_report(path)?;
+                print_output(
+                    cli.format,
+                    &render_repository_control_report(&report),
+                    &report,
+                )?;
+            }
             Some(RootCommand::Verify) => {
                 cli.preflight_implicit_project_root()?;
                 let report = build_root_report(&cli.db, cli.config.as_deref())?;
@@ -2740,6 +2779,18 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             theme,
         } => {
             let store = open_index_for_current_read(cli)?;
+            let load_report = |request: TokenReportRequest<'_>| {
+                if session.is_none() {
+                    load_synchronized_repository_token_report(
+                        &cli.db,
+                        &cli.project_root()?,
+                        None,
+                        request,
+                    )
+                } else {
+                    load_token_report(&store, request).map_err(CliError::from)
+                }
+            };
             if let Some(window) = trend {
                 if tokenizer.is_some() {
                     return Err(CliError::InvalidInput(
@@ -2752,13 +2803,16 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                             .to_string(),
                     ));
                 }
-                let report = match load_token_report(
-                    &store,
-                    TokenReportRequest::Trends {
-                        caller_label: session.as_deref(),
+                let request = session.as_deref().map_or_else(
+                    || TokenReportRequest::RepositoryTrends {
                         window: (*window).into(),
                     },
-                )? {
+                    |caller_label| TokenReportRequest::Trends {
+                        caller_label: Some(caller_label),
+                        window: (*window).into(),
+                    },
+                );
+                let report = match load_report(request)? {
                     TokenReport::Trends(report) => report,
                     TokenReport::Overview(_) => {
                         return Err(CliError::InvalidInput(
@@ -2778,13 +2832,16 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     }
                 }
             } else {
-                let mut overview = match load_token_report(
-                    &store,
-                    TokenReportRequest::Overview {
-                        caller_label: session.as_deref(),
+                let request = session.as_deref().map_or_else(
+                    || TokenReportRequest::RepositoryOverview {
                         benchmark_results: benchmark_results.as_deref(),
                     },
-                )? {
+                    |caller_label| TokenReportRequest::Overview {
+                        caller_label: Some(caller_label),
+                        benchmark_results: benchmark_results.as_deref(),
+                    },
+                );
+                let mut overview = match load_report(request)? {
                     TokenReport::Overview(overview) => overview,
                     TokenReport::Trends(_) => {
                         return Err(CliError::InvalidInput(
@@ -2984,6 +3041,22 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         },
     }
     Ok(())
+}
+
+/// Return whether this command consumes the conventional project database selection.
+fn command_uses_implicit_database(command: &Command) -> bool {
+    match command {
+        #[cfg(feature = "optional-parser-supervisor")]
+        Command::ParserPack { .. } => false,
+        Command::Init { .. }
+        | Command::Root {
+            command: Some(RootCommand::Set { .. } | RootCommand::Status { .. }),
+        }
+        | Command::RuntimeInfo => false,
+        #[cfg(unix)]
+        Command::AcquireInstallerLock { .. } => false,
+        _ => true,
+    }
 }
 
 /// Execute one explicit optional parser-pack lifecycle command from the selected project root.
@@ -4611,6 +4684,182 @@ struct RuntimeInfoReport {
     mcp_tools: Vec<String>,
 }
 
+/// Bounded structural routing state for agents operating across Git worktrees.
+#[derive(Debug, Serialize)]
+pub(crate) struct RepositoryControlReport {
+    /// Canonical checkout or Git common directory that owns the inventory.
+    control_root: String,
+    /// How the supplied path selected source.
+    source_selection: &'static str,
+    /// Exact source root selected without guessing, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_root: Option<String>,
+    /// Whether source operations require an explicit exact worktree root.
+    worktree_required: bool,
+    /// Bounded deterministic worktree inventory.
+    worktrees: Vec<RepositoryWorktreeReport>,
+    /// Whether additional structurally registered entries were omitted.
+    truncated: bool,
+    /// Closed diagnostics that prevent safe implicit selection.
+    blockers: Vec<String>,
+}
+
+/// One content-free structural worktree row.
+#[derive(Debug, Serialize)]
+struct RepositoryWorktreeReport {
+    /// Primary, linked, or non-Git source role.
+    role: &'static str,
+    /// Active, missing, or invalid structural state.
+    state: &'static str,
+    /// Exact source root when active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    root: Option<String>,
+    /// Git-owned administrative directory when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    administrative_directory: Option<String>,
+    /// Bounded structural failure when invalid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocker: Option<String>,
+}
+
+/// Maximum structural worktree rows returned through CLI or MCP status.
+const REPOSITORY_CONTROL_WORKTREE_LIMIT: usize = 256;
+
+/// Build one mutation-free structural repository/worktree status report.
+pub(crate) fn build_repository_control_report(
+    path: &Path,
+) -> Result<RepositoryControlReport, CliError> {
+    let structure = discover_repository_structure(path)?;
+    match structure {
+        RepositoryStructure::NonGit { selected_root } => Ok(RepositoryControlReport {
+            control_root: normalize_native_path_display(&selected_root),
+            source_selection: "exact_non_git",
+            selected_root: Some(normalize_native_path_display(&selected_root)),
+            worktree_required: false,
+            worktrees: vec![RepositoryWorktreeReport {
+                role: "non_git",
+                state: "active",
+                root: Some(normalize_native_path_display(&selected_root)),
+                administrative_directory: None,
+                blocker: None,
+            }],
+            truncated: false,
+            blockers: Vec::new(),
+        }),
+        RepositoryStructure::InvalidGit {
+            selected_root,
+            issue,
+        } => Ok(RepositoryControlReport {
+            control_root: normalize_native_path_display(&selected_root),
+            source_selection: "invalid_git",
+            selected_root: None,
+            worktree_required: true,
+            worktrees: Vec::new(),
+            truncated: false,
+            blockers: vec![format!(
+                "{:?}:{}",
+                issue.kind,
+                normalize_native_path_display(issue.path)
+            )],
+        }),
+        RepositoryStructure::Git(repository) => {
+            let (source_selection, selected_root, worktree_required, mut blockers) =
+                match repository.selection {
+                    GitRepositorySelection::Worktree { root, .. } => (
+                        "exact_worktree",
+                        Some(normalize_native_path_display(root)),
+                        false,
+                        Vec::new(),
+                    ),
+                    GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::Unambiguous { root },
+                    } => (
+                        "single_worktree",
+                        Some(normalize_native_path_display(root)),
+                        false,
+                        Vec::new(),
+                    ),
+                    GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::None,
+                    } => (
+                        "worktree_unavailable",
+                        None,
+                        true,
+                        vec!["active_worktree_unavailable".to_string()],
+                    ),
+                    GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::Ambiguous { .. },
+                    } => (
+                        "explicit_worktree_required",
+                        None,
+                        true,
+                        vec!["exact_worktree_selection_required".to_string()],
+                    ),
+                };
+            let truncated = repository.worktrees.len() > REPOSITORY_CONTROL_WORKTREE_LIMIT;
+            let worktrees = repository
+                .worktrees
+                .into_iter()
+                .take(REPOSITORY_CONTROL_WORKTREE_LIMIT)
+                .map(|entry| {
+                    let role = match entry.role {
+                        GitWorktreeRole::Primary => "primary",
+                        GitWorktreeRole::Linked => "linked",
+                    };
+                    let administrative_directory = Some(normalize_native_path_display(
+                        entry.administrative_directory,
+                    ));
+                    match entry.state {
+                        GitWorktreeState::Active { root, .. } => RepositoryWorktreeReport {
+                            role,
+                            state: "active",
+                            root: Some(normalize_native_path_display(root)),
+                            administrative_directory,
+                            blocker: None,
+                        },
+                        GitWorktreeState::Missing { git_control_path } => {
+                            RepositoryWorktreeReport {
+                                role,
+                                state: "missing",
+                                root: git_control_path.parent().map(normalize_native_path_display),
+                                administrative_directory,
+                                blocker: None,
+                            }
+                        }
+                        GitWorktreeState::Invalid { issue } => RepositoryWorktreeReport {
+                            role,
+                            state: "invalid",
+                            root: None,
+                            administrative_directory,
+                            blocker: Some(format!(
+                                "{:?}:{}",
+                                issue.kind,
+                                normalize_native_path_display(issue.path)
+                            )),
+                        },
+                    }
+                })
+                .collect();
+            blockers.sort();
+            blockers.dedup();
+            Ok(RepositoryControlReport {
+                control_root: normalize_native_path_display(repository.common_directory),
+                source_selection,
+                selected_root,
+                worktree_required,
+                worktrees,
+                truncated,
+                blockers,
+            })
+        }
+    }
+}
+
+/// Render structural worktree status for agent-facing text output.
+pub(crate) fn render_repository_control_report(report: &RepositoryControlReport) -> String {
+    encode_agent_payload(&json!({ "worktree_status": report }))
+}
+
 /// Project-local root identity report.
 #[derive(Debug, Serialize)]
 struct RootReport {
@@ -5499,37 +5748,40 @@ mod tests {
 
     #[test]
     fn cli_schema_version_mismatches_are_typed_and_content_free() -> Result<(), Box<dyn Error>> {
+        let supported = projectatlas_db::CURRENT_SCHEMA_VERSION;
+        let future = supported + 1;
         for (error, found) in [
             (
                 CliError::Db(DbError::SchemaVersion {
-                    found: 18,
-                    expected: 17,
+                    found: future,
+                    expected: supported,
                 }),
-                18,
+                future,
             ),
             (
                 CliError::Service(ServiceError::Db(DbError::SchemaVersion {
-                    found: 18,
-                    expected: 17,
+                    found: future,
+                    expected: supported,
                 })),
-                18,
+                future,
             ),
             (
                 CliError::Db(DbError::SchemaVersion {
                     found: 7,
-                    expected: 17,
+                    expected: supported,
                 }),
                 7,
             ),
             (
                 CliError::Service(ServiceError::Db(DbError::SchemaVersion {
                     found: 7,
-                    expected: 17,
+                    expected: supported,
                 })),
                 7,
             ),
         ] {
-            let expected_message = format!("unsupported schema version {found}, expected 17");
+            let expected_message =
+                format!("unsupported schema version {found}, expected {supported}");
             let json_text = render_cli_error(OutputFormat::Json, &error)?;
             let json: Value = serde_json::from_str(&json_text)?;
             require_condition(
@@ -5542,7 +5794,7 @@ mod tests {
                     && json
                         .pointer("/error/schema_version_mismatch/supported_schema_version")
                         .and_then(Value::as_i64)
-                        == Some(17)
+                        == Some(supported)
                     && json
                         .pointer("/error/schema_version_mismatch/runtime_version")
                         .and_then(Value::as_str)
@@ -5566,7 +5818,7 @@ mod tests {
             require_condition(
                 toon.contains("kind: schema_version_mismatch")
                     && toon.contains(&format!("found_schema_version: {found}"))
-                    && toon.contains("supported_schema_version: 17")
+                    && toon.contains(&format!("supported_schema_version: {supported}"))
                     && toon.contains(env!("CARGO_PKG_VERSION"))
                     && toon.contains("do not reset"),
                 "CLI TOON lost typed schema-version details or recovery guidance",
@@ -5575,11 +5827,11 @@ mod tests {
         for error in [
             CliError::Db(DbError::SchemaVersion {
                 found: 8,
-                expected: 17,
+                expected: supported,
             }),
             CliError::Service(ServiceError::Db(DbError::SchemaVersion {
                 found: 15,
-                expected: 17,
+                expected: supported,
             })),
         ] {
             require_condition(
@@ -5589,9 +5841,9 @@ mod tests {
             let migration = schema_migration_required_payload(&error).ok_or_else(|| {
                 std::io::Error::other("CLI omitted the admitted-predecessor migration handoff")
             })?;
-            let expected_steps = u32::try_from(17 - migration.found_schema_version)?;
+            let expected_steps = u32::try_from(supported - migration.found_schema_version)?;
             require_condition(
-                migration.supported_schema_version == 17
+                migration.supported_schema_version == supported
                     && migration.migration_steps_remaining == expected_steps,
                 "CLI migration handoff drifted from the database migration inventory",
             )?;

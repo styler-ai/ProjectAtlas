@@ -36,8 +36,8 @@ body:
     id: architecture_diagrams
     attributes:
       label: Architecture Diagrams
-      description: Link the versioned Markdown architecture views for this work under `https://github.com/styler-ai/ProjectAtlas/blob/dev/docs/`. Reuse an existing document when architecture is unchanged; do not attach a duplicate PDF.
-      placeholder: "- [Architecture views](https://github.com/styler-ai/ProjectAtlas/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)"
+      description: Link the versioned Markdown architecture views for this work under `https://github.com/styler-ai/ProjectAtlas/blob/main/docs/`. Reuse an existing document when architecture is unchanged; do not attach a duplicate PDF.
+      placeholder: "- [Architecture views](https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#user-content-architecture-views)"
     validations:
       required: true
   - type: textarea
