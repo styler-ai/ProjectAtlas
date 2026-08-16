@@ -692,8 +692,7 @@ const MCP_ERROR_WORKTREE_PATH_NON_UTF8: &str =
 const MCP_ERROR_WORKTREE_IDENTITY_CONFLICT: &str =
     "local atlas identity conflicts with its active registration";
 /// Recovery guidance when an initialized registration loses its exact atlas.
-const MCP_ERROR_BOUND_WORKTREE_ATLAS_MISSING: &str =
-    "registered worktree atlas is missing; retire and re-register the alias before initialization";
+const MCP_ERROR_BOUND_WORKTREE_ATLAS_MISSING: &str = "registered worktree atlas is missing; restore it before retrying or retiring the alias so final token totals can be synchronized";
 /// A reused administrative path cannot inherit an earlier registration.
 const MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED: &str =
     "registered worktree administrative lifecycle changed; unregister and register it again";
@@ -7647,6 +7646,10 @@ impl ProjectAtlasMcpServer {
                             })?;
                         telemetry_sync = Some(synchronized);
                         retired
+                    } else if registration.project_instance_id.is_some() {
+                        return Err(CliError::InvalidInput(
+                            MCP_ERROR_BOUND_WORKTREE_ATLAS_MISSING.to_string(),
+                        ));
                     } else {
                         control.retire_worktree(&alias, retired_at_epoch)?
                     };
@@ -11464,6 +11467,29 @@ mod tests {
             "identity-only registration routed to a replacement atlas",
         )?;
         fs::remove_dir_all(&target_b_state)?;
+        let refused_identity_only =
+            server.atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
+                worktree: "snapshot-blocked".to_string(),
+            }));
+        require(
+            refused_identity_only.contains(MCP_ERROR_BOUND_WORKTREE_ATLAS_MISSING),
+            &format!(
+                "bound registration retired without its required final snapshot: {refused_identity_only}"
+            ),
+        )?;
+        let control_after_refusal = open_atlas_store_read_only_for_project(&control_db, &primary)?;
+        require(
+            control_after_refusal
+                .worktree_registration(&WorktreeAlias::parse("snapshot-blocked")?)?
+                .state
+                == WorktreeRegistrationState::Active,
+            "missing bound atlas retirement changed the active registration",
+        )?;
+        drop(control_after_refusal);
+        fs::rename(&preserved_target_b_state, &target_b_state)?;
+        let repaired = rusqlite::Connection::open(&target_b_db)?;
+        repaired.execute("UPDATE usage_global_aggregates SET calls = 1", [])?;
+        drop(repaired);
         let retired_identity_only =
             server.atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
                 worktree: "snapshot-blocked".to_string(),
@@ -11471,10 +11497,10 @@ mod tests {
         require(
             retired_identity_only.contains("status: retired"),
             &format!(
-                "identity-only registration could not be retired without a local atlas: {retired_identity_only}"
+                "restored bound atlas did not permit final-sync retirement: {retired_identity_only}"
             ),
         )?;
-        fs::remove_dir_all(&preserved_target_b_state)?;
+        fs::remove_dir_all(&target_b_state)?;
 
         let legacy_added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
             worktree: selector_b.clone(),
@@ -11546,14 +11572,22 @@ mod tests {
             "legacy exact-path init left its alias unbound to a replacement atlas",
         )?;
         fs::remove_dir_all(&target_b_state)?;
+        let refused_legacy = server.atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
+            worktree: "legacy-init".to_string(),
+        }));
+        require(
+            refused_legacy.contains(MCP_ERROR_BOUND_WORKTREE_ATLAS_MISSING),
+            &format!("legacy-init registration retired without its atlas: {refused_legacy}"),
+        )?;
+        fs::rename(&preserved_legacy_state, &target_b_state)?;
         let retired_legacy = server.atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
             worktree: "legacy-init".to_string(),
         }));
         require(
             retired_legacy.contains("status: retired"),
-            &format!("legacy-init registration could not be retired: {retired_legacy}"),
+            &format!("restored legacy-init registration could not be retired: {retired_legacy}"),
         )?;
-        fs::remove_dir_all(&preserved_legacy_state)?;
+        fs::remove_dir_all(&target_b_state)?;
 
         init_project_with_config(&worktree_b, Some(&target_b_config))?;
         let migratable_store = AtlasStore::open_for_project(&target_b_db, &worktree_b)?;
@@ -11857,7 +11891,7 @@ mod tests {
                 .registered_worktree_token_overview(&alias)?
                 .calls
                 == 1
-                && control_after_routed.repository_token_overview()?.calls == 2,
+                && control_after_routed.repository_token_overview()?.calls == 3,
             "alias-routed MCP usage or retained independently initialized usage was miscounted",
         )?;
         drop(control_after_routed);
@@ -11886,7 +11920,7 @@ mod tests {
             theme: None,
         }));
         require(
-            repository_tokens.contains("worktree: main") && repository_tokens.contains("calls: 3"),
+            repository_tokens.contains("worktree: main") && repository_tokens.contains("calls: 4"),
             &format!(
                 "control token report did not combine routed and synchronized worktree usage: {repository_tokens}"
             ),
