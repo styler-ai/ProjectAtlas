@@ -63,6 +63,11 @@ ProjectAtlas SHALL let one explicitly selected primary/control atlas register st
 - **WHEN** an agent calls `atlas_worktree_add` with one stable or uniquely matching short selector and an optional valid alias
 - **THEN** ProjectAtlas validates reciprocal same-repository evidence and durably registers the worktree without requiring the agent to repeat a full absolute path or creating/moving any Git worktree
 
+#### Scenario: Add rejects a concurrent Git lifecycle replacement
+
+- **WHEN** Git replaces or moves the selected worktree after structural selection but before the registration transaction
+- **THEN** ProjectAtlas revalidates the same common directory, administrative directory, role, root, and filesystem lifecycle identity, returns a typed lifecycle error on any change, and creates no mixed or stale registration
+
 #### Scenario: Ambiguous selector does not guess
 
 - **WHEN** a human-friendly selector matches multiple structural candidates
@@ -82,6 +87,11 @@ ProjectAtlas SHALL let one explicitly selected primary/control atlas register st
 
 - **WHEN** Git moves a registered worktree while retaining its validated administrative identity
 - **THEN** the next resolution updates the cached canonical path and preserves the alias, database identity, and token origin
+
+#### Scenario: Concurrent remove cannot be undone by moved-root resolution
+
+- **WHEN** alias resolution observes a moved root but another request retires the captured registration before its root refresh commits
+- **THEN** the active-registration compare-and-set fails, the retired alias stays retired, and the in-flight resolution cannot reactivate or route through it
 
 #### Scenario: Reused administrative path does not inherit an alias
 

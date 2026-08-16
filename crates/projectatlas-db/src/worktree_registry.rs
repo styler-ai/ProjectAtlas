@@ -317,6 +317,38 @@ impl AtlasStore {
         })
     }
 
+    /// Refresh the canonical root of one captured active registration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the captured registration is no longer active,
+    /// the root is invalid, persisted state is malformed, or `SQLite` fails.
+    pub fn refresh_worktree_root(
+        &self,
+        registration: &WorktreeRegistration,
+        root: &Path,
+    ) -> DbResult<WorktreeRegistration> {
+        let root = normalized_absolute_path("root", root)?;
+        self.with_validated_write(|transaction| {
+            let updated = transaction.execute(
+                "UPDATE worktree_registrations
+                 SET last_root = ?1
+                 WHERE registration_id = ?2 AND alias = ?3 AND state = 'active'",
+                params![
+                    root,
+                    registration.registration_id,
+                    registration.alias.as_str()
+                ],
+            )?;
+            if updated != 1 {
+                return Err(DbError::WorktreeRegistrationNotFound {
+                    alias: registration.alias.to_string(),
+                });
+            }
+            load_by_id(transaction, registration.registration_id)
+        })
+    }
+
     /// Return one active registration by alias.
     ///
     /// # Errors
@@ -909,6 +941,23 @@ mod tests {
             &retired.state,
             &WorktreeRegistrationState::Retired,
             "retired state",
+        )?;
+        require(
+            matches!(
+                store.refresh_worktree_root(&first, &second_root),
+                Err(DbError::WorktreeRegistrationNotFound { .. })
+            ),
+            "stale root refresh reactivated a retired registration",
+        )?;
+        require_eq(
+            &store
+                .worktree_registrations(true)?
+                .into_iter()
+                .find(|registration| registration.registration_id == first.registration_id)
+                .ok_or_else(|| io::Error::other("retired registration history is missing"))?
+                .state,
+            &WorktreeRegistrationState::Retired,
+            "state after stale root refresh",
         )?;
         let replacement = store.register_worktree(
             &alias,

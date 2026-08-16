@@ -5696,6 +5696,41 @@ impl ProjectAtlasMcpServer {
             .collect()
     }
 
+    /// Revalidate one selected candidate and its filesystem lifecycle before registration.
+    fn revalidate_worktree_candidate(
+        &self,
+        expected_repository: &GitRepositoryStructure,
+        expected_entry: &GitWorktreeEntry,
+        expected_identity: &str,
+    ) -> Result<(GitRepositoryStructure, GitWorktreeEntry), CliError> {
+        let expected_root = Self::active_worktree_root(expected_entry).ok_or_else(|| {
+            CliError::InvalidInput(MCP_ERROR_WORKTREE_NO_LONGER_ACTIVE.to_string())
+        })?;
+        let repository = self.control_git_repository()?;
+        let entry = repository
+            .worktrees
+            .iter()
+            .find(|entry| entry.administrative_directory == expected_entry.administrative_directory)
+            .cloned()
+            .ok_or_else(|| {
+                CliError::InvalidInput(MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED.to_string())
+            })?;
+        let root = Self::active_worktree_root(&entry).ok_or_else(|| {
+            CliError::InvalidInput(MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED.to_string())
+        })?;
+        let identity = git_administrative_identity(&entry.administrative_directory)?;
+        if repository.common_directory != expected_repository.common_directory
+            || entry.role != expected_entry.role
+            || root != expected_root
+            || identity != expected_identity
+        {
+            return Err(CliError::InvalidInput(
+                MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED.to_string(),
+            ));
+        }
+        Ok((repository, entry))
+    }
+
     /// Build one concise add-candidate row from active structural evidence.
     fn worktree_candidate(entry: &GitWorktreeEntry) -> Option<McpWorktreeCandidate> {
         Some(McpWorktreeCandidate {
@@ -6066,16 +6101,7 @@ impl ProjectAtlasMcpServer {
         let registration = if normalize_native_path_display(&root) == registration.last_root {
             registration
         } else {
-            let observed_epoch = Self::current_epoch_seconds()?;
-            control.register_worktree(
-                alias,
-                &repository.common_directory,
-                &entry.administrative_directory,
-                &administrative_identity,
-                &root,
-                registration.project_instance_id,
-                observed_epoch,
-            )?
+            control.refresh_worktree_root(&registration, &root)?
         };
         if let Some(expected) = registration.project_instance_id {
             let store = Self::open_local_worktree_atlas(&root)?.ok_or_else(|| {
@@ -7381,6 +7407,8 @@ impl ProjectAtlasMcpServer {
             let root = Self::active_worktree_root(entry).ok_or_else(|| {
                 CliError::InvalidInput(MCP_ERROR_WORKTREE_NO_LONGER_ACTIVE.to_string())
             })?;
+            let administrative_identity =
+                git_administrative_identity(&entry.administrative_directory)?;
             let alias = match params.alias.as_deref() {
                 Some(alias) => WorktreeAlias::parse(alias.trim())?,
                 None => Self::default_worktree_alias(root)?,
@@ -7408,12 +7436,17 @@ impl ProjectAtlasMcpServer {
                     )),
                 ),
             };
+            let (repository, entry) =
+                self.revalidate_worktree_candidate(&repository, entry, &administrative_identity)?;
+            let root = Self::active_worktree_root(&entry).ok_or_else(|| {
+                CliError::InvalidInput(MCP_ERROR_WORKTREE_NO_LONGER_ACTIVE.to_string())
+            })?;
             let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
             let registration = control.register_worktree(
                 &alias,
                 &repository.common_directory,
                 &entry.administrative_directory,
-                &git_administrative_identity(&entry.administrative_directory)?,
+                &administrative_identity,
                 root,
                 project_instance_id,
                 Self::current_epoch_seconds()?,
@@ -7434,7 +7467,7 @@ impl ProjectAtlasMcpServer {
                 &McpWorktreeMutationReport {
                     operation: McpWorktreeMutationOperation::Add,
                     status: McpWorktreeMutationStatus::Registered,
-                    selector: Some(Self::worktree_candidate_selector(entry)),
+                    selector: Some(Self::worktree_candidate_selector(&entry)),
                     alias: Some(alias.to_string()),
                     root: Some(normalize_native_path_display(root)),
                     registration_id: Some(registration.registration_id),
@@ -11816,6 +11849,19 @@ mod tests {
             git_administrative_identity(&replacement_entry.administrative_directory)?
                 != administrative_identity,
             "replacement Git worktree reused the prior lifecycle identity",
+        )?;
+        let add_revalidation = server.revalidate_worktree_candidate(
+            &repository,
+            original_entry,
+            &administrative_identity,
+        );
+        require(
+            add_revalidation.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains(MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED)
+            }),
+            "add revalidation combined the old root with a replacement lifecycle",
         )?;
 
         let resolution_error = server
