@@ -3099,8 +3099,8 @@ impl UsageRuntimeInstance {
         Ok(())
     }
 
-    /// Record and seal one completed event under an exact worktree origin.
-    pub(crate) fn record_completed_for_worktree(
+    /// Record one event under an exact worktree origin.
+    pub(crate) fn record_for_worktree(
         self,
         store: &AtlasStore,
         registration_id: i64,
@@ -3111,7 +3111,7 @@ impl UsageRuntimeInstance {
             self.owner,
             registration_id,
             event,
-            true,
+            false,
         )?;
         Ok(())
     }

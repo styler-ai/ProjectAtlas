@@ -3974,18 +3974,6 @@ impl ProjectAtlasMcpServer {
         drop(record(next_instance));
     }
 
-    /// Record one accepted alias-routed event without retaining an active instance per worktree.
-    fn record_completed_worktree_usage(
-        store: &AtlasStore,
-        registration_id: i64,
-        event: &projectatlas_core::telemetry::UsageEvent,
-    ) {
-        let Some(instance) = UsageRuntimeInstance::new(UsageInstanceOwner::McpProcess) else {
-            return;
-        };
-        drop(instance.record_completed_for_worktree(store, registration_id, event));
-    }
-
     /// Best-effort telemetry for one result whose source epoch has already been accepted.
     fn record_accepted_usage(
         &self,
@@ -4049,7 +4037,14 @@ impl ProjectAtlasMcpServer {
                 return;
             };
             if control.finish_index_read_snapshot().is_ok() {
-                Self::record_completed_worktree_usage(&control, registration_id, &event);
+                self.record_usage_for_origin(
+                    &self.control_state,
+                    &control,
+                    Some(registration_id),
+                    |usage_instance| {
+                        usage_instance.record_for_worktree(&control, registration_id, &event)
+                    },
+                );
             }
             return;
         }
@@ -9621,7 +9616,7 @@ mod tests {
     }
 
     #[test]
-    fn routed_worktree_telemetry_does_not_consume_project_binding_capacity()
+    fn routed_worktree_telemetry_preserves_session_baseline_identity()
     -> Result<(), Box<dyn std::error::Error>> {
         if telemetry_disabled() {
             return Ok(());
@@ -9631,50 +9626,63 @@ mod tests {
         let server =
             ProjectAtlasMcpServer::new(state.db_path, None, "worktree-scale".to_string(), false);
         let common = temp.path().join("common.git");
-        let event = usage_from_text(
+        let event = usage_from_estimates_with_context(
             "worktree-scale",
             "atlas_overview",
             None,
             None,
-            "mod source {}",
-            "repository overview",
+            100,
+            10,
+            TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
+            TOKEN_BASELINE_SELECTED_CANDIDATES,
+            TOKEN_CONFIDENCE_INFERRED,
         );
-
-        for index in 0..=MCP_TELEMETRY_PROJECT_BINDING_LIMIT {
-            let suffix = index + 1;
-            let alias = WorktreeAlias::parse(&format!("worktree-{suffix:03}"))?;
-            let registration = control.register_worktree(
-                &alias,
-                &common,
-                &common.join(format!("worktrees/{suffix:03}")),
-                &format!("{suffix:064x}"),
-                &temp.path().join(format!("worktree-{suffix:03}")),
-                Some(ProjectInstanceId::from_bytes([u8::try_from(suffix)?; 16])?),
-                u64::try_from(suffix)?,
-            )?;
-            ProjectAtlasMcpServer::record_completed_worktree_usage(
+        let registration = control.register_worktree(
+            &WorktreeAlias::parse("worktree-001")?,
+            &common,
+            &common.join("worktrees/001"),
+            &format!("{:064x}", 1),
+            &temp.path().join("worktree-001"),
+            Some(ProjectInstanceId::from_bytes([1; 16])?),
+            1,
+        )?;
+        for _ in 0..2 {
+            server.record_usage_for_origin(
+                &server.control_state,
                 &control,
-                registration.registration_id,
-                &event,
+                Some(registration.registration_id),
+                |usage_instance| {
+                    usage_instance.record_for_worktree(
+                        &control,
+                        registration.registration_id,
+                        &event,
+                    )
+                },
             );
         }
 
+        let overview = control.repository_token_overview()?;
+
         require(
-            control.repository_token_overview()?.calls == MCP_TELEMETRY_PROJECT_BINDING_LIMIT + 1,
-            "alias-routed usage was dropped after the native MCP binding limit",
+            overview.calls == 2,
+            "alias-routed modeled usage did not retain both accepted calls",
         )?;
+        require(
+            overview.deduped_modeled_tokens_avoided == 80,
+            "alias-routed modeled usage did not reuse the session baseline witness",
+        )?;
+        require(
+            overview.repeated_baselines_deduped == 1,
+            "alias-routed modeled usage did not classify the repeated baseline",
+        )?;
+        require(
+            control.telemetry_retention_state()?.active_instance_rows == 1,
+            "alias-routed usage did not retain one bounded session identity",
+        )?;
+        server.seal_usage_instances_for_projects();
         require(
             control.telemetry_retention_state()?.active_instance_rows == 0,
-            "completed alias-routed usage retained active runtime instances",
-        )?;
-        require(
-            server
-                .usage_runtime
-                .lock()
-                .map_err(|_poisoned| io::Error::other("usage runtime lock poisoned"))?
-                .entries
-                .is_empty(),
-            "alias-routed usage consumed native MCP project binding capacity",
+            "alias-routed session identity was not sealed at MCP shutdown",
         )
     }
 
