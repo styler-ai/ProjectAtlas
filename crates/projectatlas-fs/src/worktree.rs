@@ -585,12 +585,12 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
     let mut repository_format_version = 0_u64;
     let mut has_unsupported_repository_extension = false;
     for raw_line in text.lines() {
-        let line = trim_git_config_whitespace(raw_line);
+        let mut line = trim_git_config_whitespace(raw_line);
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
             continue;
         }
         if line.starts_with('[') {
-            let Some((section_name, has_subsection)) = git_config_section(line) else {
+            let Some((section_name, has_subsection, remainder)) = git_config_section(line) else {
                 return Ok(GitLocalConfigPolicy {
                     bare_setting: None,
                     source_root_inference_safe: false,
@@ -603,7 +603,10 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
                 || section_name.eq_ignore_ascii_case("includeif");
             in_core = !has_subsection && section_name.eq_ignore_ascii_case("core");
             in_extensions = !has_subsection && section_name.eq_ignore_ascii_case("extensions");
-            continue;
+            if remainder.is_empty() || remainder.starts_with(['#', ';']) {
+                continue;
+            }
+            line = remainder;
         }
         let (key, raw_value) = line
             .split_once('=')
@@ -702,11 +705,11 @@ fn trim_git_config_whitespace(value: &str) -> &str {
     value.trim_matches([' ', '\t'])
 }
 
-/// Parse one complete Git section header while allowing only a trailing comment.
-fn git_config_section(line: &str) -> Option<(&str, bool)> {
+/// Parse one Git section header and return any assignment that follows it.
+fn git_config_section(line: &str) -> Option<(&str, bool, &str)> {
     let mut quoted = false;
     let mut escaped = false;
-    let mut header_end = line.len();
+    let mut header_end = None;
     for (index, character) in line.char_indices() {
         if escaped {
             escaped = false;
@@ -715,8 +718,8 @@ fn git_config_section(line: &str) -> Option<(&str, bool)> {
         match character {
             '\\' if quoted => escaped = true,
             '"' => quoted = !quoted,
-            '#' | ';' if !quoted => {
-                header_end = index;
+            ']' if !quoted => {
+                header_end = Some(index);
                 break;
             }
             _ => {}
@@ -725,10 +728,8 @@ fn git_config_section(line: &str) -> Option<(&str, bool)> {
     if quoted || escaped {
         return None;
     }
-    let section = trim_git_config_whitespace(&line[..header_end])
-        .strip_prefix('[')?
-        .strip_suffix(']')?
-        .trim_matches([' ', '\t']);
+    let header_end = header_end?;
+    let section = trim_git_config_whitespace(&line[1..header_end]);
     if section.is_empty() || section.contains(['[', ']']) {
         return None;
     }
@@ -743,8 +744,9 @@ fn git_config_section(line: &str) -> Option<(&str, bool)> {
         return None;
     }
     let subsection = trim_git_config_whitespace(&section[name_end..]);
+    let remainder = trim_git_config_whitespace(&line[header_end + 1..]);
     if subsection.is_empty() {
-        return Some((name, false));
+        return Some((name, false, remainder));
     }
     let subsection = subsection.strip_prefix('"')?.strip_suffix('"')?;
     let mut escaped = false;
@@ -757,7 +759,7 @@ fn git_config_section(line: &str) -> Option<(&str, bool)> {
             return None;
         }
     }
-    (!escaped).then_some((name, true))
+    (!escaped).then_some((name, true, remainder))
 }
 
 /// Remove unquoted Git comments and concatenate balanced quoted value segments.
@@ -2259,6 +2261,29 @@ mod tests {
             "invalid extensions.worktreeConfig enabled config.worktree and invented a source",
         )?;
         fs::remove_file(bare_dot_git.join("config.worktree"))?;
+        fs::write(&bare_config_path, &bare_config)?;
+
+        fs::write(&bare_config_path, "[core] bare = false\n")?;
+        let inline_section_assignment = Command::new("git")
+            .arg("--git-dir")
+            .arg(&bare_dot_git)
+            .args(["config", "--bool", "core.bare"])
+            .output()?;
+        require(
+            inline_section_assignment.status.success()
+                && String::from_utf8(inline_section_assignment.stdout)?.trim() == "false",
+            "Git fixture did not accept an assignment after a section header",
+        )?;
+        let inline_section_assignment = require_git(discover_repository_structure(&bare_dot_git)?)?;
+        require(
+            inline_section_assignment.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::Unambiguous {
+                        root: dot_git_container.canonicalize()?,
+                    },
+                },
+            "inline section assignment hid the exact configured source",
+        )?;
         fs::write(&bare_config_path, &bare_config)?;
 
         for malformed_config in [
