@@ -1522,6 +1522,8 @@ struct McpWorktreeSelection {
     alias: String,
     /// Durable registration identity; absent only for reserved `main`.
     registration_id: Option<i64>,
+    /// Project identity already bound in the control catalog, when present.
+    project_instance_id: Option<ProjectInstanceId>,
 }
 
 /// Outcome of evaluating the control atlas as an init hydration source.
@@ -3897,20 +3899,44 @@ impl ProjectAtlasMcpServer {
         Ok(outcome.value)
     }
 
-    /// Open the durable index for mutation.
-    fn open_mut_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
-        open_atlas_store_for_project(&state.db_path, &state.root)
+    /// Open the durable index for mutation and bind any migrated alias identity first.
+    fn open_mut_store(
+        state: &McpProjectState,
+        control_state: &McpProjectState,
+    ) -> Result<AtlasStore, CliError> {
+        let store = open_atlas_store_for_project(&state.db_path, &state.root)?;
+        let Some(selection) = state
+            .worktree
+            .as_ref()
+            .filter(|selection| selection.registration_id.is_some())
+        else {
+            return Ok(store);
+        };
+        let project = store.captured_project_binding()?.project_instance_id;
+        if selection.project_instance_id == Some(project) {
+            return Ok(store);
+        }
+        let control = open_atlas_store_for_project(&control_state.db_path, &control_state.root)?;
+        control.bind_worktree_project(
+            &WorktreeAlias::parse(&selection.alias)?,
+            &state.root,
+            project,
+        )?;
+        Ok(store)
     }
 
     /// Open an existing selected-project index for purpose or health mutation.
-    fn open_existing_mut_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
+    fn open_existing_mut_store(
+        state: &McpProjectState,
+        control_state: &McpProjectState,
+    ) -> Result<AtlasStore, CliError> {
         if !state.db_path.is_file() {
             return Err(Self::with_target_error_context(
                 index_init_required(&state.root, &state.db_path),
                 state,
             ));
         }
-        Self::open_mut_store(state)
+        Self::open_mut_store(state, control_state)
     }
 
     /// Return whether this MCP process can record optional telemetry.
@@ -4354,7 +4380,7 @@ impl ProjectAtlasMcpServer {
         let project = target
             .project_instance_id()?
             .ok_or(DbError::ProjectInstanceIdentityMissing)?;
-        let control = Self::open_existing_mut_store(&self.control_state)?;
+        let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
         control.bind_worktree_project(&alias, &state.root, project)?;
         Ok(())
     }
@@ -4377,7 +4403,7 @@ impl ProjectAtlasMcpServer {
         let administrative_directory =
             normalize_native_path_display(&entry.administrative_directory);
         let administrative_identity = git_administrative_identity(&entry.administrative_directory)?;
-        let control = Self::open_existing_mut_store(&self.control_state)?;
+        let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
         let Some(registration) =
             control
                 .worktree_registrations(false)?
@@ -4393,6 +4419,7 @@ impl ProjectAtlasMcpServer {
             &McpWorktreeSelection {
                 alias: registration.alias.to_string(),
                 registration_id: Some(registration.registration_id),
+                project_instance_id: registration.project_instance_id,
             },
             state,
         )
@@ -5897,6 +5924,7 @@ impl ProjectAtlasMcpServer {
             state.worktree = Some(McpWorktreeSelection {
                 alias,
                 registration_id: None,
+                project_instance_id: None,
             });
             return Ok(state);
         }
@@ -5910,7 +5938,7 @@ impl ProjectAtlasMcpServer {
         alias: &WorktreeAlias,
         validation: McpConfigValidation,
     ) -> Result<McpProjectState, CliError> {
-        let control = Self::open_existing_mut_store(&self.control_state)?;
+        let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
         let registration = control.worktree_registration(alias)?;
         let repository = self.control_git_repository()?;
         if normalize_native_path_display(&repository.common_directory)
@@ -5992,6 +6020,7 @@ impl ProjectAtlasMcpServer {
         state.worktree = Some(McpWorktreeSelection {
             alias: alias.to_string(),
             registration_id: Some(registration.registration_id),
+            project_instance_id: registration.project_instance_id,
         });
         Ok(state)
     }
@@ -7285,7 +7314,7 @@ impl ProjectAtlasMcpServer {
                     )),
                 ),
             };
-            let control = Self::open_existing_mut_store(&self.control_state)?;
+            let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
             let registration = control.register_worktree(
                 &alias,
                 &repository.common_directory,
@@ -7337,7 +7366,7 @@ impl ProjectAtlasMcpServer {
         Self::as_mcp_text((|| {
             let alias = WorktreeAlias::parse(params.worktree.trim())?;
             let repository = self.control_git_repository()?;
-            let control = Self::open_existing_mut_store(&self.control_state)?;
+            let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
             let registration = control.worktree_registration(&alias)?;
             let mut blocker = None;
             let entry = repository.worktrees.iter().find(|entry| {
@@ -7646,6 +7675,7 @@ impl ProjectAtlasMcpServer {
             );
             let text_index_max_bytes = params.text_index_max_bytes;
             if background {
+                let control_state = self.control_state.clone();
                 let task = self.start_index_task(
                     McpTaskOperation::Scan,
                     symbol_options,
@@ -7657,7 +7687,7 @@ impl ProjectAtlasMcpServer {
                             text_index_max_bytes,
                             control,
                         )?;
-                        let mut store = Self::open_mut_store(&state)?;
+                        let mut store = Self::open_mut_store(&state, &control_state)?;
                         run_scan_pipeline_controlled(&mut store, &plan, &symbol_options, control)?;
                         Ok(())
                     },
@@ -7671,7 +7701,7 @@ impl ProjectAtlasMcpServer {
                 text_index_max_bytes,
                 &control,
             )?;
-            let mut store = Self::open_mut_store(&state)?;
+            let mut store = Self::open_mut_store(&state, &self.control_state)?;
             let report =
                 run_scan_pipeline_controlled(&mut store, &plan, &symbol_options, &control)?;
             Self::encode_named_payload(MCP_PAYLOAD_SCAN, &report)
@@ -8149,6 +8179,7 @@ impl ProjectAtlasMcpServer {
             );
             let text_index_max_bytes = params.text_index_max_bytes;
             if background {
+                let control_state = self.control_state.clone();
                 let task = self.start_index_task(
                     McpTaskOperation::SymbolsBuild,
                     options,
@@ -8160,7 +8191,7 @@ impl ProjectAtlasMcpServer {
                             text_index_max_bytes,
                             control,
                         )?;
-                        let mut store = Self::open_mut_store(&state)?;
+                        let mut store = Self::open_mut_store(&state, &control_state)?;
                         run_symbol_build_pipeline_controlled(
                             &mut store, &plan, &options, None, control,
                         )?;
@@ -8176,7 +8207,7 @@ impl ProjectAtlasMcpServer {
                 text_index_max_bytes,
                 &control,
             )?;
-            let mut store = Self::open_mut_store(&state)?;
+            let mut store = Self::open_mut_store(&state, &self.control_state)?;
             let report =
                 run_symbol_build_pipeline_controlled(&mut store, &plan, &options, None, &control)?;
             Self::encode_named_payload(MCP_PAYLOAD_SYMBOLS_BUILD, &report)
@@ -8781,7 +8812,7 @@ impl ProjectAtlasMcpServer {
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_target(params.project_path, params.worktree)?;
-            let store = Self::open_existing_mut_store(&state)?;
+            let store = Self::open_existing_mut_store(&state, &self.control_state)?;
             let resolution = HealthResolution {
                 finding_id: params.finding_id,
                 category: params.category,
@@ -9008,6 +9039,7 @@ impl ProjectAtlasMcpServer {
             );
             let text_index_max_bytes = params.text_index_max_bytes;
             if background {
+                let control_state = self.control_state.clone();
                 let task = self.start_index_task(
                     McpTaskOperation::WatchOnce,
                     symbol_options,
@@ -9019,7 +9051,7 @@ impl ProjectAtlasMcpServer {
                             text_index_max_bytes,
                             control,
                         )?;
-                        let mut store = Self::open_mut_store(&state)?;
+                        let mut store = Self::open_mut_store(&state, &control_state)?;
                         run_single_watch_refresh_controlled(
                             &mut store,
                             &plan,
@@ -9038,7 +9070,7 @@ impl ProjectAtlasMcpServer {
                 text_index_max_bytes,
                 &control,
             )?;
-            let mut store = Self::open_mut_store(&state)?;
+            let mut store = Self::open_mut_store(&state, &self.control_state)?;
             let report =
                 run_single_watch_refresh_controlled(&mut store, &plan, &symbol_options, &control)?;
             Self::encode_named_payload(MCP_PAYLOAD_WATCH, &report)
@@ -9238,7 +9270,7 @@ impl ProjectAtlasMcpServer {
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_target(params.project_path, params.worktree)?;
-            let store = Self::open_existing_mut_store(&state)?;
+            let store = Self::open_existing_mut_store(&state, &self.control_state)?;
             let node_key = Self::validated_indexed_node_key(&store, &params.path)?;
             store.set_purpose(&node_key, &params.purpose, PurposeSource::Agent)?;
             let classification = if store
@@ -9291,7 +9323,7 @@ impl ProjectAtlasMcpServer {
             validate_purpose_review_admission(&requests)?;
             let state = self.state_for_target(params.project_path, params.worktree)?;
             if apply {
-                let store = Self::open_existing_mut_store(&state)?;
+                let store = Self::open_existing_mut_store(&state, &self.control_state)?;
                 let report = review_purposes(&store, &requests, true)?;
                 return Ok(render_purpose_review_report(&report));
             }
@@ -11032,7 +11064,7 @@ mod tests {
         fs::remove_dir_all(&preserved_target_b_state)?;
 
         let legacy_added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
-            worktree: selector_b,
+            worktree: selector_b.clone(),
             alias: Some("legacy-init".to_string()),
         }));
         require(
@@ -11109,6 +11141,83 @@ mod tests {
             &format!("legacy-init registration could not be retired: {retired_legacy}"),
         )?;
         fs::remove_dir_all(&preserved_legacy_state)?;
+
+        init_project_with_config(&worktree_b, Some(&target_b_config))?;
+        let migratable_store = AtlasStore::open_for_project(&target_b_db, &worktree_b)?;
+        let migratable_project = migratable_store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("migratable target identity is missing"))?;
+        drop(migratable_store);
+        let predecessor = rusqlite::Connection::open(&target_b_db)?;
+        predecessor.execute_batch(
+            "DROP TABLE usage_instance_worktree_origins;
+             DROP TABLE worktree_usage_aggregates;
+             DROP TABLE worktree_registrations;
+             DROP TABLE usage_aggregate_revisions;
+             UPDATE metadata SET value = '17' WHERE key = 'schema_version';",
+        )?;
+        drop(predecessor);
+        let migratable_added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
+            worktree: selector_b,
+            alias: Some("migratable-atlas".to_string()),
+        }));
+        require(
+            migratable_added.contains("status: registered")
+                && migratable_added
+                    .contains("registration committed without local telemetry import"),
+            &format!(
+                "supported predecessor atlas did not retain its explicit unbound registration: {migratable_added}"
+            ),
+        )?;
+        let control_before_migration =
+            open_atlas_store_read_only_for_project(&control_db, &primary)?;
+        require(
+            control_before_migration
+                .worktree_registration(&WorktreeAlias::parse("migratable-atlas")?)?
+                .project_instance_id
+                .is_none(),
+            "supported predecessor fixture unexpectedly bound before migration",
+        )?;
+        drop(control_before_migration);
+        let migrated = server.atlas_scan(Parameters(AtlasScanParams {
+            project_path: None,
+            worktree: Some("migratable-atlas".to_string()),
+            path: None,
+            nearest_project: Some(false),
+            max_bytes: None,
+            max_workers: Some(1),
+            timeout_seconds: None,
+            text_index_max_bytes: None,
+            background: Some(false),
+        }));
+        require(
+            migrated.contains("scan:"),
+            &format!("alias-routed predecessor migration did not complete its scan: {migrated}"),
+        )?;
+        let migrated_target = open_atlas_store_read_only_for_project(&target_b_db, &worktree_b)?;
+        require(
+            migrated_target.project_instance_id()? == Some(migratable_project),
+            "supported predecessor migration changed the worktree project identity",
+        )?;
+        drop(migrated_target);
+        let control_after_migration =
+            open_atlas_store_read_only_for_project(&control_db, &primary)?;
+        require(
+            control_after_migration
+                .worktree_registration(&WorktreeAlias::parse("migratable-atlas")?)?
+                .project_instance_id
+                == Some(migratable_project),
+            "alias-routed predecessor migration left its registration unbound",
+        )?;
+        drop(control_after_migration);
+        let retired_migratable =
+            server.atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
+                worktree: "migratable-atlas".to_string(),
+            }));
+        require(
+            retired_migratable.contains("status: retired"),
+            &format!("migrated registration could not be retired: {retired_migratable}"),
+        )?;
 
         let added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
             worktree: selector_a,

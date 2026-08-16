@@ -157,6 +157,8 @@ pub enum GitStructureIssueKind {
     MissingPointerTarget,
     /// A candidate common directory did not have the required Git control structure.
     InvalidCommonDirectory,
+    /// Local Git configuration can relocate or suppress the addressed source root.
+    UnsupportedSourceConfiguration,
     /// A linked administrative directory was not an immediate registered child of the common directory.
     RegistrationOutsideCommonDirectory,
     /// A registration is missing its required `gitdir` pointer.
@@ -413,6 +415,10 @@ fn inspect_worktree(root: &Path) -> Result<SelectedWorktree, GitStructureIssue> 
                 &git_control_path,
                 &common_directory.path,
             )?;
+            validate_linked_source_configuration(
+                &common_directory.path,
+                &administrative_directory,
+            )?;
             Ok(SelectedWorktree {
                 root,
                 git_control_path: canonicalize_issue(&git_control_path, &git_control_path)?,
@@ -611,6 +617,57 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
         source_root_inference_safe: source_root_inference_safe && !has_include,
         worktree_config_enabled,
     })
+}
+
+/// Reject linked-checkout configuration that can select source outside its pointer owner.
+fn validate_linked_source_configuration(
+    common_directory: &Path,
+    administrative_directory: &Path,
+) -> Result<(), GitStructureIssue> {
+    let common_config = common_directory.join("config");
+    let common_policy = match fs::symlink_metadata(&common_config) {
+        Ok(_) => local_config_policy(&common_config)?,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(issue(
+                common_config,
+                GitStructureIssueKind::FilesystemUnavailable {
+                    error_kind: source.kind(),
+                },
+            ));
+        }
+    };
+    if !common_policy.source_root_inference_safe {
+        return Err(issue(
+            common_config,
+            GitStructureIssueKind::UnsupportedSourceConfiguration,
+        ));
+    }
+    if !common_policy.worktree_config_enabled {
+        return Ok(());
+    }
+
+    let worktree_config = administrative_directory.join("config.worktree");
+    let worktree_policy = match fs::symlink_metadata(&worktree_config) {
+        Ok(_) => local_config_policy(&worktree_config)?,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(issue(
+                worktree_config,
+                GitStructureIssueKind::FilesystemUnavailable {
+                    error_kind: source.kind(),
+                },
+            ));
+        }
+    };
+    if worktree_policy.source_root_inference_safe && worktree_policy.bare_setting != Some(true) {
+        Ok(())
+    } else {
+        Err(issue(
+            worktree_config,
+            GitStructureIssueKind::UnsupportedSourceConfiguration,
+        ))
+    }
 }
 
 /// Build the primary plus registered linked-worktree inventory.
@@ -1589,6 +1646,50 @@ mod tests {
         add_worktree(&primary, "outside-linked", &outside_linked)?;
         let nested_cwd = outside_linked.join("deep").join("cwd");
         fs::create_dir_all(&nested_cwd)?;
+
+        run_git(&primary, ["config", "extensions.worktreeConfig", "true"])?;
+        run_command(
+            Command::new("git")
+                .current_dir(&nested_linked)
+                .args(["config", "--worktree", "core.worktree"])
+                .arg(&configured_worktree),
+        )?;
+        let linked_effective_root = Command::new("git")
+            .current_dir(&nested_linked)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()?;
+        require(
+            linked_effective_root.status.success()
+                && paths_equal(
+                    &PathBuf::from(String::from_utf8(linked_effective_root.stdout)?.trim())
+                        .canonicalize()?,
+                    &configured_worktree.canonicalize()?,
+                ),
+            "Git fixture did not honor linked config.worktree core.worktree",
+        )?;
+        require_invalid_kind(
+            discover_repository_structure(&nested_linked)?,
+            |kind| matches!(kind, GitStructureIssueKind::UnsupportedSourceConfiguration),
+            "linked config.worktree core.worktree was admitted as pointer-owned source",
+        )?;
+        run_git(
+            &nested_linked,
+            ["config", "--worktree", "--unset", "core.worktree"],
+        )?;
+        run_git(
+            &nested_linked,
+            ["config", "--worktree", "core.bare", "true"],
+        )?;
+        require_invalid_kind(
+            discover_repository_structure(&nested_linked)?,
+            |kind| matches!(kind, GitStructureIssueKind::UnsupportedSourceConfiguration),
+            "linked config.worktree core.bare was admitted as checked-out source",
+        )?;
+        run_git(
+            &nested_linked,
+            ["config", "--worktree", "--unset", "core.bare"],
+        )?;
+        run_git(&primary, ["config", "--unset", "extensions.worktreeConfig"])?;
 
         let primary_structure = require_git(discover_repository_structure(&primary.join("src"))?)?;
         require_worktree_selection(
