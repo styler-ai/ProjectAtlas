@@ -1042,7 +1042,7 @@ jobs:
           messages = [
               {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "projectatlas-release-e2e", "version": "0.1.0"}}},
               {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
-              {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "atlas_session_brief", "arguments": {"project_path": str(root), "query": "release_e2e_marker", "compact": True}},
+              {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "atlas_session_brief", "arguments": {"project_path": str(root), "query": "release_e2e_marker", "compact": True}}},
               {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "atlas_slice", "arguments": {"project_path": str(root), "file": "src/lib.rs", "start_line": 1, "end_line": 1}}},
           ]
           completed = subprocess.run(
