@@ -581,6 +581,8 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
     let mut worktree_config_enabled = false;
     let mut worktree_setting = None;
     let mut source_selection_policy_complete = true;
+    let mut repository_format_version = 0_u64;
+    let mut has_unsupported_repository_extension = false;
     for raw_line in text.lines() {
         let line = trim_git_config_whitespace(raw_line);
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
@@ -651,7 +653,20 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
             }
             continue;
         }
+        if in_extensions {
+            has_unsupported_repository_extension = true;
+            continue;
+        }
         if !in_core {
+            continue;
+        }
+        if key.eq_ignore_ascii_case("repositoryformatversion") {
+            if let Ok(version @ 0..=1) = value.parse::<u64>() {
+                repository_format_version = version;
+            } else {
+                source_root_inference_safe = false;
+                source_selection_policy_complete = false;
+            }
             continue;
         }
         if key.eq_ignore_ascii_case("worktree") {
@@ -675,6 +690,10 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
             source_root_inference_safe = false;
             source_selection_policy_complete = false;
         }
+    }
+    if repository_format_version == 1 && has_unsupported_repository_extension {
+        source_root_inference_safe = false;
+        source_selection_policy_complete = false;
     }
     source_selection_policy_complete &= !has_include;
     Ok(GitLocalConfigPolicy {
@@ -2102,6 +2121,29 @@ mod tests {
                     source_selection: GitManagerSourceSelection::None,
                 },
             "non-core bare key invented the manager parent as source",
+        )?;
+        fs::write(&bare_config_path, &bare_config)?;
+
+        fs::write(
+            &bare_config_path,
+            "[core]\n repositoryFormatVersion = 1\n bare = false\n[extensions]\n madeup = true\n",
+        )?;
+        let unsupported_extension = Command::new("git")
+            .arg("--git-dir")
+            .arg(&bare_dot_git)
+            .args(["rev-parse", "--is-bare-repository"])
+            .output()?;
+        require(
+            !unsupported_extension.status.success(),
+            "Git fixture accepted an unknown format-1 repository extension",
+        )?;
+        let unsupported_extension = require_git(discover_repository_structure(&bare_dot_git)?)?;
+        require(
+            unsupported_extension.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::None,
+                },
+            "unknown format-1 repository extension invented the manager parent as source",
         )?;
         fs::write(&bare_config_path, &bare_config)?;
 
