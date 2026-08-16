@@ -11121,7 +11121,7 @@ mod tests {
             "regression fixture did not reproduce the lossy selector collision",
         )?;
         let repository = GitRepositoryStructure {
-            common_directory,
+            common_directory: common_directory.clone(),
             selection: projectatlas_fs::worktree::GitRepositorySelection::CommonManager {
                 source_selection: projectatlas_fs::worktree::GitManagerSourceSelection::Ambiguous {
                     worktree_count: entries.len(),
