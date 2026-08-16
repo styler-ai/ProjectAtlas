@@ -583,16 +583,20 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
             continue;
         }
-        if let Some(section) = line
-            .strip_prefix('[')
-            .and_then(|value| value.split(']').next())
-        {
-            let section = section.trim();
-            let section_name = section.split_ascii_whitespace().next().unwrap_or_default();
+        if line.starts_with('[') {
+            let Some((section_name, has_subsection)) = git_config_section(line) else {
+                return Ok(GitLocalConfigPolicy {
+                    bare_setting: None,
+                    source_root_inference_safe: false,
+                    worktree_config_enabled: false,
+                    worktree_setting: None,
+                    source_selection_policy_complete: false,
+                });
+            };
             has_include |= section_name.eq_ignore_ascii_case("include")
                 || section_name.eq_ignore_ascii_case("includeif");
-            in_core = section.eq_ignore_ascii_case("core");
-            in_extensions = section.eq_ignore_ascii_case("extensions");
+            in_core = !has_subsection && section_name.eq_ignore_ascii_case("core");
+            in_extensions = !has_subsection && section_name.eq_ignore_ascii_case("extensions");
             continue;
         }
         if !in_core && !in_extensions {
@@ -658,6 +662,65 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
         worktree_setting,
         source_selection_policy_complete,
     })
+}
+
+/// Parse one complete Git section header while allowing only a trailing comment.
+fn git_config_section(line: &str) -> Option<(&str, bool)> {
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut header_end = line.len();
+    for (index, character) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            '#' | ';' if !quoted => {
+                header_end = index;
+                break;
+            }
+            _ => {}
+        }
+    }
+    if quoted || escaped {
+        return None;
+    }
+    let section = line[..header_end]
+        .trim()
+        .strip_prefix('[')?
+        .strip_suffix(']')?
+        .trim();
+    if section.is_empty() || section.contains(['[', ']']) {
+        return None;
+    }
+    let name_end = section
+        .find(|character: char| character.is_ascii_whitespace())
+        .unwrap_or(section.len());
+    let name = &section[..name_end];
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'))
+    {
+        return None;
+    }
+    let subsection = section[name_end..].trim();
+    if subsection.is_empty() {
+        return Some((name, false));
+    }
+    let subsection = subsection.strip_prefix('"')?.strip_suffix('"')?;
+    let mut escaped = false;
+    for character in subsection.chars() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            return None;
+        }
+    }
+    (!escaped).then_some((name, true))
 }
 
 /// Remove only unquoted Git comments and unwrap one simple quoted value.
@@ -2073,6 +2136,31 @@ mod tests {
             "invalid extensions.worktreeConfig enabled config.worktree and invented a source",
         )?;
         fs::remove_file(bare_dot_git.join("config.worktree"))?;
+        fs::write(&bare_config_path, &bare_config)?;
+
+        for malformed_config in [
+            "[core\n bare = false\n",
+            "[core] trailing garbage\n bare = false\n",
+        ] {
+            fs::write(&bare_config_path, malformed_config)?;
+            let malformed_bare = Command::new("git")
+                .arg("--git-dir")
+                .arg(&bare_dot_git)
+                .args(["config", "--bool", "core.bare"])
+                .output()?;
+            require(
+                !malformed_bare.status.success(),
+                "Git fixture accepted a malformed section header",
+            )?;
+            let malformed_bare = require_git(discover_repository_structure(&bare_dot_git)?)?;
+            require(
+                malformed_bare.selection
+                    == GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::None,
+                    },
+                "malformed section header invented the manager parent as source",
+            )?;
+        }
         fs::write(&bare_config_path, &bare_config)?;
 
         fs::write(
